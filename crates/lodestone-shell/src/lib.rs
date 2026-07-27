@@ -30,6 +30,7 @@ pub mod camera_rig;
 pub mod chat;
 pub mod collision;
 pub mod config;
+pub mod container;
 pub mod entities;
 pub mod gpu;
 pub mod hud;

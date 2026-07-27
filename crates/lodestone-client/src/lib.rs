@@ -93,7 +93,7 @@ pub use config::{KeepAlivePolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};
 pub use scoreboard::{BossBar, Objective, ScoreEntry, Scoreboard, Team};
-pub use state::{EntityView, PlayerSnapshot};
+pub use state::{EntityView, OpenMenuSnapshot, PlayerSnapshot};
 
 // The world read-model hands out owned section and light snapshots; re-export the
 // section and light types so consumers can name `Arc<ChunkSection>` and

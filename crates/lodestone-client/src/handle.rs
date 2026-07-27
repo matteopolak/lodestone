@@ -10,7 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{BotError, ClientClosed, SessionOutcome, WaitError};
 use crate::scoreboard::{BossBar, Scoreboard};
 use crate::spawn::DriverTask;
-use crate::state::{EntityView, PlayerSnapshot, SharedState};
+use crate::state::{EntityView, OpenMenuSnapshot, PlayerSnapshot, SharedState};
+use lodestone_game::menu::Menu;
 use lodestone_world::{ChunkSection, SectionLight};
 
 /// A handle to a running client session.
@@ -176,6 +177,19 @@ impl ClientHandle {
     #[must_use]
     pub fn boss_bars(&self) -> Vec<BossBar> {
         self.state.boss_bars()
+    }
+
+    /// Returns the folded player inventory menu (window 0), in vanilla menu-slot
+    /// order. The returned snapshot is owned and safe to keep for rendering.
+    #[must_use]
+    pub fn player_menu(&self) -> Menu {
+        self.state.player_menu()
+    }
+
+    /// Returns the folded non-player menu currently open, if any.
+    #[must_use]
+    pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
+        self.state.open_menu()
     }
 
     /// Returns the block-state id at `pos`, or `None` if that block's chunk is

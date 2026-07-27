@@ -2715,6 +2715,7 @@ impl VersionAdapter for V770Adapter {
                     cursor_y: cursor.y,
                     cursor_z: cursor.z,
                     inside_block: *inside_block,
+                    world_border_hit: false,
                     sequence: *sequence,
                 };
                 Ok(Some((play::serverbound::USE_ITEM_ON, encode_body(&body)?)))

@@ -75,8 +75,9 @@ use std::time::Duration;
 
 use lodestone_client::{
     ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
-    LoginProfile, PlayerListEntry, ServerAddress, Vec3,
+    LoginProfile, OpenMenuSnapshot, PlayerListEntry, ServerAddress, Vec3,
 };
+use lodestone_game::menu::Menu;
 use lodestone_model::event::SoundCategory;
 
 pub use lodestone_testsupport::unique_username;
@@ -295,6 +296,19 @@ impl NetClient {
         self.handle
             .get()
             .map_or_else(Vec::new, |h| boss_bars_from(&h.boss_bars()))
+    }
+
+    /// The folded player inventory menu (window 0), when a live client handle
+    /// exists. Empty before login or off a live connection.
+    #[must_use]
+    pub fn player_menu(&self) -> Option<Menu> {
+        self.handle.get().map(|h| h.player_menu())
+    }
+
+    /// The currently open non-player menu, if the server has one open.
+    #[must_use]
+    pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
+        self.handle.get().and_then(|h| h.open_menu())
     }
 
     /// The server-known position of the local player, once movement or a
