@@ -105,7 +105,11 @@ fn respawn_decodes_present_last_death_location() {
 }
 
 #[test]
-fn handle_play_respawn_emits_no_directive_and_consumes_all_bytes() {
+fn handle_play_respawn_emits_respawned_event() {
+    // Previously respawn only updated internal chunk shape and emitted
+    // nothing — a decode-and-discard gap. It now also surfaces a
+    // `ClientEvent::Respawned` so a consumer (HUD gamemode, dimension change,
+    // last-death compass) actually receives it.
     let adapter = V770Adapter::new();
     let directives = adapter
         .handle_packet(
@@ -115,10 +119,20 @@ fn handle_play_respawn_emits_no_directive_and_consumes_all_bytes() {
             &respawn_golden(),
         )
         .expect("handle respawn");
-    assert!(
-        directives.is_empty(),
-        "respawn only updates internal chunk shape; got {directives:?}"
-    );
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::Respawned {
+            dimension,
+            game_mode,
+            previous_game_mode,
+            last_death_location,
+        })] => {
+            assert_eq!(dimension.to_string(), "minecraft:the_nether");
+            assert_eq!(*game_mode, lodestone_model::GameMode::Survival);
+            assert_eq!(*previous_game_mode, None);
+            assert_eq!(*last_death_location, None);
+        }
+        other => panic!("expected a single Respawned event, got {other:?}"),
+    }
 }
 
 #[test]

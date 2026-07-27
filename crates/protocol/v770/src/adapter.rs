@@ -1,21 +1,23 @@
 //! [`VersionAdapter`] implementation driving the protocol 776 join flow.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use lodestone_core::{
-    Ctx, Decode, Encode, Reader, Writer, plain_text_from_nbt_component, read_network_nbt,
-};
+use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor,
     BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
-    ContainerSlotChange, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    ContainerSlotChange, DeathLocation, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
+    EntityBaseDimensions,
+    EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
-    MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand,
-    PlayerInput, PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress,
-    SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3,
-    Vec3f, VersionAdapter, Visibility, WorldSink,
+    LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
+    ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
+    RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, SoundCategory,
+    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
+    VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
@@ -28,7 +30,8 @@ use crate::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use crate::packets::common::{
-    BrandPayload, ClientInformation, KeepAlive, Pong, ResourcePackResponse,
+    BrandPayload, ClientInformation, KeepAlive, PingRequest, Pong, ResourcePackResponse,
+    TeleportToEntity,
 };
 use crate::packets::configuration::{
     AcceptCodeOfConduct, FinishConfiguration, ServerboundKnownPacks,
@@ -37,14 +40,15 @@ use crate::packets::entity::{read_lp_vec3, unpack_degrees};
 use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
     AcceptTeleportation, Attack, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
-    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChatAck, ChatCommand, ChatMessage, ChunkBatchFinished,
-    ChunkBatchReceived, ClientCommand, ClientTickEnd, CommandSuggestion, ConfigurationAcknowledged,
-    ContainerButtonClick, ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent,
-    LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION, MOVE_FLAG_ON_GROUND, MovePlayerPos,
-    MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, MoveVehicle, PaddleBoat,
-    PickItemFromBlock, PickItemFromEntity, PlayerAbilities, PlayerAction,
-    PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket, PlayerLoaded,
-    RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectTrade, ServerboundPlayerAbilities,
+    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChangeGameMode, ChatAck, ChatCommand, ChatMessage,
+    ChunkBatchFinished, ChunkBatchReceived, ClientCommand, ClientTickEnd, CommandSuggestion,
+    ConfigurationAcknowledged, ContainerButtonClick, ContainerClose, ContainerSlotStateChanged,
+    EditBook, GameEvent, GameLogin, LevelEvent, LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION,
+    MOVE_FLAG_ON_GROUND, MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly,
+    MoveVehicle, PaddleBoat, PickItemFromBlock, PickItemFromEntity, PlaceRecipe, PlayerAbilities,
+    PlayerAction, PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket,
+    PlayerLoaded, RecipeBookChangeSettings, RecipeBookSeenRecipe, RenameItem, Respawn,
+    SERVERBOUND_ABILITY_FLAG_FLYING, SelectBundleItem, SelectTrade, ServerboundPlayerAbilities,
     SetCarriedItem, SetCommandBlock, SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing,
     UseItem, UseItemOn,
 };
@@ -53,7 +57,9 @@ use crate::packets::login::{
     EncryptionRequest, EncryptionResponse, LoginAcknowledged, LoginCompression, LoginDisconnect,
     LoginFinished,
 };
-use crate::packets::metadata::{read_entity_metadata, read_update_attributes};
+use crate::packets::metadata::{
+    MetadataClass, metadata_class, read_entity_metadata, read_update_attributes,
+};
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
 use crate::packets::scoreboard::{
     self as sb, BossEvent, ResetScore, SetDisplayObjective, SetObjective, SetPlayerTeam, SetScore,
@@ -86,6 +92,12 @@ pub struct V770Adapter {
     shape: Arc<Mutex<ChunkShape>>,
     batch: Arc<Mutex<ChunkBatchState>>,
     movement: Arc<Mutex<MovementSendState>>,
+    /// Tracks the concrete type of spawned entities whose cosmetic variant lives
+    /// at a metadata index that other mobs reuse (sheep wool @ 17, horse variant
+    /// @ 18). Only these ambiguous classes are stored, bounding the map to the
+    /// mobs actually present; self-identifying registry-holder variants need no
+    /// entry. Populated on `add_entity`, cleared on `remove_entities`.
+    variants: Arc<Mutex<HashMap<i32, MetadataClass>>>,
 }
 
 /// Per-connection chunk-batch flow-control state: the running rate estimator and
@@ -145,6 +157,7 @@ impl V770Adapter {
                 batch_start: Instant::now(),
             })),
             movement: Arc::new(Mutex::new(MovementSendState::default())),
+            variants: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -504,6 +517,17 @@ fn game_mode_from_ordinal(ordinal: i32) -> Option<GameMode> {
     }
 }
 
+/// Maps the canonical [`GameMode`] to vanilla's `GameType` id, the inverse of
+/// [`game_mode_from_ordinal`].
+fn game_mode_to_ordinal(mode: GameMode) -> i32 {
+    match mode {
+        GameMode::Survival => 0,
+        GameMode::Creative => 1,
+        GameMode::Adventure => 2,
+        GameMode::Spectator => 3,
+    }
+}
+
 /// The fixed-point scale for `sound` packet positions: coordinates are sent as
 /// `(int)(block * 8)`, so each unit is `1/8` of a block (`LOCATION_ACCURACY`).
 const SOUND_POSITION_SCALE: f64 = 8.0;
@@ -582,6 +606,18 @@ fn read_filter_mask(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
         }
         other => Err(AdapterError::Decode(format!(
             "invalid filter mask ordinal {other}"
+        ))),
+    }
+}
+
+/// Reads an `EntityAnchorArgument.Anchor` ordinal (a VarInt): `0` = feet,
+/// `1` = eyes. Used by `ClientboundPlayerLookAtPacket`.
+fn read_look_anchor(reader: &mut Reader<'_>) -> Result<LookAnchor, AdapterError> {
+    match reader.var_i32().map_err(dec_err)? {
+        0 => Ok(LookAnchor::Feet),
+        1 => Ok(LookAnchor::Eyes),
+        other => Err(AdapterError::Decode(format!(
+            "invalid entity anchor ordinal {other}"
         ))),
     }
 }
@@ -745,6 +781,20 @@ fn encode_set_beacon(
     Ok(w.into_vec())
 }
 
+/// Encodes the serverbound `spectator_action` packet body
+/// (`ServerboundSpectatorActionPacket`): a single VarInt using
+/// `ByteBufCodecs.OPTIONAL_VAR_INT`'s offset encoding, **not** the common
+/// bool-then-value optional shape — `0` means "not spectating an entity"
+/// and a present id `i` is written as `i + 1`. This must be hand-written
+/// rather than a derived `Option<i32>` field, since a naive bool-prefixed
+/// encoder would silently produce a wire-incompatible packet that still
+/// parses.
+fn encode_spectator_action(target_entity_id: Option<i32>) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.var_i32(target_entity_id.map_or(0, |id| id + 1));
+    Ok(w.into_vec())
+}
+
 /// Encodes the serverbound `seen_advancements` packet body
 /// (`ServerboundSeenAdvancementsPacket`): a VarInt `Action` ordinal
 /// (`OPENED_TAB` = 0, `CLOSED_SCREEN` = 1, via `FriendlyByteBuf.writeEnum`),
@@ -864,7 +914,7 @@ fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
         window_id,
         menu_type,
-        title: Text::literal(plain_text_from_nbt_component(&title)),
+        title: Text::from_nbt(&title),
     })])
 }
 
@@ -917,11 +967,11 @@ fn nbt_reason_text(payload: &[u8]) -> Result<Text, AdapterError> {
     let mut reader = Reader::new(payload);
     let component =
         read_network_nbt(&mut reader).map_err(|err| AdapterError::Decode(err.to_string()))?;
-    let text = plain_text_from_nbt_component(&component);
-    if text.is_empty() {
+    let reason = Text::from_nbt(&component);
+    if reason.to_plain_string().is_empty() {
         Ok(Text::literal("Disconnected"))
     } else {
-        Ok(Text::literal(text))
+        Ok(reason)
     }
 }
 
@@ -1250,7 +1300,10 @@ fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
 /// itself — that struct is shared across every protocol version's adapter, and
 /// adding a field to it would force edits into v47/v340/v735 outside this
 /// crate's scope.
-fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn handle_add_entity(
+    payload: &[u8],
+    variants: &Mutex<HashMap<i32, MetadataClass>>,
+) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let entity_id = reader.var_i32().map_err(dec_err)?;
     let uuid = reader.uuid().map_err(dec_err)?;
@@ -1274,6 +1327,15 @@ fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         ))
     })?;
 
+    // Remember the concrete type only for mobs whose variant index is ambiguous,
+    // so a later `set_entity_data` can disambiguate it. Everything else is left
+    // untracked; its variant (if any) resolves by serializer alone.
+    if let Some(class) = metadata_class(name)
+        && let Ok(mut map) = variants.lock()
+    {
+        map.insert(entity_id, class);
+    }
+
     Ok(vec![
         Directive::Emit(ClientEvent::EntitySpawned {
             entity_id,
@@ -1292,7 +1354,10 @@ fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
 /// event.
-fn handle_remove_entities(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn handle_remove_entities(
+    payload: &[u8],
+    variants: &Mutex<HashMap<i32, MetadataClass>>,
+) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
@@ -1302,6 +1367,11 @@ fn handle_remove_entities(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         entity_ids.push(reader.var_i32().map_err(dec_err)?);
     }
     reader.ensure_empty().map_err(dec_err)?;
+    if let Ok(mut map) = variants.lock() {
+        for id in &entity_ids {
+            map.remove(id);
+        }
+    }
     Ok(vec![Directive::Emit(ClientEvent::EntityRemoved {
         entity_ids,
     })])
@@ -1400,12 +1470,19 @@ fn handle_set_entity_motion(payload: &[u8]) -> Result<Vec<Directive>, AdapterErr
 /// event is emitted — the entity simply keeps its prior metadata. A genuinely
 /// missing seam therefore surfaces as *absent fields* in a live test, loudly,
 /// rather than as a dropped connection.
-fn handle_set_entity_data(payload: &[u8]) -> Vec<Directive> {
+fn handle_set_entity_data(
+    payload: &[u8],
+    variants: &Mutex<HashMap<i32, MetadataClass>>,
+) -> Vec<Directive> {
     let mut reader = Reader::new(payload);
     let Ok(entity_id) = reader.var_i32() else {
         return Vec::new();
     };
-    match read_entity_metadata(&mut reader) {
+    let class = variants
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&entity_id).copied());
+    match read_entity_metadata(&mut reader, class) {
         Ok(metadata) if reader.ensure_empty().is_ok() && !metadata.is_empty() => {
             vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
                 entity_id,
@@ -1624,13 +1701,15 @@ impl V770Adapter {
             read_chat_type_bound(&mut reader)?;
             reader.ensure_empty().map_err(dec_err)?;
             // The server-decorated form (if any) is preferred for display; a
-            // plain signed message carries only its raw content.
+            // plain signed message carries only its raw content. The decorated
+            // component keeps its colour/style tree; the raw content is a bare
+            // string.
             let text = match unsigned {
-                Some(component) => plain_text_from_nbt_component(&component),
-                None => content,
+                Some(component) => Text::from_nbt(&component),
+                None => Text::literal(content),
             };
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
-                text: Text::literal(text),
+                text,
                 kind: ChatKind::Chat,
                 ack: Some(ChatAckInfo {
                     signature,
@@ -1645,7 +1724,7 @@ impl V770Adapter {
             read_chat_type_bound(&mut reader)?;
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
-                text: Text::literal(plain_text_from_nbt_component(&component)),
+                text: Text::from_nbt(&component),
                 kind: ChatKind::Chat,
                 ack: None,
             })]);
@@ -1657,14 +1736,13 @@ impl V770Adapter {
             let overlay = reader
                 .bool()
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            let text = plain_text_from_nbt_component(&component);
             let kind = if overlay {
                 ChatKind::GameInfo
             } else {
                 ChatKind::System
             };
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
-                text: Text::literal(text),
+                text: Text::from_nbt(&component),
                 kind,
                 ack: None,
             })]);
@@ -1678,9 +1756,8 @@ impl V770Adapter {
             reader
                 .ensure_empty()
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            let text = plain_text_from_nbt_component(&component);
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
-                text: Text::literal(text),
+                text: Text::from_nbt(&component),
                 kind: ChatKind::GameInfo,
                 ack: None,
             })]);
@@ -1690,7 +1767,7 @@ impl V770Adapter {
             let component = read_network_nbt(&mut reader).map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::TitleText {
-                text: Text::literal(plain_text_from_nbt_component(&component)),
+                text: Text::from_nbt(&component),
             })]);
         }
         if packet_id == play::clientbound::SET_SUBTITLE_TEXT {
@@ -1698,7 +1775,7 @@ impl V770Adapter {
             let component = read_network_nbt(&mut reader).map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::SubtitleText {
-                text: Text::literal(plain_text_from_nbt_component(&component)),
+                text: Text::from_nbt(&component),
             })]);
         }
         if packet_id == play::clientbound::CLEAR_TITLES {
@@ -1893,9 +1970,8 @@ impl V770Adapter {
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
             let component = read_network_nbt(&mut reader)
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            let message = plain_text_from_nbt_component(&component);
             return Ok(vec![Directive::Emit(ClientEvent::Death {
-                message: Text::literal(message),
+                message: Text::from_nbt(&component),
             })]);
         }
         if packet_id == play::clientbound::PLAYER_INFO_UPDATE {
@@ -2214,10 +2290,10 @@ impl V770Adapter {
             return handle_player_position(payload);
         }
         if packet_id == play::clientbound::ADD_ENTITY {
-            return handle_add_entity(payload);
+            return handle_add_entity(payload, &self.variants);
         }
         if packet_id == play::clientbound::REMOVE_ENTITIES {
-            return handle_remove_entities(payload);
+            return handle_remove_entities(payload, &self.variants);
         }
         if packet_id == play::clientbound::MOVE_ENTITY_POS {
             return handle_move_entity(payload, true, false);
@@ -2238,7 +2314,7 @@ impl V770Adapter {
             return handle_set_entity_motion(payload);
         }
         if packet_id == play::clientbound::SET_ENTITY_DATA {
-            return Ok(handle_set_entity_data(payload));
+            return Ok(handle_set_entity_data(payload, &self.variants));
         }
         if packet_id == play::clientbound::UPDATE_ATTRIBUTES {
             return Ok(handle_update_attributes(payload));
@@ -2403,8 +2479,7 @@ impl V770Adapter {
             // in full — the trailing zero-length check is the misparse detector
             // for the conditional last-death-location field — and record the new
             // dimension so `level_chunk_with_light` stays aligned across the
-            // nether/end boundary. No canonical respawn event exists yet, so no
-            // directive is emitted; the seam is reported to the model owner.
+            // nether/end boundary.
             let mut reader = Reader::new(payload);
             let respawn = Respawn::decode(&mut reader, CTX)
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
@@ -2412,7 +2487,36 @@ impl V770Adapter {
                 .ensure_empty()
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
             self.set_dimension(&respawn.dimension);
-            return Ok(Vec::new());
+            let dimension = respawn.dimension.parse().map_err(|_| {
+                AdapterError::Decode(format!("invalid dimension {}", respawn.dimension))
+            })?;
+            let mode = game_mode(respawn.game_type)?;
+            let previous_game_mode = if respawn.previous_game_type < 0 {
+                None
+            } else {
+                Some(game_mode(respawn.previous_game_type as u8)?)
+            };
+            let last_death_location = respawn
+                .last_death_location
+                .map(|loc| -> Result<DeathLocation, AdapterError> {
+                    let dimension = loc.dimension.parse().map_err(|_| {
+                        AdapterError::Decode(format!(
+                            "invalid death location dimension {}",
+                            loc.dimension
+                        ))
+                    })?;
+                    Ok(DeathLocation {
+                        dimension,
+                        pos: unpack_block_pos(loc.position),
+                    })
+                })
+                .transpose()?;
+            return Ok(vec![Directive::Emit(ClientEvent::Respawned {
+                dimension,
+                game_mode: mode,
+                previous_game_mode,
+                last_death_location,
+            })]);
         }
         if packet_id == play::clientbound::SET_TIME {
             // 26.2 reshaped set_time: a monotonic world age followed by a map of
@@ -2534,6 +2638,367 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::OPEN_SCREEN {
             return decode_open_screen(payload);
+        }
+        if packet_id == play::clientbound::PLAYER_ROTATION {
+            let mut reader = Reader::new(payload);
+            let y_rot = reader.f32().map_err(dec_err)?;
+            let relative_y = reader.bool().map_err(dec_err)?;
+            let x_rot = reader.f32().map_err(dec_err)?;
+            let relative_x = reader.bool().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PlayerRotationSet {
+                y_rot,
+                relative_y,
+                x_rot,
+                relative_x,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_CAMERA {
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CameraSet { entity_id })]);
+        }
+        if packet_id == play::clientbound::OPEN_BOOK {
+            // `InteractionHand` ordinal: 0 = main hand, 1 = off hand.
+            let mut reader = Reader::new(payload);
+            let ordinal = reader.var_i32().map_err(dec_err)?;
+            let main_hand = match ordinal {
+                0 => true,
+                1 => false,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown interaction hand ordinal {other}"
+                    )));
+                }
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::BookOpened { main_hand })]);
+        }
+        if packet_id == play::clientbound::STOP_SOUND {
+            // A flags byte: bit 0 = a source category follows, bit 1 = a sound
+            // identifier follows. Either, both, or neither may be present.
+            let mut reader = Reader::new(payload);
+            let flags = reader.u8().map_err(dec_err)?;
+            let category = if flags & 0x1 != 0 {
+                Some(read_sound_category(&mut reader)?)
+            } else {
+                None
+            };
+            let sound = if flags & 0x2 != 0 {
+                let name = reader.string(32767).map_err(dec_err)?;
+                Some(parse_key(&name, "sound")?)
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SoundStopped {
+                sound,
+                category,
+            })]);
+        }
+        if packet_id == play::clientbound::TAB_LIST {
+            let mut reader = Reader::new(payload);
+            let header = read_network_nbt(&mut reader).map_err(dec_err)?;
+            let footer = read_network_nbt(&mut reader).map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TabListChanged {
+                header: Text::from_nbt(&header),
+                footer: Text::from_nbt(&footer),
+            })]);
+        }
+        if packet_id == play::clientbound::SET_BORDER_CENTER {
+            let mut reader = Reader::new(payload);
+            let x = reader.f64().map_err(dec_err)?;
+            let z = reader.f64().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::WorldBorderCenterChanged { x, z },
+            )]);
+        }
+        if packet_id == play::clientbound::SET_BORDER_LERP_SIZE {
+            let mut reader = Reader::new(payload);
+            let old_size = reader.f64().map_err(dec_err)?;
+            let new_size = reader.f64().map_err(dec_err)?;
+            let lerp_time_ms = reader.var_i64().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::WorldBorderSizeLerping {
+                old_size,
+                new_size,
+                lerp_time_ms,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_BORDER_SIZE {
+            let mut reader = Reader::new(payload);
+            let size = reader.f64().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::WorldBorderSizeChanged {
+                size,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_BORDER_WARNING_DELAY {
+            let mut reader = Reader::new(payload);
+            let warning_time = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::WorldBorderWarningDelayChanged { warning_time },
+            )]);
+        }
+        if packet_id == play::clientbound::SET_BORDER_WARNING_DISTANCE {
+            let mut reader = Reader::new(payload);
+            let warning_blocks = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::WorldBorderWarningDistanceChanged { warning_blocks },
+            )]);
+        }
+        if packet_id == play::clientbound::INITIALIZE_BORDER {
+            let mut reader = Reader::new(payload);
+            let x = reader.f64().map_err(dec_err)?;
+            let z = reader.f64().map_err(dec_err)?;
+            let old_size = reader.f64().map_err(dec_err)?;
+            let new_size = reader.f64().map_err(dec_err)?;
+            let lerp_time_ms = reader.var_i64().map_err(dec_err)?;
+            let absolute_max_size = reader.var_i32().map_err(dec_err)?;
+            let warning_blocks = reader.var_i32().map_err(dec_err)?;
+            let warning_time = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::WorldBorderInitialized {
+                x,
+                z,
+                old_size,
+                new_size,
+                lerp_time_ms,
+                absolute_max_size,
+                warning_blocks,
+                warning_time,
+            })]);
+        }
+        if packet_id == play::clientbound::PLAYER_COMBAT_ENTER {
+            // `ClientboundPlayerCombatEnterPacket` is a singleton with no
+            // fields (`StreamCodec.unit`).
+            let reader = Reader::new(payload);
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PlayerCombatEntered)]);
+        }
+        if packet_id == play::clientbound::PLAYER_COMBAT_END {
+            let mut reader = Reader::new(payload);
+            let duration_ticks = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PlayerCombatEnded {
+                duration_ticks,
+            })]);
+        }
+        if packet_id == play::clientbound::OPEN_SIGN_EDITOR {
+            let mut reader = Reader::new(payload);
+            let packed = reader.i64().map_err(dec_err)?;
+            let is_front_text = reader.bool().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
+                pos: unpack_block_pos(packed),
+                is_front_text,
+            })]);
+        }
+        if packet_id == play::clientbound::SELECT_ADVANCEMENTS_TAB {
+            let mut reader = Reader::new(payload);
+            let has_tab = reader.bool().map_err(dec_err)?;
+            let tab = if has_tab {
+                let name = reader.string(32767).map_err(dec_err)?;
+                Some(parse_key(&name, "advancement tab")?)
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::AdvancementsTabSelected {
+                tab,
+            })]);
+        }
+        if packet_id == play::clientbound::PROJECTILE_POWER {
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let acceleration_power = reader.f64().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ProjectilePowerChanged {
+                entity_id,
+                acceleration_power,
+            })]);
+        }
+        if packet_id == play::clientbound::MOUNT_SCREEN_OPEN {
+            // Unlike most entity ids on the wire, `entityId` here is a raw
+            // 4-byte `int` (`FriendlyByteBuf::readInt`), not a VarInt.
+            let mut reader = Reader::new(payload);
+            let container_id = reader.var_i32().map_err(dec_err)?;
+            let inventory_columns = reader.var_i32().map_err(dec_err)?;
+            let entity_id = reader.i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::MountScreenOpened {
+                container_id,
+                inventory_columns,
+                entity_id,
+            })]);
+        }
+        if packet_id == play::clientbound::GAME_RULE_VALUES {
+            let mut reader = Reader::new(payload);
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count)
+                .map_err(|_| AdapterError::Decode(format!("invalid game rule count {count}")))?;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let key = reader.string(32767).map_err(dec_err)?;
+                let key = parse_key(&key, "game rule")?;
+                let value = reader.string(32767).map_err(dec_err)?;
+                values.push((key, value));
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::GameRulesChanged {
+                values,
+            })]);
+        }
+        if packet_id == play::clientbound::TRANSFER {
+            let mut reader = Reader::new(payload);
+            let host = reader.string(32767).map_err(dec_err)?;
+            let port = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TransferRequested {
+                host,
+                port,
+            })]);
+        }
+        if packet_id == play::clientbound::COOKIE_REQUEST {
+            let mut reader = Reader::new(payload);
+            let key = reader.string(32767).map_err(dec_err)?;
+            let key = parse_key(&key, "cookie")?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CookieRequested { key })]);
+        }
+        if packet_id == play::clientbound::STORE_COOKIE {
+            let mut reader = Reader::new(payload);
+            let key = reader.string(32767).map_err(dec_err)?;
+            let key = parse_key(&key, "cookie")?;
+            let cookie_payload = reader.var_bytes(5120).map_err(dec_err)?.to_vec();
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CookieStored {
+                key,
+                payload: cookie_payload,
+            })]);
+        }
+        if packet_id == play::clientbound::RESOURCE_PACK_PUSH {
+            let mut reader = Reader::new(payload);
+            let id = reader.uuid().map_err(dec_err)?;
+            let url = reader.string(32767).map_err(dec_err)?;
+            let hash = reader.string(40).map_err(dec_err)?;
+            let required = reader.bool().map_err(dec_err)?;
+            let has_prompt = reader.bool().map_err(dec_err)?;
+            let prompt = if has_prompt {
+                let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+                Some(Text::from_nbt(&component))
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPushed {
+                id,
+                url,
+                hash,
+                required,
+                prompt,
+            })]);
+        }
+        if packet_id == play::clientbound::RESOURCE_PACK_POP {
+            let mut reader = Reader::new(payload);
+            let has_id = reader.bool().map_err(dec_err)?;
+            let id = if has_id {
+                Some(reader.uuid().map_err(dec_err)?)
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ResourcePackPopped { id })]);
+        }
+        if packet_id == play::clientbound::CUSTOM_PAYLOAD {
+            // Only `minecraft:brand` gets a specially-typed codec in vanilla
+            // (a single UTF-8 string); every other channel is
+            // `DiscardedPayload`, which just consumes whatever bytes remain
+            // in the packet. Carrying the raw bytes for every channel (rather
+            // than special-casing brand) loses nothing and avoids guessing at
+            // channel-specific shapes this adapter cannot verify.
+            let mut reader = Reader::new(payload);
+            let channel = reader.string(32767).map_err(dec_err)?;
+            let channel = parse_key(&channel, "custom payload channel")?;
+            let remaining = reader.remaining();
+            let data = reader.bytes(remaining).map_err(dec_err)?.to_vec();
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CustomPayload {
+                channel,
+                data,
+            })]);
+        }
+        if packet_id == play::clientbound::SERVER_DATA {
+            let mut reader = Reader::new(payload);
+            let motd_nbt = read_network_nbt(&mut reader).map_err(dec_err)?;
+            let motd = Text::from_nbt(&motd_nbt);
+            let has_icon = reader.bool().map_err(dec_err)?;
+            let icon = if has_icon {
+                let remaining = reader.remaining();
+                Some(reader.var_bytes(remaining).map_err(dec_err)?.to_vec())
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ServerDataReceived {
+                motd,
+                icon,
+            })]);
+        }
+        if packet_id == play::clientbound::PONG_RESPONSE {
+            // `ClientboundPongResponsePacket` (the `net.minecraft.network.
+            // protocol.ping` one), distinct from the `PING`/`ClientEvent::Ping`
+            // pair handled above.
+            let mut reader = Reader::new(payload);
+            let time = reader.i64().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PongReceived { time })]);
+        }
+        if packet_id == play::clientbound::DELETE_CHAT {
+            // `MessageSignature.Packed`: a VarInt `id + 1`; `0` is followed by
+            // a full 256-byte signature, any other value is `id - 1` into the
+            // last-seen cache (which this adapter does not track — see
+            // `PackedMessageSignature`).
+            let mut reader = Reader::new(payload);
+            let id_plus_one = reader.var_i32().map_err(dec_err)?;
+            let signature = if id_plus_one == 0 {
+                PackedMessageSignature::Full(reader.bytes(256).map_err(dec_err)?.to_vec())
+            } else {
+                PackedMessageSignature::Cached(id_plus_one - 1)
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ChatMessageDeleted {
+                signature,
+            })]);
+        }
+        if packet_id == play::clientbound::PLAYER_LOOK_AT {
+            let mut reader = Reader::new(payload);
+            let from_anchor = read_look_anchor(&mut reader)?;
+            let x = reader.f64().map_err(dec_err)?;
+            let y = reader.f64().map_err(dec_err)?;
+            let z = reader.f64().map_err(dec_err)?;
+            let at_entity_flag = reader.bool().map_err(dec_err)?;
+            let at_entity = if at_entity_flag {
+                let entity_id = reader.var_i32().map_err(dec_err)?;
+                let to_anchor = read_look_anchor(&mut reader)?;
+                Some(PlayerLookAtEntity {
+                    entity_id,
+                    to_anchor,
+                })
+            } else {
+                None
+            };
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PlayerLookAt {
+                from_anchor,
+                target: Vec3 { x, y, z },
+                at_entity,
+            })]);
         }
         // Everything else in play is intentionally ignored for now.
         Ok(Vec::new())
@@ -3101,6 +3566,101 @@ impl VersionAdapter for V770Adapter {
                 };
                 Ok(Some((play::serverbound::MOVE_VEHICLE, encode_body(&body)?)))
             }
+            ClientAction::SelectBundleItem {
+                slot_id,
+                selected_item_index,
+            } if state == ConnectionState::Play => {
+                let body = SelectBundleItem {
+                    slot_id: *slot_id,
+                    selected_item_index: *selected_item_index,
+                };
+                Ok(Some((
+                    play::serverbound::BUNDLE_ITEM_SELECTED,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetContainerSlotState {
+                slot_id,
+                container_id,
+                new_state,
+            } if state == ConnectionState::Play => {
+                let body = ContainerSlotStateChanged {
+                    slot_id: *slot_id,
+                    container_id: *container_id,
+                    new_state: *new_state,
+                };
+                Ok(Some((
+                    play::serverbound::CONTAINER_SLOT_STATE_CHANGED,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetRecipeBookSettings {
+                book_type,
+                open,
+                filtering,
+            } if state == ConnectionState::Play => {
+                let body = RecipeBookChangeSettings {
+                    book_type: match book_type {
+                        RecipeBookType::Crafting => 0,
+                        RecipeBookType::Furnace => 1,
+                        RecipeBookType::BlastFurnace => 2,
+                        RecipeBookType::Smoker => 3,
+                    },
+                    is_open: *open,
+                    is_filtering: *filtering,
+                };
+                Ok(Some((
+                    play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::RecipeBookSeenRecipe { recipe } if state == ConnectionState::Play => {
+                let body = RecipeBookSeenRecipe { recipe: *recipe };
+                Ok(Some((
+                    play::serverbound::RECIPE_BOOK_SEEN_RECIPE,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::PlaceRecipe {
+                container_id,
+                recipe,
+                use_max_items,
+            } if state == ConnectionState::Play => {
+                let body = PlaceRecipe {
+                    container_id: *container_id,
+                    recipe: *recipe,
+                    use_max_items: *use_max_items,
+                };
+                Ok(Some((play::serverbound::PLACE_RECIPE, encode_body(&body)?)))
+            }
+            ClientAction::PingRequest { time } if state == ConnectionState::Play => {
+                let body = PingRequest { time: *time };
+                Ok(Some((play::serverbound::PING_REQUEST, encode_body(&body)?)))
+            }
+            ClientAction::SpectatorAction { target_entity_id }
+                if state == ConnectionState::Play =>
+            {
+                Ok(Some((
+                    play::serverbound::SPECTATOR_ACTION,
+                    encode_spectator_action(*target_entity_id)?,
+                )))
+            }
+            ClientAction::TeleportToEntity { target } if state == ConnectionState::Play => {
+                let body = TeleportToEntity { uuid: *target };
+                Ok(Some((
+                    play::serverbound::TELEPORT_TO_ENTITY,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::ChangeGameMode { mode } if state == ConnectionState::Play => {
+                let body = ChangeGameMode {
+                    mode: game_mode_to_ordinal(*mode),
+                };
+                Ok(Some((
+                    play::serverbound::CHANGE_GAME_MODE,
+                    encode_body(&body)?,
+                )))
+            }
             _ => Ok(None),
         }
     }
@@ -3119,5 +3679,13 @@ impl VersionAdapter for V770Adapter {
                 verify_token: encrypted_token.to_vec(),
             },
         )
+    }
+
+    fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
+        // The base hitbox census is version data homed in this crate; the
+        // registry seam reaches it through here so a version-free consumer never
+        // names v770. Base dims only — the caller folds SCALE/STEP_HEIGHT from
+        // the entity's attribute map.
+        crate::entity_dimensions::base_dimensions(entity_type_id)
     }
 }
