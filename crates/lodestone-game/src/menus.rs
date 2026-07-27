@@ -307,6 +307,7 @@ mod tests {
         ModelItemStack {
             item: id(name),
             count,
+            components: lodestone_model::ItemComponents::default(),
         }
     }
 

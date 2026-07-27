@@ -278,6 +278,7 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
         item: Some(ItemStack {
             item: "minecraft:stone".parse::<ResourceKey>().expect("key"),
             count: 1,
+            components: lodestone_model::ItemComponents::default(),
         }),
     });
     assert!(matches!(err, AdapterError::Unsupported(_)));

@@ -188,6 +188,7 @@ fn stack(path: &str, count: u32) -> ItemStack {
     ItemStack {
         item: dim(path),
         count,
+        components: lodestone_model::ItemComponents::default(),
     }
 }
 
@@ -1025,6 +1026,7 @@ async fn entity_head_yaw_and_equipment_are_tracked() {
                         item: Some(ItemStack {
                             item: diamond_sword.clone(),
                             count: 1,
+                            components: lodestone_model::ItemComponents::default(),
                         }),
                     }],
                 }),
@@ -1042,6 +1044,7 @@ async fn entity_head_yaw_and_equipment_are_tracked() {
                             item: Some(ItemStack {
                                 item: dim("iron_helmet"),
                                 count: 1,
+                                components: lodestone_model::ItemComponents::default(),
                             }),
                         },
                     ],
@@ -1087,6 +1090,7 @@ async fn entity_head_yaw_and_equipment_are_tracked() {
         Some(ItemStack {
             item: dim("iron_helmet"),
             count: 1,
+            components: lodestone_model::ItemComponents::default(),
         })
     );
     assert!(
