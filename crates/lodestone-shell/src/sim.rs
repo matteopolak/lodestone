@@ -730,13 +730,20 @@ impl Sim {
     /// Reads the column's own `min_y`/`section_count`, so it is correct for the
     /// locally generated world.
     ///
-    /// It does **not** yet re-mesh from the *live* client world. The section
-    /// source now exists ([`crate::net::NetClient::sections_at`]), but placing
-    /// those sections needs column geometry (`min_y`/`section_count`) the client
-    /// handle does not expose, and lighting them needs a bulk light read it also
-    /// does not expose — both reported upstream. The multi-section meshing loop
-    /// that consumes `sections_at` is `impl-render`'s to own; this remains a
-    /// no-op for live columns until that lands, rather than duplicating it here.
+    /// It does **not** re-mesh from the *live* client world. The seams that used
+    /// to block that now all exist: [`crate::net::NetClient::sections_and_light_at`]
+    /// reads a neighbourhood's blocks + light under one lock and
+    /// [`crate::net::NetClient::world_dimensions`] supplies the column geometry
+    /// (`min_y` / `section_count`) needed to place them. What still blocks it is
+    /// the **classifier**, not a client seam: the shell meshes with
+    /// [`crate::blocks::DemoClassifier`] (a 10-id demo palette), so a live 26.2
+    /// server's *vanilla* block-state ids map to non-occluding air for everything
+    /// outside those 10 ids — meshing the live world through it renders almost
+    /// nothing, and a lighting gate over it would pass vacuously. Rendering live
+    /// terrain needs the real vanilla `state_id → sprite` classifier (the parked
+    /// "texture swap"); see the `net` module docs. Until then this meshes only the
+    /// locally generated world, whose `DemoClassifier` ids are correct by
+    /// construction.
     fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
         let Some(chunk) = self.world.get(ChunkPos { x: cx, z: cz }) else {
             return;
@@ -775,11 +782,12 @@ impl Sim {
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
                     // event — the client applies decoded chunks to its own
-                    // `World`, which we now read via `NetClient::sections_at`.
-                    // Re-meshing the *live* column additionally needs the column
-                    // geometry + light seams (see `mark_column_dirty`); until
-                    // those land and `impl-render`'s multi-section loop consumes
-                    // them, this only re-meshes locally generated columns.
+                    // `World`, which we can read via `NetClient::sections_and_light_at`
+                    // (+ `world_dimensions` for geometry). Meshing the *live*
+                    // column is not blocked on a client seam any more; it is
+                    // blocked on the vanilla `state_id → sprite` classifier (see
+                    // `mark_column_dirty`). Until that lands this only re-meshes
+                    // locally generated columns.
                     self.mark_column_dirty(x, z);
                 }
                 NetUpdate::Chat { text, player } => {

@@ -55,15 +55,24 @@
 //! / [`NetClient::server_position`] are that surface; before login they return
 //! empty, never panic.
 //!
-//! **What this does *not* yet reach, verified 2026-07-28 and reported upstream:**
-//! a `ChunkSection` carries block-states + biomes only — *no light*, and the
-//! handle exposes *no column geometry* (`min_y` / `section_count`). `block_at`
-//! returns the column's `air_id` (not `None`) for out-of-range Y, so `min_y` is
-//! not even derivable by probing. So the shell can read section *contents* but
-//! cannot yet (a) place them at their true world-Y or (b) light them — both are
-//! pending `lodestone-world`/client seams (`ClientHandle::column_geometry` or a
-//! restored `chunk(pos) -> Arc<LoadedChunk>`, plus a bulk light read). Rendered
-//! live terrain waits on those; the *data* path is proven end-to-end here.
+//! **Both seams that used to be missing now exist** (landed by `impl-client`,
+//! verified 2026-07-29): [`ClientHandle::sections_and_light_at`] reads a whole
+//! neighbourhood's blocks *and* light under one lock, and
+//! [`ClientHandle::world_dimensions`] hands back the column geometry
+//! (`min_y` / `height`) needed to place streamed sections at their true
+//! world-`y`. [`NetClient::sections_and_light_at`] / [`NetClient::world_dimensions`]
+//! wrap them here, ready for a live mesher to consume.
+//!
+//! **What still blocks *rendered* live terrain is no longer a client seam — it
+//! is the classifier.** The shell meshes with [`crate::blocks::DemoClassifier`],
+//! whose palette is a hand-built 10-id demo namespace ([`crate::blocks::id`]).
+//! A live 26.2 server streams *vanilla* block-state ids (tens of thousands of
+//! them), which that classifier maps to non-occluding air for everything outside
+//! its 10 ids — so meshing the live world through it renders almost nothing, and
+//! any lighting gate over it would pass vacuously. Rendering live terrain needs
+//! the real `lodestone-assets` `AtlasBuilder` + a `state_id → sprite` classifier
+//! keyed on vanilla ids (the parked "texture swap"), *not* another client seam.
+//! That is why `mark_column_dirty` (sim.rs) still meshes only the local world.
 
 use std::sync::{
     Arc, OnceLock,
@@ -75,7 +84,8 @@ use std::time::Duration;
 
 use lodestone_client::{
     ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
-    LoginProfile, OpenMenuSnapshot, PlayerListEntry, ServerAddress, Vec3,
+    LoginProfile, OpenMenuSnapshot, PlayerListEntry, SectionLight, ServerAddress, Vec3,
+    WorldDimensions,
 };
 use lodestone_game::menu::Menu;
 use lodestone_model::event::SoundCategory;
@@ -298,15 +308,45 @@ impl NetClient {
     ///
     /// This is the section-source seam the render/mesh layer consumes: it hands
     /// out block-state sections only. Placing them at their true world-Y and
-    /// lighting them needs column geometry and a light read the handle does not
-    /// yet expose (see the module docs); this surface is ready for both the
-    /// moment those land.
+    /// lighting them needs a light read; both now exist and are wrapped below
+    /// ([`sections_and_light_at`](Self::sections_and_light_at) /
+    /// [`world_dimensions`](Self::world_dimensions)).
     #[must_use]
     pub fn sections_at(&self, requests: &[(ChunkPos, usize)]) -> Vec<Option<Arc<ChunkSection>>> {
         match self.handle.get() {
             Some(h) => h.sections_at(requests),
             None => vec![None; requests.len()],
         }
+    }
+
+    /// Batch-read owned `(block section, light section)` snapshot pairs from the
+    /// client-owned world under a single lock acquisition — the atomic block+light
+    /// companion to [`sections_at`](Self::sections_at). Each request is
+    /// `(chunk, block_section_index, light_section_index)`; the two indices are
+    /// **distinct spaces passed through unchanged** (a mesher for block section
+    /// `n` asks `(pos, n, n + 1)` — light section `0` is the below-world boundary
+    /// and light section `i` covers block section `i - 1`). Returns all
+    /// `(None, None)` before login. Never blocks, never panics.
+    #[must_use]
+    pub fn sections_and_light_at(
+        &self,
+        requests: &[(ChunkPos, usize, usize)],
+    ) -> Vec<(Option<Arc<ChunkSection>>, Option<SectionLight>)> {
+        match self.handle.get() {
+            Some(h) => h.sections_and_light_at(requests),
+            None => vec![(None, None); requests.len()],
+        }
+    }
+
+    /// The connected dimension's vertical extent (`min_y` / `height`), or `None`
+    /// before the terrain geometry is known (pre-login / pre-first-chunk). A live
+    /// mesher needs this to place streamed sections at their true world-`y`:
+    /// `section_count = height / 16`, and light sections span
+    /// `0..=section_count + 1`, matching
+    /// [`sections_and_light_at`](Self::sections_and_light_at).
+    #[must_use]
+    pub fn world_dimensions(&self) -> Option<WorldDimensions> {
+        self.handle.get().and_then(|h| h.world_dimensions())
     }
 
     /// The columns the client currently holds. Empty before login.
