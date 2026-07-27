@@ -18,6 +18,33 @@ same mistakes being made again.
 
 ---
 
+## Where the client actually is (last verified 2026-07-29)
+
+Run it — both of these were executed, not inferred:
+
+```
+./scripts/live-oracles/creative.sh                                        # start the oracle
+cargo build --release --features live --bin lodestone
+./target/release/lodestone --window --live --host 127.0.0.1 --port 25570  # flat creative
+./target/release/lodestone --window --live --host 127.0.0.1 --port 25565  # real 26.2 (cave spawn)
+```
+
+Observed against the flat-creative oracle: `loaded vanilla block atlas … sprites=929`,
+`live_cols=329`, `sections=334`, `quads=210124`, **120 fps / 8.0 ms frame / 94 MB RSS**. The
+world on screen is the **server's**, meshed through the vanilla classifier and lit by the
+server's own light data.
+
+Working end to end: join → chunk stream → vanilla-textured meshed terrain → server lighting →
+movement → chat → tab list → scoreboard → containers → entity spawn/despawn. Clientbound packet
+coverage is **108/141 decoded**, serverbound **53/69**.
+
+The three biggest known gaps are listed under [Never started](#7-never-started) and in the
+addenda: `ItemStack` components (no custom names/enchants/durability), per-entity mesh geometry
+(the *mechanism* is proven via pig; the other 87 meshes are not individually verified), and
+chat/HUD pixel gates.
+
+---
+
 ## Table of contents
 
 1. [Multi-version protocol families (v47 / v340 / v735)](#1-multi-version-protocol-families)
