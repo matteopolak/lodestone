@@ -48,7 +48,8 @@ These are current, reproduced-on-screen defects, not speculation:
 
 - **Water and lava render as nothing.** `bake_state` emits 0 quads for fluids and the translucent
   pass is not wired, so an ocean is an invisible pit. This is a *regression in appearance* from
-  the old grey-blob look and is the largest open rendering gap.
+  the old grey-blob look and is the largest open rendering gap. (In progress: `3d08b80` classifies
+  fluids and resolves their atlas sprites; geometry and the translucent pass are still to come.)
 - **Cross-plants are not biome-tinted.** Measured on one frame: grass block tops sit at G/R ≈ 1.6
   while short_grass sits at G/R ≈ 1.12 (untinted greyscale would be 1.0). Same biome, same
   `tint_index` path — so tint is reaching block faces and missing plant quads. Vanilla plains
@@ -56,14 +57,36 @@ These are current, reproduced-on-screen defects, not speculation:
 - **The hotbar is a placeholder bar**, while hearts and hunger beside it are pixel-correct vanilla
   sprites — so the GUI atlas and `gui.scaling` model are fine and the fault is isolated to the
   hotbar widget.
-- **Death is terminal.** `sim.rs` sets the status string `server: player dead (no chunks)` and
-  never sends `ClientAction::Respawn`, which exists and is wired in the adapter. Die once and the
-  session is functionally over.
-- **Chat renders raw translation keys, upper-cased**: `E00109223M WAS SLAIN BY
-  ENTITY.MINECRAFT.SPIDER` where vanilla says `Lodestone was slain by Spider`. Chat components
-  (`translate` + `with`, nested `extra`, inherited style) are not resolved against `en_us.json`.
+- **The HUD font is a 5×7 debug font with uppercase glyphs only** (`hud/font.rs:16` calls
+  `to_ascii_uppercase`), with a fixed advance. Vanilla text needs `ascii.png` + unicode pages,
+  **per-glyph proportional widths**, and the 1px 25%-brightness drop shadow. Proportional widths
+  are most of what makes vanilla text look like vanilla text — and note that a font with the right
+  characters at the wrong widths passes every `assert_eq!` on the source string, so this has to be
+  gated on pixels.
 - **No smooth lighting / AO on the model path** — flat per-block light plus directional shade.
   Correct, but one of the most recognisable "not Minecraft" tells now that geometry is right.
+- **Block placement does not exist.** `ClientAction::UseItemOn` is modeled and wired through the
+  adapter, but nothing in `lodestone-game` produces it. Mining works; the inverse does not.
+
+### Fixed since that play-test
+
+- **Death is no longer terminal** (`44a8ec3`). My diagnosis was wrong in an instructive way: I
+  claimed nothing sent `ClientAction::Respawn`. In fact `RespawnPolicy::Automatic` was already
+  answering `ClientEvent::Death` and the library was recovering fine — the shell was setting
+  `SessionPhase::Ended` and dropping `ClientEvent::Respawned` in a catch-all, so the library played
+  on while the shell had declared the game over. **The status string invented a causal story
+  (`no chunks`) that sent me looking in the wrong place.** Misleading diagnostics cost more than
+  absent ones.
+- **Chat resolves translation keys** (`258ffec`). `lodestone-assets::Language` loads the real
+  vanilla `en_us.json` (8,123 keys) from the downloaded `client.jar`; `lodestone-game::text::resolve`
+  lowers `Text → Text` so every `translate` node becomes a resolved literal subtree, with `%s` /
+  `%N$s` / `%%`, style inheritance down `extra`, and **missing key → the key itself, never an error
+  or empty string**. Live: `…was slain by entity.minecraft.spider` → `…was slain by Spider`.
+  Here too the defect was **a missing table, not missing logic** — the model already formatted
+  correctly once given a real one, so the smallest correct fix was data plus a lowering shim rather
+  than a new formatter. Still parked: the shell doesn't consume it yet (`chat.rs:88`), and
+  `TextContent` models only `Literal`/`Translate`, so keybind/score are dropped before they reach
+  the resolver.
 
 The other big gaps are under [Never started](#7-never-started): per-entity mesh geometry (the
 *mechanism* is proven via pig; the other 87 meshes are not individually verified) and chat/HUD
