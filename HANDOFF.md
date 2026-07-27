@@ -1,0 +1,514 @@
+# Lodestone — Deferred Work Handoff
+
+**Status of this document:** everything below was **deliberately descoped**, not abandoned or
+found broken. Each area is left in a *working, committed, test-covered* state. This file exists so
+the work can be picked up by someone who was not present when it was built.
+
+**Current active scope** is v770 only (protocol 776 / MC 26.2), across four workstreams:
+packets, UI, entities, lighting. Everything in this document is **outside** that scope.
+
+**Rule for anyone resuming:** every number in this file was measured on real data, not estimated.
+Where something is unproven it says so explicitly. Please preserve that distinction — the single
+most expensive recurring failure on this project has been a claim that outran its evidence.
+
+**See also:** [`DESIGN.md`](./DESIGN.md) — full architecture and rationale. Its **§12 validation
+log** is the highest-value part: ~20 entries recording beliefs that were confidently held and
+empirically false, and how each was caught. This file is self-contained, but §12 is what stops the
+same mistakes being made again.
+
+---
+
+## Table of contents
+
+1. [Multi-version protocol families (v47 / v340 / v735)](#1-multi-version-protocol-families)
+2. [WebAssembly / browser target](#2-webassembly--browser-target)
+3. [Audio](#3-audio)
+4. [Worldgen performance](#4-worldgen-performance)
+5. [Online-mode authentication](#5-online-mode-authentication)
+6. [Allocator selection (closed — no action needed)](#6-allocator-selection-closed)
+7. [Never started](#7-never-started)
+8. [Traps that are expensive to rediscover](#8-traps-that-are-expensive-to-rediscover)
+
+---
+
+## 1. Multi-version protocol families
+
+### Decision
+
+The original target was 17 protocol families spanning 1.8.9 → 26.2. That was cut first to four
+(v770, v735, v340, v47) and then to **v770 only**. The other three families **remain in the tree
+and must not be deleted** — they are the empirical proof that the version-isolation architecture
+works, and re-deriving that proof is far more expensive than carrying the code.
+
+### Why the reduction happened (this is the load-bearing part)
+
+Two independent findings converged, and together they mean 17 families was the *wrong plan*
+rather than merely an ambitious one:
+
+- **Adapter dispatch cannot be generated.** ID routing is mechanical, but lowering/raising to
+  `ClientEvent`/`ClientAction`, world side effects, registry lookups, teleport replies and
+  chunk-shape state are semantic per-version work.
+- **Wire-shape migration cannot be generated either.** `xtask new-version` cloned v340 → v735
+  correctly and mechanically, and the result was a 1.12.2 client wearing 1.16 packet IDs.
+
+So codegen covers packet IDs and registry tables — the cheap part — and covers **neither dispatch
+nor shape migration**, which are the bulk *and* the risk.
+
+### Measured cost of a family
+
+Do **not** use the `cargo xtask codegen-ratio` "hand-written lines" figure to plan with; it counts
+docs, blanks and derived struct declarations. The real measurement, taken on v735:
+
+| bucket | lines |
+|---|---|
+| generated (`packet_ids` 841 + `entity_types` 123) | 964 |
+| hand-written total | 3007 |
+| · doc/comments | 997 |
+| · blank | 181 |
+| · **actual code** | **1829** |
+
+And within that 1829:
+
+| file | lines | nature |
+|---|---|---|
+| `adapter.rs` | 712 | dispatch / choreography / lower / raise — **irreducible** |
+| `chunk.rs` | 191 | paletted decode, biomes prefix, light split, flattening — **irreducible** |
+| `metadata.rs` | 211 | typed union + per-version type-id table — semi-reducible |
+| hand codecs | ~200 | JoinGame/Respawn NBT, slot, position — macro-closable |
+| derived decls | ~515 | `#[derive]` + field lists — mechanical |
+
+**Genuine irreducible per-version knowledge is ~900 code lines.** A fifth family is roughly a day
+of work, not a project. Budget accordingly if resuming.
+
+### State of each family
+
+| family | version | protocol | live-verified | `ClientAction` encode |
+|---|---|---|---|---|
+| `v770` | 26.2 | 776 | yes — active scope | 42/43 |
+| `v735` | 1.16.5 | 754 | yes, chunk decode against a real 1.16.5 server | 17/43 |
+| `v340` | 1.12.2 | 340 | yes | 17/43 |
+| `v47` | 1.8.9 | 47 | yes — 81 columns via `map_chunk` + `map_chunk_bulk`, 0 trailing bytes | 16/43 |
+
+Deletability is **measured**, not asserted — `cargo xtask check-deletable <family>` simulates
+removal and reports the true fallout. All families are cleanly deletable (v47 5 manifest lines,
+v340 4, v770 8).
+
+### What is left if you resume
+
+1. **Action encode breadth is the biggest gap.** v47/v340/v735 sit at 16–17 of 43 while v770 is at
+   42. Concretely, **a 1.8.9 client still cannot break a block.** `BlockAction`, `UseItemOn`/
+   `UseItem` and `InteractEntity` are partial/lossy; `ContainerClick` is absent on all three.
+2. **Critically — some of that gap is correct by design and must not be "fixed."** The canonical
+   model is shaped by the newest protocol and older adapters translate *upward*, so
+   `SetPlayerInput`, `EndClientTick` and `ChatAck` genuinely have no 1.8.9 form. **Any resumed work
+   must first produce a table distinguishing *absent by design* from *not done yet*,** because a
+   table where those look identical is exactly how v735 shipped registered-but-unreviewed.
+3. **v47 place-interaction cannot be gated in the current lab.** The 1.8.9 container is survival
+   with no RCON and no console, so the player has nothing to place. Break-only is the maximum until
+   that container gets an RCON channel. This is documented in-crate rather than silently absent.
+
+### The `SHAPE_REVIEW.toml` gate — do not remove it
+
+`xtask new-version` clones a family and prints a residue list telling you the packet structs are
+still the *source* family's wire shapes. On first use, that warning went to stdout and evaporated
+while the same command wired the new family into the registry as **supported**. One command emitted
+a true signal and an opposite fact, and only the fact survived.
+
+The fix is that a family is **not registerable** while `SHAPE_REVIEW.toml` has undischarged
+entries. v735 was de-registered until all 62 packet entries were audited. **Residue printed is
+residue lost** — if you extend the tooling, keep the failure closed.
+
+Also: **never clone a live test.** A cloned live gate pointing at the *source* family's server is
+worse than no test, because it manufactures evidence for the wrong version. v735 shipped with a
+cloned `live_chunk.rs` still pointing at the 1.12.2 container on port 25568.
+
+---
+
+## 2. WebAssembly / browser target
+
+### State: working spike, goal met, frozen
+
+Verified end to end in Chrome:
+
+```
+[status] REAL terrain from real server bytes — 16 chunks, 16 sections, 250 greedy quads
+         backend: BrowserWebGpu | select_strategy(): PerDraw     ~119–121 fps
+[net]    relay probe OK — browser WebSocket → relay → live server
+         version.name = "26.2" | {"version":{"name":"26.2","protocol":776}, …}
+```
+
+Browser → WebSocket relay → **live vanilla 26.2 server**, round-tripping real status JSON, with
+real vanilla textures decoded in-browser. `trunk` 0.21.14 is installed and `trunk serve` works.
+
+`scripts/wasm-check.sh` passes for all wasm targets and is the regression guard.
+
+### Architecture notes worth keeping
+
+- **The one true blocker is networking, permanently.** Browsers cannot open raw TCP; vanilla
+  servers speak only raw TCP. A browser build **strictly requires** a WebSocket↔TCP relay. No
+  browser API removes this (WebTransport/WebRTC don't speak to a vanilla TCP listener either).
+- **The relay is ~150 lines and protocol-blind.** Because the codec is byte-transparent framing, it
+  never parses a packet, so **one relay serves all versions and all servers**. The moment it parses
+  a packet it becomes a per-version component and you need one per family. Keep it dumb.
+- **Payload: 933 KB brotli** (raw 3.71 MiB, gzip 1.21 MiB) at last measurement. **Report brotli** —
+  servers ship wasm brotli-compressed and gzip overstates real cost by ~26%. Attribution:
+  wgpu + naga + glow ≈ 1.19 MiB, i.e. the graphics stack, not our code.
+- **`wasm-opt -Oz` is counterproductive for download size** — it shrinks the raw module ~10% but
+  makes the *brotli* artefact 4 KB larger. It trades download for parse/instantiate time. Trunk's
+  `data-wasm-opt="0"` is correct if you are optimising bytes.
+- **`opt-level = "z"` (1.21 MiB) beats `"s"` (1.30) and `"3"` (1.62).** `"3"` is a +28% regression
+  for speed a 250-quad scene does not need.
+
+### `webgl` feature was removed, and it is **not** a toggle
+
+It cost 537 KB brotli — **68% of the entire download** — for a path that **panicked before frame
+0**. The terrain pipeline binds a vertex-stage storage buffer (`block.rs`, `ShaderStages::VERTEX` +
+`BufferBindingType::Storage`), which WebGL2 categorically lacks, so `create_bind_group_layout`
+panics at construction.
+
+**Re-adding WebGL2 costs a downlevel-compatible render path (no vertex-stage storage), not a
+feature flag.** That is recorded in `web/Cargo.toml` beside the removal. Before pricing any
+fallback, *run it* — a fallback that has never executed is not a fallback.
+
+### Traps
+
+- **COOP/COEP asymmetry.** `trunk serve` sets both headers → `crossOriginIsolated === true`; a
+  plain static server sets neither. Anything depending on cross-origin isolation (threaded meshing
+  via `wasm-bindgen-rayon`) **works under trunk and fails mysteriously elsewhere.** Documented in
+  `web/README.md`.
+- **A 2-D `getImageData` readback of the WebGPU canvas returns all-black.** That is the un-retained
+  drawing buffer, *not* a blank scene. Use the **composited screenshot** to verify. This is the
+  inverse of the project's usual failure mode and just as misleading.
+- **`std::fs` compiles for `wasm32-unknown-unknown` and fails only at runtime.** A `cfg` gate
+  removes *existing* entry points but does nothing about a newly added ungated `fs::read`. The
+  enforcement is confinement to a single gated file (`lodestone-assets/src/source_native.rs`) plus
+  a grep guard in `scripts/wasm-check.sh`. Keep both.
+- **Cargo features are advisory, not architectural boundaries.** Features unify across the whole
+  graph, so a downstream crate taking a dependency with default features on silently overrides
+  `default-features = false` elsewhere. For a hard boundary use `cfg(target_arch)`.
+- **Run `scripts/wasm-check.sh` whenever a dependency is added or bumped.** Dependency changes are
+  the only way this breakage class enters the tree — an `rsa 0.9` addition once pulled in a third
+  major of `getrandom` via a `rand_core 0.6` pin and broke the browser build, and nothing anyone
+  edited mentioned `getrandom`.
+
+### What is left
+
+Browser **singleplayer** is unblocked (`lodestone-server`'s tokio is target-split) but not wired.
+The browser is **not** the limiting factor for multiplayer — adapter dispatch breadth is. Do not
+optimise the wasm layer in response to multiplayer feeling thin.
+
+---
+
+## 3. Audio
+
+### State: complete and working, consumed only partially
+
+`lodestone-audio`: 63 tests. `lewton` 0.10.2 (pure-Rust Vorbis) + `cpal` 0.18.1 (native-only,
+`cfg`-gated). Sample-driven clock with **no `Instant::now()` anywhere**, enforced by a crate-wide
+guard with an empty allowlist.
+
+`SOUND`, `SOUND_ENTITY`, `LEVEL_EVENT` and `LEVEL_PARTICLES` all dispatch, so the packet seam is
+connected. Playback is gated behind `LODESTONE_ASSET_ROOT`.
+
+### Validation approach worth preserving
+
+Decode validation deliberately avoids self-comparison: **libsndfile encodes** the fixture,
+**ffmpeg decodes** the golden PCM, **lewton** is under test — `max_abs_diff 3.1e-5`, `rms 1.8e-5`.
+The test has teeth: negated, channel-swapped, and one-frame-shifted goldens are each asserted to
+**fail** the tolerance.
+
+**Trap:** a genuinely-silent vanilla ogg gives a worthless all-zeros "match" — two silent buffers
+agree perfectly. Guarded by a `peak > 0.3` assertion on the fixture.
+
+### Parity facts (transcribed with call-site citations)
+
+- **`SoundSource` has 11 buses in 26.2** (don't forget `UI`).
+- Range = `max(instanceVolume, 1.0) × attenuationDistance` (default 16).
+- `AL_LINEAR_DISTANCE` rolloff 1.0 ref 0.0 → `gain = max(0, 1 − dist/maxDist)`.
+- MASTER is **not** squared. Pitch clamped `[0.5, 2.0]`.
+- Only MONO spatialises; stereo plays flat with no downmix.
+
+### Known limitation, honestly graded
+
+**Panning geometry is not parity.** Vanilla delegates stereo placement to OpenAL-Soft's HRTF. Ours
+is equal-power panning, documented as an approximation rather than claimed exact.
+
+### Sound asset layout (non-obvious)
+
+**`sounds.json` is not in `client.jar`.** It, like every `.ogg`, lives in the external asset-object
+store addressed by `asset-index-<n>.json` at `objects/<sha1[0..2]>/<sha1>`.
+
+Corpus: **1968 events, 8024 entries (7963 file, 61 event-refs), 4843 distinct files.** Entry type
+is `"file" | "event"` (**not** `"sound" | "event"`). All 61 refs are depth-1 and acyclic, but
+**vanilla ships no cycle guard**, so a malicious pack would stack-overflow at play time — we bound
+it with a visited set and depth cap. A `type: event` entry contributes the *referenced* event's
+total weight to the parent's selection sum.
+
+---
+
+## 4. Worldgen performance
+
+### State: correctness complete and verified; performance unmeasured
+
+`lodestone-worldgen` has the strongest evidence in the codebase, all bit-exact against a JVM oracle,
+element-wise, naming the divergent coordinate on failure:
+
+```
+noise router      34048 / 34048   whole region
+final density     98304 / 98304   whole chunk, interpolated (4×8×4 cells, trilerped)
+carvers           98304 / 98304   × 2 chunks
+surface + aquifer land and ocean profiles
+ore features      whole-chunk exact BOTH directions, 3 fixtures / 2 seeds / 2 terrain profiles
+```
+
+It is now genuinely on screen — wiring it into the shell moved spawn Y from 46 (a sine+hash
+placeholder) to **71** (real vanilla surface height), and meshed sections from 610 to 831.
+
+### The one open question
+
+**Debug-build generation measured ~1.1 s/chunk (169 chunks in 3m09s).** Release-mode per-chunk time
+was never measured. Before optimising, measure — and note the constraint: **generation
+parallelisation must not break per-chunk RNG determinism**, which the ore-feature parity depends on.
+Do not trade parity for speed.
+
+### The bug class to watch
+
+Buried ores draw a `nextFloat` inside `shouldSkipAirCheck` **before** the 6-neighbour air test.
+Short-circuiting them desynchronises the shared RNG stream and **three ore families silently
+vanish.** A wrong draw *count* is invisible to any test asking "did ores appear" and instantly fatal
+to whole-chunk parity.
+
+This is why both gate styles are needed: **exact-match on one chunk catches a wrong draw order;
+count bands catch a plausible-but-wrong distribution. Neither catches the other.**
+
+### Architecture note
+
+Worldgen is **data, not code** — vanilla 26.2 ships its noise router as **963 JSON files** under
+`data/minecraft/worldgen/`. The generator is a ~700-line version-free interpreter over per-version
+JSON, not ~10k lines of ported logic.
+
+The proof that it is data is better than the claim: the Rust interpreter reads **disk JSON** while
+the oracle evaluates the **running server's live `RandomState` router**. If disk JSON were an
+incomplete picture the two would diverge. They agree 100%.
+
+### Deferred architectural step
+
+The shell currently calls the generator **directly**. Vanilla runs singleplayer as an integrated
+server, so the faithful destination is generate → loopback → client-consumes, sharing the
+multiplayer path. This was deliberately deferred: closing the island today by a direct call was
+worth more than the correct architecture arriving later, and **the generator itself does not have
+to change when the call site is replaced.** Recorded so the shortcut is a decision with a named
+successor rather than drift.
+
+---
+
+## 5. Online-mode authentication
+
+### State: crypto path works end to end; a full authenticated join is untested and not claimed
+
+```
+$ cargo test -p lodestone-net --test online_handshake -- --ignored --nocapture
+post-encryption disconnect reason: {"translate":"multiplayer.disconnect.unverified_username"}
+test result: ok. 1 passed
+```
+
+**The measurement is the failure, and it is a strong one.** That disconnect arrived **encrypted**
+and decrypted cleanly. So the server accepted our RSA-wrapped shared secret, matched the verify
+token we echoed, switched on its cipher, and its AES-128-CFB8 reply round-tripped against ours. The
+only thing that failed is the session-server ownership lookup, which needs a Microsoft account we
+do not have.
+
+A framing or decrypt error would mean broken crypto; a clean protocol-level "unverified username"
+means the crypto is right. **When you cannot reach success, choose a failure that discriminates.**
+
+### What exists
+
+- `lodestone-auth`: Microsoft device-code OAuth (`flow.rs`) with token caching (`cache.rs`).
+- `lodestone-net`: `Cfb8Cipher`, SRV record resolution (`resolve.rs`), legacy/status ping (`ping.rs`).
+- Encryption is outermost on the wire: `encode = frame(compress(body))` then encrypt; `feed =
+  decrypt` then buffer. One cipher per connection, separate CFB8 feedback registers per direction,
+  key == IV == the 16-byte secret. It lives in the sans-IO codec, so the browser path inherits it.
+
+### External vectors (an authority we did not write — keep these)
+
+Minecraft's server-ID hash is a **signed** SHA-1: `BigInteger.toString(16)` over the raw digest, so
+negatives get a leading `-` and a leading-zero digest loses a character. A naive hex digest passes
+the first and fails the other two:
+
+```
+Notch  4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48
+jeb_   -7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1     ← the negative case
+simon  88e16a1019277b15d58faf0541e11910eb756f6      ← 39 digits, leading zero
+```
+
+CFB8-AES128 is checked against NIST SP800-38A F.3.7.
+
+**The cipher is stateful across the whole connection, not per packet.** There is a deliberate
+"per-packet-reinit-is-wrong" test that proves statefulness matters rather than merely asserting it.
+
+### What is left
+
+A real authenticated join, which needs Microsoft credentials. `rsa`/`rand` are native-only
+(`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`) — deliberately, since the
+session-server call is native-only anyway. The docs name that seam as where a browser auth story
+would land.
+
+---
+
+## 6. Allocator selection (closed)
+
+**No action needed. Decision: keep the system allocator.** Benchmarked in
+`crates/lodestone-allocbench` — one binary per allocator, mutually-exclusive features, peak RSS via
+`/usr/bin/time -l`, median of 5.
+
+| vs. system baseline | throughput (geomean) | mean RSS |
+|---|---|---|
+| mimalloc 0.1.52 | 94% | **130%** |
+| snmalloc-rs 0.7.4 | 79% | 104% |
+| tikv-jemallocator 0.7.0 | **113%** | 111% |
+
+No candidate is both faster *and* leaner than macOS `libmalloc`, and the top-end wins are within
+measured noise. Each costs a C/C++ toolchain dependency. **Not justified.** If meshing throughput is
+later *proven* by profiling to be the bottleneck, jemalloc is the only candidate with a consistent
+edge — revisit then, not before.
+
+Two findings worth keeping:
+
+- **Cross-thread free inverts the ranking.** Local-free order is `jemalloc > system ≈ mimalloc ≫
+  snmalloc`; cross-thread free at 8–10 threads is `snmalloc > jemalloc ≈ mimalloc > system`.
+  Benchmarking with same-thread free — the obvious thing to write — ranks snmalloc last and produces
+  the opposite conclusion.
+- **Methodology trap:** `vec![0u8; n]` routes to `alloc_zeroed`, letting an allocator skip the
+  memset on fresh OS-zeroed pages — it showed jemalloc at a bogus 4×. Use `with_capacity` + a real
+  fill so the benchmark matches how sections and meshes are actually written.
+
+**Rule: library crates must never set `#[global_allocator]`.** That is an application-level
+decision; a library that hijacks it breaks every downstream consumer.
+
+---
+
+## 7. Never started
+
+- **Scripting host.** WASM (`wasmtime`, sandboxed) vs Lua (`mlua`, ergonomic). Leaning WASM for
+  untrusted plugins with a capability-based API. No code exists.
+- **The other 13 protocol families.** See §1 for the real per-family cost (~900 irreducible lines).
+- **Entity model ports.** ~130–150 base mob meshes are hand-written `LayerDefinition`/
+  `MeshDefinition` classes in vanilla with **no data path** — nothing in the generated reports or
+  minecraft-data exposes mesh geometry. The version-free primitive (`CubeDef`/`PartPose`/`PartDef`
+  → `bake_entity`) exists in `lodestone-assets`; the per-mob data does not. Meshes are largely
+  stable across versions, so this is author-once, tweak-per-version.
+
+---
+
+## 8. Traps that are expensive to rediscover
+
+These cost real time to find. They are not specific to the deferred work, but they are the things
+most likely to bite someone resuming it.
+
+### Four species of vacuous test
+
+A test can be green, well-written, live, and prove nothing. Two of these species **cannot be found
+by reading the test** — the source is exemplary and the flaw is a property of what the test was
+pointed at.
+
+| species | flaw lives in | readable? | example |
+|---|---|---|---|
+| **assertion** | the assert | yes | `let _ = walk_to(...)`; position printed, never asserted |
+| **precondition** | the setup | yes | missing fixture → `skip` instead of fail; gate passed in 0.00s |
+| **duration** | test lifetime vs system counters | **no** | server stops sending chunks after 10 unacked batches; every gate disconnects first |
+| **world** | the input data | **no** | light propagation gated on **superflat**, where sky light never spreads sideways |
+
+Audit questions to carry forward:
+- *Does any server-side counter accumulate past our gate's lifetime?*
+- *Does the input actually contain the structure the code under test exists to handle?*
+
+### An expected value must originate outside the code under test
+
+`decode(encode(x)) == x` is satisfied by two symmetric misunderstandings. v735's hermetic chunk
+fixtures were generated with **our own encoder** and passed throughout, then the live gate produced
+49 × "unexpected end of input" — the decoder was missing the 1.16.2 biomes varint length-prefix.
+Encoder and decoder shared one wrong mental model, so the round trip closed perfectly on bytes no
+server would ever send.
+
+Use captured server bytes, a JVM oracle, or a hand-decoded spec example. Where a live capture is
+impractical, check the fixture in **as bytes** the first time it is validated against reality.
+
+The same trap at the oracle level: a self-authored JVM oracle validates *the behaviour you chose to
+model in it*, not vanilla's. Three implementations once agreed bit-for-bit across 16 scenarios and
+all three were wrong, because all 16 happened to be flush contacts where two competing formulations
+coincide. **Agreement across ports is weak evidence when the ports share an author.**
+
+### Assertions of an absence need a control proving the detector works
+
+"No corrective teleport", "no trailing bytes", "no dropped packet" are each only as good as the
+evidence the mechanism *would* have fired. The live physics gate asserts zero corrective
+`player_position` packets — and the server only validates movement once `hasClientLoaded()` is true,
+so without sending `player_loaded` it silently ignores movement and returns a false green. The
+permanent negative control (one 30-block teleport that **must** be snapped back) is what makes the
+absence meaningful.
+
+### Test-suite health
+
+- **`cargo build --workspace` is not a health check** — it does not build test targets. Use
+  **`cargo check --workspace --all-targets`**.
+- **A test total gathered during concurrent edits is a sample, not a measurement.** The meaningful
+  invariant is *zero failures **and** zero non-compiling targets*, never the absolute count. A run
+  once reported "1406 passed, 0 failed" while exiting 1, because a crate failed to compile.
+- **A live gate behind both a feature flag and `#[ignore]` compiles to zero tests without the
+  feature** and reports `ok. 0 passed`, which is indistinguishable from success at a glance. Put the
+  full invocation in the docs at every call site.
+
+### Live-server hazards
+
+- **Offline mode derives the account UUID from the *username*, ignoring the UUID the client sends.**
+  Every test sharing a name shares one persisted player file. A mob killed that player once, vanilla
+  persisted the dead state, and every subsequent join was held on the death screen — **which sends
+  no chunks.** A dead player is a silent, total chunk blackout while join, keep-alives and entity
+  movement all continue perfectly. Use `lodestone-testsupport`'s `unique_username`.
+- That helper must be unique **by construction** (an `AtomicU64` plus pid), never derived from a
+  clock. A `nanos % 1e9` version reads as a 10⁹ space and delivered ~10⁶ because the platform clock
+  had microsecond resolution. The counter goes **first** in the string so the server's hard 16-char
+  limit truncates the *timestamp*, not the discriminator.
+- **A freshly summoned entity is not selector-visible until the next server tick.** Poll for it;
+  never assert immediately. `Invulnerable:1b` additionally makes an entity **un-targetable** —
+  vanilla's `TargetingConditions` rejects it — so use `NoAI:1b` for a stationary lure.
+- **Vanilla's RCON client performs exactly one `read()` per request** and closes the socket unless
+  `pktsize == read - 4`. Sending the frame as two `write_all` calls silently closes the connection
+  after a few commands. **Write the entire frame in one call.**
+- **`tick step N` does not advance entity physics; only `tick sprint N` does** — and a
+  `tick sprint 1` used for registration silently consumes a tick, presenting as a phantom +1 offset.
+
+### Resource hygiene — read this before running anything
+
+**This machine is shared with an unrelated project.** Docker holds images, volumes and build cache
+belonging to the user's other work (`mht-*`, postgres, valkey, seaweedfs).
+
+**`docker system prune`, `docker volume prune` and `docker builder prune` would each destroy it.
+Never run them.** Every cleanup action must name its target explicitly. Note also that Docker's
+`name=` filter is a **substring** match, not a prefix match.
+
+Containers are named `lodestone-<purpose>`; prefer `docker run --rm`. Reclaim disk by deleting
+`target/debug/incremental` first (pure regenerable cache — it does **not** force a dependency
+rebuild), then stale **own-crate** artefacts in `target/debug/deps` by mtime. **Never third-party
+artefacts, never `deps` wholesale** — `cargo sweep --time N` is actively wrong here, because the
+oldest mtimes belong to stable third-party deps that are still current, while our own crates
+accumulate one dead content hash per rebuild.
+
+---
+
+## Appendix: authoritative data sources, in order
+
+1. **Mojang's own generator** (`packets.json`, `registries.json`, `blocks.json`) — authoritative,
+   works for every version ≥1.14 including 26.x.
+2. **Decompiled source** — reference for behaviour only; never transliterated. 26.2 ships
+   de-obfuscated, so class and method names are real.
+3. **minecraft-data** — bootstrap and cross-check for **1.8–1.21.11 only**; it has no 26.x data.
+4. **minecraft.wiki protocol pages** — human documentation.
+
+**Prefer interrogating the real jar over any community dataset.** `blocks.json` contains no
+collision geometry at all, and minecraft-data's `blockCollisionShapes.json` measured **stale and
+incomplete for 26.2** — 92.29% of states reliably covered, 30 blocks missing by name. A spot check
+would have said "looks fine." The replacement boots the real server headlessly and dumps
+`getCollisionShape(...).toAabbs()` for all 32,366 states.
+
+Where minecraft-data is still the practical choice, record why.
