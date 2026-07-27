@@ -10,9 +10,10 @@ A multi-version, library-first Minecraft Java Edition client in Rust (2024 editi
 > **§12 is the validation log, and it is the most valuable section.** It records every claim that
 > was empirically tested during construction — including roughly twenty cases where a confident,
 > well-argued belief (frequently mine) turned out to be false, and how it was caught. Several
-> entries document the *same* error recurring at a new layer. If you are resuming this project,
-> read §12 before writing code; it is a list of the specific ways this codebase produces green
-> tests that are not evidence.
+> entries document the *same* error recurring at a new layer; §12.66, §12.74, §12.88 and §12.92
+> are four successive failures of a single metric, each at a different layer and the last one
+> merely from going stale. If you are resuming this project, read §12 before writing code — it is
+> a list of the specific ways this codebase produces green tests that are not evidence.
 >
 > **Current scope is narrowed to v770 (protocol 776 / MC 26.2) across four workstreams: packets,
 > UI, entities, lighting.** Work explicitly deferred out of that scope — other protocol families,
@@ -22,9 +23,15 @@ A multi-version, library-first Minecraft Java Edition client in Rust (2024 editi
 >
 > **Status of the code:** contrary to the line below (written at design time and left for the
 > record), substantial production code exists — ~25 crates, four protocol families, a playable
-> shell that renders real generated terrain, and a browser build. What the codebase has
-> consistently *lacked* is not depth but **connectedness**: subsystems verified to a high standard
-> in isolation while nothing consumed them. See §12.85 and §12.88.
+> shell that renders real generated terrain, and a browser build. Measured protocol coverage for
+> v770 is **91/141 clientbound decoded, 89/141 reaching the seam, 49/69 serverbound encoded**
+> (`cargo xtask connectedness` — run it, don't quote this line, it will go stale too).
+>
+> What the codebase has consistently *lacked* is not depth but **connectedness**: subsystems
+> verified to a high standard in isolation while nothing consumed them. That is now located
+> precisely — packets reach the seam well, but **37 of 66 `ClientEvent` variants have no
+> consumer**, so the constraint lives in UI and rendering, not in the protocol crates. See §12.85,
+> §12.88 and §12.92.
 
 **Status:** design complete, core risks empirically validated (see §12). No production code written yet.
 
@@ -2286,3 +2293,39 @@ New direction, superseding §12.80's four-family target: **make the latest versi
 Secondary benefit worth noting: dropping from 22 to 14 active agents should materially reduce the shared-checkout contention that has repeatedly produced transiently-broken workspaces (§12.62, §12.64) — and it removes the excuse, so a red tree is now someone's fault rather than ambient noise.
 
 **Lighting is unblocked.** `handle.light_at` / `lights_at` / `sections_and_light_at` have landed on `lodestone-client`'s public surface — verified by grep, after several rounds of it being the single named blocker. The remaining lighting work is moving the oracle off superflat (§12.82) and consuming light in the mesher.
+
+**12.91 Handoff committed to the repo, and the resource cut executed.**
+
+User asked that the descoped work be captured "in a plan and handoff in the repo so i can pass it off later." Two documents committed and pushed (`1a7f7b8`):
+
+- **`HANDOFF.md`** (509 lines) — the deferred work, self-contained. One section per area (the three frozen protocol families, WebAssembly/browser, audio, worldgen perf, online-mode auth, the closed allocator question, never-started items), each with *measured* current state, entry points, what remains, and the traps. Plus a consolidated traps section: the four species of vacuous test, the "expected value must originate outside the code under test" rule, absence-needs-a-control, live-server hazards, and the resource-hygiene warnings.
+- **`DESIGN.md`** (2,264 lines) — the full design plan, which until now existed **only in session state**. That was a real gap: if this project were handed off, the single most valuable artefact would not have been in the repo. Prefixed with a reading guide flagging that §12 is the highest-value section, and correcting the stale "no production code written yet" line rather than deleting it.
+
+Both verified non-ignored before committing (`git check-ignore`) — a `.gitignore` that over-matches silently drops source, which is the failure mode that would have destroyed the JVM parity anchors.
+
+**Resource cut, which the user explicitly asked for.** Containers went 8 → **3**: stopped `mc189` (1.8.9), `mc1122` and `tw1122` (1.12.2), `mc1165` (1.16.5) — all serving now-frozen families — and `mc-online`, whose online-mode auth work is deferred. Kept `mc262` (v770), `creative` (v770 click/inventory oracles) and `entity-oracle` (v770 attributes). Disk was at **22 GiB free**, below the ~28 GiB threshold; reclaimed `target/debug/incremental` plus own-crate artefacts in `deps` older than 90 minutes → **27 GiB free**, `target/` 32G → 27G. Third-party artefacts untouched.
+
+**Agents 22 → 14 active.** Verified `cargo check --workspace --all-targets` → exit 0 before committing. One transient red during the sweep (`lodestone-client` importing `lodestone_game::chat_ack` before the manifest edit landed) resolved on its own — the §12.86 re-layering completing mid-flight, and the §12.62 rule applying exactly as written: a mid-edit sample is not a measurement.
+
+**Verified `impl-world`'s vacuity guard rather than taking the report** (`118 passed, 0 failed`). `light_exercises_propagation` makes the §12.82 degenerate-world case **fail closed**, and it ships with `propagation_check_ignores_a_secretly_uniform_values_array` — a `Values` array that is *materially* uniform passes a naive "is it `Uniform`?" check, so without that test the guard would itself have been vacuous. The remedy for a species of vacuity, built without reintroducing it.
+
+**12.92 The connectedness metric, finally measured by a tool — and I was wrong a fourth time, in the opposite direction.**
+
+`cargo xtask connectedness` landed and reports, for v770:
+
+```
+clientbound decoded 91/141; emits 89/141; decoded-but-stranded 2 [CHUNK_BATCH_START, RESPAWN]
+serverbound encoded 49/69; examined 91 arm(s)
+```
+
+I had been quoting **"~40 of 141 clientbound"** — in agent briefs and in status to the user. The true figure is **91**. The bulk agents landed roughly fifty packets while my number stood still, because I was carrying a hand-count from §12.74 and never re-derived it.
+
+**Verified independently before believing it**, because a tool I commissioned reporting a flattering number is precisely when to be suspicious:
+- Denominators: `141` clientbound / `69` serverbound counted straight out of the `play::{clientbound,serverbound}` modules of `generated/packet_ids.rs` — exact match with the tool.
+- Numerator sanity: a naive `grep -oE 'clientbound::[A-Z_0-9]+' | sort -u` gives **98**, against the tool's **91**. The tool is *below* the naive grep, i.e. it discards non-dispatch mentions rather than inflating. Wrong direction for a flattering bug.
+
+**The fourth error in this metric, and the first optimistic one.** §12.66 wrong denominator, §12.74 wrong numerator, §12.88 numerator wrong one hop later — all three pessimistic-or-flattering in ways that tracked whatever was cheapest to count. This one is different in kind: the number was *correct when measured* and simply **went stale while the thing it measured moved**. That is a fifth failure mode to name — not a bad measurement, but a good measurement quoted long after its subject changed. The remedy is the tool existing, which is why it was worth building.
+
+**What it does and does not say.** `emits 89/141` is the decode→seam layer, and it is genuinely strong — only **2** decoded-but-stranded packets (`CHUNK_BATCH_START`, `RESPAWN`). It does **not** contradict §12.88: 37 of 66 `ClientEvent` variants still have no consumer. Both are true. Packets now decode and reach the seam well; **consumption is the binding constraint**, and it sits in UI and rendering, not in the protocol crates.
+
+**Consequence for prioritisation, acted on immediately:** packets are in far better shape than I told the keepers, so relative weight should shift toward **UI, entities and lighting** — the three workstreams that *consume*. I have corrected the baseline with the agents rather than letting a wrong figure keep steering them.
