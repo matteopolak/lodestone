@@ -41,6 +41,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 pollster.workspace = true
 thiserror.workspace = true
+serde_json.workspace = true
 glam.workspace = true
 lodestone-assets.workspace = true
 lodestone-model.workspace = true
@@ -64,5 +65,4 @@ rayon.workspace = true
 [dev-dependencies]
 pollster.workspace = true
 lodestone-model.workspace = true
-serde_json.workspace = true
 lodestone-testsupport.workspace = true

@@ -27,12 +27,13 @@
 //! Run with:
 //! `cargo test -p lodestone-render --test block_texture_gate -- --ignored --nocapture`
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use lodestone_assets::{Image, ResourceLocation, ResourceManager, ZipSource};
-use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
-use lodestone_render::{BlockAtlas, BlockClassifier, Face};
+use lodestone_model::{BlockStateRegistry, Identifier};
+use lodestone_render::{
+    BlockAtlas, BlockClassifier, BlocksJsonRegistry, Face, blocks_json_registry,
+};
 
 // --- jar / registry discovery (mirrors lodestone-assets/tests/real_jar.rs) ---
 
@@ -83,106 +84,13 @@ fn blocks_report_path() -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// A test-support [`BlockStateRegistry`] loaded from Mojang's data-generator
-/// `blocks.json`. This is the authority a version crate (`v770`) owns in
-/// production; the gate builds it here only so the resolver can be measured
-/// offline. It carries the **real vanilla global state ids** the renderer
-/// receives on the wire.
-#[derive(Debug)]
-struct BlocksReport {
-    entries: Vec<Option<(Identifier, BTreeMap<String, String>)>>,
-    /// The `default: true` state id per block name, so the gate asserts against
-    /// the state a block reports as canonical (e.g. `grass_block` → `snowy=false`)
-    /// rather than the numerically-lowest one (`snowy=true`, the snow model).
-    defaults: BTreeMap<String, u32>,
-}
-
-impl BlocksReport {
-    fn load() -> Option<Self> {
-        let bytes = std::fs::read(blocks_report_path()?).ok()?;
-        let root: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        let obj = root.as_object()?;
-
-        let mut states: Vec<(u32, Identifier, BTreeMap<String, String>)> = Vec::new();
-        let mut defaults: BTreeMap<String, u32> = BTreeMap::new();
-        let mut max_id = 0u32;
-        for (name, block) in obj {
-            let id: Identifier = name.parse().ok()?;
-            let Some(arr) = block.get("states").and_then(|s| s.as_array()) else {
-                continue;
-            };
-            for state in arr {
-                let sid = state.get("id").and_then(serde_json::Value::as_u64)? as u32;
-                let mut props = BTreeMap::new();
-                if let Some(p) = state.get("properties").and_then(|p| p.as_object()) {
-                    for (k, v) in p {
-                        if let Some(v) = v.as_str() {
-                            props.insert(k.clone(), v.to_string());
-                        }
-                    }
-                }
-                if state.get("default").and_then(serde_json::Value::as_bool) == Some(true) {
-                    defaults.insert(name.clone(), sid);
-                }
-                max_id = max_id.max(sid);
-                states.push((sid, id.clone(), props));
-            }
-        }
-
-        let mut entries = vec![None; max_id as usize + 1];
-        for (sid, id, props) in states {
-            entries[sid as usize] = Some((id, props));
-        }
-        Some(Self { entries, defaults })
-    }
-
-    /// The block's canonical (`default: true`) state id, falling back to the
-    /// first state if the report marks none.
-    fn default_state_of(&self, block: &str) -> Option<u32> {
-        self.defaults
-            .get(block)
-            .copied()
-            .or_else(|| self.first_state_of(block))
-    }
-
-    /// The first (numerically lowest) state id for a block.
-    fn first_state_of(&self, block: &str) -> Option<u32> {
-        let want: Identifier = block.parse().ok()?;
-        self.entries
-            .iter()
-            .enumerate()
-            .find_map(|(i, e)| e.as_ref().filter(|(id, _)| *id == want).map(|_| i as u32))
-    }
-
-    /// The state id matching a block with a specific property value (e.g.
-    /// `oak_log` with `axis=y`), or `None`.
-    fn state_with(&self, block: &str, key: &str, value: &str) -> Option<u32> {
-        let want: Identifier = block.parse().ok()?;
-        self.entries.iter().enumerate().find_map(|(i, e)| {
-            e.as_ref()
-                .filter(|(id, props)| {
-                    *id == want && props.get(key).map(String::as_str) == Some(value)
-                })
-                .map(|_| i as u32)
-        })
-    }
-}
-
-impl BlockStateRegistry for BlocksReport {
-    fn resolve(&self, id: u32) -> Option<ResolvedBlockState<'_>> {
-        let (block, properties) = self.entries.get(id as usize)?.as_ref()?;
-        Some(ResolvedBlockState { block, properties })
-    }
-
-    fn state_count(&self) -> u32 {
-        self.entries.len() as u32
-    }
-}
-
-/// Loads the registry, failing loudly with the fix if the generated report is
-/// absent. An `#[ignore]`d test explicitly run must never pass without it.
-fn blocks_report() -> BlocksReport {
-    BlocksReport::load().unwrap_or_else(|| {
+/// The version-free [`BlockStateRegistry`] the shell consumes, loaded through
+/// the crate's *shipped* [`blocks_json_registry`] loader — not a test-private
+/// parser. Exercising the real loader here is deliberate: the gate then proves
+/// the exact API a host calls, so a parallel parser can never drift from it.
+/// Fails **closed** — an explicitly-run gate must never pass without its report.
+fn blocks_report() -> BlocksJsonRegistry {
+    let path = blocks_report_path().unwrap_or_else(|| {
         panic!(
             "missing generated/reports/blocks.json next to the selected client.jar.\n\
              Expected at: .cache/mc/26.2/generated/reports/blocks.json\n\
@@ -191,6 +99,27 @@ fn blocks_report() -> BlocksReport {
              then copy generated/reports/ next to the jar. Do NOT skip — a green test \
              with no registry is not evidence."
         )
+    });
+    blocks_json_registry(&path).expect("parse blocks.json into a registry")
+}
+
+/// The first (numerically lowest) state id for a block, derived independently of
+/// the atlas under test by walking only the registry's `resolve`/`state_count`.
+/// For single-state blocks (stone, air) this is also the canonical state.
+fn first_state_of(reg: &impl BlockStateRegistry, block: &str) -> Option<u32> {
+    let want: Identifier = block.parse().ok()?;
+    (0..reg.state_count()).find(|&i| reg.resolve(i).is_some_and(|r| *r.block == want))
+}
+
+/// The state id of a block carrying a specific property value (e.g. `oak_log`
+/// with `axis=y`, or `grass_block` with `snowy=false`), derived the same
+/// independent way. Used where the canonical state is not the lowest id.
+fn state_with(reg: &impl BlockStateRegistry, block: &str, key: &str, value: &str) -> Option<u32> {
+    let want: Identifier = block.parse().ok()?;
+    (0..reg.state_count()).find(|&i| {
+        reg.resolve(i).is_some_and(|r| {
+            *r.block == want && r.properties.get(key).map(String::as_str) == Some(value)
+        })
     })
 }
 
@@ -225,9 +154,7 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     );
 
     // --- stone: a full cube, all six faces the same `block/stone` sprite. ----
-    let stone = registry
-        .default_state_of("minecraft:stone")
-        .expect("stone in registry");
+    let stone = first_state_of(&registry, "minecraft:stone").expect("stone in registry");
     let stone_cell = atlas.classify(stone, 0, 15);
     assert!(
         stone_cell.occludes,
@@ -251,9 +178,8 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     );
 
     // --- grass_block: top ≠ bottom, and the top is a *tinted* sprite. --------
-    let grass = registry
-        .default_state_of("minecraft:grass_block")
-        .expect("grass_block in registry");
+    let grass = state_with(&registry, "minecraft:grass_block", "snowy", "false")
+        .expect("grass_block[snowy=false] in registry");
     let top = sprite_location_for(&atlas, grass, Face::PosY).expect("grass top sprite");
     let bottom = sprite_location_for(&atlas, grass, Face::NegY).expect("grass bottom sprite");
     assert_ne!(
@@ -279,8 +205,7 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     );
 
     // --- oak_log[axis=y]: up/down = oak_log_top, sides = oak_log. ------------
-    let log = registry
-        .state_with("minecraft:oak_log", "axis", "y")
+    let log = state_with(&registry, "minecraft:oak_log", "axis", "y")
         .expect("oak_log axis=y in registry");
     let log_up = sprite_location_for(&atlas, log, Face::PosY).expect("log up sprite");
     let log_down = sprite_location_for(&atlas, log, Face::NegY).expect("log down sprite");
@@ -290,7 +215,7 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     assert_eq!(log_side.path(), "block/oak_log", "oak_log side face");
 
     // --- PROVENANCE: forward name→id (`state_id_of`) agrees with the report's own
-    // independent blocks.json inversion (`default_state_of`/`state_with`), which is
+    // independent blocks.json inversion (`first_state_of`/`state_with`), which is
     // never derived from the atlas under test. This is the seam impl-shell's
     // generator calls to turn real vanilla state strings into classifier ids.
     assert_eq!(
@@ -375,12 +300,8 @@ fn real_vanilla_block_textures_reach_pixels() {
     let registry = blocks_report();
     let atlas = BlockAtlas::build(&manager, &registry).expect("build block atlas from real jar");
 
-    let air = registry
-        .first_state_of("minecraft:air")
-        .expect("air in registry");
-    let stone = registry
-        .default_state_of("minecraft:stone")
-        .expect("stone in registry");
+    let air = first_state_of(&registry, "minecraft:air").expect("air in registry");
+    let stone = first_state_of(&registry, "minecraft:stone").expect("stone in registry");
 
     // A solid stone slab inset from the section boundaries so its exposed faces
     // border lit in-section air, mirroring gpu.rs::real_chunk_section_renders.
