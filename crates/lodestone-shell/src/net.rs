@@ -390,6 +390,15 @@ impl NetClient {
             .map_or_else(Vec::new, |h| h.loaded_chunks())
     }
 
+    /// Whether the column at `pos` is currently loaded in the client-owned world.
+    /// `false` before login. Cheaper than scanning [`loaded_chunks`](Self::loaded_chunks)
+    /// and used by the live-collision path to decide whether the ground under the
+    /// player is known yet (vs. holding the player until its column streams in).
+    #[must_use]
+    pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
+        self.handle.get().is_some_and(|h| h.is_chunk_loaded(pos))
+    }
+
     /// The current tab-list entries (version-free `PlayerListEntry`), read from
     /// the client-owned state through the shared handle. Empty before login and
     /// never blocks — same lock-free read path as [`sections_at`](Self::sections_at).
