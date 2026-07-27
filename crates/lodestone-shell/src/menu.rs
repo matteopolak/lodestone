@@ -50,6 +50,9 @@ pub enum Screen {
     /// world behind keeps rendering and ticking. A sub-mode of [`Playing`] rather
     /// than a full screen — Escape or submit returns straight to it.
     Chat,
+    /// A container or the player inventory is open over the world: pointer
+    /// released and gameplay input frozen while the world keeps rendering.
+    Container,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop.
@@ -124,6 +127,12 @@ impl UiState {
         self.screen == Screen::Chat
     }
 
+    /// Whether a container/inventory screen is open over the world.
+    #[must_use]
+    pub fn is_container_open(&self) -> bool {
+        self.screen == Screen::Container
+    }
+
     /// Whether a session is currently being established.
     #[must_use]
     pub fn is_connecting(&self) -> bool {
@@ -187,7 +196,12 @@ impl UiState {
         // error from a shutting-down session doesn't resurrect the error screen.
         if matches!(
             self.screen,
-            Screen::Connecting | Screen::Playing | Screen::Paused | Screen::Error
+            Screen::Connecting
+                | Screen::Playing
+                | Screen::Chat
+                | Screen::Container
+                | Screen::Paused
+                | Screen::Error
         ) {
             self.error = Some(reason.into());
             self.screen = Screen::Error;
@@ -222,6 +236,20 @@ impl UiState {
         }
     }
 
+    /// Open a container or the player inventory over the world.
+    pub fn open_container(&mut self) {
+        if self.screen == Screen::Playing {
+            self.screen = Screen::Container;
+        }
+    }
+
+    /// Close the container/inventory screen back to the world.
+    pub fn close_container(&mut self) {
+        if self.screen == Screen::Container {
+            self.screen = Screen::Playing;
+        }
+    }
+
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
@@ -232,7 +260,7 @@ impl UiState {
         match self.screen {
             Screen::Playing => self.screen = Screen::Paused,
             Screen::Paused => self.screen = Screen::Playing,
-            Screen::Chat => self.screen = Screen::Playing,
+            Screen::Chat | Screen::Container => self.screen = Screen::Playing,
             Screen::Error => self.dismiss_error(),
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
@@ -243,7 +271,10 @@ impl UiState {
     /// playing or with chat open (a focus loss must not leave input captured);
     /// a focus loss on a menu/loading/error screen is a no-op.
     pub fn pause(&mut self) {
-        if matches!(self.screen, Screen::Playing | Screen::Chat) {
+        if matches!(
+            self.screen,
+            Screen::Playing | Screen::Chat | Screen::Container
+        ) {
             self.screen = Screen::Paused;
         }
     }

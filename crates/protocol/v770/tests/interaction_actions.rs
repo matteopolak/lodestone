@@ -140,6 +140,7 @@ fn use_item_on_is_byte_exact() {
     want.extend_from_slice(&0.25_f32.to_be_bytes());
     want.extend_from_slice(&0.75_f32.to_be_bytes());
     want.push(1); // inside_block = true
+    want.push(0); // world_border_hit = false
     want.extend_from_slice(&varint(42));
     assert_eq!(bytes, want);
 }

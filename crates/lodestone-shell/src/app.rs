@@ -20,6 +20,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
+use crate::container::{ContainerFrame, ContainerRenderer};
 use crate::gpu::RenderState;
 use crate::hud::{HudFrame, HudRenderer};
 use crate::menu::UiState;
@@ -124,6 +125,7 @@ struct WindowApp {
     target: Option<lodestone_render::SurfaceTarget<'static>>,
     render: Option<RenderState>,
     hud: Option<HudRenderer>,
+    container: Option<ContainerRenderer>,
     grabbed: bool,
     /// Playing ↔ paused screen state; owns cursor-grab intent and shutdown.
     ui: UiState,
@@ -148,6 +150,7 @@ impl WindowApp {
             target: None,
             render: None,
             hud: None,
+            container: None,
             grabbed: false,
             ui: UiState::new(),
             show_debug: true,
@@ -253,12 +256,17 @@ impl WindowApp {
     fn redraw(&mut self) {
         // Reconcile the menu with the live session before we borrow GPU state.
         self.drive_ui_from_session();
+        if self.sim.open_menu().is_some() && self.ui.is_playing() {
+            self.ui.open_container();
+            self.set_grab(false);
+        }
 
-        let (Some(gpu), Some(target), Some(render), Some(hud)) = (
+        let (Some(gpu), Some(target), Some(render), Some(hud), Some(container_renderer)) = (
             self.gpu.as_ref(),
             self.target.as_mut(),
             self.render.as_mut(),
             self.hud.as_mut(),
+            self.container.as_mut(),
         ) else {
             return;
         };
@@ -315,6 +323,21 @@ impl WindowApp {
         self.sim.stats.entities_drawn = stats.entities_drawn;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
+
+        let open_menu = self.sim.open_menu();
+        let player_menu;
+        let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
+            (Some(&open.menu), open.title.to_plain_string())
+        } else if self.ui.is_container_open() {
+            player_menu = self.sim.player_menu();
+            (Some(&player_menu), "Inventory".to_string())
+        } else {
+            (None, String::new())
+        };
+        if container_menu.is_some() {
+            let container_frame = ContainerFrame::new(container_menu, &container_title);
+            container_renderer.render(device, queue, frame.view(), &container_frame, w, h);
+        }
 
         // Assemble the HUD frame: debug overlay, chat log + prompt, tab list,
         // and the survival gauges. Locals are collected up-front so their
@@ -388,6 +411,7 @@ impl ApplicationHandler for WindowApp {
         let format = target.format();
         let mut render = RenderState::new(gpu.device(), gpu.queue(), format, w, h);
         let hud = HudRenderer::new(gpu.device(), format);
+        let container = ContainerRenderer::new(gpu.device(), format);
 
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {
@@ -416,6 +440,7 @@ impl ApplicationHandler for WindowApp {
         self.target = Some(target);
         self.render = Some(render);
         self.hud = Some(hud);
+        self.container = Some(container);
         // Grab only if the chosen screen wants it (dev world yes; loading no).
         self.set_grab(self.ui.wants_cursor_grab());
     }
@@ -492,11 +517,23 @@ impl ApplicationHandler for WindowApp {
                 } else if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && pressed {
                         // Context-sensitive: Playing↔Paused, Error→menu, etc.
+                        if self.ui.is_container_open() {
+                            self.sim.close_open_menu();
+                        }
                         self.ui.on_escape();
                         self.set_grab(self.ui.wants_cursor_grab());
                     } else if code == KeyCode::KeyQ && pressed && self.ui.is_paused() {
                         // A quit affordance from the (text-less) pause screen.
                         self.ui.request_quit();
+                    } else if self.ui.is_container_open() && pressed {
+                        match code {
+                            KeyCode::Escape | KeyCode::KeyE => {
+                                self.sim.close_open_menu();
+                                self.ui.close_container();
+                                self.set_grab(self.ui.wants_cursor_grab());
+                            }
+                            _ => {}
+                        }
                     } else if code == KeyCode::F3 && pressed {
                         // Toggle the debug instrument (§S4).
                         self.show_debug = !self.show_debug;
@@ -515,6 +552,11 @@ impl ApplicationHandler for WindowApp {
                             self.chat_input.push_char('/');
                         }
                         self.ui.open_chat();
+                        self.tab_held = false;
+                        self.set_grab(false);
+                    } else if code == KeyCode::KeyE && pressed && self.ui.accepts_gameplay_input() {
+                        self.sim.input.release_all();
+                        self.ui.open_container();
                         self.tab_held = false;
                         self.set_grab(false);
                     } else if code == KeyCode::KeyF && pressed && self.ui.accepts_gameplay_input() {

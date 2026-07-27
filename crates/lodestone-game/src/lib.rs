@@ -44,6 +44,7 @@ pub mod effect;
 pub mod hud;
 pub mod item;
 pub mod menu;
+pub mod menus;
 pub mod player_state;
 pub mod progress;
 pub mod recipe;

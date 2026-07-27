@@ -25,10 +25,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
+use lodestone_game::{menu::Menu, menus::Menus};
 use lodestone_model::{
     BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityEquipment,
     EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode, PlayerListEntry,
-    ResourceKey, Rotation, Vec3,
+    ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
@@ -161,6 +162,20 @@ struct Inner {
     scoreboard: Scoreboard,
     /// Boss bars in server insertion order (render order).
     boss_bars: Vec<BossBar>,
+    menus: Menus,
+}
+
+/// A snapshot of the currently open non-player menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenMenuSnapshot {
+    /// Window/container id.
+    pub window_id: i32,
+    /// Canonical menu type key.
+    pub menu_type: ResourceKey,
+    /// Screen title.
+    pub title: Text,
+    /// Predicted menu contents to render.
+    pub menu: Menu,
 }
 
 /// A cheap, cloneable handle to the maintained read-model.
@@ -481,11 +496,37 @@ impl SharedState {
             .boss_bars
             .clone()
     }
+
+    /// Clones out the player inventory menu (window 0) in menu-slot order.
+    #[must_use]
+    pub(crate) fn player_menu(&self) -> Menu {
+        self.inner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .menus
+            .player()
+            .clone()
+    }
+
+    /// Clones out the currently open non-player menu, if one is active.
+    #[must_use]
+    pub(crate) fn open_menu(&self) -> Option<OpenMenuSnapshot> {
+        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        Some(OpenMenuSnapshot {
+            window_id: inner.menus.opened_window_id()?,
+            menu_type: inner.menus.opened_menu_type()?.clone(),
+            title: inner.menus.opened_title()?.clone(),
+            menu: inner.menus.opened()?.clone(),
+        })
+    }
 }
 
 impl Inner {
     /// Folds one non-chunk event into the model.
     fn apply(&mut self, event: &ClientEvent) {
+        if self.menus.apply(event) {
+            return;
+        }
         match event {
             ClientEvent::Login {
                 entity_id,

@@ -593,6 +593,8 @@ pub struct UseItemOn {
     pub cursor_z: f32,
     /// Whether the player's head is inside the target block.
     pub inside_block: bool,
+    /// Whether the hit collided with the world border.
+    pub world_border_hit: bool,
     /// Client block-prediction sequence number.
     #[mc(varint)]
     pub sequence: i32,

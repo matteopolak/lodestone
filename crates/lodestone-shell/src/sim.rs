@@ -6,8 +6,9 @@
 
 use std::time::Instant;
 
-use lodestone_client::ClientAction;
+use lodestone_client::{ClientAction, OpenMenuSnapshot};
 use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
+use lodestone_game::menu::Menu;
 use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
 use lodestone_render::Camera;
 use lodestone_world::{ChunkPos, World};
@@ -250,6 +251,32 @@ impl Sim {
         self.net
             .as_ref()
             .map_or_else(Vec::new, NetClient::boss_bars)
+    }
+
+    /// The folded player inventory menu. Off a live connection this returns an
+    /// empty player menu so the local inventory screen can still render.
+    #[must_use]
+    pub fn player_menu(&self) -> Menu {
+        self.net
+            .as_ref()
+            .and_then(NetClient::player_menu)
+            .unwrap_or_else(Menu::player)
+    }
+
+    /// The currently open server menu, if any.
+    #[must_use]
+    pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
+        self.net.as_ref().and_then(NetClient::open_menu)
+    }
+
+    /// Best-effort close request for the open server menu.
+    pub fn close_open_menu(&self) {
+        let Some(open) = self.open_menu() else { return };
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::ContainerClose {
+                window_id: open.window_id,
+            });
+        }
     }
 
     /// Compose a typed chat line onto the outbound [`ClientAction`] seam and hand
