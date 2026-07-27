@@ -13,7 +13,7 @@
 //! 1. **Geometry is non-trivial.** An empty/air world meshes to zero quads and is
 //!    trivially "not full-bright", so a lighting-only gate would pass on a world
 //!    that draws nothing. We first assert a real coverage threshold of merged
-//!    quads from live server columns — the proof the demo→vanilla classifier swap
+//!    quads from live server chunks — the proof the demo→vanilla classifier swap
 //!    actually connected the island (with the demo palette every vanilla state id
 //!    classifies to air, so this count would be ~0).
 //! 2. **Lighting is real.** Only then do we assert that a shadowed cell meshes
@@ -25,12 +25,16 @@
 //!
 //! To make stage 2 **deterministic** rather than a race against which chunks a
 //! cave-spawn streams first, we build the shadow ourselves: on the flat creative
-//! oracle (`:25570`, RCON `:25571`) we RCON a sealed stone room whose interior is
-//! fully enclosed, so the server relights it to sky `0`; the surrounding flat
-//! ground stays under open sky (`15`). Both land in the same sampled column, so
-//! the meshes carry the full gradient. Building the shadow (rather than hunting
-//! for one) is the same reason the entity/container gates use this oracle: it is
-//! the target where we can *cause* a known world arrangement over RCON.
+//! oracle (`:25570`, RCON `:25571`) we connect the shell's client first (the flat
+//! oracle unloads chunks when empty, so a player must be online before RCON can
+//! edit the world), read the player's spawn column, then RCON a sealed stone room
+//! inside it. The server relights the fully-enclosed interior to sky `0` and
+//! streams the block+light edits to the connected client (the v770 adapter applies
+//! `BLOCK_UPDATE`/`SECTION_BLOCKS_UPDATE` + `LIGHT_UPDATE` live). The surrounding
+//! flat ground stays under open sky (`15`), so the meshed column carries the full
+//! gradient. Building the shadow (rather than hunting for one) is the same reason
+//! the entity/container gates use this oracle: it is the target where we can
+//! *cause* a known world arrangement over RCON.
 //!
 //! Gated behind `--features live` **and** `#[ignore]`. Per §12.52 it **fails**
 //! rather than skips when it cannot run — no server, no RCON, or vanilla assets
@@ -64,12 +68,6 @@ const PROTOCOL: i32 = 776;
 /// i.e. real terrain, not a blackout or a single stray block.
 const MIN_LIVE_QUADS: usize = 256;
 
-/// The sealed room is built inside chunk `(6, 6)`, the flat oracle's spawn chunk
-/// (player spawns at ~`(96.5, 80, 96.5)`), so it is resident the moment the
-/// client logs in. Coordinates stay within `x,z ∈ [96, 111]` so the whole box
-/// lives in that one column.
-const ROOM_CHUNK: (i32, i32) = (6, 6);
-
 /// Highest per-vertex sky-light byte a mesh emitted (`0..=255`, scaled from the
 /// stored `0..=15`).
 fn max_vertex_sky(mesh: &lodestone_render::Mesh) -> u8 {
@@ -89,6 +87,44 @@ fn min_vertex_sky(mesh: &lodestone_render::Mesh) -> u8 {
         .unwrap_or(255)
 }
 
+/// Parse `x` and `z` out of an RCON `data get entity @p Pos` reply, whose tail is
+/// `[<x>d, <y>d, <z>d]`.
+fn parse_xz(reply: &str) -> Option<(f64, f64)> {
+    let start = reply.find('[')?;
+    let end = reply[start..].find(']')? + start;
+    let nums: Vec<f64> = reply[start + 1..end]
+        .split(',')
+        .filter_map(|p| p.trim().trim_end_matches('d').parse().ok())
+        .collect();
+    (nums.len() >= 3).then(|| (nums[0], nums[2]))
+}
+
+/// Connect-and-wait helper: block until the client logs in and reports column
+/// geometry, or fail loudly.
+fn wait_logged_in(net: &NetClient, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut logged_in = false;
+    let mut last_err: Option<String> = None;
+    while Instant::now() < deadline {
+        for u in net.poll() {
+            match u {
+                NetUpdate::LoggedIn { .. } => logged_in = true,
+                NetUpdate::Error(e) => last_err = Some(e),
+                NetUpdate::Disconnected(r) => last_err = Some(format!("disconnected: {r}")),
+                _ => {}
+            }
+        }
+        if logged_in && net.world_dimensions().is_some() && !net.loaded_chunks().is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "{label} client never logged in to {HOST}:{PORT} within 60s (last event: {last_err:?}). \
+         Fix: start the flat creative 26.2 oracle and run with `--features live`."
+    );
+}
+
 #[test]
 #[ignore = "requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/26.2, and `--features live`"]
 fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
@@ -105,68 +141,98 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     );
     let classifier: ShellClassifier = resources.classifier;
 
-    // Build a sealed stone room over RCON so its interior is a guaranteed sky-`0`
-    // shadow, then let the server relight before the client connects. A
-    // one-block-thick shell fully encloses the interior, so no skylight leaks in.
+    // A player must be online before RCON can find the spawn column and before
+    // the flat oracle keeps chunks resident. Connect a *scout* client, learn where
+    // it spawned, then build the room in its column.
+    let scout = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    wait_logged_in(&scout, "scout");
+
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
         panic!(
             "cannot reach RCON at {RCON_ADDR}: {e}. Fix: start the flat creative 26.2 oracle \
              (game :25570, RCON :25571) and run with `--features live`."
         )
     });
-    // Solid outer box, then hollow interior: interior x101..109, y79..96, z101..109.
-    let r1 = rcon.cmd("fill 100 78 100 110 97 110 minecraft:stone");
-    let r2 = rcon.cmd("fill 101 79 101 109 96 109 minecraft:air");
-    let probe_solid = rcon.cmd("execute if block 100 88 100 minecraft:stone");
-    let probe_air = rcon.cmd("execute if block 105 88 105 minecraft:air");
-    let spawn = rcon.cmd("data get entity @p Pos");
-    eprintln!("fill stone -> {r1:?}\nfill air -> {r2:?}\nprobe wall -> {probe_solid:?}\nprobe interior -> {probe_air:?}\nplayer pos -> {spawn:?}");
-    // Give the server a moment to propagate the sky-light removal into the box.
-    std::thread::sleep(Duration::from_millis(750));
-
-    // Connect and wait until the client holds the room's column AND knows the
-    // column geometry (min_y / section_count) needed to place sections.
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let mut logged_in = false;
-    let mut last_err: Option<String> = None;
-    while Instant::now() < deadline {
-        for u in net.poll() {
-            match u {
-                NetUpdate::LoggedIn { .. } => logged_in = true,
-                NetUpdate::Error(e) => last_err = Some(e),
-                NetUpdate::Disconnected(r) => last_err = Some(format!("disconnected: {r}")),
-                _ => {}
-            }
-        }
-        let has_room = net
-            .loaded_chunks()
-            .iter()
-            .any(|c| (c.x, c.z) == ROOM_CHUNK);
-        if logged_in && net.world_dimensions().is_some() && has_room {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    // Drain a final burst so the room column and its light are fully resident.
-    std::thread::sleep(Duration::from_millis(500));
-    for _ in net.poll() {}
-
-    assert!(
-        logged_in,
-        "never logged in to {HOST}:{PORT} within 60s (last event: {last_err:?}). \
-         Fix: start the flat creative 26.2 oracle and run with `--features live`."
+    let pos_reply = rcon.cmd("data get entity @p Pos");
+    let (px, pz) = parse_xz(&pos_reply)
+        .unwrap_or_else(|| panic!("could not parse player position from RCON: {pos_reply:?}"));
+    let (scx, scz) = (
+        (px.floor() as i32).div_euclid(16),
+        (pz.floor() as i32).div_euclid(16),
     );
+    let room_chunk = (scx, scz);
+
+    // Force-load the room column so the server keeps it resident **and fully lit**
+    // independent of any player, then build a sealed stone room inside it. A
+    // one-block-thick shell fully encloses the interior, so no skylight leaks in
+    // and the server relights the pocket to sky 0. Coordinates stay inside the
+    // chunk's 16-wide footprint.
+    let (x0, z0) = (scx * 16 + 2, scz * 16 + 2);
+    let (y_lo, y_hi) = (78, 97);
+    let r_force = rcon.cmd(&format!(
+        "forceload add {} {} {} {}",
+        scx * 16,
+        scz * 16,
+        scx * 16 + 15,
+        scz * 16 + 15
+    ));
+    let stone = format!(
+        "fill {x0} {y_lo} {z0} {} {y_hi} {} minecraft:stone",
+        x0 + 11,
+        z0 + 11
+    );
+    let air = format!(
+        "fill {} {} {} {} {} {} minecraft:air",
+        x0 + 1,
+        y_lo + 1,
+        z0 + 1,
+        x0 + 10,
+        y_hi - 1,
+        z0 + 10
+    );
+    let r_stone = rcon.cmd(&stone);
+    let r_air = rcon.cmd(&air);
+    eprintln!(
+        "room in chunk {room_chunk:?} (x0={x0} z0={z0}): forceload={r_force:?} stone={r_stone:?} \
+         air={r_air:?}"
+    );
+    assert!(
+        !r_stone.contains("not loaded") && !r_stone.contains("No entity"),
+        "fill did not land ({r_stone:?}); the spawn chunk was not editable — is a player online?"
+    );
+
+    // Give the server a moment to run its lighting engine over the new geometry.
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Connect a **fresh** client so the room column streams down as a full
+    // chunk-data packet carrying the server's now-seam-complete light — far more
+    // reliable than depending on incremental LIGHT_UPDATE deltas reaching the
+    // scout. The scout stays connected to keep the area active while B streams.
+    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    wait_logged_in(&net, "reader");
     let dims = net.world_dimensions().expect(
         "logged in but the client never reported world dimensions — the column geometry seam \
          (world_dimensions) returned None; cannot place live sections.",
     );
+    let chunk_deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < chunk_deadline {
+        for _ in net.poll() {}
+        if net.loaded_chunks().iter().any(|c| (c.x, c.z) == room_chunk) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
-        net.loaded_chunks()
-            .iter()
-            .any(|c| (c.x, c.z) == ROOM_CHUNK),
-        "the room column {ROOM_CHUNK:?} never became resident; cannot mesh the constructed shadow."
+        net.loaded_chunks().iter().any(|c| (c.x, c.z) == room_chunk),
+        "the room column {room_chunk:?} never streamed to the reader client within 30s; cannot \
+         mesh the constructed shadow."
     );
+    // Drain a little more so late light packets for the column settle in.
+    let settle = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < settle {
+        for _ in net.poll() {}
+        std::thread::sleep(Duration::from_millis(100));
+    }
 
     let section_count = dims.section_count();
 
@@ -177,8 +243,8 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     let mut snapshots = Vec::new();
     for si in 0..section_count {
         let key = SectionKey {
-            cx: ROOM_CHUNK.0,
-            cz: ROOM_CHUNK.1,
+            cx: room_chunk.0,
+            cz: room_chunk.1,
             si,
             min_y: dims.min_y,
         };
@@ -224,8 +290,8 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     assert!(
         live_min < 64,
         "the sealed room did not read as shadow (min sky {live_min}); expected the fully-enclosed \
-         interior to relight to ~0. Did the fill land, and did the server propagate the skylight \
-         removal before the client streamed the column?"
+         interior to relight to ~0. Did the fill land, and did the client apply the server's \
+         block + light updates before we meshed?"
     );
     assert!(
         live_delta >= 128,
@@ -255,6 +321,14 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
         "the full-bright control should render every face at full sky brightness (255), got \
          {control_max}."
     );
+
+    // Clean up the structure and the force-load so re-runs start from flat ground.
+    rcon.cmd(&format!(
+        "fill {x0} {y_lo} {z0} {} {y_hi} {} minecraft:air",
+        x0 + 11,
+        z0 + 11
+    ));
+    rcon.cmd(&format!("forceload remove {} {}", scx * 16, scz * 16));
 
     eprintln!(
         "live world mesh gate OK: {total_quads} quads; live sky [{live_min}..{live_max}] (real \
