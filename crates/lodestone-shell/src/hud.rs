@@ -47,6 +47,11 @@ pub struct DebugStats {
     /// chunk-blackout signal, and a non-zero count is the section-read seam
     /// proving live world data is reaching the shell.
     pub live_columns: usize,
+    /// Live columns that failed to mesh (guard rejected or all-air centre on a
+    /// column the server reports loaded). Mirrors [`crate::sim::Sim`]'s
+    /// `mesh_drops` counter; shown next to `LIVE COLS` so a recurrence of the
+    /// silent-drop defect class is visible at a glance. Healthy sessions read `0`.
+    pub mesh_drops: u64,
     /// Uploaded (non-empty) mesh sections.
     pub section_count: usize,
     /// Quads currently resident.
@@ -124,8 +129,8 @@ impl DebugStats {
                 self.chunk_count, self.section_count, self.quads
             ),
             format!(
-                "LIVE COLS {} ENTITIES {}",
-                self.live_columns, self.entities_drawn
+                "LIVE COLS {} DROPS {} ENTITIES {}",
+                self.live_columns, self.mesh_drops, self.entities_drawn
             ),
             format!(
                 "MESH VRAM {} KB WORLD {} KB RSS {} MB",
@@ -141,7 +146,7 @@ impl DebugStats {
     #[must_use]
     pub fn one_line(&self) -> String {
         format!(
-            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} entities={} sections={} quads={} vram={}KB world={}KB rss={}MB {}",
+            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} sections={} quads={} vram={}KB world={}KB rss={}MB {}",
             self.position[0],
             self.position[1],
             self.position[2],
@@ -156,6 +161,7 @@ impl DebugStats {
             self.frame_ms,
             self.chunk_count,
             self.live_columns,
+            self.mesh_drops,
             self.entities_drawn,
             self.section_count,
             self.quads,

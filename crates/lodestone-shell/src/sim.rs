@@ -4,6 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,7 +19,7 @@ use crate::audio::ShellAudio;
 use crate::blocks::id;
 use crate::camera_rig::build_camera;
 use crate::chat::{ChatLog, compose_chat_action};
-use crate::collision::WorldCollision;
+use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::Config;
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
@@ -83,6 +84,20 @@ pub struct Sim {
     /// two use disjoint block-id spaces and must never be meshed with the wrong
     /// classifier.
     vanilla_atlas: Option<Arc<BlockAtlas>>,
+    /// Vanilla water state ids, precomputed once from the atlas, for the live
+    /// collision view's `is_water` swim hook. Empty on the demo palette.
+    water_ids: Arc<HashSet<u32>>,
+    /// Count of live columns that failed to mesh (guard rejected or all-air
+    /// centre on a column the server reports loaded). Surfaced in the debug HUD
+    /// next to `live_cols` so this defect class is a one-line diagnosis instead
+    /// of a play-test archaeology session. Should stay `0` in a healthy session.
+    mesh_drops: u64,
+    /// Diagnostic switch (normal play: always `true`): when `false`, the live
+    /// path collides against the offline demo world instead of the server
+    /// terrain. This exists to reproduce the pre-collision "fall through absent
+    /// ground / rubber-band" behaviour as a negative control in the live gate;
+    /// it is never flipped in real play.
+    pub collide_against_live_world: bool,
     /// Debug-overlay line set when vanilla assets failed to load and the session
     /// fell back to the demo palette.
     asset_banner: Option<String>,
@@ -183,6 +198,23 @@ impl Sim {
         let render_live = resources.vanilla_atlas.is_some();
         let mut scheduler = MeshScheduler::new(workers, resources.classifier);
 
+        // Vanilla water ids, precomputed once from the atlas for the live
+        // collision view's swim hook. Water never occludes (so it is already a
+        // non-solid collider); this set only drives buoyancy. Built before the
+        // atlas is moved into the struct; empty on the demo palette.
+        let water_ids: Arc<HashSet<u32>> = {
+            let mut set = HashSet::new();
+            if let Some(atlas) = resources.vanilla_atlas.as_deref() {
+                for level in 0..=15 {
+                    if let Some(sid) = atlas.state_id_of(&format!("minecraft:water[level={level}]"))
+                    {
+                        set.insert(sid);
+                    }
+                }
+            }
+            Arc::new(set)
+        };
+
         // Schedule the demo world only when meshing on the demo palette. Under
         // the vanilla atlas the demo world's ids would misclassify, so it is left
         // unmeshed and the live server world is meshed instead (on chunk arrival,
@@ -233,14 +265,17 @@ impl Sim {
             interp_alpha: 0.0,
             tick_count: 0,
             frame_count: 0,
-            // Live sessions default to free-fly: the shell has no collision
-            // geometry for the live server world yet (physics collide against the
-            // demo world, which does not extend to a far spawn), so physics-walk
-            // there would fall through. Free-fly keeps the synced camera parked on
-            // the server's spawn so the streamed world is viewable and navigable.
-            fly: render_live,
+            // Physics-walk is the default everywhere, including live: the shell
+            // now collides against the live client-owned world (see
+            // `LiveCollision` / `physics_tick`), so the player stands on the
+            // server's ground. While a column is still streaming in, the live
+            // path holds the player in place rather than letting them fall.
+            fly: false,
             pending_removals: Vec::new(),
             vanilla_atlas: resources.vanilla_atlas,
+            water_ids,
+            mesh_drops: 0,
+            collide_against_live_world: true,
             asset_banner: resources.banner,
             phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
@@ -612,8 +647,82 @@ impl Sim {
             base
         };
         self.player = self.player.with_movement_speed(attr);
+
+        // Live path: collide against the server's terrain (client-owned world),
+        // not the offline demo world. This changes *where blocks come from*, not
+        // how collision resolves — `LiveCollision` fills the exact same
+        // `CollisionView` hooks `WorldCollision` does, so movement stays
+        // bit-exact. A `None` snapshot means the player's own column has not
+        // streamed in yet: hold in place (as vanilla waits for chunks) rather
+        // than falling through absent ground and rubber-banding against the
+        // server's corrective teleports.
+        if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
+            match self.live_collision() {
+                Some(view) => tick(&mut self.player, intent, &view, &self.profile),
+                None => {
+                    self.player.velocity = Vec3d::ZERO;
+                    self.player.on_ground = true;
+                }
+            }
+            return;
+        }
+
         let view = WorldCollision::new(&self.world);
         tick(&mut self.player, intent, &view, &self.profile);
+    }
+
+    /// Build a [`LiveCollision`] snapshot of the server terrain around the
+    /// player, or `None` when the live world can't yet be collided against
+    /// (no atlas/net/dimensions, or the player's own column hasn't streamed in).
+    ///
+    /// Snapshots the 3×3 columns centred on the player over the full vertical
+    /// range under a single lock (`sections_at`), returning owned
+    /// `Arc<ChunkSection>` handles so no world lock is held while physics queries
+    /// it. The 3×3 span covers the player's ±0.3-wide hitbox and its swept path
+    /// within a tick; all-air sections are elided by `sections_at` and simply
+    /// read as air.
+    fn live_collision(&self) -> Option<LiveCollision> {
+        let atlas = self.vanilla_atlas.clone()?;
+        let net = self.net.as_ref()?;
+        let dims = net.world_dimensions()?;
+        let min_y = dims.min_y;
+        let section_count = dims.section_count();
+
+        let pcx = (self.player.position.x.floor() as i32).div_euclid(16);
+        let pcz = (self.player.position.z.floor() as i32).div_euclid(16);
+
+        // Hold the player until the ground under them is known. `sections_at`
+        // elides all-air sections to `None`, so an absent section is *not* proof
+        // of an unloaded column — key the hold on the column being loaded.
+        if !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz }) {
+            return None;
+        }
+
+        let mut requests: Vec<(lodestone_client::ChunkPos, usize)> =
+            Vec::with_capacity(9 * section_count);
+        for cz in (pcz - 1)..=(pcz + 1) {
+            for cx in (pcx - 1)..=(pcx + 1) {
+                for si in 0..section_count {
+                    requests.push((lodestone_client::ChunkPos { x: cx, z: cz }, si));
+                }
+            }
+        }
+
+        let fetched = net.sections_at(&requests);
+        let mut sections = HashMap::new();
+        for ((pos, si), section) in requests.iter().zip(fetched) {
+            if let Some(section) = section {
+                sections.insert((pos.x, pos.z, *si), section);
+            }
+        }
+
+        Some(LiveCollision::new(
+            sections,
+            min_y,
+            section_count,
+            atlas,
+            Arc::clone(&self.water_ids),
+        ))
     }
 
     /// One free-fly tick: move horizontally relative to yaw, vertically with
@@ -814,16 +923,49 @@ impl Sim {
                     snapshot_section_live(net, key, count).ok_or(key)
                 })
                 .collect();
+            let mut meshed_any = false;
             for job in jobs {
                 match job {
-                    Ok(snap) => self.scheduler.submit(snap),
+                    Ok(snap) => {
+                        self.scheduler.submit(snap);
+                        meshed_any = true;
+                    }
+                    // A single empty section is routine (sky/void sections have no
+                    // geometry): drop it from the GPU, no alarm.
                     Err(key) => self.pending_removals.push(key),
                 }
+            }
+            if !meshed_any {
+                // The whole column produced no geometry even though it was
+                // dirtied by a server chunk event — the "invisible blocks" defect
+                // class. Not silently dropped: make it loud and counted (surfaced
+                // in the HUD next to `live_cols`) so any recurrence is a one-line
+                // diagnosis, not a play-test hunt.
+                self.mesh_drops += 1;
+                tracing::warn!(
+                    cx,
+                    cz,
+                    branch = "live-all-air-column",
+                    "live column produced no geometry despite a chunk event"
+                );
             }
             return;
         }
 
-        // Demo path: re-mesh the locally generated column.
+        // Demo path: re-mesh the locally generated column. A *live* session
+        // reaching here means the live guard was rejected (net not attached, or
+        // dimensions not yet known) — the demo world has no such column, so this
+        // would drop it silently. Count and log it loudly instead.
+        if self.vanilla_atlas.is_some() {
+            self.mesh_drops += 1;
+            tracing::warn!(
+                cx,
+                cz,
+                branch = "live-guard-rejected",
+                "live column skipped: net/dimensions not ready at mesh time"
+            );
+            return;
+        }
         let Some(chunk) = self.world.get(ChunkPos { x: cx, z: cz }) else {
             return;
         };
@@ -1071,6 +1213,7 @@ impl Sim {
         self.stats.pitch = self.player.pitch;
         self.stats.chunk_count = self.world.len();
         self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
+        self.stats.mesh_drops = self.mesh_drops;
         self.stats.world_bytes = self.world.heap_bytes();
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
