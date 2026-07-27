@@ -147,16 +147,20 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
-    /// Player health/food changed. `health == 0.0` means dead — the
-    /// chunk-blackout trap the shell surfaces in its status line.
+    /// Player health/food changed.
     Health {
         /// Current health in `0..=20`.
         health: f32,
         /// Current food level in `0..=20`.
         food: i32,
     },
-    /// The player died.
+    /// The player died. A transient state, not the end of the session: the
+    /// client library auto-respawns, and [`NetUpdate::Respawned`] follows.
     Death,
+    /// The server confirmed a respawn (post-death, dimension change, or
+    /// `/respawn`). The fresh position arrives in the placement
+    /// [`NetUpdate::Teleport`] that follows.
+    Respawned,
     /// Player experience changed (`set_experience`): progress toward the next
     /// level, the level itself, and total accumulated points. The HUD's XP bar
     /// must draw these real numbers, not a locally-faked value — there is no
@@ -623,6 +627,7 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         }
         ClientEvent::HealthChanged { health, food, .. } => NetUpdate::Health { health, food },
         ClientEvent::Death { .. } => NetUpdate::Death,
+        ClientEvent::Respawned { .. } => NetUpdate::Respawned,
         ClientEvent::ExperienceChanged {
             progress,
             level,

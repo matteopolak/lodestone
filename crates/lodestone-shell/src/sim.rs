@@ -139,6 +139,23 @@ pub struct Sim {
     health: Option<f32>,
     /// Latest server-reported food level in `0..=20`, `None` until reported.
     food: Option<i32>,
+    /// Whether the local player is currently dead — set by [`NetUpdate::Death`]
+    /// and cleared by [`NetUpdate::Respawned`]. Death is a transient *state*, not
+    /// the end of the session: the client library's `RespawnPolicy::Automatic`
+    /// answers the death packet with a `Respawn` action, so the shell rides
+    /// through the death screen rather than tearing the session down. While dead
+    /// the corpse does not walk — [`Sim::step`] feeds [`MovementInput::NONE`] and
+    /// withholds movement packets until the post-respawn placement teleport lands.
+    dead: bool,
+    /// Count of respawns observed (one per [`NetUpdate::Respawned`]). A diagnostic
+    /// the live death gate reads to confirm the client actually recovered rather
+    /// than merely never dying.
+    respawn_count: u64,
+    /// Test seam (normal play: always `true`): when `false`, death is treated as
+    /// the terminal `SessionPhase::Ended` it used to be, reproducing the "stuck
+    /// on the death screen forever" bug as the live gate's negative control. Never
+    /// flipped in real play.
+    pub recover_from_death: bool,
     /// Latest server-reported experience (progress toward next level, level,
     /// total points), `None` until `set_experience` arrives. The HUD must not
     /// substitute a locally-derived guess for this — there is no vanilla
@@ -294,6 +311,9 @@ impl Sim {
             clock_secs: 0.0,
             health: None,
             food: None,
+            dead: false,
+            respawn_count: 0,
+            recover_from_death: true,
             experience: None,
             entity_interp: EntityInterpolator::new(),
             selected_slot: 0,
@@ -336,6 +356,20 @@ impl Sim {
     #[must_use]
     pub fn session_phase(&self) -> &SessionPhase {
         &self.phase
+    }
+
+    /// Whether the local player is currently dead (awaiting the server-confirmed
+    /// respawn). Movement is frozen while this holds.
+    #[must_use]
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
+    /// Number of respawns observed since the session started — a diagnostic the
+    /// live death gate reads to confirm the client recovered from a death.
+    #[must_use]
+    pub fn respawn_count(&self) -> u64 {
+        self.respawn_count
     }
 
     /// The most recent chat/system lines (oldest-first) for the HUD to draw,
@@ -583,7 +617,13 @@ impl Sim {
         self.clock_secs += dt.max(0.0);
         self.accumulator += dt.clamp(0.0, 0.25);
 
-        let intent = movement_intent(&self.input);
+        let intent = if self.dead {
+            // A corpse does not walk: ignore held keys while dead so the player
+            // holds still on the death screen until the respawn teleport lands.
+            MovementInput::NONE
+        } else {
+            movement_intent(&self.input)
+        };
         while self.accumulator >= TICK_DT {
             self.prev_position = self.player.position;
             if self.fly {
@@ -605,8 +645,11 @@ impl Sim {
             // to correct us. Only once we're actually in the world — before the
             // server places us the adapter (correctly) has no Play-state packet
             // for a Move, so sending earlier just produces dropped-action noise.
+            // While dead the vanilla client sends no movement (it is held on the
+            // death screen), so withhold it until the respawn lands.
             // Best-effort — a closed session just drops it.
-            if self.phase == SessionPhase::Connected
+            if !self.dead
+                && self.phase == SessionPhase::Connected
                 && let Some(net) = &self.net
             {
                 net.send_action(move_action(&self.player));
@@ -1075,11 +1118,13 @@ impl Sim {
                     }
                 }
                 NetUpdate::Health { health, food } => {
+                    // Record the vitals for the HUD. Death is a separate event
+                    // ([`NetUpdate::Death`], which the library always emits on the
+                    // death packet); health reaching zero is not itself a session
+                    // event and — contrary to the old status line — does not
+                    // unload chunks.
                     self.health = Some(health);
                     self.food = Some(food);
-                    if health <= 0.0 {
-                        self.status = "server: player dead (no chunks)".into();
-                    }
                 }
                 NetUpdate::Experience {
                     progress,
@@ -1089,8 +1134,36 @@ impl Sim {
                     self.experience = Some((progress, level, total));
                 }
                 NetUpdate::Death => {
-                    self.status = "server: died".into();
-                    self.phase = SessionPhase::Ended("player died".into());
+                    // Death is a state the shell rides through, not the end of the
+                    // session. The client library's `RespawnPolicy::Automatic`
+                    // already answers the death packet with a `ClientAction::
+                    // Respawn`, so the shell does not send anything here: it marks
+                    // itself dead (which freezes movement in `step`) and stays
+                    // Connected, waiting for the server-confirmed respawn. The new
+                    // position rides in on the placement teleport that follows
+                    // `NetUpdate::Respawned`, whose arm snaps `prev_position` too.
+                    if self.recover_from_death {
+                        self.dead = true;
+                        self.status = "you died — respawning…".into();
+                    } else {
+                        // Retained only as the live death gate's negative control:
+                        // the pre-fix behaviour that declared the session over and
+                        // stranded the client on the death screen forever.
+                        self.status = "server: died".into();
+                        self.phase = SessionPhase::Ended("player died".into());
+                    }
+                }
+                NetUpdate::Respawned => {
+                    // The server confirmed the respawn: the player is alive again.
+                    // The fresh spawn position arrives in the placement teleport
+                    // that immediately follows this event; the `NetUpdate::Teleport`
+                    // arm snaps `position` and `prev_position` together, so the
+                    // frame interpolator never smears the camera from the death
+                    // site across the world to the new spawn (the same class of
+                    // bug as the original far-spawn camera gap).
+                    self.dead = false;
+                    self.respawn_count += 1;
+                    self.status = "respawned".into();
                 }
                 NetUpdate::Sound {
                     name,
