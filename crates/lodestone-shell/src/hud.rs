@@ -211,6 +211,16 @@ pub struct HudFrame<'a> {
     /// cells are empty frames for now — the frame and selection are honest, the
     /// contents are explicitly not modelled.
     pub hotbar: Option<usize>,
+    /// The XP bar `(level, progress 0..=1)`, `Some` once the server has sent
+    /// experience. Drawn as a green progress bar above the hotbar with the level
+    /// centred above it. Off a live server this is `None` — no bar is drawn.
+    pub xp: Option<(i32, f32)>,
+    /// The title/subtitle overlay `(title, subtitle, alpha)`, drawn large and
+    /// centred with a server-driven fade. `None` when no title is showing.
+    pub title: Option<(String, Option<String>, f32)>,
+    /// The action-bar message `(text, alpha)`, drawn just above the hotbar
+    /// cluster with a fade. `None` when nothing is showing.
+    pub action_bar: Option<(String, f32)>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -230,6 +240,9 @@ impl<'a> HudFrame<'a> {
             health: None,
             food: None,
             hotbar: None,
+            xp: None,
+            title: None,
+            action_bar: None,
         }
     }
 }
@@ -373,10 +386,44 @@ impl HudGeometry {
             b.h - margin
         };
 
-        // Health / food pip rows, sitting just above the hotbar. Each row is 10
-        // pips of 2 units; a pip lights the moment any of its two units is
-        // present (a deliberate simplification — no half-pip art yet).
-        let bars_y = hotbar_top - pip - 4.0;
+        // XP bar: a full-hotbar-width green progress bar just above the hotbar,
+        // with the level number centred above it (vanilla green). Drawn only
+        // once the server has sent experience (`frame.xp`); off a live server
+        // this is `None` and nothing draws, keeping the gauge honest.
+        let vitals_base = if let Some((level, progress)) = frame.xp {
+            let bar_w = 9.0 * 22.0;
+            let bx = cx - bar_w * 0.5;
+            let bar_h = 4.0;
+            let by = hotbar_top - bar_h - 5.0;
+            b.rect_px(bx, by, bar_w, bar_h, [0.0, 0.0, 0.0, 0.7]);
+            let fill = bar_w * progress.clamp(0.0, 1.0);
+            if fill > 0.0 {
+                b.rect_px(bx, by, fill, bar_h, [0.47, 0.82, 0.16, 1.0]);
+            }
+            let level_gap = if level > 0 {
+                let s = level.to_string();
+                let tw = text_w(&s, scale);
+                b.text(
+                    &s,
+                    cx - tw * 0.5,
+                    by - line_h,
+                    scale,
+                    [0.44, 0.92, 0.20, 1.0],
+                );
+                line_h
+            } else {
+                0.0
+            };
+            by - level_gap
+        } else {
+            hotbar_top
+        };
+
+        // Health / food pip rows, sitting just above the hotbar (or the XP bar
+        // when one is drawn). Each row is 10 pips of 2 units; a pip lights the
+        // moment any of its two units is present (a deliberate simplification —
+        // no half-pip art yet).
+        let bars_y = vitals_base - pip - 4.0;
         if let Some(hp) = frame.health {
             b.pips(
                 hp,
@@ -396,6 +443,41 @@ impl HudGeometry {
                 gap,
                 [0.78, 0.60, 0.20, 1.0],
             );
+        }
+
+        // Action bar: a single centred line just above the vitals/XP cluster,
+        // fading with the server-driven alpha. Legacy `§` colour codes render.
+        if let Some((msg, alpha)) = frame.action_bar.as_ref().filter(|(_, a)| *a > 0.0) {
+            let tw = text_w(msg, scale);
+            b.text_legacy(
+                msg,
+                cx - tw * 0.5,
+                bars_y - line_h - 6.0,
+                scale,
+                [1.0, 1.0, 1.0],
+                *alpha,
+            );
+        }
+
+        // Title / subtitle: a large centred overlay mid-screen, fading with the
+        // server-driven alpha. Drawn only while a server-sent title is active,
+        // so it costs nothing off a server that sends none.
+        if let Some((title, subtitle, alpha)) = frame.title.as_ref().filter(|(_, _, a)| *a > 0.0) {
+            let ts = scale * 4.0;
+            let tw = text_w(title, ts);
+            let ty = b.h * 0.40;
+            b.text(title, (b.w - tw) * 0.5, ty, ts, [1.0, 1.0, 1.0, *alpha]);
+            if let Some(sub) = subtitle {
+                let ss = scale * 2.0;
+                let sw = text_w(sub, ss);
+                b.text(
+                    sub,
+                    (b.w - sw) * 0.5,
+                    ty + ts * 9.0,
+                    ss,
+                    [1.0, 1.0, 1.0, *alpha],
+                );
+            }
         }
 
         // Boss bars: stacked title-over-bar at the top-centre. The fill is
@@ -1176,5 +1258,355 @@ mod tests {
         let line = stats.one_line();
         assert!(line.contains("fps=60"));
         assert!(line.contains("frame=16.60ms"));
+    }
+
+    /// Clear `view` to an opaque `rgb` background (Rgba8Unorm is linear, so the
+    /// byte value lands verbatim). Used to give the HUD's `Load` pass a known
+    /// backdrop for pixel readback.
+    #[cfg(test)]
+    fn clear_view(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        rgb: [u8; 3],
+    ) {
+        let color = wgpu::Color {
+            r: f64::from(rgb[0]) / 255.0,
+            g: f64::from(rgb[1]) / 255.0,
+            b: f64::from(rgb[2]) / 255.0,
+            a: 1.0,
+        };
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("clear"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Pixel-readback proof that server chat *reaches pixels*, not merely that a
+    /// frame counter ticks. Renders the HUD (chat only — no crosshair, overlay,
+    /// hotbar or vitals) over a known grey backdrop and inspects the bottom-left
+    /// chat region. The discriminator is luminance: the translucent backing
+    /// panel is *darker* than the grey background, the near-white glyphs are
+    /// *brighter* — so text and panel are counted separately and a blank-but-
+    /// panelled line cannot masquerade as rendered text.
+    ///
+    /// Three frames make the assertion two-sided:
+    /// * no message → the region is untouched background (zero of both);
+    /// * a whitespace-only line → the panel draws (dark pixels) but no glyphs;
+    /// * a real line → glyphs add bright pixels the panel-only frame lacks.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn chat_text_reaches_pixels() {
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let mut hud = HudRenderer::new(device, format);
+        let stats = DebugStats::default();
+
+        const BG: u8 = 128;
+        // Count bright (glyph) and dark (panel) pixels in the bottom-left chat
+        // region, well clear of the bottom-centre hotbar/vitals (which are off
+        // anyway) and the top-left debug overlay.
+        let x_max = (w as f32 * 0.55) as u32;
+        let y_min = (h as f32 * 0.60) as u32;
+
+        let mut render = |chat: &[(&str, f32)]| -> (usize, usize) {
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [BG, BG, BG]);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                chat,
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            let pixels = target.read_texels(device, queue);
+            let (mut bright, mut dark) = (0usize, 0usize);
+            for y in y_min..h {
+                for x in 0..x_max {
+                    let i = ((y * w + x) * 4) as usize;
+                    let avg = (u32::from(pixels[i])
+                        + u32::from(pixels[i + 1])
+                        + u32::from(pixels[i + 2]))
+                        / 3;
+                    if avg > u32::from(BG) + 30 {
+                        bright += 1;
+                    } else if avg + 30 < u32::from(BG) {
+                        dark += 1;
+                    }
+                }
+            }
+            (bright, dark)
+        };
+
+        let (blank_bright, blank_dark) = render(&[]);
+        let (panel_bright, panel_dark) = render(&[(" ", 0.0)]);
+        let (text_bright, text_dark) = render(&[("chat works", 0.0)]);
+
+        eprintln!("=== chat readback (headless) ===");
+        eprintln!("blank  bright={blank_bright} dark={blank_dark}");
+        eprintln!("panel  bright={panel_bright} dark={panel_dark}");
+        eprintln!("text   bright={text_bright} dark={text_dark}");
+
+        // No message: pure background — neither panel nor glyphs.
+        assert_eq!(
+            (blank_bright, blank_dark),
+            (0, 0),
+            "with no chat, the chat region must be untouched background"
+        );
+        // A line draws its translucent backing panel (dark) but a space has no
+        // glyphs, so almost no bright pixels.
+        assert!(panel_dark > 0, "a chat line must draw its backing panel");
+        assert!(
+            panel_bright < 50,
+            "a whitespace-only line must not paint glyph pixels, got {panel_bright}"
+        );
+        // The glyphs of a real line add bright pixels the panel-only frame lacks
+        // — this is the assertion that fails if the text were blank.
+        assert!(
+            text_dark > 0,
+            "the text line must also draw its backing panel"
+        );
+        assert!(
+            text_bright > panel_bright + 150,
+            "chat glyphs must reach pixels over the bare panel: text_bright={text_bright}, \
+             panel_bright={panel_bright}"
+        );
+    }
+
+    /// Pixel-readback proof that the **XP bar** reaches pixels once the server
+    /// has sent experience — the same "prove it's on screen, with a control"
+    /// discipline as the chat gate. The discriminator is *green dominance*: the
+    /// vanilla XP fill (and the level digits) are green (`G` well above `R`/`B`),
+    /// which the grey background, grey hotbar wells, red health and gold food
+    /// pips all fail, so a green-dominant pixel can only be the XP bar.
+    ///
+    /// Two frames make it two-sided:
+    /// * `xp = None` (no server experience) → zero green pixels, no bar;
+    /// * `xp = Some((level, progress))` → a run of green fill + digit pixels.
+    ///
+    /// The control is the load-bearing half: it fails if the bar ever draws
+    /// without server-sent experience (the §12.24 "plausible gauge" trap).
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn xp_bar_reaches_pixels() {
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let mut hud = HudRenderer::new(device, format);
+        let stats = DebugStats::default();
+
+        const BG: u8 = 128;
+        // The XP bar and level digits live at the bottom-centre; scan a generous
+        // bottom band there. Hotbar/vitals/crosshair are all off so nothing else
+        // paints here.
+        let x0 = (w as f32 * 0.20) as u32;
+        let x1 = (w as f32 * 0.80) as u32;
+        let y0 = (h as f32 * 0.78) as u32;
+
+        let mut render = |xp: Option<(i32, f32)>| -> usize {
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [BG, BG, BG]);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                xp,
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            let pixels = target.read_texels(device, queue);
+            let mut green = 0usize;
+            for y in y0..h {
+                for x in x0..x1 {
+                    let i = ((y * w + x) * 4) as usize;
+                    let (r, g, b) = (
+                        u32::from(pixels[i]),
+                        u32::from(pixels[i + 1]),
+                        u32::from(pixels[i + 2]),
+                    );
+                    // Green-dominant: clearly more green than red or blue, and
+                    // brighter than the grey background so unblended greys and
+                    // the gold food pips (high red) are excluded.
+                    if g > r + 40 && g > b + 40 && g > u32::from(BG) {
+                        green += 1;
+                    }
+                }
+            }
+            green
+        };
+
+        let no_xp = render(None);
+        let with_xp = render(Some((5, 0.5)));
+
+        eprintln!("=== xp bar readback (headless) ===");
+        eprintln!("no_xp green={no_xp}");
+        eprintln!("with_xp green={with_xp}");
+
+        // Control: off a live server (no experience) the bar must not draw.
+        assert_eq!(
+            no_xp, 0,
+            "without server experience the XP bar must not draw a single green pixel"
+        );
+        // A half-full level-5 bar paints a wide green fill plus the green level
+        // digit — hundreds of pixels. This fails if the bar were blank.
+        assert!(
+            with_xp > 150,
+            "the XP bar's green fill must reach pixels once experience arrives, got {with_xp}"
+        );
+    }
+
+    /// GPU gate: the **title/subtitle** overlay and the **action bar** must reach
+    /// pixels once a server sends them, and must paint **nothing** when empty.
+    ///
+    /// This is the "show me pixels, with a control" shape, applied to the text
+    /// path (the strongest control per the director's template): an empty overlay
+    /// and a populated one must give measurably different coverage inside the
+    /// widget's own rect, or the text path has proven nothing.
+    ///
+    /// Two independent bands are scanned — the title's mid-screen rect and the
+    /// action bar's lower-centre rect — and each state paints only its own band.
+    /// That isolation is a second control: a blanket-fill or wrong-clear bug would
+    /// light the *other* band and fail. Everything else (hotbar, vitals,
+    /// crosshair, debug) is off so nothing else paints in either band.
+    #[test]
+    #[ignore = "requires a GPU adapter; run with --ignored"]
+    fn title_and_action_bar_reach_pixels() {
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let mut hud = HudRenderer::new(device, format);
+        let stats = DebugStats::default();
+
+        const BG: u8 = 128;
+        // Title band: mid-screen, centred (title draws at y≈0.40h, tall). Action
+        // band: lower-centre, above the (absent) hotbar/vitals. x kept central so
+        // the bottom-left chat feed never intrudes.
+        let xa = (w as f32 * 0.15) as u32;
+        let xb = (w as f32 * 0.85) as u32;
+        let title_y0 = (h as f32 * 0.30) as u32;
+        let title_y1 = (h as f32 * 0.64) as u32;
+        let act_y0 = (h as f32 * 0.78) as u32;
+        let act_y1 = (h as f32 * 0.96) as u32;
+
+        // Count near-white text texels (white glyphs on the grey clear) in a band.
+        let bright_in = |pixels: &[u8], y0: u32, y1: u32| -> usize {
+            let mut n = 0usize;
+            for y in y0..y1 {
+                for x in xa..xb {
+                    let i = ((y * w + x) * 4) as usize;
+                    let (r, g, b) = (pixels[i], pixels[i + 1], pixels[i + 2]);
+                    if r > BG + 40 && g > BG + 40 && b > BG + 40 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+
+        let mut render = |title: Option<(String, Option<String>, f32)>,
+                          action_bar: Option<(String, f32)>|
+         -> (usize, usize) {
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), [BG, BG, BG]);
+            let hud_frame = HudFrame {
+                show_debug: false,
+                crosshair: false,
+                title,
+                action_bar,
+                ..HudFrame::new(&stats)
+            };
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            let pixels = target.read_texels(device, queue);
+            (
+                bright_in(&pixels, title_y0, title_y1),
+                bright_in(&pixels, act_y0, act_y1),
+            )
+        };
+
+        let (empty_title, empty_act) = render(None, None);
+        let (shown_title, title_leak_act) =
+            render(Some(("TITLE".into(), Some("subtitle".into()), 1.0)), None);
+        let (act_leak_title, shown_act) =
+            render(None, Some(("Action bar!".into(), 1.0)));
+
+        eprintln!("=== title/action-bar readback (headless) ===");
+        eprintln!("empty:  title_band={empty_title} act_band={empty_act}");
+        eprintln!("title:  title_band={shown_title} act_band={title_leak_act}");
+        eprintln!("action: title_band={act_leak_title} act_band={shown_act}");
+
+        // Controls: with no server title/action-bar, neither band paints a pixel.
+        assert_eq!(
+            (empty_title, empty_act),
+            (0, 0),
+            "an empty HUD must not paint the title or action-bar rects"
+        );
+        // The title's large glyphs + subtitle cover hundreds of texels.
+        assert!(
+            shown_title > 100,
+            "a server-sent title must reach pixels in its rect, got {shown_title}"
+        );
+        // The action-bar line is smaller but still tens of texels of white text.
+        assert!(
+            shown_act > 40,
+            "a server-sent action bar must reach pixels in its rect, got {shown_act}"
+        );
+        // Isolation control: each widget paints only its own band. A blanket-fill
+        // or wrong-clear bug would light the other band and trip these.
+        assert_eq!(
+            title_leak_act, 0,
+            "the title overlay must not bleed into the action-bar rect"
+        );
+        assert_eq!(
+            act_leak_title, 0,
+            "the action bar must not bleed into the title rect"
+        );
     }
 }

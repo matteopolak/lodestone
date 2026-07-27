@@ -21,6 +21,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
 use crate::container::{ContainerFrame, ContainerRenderer};
+use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HudFrame, HudRenderer};
 use crate::menu::UiState;
@@ -125,6 +126,9 @@ struct WindowApp {
     target: Option<lodestone_render::SurfaceTarget<'static>>,
     render: Option<RenderState>,
     hud: Option<HudRenderer>,
+    /// Self-contained overlay for active status effects (owns its own pipeline
+    /// so it composites over the HUD without touching the HUD renderer).
+    effects: Option<EffectsRenderer>,
     container: Option<ContainerRenderer>,
     grabbed: bool,
     /// Playing ↔ paused screen state; owns cursor-grab intent and shutdown.
@@ -150,6 +154,7 @@ impl WindowApp {
             target: None,
             render: None,
             hud: None,
+            effects: None,
             container: None,
             grabbed: false,
             ui: UiState::new(),
@@ -344,7 +349,14 @@ impl WindowApp {
         // borrows outlive the frame struct.
         let chat_open = self.ui.is_chat_open();
         // Pull enough history for the HUD to fade/scroll; it caps and ages them.
-        let chat_lines: Vec<(&str, f32)> = self.sim.recent_chat(if chat_open { 20 } else { 10 });
+        // The feed hands back owned legacy strings (flattened from the canonical
+        // `ChatFeed`'s `Text` at read time); borrow them into the `&str` slice
+        // the HUD frame takes, keeping both locals alive for the frame's scope.
+        let chat_owned: Vec<(String, f32)> = self.sim.recent_chat(if chat_open { 20 } else { 10 });
+        let chat_lines: Vec<(&str, f32)> = chat_owned
+            .iter()
+            .map(|(line, age)| (line.as_str(), *age))
+            .collect();
         let player_rows: Vec<String> = if self.tab_held {
             self.sim.player_rows()
         } else {
@@ -367,7 +379,14 @@ impl WindowApp {
         hud_frame.health = health;
         hud_frame.food = food;
         hud_frame.hotbar = crosshair.then(|| self.sim.selected_slot());
+        hud_frame.xp = self.sim.xp();
+        hud_frame.title = self.sim.title_overlay();
+        hud_frame.action_bar = self.sim.action_bar_overlay();
         hud.render(device, queue, frame.view(), &hud_frame, w, h);
+        // Status-effect overlay, composited over the HUD in its own Load pass.
+        if let Some(effects) = self.effects.as_mut() {
+            effects.render(device, queue, frame.view(), self.sim.active_effects(), w, h);
+        }
 
         if let Some(window) = &self.window {
             window.pre_present_notify();
@@ -411,6 +430,7 @@ impl ApplicationHandler for WindowApp {
         let format = target.format();
         let mut render = RenderState::new(gpu.device(), gpu.queue(), format, w, h);
         let hud = HudRenderer::new(gpu.device(), format);
+        let effects = EffectsRenderer::new(gpu.device(), format);
         let container = ContainerRenderer::new(gpu.device(), format);
 
         // Upload whatever has already meshed; the rest streams in per frame.
@@ -440,6 +460,7 @@ impl ApplicationHandler for WindowApp {
         self.target = Some(target);
         self.render = Some(render);
         self.hud = Some(hud);
+        self.effects = Some(effects);
         self.container = Some(container);
         // Grab only if the chosen screen wants it (dev world yes; loading no).
         self.set_grab(self.ui.wants_cursor_grab());

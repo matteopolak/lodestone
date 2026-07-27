@@ -85,6 +85,19 @@ pub struct Sim {
     tab_list: lodestone_game::tablist::TabList,
     /// Folded server scoreboard state; rendered as the right-edge sidebar.
     scoreboard: lodestone_game::scoreboard::Scoreboard,
+    /// The local player's active status effects, folded from `update_mob_effect`
+    /// / `remove_mob_effect` and ticked down at 20 Hz; drawn by [`crate::effects`]
+    /// as the top-right HUD stack. Distinct from [`PlayerState::effects`], which
+    /// is the *physics* view (only motion-relevant effects); this is the full,
+    /// display-oriented set with durations and levels.
+    hud_effects: lodestone_game::effect::ActiveEffects,
+    /// Title/subtitle overlay, folded through the canonical
+    /// [`lodestone_game::player_state::TitleState`] and ticked at 20 Hz for the
+    /// vanilla fade. Empty (drawing nothing) until the server sends a title.
+    title: lodestone_game::player_state::TitleState,
+    /// Action-bar overlay (GameInfo messages), folded through
+    /// [`lodestone_game::player_state::ActionBar`]; self-clears after 60 ticks.
+    action_bar: lodestone_game::player_state::ActionBar,
     /// Monotonic wall-clock seconds since the sim started, accumulated from the
     /// real per-frame `dt` in [`Sim::step`]. Stamps chat arrivals so the HUD can
     /// age lines for the vanilla fade-out without reaching for a clock itself.
@@ -94,6 +107,12 @@ pub struct Sim {
     health: Option<f32>,
     /// Latest server-reported food level in `0..=20`, `None` until reported.
     food: Option<i32>,
+    /// Latest server-reported experience (progress toward next level, level,
+    /// total points), `None` until `set_experience` arrives. The HUD must not
+    /// substitute a locally-derived guess for this — there is no vanilla
+    /// leveling curve the shell could invert from partial data that would be
+    /// guaranteed to match the (possibly modded) server's own numbers.
+    experience: Option<(f32, i32, i32)>,
     /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
     /// render-rate transforms the entity pass draws. Empty off a live server.
     entity_interp: EntityInterpolator,
@@ -105,6 +124,12 @@ pub struct Sim {
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
     audio: Option<ShellAudio>,
+    /// The server-assigned entity id for the local player, set on
+    /// [`NetUpdate::LoggedIn`]. `None` off a live server (or before login
+    /// completes), in which case entity-scoped `NetUpdate`s that need to
+    /// distinguish "this is us" (e.g. mob effects) are not the local player's
+    /// and are ignored rather than misattributed.
+    local_entity_id: Option<i32>,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -184,12 +209,17 @@ impl Sim {
             chat_log: ChatLog::new(),
             tab_list: lodestone_game::tablist::TabList::new(),
             scoreboard: lodestone_game::scoreboard::Scoreboard::new(),
+            hud_effects: lodestone_game::effect::ActiveEffects::new(),
+            title: lodestone_game::player_state::TitleState::new(),
+            action_bar: lodestone_game::player_state::ActionBar::new(),
             clock_secs: 0.0,
             health: None,
             food: None,
+            experience: None,
             entity_interp: EntityInterpolator::new(),
             selected_slot: 0,
             audio: ShellAudio::from_env(),
+            local_entity_id: None,
         }
     }
 
@@ -210,7 +240,7 @@ impl Sim {
     /// each paired with its **age in seconds** (now − arrival) so the HUD can
     /// apply the vanilla fade-out. Lines carry legacy `§` colour codes.
     #[must_use]
-    pub fn recent_chat(&self, n: usize) -> Vec<(&str, f32)> {
+    pub fn recent_chat(&self, n: usize) -> Vec<(String, f32)> {
         let now = self.clock_secs;
         self.chat_log
             .recent(n)
@@ -229,6 +259,15 @@ impl Sim {
     #[must_use]
     pub fn food(&self) -> Option<i32> {
         self.food
+    }
+
+    /// Server-reported experience as `(progress, level, total)`, or `None`
+    /// before `set_experience` has arrived (e.g. the local dev world, or a
+    /// live server before the first packet). `progress` is `0.0..1.0` toward
+    /// the next level.
+    #[must_use]
+    pub fn experience(&self) -> Option<(f32, i32, i32)> {
+        self.experience
     }
 
     /// The current tab-list, formatted as `NAME  <latency>ms` rows sorted by
@@ -251,6 +290,43 @@ impl Sim {
         self.net
             .as_ref()
             .map_or_else(Vec::new, NetClient::boss_bars)
+    }
+
+    /// The XP bar to draw as `(level, progress 0..=1)`, `Some` only once the
+    /// server has sent an experience update. Reads the already-folded
+    /// [`Sim::experience`]; off a live server it stays `None` and no bar draws.
+    #[must_use]
+    pub fn xp(&self) -> Option<(i32, f32)> {
+        self.experience
+            .map(|(progress, level, _total)| (level, progress))
+    }
+
+    /// The title/subtitle overlay as `(title, subtitle, alpha)`, `Some` while a
+    /// server-sent title is visible. `Text` is flattened to a legacy `§` string
+    /// at read time, matching the chat path, so colour survives once decoded.
+    #[must_use]
+    pub fn title_overlay(&self) -> Option<(String, Option<String>, f32)> {
+        let title = self.title.title()?;
+        Some((
+            title.to_legacy_string(),
+            self.title.subtitle().map(|s| s.to_legacy_string()),
+            self.title.alpha(),
+        ))
+    }
+
+    /// The action-bar message as `(text, alpha)`, `Some` while a GameInfo
+    /// message is visible (fades over its final ticks).
+    #[must_use]
+    pub fn action_bar_overlay(&self) -> Option<(String, f32)> {
+        let text = self.action_bar.text()?;
+        Some((text.to_legacy_string(), self.action_bar.alpha()))
+    }
+
+    /// The local player's active status effects, for the top-right HUD overlay.
+    /// Empty until a server applies one; ticked down in [`Sim::step`].
+    #[must_use]
+    pub fn active_effects(&self) -> &lodestone_game::effect::ActiveEffects {
+        &self.hud_effects
     }
 
     /// The folded player inventory menu. Off a live connection this returns an
@@ -415,6 +491,13 @@ impl Sim {
             }
             self.tick_count += 1;
             self.accumulator -= TICK_DT;
+            // Age the HUD status effects at the same fixed 20 Hz the server ticks
+            // them, so displayed timers count down in step with the world.
+            self.hud_effects.tick(1);
+            // Age the title/subtitle and action-bar overlays at the same 20 Hz
+            // so their vanilla fades run in step with the world.
+            self.title.tick(1);
+            self.action_bar.tick(1);
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. Only once we're actually in the world — before the
@@ -687,6 +770,7 @@ impl Sim {
                 NetUpdate::LoggedIn { entity_id } => {
                     self.status = format!("connected (entity {entity_id})");
                     self.phase = SessionPhase::Connected;
+                    self.local_entity_id = Some(entity_id);
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
@@ -698,9 +782,17 @@ impl Sim {
                     // them, this only re-meshes locally generated columns.
                     self.mark_column_dirty(x, z);
                 }
-                NetUpdate::Chat(msg) => {
-                    tracing::info!(target: "chat", "{msg}");
-                    self.chat_log.push(msg, self.clock_secs);
+                NetUpdate::Chat { text, player } => {
+                    tracing::info!(target: "chat", "{}", text.to_legacy_string());
+                    if player {
+                        self.chat_log.push_player(
+                            text,
+                            lodestone_game::chat::MessageTrust::NotSecure,
+                            self.clock_secs,
+                        );
+                    } else {
+                        self.chat_log.push_system(text, self.clock_secs);
+                    }
                 }
                 NetUpdate::Health { health, food } => {
                     self.health = Some(health);
@@ -708,6 +800,13 @@ impl Sim {
                     if health <= 0.0 {
                         self.status = "server: player dead (no chunks)".into();
                     }
+                }
+                NetUpdate::Experience {
+                    progress,
+                    level,
+                    total,
+                } => {
+                    self.experience = Some((progress, level, total));
                 }
                 NetUpdate::Death => {
                     self.status = "server: died".into();
@@ -741,11 +840,57 @@ impl Sim {
                         audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
                     }
                 }
+                // Only the local player's effects are folded: they feed both the
+                // physics view ([`PlayerState::effects`]) and the display view
+                // ([`Sim::hud_effects`]). Entity-scoped effects are filtered here
+                // rather than in `net::forward`, keeping the wire event
+                // entity-agnostic.
+                NetUpdate::EffectApplied {
+                    entity_id,
+                    effect,
+                    amplifier,
+                    duration_ticks,
+                    ambient,
+                    show_icon,
+                } => {
+                    if self.local_entity_id == Some(entity_id) {
+                        self.player.effects.apply(&effect, amplifier);
+                        if let Ok(id) =
+                            lodestone_model::Identifier::new("minecraft", effect.as_str())
+                        {
+                            self.hud_effects
+                                .apply(lodestone_game::effect::StatusEffect {
+                                    id,
+                                    amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
+                                    duration_ticks,
+                                    ambient,
+                                    show_particles: true,
+                                    show_icon,
+                                });
+                        }
+                    }
+                }
+                NetUpdate::EffectRemoved { entity_id, effect } => {
+                    if self.local_entity_id == Some(entity_id) {
+                        self.player.effects.remove(&effect);
+                        if let Ok(id) =
+                            lodestone_model::Identifier::new("minecraft", effect.as_str())
+                        {
+                            self.hud_effects.remove(&id);
+                        }
+                    }
+                }
                 NetUpdate::TabListEvent(event) => {
                     let _ = self.tab_list.apply(&event);
                 }
                 NetUpdate::ScoreboardEvent(event) => {
                     let _ = self.scoreboard.apply(&event);
+                }
+                NetUpdate::TitleEvent(event) => {
+                    let _ = self.title.apply(&event);
+                }
+                NetUpdate::ActionBar(text) => {
+                    self.action_bar.set(text);
                 }
                 NetUpdate::Disconnected(reason) => {
                     self.status = format!("disconnected: {reason}");
@@ -926,6 +1071,81 @@ mod tests {
     }
 
     #[test]
+    fn mob_effect_applied_for_local_player_reaches_status_effects() {
+        use crate::net::NetUpdate;
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        sim.poll_net();
+        assert!(sim.player.effects.levitation.is_none());
+
+        feed.send(NetUpdate::EffectApplied {
+            entity_id: 7,
+            effect: "levitation".into(),
+            amplifier: 2,
+            duration_ticks: 200,
+            ambient: false,
+            show_icon: true,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert_eq!(
+            sim.player.effects.levitation,
+            Some(2),
+            "the wire→StatusEffects seam must fold an effect for the local entity id"
+        );
+        // The same event must also reach the display model with its full data.
+        let chips = crate::effects::chips_from(sim.active_effects());
+        assert_eq!(chips.len(), 1, "the HUD effect model must fold it too");
+        assert_eq!(chips[0].label, "levitation III"); // amplifier 2 → level III
+        assert_eq!(chips[0].time, "0:10"); // 200 ticks → 10 s
+
+        feed.send(NetUpdate::EffectRemoved {
+            entity_id: 7,
+            effect: "levitation".into(),
+        })
+        .unwrap();
+        sim.poll_net();
+        assert!(sim.player.effects.levitation.is_none());
+        assert!(
+            sim.active_effects().is_empty(),
+            "removal must clear the HUD effect model as well"
+        );
+    }
+
+    #[test]
+    fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
+        use crate::net::NetUpdate;
+        // `update_mob_effect` is entity-agnostic on the wire; only the entity id
+        // that matches the local player's should ever mutate `sim.player`.
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        sim.poll_net();
+
+        feed.send(NetUpdate::EffectApplied {
+            entity_id: 1234, // some other (mob) entity, not the local player
+            effect: "levitation".into(),
+            amplifier: 0,
+            duration_ticks: 200,
+            ambient: false,
+            show_icon: true,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert!(
+            sim.player.effects.levitation.is_none(),
+            "a remote entity's effect must not leak into the local player's StatusEffects"
+        );
+        assert!(
+            sim.active_effects().is_empty(),
+            "a remote entity's effect must not reach the local HUD overlay either"
+        );
+    }
+
+    #[test]
     fn session_phase_tracks_net_updates() {
         use crate::net::NetUpdate;
         let (net, _actions, feed) = NetClient::loopback_with_feed();
@@ -983,12 +1203,16 @@ mod tests {
         sim.attach_net(net);
 
         // Inbound server chat must surface in the HUD log (not merely logged).
-        feed.send(NetUpdate::Chat("hello world".into())).unwrap();
+        feed.send(NetUpdate::Chat {
+            text: lodestone_model::Text::literal("hello world"),
+            player: false,
+        })
+        .unwrap();
         sim.poll_net();
-        let lines: Vec<&str> = sim.recent_chat(10).into_iter().map(|(l, _)| l).collect();
+        let lines: Vec<String> = sim.recent_chat(10).into_iter().map(|(l, _)| l).collect();
         assert_eq!(
             lines,
-            vec!["hello world"],
+            vec!["hello world".to_string()],
             "inbound chat must reach the display log"
         );
 
@@ -1022,7 +1246,11 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
 
-        feed.send(NetUpdate::Chat("aged line".into())).unwrap();
+        feed.send(NetUpdate::Chat {
+            text: lodestone_model::Text::literal("aged line"),
+            player: false,
+        })
+        .unwrap();
         sim.poll_net();
         // Freshly received: age is ~0.
         assert!(
@@ -1058,6 +1286,192 @@ mod tests {
         // Both fields must land — a one-sided store would leave the other None.
         assert_eq!(sim.health(), Some(14.0));
         assert_eq!(sim.food(), Some(17));
+    }
+
+    #[test]
+    fn server_experience_reaches_the_hud_accessor() {
+        use crate::net::NetUpdate;
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        // Off a live server (or before the first packet) there is no real XP
+        // value, so the HUD must not draw a faked bar.
+        assert_eq!(sim.experience(), None);
+
+        feed.send(NetUpdate::Experience {
+            progress: 0.6,
+            level: 30,
+            total: 1395,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert_eq!(sim.experience(), Some((0.6, 30, 1395)));
+    }
+
+    #[test]
+    fn title_events_fold_into_the_title_overlay() {
+        use crate::net::NetUpdate;
+        use lodestone_model::{ClientEvent, Text};
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        // No title yet → nothing to draw.
+        assert!(sim.title_overlay().is_none());
+
+        feed.send(NetUpdate::TitleEvent(ClientEvent::TitleText {
+            text: Text::literal("Welcome"),
+        }))
+        .unwrap();
+        feed.send(NetUpdate::TitleEvent(ClientEvent::SubtitleText {
+            text: Text::literal("to the server"),
+        }))
+        .unwrap();
+        sim.poll_net();
+
+        let (title, subtitle, _alpha) = sim
+            .title_overlay()
+            .expect("a server-sent title must reach the HUD accessor");
+        assert_eq!(title, "Welcome");
+        assert_eq!(subtitle.as_deref(), Some("to the server"));
+
+        // A clear packet must empty the overlay again.
+        feed.send(NetUpdate::TitleEvent(ClientEvent::TitlesCleared {
+            reset_times: false,
+        }))
+        .unwrap();
+        sim.poll_net();
+        assert!(sim.title_overlay().is_none());
+    }
+
+    #[test]
+    fn game_info_chat_folds_into_the_action_bar_not_the_feed() {
+        use crate::net::NetUpdate;
+        use lodestone_model::Text;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        assert!(sim.action_bar_overlay().is_none());
+
+        feed.send(NetUpdate::ActionBar(Text::literal("Boss incoming")))
+            .unwrap();
+        sim.poll_net();
+
+        let (text, alpha) = sim
+            .action_bar_overlay()
+            .expect("a GameInfo message must reach the action-bar accessor");
+        assert_eq!(text, "Boss incoming");
+        assert!(alpha > 0.0, "a fresh action-bar message is fully opaque");
+        // It must not have leaked into the chat scrollback.
+        assert!(
+            sim.recent_chat(10).is_empty(),
+            "GameInfo is the action bar, not chat — it must not enter the feed"
+        );
+    }
+
+    #[test]
+    fn player_list_events_fold_into_tab_overlay_rows() {
+        use crate::net::NetUpdate;
+        use lodestone_model::{ClientEvent, GameMode, PlayerListEntry, Text};
+        use uuid::Uuid;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+
+        let alice = Uuid::from_u128(1);
+        let bob = Uuid::from_u128(2);
+        feed.send(NetUpdate::TabListEvent(ClientEvent::PlayerListUpdate {
+            entries: vec![
+                PlayerListEntry {
+                    uuid: bob,
+                    name: Some("Bob".into()),
+                    game_mode: Some(GameMode::Spectator),
+                    latency: Some(30),
+                    display_name: None,
+                    listed: Some(true),
+                },
+                PlayerListEntry {
+                    uuid: alice,
+                    name: Some("Alice".into()),
+                    game_mode: Some(GameMode::Survival),
+                    latency: Some(12),
+                    display_name: Some(Text::literal("Alice the Brave")),
+                    listed: Some(true),
+                },
+            ],
+        }))
+        .unwrap();
+        sim.poll_net();
+
+        assert_eq!(
+            sim.player_rows(),
+            vec!["Alice the Brave  12ms".to_string(), "Bob  30ms".to_string(),],
+            "tab overlay rows must come from lodestone-game's folded TabList state"
+        );
+
+        feed.send(NetUpdate::TabListEvent(ClientEvent::PlayerListRemove {
+            profile_ids: vec![alice],
+        }))
+        .unwrap();
+        sim.poll_net();
+        assert_eq!(sim.player_rows(), vec!["Bob  30ms".to_string()]);
+    }
+
+    #[test]
+    fn scoreboard_events_fold_into_sidebar_view() {
+        use crate::net::NetUpdate;
+        use lodestone_model::event::{DisplaySlot, ObjectiveMode, ObjectiveRenderType};
+        use lodestone_model::{ClientEvent, Text};
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+
+        for event in [
+            ClientEvent::ObjectiveUpdate {
+                name: "kills".into(),
+                mode: ObjectiveMode::Add,
+                display_name: Some(Text::literal("Kills")),
+                render_type: Some(ObjectiveRenderType::Integer),
+                number_format: None,
+            },
+            ClientEvent::DisplayObjective {
+                slot: DisplaySlot::Sidebar,
+                objective: Some("kills".into()),
+            },
+            ClientEvent::ScoreUpdate {
+                holder: "Alice".into(),
+                objective: "kills".into(),
+                value: 7,
+                display: Some(Text::literal("Alice the Brave")),
+                number_format: None,
+            },
+            ClientEvent::ScoreUpdate {
+                holder: "Bob".into(),
+                objective: "kills".into(),
+                value: 3,
+                display: None,
+                number_format: None,
+            },
+        ] {
+            feed.send(NetUpdate::ScoreboardEvent(event)).unwrap();
+        }
+        sim.poll_net();
+
+        let sidebar = sim.sidebar().expect("sidebar objective should be visible");
+        assert_eq!(sidebar.title, "Kills");
+        let rows: Vec<(&str, &str)> = sidebar
+            .lines
+            .iter()
+            .map(|line| (line.label.as_str(), line.score.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![("Alice the Brave", "7"), ("Bob", "3")],
+            "sidebar rows must come from lodestone-game's folded Scoreboard state"
+        );
     }
 
     #[test]
