@@ -248,6 +248,25 @@ fn loaded_chunk_with_block_and_light(
     LoadedChunk::new(column, light, Heightmaps::new(), Vec::new())
 }
 
+/// Builds an all-air [`LoadedChunk`] with a caller-chosen vertical extent, so a
+/// test can assert the dimension geometry (`min_y` / height) the mesher reads.
+fn loaded_chunk_with_extent(min_y: i32, section_count: usize) -> LoadedChunk {
+    let column = ChunkColumn::new(
+        min_y,
+        section_count,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    );
+    LoadedChunk::new(
+        column,
+        ColumnLight::new(section_count),
+        Heightmaps::new(),
+        Vec::new(),
+    )
+}
+
 /// The read-model folds login, health, and teleport into queryable player
 /// state.
 #[tokio::test]
@@ -693,6 +712,85 @@ async fn sections_and_light_read_pairwise_in_one_epoch() {
         batch[0].1.as_ref().unwrap().sky_at(1, 2, 3),
         handle.section_light(pos, 5).unwrap().sky_at(1, 2, 3),
         "bulk light matches the singular section_light(5)"
+    );
+
+    drop(handle);
+}
+
+/// The mesher needs the connected dimension's vertical extent — `min_y` and
+/// height — to place a live column's block/light sections at the correct
+/// world-`y`; the `DimensionId` alone (a resource key like `minecraft:overworld`)
+/// carries no geometry. The extent is read straight off a loaded column's shape
+/// (the adapter built it from the server's dimension type), so it is `None`
+/// before any terrain has arrived and reflects the real column geometry
+/// afterwards — and is not retained as a stale anchor once the column unloads.
+#[tokio::test]
+async fn world_dimensions_report_min_y_and_height_from_a_loaded_column() {
+    const LOAD: i32 = 1;
+    const UNLOAD: i32 = 2;
+
+    // Real overworld extent: min_y = -64, 24 block sections (height 384).
+    let chunk = loaded_chunk_with_extent(-64, 24);
+    let pos = ChunkPos::new(0, 0);
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .world_write(
+            ConnectionState::Play,
+            LOAD,
+            WorldWrite::Load(WorldChunkPos::new(0, 0), chunk),
+        )
+        .on(
+            ConnectionState::Play,
+            LOAD,
+            vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })],
+        )
+        .world_write(
+            ConnectionState::Play,
+            UNLOAD,
+            WorldWrite::Unload(WorldChunkPos::new(0, 0)),
+        )
+        .on(
+            ConnectionState::Play,
+            UNLOAD,
+            vec![Directive::Emit(ClientEvent::ChunkUnloaded { pos })],
+        );
+    let (handle, _events, mut peer) = start(adapter);
+
+    // Pre-terrain: a resource-key dimension is all we have; the extent is unknown.
+    assert!(
+        handle.world_dimensions().is_none(),
+        "no vertical extent before any column has loaded"
+    );
+
+    peer.write_packet(LOAD, &[]).await.unwrap();
+    handle
+        .wait_for_chunk(pos, Duration::from_secs(2))
+        .await
+        .expect("chunk should load");
+
+    let dims = handle
+        .world_dimensions()
+        .expect("extent is known once a column is loaded");
+    assert_eq!(
+        dims.min_y, -64,
+        "min_y is the column anchor, not derivable shell-side"
+    );
+    assert_eq!(dims.height, 384, "24 block sections * 16");
+    assert_eq!(dims.section_count(), 24, "height / 16");
+    // Light sections span one section past the block range at both ends
+    // (0 = below-world boundary), matching `sections_and_light_at`'s indexing.
+    assert_eq!(dims.light_section_count(), 26);
+
+    // After the only column unloads, the extent is unknown again rather than a
+    // stale anchor — a mesher must not place geometry against a dead dimension.
+    peer.write_packet(UNLOAD, &[]).await.unwrap();
+    handle
+        .wait_for(Duration::from_secs(2), |h| !h.is_chunk_loaded(pos))
+        .await
+        .expect("chunk should unload");
+    assert!(
+        handle.world_dimensions().is_none(),
+        "extent is not retained after the last column unloads"
     );
 
     drop(handle);

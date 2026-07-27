@@ -102,6 +102,10 @@ pub use state::{EntityView, PlayerSnapshot};
 // (e.g. an above-the-world sky default) rather than only its accessors.
 pub use lodestone_world::{ChunkSection, LightData, SectionLight};
 
+// The dimension's vertical extent is a client-level view over that world
+// snapshot (read from a loaded column's shape), so its type lives on the handle.
+pub use handle::WorldDimensions;
+
 // Re-export the model types a client user needs so they can build a session and
 // use the bot API without depending on `lodestone-model` directly.
 pub use lodestone_model::{

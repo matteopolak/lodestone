@@ -378,6 +378,21 @@ impl SharedState {
             .collect()
     }
 
+    /// Returns the connected dimension's vertical extent as `(min_y, height)`,
+    /// or `None` if no column is loaded. Every column in a dimension shares the
+    /// same shape — the adapter builds them all from the one dimension type the
+    /// server sent at login — so any loaded column is authoritative; `height` is
+    /// `section_count * 16`.
+    #[must_use]
+    pub(crate) fn world_extent(&self) -> Option<(i32, u32)> {
+        let world = self.world.read().unwrap_or_else(|e| e.into_inner());
+        let column = &world.values().next()?.column;
+        Some((
+            column.min_y(),
+            (column.section_count() * ChunkSection::EDGE) as u32,
+        ))
+    }
+
     /// Whether the chunk at `pos` is currently loaded.
     #[must_use]
     pub(crate) fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {

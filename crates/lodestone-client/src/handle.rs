@@ -314,6 +314,25 @@ impl ClientHandle {
         self.state.sections_and_light_at(requests)
     }
 
+    /// Returns the connected dimension's vertical extent, or `None` before the
+    /// dimension's terrain is known (pre-login / pre-first-chunk).
+    ///
+    /// A live mesher needs this to place a streamed column's block and light
+    /// sections at the correct world-`y`:
+    /// [`section_count`](WorldDimensions::section_count) is `height / 16`, and
+    /// light sections span `0..=section_count + 1` (`0` is the below-world
+    /// boundary and light section `i` covers block section `i - 1`), matching
+    /// [`sections_and_light_at`](ClientHandle::sections_and_light_at). A
+    /// `DimensionId` alone cannot supply this — it is only a resource key and
+    /// carries no geometry, and probing the light accessor reveals a section
+    /// *count* but never the `min_y` anchor.
+    #[must_use]
+    pub fn world_dimensions(&self) -> Option<WorldDimensions> {
+        self.state
+            .world_extent()
+            .map(|(min_y, height)| WorldDimensions { min_y, height })
+    }
+
     /// Returns `(world_age, time_of_day)` as last reported by the server.
     #[must_use]
     pub fn world_time(&self) -> (i64, i64) {
@@ -707,5 +726,41 @@ impl EventStream {
     /// or the session has ended.
     pub fn try_recv(&mut self) -> Result<ClientEvent, mpsc::error::TryRecvError> {
         self.rx.try_recv()
+    }
+}
+
+/// The connected dimension's vertical extent — the geometry a mesher needs to
+/// place a live column's sections at the correct world-`y`.
+///
+/// `min_y` is the lowest world-`y` (e.g. `-64` for the overworld) and `height`
+/// the number of blocks tall (a multiple of 16, e.g. `384`). Block sections are
+/// `height / 16` ([`section_count`](WorldDimensions::section_count)); light
+/// sections run one section past the block range at both ends
+/// ([`light_section_count`](WorldDimensions::light_section_count)), where light
+/// section `0` is the below-world boundary and light section `i` covers block
+/// section `i - 1` — the exact indexing
+/// [`sections_and_light_at`](ClientHandle::sections_and_light_at) and
+/// [`section_light`](ClientHandle::section_light) use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldDimensions {
+    /// Lowest world-`y` in the dimension.
+    pub min_y: i32,
+    /// Dimension height in blocks (a multiple of 16).
+    pub height: u32,
+}
+
+impl WorldDimensions {
+    /// Number of 16-block-tall block sections in a column (`height / 16`).
+    #[must_use]
+    pub const fn section_count(self) -> usize {
+        (self.height / 16) as usize
+    }
+
+    /// Number of light sections, which extend one section past the block range
+    /// at both ends (`section_count + 2`): light section `0` is the below-world
+    /// boundary and the last covers the boundary above the top of the world.
+    #[must_use]
+    pub const fn light_section_count(self) -> usize {
+        self.section_count() + 2
     }
 }
