@@ -36,12 +36,18 @@
 //!
 //! # Seams
 //!
-//! Propagation runs over one whole chunk column (all 16×16 columns at once), so
-//! *intra*-chunk horizontal spread is exact. Light entering from a neighbouring
-//! chunk is not pulled in, so cells within 15 of an x/z border can under-report
-//! by a neighbour's contribution; the correctness gate compares interior cells,
-//! and a neighbour-aware volume is the next increment behind this same
-//! interface.
+//! [`compute_column_light`] runs over one whole chunk column (all 16×16 columns
+//! at once), so *intra*-chunk horizontal spread is exact. Light entering from a
+//! neighbouring chunk is not pulled in, so cells under an overhang within 15 of
+//! an x/z border can under-report by a neighbour's contribution — a residual
+//! confined to the border region. [`compute_column_light_with_neighbours`]
+//! closes that gap: it floods the same rule over a 3×3 neighbourhood and is
+//! *exact* for the centre chunk, because light decays at least one level per
+//! block and 15 < 16, so no source beyond the immediate neighbours can reach it.
+//! A neighbour left absent is treated as an opaque seam, reproducing the isolated
+//! result on that side — the honest, later-correctable state when a neighbour has
+//! not loaded. [`diff_column_light`] reports edge and interior disagreements
+//! separately so the seam residual is a watched number, not a caveat.
 //!
 //! # Removal
 //!
@@ -76,9 +82,9 @@ pub trait LightProperties {
 /// Read-only block access for the engine, in chunk-local `x`/`z` (`0..16`) and
 /// world `y`.
 ///
-/// [`ChunkColumn`](crate::ChunkColumn) implements this directly; a future
-/// neighbour-aware implementation can answer for a 3×3 column neighbourhood
-/// without changing the engine.
+/// [`ChunkColumn`](crate::ChunkColumn) implements this directly; the
+/// neighbour-aware [`compute_column_light_with_neighbours`] samples several of
+/// these — a centre plus its neighbours — over one wide field.
 pub trait BlockVolume {
     /// Block-state id at chunk-local `(x, z)` and world `y`. Must return the air
     /// id for any `y` outside the built column (the engine reads one section of
@@ -105,17 +111,58 @@ impl BlockVolume for crate::ChunkColumn {
 }
 
 const EDGE: usize = ChunkSection::EDGE; // 16
-const AREA: usize = EDGE * EDGE; // 256 cells per y-layer
 const MAX_LIGHT: u8 = 15;
+
+/// The horizontal footprint a light computation runs over. Single-column light
+/// uses a `16×16` field; a neighbour-aware compute widens it to a `48×48` 3×3
+/// chunk neighbourhood so light entering from adjacent chunks is pulled in
+/// rather than dropped at the seam. `y` is the outer axis, so a whole horizontal
+/// layer is contiguous; the order is internal (only the packed output must match
+/// the wire nibble order).
+#[derive(Clone, Copy)]
+struct Field {
+    wx: usize,
+    wz: usize,
+    height: usize,
+}
+
+impl Field {
+    #[inline]
+    fn area(&self) -> usize {
+        self.wx * self.wz
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.area() * self.height
+    }
+    #[inline]
+    fn cell(&self, x: usize, y: usize, z: usize) -> usize {
+        (y * self.area()) + (z * self.wx) + x
+    }
+    #[inline]
+    fn uncell(&self, idx: usize) -> (usize, usize, usize) {
+        let a = self.area();
+        let y = idx / a;
+        let rem = idx % a;
+        (rem % self.wx, y, rem / self.wx)
+    }
+}
 
 /// Computes sky and block light for one chunk column, returning a fully
 /// populated [`ColumnLight`] spanning `section_count + 2` light sections (one
 /// apron section below the world and one above, exactly as a `light_update`
 /// packet carries).
 ///
-/// This is the whole public surface of the engine. It is deterministic and
-/// depends only on `blocks` and `props`, so it is trivially testable against a
-/// live server's light for the same chunk.
+/// This computes the column **in isolation**: light entering from a neighbouring
+/// chunk is not pulled in, so cells under an overhang within 15 blocks of an x/z
+/// border can under-report by a neighbour's contribution. That residual is
+/// confined to the chunk border region and is *correctable* once the neighbour
+/// loads — see [`compute_column_light_with_neighbours`], which is exact for the
+/// centre chunk, and [`diff_column_light`], which reports edge and interior
+/// disagreements separately so the residual is a watched number rather than a
+/// caveat. On open terrain (every column a full-strength sky source) the
+/// isolated result is already exact everywhere, which is why the superflat light
+/// oracle agrees cell-for-cell.
 #[must_use]
 pub fn compute_column_light(
     blocks: &impl BlockVolume,
@@ -123,51 +170,194 @@ pub fn compute_column_light(
 ) -> ColumnLight {
     let section_count = blocks.section_count();
     let min_y = blocks.min_y();
-    // Light sections span [section_count + 2]; the field covers that whole range
-    // so the apron (open sky above the build limit, dark below it) is computed,
-    // not assumed. `y_rel` 0 maps to the bottom of light section 0.
+    let field = Field {
+        wx: EDGE,
+        wz: EDGE,
+        height: (section_count + 2) * EDGE,
+    };
+    // Single column: every field cell is the centre chunk (offset 0,0), never a
+    // barrier, so this reduces exactly to a 16×16 computation.
+    compute_lit(section_count, min_y, field, 0, 0, props, |x, world_y, z| {
+        Some(blocks.block(x, world_y, z))
+    })
+}
+
+/// Up to nine chunk columns — a centre plus its eight neighbours — supplied to
+/// [`compute_column_light_with_neighbours`] so the centre's light can be
+/// computed with cross-chunk propagation resolved.
+///
+/// All columns must share the centre's `min_y` and `section_count` (same world),
+/// which a `debug_assert` checks. Neighbours not supplied are treated as an
+/// opaque barrier at the seam, which is exactly the isolated-column behaviour on
+/// that side — the honest, later-correctable result when a neighbour has not
+/// loaded yet.
+pub struct Neighbourhood<'a, V: BlockVolume> {
+    center: &'a V,
+    // Indexed by `(dz + 1) * 3 + (dx + 1)`; the centre slot (4) is unused.
+    neighbours: [Option<&'a V>; 9],
+}
+
+impl<'a, V: BlockVolume> Neighbourhood<'a, V> {
+    /// Starts a neighbourhood with only the centre column loaded.
+    #[must_use]
+    pub fn new(center: &'a V) -> Self {
+        Self {
+            center,
+            neighbours: [None; 9],
+        }
+    }
+
+    /// Adds the neighbour at chunk offset `(dx, dz)`, each in `-1..=1` and not
+    /// both zero (that is the centre). Later calls with the same offset replace.
+    #[must_use]
+    pub fn with(mut self, dx: i32, dz: i32, neighbour: &'a V) -> Self {
+        assert!(
+            (-1..=1).contains(&dx) && (-1..=1).contains(&dz) && (dx, dz) != (0, 0),
+            "neighbour offset ({dx},{dz}) must be in -1..=1 and not the centre"
+        );
+        debug_assert_eq!(neighbour.min_y(), self.center.min_y(), "neighbour min_y");
+        debug_assert_eq!(
+            neighbour.section_count(),
+            self.center.section_count(),
+            "neighbour section_count"
+        );
+        self.neighbours[((dz + 1) * 3 + (dx + 1)) as usize] = Some(neighbour);
+        self
+    }
+
+    #[inline]
+    fn at(&self, dx: i32, dz: i32) -> Option<&V> {
+        if (dx, dz) == (0, 0) {
+            Some(self.center)
+        } else {
+            self.neighbours[((dz + 1) * 3 + (dx + 1)) as usize]
+        }
+    }
+}
+
+impl<V: BlockVolume> std::fmt::Debug for Neighbourhood<'_, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `V` need not be `Debug`; report the loaded footprint instead.
+        let loaded: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0) && self.at(dx, dz).is_some())
+            .collect();
+        f.debug_struct("Neighbourhood")
+            .field("loaded_neighbours", &loaded)
+            .finish()
+    }
+}
+
+/// Computes the **centre** chunk's light with its loaded neighbours present, so
+/// sky and block light that spread across a chunk seam are resolved.
+///
+/// This is exact for the centre chunk: a cell can receive light only from a
+/// source within 15 blocks (each block crossed costs at least one level), and 15
+/// is less than the 16-wide chunk, so a source two chunks away — a
+/// neighbour-of-a-neighbour — can never reach the centre. A 3×3 neighbourhood
+/// therefore contains every source the centre can see. Neighbours left out of
+/// the [`Neighbourhood`] act as an opaque barrier, matching the isolated result
+/// on that side; when such a neighbour later loads, recomputing lifts the centre
+/// border to its correct value.
+///
+/// It runs the same flood over a 9× wider field, so it costs roughly 9× a single
+/// column ([`compute_column_light`]); an incremental seam re-propagation touching
+/// only the two columns at a changed boundary is the optimisation to add later,
+/// behind this same interface, with a measurement.
+#[must_use]
+pub fn compute_column_light_with_neighbours(
+    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
+    props: &impl LightProperties,
+) -> ColumnLight {
+    let center = neighbourhood.center;
+    let section_count = center.section_count();
+    let min_y = center.min_y();
+    let field = Field {
+        wx: 3 * EDGE,
+        wz: 3 * EDGE,
+        height: (section_count + 2) * EDGE,
+    };
+    // Field x/z 0..48 map to chunk offset dx/dz in -1..=1; the centre chunk sits
+    // at field offset (16, 16). A missing neighbour returns `None` → barrier.
+    compute_lit(
+        section_count,
+        min_y,
+        field,
+        EDGE,
+        EDGE,
+        props,
+        |fx, world_y, fz| {
+            let dx = (fx / EDGE) as i32 - 1;
+            let dz = (fz / EDGE) as i32 - 1;
+            neighbourhood
+                .at(dx, dz)
+                .map(|v| v.block(fx % EDGE, world_y, fz % EDGE))
+        },
+    )
+}
+
+/// The shared core: sample blocks over `field` (via `sample`, which returns the
+/// state id or `None` for a barrier cell), flood sky and block light, then pack
+/// the centre `16×16` sub-column at field offset `(ox, oz)`.
+fn compute_lit(
+    section_count: usize,
+    min_y: i32,
+    field: Field,
+    ox: usize,
+    oz: usize,
+    props: &impl LightProperties,
+    sample: impl Fn(usize, i32, usize) -> Option<u32>,
+) -> ColumnLight {
     let light_sections = section_count + 2;
-    let height = light_sections * EDGE;
+    debug_assert_eq!(field.height, light_sections * EDGE);
     let field_bottom_y = min_y - EDGE as i32;
 
-    // Cache opacity per cell once; the BFS reads it many times per cell.
-    let mut opacity = vec![0u8; AREA * height];
-    for y_rel in 0..height {
+    // One pass over the field builds the opacity cache (shared by both floods)
+    // and seeds block-light sources. Barrier cells are opaque and never sources,
+    // so no light passes their seam and none is invented behind them.
+    let mut opacity = vec![0u8; field.len()];
+    let mut block = vec![0u8; field.len()];
+    let mut block_buckets = Buckets::new();
+    for y_rel in 0..field.height {
         let world_y = field_bottom_y + y_rel as i32;
-        for z in 0..EDGE {
-            for x in 0..EDGE {
-                let state = blocks.block(x, world_y, z);
-                opacity[cell(x, y_rel, z)] = props.opacity(state).min(MAX_LIGHT);
+        for fz in 0..field.wz {
+            for fx in 0..field.wx {
+                let idx = field.cell(fx, y_rel, fz);
+                match sample(fx, world_y, fz) {
+                    Some(state) => {
+                        opacity[idx] = props.opacity(state).min(MAX_LIGHT);
+                        let emission = props.emission(state).min(MAX_LIGHT);
+                        if emission > 0 {
+                            // A source holds its emission regardless of its own
+                            // opacity (a jack-o'-lantern is opaque yet lit).
+                            block[idx] = emission;
+                            block_buckets.push(emission, idx as u32);
+                        }
+                    }
+                    None => opacity[idx] = MAX_LIGHT,
+                }
             }
         }
     }
 
-    let sky = compute_sky(&opacity, height);
-    let block = compute_block(blocks, props, field_bottom_y, height);
+    let sky = compute_sky(&field, &opacity);
+    propagate(&field, &mut block, &opacity, &mut block_buckets);
 
-    pack(section_count, light_sections, height, &sky, &block)
-}
-
-/// Flat index into a `AREA * height` field. `y` is the outer axis so a whole
-/// horizontal layer is contiguous; the exact order is internal (only the packed
-/// output must match the wire nibble order).
-#[inline]
-fn cell(x: usize, y_rel: usize, z: usize) -> usize {
-    (y_rel * AREA) + (z * EDGE) + x
+    pack(section_count, light_sections, &field, ox, oz, &sky, &block)
 }
 
 /// Sky light: seed every cell open to the sky at 15, then propagate.
-fn compute_sky(opacity: &[u8], height: usize) -> Vec<u8> {
-    let mut level = vec![0u8; AREA * height];
+fn compute_sky(field: &Field, opacity: &[u8]) -> Vec<u8> {
+    let mut level = vec![0u8; field.len()];
     let mut buckets = Buckets::new();
 
-    for z in 0..EDGE {
-        for x in 0..EDGE {
+    for fz in 0..field.wz {
+        for fx in 0..field.wx {
             // Scan down from the top of the field. Every cell is a full-strength
             // source until the first cell that dampens light at all; that cell
             // and everything below get their light from propagation instead.
-            for y_rel in (0..height).rev() {
-                let idx = cell(x, y_rel, z);
+            for y_rel in (0..field.height).rev() {
+                let idx = field.cell(fx, y_rel, fz);
                 if opacity[idx] != 0 {
                     break;
                 }
@@ -177,47 +367,14 @@ fn compute_sky(opacity: &[u8], height: usize) -> Vec<u8> {
         }
     }
 
-    propagate(&mut level, opacity, height, &mut buckets);
-    level
-}
-
-/// Block light: seed every emitting cell at its emission, then propagate.
-fn compute_block(
-    blocks: &impl BlockVolume,
-    props: &impl LightProperties,
-    field_bottom_y: i32,
-    height: usize,
-) -> Vec<u8> {
-    let mut level = vec![0u8; AREA * height];
-    let mut opacity = vec![0u8; AREA * height];
-    let mut buckets = Buckets::new();
-
-    for y_rel in 0..height {
-        let world_y = field_bottom_y + y_rel as i32;
-        for z in 0..EDGE {
-            for x in 0..EDGE {
-                let state = blocks.block(x, world_y, z);
-                let idx = cell(x, y_rel, z);
-                opacity[idx] = props.opacity(state).min(MAX_LIGHT);
-                let emission = props.emission(state).min(MAX_LIGHT);
-                if emission > 0 {
-                    // A source cell holds its emission regardless of its own
-                    // opacity (a jack-o'-lantern is opaque yet lit).
-                    level[idx] = emission;
-                    buckets.push(emission, idx as u32);
-                }
-            }
-        }
-    }
-
-    propagate(&mut level, &opacity, height, &mut buckets);
+    propagate(field, &mut level, opacity, &mut buckets);
     level
 }
 
 /// The shared descending-level flood: drain level 15 down to 1, lifting each
 /// in-bounds neighbour to `l - max(1, opacity(neighbour))` when that improves
 /// it. A cell popped at a level below its current value is stale and skipped.
-fn propagate(level: &mut [u8], opacity: &[u8], height: usize, buckets: &mut Buckets) {
+fn propagate(field: &Field, level: &mut [u8], opacity: &[u8], buckets: &mut Buckets) {
     let mut l = MAX_LIGHT;
     while l >= 1 {
         while let Some(idx) = buckets.pop(l) {
@@ -225,9 +382,9 @@ fn propagate(level: &mut [u8], opacity: &[u8], height: usize, buckets: &mut Buck
             if level[idx] != l {
                 continue;
             }
-            let (x, y_rel, z) = uncell(idx);
-            for (nx, ny, nz) in neighbours(x, y_rel, z, height) {
-                let nidx = cell(nx, ny, nz);
+            let (x, y_rel, z) = field.uncell(idx);
+            for (nx, ny, nz) in neighbours(field, x, y_rel, z) {
+                let nidx = field.cell(nx, ny, nz);
                 let cost = opacity[nidx].max(1);
                 let new = l.saturating_sub(cost);
                 if new > level[nidx] {
@@ -240,42 +397,36 @@ fn propagate(level: &mut [u8], opacity: &[u8], height: usize, buckets: &mut Buck
     }
 }
 
-/// The (up to) six in-bounds orthogonal neighbours. Horizontal moves outside
-/// `0..16` are dropped — the documented chunk seam.
+/// The (up to) six in-bounds orthogonal neighbours. Horizontal moves outside the
+/// field's `wx`/`wz` are dropped — that boundary is the chunk seam for a
+/// single-column field and the neighbourhood edge for a 3×3 field.
 #[inline]
 fn neighbours(
+    field: &Field,
     x: usize,
     y: usize,
     z: usize,
-    height: usize,
 ) -> impl Iterator<Item = (usize, usize, usize)> {
     let mut out: [Option<(usize, usize, usize)>; 6] = [None; 6];
     if x > 0 {
         out[0] = Some((x - 1, y, z));
     }
-    if x + 1 < EDGE {
+    if x + 1 < field.wx {
         out[1] = Some((x + 1, y, z));
     }
     if z > 0 {
         out[2] = Some((x, y, z - 1));
     }
-    if z + 1 < EDGE {
+    if z + 1 < field.wz {
         out[3] = Some((x, y, z + 1));
     }
     if y > 0 {
         out[4] = Some((x, y - 1, z));
     }
-    if y + 1 < height {
+    if y + 1 < field.height {
         out[5] = Some((x, y + 1, z));
     }
     out.into_iter().flatten()
-}
-
-#[inline]
-fn uncell(idx: usize) -> (usize, usize, usize) {
-    let y = idx / AREA;
-    let rem = idx % AREA;
-    (rem % EDGE, y, rem / EDGE)
 }
 
 /// A 15-level bucket queue (level `0` is never queued: a cell at 0 propagates
@@ -301,33 +452,36 @@ impl Buckets {
     }
 }
 
-/// Slices the two flat fields into per-light-section [`LightData`], collapsing
-/// uniform sections to a tag.
+/// Slices the two flat fields into per-light-section [`LightData`] for the centre
+/// chunk at field offset `(ox, oz)`, collapsing uniform sections to a tag.
 fn pack(
     section_count: usize,
     light_sections: usize,
-    height: usize,
+    field: &Field,
+    ox: usize,
+    oz: usize,
     sky: &[u8],
     block: &[u8],
 ) -> ColumnLight {
-    debug_assert_eq!(height, light_sections * EDGE);
+    debug_assert_eq!(field.height, light_sections * EDGE);
     let mut out = ColumnLight::new(section_count);
     for s in 0..light_sections {
-        *out.sky_mut(s) = pack_section(sky, s);
-        *out.block_mut(s) = pack_section(block, s);
+        *out.sky_mut(s) = pack_section(field, ox, oz, sky, s);
+        *out.block_mut(s) = pack_section(field, ox, oz, block, s);
     }
     out
 }
 
-/// Packs the 16³ cells of light section `s` into a [`LightData`], using vanilla's
+/// Packs the centre chunk's 16³ cells of light section `s` (the `16×16` column at
+/// field offset `(ox, oz)`) into a [`LightData`], using vanilla's
 /// `y<<8 | z<<4 | x` nibble order so it round-trips the wire exactly.
-fn pack_section(field: &[u8], s: usize) -> LightData {
+fn pack_section(field: &Field, ox: usize, oz: usize, data: &[u8], s: usize) -> LightData {
     let base_y = s * EDGE;
     let mut bytes = [0u8; 2048];
     for y_local in 0..EDGE {
         for z in 0..EDGE {
             for x in 0..EDGE {
-                let value = field[cell(x, base_y + y_local, z)] & 0x0F;
+                let value = data[field.cell(ox + x, base_y + y_local, oz + z)] & 0x0F;
                 let nibble = (y_local << 8) | (z << 4) | x;
                 bytes[nibble >> 1] |= value << (4 * (nibble & 1));
             }
@@ -348,6 +502,19 @@ pub struct LightDiff {
     pub sky_disagreements: usize,
     /// Compared block-light cells whose values disagree.
     pub block_disagreements: usize,
+    /// Disagreements (either layer) on a chunk **border** column — `x` or `z` in
+    /// `{0, 15}`. This is where our single-column engine legitimately differs
+    /// from a server that lit the cell with a neighbour loaded, so a non-zero
+    /// count here alone is the known cross-chunk seam, not a defect. It is a
+    /// *watched number*: an edge count that changes when a neighbour arrives is
+    /// the plumbing gap that [`compute_column_light_with_neighbours`] closes.
+    pub edge_disagreements: usize,
+    /// Disagreements (either layer) on an **interior** cell — every cell that is
+    /// not on a border column. An interior disagreement of any size is a real
+    /// bug, never the seam: no neighbour can reach an interior cell that our own
+    /// column's sources do not already dominate on open terrain, and under an
+    /// overhang a neighbour-aware compute must be used before diffing.
+    pub interior_disagreements: usize,
 }
 
 impl LightDiff {
@@ -366,12 +533,24 @@ impl LightDiff {
     }
 }
 
+/// Whether chunk-local `(x, z)` sits on a border column (`x` or `z` in `{0, 15}`).
+#[inline]
+fn is_edge_column(x: usize, z: usize) -> bool {
+    x == 0 || x == EDGE - 1 || z == 0 || z == EDGE - 1
+}
+
 /// Diffs two column lights cell-by-cell, restricted to the interior columns more
-/// than `interior_margin` blocks from the x/z chunk border.
+/// than `interior_margin` blocks from the x/z chunk border, and partitioning
+/// disagreements into [`edge`](LightDiff::edge_disagreements) and
+/// [`interior`](LightDiff::interior_disagreements) counts so the cross-chunk
+/// residual is a watched number rather than a caveat. Pass a margin of `0` (or
+/// call [`diff_column_light_full`]) to compare the whole column and see the edge
+/// count; a non-zero margin excludes the border and leaves the edge count `0`.
 ///
-/// The margin exists because this engine does not pull light in from neighbouring
-/// chunks (see the module seam note), so border cells can legitimately disagree
-/// with a server that lit them with neighbours loaded.
+/// The margin exists because [`compute_column_light`] does not pull light in from
+/// neighbouring chunks, so border cells can legitimately disagree with a server
+/// that lit them with neighbours loaded. [`compute_column_light_with_neighbours`]
+/// removes that residual for the centre chunk.
 ///
 /// A column is [`EDGE`] (16) wide, so no interior cell is more than 7 blocks from
 /// a border: **the margin must be less than `EDGE / 2` (8)**, or both axis loops
@@ -403,16 +582,27 @@ pub fn diff_column_light(
             for z in lo..hi {
                 for x in lo..hi {
                     let idx = NibbleArray::index(x, y, z);
+                    let edge = is_edge_column(x, z);
                     if let Some(theirs) = server.sky(s).get(idx) {
                         diff.cells_compared += 1;
                         if ours.sky(s).get(idx).unwrap_or(0) != theirs {
                             diff.sky_disagreements += 1;
+                            if edge {
+                                diff.edge_disagreements += 1;
+                            } else {
+                                diff.interior_disagreements += 1;
+                            }
                         }
                     }
                     if let Some(theirs) = server.block(s).get(idx) {
                         diff.cells_compared += 1;
                         if ours.block(s).get(idx).unwrap_or(0) != theirs {
                             diff.block_disagreements += 1;
+                            if edge {
+                                diff.edge_disagreements += 1;
+                            } else {
+                                diff.interior_disagreements += 1;
+                            }
                         }
                     }
                 }
@@ -420,6 +610,49 @@ pub fn diff_column_light(
         }
     }
     diff
+}
+
+/// [`diff_column_light`] over the whole column (margin `0`), so every cell is
+/// compared and the [`edge`](LightDiff::edge_disagreements) versus
+/// [`interior`](LightDiff::interior_disagreements) split is populated. This is the
+/// form a real-terrain oracle wants: assert `interior_disagreements == 0` (a hard
+/// correctness claim) while reporting `edge_disagreements` as the known,
+/// neighbour-correctable seam count.
+#[must_use]
+pub fn diff_column_light_full(ours: &ColumnLight, server: &ColumnLight) -> LightDiff {
+    diff_column_light(ours, server, 0)
+}
+
+/// Returns `true` if `light` contains at least one section whose sky or block
+/// light genuinely varies across cells — i.e. a horizontal gradient produced by
+/// propagation spreading sideways.
+///
+/// This exists to make the *vacuous-world* trap fail closed. A live light oracle
+/// that diffs computed light against a server is only meaningful if its input
+/// actually exercises sideways propagation; on a superflat world under open sky
+/// every section is uniform (sky 15 above the floor, 0 below, block 0
+/// everywhere), so sky light never spreads horizontally and a `0 disagreements`
+/// result is trivially true rather than evidence. The flaw there is the input,
+/// not the assertion, so reading the test cannot find it — but asserting this
+/// over the server's own light before diffing turns "accidentally ran on
+/// superflat again" from a silent pass into a failure. Pair it with the negative
+/// control the way `diff_column_light`'s cell count pairs with its comparison.
+#[must_use]
+pub fn light_exercises_propagation(light: &ColumnLight) -> bool {
+    (0..light.light_section_count())
+        .any(|s| section_has_gradient(light.sky(s)) || section_has_gradient(light.block(s)))
+}
+
+/// Whether one section's light holds two differing cell values. A `Uniform` or
+/// `Missing` section is flat by definition; only an explicit array can vary.
+fn section_has_gradient(data: &LightData) -> bool {
+    match data {
+        LightData::Values(arr) => {
+            let first = arr.get(0);
+            (1..NibbleArray::LEN).any(|i| arr.get(i) != first)
+        }
+        LightData::Missing | LightData::Uniform(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -703,6 +936,150 @@ mod tests {
         let a = ColumnLight::new(1);
         let b = ColumnLight::new(1);
         let _ = diff_column_light(&a, &b, EDGE / 2);
+    }
+
+    #[test]
+    fn propagation_check_rejects_a_superflat_style_uniform_column() {
+        // Every section uniform (sky on above the floor, off below, block dark):
+        // the shape a superflat world produces. No sideways spread, so an oracle
+        // on this input would be vacuous — the guard must return false.
+        let mut light = ColumnLight::new(4);
+        for i in 0..light.light_section_count() {
+            *light.sky_mut(i) = if i >= 3 {
+                LightData::Uniform(15)
+            } else {
+                LightData::Uniform(0)
+            };
+            *light.block_mut(i) = LightData::Uniform(0);
+        }
+        assert!(
+            !light_exercises_propagation(&light),
+            "a fully-uniform column does not exercise propagation"
+        );
+
+        // A single section carrying a real horizontal gradient flips it to true.
+        let mut arr = NibbleArray::filled(15);
+        arr.set(NibbleArray::index(3, 4, 5), 11);
+        *light.sky_mut(2) = LightData::Values(arr);
+        assert!(
+            light_exercises_propagation(&light),
+            "one varying section means sideways spread is present"
+        );
+    }
+
+    #[test]
+    fn propagation_check_ignores_a_secretly_uniform_values_array() {
+        // A Values array whose cells are all equal is still flat — it must not
+        // count as exercising propagation just because it is not a Uniform tag.
+        let mut light = ColumnLight::new(1);
+        *light.sky_mut(0) = LightData::Values(NibbleArray::filled(7));
+        assert!(!light_exercises_propagation(&light));
+    }
+
+    /// A column with a solid `STONE` roof plane across its whole footprint at
+    /// `y = -8`. Everything below the roof is cut off from vertical sky and can
+    /// only be lit horizontally — from a neighbour, if one is present.
+    fn roofed_column() -> ChunkColumn {
+        let mut c = column();
+        for z in 0..16 {
+            for x in 0..16 {
+                c.set_block(x, -8, z, STONE);
+            }
+        }
+        c
+    }
+
+    #[test]
+    fn diff_partitions_disagreements_into_edge_and_interior() {
+        // Two disagreements placed by hand: one on a border column (x = 0) and
+        // one in the interior. The partition must attribute exactly one to each,
+        // so "edge-only" becomes a number the caller can watch.
+        let mut server = ColumnLight::new(1);
+        *server.sky_mut(1) = LightData::Values(NibbleArray::filled(15));
+        let mut ours = ColumnLight::new(1);
+        let mut arr = NibbleArray::filled(15);
+        arr.set(NibbleArray::index(0, 0, 5), 3); // border column
+        arr.set(NibbleArray::index(8, 0, 8), 3); // interior
+        *ours.sky_mut(1) = LightData::Values(arr);
+
+        let diff = diff_column_light_full(&ours, &server);
+        assert_eq!(diff.cells_compared, NibbleArray::LEN, "one full section compared");
+        assert_eq!(diff.disagreements(), 2);
+        assert_eq!(diff.edge_disagreements, 1);
+        assert_eq!(diff.interior_disagreements, 1);
+    }
+
+    #[test]
+    fn neighbour_light_crosses_a_chunk_seam_that_isolation_drops() {
+        // The plumbing-gap proof. A west-neighbour A is open sky; the centre B is
+        // roofed, so B's under-roof cells can only be lit by light spilling in
+        // from A across the shared x-seam.
+        let props = FakeProps::new();
+        let b = roofed_column();
+        let a_open = column(); // all air → open sky, 15 everywhere
+        let a_roofed = roofed_column(); // dark under its own roof at the seam
+
+        let iso = compute_column_light(&b, &props);
+        let with_open =
+            compute_column_light_with_neighbours(&Neighbourhood::new(&b).with(-1, 0, &a_open), &props);
+        let with_roofed = compute_column_light_with_neighbours(
+            &Neighbourhood::new(&b).with(-1, 0, &a_roofed),
+            &props,
+        );
+        let with_none = compute_column_light_with_neighbours(&Neighbourhood::new(&b), &props);
+
+        // Isolated: the under-roof seam cell is dark — it under-reports exactly
+        // the neighbour contribution a server would have applied.
+        assert_eq!(sky_at(&iso, -64, 1, -9, 8), 0, "isolated under-roof seam is dark");
+
+        // With the open neighbour present, light crosses the seam and decays by
+        // one per block: A(15) → B(0)=14 → B(1)=13. This is the combined-field
+        // truth, computed by construction, pinned to a hand value.
+        assert_eq!(sky_at(&with_open, -64, 1, -9, 8), 13, "open neighbour lights the seam");
+        // Interior cells under the overhang depend on the neighbour too, and are
+        // corrected exactly: B(5) = 15 - 1 - 5 = 9.
+        assert_eq!(sky_at(&with_open, -64, 5, -9, 8), 9, "interior under overhang fixed");
+        assert_eq!(sky_at(&iso, -64, 5, -9, 8), 0, "same interior cell dark in isolation");
+
+        // §12.53: the assertion must fail if the neighbour's contribution is
+        // suppressed. Swap the open neighbour for a roofed one — dark at the seam
+        // — and the seam cell falls back to dark. The lift came from A's *blocks*
+        // being open, not merely from taking the neighbour-aware code path.
+        assert_eq!(
+            sky_at(&with_roofed, -64, 1, -9, 8),
+            0,
+            "a roofed neighbour contributes nothing across the seam"
+        );
+
+        // A neighbourhood with no neighbours loaded reduces exactly to the
+        // isolated column — the honest region-edge result, later correctable.
+        assert_eq!(with_none, iso, "no neighbours ⇒ isolated behaviour, byte for byte");
+
+        // Input floor: the corrected column is genuinely non-degenerate, so this
+        // whole test is not the vacuous-world trap one level out.
+        assert!(light_exercises_propagation(&with_open));
+    }
+
+    #[test]
+    fn neighbour_aware_open_terrain_matches_isolation() {
+        // When neighbours contribute nothing (all open sky), the neighbour-aware
+        // compute must reproduce the isolated result byte for byte — no spurious
+        // brightening from the wider field, no dimming from the barrier apron.
+        // This is why the superflat oracle's `0 disagreements` stays honest.
+        let props = FakeProps::new();
+        let open = column();
+        let iso = compute_column_light(&open, &props);
+        let all = Neighbourhood::new(&open)
+            .with(-1, 0, &open)
+            .with(1, 0, &open)
+            .with(0, -1, &open)
+            .with(0, 1, &open)
+            .with(-1, -1, &open)
+            .with(1, -1, &open)
+            .with(-1, 1, &open)
+            .with(1, 1, &open);
+        let with_all = compute_column_light_with_neighbours(&all, &props);
+        assert_eq!(with_all, iso, "open neighbours change nothing");
     }
 
     #[test]

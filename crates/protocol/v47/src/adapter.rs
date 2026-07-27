@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, ChatKind, ChunkPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, EntityInteraction, EntityMovement, GameMode, Hand, LoginProfile,
-    PlayerCommand, Rotation, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
+    AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
+    ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
+    EntityMovement, GameMode, Hand, LoginProfile, PlayerCommand, Rotation, ServerAddress,
+    TeleportFlags, Text, Vec3, VersionAdapter,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk, WorldSink};
 
@@ -26,8 +27,11 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
 use crate::packets::position::Position;
+use crate::packets::settings::{BrandPayload, PlayerAbilities, Settings};
 use crate::packets::slot::Slot;
-use crate::packets::window::{ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot};
+use crate::packets::window::{
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+};
 
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 47;
@@ -236,6 +240,34 @@ const fn face_ordinal(face: BlockFace) -> i8 {
 fn cursor_byte(v: f32) -> i8 {
     (v.clamp(0.0, 1.0) * 15.0).round() as i8
 }
+
+/// Packs a [`DisplayedSkinParts`] into the 1.8 skin-parts bitmask.
+const fn skin_parts_bits(parts: DisplayedSkinParts) -> u8 {
+    (parts.cape as u8)
+        | ((parts.jacket as u8) << 1)
+        | ((parts.left_sleeve as u8) << 2)
+        | ((parts.right_sleeve as u8) << 3)
+        | ((parts.left_pants_leg as u8) << 4)
+        | ((parts.right_pants_leg as u8) << 5)
+        | ((parts.hat as u8) << 6)
+}
+
+/// Maps a canonical [`ChatMode`] to the wire chat-visibility value
+/// (`0` full, `1` commands only, `2` hidden).
+const fn chat_mode_value(mode: ChatMode) -> i8 {
+    match mode {
+        ChatMode::Full => 0,
+        ChatMode::CommandsOnly => 1,
+        ChatMode::Hidden => 2,
+    }
+}
+
+/// The vanilla flying-ability flag bit set when the client is flying.
+const ABILITY_FLYING: i8 = 0x02;
+/// Vanilla default flying speed, sent in the server-ignored serverbound field.
+const DEFAULT_FLYING_SPEED: f32 = 0.05;
+/// Vanilla default walking speed, sent in the server-ignored serverbound field.
+const DEFAULT_WALKING_SPEED: f32 = 0.1;
 
 impl V47Adapter {
     /// Handles a clientbound packet while in the login state.
@@ -898,12 +930,78 @@ impl VersionAdapter for V47Adapter {
                     encode_body(&body)?,
                 )))
             }
-            // Inventory clicks predate the modern `state_id` reconciliation and
-            // require the item registry to encode the carried/changed stacks, so
-            // they are rejected loudly rather than encoded with wrong bytes.
+            // Newly modelled actions that 1.8 genuinely carries. Encoded
+            // faithfully against the minecraft-data wire shapes.
+            ClientAction::SetClientSettings(settings) => {
+                let ClientSettings {
+                    locale,
+                    view_distance,
+                    chat_mode,
+                    chat_colors,
+                    skin_parts,
+                    // 1.8 predates these fields; dropped deliberately.
+                    main_hand: _,
+                    text_filtering: _,
+                    allow_server_listing: _,
+                    particle_status: _,
+                } = settings;
+                let body = Settings {
+                    locale: locale.clone(),
+                    view_distance: *view_distance,
+                    chat_flags: chat_mode_value(*chat_mode),
+                    chat_colors: *chat_colors,
+                    skin_parts: skin_parts_bits(*skin_parts),
+                };
+                Ok(Some((play::serverbound::SETTINGS, encode_body(&body)?)))
+            }
+            ClientAction::SendBrand { brand } => {
+                let body = BrandPayload {
+                    channel: "MC|Brand".to_owned(),
+                    brand: brand.clone(),
+                };
+                Ok(Some((
+                    play::serverbound::CUSTOM_PAYLOAD,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::ContainerButtonClick {
+                window_id,
+                button_id,
+            } => {
+                let window_id = i8::try_from(*window_id).map_err(|_| {
+                    AdapterError::Encode(format!("window id {window_id} overflows i8"))
+                })?;
+                let button = i8::try_from(*button_id).map_err(|_| {
+                    AdapterError::Encode(format!("button id {button_id} overflows i8"))
+                })?;
+                let body = EnchantItem { window_id, button };
+                Ok(Some((play::serverbound::ENCHANT_ITEM, encode_body(&body)?)))
+            }
+            ClientAction::SetFlying { flying } => {
+                let body = PlayerAbilities {
+                    flags: if *flying { ABILITY_FLYING } else { 0 },
+                    flying_speed: DEFAULT_FLYING_SPEED,
+                    walking_speed: DEFAULT_WALKING_SPEED,
+                };
+                Ok(Some((play::serverbound::ABILITIES, encode_body(&body)?)))
+            }
+
+            // Container clicks predate the modern `state_id` reconciliation.
+            // Faithfully encoding 1.8's `window_click` requires three things the
+            // current model/architecture cannot supply, so it is refused loudly
+            // rather than encoded with wrong bytes (which a live server rejects
+            // via a failed transaction, silently dropping the click):
+            //   1. a client-tracked transaction id (the `action` counter) plus
+            //      the `confirm_transaction` ack loop — the model carries only
+            //      the 1.17+ `state_id`, and this adapter is stateless;
+            //   2. an item registry (`ResourceKey` -> numeric id) to encode the
+            //      clicked stack, which no version crate has yet;
+            //   3. item metadata/damage, which pre-1.13 slots carry but the
+            //      model's `ItemStack { item, count }` cannot express.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 ContainerClick requires an item registry and transaction id that are \
-                 not yet available"
+                "protocol 47 ContainerClick needs a client-tracked transaction id (model carries \
+                 only the 1.17+ state_id), an item registry, and item metadata the model's \
+                 ItemStack cannot express"
                     .to_owned(),
             )),
 
@@ -920,30 +1018,18 @@ impl VersionAdapter for V47Adapter {
                 "protocol 47 has no player-input packet".to_owned(),
             )),
 
-            // Newly modelled actions (client settings/brand/pong/resource pack,
-            // container button click, beacon, book/sign editing, command block,
-            // player abilities, trade/pick-item) are not yet wired up for
-            // protocol 47. Rejected loudly rather than silently dropped.
-            ClientAction::SetClientSettings(_) => Err(AdapterError::Unsupported(
-                "protocol 47 client settings encoding is not yet implemented".to_owned(),
-            )),
-            ClientAction::SendBrand { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 brand payload encoding is not yet implemented".to_owned(),
-            )),
+            // Actions that predate 1.8 wire support or need model carriers 1.8
+            // lacks. Rejected loudly rather than silently dropped.
             ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
                 "protocol 47 has no configuration/play ping-pong handshake".to_owned(),
             )),
             ClientAction::ResourcePackResponse { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 resource pack response encoding is not yet implemented".to_owned(),
+                "protocol 47 resource_pack_receive carries a pack hash string that the model's \
+                 Uuid-keyed ResourcePackResponse cannot supply"
+                    .to_owned(),
             )),
             ClientAction::EndClientTick => Err(AdapterError::Unsupported(
                 "protocol 47 has no client_tick_end packet".to_owned(),
-            )),
-            ClientAction::ContainerButtonClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 container button click encoding is not yet implemented".to_owned(),
-            )),
-            ClientAction::SetFlying { .. } => Err(AdapterError::Unsupported(
-                "protocol 47 player abilities encoding is not yet implemented".to_owned(),
             )),
             ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
                 "protocol 47 rename item encoding is not yet implemented".to_owned(),

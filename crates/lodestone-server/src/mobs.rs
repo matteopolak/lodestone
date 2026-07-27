@@ -33,12 +33,15 @@
 //! the point: a wrong-because-half-built loop is worse than an honest boundary.
 
 use std::collections::HashMap;
+use std::str::FromStr;
 
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
-use lodestone_model::Vec3;
+use lodestone_model::{ResourceKey, Rotation, Vec3};
+use uuid::Uuid;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::protocol::EntitySnapshot;
 use crate::mob_spawn::{
     DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
 };
@@ -193,6 +196,15 @@ pub struct SimMob<'w> {
     /// Whether the mob is exempt from natural despawn (named, persistence-
     /// required, or a persistent category). Persistent mobs skip the gates.
     persistent: bool,
+    /// Stable identity for the mob's sim-entry lifetime, encoded verbatim in the
+    /// spawn packet. Assigned once at [`MobSim::spawn`].
+    uuid: Uuid,
+    /// Canonical entity-type key (e.g. `minecraft:zombie`). The sim spawns mobs
+    /// by spawn-rule [`MobCategory`], not species, so this is a documented
+    /// placeholder (defaulting to `minecraft:zombie`, matching the default
+    /// `Monster` category) until species-aware spawning lands; a consumer that
+    /// knows the species sets it with [`set_entity_type`](SimMob::set_entity_type).
+    entity_type: ResourceKey,
 }
 
 impl<'w> SimMob<'w> {
@@ -264,6 +276,64 @@ impl<'w> SimMob<'w> {
         self.persistent = persistent;
         self
     }
+
+    /// The mob's stable UUID, encoded verbatim in the spawn packet.
+    #[must_use]
+    pub fn uuid(&self) -> Uuid {
+        self.uuid
+    }
+
+    /// The mob's canonical entity-type key (e.g. `minecraft:zombie`). See the
+    /// field docs for the placeholder caveat.
+    #[must_use]
+    pub fn entity_type(&self) -> &ResourceKey {
+        &self.entity_type
+    }
+
+    /// Sets the mob's canonical entity-type key. Used by a species-aware spawn
+    /// driver so the encoded spawn packet names the right entity.
+    pub fn set_entity_type(&mut self, entity_type: ResourceKey) -> &mut Self {
+        self.entity_type = entity_type;
+        self
+    }
+
+    /// The mob's body rotation (degrees). Body yaw tracks the movement
+    /// direction; ground mobs keep a level body, so pitch is 0.
+    #[must_use]
+    pub fn rotation(&self) -> Rotation {
+        Rotation::new(self.mob.body_yaw(), 0.0)
+    }
+
+    /// The mob's head yaw in degrees — toward its look target if a goal set one,
+    /// otherwise the body yaw. Matches `ClientEvent::EntityHeadRotation`.
+    #[must_use]
+    pub fn head_yaw(&self) -> f32 {
+        self.mob.head_yaw()
+    }
+
+    /// The mob's velocity in **blocks per tick** (the unit vanilla's wire packing
+    /// assumes), i.e. the position delta applied on the last tick.
+    #[must_use]
+    pub fn velocity(&self) -> Vec3 {
+        self.mob.velocity()
+    }
+
+    /// Lowers the mob into a version-free [`EntitySnapshot`] for the encode seam.
+    /// This is the whole identity/motion surface a [`ServerProtocol`] needs to
+    /// build spawn/move/remove packets; the server holds the previous snapshot
+    /// per connection so the protocol can stay stateless.
+    #[must_use]
+    pub fn snapshot(&self) -> EntitySnapshot {
+        EntitySnapshot {
+            id: self.id,
+            uuid: self.uuid,
+            entity_type: self.entity_type.clone(),
+            position: self.position(),
+            rotation: self.rotation(),
+            head_yaw: self.head_yaw(),
+            velocity: self.velocity(),
+        }
+    }
 }
 
 /// The server-side mob simulation: owns the live mobs and advances them.
@@ -278,6 +348,17 @@ pub struct MobSim<'w> {
     next_id: i32,
     tick_count: u64,
 }
+
+// The integrated server owns the sim behind an `Arc<Mutex<…>>` and hands it to
+// a `tokio::spawn`ed connection task as an `EntitySource`, which requires
+// `Send`. `MobSim` stores goals as `Box<dyn Goal>`, so this holds only because
+// `Goal: Send`; pin it here so a future `!Send` goal or field fails to compile
+// with a clear pointer, instead of surfacing as an opaque spawn error at the
+// call site.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<MobSim<'static>>();
+};
 
 impl<'w> MobSim<'w> {
     /// Creates an empty simulation over `world`.
@@ -313,6 +394,9 @@ impl<'w> MobSim<'w> {
             category: MobCategory::Monster,
             no_action_time: 0,
             persistent: false,
+            uuid: Uuid::new_v4(),
+            entity_type: ResourceKey::from_str("minecraft:zombie")
+                .expect("static key is valid"),
         });
         self.mobs.last_mut().expect("just pushed")
     }

@@ -49,14 +49,27 @@ lodestone-physics = { path = "../../lodestone-physics" }
 # express (see `cargo run -p xtask -- check-isolation`).
 live-chunk = []
 
-# Enables the live block-light oracle (`live_block_light`): joins the vanilla
-# 26.2 RCON oracle (game :25567, RCON :25575), places a glowstone in mid-air via
-# `/setblock`, then judges our light engine's *emission/decay* path against the
-# block light the server itself relights and sends back. Distinct from
-# `live-chunk` (which targets the flat :25565 world and exercises only sky
-# light — block light is 0 across a flat overworld). Off by default and
-# `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+# Enables the live block-light oracle (`live_block_light`): joins the flat
+# creative 26.2 oracle (game :25570, RCON :25571), places a glowstone in mid-air
+# via `/setblock`, then judges our light engine's *emission/decay* path against
+# the block light the server itself relights and sends back. A `minecraft:flat`
+# world is used deliberately — block light is 0 everywhere except our source, so
+# a single in-column glowstone is a clean single-source oracle our engine must
+# match cell-for-cell. Distinct from `live-chunk` (which targets the flat :25565
+# world and exercises only sky light). Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v770` stays hermetic.
 live-block-light = []
+
+# Enables the live real-terrain light oracle (`live_terrain_light`): joins a
+# normal-generation 26.2 server (game :25580) — hills, caves, overhangs, trees —
+# and diffs our neighbour-aware light compute against the light the server baked
+# into every chunk. Where `live-block-light`/`live-chunk` run on a `minecraft:flat`
+# world (a *vacuous world* for light: no horizontal gradient), this one exercises
+# the horizontal-decay path and section seams, guards non-vacuity with a
+# horizontal-gradient floor, and asserts `interior_disagreements == 0`. Start the
+# oracle with `scripts/live-oracles/terrain.sh`. Off by default and `#[ignore]`d
+# so `cargo test -p lodestone-v770` stays hermetic.
+live-terrain-light = []
 
 # Enables the live physics gate (`live_physics`): joins the real 26.2 server,
 # walks a player driven by `lodestone-physics`, and asserts the server sends

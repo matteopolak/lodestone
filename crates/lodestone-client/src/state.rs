@@ -66,6 +66,14 @@ pub struct PlayerSnapshot {
     pub alive: bool,
     /// Whether we have received the initial [`ClientEvent::HealthChanged`].
     pub health_known: bool,
+    /// Progress toward the next level, in `0.0..1.0`, once known.
+    pub xp_progress: f32,
+    /// Current experience level, once known.
+    pub xp_level: i32,
+    /// Total accumulated experience points, once known.
+    pub xp_total: i32,
+    /// Whether we have received the initial [`ClientEvent::ExperienceChanged`].
+    pub xp_known: bool,
 }
 
 impl Default for PlayerSnapshot {
@@ -82,6 +90,10 @@ impl Default for PlayerSnapshot {
             dimension: None,
             alive: true,
             health_known: false,
+            xp_progress: 0.0,
+            xp_level: 0,
+            xp_total: 0,
+            xp_known: false,
         }
     }
 }
@@ -152,7 +164,7 @@ pub struct EntityView {
 /// The mutable scalar state behind the lock. Private; only ever touched under
 /// [`SharedState`]'s lock. World (chunk) state lives in a separate lock so a
 /// chunk write never contends with a scalar read.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Inner {
     player: PlayerSnapshot,
     entities: HashMap<i32, EntityView>,
@@ -163,6 +175,21 @@ struct Inner {
     /// Boss bars in server insertion order (render order).
     boss_bars: Vec<BossBar>,
     menus: Menus,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            player: PlayerSnapshot::default(),
+            entities: HashMap::new(),
+            players: HashMap::new(),
+            world_age: 0,
+            time_of_day: 0,
+            scoreboard: Scoreboard::default(),
+            boss_bars: Vec::new(),
+            menus: Menus::new(),
+        }
+    }
 }
 
 /// A snapshot of the currently open non-player menu.
@@ -589,6 +616,16 @@ impl Inner {
             }
             ClientEvent::Death { .. } => {
                 self.player.alive = false;
+            }
+            ClientEvent::ExperienceChanged {
+                progress,
+                level,
+                total,
+            } => {
+                self.player.xp_progress = *progress;
+                self.player.xp_level = *level;
+                self.player.xp_total = *total;
+                self.player.xp_known = true;
             }
             ClientEvent::TimeChanged {
                 world_age,

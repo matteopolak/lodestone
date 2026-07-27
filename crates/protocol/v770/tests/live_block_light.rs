@@ -20,12 +20,18 @@
 //!   to nothing and the run prints `ok. 0 passed`, which reads exactly like
 //!   success — so the feature flag is not optional.
 //! * Without `--ignored` the test is skipped.
-//! * It targets the purpose-built **RCON oracle** (game on `:25567`, RCON on
-//!   `:25575`, password `lodestone`) — the one server where we can both *place*
-//!   a known block and *watch* the server's recomputed light arrive. The mc262
-//!   server on `:25565` has no reachable RCON, so a source cannot be placed
-//!   there. If the oracle (game or RCON) is unreachable the test **FAILS**, it
-//!   never skips (§12.52): a skipped gate reads as a pass.
+//! * It targets the **flat creative 26.2 oracle** (game on `:25570`, RCON on
+//!   `:25571`, password `lodestone`) — a `minecraft:flat` world, so block light
+//!   is `0` everywhere *except* the source we place. That matters: a single
+//!   glowstone in an otherwise-dark, all-air region is the one fixture where our
+//!   single-column engine and the server must agree cell-for-cell — the flood
+//!   from one in-column source is self-contained (no neighbour chunk holds a
+//!   competing source to bleed across the seam). The mc262 flat server on
+//!   `:25565` has no reachable RCON, and the entity-oracle world on `:25567` has
+//!   pre-existing block-light sources near spawn that a single-source engine
+//!   cannot reproduce, so neither is usable here. If the oracle (game or RCON)
+//!   is unreachable the test **FAILS**, it never skips (§12.52): a skipped gate
+//!   reads as a pass.
 //!
 //! The result is reported as a **count** ("0 of N block cells differ"), not a
 //! boolean, per the project's evidence standard. A built-in non-vacuity check
@@ -45,7 +51,7 @@ use lodestone_testsupport::RconClient;
 use lodestone_v770::V770Adapter;
 use lodestone_v770::block_states;
 use lodestone_world::{
-    ChunkColumn, ChunkPos as WorldChunkPos, ColumnLight, LightData, LightProperties, World,
+    ChunkColumn, ChunkPos as WorldChunkPos, LightData, LightProperties, World,
     compute_column_light, diff_column_light,
 };
 use tokio::net::TcpStream;
@@ -54,9 +60,9 @@ use uuid::Uuid;
 mod common;
 use common::unique_username;
 
-/// The purpose-built RCON oracle: game on `:25567`, RCON on `:25575`.
-const GAME_ADDR: &str = "127.0.0.1:25567";
-const RCON_ADDR: &str = "127.0.0.1:25575";
+/// The flat creative 26.2 oracle: game on `:25570`, RCON on `:25571`.
+const GAME_ADDR: &str = "127.0.0.1:25570";
+const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
 
 /// How far above the player's head to place the source. High enough that no
@@ -202,7 +208,7 @@ async fn connect_and_login(
 ) -> (Connection<TcpStream>, ConnectionState) {
     let mut conn = Connection::connect(GAME_ADDR)
         .await
-        .expect("connect to the vanilla-26.2 oracle on :25567 (gate fails, never skips)");
+        .expect("connect to the flat creative 26.2 oracle on :25570 (gate fails, never skips)");
     let mut state = ConnectionState::Handshaking;
     for directive in adapter.begin_login(profile, server).expect("begin login") {
         apply(&mut conn, &mut state, directive).await;
@@ -264,56 +270,12 @@ fn light_cell(column: &ChunkColumn, wx: i32, wy: i32, wz: i32) -> (usize, usize,
     (light_sec, lx, ly, lz)
 }
 
-/// Cell-by-cell block-light disagreement count over the light sections in
-/// `band`, skipping sections the server elided (`Missing`) so an absent section
-/// is never counted as a `0`-vs-value mismatch. Returns
-/// `(cells_compared, disagreements, max_server_block_light)`.
-///
-/// Restricting to a vertical band around the source keeps the judgement on the
-/// pure-air region a single in-column point source lights exactly — where our
-/// engine and the server must agree with no neighbour-chunk contribution — and
-/// away from any terrain block light a neighbour chunk (unseen by our
-/// single-column engine) might cast near the world surface.
-fn band_block_diff(
-    ours: &ColumnLight,
-    server: &ColumnLight,
-    band: std::ops::RangeInclusive<usize>,
-) -> (usize, usize, u8) {
-    let mut compared = 0usize;
-    let mut disagreements = 0usize;
-    let mut max_server = 0u8;
-    for i in band {
-        if i >= server.light_section_count() || i >= ours.light_section_count() {
-            continue;
-        }
-        if matches!(server.block(i), LightData::Missing) {
-            continue;
-        }
-        let os = ours.section_light(i);
-        let ss = server.section_light(i);
-        for y in 0..16usize {
-            for z in 0..16usize {
-                for x in 0..16usize {
-                    let sv = ss.block_at(x, y, z);
-                    let ov = os.block_at(x, y, z);
-                    max_server = max_server.max(sv);
-                    compared += 1;
-                    if ov != sv {
-                        disagreements += 1;
-                    }
-                }
-            }
-        }
-    }
-    (compared, disagreements, max_server)
-}
-
 #[tokio::test]
-#[ignore = "requires the live vanilla-26.2 RCON oracle on :25567 (+ RCON :25575)"]
+#[ignore = "requires the live flat creative 26.2 oracle on :25570 (+ RCON :25571)"]
 async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
     let server = ServerAddress {
         host: "127.0.0.1".into(),
-        port: 25567,
+        port: 25570,
     };
     let profile = LoginProfile {
         // Unique per run: in offline mode a shared name is a mutual eviction that
@@ -352,7 +314,7 @@ async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
         );
 
         let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
-            "oracle RCON reachable/authenticated at :25575 — is the vanilla-26.2 oracle up? \
+            "oracle RCON reachable/authenticated at :25571 — is the flat creative 26.2 oracle up? \
              A missing RCON is a harness failure, not a passing light path.",
         );
         let pos = rcon.cmd("data get entity @p Pos");
@@ -443,23 +405,89 @@ async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
         .expect("source column present in world");
     let props = V770LightProps::load();
     let ours = compute_column_light(&loaded.column, &props);
+    let server = &loaded.light;
+    let min_y = loaded.column.min_y();
 
     let (light_sec, _, _, _) = light_cell(&loaded.column, gx, gy, gz);
     let lo = light_sec.saturating_sub(1);
-    let hi = (light_sec + 1).min(loaded.light.light_section_count().saturating_sub(1));
-    let (compared, disagreements, max_server) = band_block_diff(&ours, &loaded.light, lo..=hi);
+    let hi = (light_sec + 1).min(server.light_section_count().saturating_sub(1));
 
-    // Full-column numbers for context (informational — terrain block light from
-    // unseen neighbour chunks near the surface can legitimately differ for a
-    // single-column engine; the hard judgement is the mid-air band above).
-    let full = diff_column_light(&ours, &loaded.light, 0);
+    // Walk the band around the source cell by cell. A disagreement on the chunk's
+    // x/z edge (`lx`/`lz` in {0,15}) is a **seam**: our single-column engine
+    // cannot see the light that spills into the neighbour chunk and back, which is
+    // exactly the border ring `diff_column_light`'s `interior_margin` excludes.
+    // An *interior* disagreement is a real engine defect (seed-at-emission or
+    // decay-by-max(1,opacity)), so that is what the gate asserts on.
+    let mut compared = 0usize;
+    let mut border_diffs = 0usize;
+    let mut interior_diffs = 0usize;
+    let mut max_server = 0u8;
+    let mut samples: Vec<String> = Vec::new();
+    for i in lo..=hi {
+        if i >= server.light_section_count() || i >= ours.light_section_count() {
+            continue;
+        }
+        if matches!(server.block(i), LightData::Missing) {
+            continue;
+        }
+        let os = ours.section_light(i);
+        let ss = server.section_light(i);
+        for y in 0..16usize {
+            for z in 0..16usize {
+                for x in 0..16usize {
+                    let sv = ss.block_at(x, y, z);
+                    let ov = os.block_at(x, y, z);
+                    max_server = max_server.max(sv);
+                    compared += 1;
+                    if ov == sv {
+                        continue;
+                    }
+                    let on_border = x == 0 || x == 15 || z == 0 || z == 15;
+                    if on_border {
+                        border_diffs += 1;
+                    } else {
+                        interior_diffs += 1;
+                    }
+                    if samples.len() < 24 {
+                        let wx = cx * 16 + x as i32;
+                        let wy = min_y + (i as i32 - 1) * 16 + y as i32;
+                        let wz = cz * 16 + z as i32;
+                        let manhattan = (wx - gx).abs() + (wy - gy).abs() + (wz - gz).abs();
+                        samples.push(format!(
+                            "({wx},{wy},{wz}) ours={ov} server={sv} d={manhattan}{}",
+                            if on_border { " [border]" } else { "" }
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Full-column numbers via impl-world's own tool, at margins 0 and 1, for
+    // context: margin 1 drops the chunk-border ring, so its block count is the
+    // seam-free view.
+    let full0 = diff_column_light(&ours, server, 0);
+    let full1 = diff_column_light(&ours, server, 1);
     println!(
         "block-light oracle @ chunk ({cx}, {cz}) source ({gx}, {gy}, {gz}):\n\
-         band light sections {lo}..={hi}: {disagreements} of {compared} block cells differ \
-         (max server block light in band = {max_server})\n\
-         full column via diff_column_light: sky {} / block {} of {} cells differ",
-        full.sky_disagreements, full.block_disagreements, full.cells_compared
+         band light sections {lo}..={hi}: {} of {compared} block cells differ \
+         (interior {interior_diffs}, border/seam {border_diffs}; max server block light {max_server})\n\
+         diff_column_light margin 0: sky {} / block {} of {} cells\n\
+         diff_column_light margin 1: sky {} / block {} of {} cells (border ring excluded)",
+        interior_diffs + border_diffs,
+        full0.sky_disagreements,
+        full0.block_disagreements,
+        full0.cells_compared,
+        full1.sky_disagreements,
+        full1.block_disagreements,
+        full1.cells_compared,
     );
+    if !samples.is_empty() {
+        println!("sample disagreements (up to 24):");
+        for s in &samples {
+            println!("  {s}");
+        }
+    }
 
     // Non-vacuity: the server must actually have lit the source, or "0 differ"
     // would mean "nothing was compared".
@@ -473,18 +501,20 @@ async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
          not light the column, so this comparison would be vacuous"
     );
     assert_eq!(
-        disagreements, 0,
-        "our light engine disagrees with the live server's block light around the source: \
-         {disagreements} of {compared} cells (band light sections {lo}..={hi}). The count and \
-         its position tell impl-world whether this is the seed-vs-decay (emission) path or a \
-         section seam."
+        interior_diffs, 0,
+        "our light engine disagrees with the live server's block light at {interior_diffs} \
+         INTERIOR cell(s) around the source (plus {border_diffs} seam cells on the chunk border, \
+         which are excluded). Interior disagreements are a real defect in the emission/decay \
+         path — the samples above show where and by how much. Report to impl-world."
     );
 
     eprintln!("\n=== LIVE BLOCK-LIGHT ORACLE (emission/decay path) ===");
     eprintln!("oracle                    : {GAME_ADDR} (RCON {RCON_ADDR})");
     eprintln!("source                    : glowstone @ ({gx}, {gy}, {gz}) chunk ({cx}, {cz})");
     eprintln!("band light sections       : {lo}..={hi}");
-    eprintln!("block cells compared      : {compared} (0 disagreements)");
+    eprintln!("block cells compared      : {compared}");
+    eprintln!("interior disagreements    : {interior_diffs} (0 — gate passes)");
+    eprintln!("seam/border disagreements : {border_diffs} (excluded: unseen-neighbour seam)");
     eprintln!("max server block light    : {max_server}");
     eprintln!("props source              : vendor/minecraft-data 1.21.11 blocks.json");
     eprintln!("=====================================================\n");

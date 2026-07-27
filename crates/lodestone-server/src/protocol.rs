@@ -9,9 +9,39 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
+use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
+
+/// A version-free description of one entity's wire-relevant state at a moment in
+/// time, handed to a [`ServerProtocol`] so it can encode spawn/move/remove
+/// packets without ever seeing the server's internal mob representation.
+///
+/// The server owns the per-connection "last-sent" bookkeeping and passes the
+/// previous snapshot alongside the current one to
+/// [`encode_entity_update`](ServerProtocol::encode_entity_update); the protocol
+/// stays stateless. Units are deliberate: `position` is world-space blocks
+/// (f64), rotation/`head_yaw` are degrees, and `velocity` is **blocks per tick**
+/// — the unit vanilla's motion packet packs directly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntitySnapshot {
+    /// The entity's network id.
+    pub id: i32,
+    /// The entity's stable UUID (encoded verbatim in the spawn packet).
+    pub uuid: Uuid,
+    /// The canonical entity-type key (e.g. `minecraft:zombie`); the protocol
+    /// maps it to its own numeric type id.
+    pub entity_type: ResourceKey,
+    /// World-space feet position, in blocks.
+    pub position: Vec3,
+    /// Body rotation in degrees.
+    pub rotation: Rotation,
+    /// Head yaw in degrees (may differ from the body yaw).
+    pub head_yaw: f32,
+    /// Velocity in **blocks per tick**.
+    pub velocity: Vec3,
+}
 
 /// A server-bound packet, lifted into the version-free vocabulary the server
 /// loop understands.
@@ -73,6 +103,10 @@ pub enum ServerDirective {
     SetState(State),
     /// Enable or reconfigure zlib compression (negative disables).
     SetCompression(i32),
+    /// No side effect — the scalar analog of returning an empty directive list.
+    /// Used by the default entity encoders so a protocol without entity support
+    /// emits nothing rather than a bogus packet; the connection layer skips it.
+    None,
 }
 
 /// Implemented by a protocol/version crate to translate packets for the
@@ -135,4 +169,41 @@ pub trait ServerProtocol: Send + Sync {
     /// Marks the end of a chunk batch of `batch_size` columns (vanilla's
     /// `CHUNK_BATCH_FINISHED`).
     fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective;
+
+    /// Emits any directives to send right after the initial chunk batch has
+    /// gone out (a post-join system chat message, say). Optional: the default
+    /// sends nothing, so an implementor that has no such content need not
+    /// override it.
+    fn welcome_message(&self) -> Vec<ServerDirective> {
+        Vec::new()
+    }
+
+    /// Encodes an entity's initial appearance for a client that has not seen it
+    /// (vanilla `ADD_ENTITY`, plus any immediate follow-up the protocol bundles).
+    /// The default emits nothing, so a protocol without entity support need not
+    /// override it.
+    fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
+        let _ = entity;
+        ServerDirective::None
+    }
+
+    /// Encodes a per-tick update for an entity the client already tracks, given
+    /// the previously-sent snapshot (`None` before the first update was sent) so
+    /// the protocol can choose an absolute or relative encoding without holding
+    /// any per-connection state itself. The default emits nothing.
+    fn encode_entity_update(
+        &self,
+        prev: Option<&EntitySnapshot>,
+        current: &EntitySnapshot,
+    ) -> Vec<ServerDirective> {
+        let _ = (prev, current);
+        Vec::new()
+    }
+
+    /// Encodes the removal of a batch of entities in one packet (vanilla
+    /// `REMOVE_ENTITIES`, a count-prefixed id list). The default emits nothing.
+    fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
+        let _ = ids;
+        ServerDirective::None
+    }
 }

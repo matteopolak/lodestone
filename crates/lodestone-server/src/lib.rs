@@ -58,11 +58,11 @@ pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSou
 pub use integrated::IntegratedServer;
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
-    SpawnState, check_despawn,
+    SpawnState, check_despawn, resolve_mob_shape,
 };
 pub use mobs::{ChunkWorld, MobSim, SimMob};
-pub use protocol::{ServerBound, ServerDirective, ServerProtocol};
-pub use server::{ServeSummary, ServerError, serve_connection};
+pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator

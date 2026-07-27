@@ -1,3 +1,0 @@
-[2m2026-07-27T16:11:37.261892Z[0m [32m INFO[0m [2mlodestone_relay[0m[2m:[0m relay listening [3mlisten[0m[2m=[0m127.0.0.1:25580 [3mtarget[0m[2m=[0m127.0.0.1:25565
-[2m2026-07-27T16:12:28.431099Z[0m [32m INFO[0m [2mlodestone_relay[0m[2m:[0m bridge open [3mpeer[0m[2m=[0m127.0.0.1:49630 [3mtarget[0m[2m=[0m127.0.0.1:25565
-[2m2026-07-27T16:12:58.580824Z[0m [32m INFO[0m [2mlodestone_relay[0m[2m:[0m bridge closed [3mpeer[0m[2m=[0m127.0.0.1:49630

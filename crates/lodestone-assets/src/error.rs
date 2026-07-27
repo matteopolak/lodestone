@@ -129,6 +129,20 @@ pub enum ItemModelError {
     BadModel(#[from] ResourceLocationError),
 }
 
+/// Errors produced while building an item's inventory [`crate::ItemIcon`].
+#[derive(Debug, thiserror::Error)]
+pub enum IconError {
+    /// No `items/<id>.json` definition exists for the item.
+    #[error("item definition not found: {0}")]
+    DefinitionMissing(String),
+    /// The item definition failed to parse.
+    #[error("item definition error: {0}")]
+    Definition(#[from] ItemModelError),
+    /// A model the definition references failed to resolve.
+    #[error("model error: {0}")]
+    Model(#[from] ModelError),
+}
+
 /// Errors produced while parsing an `atlases/<id>.json` source list.
 #[derive(Debug, thiserror::Error)]
 pub enum AtlasSourceError {

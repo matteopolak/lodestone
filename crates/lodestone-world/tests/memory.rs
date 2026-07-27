@@ -7,8 +7,8 @@
 //! `2 bytes * 98304` layout.
 
 use lodestone_world::{
-    ChunkColumn, ColumnLight, LightData, LightProperties, NibbleArray, PaletteKind,
-    compute_column_light,
+    ChunkColumn, ColumnLight, LightData, LightProperties, NibbleArray, Neighbourhood, PaletteKind,
+    compute_column_light, compute_column_light_with_neighbours,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -325,5 +325,58 @@ fn measure_light_recompute_cost() {
     assert!(
         mean_ms < 50.0,
         "column light recompute unexpectedly slow: {mean_ms:.3} ms"
+    );
+}
+
+/// Puts a number on the neighbour-aware compute that closes the cross-chunk seam.
+/// It floods over a 3×3 field (9× the cells), so it should cost several times a
+/// single column — the figure that decides whether an incremental seam
+/// re-propagation (touching only the two columns at a changed boundary) is worth
+/// building, or whether a full neighbourhood relight is cheap enough to leave
+/// deferred behind the same interface.
+#[test]
+fn measure_neighbour_light_cost() {
+    let center = realistic_terrain_column();
+    let n = realistic_terrain_column();
+    let props = TimingProps;
+    let hood = Neighbourhood::new(&center)
+        .with(-1, 0, &n)
+        .with(1, 0, &n)
+        .with(0, -1, &n)
+        .with(0, 1, &n)
+        .with(-1, -1, &n)
+        .with(1, -1, &n)
+        .with(-1, 1, &n)
+        .with(1, 1, &n);
+
+    for _ in 0..4 {
+        black_box(compute_column_light(black_box(&center), black_box(&props)));
+        black_box(compute_column_light_with_neighbours(black_box(&hood), black_box(&props)));
+    }
+
+    const ITERS: usize = 60;
+    let mut single_best = f64::INFINITY;
+    let mut hood_best = f64::INFINITY;
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        black_box(compute_column_light(black_box(&center), black_box(&props)));
+        single_best = single_best.min(t0.elapsed().as_secs_f64() * 1e3);
+
+        let t1 = Instant::now();
+        black_box(compute_column_light_with_neighbours(black_box(&hood), black_box(&props)));
+        hood_best = hood_best.min(t1.elapsed().as_secs_f64() * 1e3);
+    }
+
+    println!("cross-chunk (3×3 neighbourhood) light over a realistic 24-section centre:");
+    println!("  single column best {single_best:.3} ms/call");
+    println!(
+        "  3×3 neighbourhood best {hood_best:.3} ms/call  ({:.1}× single)",
+        hood_best / single_best
+    );
+
+    // Sanity ceiling only; the printed factor is the deliverable.
+    assert!(
+        hood_best < 200.0,
+        "neighbourhood light unexpectedly slow: {hood_best:.3} ms"
     );
 }

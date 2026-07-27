@@ -15,19 +15,34 @@
 use std::collections::VecDeque;
 
 use lodestone_client::ClientAction;
+use lodestone_game::chat::{ChatEntry, ChatFeed, MessageTrust};
+use lodestone_model::Text;
 
-/// How many chat lines the scrollback retains. Older lines are dropped.
-const MAX_LINES: usize = 100;
+/// The display component of a feed entry, regardless of variant.
+fn entry_display(entry: &ChatEntry) -> &Text {
+    match entry {
+        ChatEntry::Player { display, .. } => display,
+        ChatEntry::System { content } => content,
+    }
+}
 
-/// A bounded, newest-last scrollback of received chat/system lines (already
-/// flattened to a legacy `§`-code string by the caller). Each line records the
-/// monotonic timestamp it arrived at — a plain `f64` supplied by the caller, so
-/// this module stays free of any clock (and thus wasm-safe and unit-testable
-/// without a real time source). The HUD uses the age to drive the vanilla
-/// fade-out.
+/// The received chat scrollback.
+///
+/// The message *content* model — bounding, ordering, trust, the 100-line cap —
+/// is [`lodestone_game::chat::ChatFeed`], the version-free canonical feed the
+/// game crate owns; the shell does not reimplement it. What the shell adds here
+/// is purely a **render concern**: the monotonic arrival time of each entry,
+/// which drives the vanilla fade-out (a client-renderer detail that vanilla
+/// itself keeps in `ChatComponent`, not in server state). The two structures
+/// are pushed and evicted in lockstep so index *i* of one matches the other.
+///
+/// Times are plain `f64` seconds supplied by the caller, so this module stays
+/// free of any clock (and thus wasm-safe and unit-testable without a real time
+/// source).
 #[derive(Debug, Clone, Default)]
 pub struct ChatLog {
-    lines: VecDeque<(String, f64)>,
+    feed: ChatFeed,
+    times: VecDeque<f64>,
 }
 
 impl ChatLog {
@@ -37,37 +52,53 @@ impl ChatLog {
         Self::default()
     }
 
-    /// Append a received line stamped with the caller's monotonic clock (`at`,
-    /// in seconds), evicting the oldest if at capacity.
-    pub fn push(&mut self, line: impl Into<String>, at: f64) {
-        self.lines.push_back((line.into(), at));
-        while self.lines.len() > MAX_LINES {
-            self.lines.pop_front();
+    /// Record the entry's arrival time, evicting the oldest in lockstep with the
+    /// feed so the two stay index-aligned.
+    fn stamp(&mut self, at: f64) {
+        if self.times.len() == self.feed.capacity() {
+            self.times.pop_front();
         }
+        self.times.push_back(at);
+    }
+
+    /// Append a decorated player/disguised message (its `display` component is
+    /// already the server-decorated `<sender> body`), stamped with the caller's
+    /// monotonic clock (`at`, in seconds).
+    pub fn push_player(&mut self, display: Text, trust: MessageTrust, at: f64) {
+        self.feed.push_player(display, trust);
+        self.stamp(at);
+    }
+
+    /// Append a system message, stamped with the caller's monotonic clock.
+    pub fn push_system(&mut self, content: Text, at: f64) {
+        self.feed.push_system(content);
+        self.stamp(at);
     }
 
     /// The most recent `n` lines, oldest-first (render order, top to bottom),
-    /// each paired with the timestamp it arrived at.
+    /// each flattened to a legacy `§`-code string at read time (colour survives
+    /// once the adapter preserves it) and paired with its arrival timestamp.
     #[must_use]
-    pub fn recent(&self, n: usize) -> Vec<(&str, f64)> {
-        let start = self.lines.len().saturating_sub(n);
-        self.lines
+    pub fn recent(&self, n: usize) -> Vec<(String, f64)> {
+        let start = self.feed.len().saturating_sub(n);
+        self.feed
             .iter()
+            .zip(self.times.iter())
             .skip(start)
-            .map(|(line, at)| (line.as_str(), *at))
+            .map(|(entry, at)| (entry_display(entry).to_legacy_string(), *at))
             .collect()
     }
 
     /// Total retained lines.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lines.len()
+        self.feed.len()
     }
 
     /// Whether the log is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
+        self.feed.is_empty()
     }
 }
 
@@ -162,14 +193,17 @@ pub fn compose_chat_action(line: &str) -> Option<ClientAction> {
 mod tests {
     use super::*;
 
+    /// Mirrors [`lodestone_game::chat::ChatFeed`]'s default capacity.
+    const MAX_LINES: usize = 100;
+
     #[test]
     fn log_keeps_newest_and_bounds_length() {
         let mut log = ChatLog::new();
         for i in 0..(MAX_LINES + 10) {
-            log.push(format!("line {i}"), i as f64);
+            log.push_system(Text::literal(format!("line {i}")), i as f64);
         }
         assert_eq!(log.len(), MAX_LINES, "log must evict oldest at capacity");
-        let recent: Vec<&str> = log.recent(3).into_iter().map(|(line, _)| line).collect();
+        let recent: Vec<String> = log.recent(3).into_iter().map(|(line, _)| line).collect();
         // The three newest survive, oldest-first.
         assert_eq!(
             recent,
@@ -178,22 +212,19 @@ mod tests {
                 format!("line {}", MAX_LINES + 8),
                 format!("line {}", MAX_LINES + 9),
             ]
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn recent_handles_asking_for_more_than_exist() {
         let mut log = ChatLog::new();
-        log.push("only", 0.0);
+        log.push_system(Text::literal("only"), 0.0);
         assert_eq!(
             log.recent(10)
                 .into_iter()
                 .map(|(l, _)| l)
                 .collect::<Vec<_>>(),
-            vec!["only"]
+            vec!["only".to_string()]
         );
         assert!(ChatLog::new().recent(5).is_empty());
     }
@@ -201,9 +232,12 @@ mod tests {
     #[test]
     fn recent_carries_arrival_timestamps() {
         let mut log = ChatLog::new();
-        log.push("first", 1.5);
-        log.push("second", 4.25);
-        assert_eq!(log.recent(2), vec![("first", 1.5), ("second", 4.25)]);
+        log.push_system(Text::literal("first"), 1.5);
+        log.push_system(Text::literal("second"), 4.25);
+        assert_eq!(
+            log.recent(2),
+            vec![("first".to_string(), 1.5), ("second".to_string(), 4.25)]
+        );
     }
 
     #[test]

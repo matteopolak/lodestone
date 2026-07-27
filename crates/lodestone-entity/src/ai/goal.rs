@@ -94,7 +94,12 @@ impl FlagSet {
 /// Mirrors vanilla's `Goal`. `can_use` decides whether the goal may start;
 /// `can_continue_to_use` (defaulting to `can_use`) decides whether it keeps
 /// running. `start`/`stop`/`tick` have empty defaults.
-pub trait Goal {
+///
+/// `Send` is required so a `MobSim` (which stores goals as `Box<dyn Goal>`) can
+/// be owned behind an `Arc<Mutex<…>>` and handed to the integrated server's
+/// connection task, which `tokio::spawn` requires to be `Send`. Every goal is a
+/// plain state machine over `Copy`/owned fields, so this costs nothing.
+pub trait Goal: Send {
     /// The action categories this goal occupies while running.
     fn flags(&self) -> FlagSet;
 

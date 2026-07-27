@@ -14,7 +14,8 @@
 
 use std::collections::HashMap;
 
-use lodestone_model::{GameMode, Text};
+use lodestone_model::event as m;
+use lodestone_model::{ClientEvent, GameMode, Text};
 use uuid::Uuid;
 
 /// A signed profile property (e.g. `textures`, whose value is the base64 skin
@@ -206,4 +207,182 @@ impl TabList {
 
 fn spectator_rank(e: &PlayerListEntry) -> u8 {
     u8::from(e.game_mode == GameMode::Spectator)
+}
+
+// --- ClientEvent fold -------------------------------------------------------
+//
+// Folds `PlayerListUpdate` / `PlayerListRemove` into the list. The model type is
+// imported as `m`. Unlike a naive replace-by-uuid, this merges partial updates:
+// each field of a model entry is `Some` only when the update carried it, so an
+// existing entry keeps fields the update omitted. That makes the fold correct
+// whether an adapter emits full snapshots or per-field deltas.
+//
+// One model gap to surface upward: the model's `PlayerListEntry` carries no
+// profile properties, so a folded profile has no `textures` (skin) blob yet.
+// When impl-model adds a properties carrier, seed it here; until then the shell
+// gets identity, game mode, latency, listed and display name but no skin.
+
+impl TabList {
+    /// Folds a tab-list [`ClientEvent`] into this state, returning whether the
+    /// event was one this aggregate owns.
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::PlayerListUpdate { entries } => {
+                for entry in entries {
+                    self.fold_entry(entry);
+                }
+                true
+            }
+            ClientEvent::PlayerListRemove { profile_ids } => {
+                for id in profile_ids {
+                    self.remove(id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Merges one model entry: updates the present (`Some`) fields of an existing
+    /// entry, or creates a new one keyed by uuid. A brand-new entry with no name
+    /// in the update falls back to an empty profile name.
+    fn fold_entry(&mut self, e: &m::PlayerListEntry) {
+        match self.get_mut(&e.uuid) {
+            Some(existing) => {
+                if let Some(gm) = e.game_mode {
+                    existing.game_mode = gm;
+                }
+                if let Some(latency) = e.latency {
+                    existing.latency = latency;
+                }
+                if let Some(display_name) = &e.display_name {
+                    existing.display_name = Some(display_name.clone());
+                }
+                if let Some(listed) = e.listed {
+                    existing.listed = listed;
+                }
+            }
+            None => {
+                let name = e.name.clone().unwrap_or_default();
+                let mut entry = PlayerListEntry::new(GameProfile::new(e.uuid, name));
+                if let Some(gm) = e.game_mode {
+                    entry.game_mode = gm;
+                }
+                if let Some(latency) = e.latency {
+                    entry.latency = latency;
+                }
+                entry.display_name = e.display_name.clone();
+                if let Some(listed) = e.listed {
+                    entry.listed = listed;
+                }
+                self.insert(entry);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn uid(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn add_entry(id: Uuid, name: &str, mode: GameMode, latency: i32) -> m::PlayerListEntry {
+        m::PlayerListEntry {
+            uuid: id,
+            name: Some(name.to_string()),
+            game_mode: Some(mode),
+            latency: Some(latency),
+            display_name: None,
+            listed: Some(true),
+        }
+    }
+
+    #[test]
+    fn add_is_readable_through_public_api() {
+        let mut tabs = TabList::new();
+        let id = uid(1);
+        assert!(tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![add_entry(id, "Alice", GameMode::Creative, 42)],
+        }));
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.profile.name, "Alice");
+        assert_eq!(entry.game_mode, GameMode::Creative);
+        assert_eq!(entry.latency, 42);
+        assert!(entry.listed);
+    }
+
+    #[test]
+    fn partial_update_merges_and_keeps_untouched_fields() {
+        let mut tabs = TabList::new();
+        let id = uid(2);
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![add_entry(id, "Bob", GameMode::Survival, 10)],
+        });
+        // A latency-only delta must not wipe the name or game mode.
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: None,
+                game_mode: None,
+                latency: Some(250),
+                display_name: None,
+                listed: None,
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.profile.name, "Bob");
+        assert_eq!(entry.game_mode, GameMode::Survival);
+        assert_eq!(entry.latency, 250);
+        assert!(entry.listed);
+    }
+
+    #[test]
+    fn display_name_is_applied() {
+        let mut tabs = TabList::new();
+        let id = uid(3);
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: id,
+                name: Some("Cara".into()),
+                game_mode: Some(GameMode::Adventure),
+                latency: Some(5),
+                display_name: Some(Text::literal("[VIP] Cara")),
+                listed: Some(true),
+            }],
+        });
+        let entry = tabs.get(&id).expect("entry present");
+        assert_eq!(entry.effective_name(), Text::literal("[VIP] Cara"));
+    }
+
+    #[test]
+    fn remove_drops_entries() {
+        let mut tabs = TabList::new();
+        let a = uid(10);
+        let b = uid(11);
+        tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![
+                add_entry(a, "A", GameMode::Survival, 1),
+                add_entry(b, "B", GameMode::Survival, 1),
+            ],
+        });
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs.apply(&ClientEvent::PlayerListRemove {
+            profile_ids: vec![a],
+        }));
+        assert_eq!(tabs.len(), 1);
+        assert!(tabs.get(&a).is_none());
+        assert!(tabs.get(&b).is_some());
+    }
+
+    #[test]
+    fn non_tablist_event_is_not_claimed() {
+        let mut tabs = TabList::new();
+        assert!(!tabs.apply(&ClientEvent::BossBarUpdate {
+            id: uid(1),
+            action: m::BossAction::Remove,
+        }));
+    }
 }

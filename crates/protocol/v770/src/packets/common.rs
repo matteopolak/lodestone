@@ -20,6 +20,29 @@ pub struct Pong {
     pub id: i32,
 }
 
+/// The `ping_request` packet body, shared between the status and play
+/// states (`net.minecraft.network.protocol.ping.ServerboundPingRequestPacket`):
+/// a single big-endian 64-bit client clock reading. In play, vanilla sends
+/// this periodically from the F3 debug overlay's network graph
+/// (`PingDebugMonitor`), independent of [`Pong`]'s server-initiated
+/// challenge/response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub struct PingRequest {
+    /// Client's local clock reading in milliseconds.
+    pub time: i64,
+}
+
+/// Serverbound `teleport_to_entity` packet.
+///
+/// Sent while spectating to teleport to an entity by uuid, e.g. clicking a
+/// player in the tab list (`ServerboundTeleportToEntityPacket`). Wire
+/// layout: a single raw 16-byte UUID, not a VarInt entity id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub struct TeleportToEntity {
+    /// Uuid of the entity to teleport to.
+    pub uuid: Uuid,
+}
+
 /// Serverbound `custom_payload` packet body for the `minecraft:brand` channel.
 ///
 /// Wire layout: the channel identifier (a UTF string, since `writeIdentifier`

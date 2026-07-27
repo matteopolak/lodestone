@@ -118,6 +118,23 @@ pub struct ServerboundHeldItemSlot {
     pub slot: i16,
 }
 
+/// Serverbound `enchant_item` — the player clicks a non-slot menu button, such
+/// as an enchanting-table option or a lectern page turn.
+///
+/// 1.8 through 1.16 share this exact `{windowId, button}` shape, so the model's
+/// `ContainerButtonClick { window_id, button_id }` maps onto it directly with no
+/// item registry or transaction id involved.
+///
+/// Wire layout: signed-byte window id, signed-byte button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:enchant_item", state = Play, bound = Server)]
+pub struct EnchantItem {
+    /// Open window handle id.
+    pub window_id: i8,
+    /// Button id defined by the open menu type.
+    pub button: i8,
+}
+
 /// Serverbound `set_creative_slot` — the creative-mode client sets a slot's item
 /// directly.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]

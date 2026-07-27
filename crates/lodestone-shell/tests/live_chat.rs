@@ -106,11 +106,15 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         for update in net.poll() {
-            if let NetUpdate::Chat(line) = update
-                && line.contains(&token)
-            {
-                matched = Some(line);
-                break;
+            if let NetUpdate::Chat { text, .. } = update {
+                // Flatten the same `Text` the shell stores in its `ChatFeed`;
+                // colour survives as legacy `§` codes iff the adapter preserved
+                // it (Claim 2 below).
+                let line = text.to_legacy_string();
+                if line.contains(&token) {
+                    matched = Some(line);
+                    break;
+                }
             }
         }
         if matched.is_some() {

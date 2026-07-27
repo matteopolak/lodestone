@@ -16,9 +16,18 @@
 
 use lodestone_entity::ai::goals::MeleeAttackGoal;
 use lodestone_entity::pathfinding::MobShape;
+use lodestone_entity::AttributeMap;
 use lodestone_model::Vec3;
-use lodestone_server::{ChunkWorld, MobSim, WorldgenChunkSource};
+use lodestone_model::action::ClientAction;
+use lodestone_model::adapter::{
+    AdapterError, ConnectionState, Directive, EntityBaseDimensions, LoginProfile, ServerAddress,
+    VersionAdapter, WorldSink,
+};
+use lodestone_server::{
+    ChunkWorld, EntitySnapshot, EntitySource, MobSim, WorldgenChunkSource, resolve_mob_shape,
+};
 use lodestone_worldgen::density::Density;
+use std::sync::{Arc, Mutex};
 
 /// A `y_clamped_gradient` that is positive below y=0 and negative above: a flat
 /// solid floor with its surface at y=0, built from the *same* density-function
@@ -162,5 +171,320 @@ fn mob_detours_a_two_tall_wall_and_holds_the_recompute_throttle() {
     assert!(
         searches < (TICKS as u32) / 15,
         "recompute throttle regressed: {searches} A* searches over {TICKS} ticks"
+    );
+}
+
+/// The identity/motion accessors `bulk-encoders` consumes to build entity-spawn
+/// and move packets must expose **real derived values**, not placeholders that
+/// happen to compile. This drives a mob east over real terrain and asserts:
+///   * `uuid` is unique per mob and stable across ticks (needed verbatim in the
+///     spawn packet);
+///   * `entity_type` defaults to a valid key and is overridable;
+///   * `velocity` is in **blocks/tick** (≈ the 0.15 step, not ×20 blocks/sec —
+///     the exact scale bug the wire packing would hide);
+///   * `rotation`/`head_yaw` face the movement direction (due-east ⇒ yaw ≈ −90).
+#[test]
+fn identity_and_motion_accessors_expose_real_derived_state() {
+    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+    let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
+
+    let mut sim = MobSim::new(&world);
+    let start = Vec3::new(0.5, 0.0, 0.5);
+    let target = Vec3::new(8.5, 0.0, 0.5); // due east of the start
+    let (id_a, uuid_a) = {
+        let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
+        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.set_attack_target(Some(target));
+        // Default entity_type is a valid, namespaced key.
+        assert_eq!(m.entity_type().to_string(), "minecraft:zombie");
+        (m.id(), m.uuid())
+    };
+    // A second mob gets a distinct UUID and an overridable type.
+    let (id_b, uuid_b) = {
+        let m = sim.spawn(Vec3::new(0.5, 0.0, 4.5), MobShape::land(0.9, 0.9), 0.25, 400);
+        m.set_entity_type("minecraft:pig".parse().unwrap());
+        assert_eq!(m.entity_type().to_string(), "minecraft:pig");
+        (m.id(), m.uuid())
+    };
+    assert_ne!(uuid_a, uuid_b, "distinct mobs must get distinct UUIDs");
+
+    // Let the first mob get up to cruising speed, still far from its target.
+    sim.tick_for(10);
+
+    let a = sim.get(id_a).unwrap();
+    // UUID is stable across ticks.
+    assert_eq!(a.uuid(), uuid_a, "UUID changed across ticks");
+
+    // The version-free snapshot the encode seam consumes carries the same
+    // derived state as the accessors — a real lowering, not defaults.
+    let snap = a.snapshot();
+    assert_eq!(snap.id, id_a);
+    assert_eq!(snap.uuid, uuid_a);
+    assert_eq!(snap.entity_type.to_string(), "minecraft:zombie");
+    assert_eq!(snap.position, a.position());
+    assert_eq!(snap.rotation, a.rotation());
+    assert_eq!(snap.head_yaw, a.head_yaw());
+    assert_eq!(snap.velocity, a.velocity());
+
+    // Velocity is blocks/tick: horizontal speed near the 0.15 step, decisively
+    // NOT ~3.0 (the ×20 blocks/sec scale bug bulk-encoders warned about).
+    let v = a.velocity();
+    let speed = (v.x * v.x + v.z * v.z).sqrt();
+    assert!(
+        (0.05..=0.16).contains(&speed),
+        "velocity not in blocks/tick: speed = {speed:.3} (expected ~0.15, not ~3.0)"
+    );
+    assert!(v.x > 0.1, "mob heading toward +X target should have vx>0: {v:?}");
+    assert!(v.z.abs() < 0.05, "straight-east path should have ~0 vz: {v:?}");
+
+    // Body rotation faces the motion: due-east (+X) is yaw −90 in MC convention,
+    // pitch level for a ground mob.
+    let rot = a.rotation();
+    assert!(
+        (rot.yaw - (-90.0)).abs() < 30.0,
+        "body yaw not facing east: yaw = {} (expected ~-90)",
+        rot.yaw
+    );
+    assert_eq!(rot.pitch, 0.0, "ground mob body pitch should be level");
+    assert!(a.head_yaw().is_finite(), "head yaw must be a real angle");
+
+    // The second mob, never ticked toward a target, is idle: zero velocity.
+    let b = sim.get(id_b).unwrap();
+    let bv = b.velocity();
+    assert!(
+        bv.x.abs() < 1e-9 && bv.z.abs() < 1e-9,
+        "idle mob should have zero velocity: {bv:?}"
+    );
+}
+
+/// The exact wrapper the integrated server will hand to a connection task: the
+/// shared, ticking simulation viewed as an [`EntitySource`]. Because
+/// `EntitySource: Send + Sync`, this `impl` only compiles if `MobSim` is `Send`
+/// — which it is *only* because `Goal: Send` and `PathWorld: Send + Sync`. So
+/// this type is itself a standing proof of that seam, and its `snapshots()`
+/// lowers each live mob through the same `SimMob::snapshot()` the encoders read.
+struct SimSource<'w>(Arc<Mutex<MobSim<'w>>>);
+
+impl EntitySource for SimSource<'_> {
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        self.0.lock().unwrap().iter().map(|m| m.snapshot()).collect()
+    }
+}
+
+/// Closes the "a real ticking mob is actually visible" gap: a real `MobSim`
+/// behind the `Arc<Mutex<…>>` the integrated server uses, viewed as an
+/// `EntitySource`, yields snapshots that track the mob's real movement across
+/// ticks — spawn appears, then position advances toward the target. bulk-encoders
+/// proved the transport/client half with a stand-in source; this proves the
+/// other half of the same seam with a *real* sim (no stand-in), so the two meet
+/// in the middle.
+#[test]
+fn real_mobsim_behind_arc_mutex_is_an_entity_source_that_tracks_movement() {
+    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+    let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
+
+    let sim = Arc::new(Mutex::new(MobSim::new(&world)));
+    let start = Vec3::new(0.5, 0.0, 0.5);
+    let target = Vec3::new(8.5, 0.0, 0.5);
+    let id = {
+        let mut guard = sim.lock().unwrap();
+        let m = guard.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
+        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.set_attack_target(Some(target));
+        m.id()
+    };
+
+    let entities = SimSource(sim.clone());
+
+    // Before any tick: exactly one snapshot, our mob, at the spawn position.
+    let before = entities.snapshots();
+    assert_eq!(before.len(), 1, "one spawned mob should yield one snapshot");
+    assert_eq!(before[0].id, id);
+    assert_eq!(before[0].position, start, "pre-tick snapshot is the spawn point");
+
+    // Drive the shared sim (the integrated server's sim loop does this), then
+    // read the source again — the same seam a connection task reads each pass.
+    sim.lock().unwrap().tick_for(60);
+    let after = entities.snapshots();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, id, "same entity id across ticks");
+
+    // The snapshot moved toward +X with the real sim — not frozen at spawn, and
+    // not teleported past the target.
+    assert!(
+        after[0].position.x > before[0].position.x + 1.0,
+        "snapshot did not track the mob's real eastward movement: {} -> {}",
+        before[0].position.x,
+        after[0].position.x
+    );
+    assert!(
+        after[0].position.x <= target.x + 0.5,
+        "mob overshot the target: {:?}",
+        after[0].position
+    );
+    // Grounded the whole way (the snapshot y stays on the floor surface).
+    assert!(
+        after[0].position.y.abs() < 0.6,
+        "mob left the floor surface: y = {}",
+        after[0].position.y
+    );
+}
+
+/// Builds a 1-wide walled corridor along +z with a **two-block-high tunnel** over
+/// its middle: floor at y=-1, side walls 3 tall at x=±1 (so a mob cannot detour
+/// laterally), and a solid ceiling at y=2 over z=4..=6 leaving exactly two blocks
+/// of headroom (air at y=0 and y=1). A mob that occupies two vertical cells fits;
+/// one that needs a third does not.
+fn tunnel_world() -> ChunkWorld {
+    let mut world = ChunkWorld::new(-4, 24);
+    for z in -2..=12 {
+        for x in -1..=1 {
+            world.set_solid(x, -1, z, true); // floor, surface at y=0
+        }
+        for y in 0..=2 {
+            world.set_solid(-1, y, z, true); // side walls, 3 tall
+            world.set_solid(1, y, z, true);
+        }
+    }
+    for z in 4..=6 {
+        world.set_solid(0, 2, z, true); // low ceiling: 2-high tunnel
+    }
+    world
+}
+
+/// A minimal [`VersionAdapter`] answering `entity_dimensions` from a fixed table
+/// (real census numbers) and panicking on everything else — the census consumer
+/// only ever calls `entity_dimensions`, so a real registry adapter slots in
+/// unchanged. This proves the seam end-to-end (census → fold → shape → path)
+/// without naming a version crate.
+#[derive(Debug)]
+struct CensusStub(std::collections::HashMap<i32, EntityBaseDimensions>);
+
+impl CensusStub {
+    fn with(pairs: &[(i32, f32, f32)]) -> Self {
+        Self(
+            pairs
+                .iter()
+                .map(|&(id, width, height)| (id, EntityBaseDimensions { width, height }))
+                .collect(),
+        )
+    }
+}
+
+impl VersionAdapter for CensusStub {
+    fn protocol_version(&self) -> i32 {
+        0
+    }
+    fn minecraft_versions(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn supports(&self, _protocol: i32) -> bool {
+        false
+    }
+    fn begin_login(
+        &self,
+        _profile: &LoginProfile,
+        _server: &ServerAddress,
+    ) -> Result<Vec<Directive>, AdapterError> {
+        unimplemented!("census stub")
+    }
+    fn handle_packet(
+        &self,
+        _world: &mut dyn WorldSink,
+        _state: ConnectionState,
+        _packet_id: i32,
+        _payload: &[u8],
+    ) -> Result<Vec<Directive>, AdapterError> {
+        unimplemented!("census stub")
+    }
+    fn encode_action(
+        &self,
+        _state: ConnectionState,
+        _action: &ClientAction,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        unimplemented!("census stub")
+    }
+    fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
+        self.0.get(&entity_type_id).copied()
+    }
+}
+
+/// The census consumer, gated on *consequence*: a mob's real hitbox height,
+/// folded through [`resolve_mob_shape`], decides whether it can path a two-high
+/// tunnel. A 1.95-tall zombie fits; a 2.9-tall enderman does not — and swapping
+/// the enderman's census height for a wrong 1.8 flips the outcome, proving the
+/// value (not the world geometry) is what bites.
+#[test]
+fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
+    let world = tunnel_world();
+
+    // Ground truth: the tunnel is exactly two blocks of headroom, the approach is
+    // open above it, and the side walls really enclose the corridor — so the only
+    // route to the far side runs *through* the tunnel.
+    assert!(
+        !world.is_solid(0, 0, 5) && !world.is_solid(0, 1, 5),
+        "tunnel is not open at y=0/y=1"
+    );
+    assert!(world.is_solid(0, 2, 5), "tunnel has no ceiling at y=2");
+    assert!(
+        !world.is_solid(0, 2, 2),
+        "approach should have open headroom at y=2"
+    );
+    assert!(
+        world.is_solid(-1, 1, 5) && world.is_solid(1, 1, 5),
+        "corridor is not walled at x=±1"
+    );
+
+    // Real census geometry, folded through the actual consumer with a default
+    // attribute map (scale 1.0, step_height 0.6 from the registry).
+    let adapter = CensusStub::with(&[
+        (151, 0.6, 1.95), // minecraft:zombie
+        (41, 0.6, 2.9),   // minecraft:enderman
+    ]);
+    let attrs = AttributeMap::new();
+    let zombie = resolve_mob_shape(&adapter, 151, &attrs).expect("zombie census");
+    let enderman = resolve_mob_shape(&adapter, 41, &attrs).expect("enderman census");
+    // The mechanism: the 2.9-tall enderman needs a third vertical cell.
+    assert_eq!(zombie.cell_height(), 2, "zombie should occupy 2 cells");
+    assert_eq!(enderman.cell_height(), 3, "enderman should occupy 3 cells");
+
+    let start = Vec3::new(0.5, 0.0, 0.5);
+    let target = Vec3::new(0.5, 0.0, 9.5); // past the tunnel
+
+    let run = |shape: MobShape| -> f64 {
+        let mut sim = MobSim::new(&world);
+        let id = {
+            let m = sim.spawn(start, shape, 0.15, 600);
+            m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+            m.set_attack_target(Some(target));
+            m.id()
+        };
+        sim.tick_for(1500);
+        sim.position(id).expect("mob present").z
+    };
+
+    // The 1.95-tall zombie clears the tunnel and reaches the far side...
+    let zombie_z = run(zombie);
+    assert!(
+        zombie_z > 8.0,
+        "zombie failed to clear a 2-high tunnel it fits: z = {zombie_z:.2}"
+    );
+    // ...while the real 2.9-tall enderman is stopped short of the ceiling.
+    let enderman_z = run(enderman);
+    assert!(
+        enderman_z < 4.0,
+        "2.9-tall enderman wrongly cleared a 2-high tunnel: z = {enderman_z:.2}"
+    );
+
+    // Bite / non-vacuity: feed the *same* enderman a wrong 1.8 census height
+    // (cell_height 2) and it now clears the tunnel — the real 2.9 is what blocks
+    // it, not the world.
+    let wrong = CensusStub::with(&[(41, 0.6, 1.8)]);
+    let enderman_wrong = resolve_mob_shape(&wrong, 41, &attrs).expect("wrong census");
+    assert_eq!(enderman_wrong.cell_height(), 2);
+    let wrong_z = run(enderman_wrong);
+    assert!(
+        wrong_z > 8.0,
+        "a wrong 1.8-height enderman should clear the tunnel (bite check): z = {wrong_z:.2}"
     );
 }

@@ -198,6 +198,24 @@ pub enum ClientActionKind {
     PaddleBoat,
     /// [`ClientAction::MoveVehicle`].
     MoveVehicle,
+    /// [`ClientAction::SelectBundleItem`].
+    SelectBundleItem,
+    /// [`ClientAction::SetContainerSlotState`].
+    SetContainerSlotState,
+    /// [`ClientAction::SetRecipeBookSettings`].
+    SetRecipeBookSettings,
+    /// [`ClientAction::RecipeBookSeenRecipe`].
+    RecipeBookSeenRecipe,
+    /// [`ClientAction::PlaceRecipe`].
+    PlaceRecipe,
+    /// [`ClientAction::PingRequest`].
+    PingRequest,
+    /// [`ClientAction::SpectatorAction`].
+    SpectatorAction,
+    /// [`ClientAction::TeleportToEntity`].
+    TeleportToEntity,
+    /// [`ClientAction::ChangeGameMode`].
+    ChangeGameMode,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -246,6 +264,15 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::CommandSuggestion { .. } => Self::CommandSuggestion,
             ClientAction::PaddleBoat { .. } => Self::PaddleBoat,
             ClientAction::MoveVehicle { .. } => Self::MoveVehicle,
+            ClientAction::SelectBundleItem { .. } => Self::SelectBundleItem,
+            ClientAction::SetContainerSlotState { .. } => Self::SetContainerSlotState,
+            ClientAction::SetRecipeBookSettings { .. } => Self::SetRecipeBookSettings,
+            ClientAction::RecipeBookSeenRecipe { .. } => Self::RecipeBookSeenRecipe,
+            ClientAction::PlaceRecipe { .. } => Self::PlaceRecipe,
+            ClientAction::PingRequest { .. } => Self::PingRequest,
+            ClientAction::SpectatorAction { .. } => Self::SpectatorAction,
+            ClientAction::TeleportToEntity { .. } => Self::TeleportToEntity,
+            ClientAction::ChangeGameMode { .. } => Self::ChangeGameMode,
         }
     }
 }

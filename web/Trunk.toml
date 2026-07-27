@@ -1,5 +1,12 @@
 # Trunk dev-server config for the wasm render spike.
 #
+# Build + run (and the required WS→TCP relay for live multiplayer) are documented
+# in web/README.md → "Run it". In short:
+#   cd web && trunk serve --release          # http://127.0.0.1:8080/
+#   cargo run -p lodestone-relay -- --listen 127.0.0.1:25580 --target 127.0.0.1:25565
+# The browser cannot open raw TCP, so joining a real server needs the relay up;
+# render + in-memory singleplayer work without it.
+#
 # The COOP/COEP headers are set NOW even though this spike is single-threaded and
 # does not yet need SharedArrayBuffer. They are required the moment we adopt
 # `wasm-bindgen-rayon`/threads, they are free today, and a missing cross-origin

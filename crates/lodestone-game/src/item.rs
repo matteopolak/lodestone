@@ -292,6 +292,23 @@ impl ItemStack {
     }
 }
 
+impl From<&lodestone_model::ItemStack> for ItemStack {
+    /// Lifts the model's minimal wire stack (`item` + `count`) into the rich
+    /// component-carrying canonical stack.
+    ///
+    /// This is the version-free "translate upward" adapter from plan §3.4: the
+    /// model event layer does not yet carry item components, so the resulting
+    /// stack has an empty component set. When the model's `ItemStack` gains a
+    /// component patch, seed it here so folded server stacks keep their custom
+    /// names, enchantments, durability and stack-size overrides.
+    fn from(stack: &lodestone_model::ItemStack) -> Self {
+        Self::new(
+            stack.item.clone(),
+            i32::try_from(stack.count).unwrap_or(i32::MAX),
+        )
+    }
+}
+
 /// Extension helpers for the `Option<ItemStack>` slot/cursor representation.
 ///
 /// These centralise the "empty is `None`" convention so the container and click

@@ -17,7 +17,8 @@
 
 use crate::entity::{
     CatCoat, CubeDef, EntityModelDef, EntityTexture, EntityVariant, HorseColor, HorseMarkings,
-    LlamaColor, ParrotColor, PartDef, PartPose, Temperature, WolfCoat, WolfState, player_model,
+    LlamaColor, MooshroomColor, ParrotColor, PartDef, PartPose, Temperature, WolfCoat, WolfState,
+    player_model,
 };
 use std::f32::consts::PI;
 
@@ -3978,35 +3979,35 @@ pub fn horse_markings_texture(markings: HorseMarkings) -> Option<&'static str> {
 /// `scaling(DONKEY_SCALE = 0.87)`. Fixed texture, no variant.
 fn donkey_body_root(scale: f32) -> EntityModelDef {
     let mut root = equine_base_root();
-    if let Some(head_parts) = root.child_mut("head_parts") {
-        if let Some(head) = head_parts.child_mut("head") {
-            head.children
-                .retain(|(n, _)| n != "left_ear" && n != "right_ear");
-            head.children.push((
-                "left_ear".to_string(),
-                PartDef::new(PartPose::offset_and_rotation(
-                    1.25,
-                    -10.0,
-                    4.0,
-                    PI / 12.0,
-                    0.0,
-                    PI / 12.0,
-                ))
-                .with_cube(cube([-1.0, -7.0, 0.0], [2.0, 7.0, 1.0], [0.0, 12.0])),
-            ));
-            head.children.push((
-                "right_ear".to_string(),
-                PartDef::new(PartPose::offset_and_rotation(
-                    -1.25,
-                    -10.0,
-                    4.0,
-                    PI / 12.0,
-                    0.0,
-                    -PI / 12.0,
-                ))
-                .with_cube(cube([-1.0, -7.0, 0.0], [2.0, 7.0, 1.0], [0.0, 12.0])),
-            ));
-        }
+    if let Some(head_parts) = root.child_mut("head_parts")
+        && let Some(head) = head_parts.child_mut("head")
+    {
+        head.children
+            .retain(|(n, _)| n != "left_ear" && n != "right_ear");
+        head.children.push((
+            "left_ear".to_string(),
+            PartDef::new(PartPose::offset_and_rotation(
+                1.25,
+                -10.0,
+                4.0,
+                PI / 12.0,
+                0.0,
+                PI / 12.0,
+            ))
+            .with_cube(cube([-1.0, -7.0, 0.0], [2.0, 7.0, 1.0], [0.0, 12.0])),
+        ));
+        head.children.push((
+            "right_ear".to_string(),
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.25,
+                -10.0,
+                4.0,
+                PI / 12.0,
+                0.0,
+                -PI / 12.0,
+            ))
+            .with_cube(cube([-1.0, -7.0, 0.0], [2.0, 7.0, 1.0], [0.0, 12.0])),
+        ));
     }
     if let Some(body) = root.child_mut("body") {
         body.children.push((
@@ -4341,10 +4342,10 @@ fn wolf_coat_texture(v: EntityVariant) -> &'static str {
     }
 }
 
-/// Vanilla's `Wolf.getTexture()` does `Identifier.withDefaultNamespace(fileName
-/// + suffix)` at runtime; this corpus only has `&'static str`s to hand back,
-/// so the (small, fixed) concatenated set is enumerated instead of built with
-/// runtime string concatenation.
+/// Vanilla's `Wolf.getTexture()` does `Identifier.withDefaultNamespace` string
+/// concatenation at runtime; this corpus only has `&'static str`s to hand
+/// back, so the small, fixed concatenated set is enumerated instead of built
+/// with runtime string concatenation.
 fn wolf_suffixed(base: &'static str, suffix: &'static str) -> &'static str {
     match (base, suffix) {
         ("entity/wolf/wolf", "_tame") => "entity/wolf/wolf_tame",
@@ -4459,6 +4460,315 @@ fn parrot_color_texture(v: EntityVariant) -> &'static str {
         // even though the enum case (matching `Parrot.Variant.GRAY`) is not.
         EntityVariant::Parrot(ParrotColor::Gray) => "entity/parrot/parrot_grey",
         _ => "entity/parrot/parrot_red_blue",
+    }
+}
+
+// ============================================================================
+// Second batch of overworld-priority mobs, ordered by how often a player
+// actually encounters them: polar_bear (common in snowy biomes), the illager
+// raid roster (pillager/vindicator/evoker/illusioner, all one shared mesh),
+// ravager, allay, shulker.
+// ============================================================================
+
+/// `PolarBearModel.createBodyLayer` (`QuadrupedModel`): head (main box, mouth,
+/// 2 ears — all direct siblings on one part, not nested), body, and 4
+/// unparented legs, baked at `scaling(1.2)`. Sheet 128×64. Fixed texture; the
+/// baby variant is a separate `ModelLayer`/renderer scale, out of scope like
+/// this port's other baby models.
+pub fn polar_bear_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, 10.0, -16.0))
+        .with_cube(cube([-3.5, -3.0, -3.0], [7.0, 7.0, 7.0], [0.0, 0.0]))
+        .with_cube(cube([-2.5, 1.0, -6.0], [5.0, 3.0, 3.0], [0.0, 44.0]))
+        .with_cube(cube([-4.5, -4.0, -1.0], [2.0, 2.0, 1.0], [26.0, 0.0]))
+        .with_cube(cube([2.5, -4.0, -1.0], [2.0, 2.0, 1.0], [26.0, 0.0]).mirrored());
+    let body = PartDef::new(PartPose::offset_and_rotation(-2.0, 9.0, 12.0, PI / 2.0, 0.0, 0.0))
+        .with_cube(cube([-5.0, -13.0, -7.0], [14.0, 14.0, 11.0], [0.0, 19.0]))
+        .with_cube(cube([-4.0, -25.0, -7.0], [12.0, 12.0, 10.0], [39.0, 0.0]));
+    let hind_leg = || cube([-2.0, 0.0, -2.0], [4.0, 10.0, 8.0], [50.0, 22.0]);
+    let front_leg = || cube([-2.0, 0.0, -2.0], [4.0, 10.0, 6.0], [50.0, 40.0]);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child("body", body)
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-4.5, 14.0, 6.0)).with_cube(hind_leg()),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(4.5, 14.0, 6.0)).with_cube(hind_leg()),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-3.5, 14.0, -8.0)).with_cube(front_leg()),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(3.5, 14.0, -8.0)).with_cube(front_leg()),
+        );
+    scaled(
+        EntityModelDef {
+            texture_width: 128,
+            texture_height: 64,
+            root,
+        },
+        1.2,
+    )
+}
+
+/// `IllagerModel.createBodyLayer`: the shared mesh for pillager, vindicator,
+/// evoker and illusioner (`LayerDefinitions.java` puts the identical
+/// `illagerBodyLayer` under all four `ModelLayers` entries, unscaled). `head`
+/// carries a `hat` child (vanilla sets `hat.visible = false` permanently for
+/// this model — a runtime visibility toggle this port doesn't model, same as
+/// the always-shown player/zombie hat elsewhere in this corpus) and a `nose`.
+/// `arms` itself carries two direct cubes *and* a `left_shoulder` child
+/// (vanilla's own asymmetric shape: `arms` is the crossed-arms pose, only
+/// shown when `IllagerArmPose.CROSSED`; `right_arm`/`left_arm` are the normal
+/// separate arms). Sheet 64×64.
+fn illager_base_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, -10.0, -4.0], [8.0, 10.0, 8.0], [0.0, 0.0]))
+        .with_child(
+            "hat",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-4.0, -10.0, -4.0], [8.0, 12.0, 8.0], [32.0, 0.0]).grown(0.45)),
+        )
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::offset(0.0, -2.0, 0.0))
+                .with_cube(cube([-1.0, -1.0, -6.0], [2.0, 4.0, 2.0], [24.0, 0.0])),
+        );
+    let body = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, 0.0, -3.0], [8.0, 12.0, 6.0], [16.0, 20.0]))
+        .with_cube(cube([-4.0, 0.0, -3.0], [8.0, 20.0, 6.0], [0.0, 38.0]).grown(0.5));
+    let arms = PartDef::new(PartPose::offset_and_rotation(0.0, 3.0, -1.0, -0.75, 0.0, 0.0))
+        .with_cube(cube([-8.0, -2.0, -2.0], [4.0, 8.0, 4.0], [44.0, 22.0]))
+        .with_cube(cube([-4.0, 2.0, -2.0], [8.0, 4.0, 4.0], [40.0, 38.0]))
+        .with_child(
+            "left_shoulder",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([4.0, -2.0, -2.0], [4.0, 8.0, 4.0], [44.0, 22.0]).mirrored()),
+        );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child("body", body)
+        .with_child("arms", arms)
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-2.0, 12.0, 0.0))
+                .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 22.0])),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(2.0, 12.0, 0.0))
+                .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 22.0]).mirrored()),
+        )
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-5.0, 2.0, 0.0))
+                .with_cube(cube([-3.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40.0, 46.0])),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(5.0, 2.0, 0.0))
+                .with_cube(cube([-1.0, -2.0, -2.0], [4.0, 12.0, 4.0], [40.0, 46.0]).mirrored()),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// Pillager: the illager mesh, unscaled. Fixed texture.
+pub fn pillager_model() -> EntityModelDef {
+    illager_base_model()
+}
+
+/// Vindicator: the illager mesh, unscaled. Fixed texture.
+pub fn vindicator_model() -> EntityModelDef {
+    illager_base_model()
+}
+
+/// Evoker: the illager mesh, unscaled. Fixed texture. (`EvokerFangsModel` is a
+/// separate summon-effect entity, out of scope here.)
+pub fn evoker_model() -> EntityModelDef {
+    illager_base_model()
+}
+
+/// Illusioner: the illager mesh, unscaled. Fixed texture.
+pub fn illusioner_model() -> EntityModelDef {
+    illager_base_model()
+}
+
+/// `RavagerModel.createBodyLayer`: `neck` (1 box) holds `head` (2 boxes,
+/// skull plus a small nested box), which itself holds `right_horn`,
+/// `left_horn` and `mouth`; `body` (2 boxes) and 4 unparented legs are
+/// direct root children. Sheet 128×128, unscaled.
+pub fn ravager_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, 16.0, -17.0))
+        .with_cube(cube([-8.0, -20.0, -14.0], [16.0, 20.0, 16.0], [0.0, 0.0]))
+        .with_cube(cube([-2.0, -6.0, -18.0], [4.0, 8.0, 4.0], [0.0, 0.0]))
+        .with_child(
+            "right_horn",
+            PartDef::new(PartPose::offset_and_rotation(-10.0, -14.0, -8.0, 1.0995574, 0.0, 0.0))
+                .with_cube(cube([0.0, -14.0, -2.0], [2.0, 14.0, 4.0], [74.0, 55.0])),
+        )
+        .with_child(
+            "left_horn",
+            PartDef::new(PartPose::offset_and_rotation(8.0, -14.0, -8.0, 1.0995574, 0.0, 0.0))
+                .with_cube(cube([0.0, -14.0, -2.0], [2.0, 14.0, 4.0], [74.0, 55.0]).mirrored()),
+        )
+        .with_child(
+            "mouth",
+            PartDef::new(PartPose::offset(0.0, -2.0, 2.0))
+                .with_cube(cube([-8.0, 0.0, -16.0], [16.0, 3.0, 16.0], [0.0, 36.0])),
+        );
+    let neck = PartDef::new(PartPose::offset(0.0, -7.0, 5.5))
+        .with_cube(cube([-5.0, -1.0, -18.0], [10.0, 10.0, 18.0], [68.0, 73.0]))
+        .with_child("head", head);
+    let body = PartDef::new(PartPose::offset_and_rotation(0.0, 1.0, 2.0, PI / 2.0, 0.0, 0.0))
+        .with_cube(cube([-7.0, -10.0, -7.0], [14.0, 16.0, 20.0], [0.0, 55.0]))
+        .with_cube(cube([-6.0, 6.0, -7.0], [12.0, 13.0, 18.0], [0.0, 91.0]));
+    let hind_leg = || cube([-4.0, 0.0, -4.0], [8.0, 37.0, 8.0], [96.0, 0.0]);
+    let front_leg = || cube([-4.0, 0.0, -4.0], [8.0, 37.0, 8.0], [64.0, 0.0]);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("neck", neck)
+        .with_child("body", body)
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-8.0, -13.0, 18.0)).with_cube(hind_leg()),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(8.0, -13.0, 18.0)).with_cube(hind_leg().mirrored()),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-8.0, -13.0, -5.0)).with_cube(front_leg()),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(8.0, -13.0, -5.0)).with_cube(front_leg().mirrored()),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// `AllayModel.createBodyLayer`: the mesh's *own* root is empty and holds one
+/// child, `"root"` (offset `(0, 23.5, 0)`), which vanilla's constructor then
+/// re-roots onto (`super(root.getChild("root"))`) — i.e. the part vanilla
+/// actually renders from is `"root"`, not the mesh's nominal top part. This
+/// port bakes that offset directly into `EntityModelDef.root`'s own pose
+/// (matching what vanilla actually renders) rather than reproducing the
+/// unused outer wrapper part, which would just be a no-op pass-through here.
+/// `right_wing`/`left_wing` are zero-*width* degenerate boxes, like parrot's
+/// `feather` — kept verbatim. Sheet 32×32.
+pub fn allay_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -3.99, 0.0))
+        .with_cube(cube([-2.5, -5.0, -2.5], [5.0, 5.0, 5.0], [0.0, 0.0]));
+    let body = PartDef::new(PartPose::offset(0.0, -4.0, 0.0))
+        .with_cube(cube([-1.5, 0.0, -1.0], [3.0, 4.0, 2.0], [0.0, 10.0]))
+        .with_cube(cube([-1.5, 0.0, -1.0], [3.0, 5.0, 2.0], [0.0, 16.0]).grown(-0.2))
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-1.75, 0.5, 0.0))
+                .with_cube(cube([-0.75, -0.5, -1.0], [1.0, 4.0, 2.0], [23.0, 0.0]).grown(-0.01)),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(1.75, 0.5, 0.0))
+                .with_cube(cube([-0.25, -0.5, -1.0], [1.0, 4.0, 2.0], [23.0, 6.0]).grown(-0.01)),
+        )
+        .with_child(
+            "right_wing",
+            PartDef::new(PartPose::offset(-0.5, 0.0, 0.6))
+                .with_cube(cube([0.0, 1.0, 0.0], [0.0, 5.0, 8.0], [16.0, 14.0])),
+        )
+        .with_child(
+            "left_wing",
+            PartDef::new(PartPose::offset(0.5, 0.0, 0.6))
+                .with_cube(cube([0.0, 1.0, 0.0], [0.0, 5.0, 8.0], [16.0, 14.0])),
+        );
+    let root = PartDef::new(PartPose::offset(0.0, 23.5, 0.0))
+        .with_child("head", head)
+        .with_child("body", body);
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `ShulkerModel.createBodyLayer`: `lid`, `base` and `head`, all direct root
+/// children with no nesting. Sheet 64×64. Fixed to the default (purple)
+/// skin: vanilla's actual texture is a genuine `DyeColor` (16-way + a
+/// colourless default) variant (`ShulkerRenderer.getTextureLocation`), which
+/// this port does not model — `DyeColor` doesn't exist as a shared type in
+/// this crate yet, and adding a 17th ad-hoc variant enum for a single mob
+/// felt like more mechanism than the "keep geometry moving" priority
+/// warranted this pass. Flagging as an explicit gap, not a silent one.
+pub fn shulker_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "lid",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-8.0, -16.0, -8.0], [16.0, 12.0, 16.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "base",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-8.0, -8.0, -8.0], [16.0, 8.0, 16.0], [0.0, 28.0])),
+        )
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 12.0, 0.0))
+                .with_cube(cube([-3.0, 0.0, -3.0], [6.0, 6.0, 6.0], [0.0, 52.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+// ============================================================================
+// Cheap-reuse mobs: same builder as an already-ported mesh, only the texture
+// (or texture variant) differs. Connecting existing geometry to new registry
+// entries rather than porting anything new.
+// ============================================================================
+
+/// `GlowSquidRenderer` reuses `SquidModel` verbatim; only the texture path
+/// changes (`entity/squid/glow_squid`, not e.g. a tinted overlay — the glow
+/// itself is an emissive-texture/render-layer effect, not geometry).
+pub fn glow_squid_model() -> EntityModelDef {
+    squid_model()
+}
+
+/// `WanderingTraderRenderer` reuses `VillagerModel` verbatim (bakes
+/// `ModelLayers.WANDERING_TRADER`, the same mesh shape as the plain
+/// villager), swapping only the base skin
+/// (`entity/wandering_trader/wandering_trader`); profession-specific
+/// clothing layers are a separate `CustomHeadLayer`/item-layer concern this
+/// port doesn't model, same as for villager professions.
+pub fn wandering_trader_model() -> EntityModelDef {
+    villager_model()
+}
+
+/// Mooshroom: the plain `CowModel`, unscaled — vanilla's mushroom growth is a
+/// render layer (`MushroomCowMushroomLayer`), not extra mesh geometry.
+pub fn mooshroom_model() -> EntityModelDef {
+    cow_model()
+}
+
+fn mooshroom_color_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Mooshroom(MooshroomColor::Red) => "entity/cow/mooshroom_red",
+        EntityVariant::Mooshroom(MooshroomColor::Brown) => "entity/cow/mooshroom_brown",
+        _ => "entity/cow/mooshroom_red",
     }
 }
 
@@ -4901,6 +5211,67 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
                 select: parrot_color_texture,
             },
             build: parrot_model,
+        },
+        // ---- second overworld-priority batch: polar_bear, illager raid
+        // roster, ravager, allay, shulker ----
+        EntityModelEntry {
+            name: "polar_bear",
+            texture: EntityTexture::Fixed("entity/bear/polarbear"),
+            build: polar_bear_model,
+        },
+        EntityModelEntry {
+            name: "pillager",
+            texture: EntityTexture::Fixed("entity/illager/pillager"),
+            build: pillager_model,
+        },
+        EntityModelEntry {
+            name: "vindicator",
+            texture: EntityTexture::Fixed("entity/illager/vindicator"),
+            build: vindicator_model,
+        },
+        EntityModelEntry {
+            name: "evoker",
+            texture: EntityTexture::Fixed("entity/illager/evoker"),
+            build: evoker_model,
+        },
+        EntityModelEntry {
+            name: "illusioner",
+            texture: EntityTexture::Fixed("entity/illager/illusioner"),
+            build: illusioner_model,
+        },
+        EntityModelEntry {
+            name: "ravager",
+            texture: EntityTexture::Fixed("entity/illager/ravager"),
+            build: ravager_model,
+        },
+        EntityModelEntry {
+            name: "allay",
+            texture: EntityTexture::Fixed("entity/allay/allay"),
+            build: allay_model,
+        },
+        EntityModelEntry {
+            name: "shulker",
+            texture: EntityTexture::Fixed("entity/shulker/shulker"),
+            build: shulker_model,
+        },
+        // ---- cheap-reuse mobs: existing builder, new registry entry only ----
+        EntityModelEntry {
+            name: "glow_squid",
+            texture: EntityTexture::Fixed("entity/squid/glow_squid"),
+            build: glow_squid_model,
+        },
+        EntityModelEntry {
+            name: "wandering_trader",
+            texture: EntityTexture::Fixed("entity/wandering_trader/wandering_trader"),
+            build: wandering_trader_model,
+        },
+        EntityModelEntry {
+            name: "mooshroom",
+            texture: EntityTexture::ByVariant {
+                default: "entity/cow/mooshroom_red",
+                select: mooshroom_color_texture,
+            },
+            build: mooshroom_model,
         },
     ]
 }

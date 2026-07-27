@@ -9,18 +9,22 @@
 
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState,
-    ContainerClickType, EntityInteraction, Hand, ItemStack, PlayerCommand, PlayerInput,
-    ResourceKey, Rotation, Vec3, Vec3f, VersionAdapter,
+    AdapterError, BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
+    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, Hand, ItemStack,
+    MainHand, ParticleStatus, PlayerCommand, PlayerInput, ResourceKey, ResourcePackResponseKind,
+    Rotation, Vec3, Vec3f, VersionAdapter,
 };
 use lodestone_v340::V340Adapter;
 use lodestone_v340::packet_ids::play;
 use lodestone_v340::packets::game::{
     BlockDig, BlockPlace, EntityAction, UseEntity, UseEntityAt, UseEntityInteract,
 };
+use lodestone_v340::packets::settings::{
+    BrandPayload, PlayerAbilities, ResourcePackReceive, Settings,
+};
 use lodestone_v340::packets::slot::Slot;
 use lodestone_v340::packets::window::{
-    ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
 };
 
 const CTX: Ctx = Ctx { version: 340 };
@@ -271,4 +275,135 @@ fn interaction_actions_are_ignored_outside_play() {
         out.is_none(),
         "no serverbound play packet before Play state"
     );
+}
+
+/// Builds a representative client-settings value with two skin bits set.
+fn sample_settings() -> ClientSettings {
+    ClientSettings {
+        locale: "en_us".to_owned(),
+        view_distance: 8,
+        chat_mode: ChatMode::Full,
+        chat_colors: true,
+        skin_parts: DisplayedSkinParts {
+            cape: true,
+            hat: true,
+            ..DisplayedSkinParts::default()
+        },
+        main_hand: MainHand::Right,
+        text_filtering: false,
+        allow_server_listing: true,
+        particle_status: ParticleStatus::All,
+    }
+}
+
+#[test]
+fn client_settings_encode_1_12_shape() {
+    let (id, body) = encode(&ClientAction::SetClientSettings(sample_settings()));
+    assert_eq!(id, play::serverbound::SETTINGS);
+    // Wire layout per minecraft-data pc/1.12 `settings`: string locale, i8 view
+    // distance, varint chat flags, bool chat colors, u8 skin parts, varint main
+    // hand. Unlike 1.8 the chat flags and main hand are varints.
+    assert_eq!(
+        body,
+        vec![5, b'e', b'n', b'_', b'u', b's', 8, 0, 1, 0b0100_0001, 1]
+    );
+    let decoded: Settings = decode(&body);
+    assert_eq!(decoded.locale, "en_us");
+    assert_eq!(decoded.chat_flags, 0);
+    assert_eq!(decoded.skin_parts, 0b0100_0001, "cape (bit0) + hat (bit6)");
+    assert_eq!(decoded.main_hand, 1, "right hand");
+}
+
+#[test]
+fn main_hand_and_chat_mode_map_to_wire_values() {
+    for (mode, hand, chat, mh) in [
+        (ChatMode::Full, MainHand::Left, 0, 0),
+        (ChatMode::CommandsOnly, MainHand::Right, 1, 1),
+        (ChatMode::Hidden, MainHand::Left, 2, 0),
+    ] {
+        let mut settings = sample_settings();
+        settings.chat_mode = mode;
+        settings.main_hand = hand;
+        let (_, body) = encode(&ClientAction::SetClientSettings(settings));
+        let decoded: Settings = decode(&body);
+        assert_eq!(decoded.chat_flags, chat);
+        assert_eq!(decoded.main_hand, mh);
+    }
+}
+
+#[test]
+fn send_brand_uses_legacy_channel_on_1_12() {
+    let (id, body) = encode(&ClientAction::SendBrand {
+        brand: "lodestone".to_owned(),
+    });
+    assert_eq!(id, play::serverbound::CUSTOM_PAYLOAD);
+    let decoded: BrandPayload = decode(&body);
+    assert_eq!(decoded.channel, "MC|Brand", "1.12 predates the 1.13 rename");
+    assert_eq!(decoded.brand, "lodestone");
+}
+
+#[test]
+fn container_button_click_maps_to_enchant_item() {
+    let (id, body) = encode(&ClientAction::ContainerButtonClick {
+        window_id: 3,
+        button_id: 1,
+    });
+    assert_eq!(id, play::serverbound::ENCHANT_ITEM);
+    assert_eq!(body, vec![3, 1]);
+    let decoded: EnchantItem = decode(&body);
+    assert_eq!(decoded.window_id, 3);
+    assert_eq!(decoded.button, 1);
+}
+
+#[test]
+fn set_flying_toggles_the_ability_bit() {
+    for (flying, expected_flag) in [(true, 0x02_i8), (false, 0x00_i8)] {
+        let (id, body) = encode(&ClientAction::SetFlying { flying });
+        assert_eq!(id, play::serverbound::ABILITIES);
+        assert_eq!(body.len(), 9, "flags + 2 f32 (1.12 keeps the speed tail)");
+        assert_eq!(body[0] as i8, expected_flag);
+        let decoded: PlayerAbilities = decode(&body);
+        assert_eq!(decoded.flags, expected_flag);
+        assert_eq!(decoded.flying_speed, 0.05);
+        assert_eq!(decoded.walking_speed, 0.1);
+    }
+}
+
+#[test]
+fn resource_pack_response_encodes_result_only() {
+    // 1.12 `resource_pack_receive` is just a result varint — no pack hash — so
+    // the four legacy outcomes are encodable from the Uuid-keyed model.
+    for (kind, expected) in [
+        (ResourcePackResponseKind::SuccessfullyLoaded, 0),
+        (ResourcePackResponseKind::Declined, 1),
+        (ResourcePackResponseKind::FailedDownload, 2),
+        (ResourcePackResponseKind::Accepted, 3),
+    ] {
+        let (id, body) = encode(&ClientAction::ResourcePackResponse {
+            id: uuid::Uuid::from_u128(0),
+            response: kind,
+        });
+        assert_eq!(id, play::serverbound::RESOURCE_PACK_RECEIVE);
+        assert_eq!(body, vec![expected]);
+        let decoded: ResourcePackReceive = decode(&body);
+        assert_eq!(decoded.result, i32::from(expected));
+    }
+}
+
+#[test]
+fn modern_resource_pack_outcomes_fail_loudly_on_1_12() {
+    // 1.20.3+ outcomes have no 1.12 result code; they must not be silently
+    // mapped onto a wrong legacy value.
+    for kind in [
+        ResourcePackResponseKind::Downloaded,
+        ResourcePackResponseKind::InvalidUrl,
+        ResourcePackResponseKind::FailedReload,
+        ResourcePackResponseKind::Discarded,
+    ] {
+        let err = encode_err(&ClientAction::ResourcePackResponse {
+            id: uuid::Uuid::from_u128(0),
+            response: kind,
+        });
+        assert!(matches!(err, AdapterError::Unsupported(_)), "{kind:?}");
+    }
 }

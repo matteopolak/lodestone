@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
-    common::Hand,
+    common::{GameMode, Hand},
     ids::ResourceKey,
     item::ItemStack,
     math::{BlockPos, Rotation, Vec3, Vec3f},
@@ -320,6 +320,90 @@ pub enum ClientAction {
         /// Whether the vehicle is on the ground.
         on_ground: bool,
     },
+    /// Select which stack inside a bundle tooltip is highlighted.
+    SelectBundleItem {
+        /// Slot id holding the bundle.
+        slot_id: i32,
+        /// Highlighted stack's index within the bundle, or `-1` for none.
+        selected_item_index: i32,
+    },
+    /// Toggle a container slot's on/off state (e.g. a crafter's disabled
+    /// slots).
+    SetContainerSlotState {
+        /// Slot index within the container.
+        slot_id: i32,
+        /// Open container id.
+        container_id: i32,
+        /// New enabled/disabled state.
+        new_state: bool,
+    },
+    /// Change a recipe book's open/filtering settings.
+    SetRecipeBookSettings {
+        /// Which recipe book this applies to.
+        book_type: RecipeBookType,
+        /// Whether the book is open.
+        open: bool,
+        /// Whether the "only craftable" filter is active.
+        filtering: bool,
+    },
+    /// Mark a recipe as seen, clearing its "new" highlight in the recipe
+    /// book.
+    RecipeBookSeenRecipe {
+        /// The recipe's display index.
+        recipe: i32,
+    },
+    /// Click a recipe book entry to auto-place its ingredients into an open
+    /// crafting container.
+    PlaceRecipe {
+        /// Open container id.
+        container_id: i32,
+        /// The recipe's display index.
+        recipe: i32,
+        /// Whether to place the maximum possible quantity rather than one
+        /// set of ingredients.
+        use_max_items: bool,
+    },
+    /// Client-initiated round-trip latency probe, sent periodically during
+    /// play by the F3 debug overlay's network graph (vanilla's
+    /// `PingDebugMonitor`), independent of the server-initiated
+    /// [`ClientAction::PongResponse`] reply.
+    PingRequest {
+        /// Client's local clock reading in milliseconds, echoed back by the
+        /// server so round-trip time can be computed.
+        time: i64,
+    },
+    /// While spectating, select which entity (if any) the spectator's
+    /// third-person view should follow.
+    SpectatorAction {
+        /// Id of the entity to spectate, or `None` to stop following one.
+        target_entity_id: Option<i32>,
+    },
+    /// While spectating, teleport to an entity's position by uuid (e.g.
+    /// clicking a player in the tab list or team overlay).
+    TeleportToEntity {
+        /// Uuid of the entity to teleport to.
+        target: Uuid,
+    },
+    /// Request a game-mode change, e.g. via the singleplayer/LAN F4
+    /// cheats-enabled game-mode switcher. The server is authoritative and
+    /// may ignore this if the requester lacks permission.
+    ChangeGameMode {
+        /// Requested game mode.
+        mode: GameMode,
+    },
+}
+
+/// Which recipe book a recipe-book action applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecipeBookType {
+    /// The crafting-table recipe book.
+    Crafting,
+    /// The furnace recipe book.
+    Furnace,
+    /// The blast furnace recipe book.
+    BlastFurnace,
+    /// The smoker recipe book.
+    Smoker,
 }
 
 /// Client display and locale settings, sent at join and whenever changed.

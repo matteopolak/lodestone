@@ -96,18 +96,40 @@ impl BlockResources {
 }
 
 /// Locate a vanilla resource-pack root, version-free: honour `LODESTONE_ASSETS`
-/// if set, else pick the highest-sorting `.cache/mc/<any>` directory that holds a
-/// `client.jar`. Naming no version in code is deliberate — the shell must not
-/// name a protocol version; the cache directory's own name carries it.
+/// if set, else search upward from the current directory for a `.cache/mc/<any>`
+/// entry that holds **both** a `client.jar` and a `generated/reports/blocks.json`
+/// (both are required to stitch the atlas), picking the highest-sorting such
+/// directory. Naming no version in code is deliberate — the shell must not name a
+/// protocol version; the cache directory's own name carries it.
+///
+/// The ancestor walk makes this robust to the working directory: the binary runs
+/// from the workspace root while integration tests run from the crate directory,
+/// and both need to find the same repo-root `.cache/mc`.
 fn asset_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
         let p = PathBuf::from(dir);
-        return p.join("client.jar").is_file().then_some(p);
+        return is_pack_root(&p).then_some(p);
     }
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(Path::new(".cache/mc"))
+    let cwd = std::env::current_dir().ok()?;
+    for base in cwd.ancestors() {
+        if let Some(root) = best_pack_in(&base.join(".cache/mc")) {
+            return Some(root);
+        }
+    }
+    None
+}
+
+/// True when `dir` holds both files needed to stitch the vanilla atlas.
+fn is_pack_root(dir: &Path) -> bool {
+    dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+}
+
+/// The highest-sorting complete pack directly under `cache_dir`, or `None`.
+fn best_pack_in(cache_dir: &Path) -> Option<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(cache_dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.join("client.jar").is_file())
+        .filter(|p| is_pack_root(p))
         .collect();
     entries.sort();
     entries.pop()

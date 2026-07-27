@@ -37,10 +37,12 @@
 
 use lodestone_core::{Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt};
 use lodestone_model::{
-    EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose, Identifier,
+    EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
+    EntityVariant, Identifier,
 };
 
 use crate::attribute_types::attribute_name;
+use crate::entity_variants;
 
 /// Sentinel index terminating a metadata list.
 const EOF_MARKER: u8 = 255;
@@ -61,6 +63,33 @@ const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
 const IDX_POSE: u8 = 6;
 const IDX_HEALTH: u8 = 9;
 const IDX_BABY: u8 = 16;
+// Class-specific indices that alias the same numbers across mobs, so they are
+// only meaningful once the entity's concrete type is known (see `MetadataClass`).
+// Sheep's first field (index 17) is the wool byte; AbstractHorse's variant int
+// lands at index 18 (its flags byte occupies 17).
+const IDX_SHEEP_WOOL: u8 = 17;
+const IDX_HORSE_VARIANT: u8 = 18;
+
+/// The mobs whose cosmetic variant sits at an index that other mobs reuse for an
+/// unrelated field, so the raiser can only read it when the concrete entity type
+/// is known. Registry-holder variants (cat, cow, …) are self-identifying by
+/// serializer and need no entry here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataClass {
+    Sheep,
+    Horse,
+}
+
+/// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
+/// ambiguous variant index the raiser must disambiguate. Every other type yields
+/// `None`; its self-identifying variants (if any) still resolve by serializer.
+pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
+    match entity_type {
+        "minecraft:sheep" => Some(MetadataClass::Sheep),
+        "minecraft:horse" => Some(MetadataClass::Horse),
+        _ => None,
+    }
+}
 
 // --- 26.2 serializer type ids (EntityDataSerializers registration order) -----
 const SER_BYTE: i32 = 0;
@@ -97,12 +126,22 @@ const SER_HUMANOID_ARM: i32 = 42;
 /// a version-free representation for every value shape in the game.
 enum Value {
     Byte(i8),
+    /// A signed VarInt (surfaced for the horse variant packing).
+    Int(i32),
     Float(f32),
     Bool(bool),
     /// An optional text component (used by custom name). Inner `None` = cleared.
     OptText(Option<String>),
     /// A pose enum id.
     Pose(u32),
+    /// A resolved registry-holder appearance variant (cat, cow, wolf, …).
+    Keyed(Identifier),
+    /// A resolved villager type/profession/level composite.
+    Villager {
+        kind: Identifier,
+        profession: Identifier,
+        level: i32,
+    },
     /// Consumed correctly but not surfaced.
     Consumed,
 }
@@ -141,10 +180,7 @@ fn unknown_serializer(id: i32) -> Error {
 fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
     let value = match serializer {
         SER_BYTE => Value::Byte(reader.i8()?),
-        SER_INT => {
-            reader.var_i32()?;
-            Value::Consumed
-        }
+        SER_INT => Value::Int(reader.var_i32()?),
         SER_LONG => {
             reader.var_i64()?;
             Value::Consumed
@@ -198,18 +234,38 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             Value::Consumed
         }
         SER_VILLAGER_DATA => {
-            // holder type + holder profession + level, all VarInt.
-            reader.var_i32()?;
-            reader.var_i32()?;
-            reader.var_i32()?;
-            Value::Consumed
+            // holderRegistry(type) + holderRegistry(profession) + VarInt level.
+            // Each holder is a registry id written as `id + 1` (0 = inline direct,
+            // which vanilla never sends for villagers).
+            let type_id = reader.var_i32()? - 1;
+            let profession_id = reader.var_i32()? - 1;
+            let level = reader.var_i32()?;
+            match (
+                entity_variants::villager_type(type_id),
+                entity_variants::villager_profession(profession_id),
+            ) {
+                (Some(kind), Some(profession)) => Value::Villager {
+                    kind: parse_identifier(kind)?,
+                    profession: parse_identifier(profession)?,
+                    level,
+                },
+                // An unmapped datapack id: stay aligned, raise no variant.
+                _ => Value::Consumed,
+            }
         }
         SER_POSE => Value::Pose(reader.var_i32()?.max(0) as u32),
-        // Ids 21..=38 (excluding the global-pos serializer at 33) are all single
-        // registry-holder / enum VarInts: cat/cow/wolf/frog/pig/… variants and
-        // sound variants, painting variant, sniffer/armadillo/copper-golem/
-        // weathering-copper states.
-        21..=32 | 34..=38 => {
+        // Appearance variants are `Holder<Variant>` registry references (wire is
+        // `id + 1`; 0 = inline direct, never sent for mobs). Resolve the ones that
+        // name an appearance to a canonical key; the interleaved sound-variant and
+        // enum-state serializers in this range carry no field we surface.
+        21 | 23 | 25 | 27 | 28 | 30 | 32 => {
+            let id = reader.var_i32()? - 1;
+            match entity_variants::appearance_variant(serializer, id) {
+                Some(key) => Value::Keyed(parse_identifier(key)?),
+                None => Value::Consumed,
+            }
+        }
+        22 | 24 | 26 | 29 | 31 | 34..=38 => {
             reader.var_i32()?;
             Value::Consumed
         }
@@ -248,7 +304,10 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
 ///
 /// The reader is left positioned immediately after the `0xFF` terminator; the
 /// caller asserts the payload is then empty (the misparse detector).
-pub fn read_entity_metadata(reader: &mut Reader<'_>) -> Result<EntityMetadataUpdate> {
+pub fn read_entity_metadata(
+    reader: &mut Reader<'_>,
+    class: Option<MetadataClass>,
+) -> Result<EntityMetadataUpdate> {
     let mut md = EntityMetadataUpdate::default();
     loop {
         let index = reader.u8()?;
@@ -264,6 +323,38 @@ pub fn read_entity_metadata(reader: &mut Reader<'_>) -> Result<EntityMetadataUpd
             (IDX_POSE, Value::Pose(p)) => md.pose = Some(pose_from_id(p)),
             (IDX_HEALTH, Value::Float(f)) => md.health = Some(f),
             (IDX_BABY, Value::Bool(b)) => md.baby = Some(b),
+            // Sheep pack wool colour and the sheared flag into one byte; only a
+            // sheep uses index 17 for a byte, hence the class guard.
+            (IDX_SHEEP_WOOL, Value::Byte(b)) if class == Some(MetadataClass::Sheep) => {
+                md.variant = Some(EntityVariant::Dyed {
+                    color: (b as u8) & 0x0F,
+                    sheared: (b as u8) & 0x10 != 0,
+                });
+            }
+            // Horse packs colour (low byte) and markings (next byte) into an int.
+            (IDX_HORSE_VARIANT, Value::Int(v)) if class == Some(MetadataClass::Horse) => {
+                md.variant = Some(EntityVariant::Horse {
+                    color: (v & 0xFF) as u8,
+                    markings: ((v >> 8) & 0xFF) as u8,
+                });
+            }
+            // Registry-holder variants identify themselves by serializer, so the
+            // index is irrelevant and no class context is needed.
+            (_, Value::Keyed(key)) => md.variant = Some(EntityVariant::Keyed(key)),
+            (
+                _,
+                Value::Villager {
+                    kind,
+                    profession,
+                    level,
+                },
+            ) => {
+                md.variant = Some(EntityVariant::Villager {
+                    kind,
+                    profession,
+                    level,
+                });
+            }
             // Any other (index, value) is decoded for alignment but not surfaced.
             _ => {}
         }
@@ -378,14 +469,15 @@ mod tests {
         bytes.push(IDX_BABY);
         bytes.extend(varint(SER_BOOLEAN));
         bytes.push(1);
-        // index 19 (pig variant), a holder VarInt we must consume but not surface
+        // index 19 (a pig's variant field), PIG_VARIANT serializer: a registry
+        // holder we now resolve to a canonical key. Wire id 3 = registry id 2.
         bytes.push(19);
         bytes.extend(varint(28)); // PIG_VARIANT serializer id
-        bytes.extend(varint(3)); // some registry id
+        bytes.extend(varint(3)); // holder wire value (registry id 2)
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader).expect("decode");
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
         reader.ensure_empty().expect("no trailing bytes");
 
         assert_eq!(md.flags, Some(0x01));
@@ -394,6 +486,10 @@ mod tests {
         assert_eq!(md.pose, Some(EntityPose::Crouching));
         assert_eq!(md.health, Some(10.0));
         assert_eq!(md.baby, Some(true));
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Keyed("minecraft:cold".parse().unwrap()))
+        );
     }
 
     /// An empty list (just the terminator) decodes to an empty update.
@@ -401,7 +497,7 @@ mod tests {
     fn empty_list_is_empty_update() {
         let bytes = [EOF_MARKER];
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader).expect("decode");
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
         reader.ensure_empty().expect("empty");
         assert!(md.is_empty());
     }
@@ -416,7 +512,7 @@ mod tests {
         bytes.push(0); // absent
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader).expect("decode");
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
         reader.ensure_empty().expect("empty");
         assert_eq!(md.custom_name, Some(None));
     }
@@ -431,7 +527,7 @@ mod tests {
         bytes.extend_from_slice(&[0x41, 0x20]); // 2 of 4 float bytes
         // no terminator
         let mut reader = Reader::new(&bytes);
-        assert!(read_entity_metadata(&mut reader).is_err());
+        assert!(read_entity_metadata(&mut reader, None).is_err());
     }
 
     /// A complex serializer mobs never emit is rejected explicitly, not guessed.
@@ -442,7 +538,168 @@ mod tests {
         bytes.extend(varint(SER_ITEM_STACK));
         bytes.push(0);
         let mut reader = Reader::new(&bytes);
-        assert!(read_entity_metadata(&mut reader).is_err());
+        assert!(read_entity_metadata(&mut reader, None).is_err());
+    }
+
+    /// A sheep's wool byte at index 17 packs colour (low nibble) and the sheared
+    /// flag (bit 4). Only raised when the entity is known to be a sheep.
+    #[test]
+    fn sheep_wool_byte_raises_dyed_variant() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_SHEEP_WOOL);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x1E); // colour 14 (red) + sheared bit (0x10)
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep)).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Dyed {
+                color: 14,
+                sheared: true,
+            })
+        );
+    }
+
+    /// The same byte at index 17 with no sheep context (or a different class) must
+    /// NOT be raised — index 17 aliases unrelated byte fields on other mobs.
+    #[test]
+    fn wool_index_without_sheep_class_is_not_raised() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_SHEEP_WOOL);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x1E);
+        bytes.push(EOF_MARKER);
+
+        for class in [None, Some(MetadataClass::Horse)] {
+            let mut reader = Reader::new(&bytes);
+            let md = read_entity_metadata(&mut reader, class).expect("decode");
+            reader.ensure_empty().expect("empty");
+            assert_eq!(md.variant, None);
+        }
+    }
+
+    /// A horse's variant int at index 18 packs colour (low byte) and markings
+    /// (next byte). Raised only when the entity is known to be a horse.
+    #[test]
+    fn horse_variant_int_raises_horse_variant() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_HORSE_VARIANT);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(0x0305)); // markings 3, colour 5
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Horse)).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Horse {
+                color: 5,
+                markings: 3,
+            })
+        );
+    }
+
+    /// The int at index 18 without horse context must not be raised.
+    #[test]
+    fn variant_index_without_horse_class_is_not_raised() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_HORSE_VARIANT);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(0x0305));
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep)).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.variant, None);
+    }
+
+    /// A registry-holder appearance variant (here a wolf, serializer 25) is
+    /// self-identifying: it raises `Keyed` from the serializer alone, at whatever
+    /// index it appears and with no class context. Wire value is `id + 1`.
+    #[test]
+    fn wolf_variant_holder_raises_keyed() {
+        let mut bytes = Vec::new();
+        bytes.push(22); // wolf's variant field index (irrelevant to the raise)
+        bytes.extend(varint(25)); // WOLF_VARIANT serializer
+        bytes.extend(varint(5)); // holder wire value → registry id 4 → ashen
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Keyed("minecraft:ashen".parse().unwrap()))
+        );
+    }
+
+    /// A cow variant (serializer 23) resolves through the shared temperature table.
+    #[test]
+    fn cow_variant_holder_raises_keyed() {
+        let mut bytes = Vec::new();
+        bytes.push(17);
+        bytes.extend(varint(23)); // COW_VARIANT serializer
+        bytes.extend(varint(2)); // wire value → registry id 1 → warm
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Keyed("minecraft:warm".parse().unwrap()))
+        );
+    }
+
+    /// An unmapped holder id stays byte-aligned and raises no variant, so a
+    /// datapack-added variant degrades to "no override" rather than a wrong key.
+    #[test]
+    fn unmapped_variant_id_raises_nothing_but_stays_aligned() {
+        let mut bytes = Vec::new();
+        bytes.push(17);
+        bytes.extend(varint(23)); // cow variant
+        bytes.extend(varint(99)); // wire value → registry id 98 → unmapped
+        bytes.push(IDX_HEALTH); // a following field must still decode cleanly
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(5.0f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(md.variant, None);
+        assert_eq!(md.health, Some(5.0));
+    }
+
+    /// VillagerData (serializer 18) decodes two registry holders and a level into
+    /// the `Villager` variant.
+    #[test]
+    fn villager_data_raises_villager_variant() {
+        let mut bytes = Vec::new();
+        bytes.push(17); // villager's data index
+        bytes.extend(varint(SER_VILLAGER_DATA));
+        bytes.extend(varint(4)); // type wire → id 3 → savanna
+        bytes.extend(varint(6)); // profession wire → id 5 → farmer
+        bytes.extend(varint(3)); // level
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        reader.ensure_empty().expect("empty");
+        assert_eq!(
+            md.variant,
+            Some(EntityVariant::Villager {
+                kind: "minecraft:savanna".parse().unwrap(),
+                profession: "minecraft:farmer".parse().unwrap(),
+                level: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn metadata_class_only_classifies_ambiguous_mobs() {
+        assert_eq!(metadata_class("minecraft:sheep"), Some(MetadataClass::Sheep));
+        assert_eq!(metadata_class("minecraft:horse"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:cow"), None);
+        assert_eq!(metadata_class("minecraft:villager"), None);
     }
 
     /// A known-answer `update_attributes`: one movement-speed attribute with a

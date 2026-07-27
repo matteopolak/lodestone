@@ -8,6 +8,7 @@ pub mod handshake;
 pub mod login;
 pub mod metadata;
 pub mod position;
+pub mod settings;
 pub mod slot;
 pub mod status;
 pub mod window;

@@ -9,16 +9,18 @@
 
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, BlockPos, ClientAction, ConnectionState,
-    ContainerClickType, EntityInteraction, Hand, ItemStack, PlayerCommand, PlayerInput,
-    ResourceKey, Rotation, Vec3, Vec3f, VersionAdapter,
+    AdapterError, BlockActionKind, BlockFace, BlockPos, ChatMode, ClientAction, ClientSettings,
+    ConnectionState, ContainerClickType, DisplayedSkinParts, EntityInteraction, Hand, ItemStack,
+    MainHand, ParticleStatus, PlayerCommand, PlayerInput, ResourceKey, Rotation, Vec3, Vec3f,
+    VersionAdapter,
 };
 use lodestone_v47::V47Adapter;
 use lodestone_v47::packet_ids::play;
 use lodestone_v47::packets::game::{BlockDig, BlockPlace, EntityAction, UseEntity, UseEntityAt};
+use lodestone_v47::packets::settings::{BrandPayload, PlayerAbilities, Settings};
 use lodestone_v47::packets::slot::Slot;
 use lodestone_v47::packets::window::{
-    ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
 };
 
 const CTX: Ctx = Ctx { version: 47 };
@@ -323,4 +325,111 @@ fn interaction_actions_are_ignored_outside_play() {
         out.is_none(),
         "no serverbound play packet before Play state"
     );
+}
+
+/// Builds a representative client-settings value with two skin bits set so the
+/// bitmask packing is exercised.
+fn sample_settings() -> ClientSettings {
+    ClientSettings {
+        locale: "en_us".to_owned(),
+        view_distance: 8,
+        chat_mode: ChatMode::Full,
+        chat_colors: true,
+        skin_parts: DisplayedSkinParts {
+            cape: true,
+            hat: true,
+            ..DisplayedSkinParts::default()
+        },
+        main_hand: MainHand::Right,
+        text_filtering: false,
+        allow_server_listing: true,
+        particle_status: ParticleStatus::All,
+    }
+}
+
+#[test]
+fn client_settings_encode_1_8_shape() {
+    let (id, body) = encode(&ClientAction::SetClientSettings(sample_settings()));
+    assert_eq!(id, play::serverbound::SETTINGS);
+    // Wire layout per minecraft-data pc/1.8 `settings`: string locale, i8 view
+    // distance, i8 chat flags, bool chat colors, u8 skin parts. `main_hand` is
+    // absent in 1.8 (added 1.9), so the body ends after the skin-parts byte.
+    assert_eq!(
+        body,
+        vec![5, b'e', b'n', b'_', b'u', b's', 8, 0, 1, 0b0100_0001]
+    );
+    let decoded: Settings = decode(&body);
+    assert_eq!(decoded.locale, "en_us");
+    assert_eq!(decoded.chat_flags, 0);
+    assert_eq!(decoded.skin_parts, 0b0100_0001, "cape (bit0) + hat (bit6)");
+}
+
+#[test]
+fn chat_mode_maps_to_visibility_value() {
+    for (mode, expected) in [
+        (ChatMode::Full, 0),
+        (ChatMode::CommandsOnly, 1),
+        (ChatMode::Hidden, 2),
+    ] {
+        let mut settings = sample_settings();
+        settings.chat_mode = mode;
+        let (_, body) = encode(&ClientAction::SetClientSettings(settings));
+        let decoded: Settings = decode(&body);
+        assert_eq!(decoded.chat_flags, expected);
+    }
+}
+
+#[test]
+fn send_brand_uses_legacy_channel() {
+    let (id, body) = encode(&ClientAction::SendBrand {
+        brand: "lodestone".to_owned(),
+    });
+    assert_eq!(id, play::serverbound::CUSTOM_PAYLOAD);
+    let decoded: BrandPayload = decode(&body);
+    assert_eq!(
+        decoded.channel, "MC|Brand",
+        "1.8 uses the pipe-namespaced channel"
+    );
+    assert_eq!(decoded.brand, "lodestone");
+}
+
+#[test]
+fn container_button_click_maps_to_enchant_item() {
+    let (id, body) = encode(&ClientAction::ContainerButtonClick {
+        window_id: 3,
+        button_id: 1,
+    });
+    assert_eq!(id, play::serverbound::ENCHANT_ITEM);
+    assert_eq!(body, vec![3, 1]);
+    let decoded: EnchantItem = decode(&body);
+    assert_eq!(decoded.window_id, 3);
+    assert_eq!(decoded.button, 1);
+}
+
+#[test]
+fn set_flying_toggles_the_ability_bit() {
+    for (flying, expected_flag) in [(true, 0x02_i8), (false, 0x00_i8)] {
+        let (id, body) = encode(&ClientAction::SetFlying { flying });
+        assert_eq!(id, play::serverbound::ABILITIES);
+        // flags (i8) + flying speed (f32) + walking speed (f32) = 9 bytes.
+        assert_eq!(body.len(), 9);
+        assert_eq!(body[0] as i8, expected_flag);
+        let decoded: PlayerAbilities = decode(&body);
+        assert_eq!(decoded.flags, expected_flag);
+        // The two speed fields carry the vanilla defaults the server ignores.
+        assert_eq!(decoded.flying_speed, 0.05);
+        assert_eq!(decoded.walking_speed, 0.1);
+    }
+}
+
+#[test]
+fn resource_pack_response_needs_hash_the_model_lacks() {
+    // 1.8 `resource_pack_receive` carries a pack hash string; the model keys the
+    // response by a Uuid instead, so it cannot be encoded faithfully and must
+    // fail loudly rather than send a wrong/empty hash.
+    let err = encode_err(&ClientAction::ResourcePackResponse {
+        id: uuid::Uuid::from_u128(0),
+        response: lodestone_model::ResourcePackResponseKind::SuccessfullyLoaded,
+    });
+    assert!(matches!(err, AdapterError::Unsupported(_)));
 }

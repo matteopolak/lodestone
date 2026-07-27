@@ -92,7 +92,9 @@ pub use container::{LongArrayFraming, PaletteKind, PalettedContainer};
 pub use heightmap::{Heightmap, Heightmaps, height_bits};
 pub use light::{ColumnLight, LightData, NibbleArray, SectionLight};
 pub use lighting::{
-    BlockVolume, LightDiff, LightProperties, compute_column_light, diff_column_light,
+    BlockVolume, LightDiff, LightProperties, Neighbourhood, compute_column_light,
+    compute_column_light_with_neighbours, diff_column_light, diff_column_light_full,
+    light_exercises_propagation,
 };
 pub use packed::PackedArray;
 pub use section::ChunkSection;
