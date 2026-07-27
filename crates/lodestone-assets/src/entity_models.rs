@@ -684,6 +684,263 @@ pub fn enderman_model() -> EntityModelDef {
     }
 }
 
+// ===========================================================================
+// monster/* remainder (impl-assets lane). Everything below is transcribed from
+// `net/minecraft/client/model/...` for the 26.2 family. The sibling `animal/*`,
+// `npc/*` and `object/*` models are appended to `entity_models()` in their own
+// delimited block.
+// ===========================================================================
+
+/// `DrownedModel` (extends `ZombieModel`): the zombie humanoid mesh with the
+/// left arm and left leg re-textured (`texOffs (32,48)` / `(16,48)`) and no
+/// longer mirrored. Sheet 64×64.
+pub fn drowned_model() -> EntityModelDef {
+    let mut root = humanoid_root(0.0);
+    if let Some(arm) = root.child_mut("left_arm") {
+        arm.pose = PartPose::offset(5.0, 2.0, 0.0);
+        arm.cubes = vec![cube([-1.0, -2.0, -2.0], [4.0, 12.0, 4.0], [32.0, 48.0])];
+    }
+    if let Some(leg) = root.child_mut("left_leg") {
+        leg.pose = PartPose::offset(1.9, 12.0, 0.0);
+        leg.cubes = vec![cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [16.0, 48.0])];
+    }
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `IronGolemModel`: head (+nose), a broad body (+belt), long arms and stocky
+/// legs. Sheet **128×128** — the largest in the corpus, pinned by the real-PNG
+/// coverage test.
+pub fn iron_golem_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -7.0, -2.0))
+        .with_cube(cube([-4.0, -12.0, -5.5], [8.0, 10.0, 8.0], [0.0, 0.0]))
+        .with_cube(cube([-1.0, -5.0, -7.5], [2.0, 4.0, 2.0], [24.0, 0.0]));
+    let body = PartDef::new(PartPose::offset(0.0, -7.0, 0.0))
+        .with_cube(cube([-9.0, -2.0, -6.0], [18.0, 12.0, 11.0], [0.0, 40.0]))
+        .with_cube(cube([-4.5, 10.0, -3.0], [9.0, 5.0, 6.0], [0.0, 70.0]).grown(0.5));
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child("body", body)
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(0.0, -7.0, 0.0)).with_cube(cube(
+                [-13.0, -2.5, -3.0],
+                [4.0, 30.0, 6.0],
+                [60.0, 21.0],
+            )),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(0.0, -7.0, 0.0)).with_cube(cube(
+                [9.0, -2.5, -3.0],
+                [4.0, 30.0, 6.0],
+                [60.0, 58.0],
+            )),
+        )
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-4.0, 11.0, 0.0)).with_cube(cube(
+                [-3.5, -3.0, -3.0],
+                [6.0, 16.0, 5.0],
+                [37.0, 0.0],
+            )),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(5.0, 11.0, 0.0)).with_cube(
+                cube([-3.5, -3.0, -3.0], [6.0, 16.0, 5.0], [60.0, 0.0]).mirrored(),
+            ),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// `SnowGolemModel`: two stacked snow spheres, a head and two stick arms posed
+/// with a `zRot` of ±1 rad (the right arm additionally yawed by π). All cubes
+/// carry a `-0.5` deformation. Sheet 64×64.
+pub fn snow_golem_model() -> EntityModelDef {
+    let g = -0.5;
+    let arm = || cube([-1.0, 0.0, -1.0], [12.0, 2.0, 2.0], [32.0, 0.0]).grown(g);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 4.0, 0.0))
+                .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]).grown(g)),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset_and_rotation(5.0, 6.0, 1.0, 0.0, 0.0, 1.0))
+                .with_cube(arm()),
+        )
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset_and_rotation(-5.0, 6.0, -1.0, 0.0, PI, -1.0))
+                .with_cube(arm()),
+        )
+        .with_child(
+            "upper_body",
+            PartDef::new(PartPose::offset(0.0, 13.0, 0.0))
+                .with_cube(cube([-5.0, -10.0, -5.0], [10.0, 10.0, 10.0], [0.0, 16.0]).grown(g)),
+        )
+        .with_child(
+            "lower_body",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-6.0, -12.0, -6.0], [12.0, 12.0, 12.0], [0.0, 36.0]).grown(g)),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `VexModel`: a small floating humanoid — head, two-box body, thin arms and two
+/// flat wings, all under a `root` pivot offset by `-2.5`. Sheet 32×32.
+pub fn vex_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::offset(0.0, 20.0, 0.0))
+        .with_cube(cube([-1.5, 0.0, -1.0], [3.0, 4.0, 2.0], [0.0, 10.0]))
+        .with_cube(cube([-1.5, 1.0, -1.0], [3.0, 5.0, 2.0], [0.0, 16.0]).grown(-0.2))
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-1.75, 0.25, 0.0)).with_cube(
+                cube([-1.25, -0.5, -1.0], [2.0, 4.0, 2.0], [23.0, 0.0]).grown(-0.1),
+            ),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(1.75, 0.25, 0.0)).with_cube(
+                cube([-0.75, -0.5, -1.0], [2.0, 4.0, 2.0], [23.0, 6.0]).grown(-0.1),
+            ),
+        )
+        .with_child(
+            "left_wing",
+            PartDef::new(PartPose::offset(0.5, 1.0, 1.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [0.0, 5.0, 8.0], [16.0, 14.0]).mirrored()),
+        )
+        .with_child(
+            "right_wing",
+            PartDef::new(PartPose::offset(-0.5, 1.0, 1.0)).with_cube(cube(
+                [0.0, 0.0, 0.0],
+                [0.0, 5.0, 8.0],
+                [16.0, 14.0],
+            )),
+        );
+    let root = PartDef::new(PartPose::offset(0.0, -2.5, 0.0))
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 20.0, 0.0)).with_cube(cube(
+                [-2.5, -5.0, -2.5],
+                [5.0, 5.0, 5.0],
+                [0.0, 0.0],
+            )),
+        )
+        .with_child("body", body);
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child("root", root),
+    }
+}
+
+/// The shared segment-worm builder for `SilverfishModel`/`EndermiteModel`: each
+/// segment is a box sized from `sizes[i]` at `texOffs texs[i]`, dropped to the
+/// floor (`y = 24 - height`) and chained along `z` by half the sum of adjacent
+/// depths starting at `-3.5`. Returns the root plus the per-segment `z` offsets
+/// (the silverfish reuses them to place its raised plates).
+fn segment_worm(sizes: &[[i32; 3]], texs: &[[i32; 2]]) -> (PartDef, Vec<f32>) {
+    let mut root = PartDef::new(PartPose::ZERO);
+    let mut z_place = Vec::with_capacity(sizes.len());
+    let mut placement = -3.5f32;
+    for i in 0..sizes.len() {
+        let (w, h, d) = (sizes[i][0], sizes[i][1], sizes[i][2]);
+        root = root.with_child(
+            &format!("segment{i}"),
+            PartDef::new(PartPose::offset(0.0, (24 - h) as f32, placement)).with_cube(cube(
+                [w as f32 * -0.5, 0.0, d as f32 * -0.5],
+                [w as f32, h as f32, d as f32],
+                [texs[i][0] as f32, texs[i][1] as f32],
+            )),
+        );
+        z_place.push(placement);
+        if i + 1 < sizes.len() {
+            placement += (d + sizes[i + 1][2]) as f32 * 0.5;
+        }
+    }
+    (root, z_place)
+}
+
+/// `SilverfishModel`: a seven-segment worm plus three raised texture plates
+/// keyed off the segment `z` offsets. Sheet 64×32.
+pub fn silverfish_model() -> EntityModelDef {
+    let sizes = [
+        [3, 2, 2],
+        [4, 3, 2],
+        [6, 4, 3],
+        [3, 3, 3],
+        [2, 2, 3],
+        [2, 1, 2],
+        [1, 1, 2],
+    ];
+    let texs = [
+        [0, 0],
+        [0, 4],
+        [0, 9],
+        [0, 16],
+        [0, 22],
+        [11, 0],
+        [13, 4],
+    ];
+    let (mut root, zp) = segment_worm(&sizes, &texs);
+    root = root
+        .with_child(
+            "plate0",
+            PartDef::new(PartPose::offset(0.0, 16.0, zp[2])).with_cube(cube(
+                [-5.0, 0.0, sizes[2][2] as f32 * -0.5],
+                [10.0, 8.0, sizes[2][2] as f32],
+                [20.0, 0.0],
+            )),
+        )
+        .with_child(
+            "plate1",
+            PartDef::new(PartPose::offset(0.0, 20.0, zp[4])).with_cube(cube(
+                [-3.0, 0.0, sizes[4][2] as f32 * -0.5],
+                [6.0, 4.0, sizes[4][2] as f32],
+                [20.0, 11.0],
+            )),
+        )
+        .with_child(
+            "plate2",
+            PartDef::new(PartPose::offset(0.0, 19.0, zp[1])).with_cube(cube(
+                [-3.0, 0.0, sizes[4][2] as f32 * -0.5],
+                [6.0, 5.0, sizes[1][2] as f32],
+                [20.0, 18.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `EndermiteModel`: a four-segment worm on the same chaining rule. Sheet 64×32.
+pub fn endermite_model() -> EntityModelDef {
+    let sizes = [[4, 3, 2], [6, 4, 5], [3, 3, 1], [1, 2, 1]];
+    let texs = [[0, 0], [0, 5], [0, 14], [0, 18]];
+    let (root, _) = segment_worm(&sizes, &texs);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
 fn player_wide() -> EntityModelDef {
     player_model(false)
 }
@@ -798,6 +1055,37 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             name: "enderman",
             texture: "entity/enderman/enderman",
             build: enderman_model,
+        },
+        // Tier 3: monster/* remainder (impl-assets lane).
+        EntityModelEntry {
+            name: "drowned",
+            texture: "entity/zombie/drowned",
+            build: drowned_model,
+        },
+        EntityModelEntry {
+            name: "iron_golem",
+            texture: "entity/iron_golem/iron_golem",
+            build: iron_golem_model,
+        },
+        EntityModelEntry {
+            name: "snow_golem",
+            texture: "entity/snow_golem/snow_golem",
+            build: snow_golem_model,
+        },
+        EntityModelEntry {
+            name: "vex",
+            texture: "entity/illager/vex",
+            build: vex_model,
+        },
+        EntityModelEntry {
+            name: "silverfish",
+            texture: "entity/silverfish/silverfish",
+            build: silverfish_model,
+        },
+        EntityModelEntry {
+            name: "endermite",
+            texture: "entity/endermite/endermite",
+            build: endermite_model,
         },
     ]
 }
