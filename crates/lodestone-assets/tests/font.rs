@@ -328,6 +328,56 @@ fn string_width_sums_advances() {
         .unwrap();
     // "AB i" -> 6 + 4 + 4 + 2 = 16
     assert_eq!(font.string_width("AB i"), 16.0);
+    // string_width must agree exactly with an independent sum over the public
+    // per-glyph `advance()` API — the drawing side measures the same way.
+    let independent: f32 = "AB i"
+        .chars()
+        .map(|c| font.advance(c as u32).unwrap())
+        .sum();
+    assert_eq!(font.string_width("AB i"), independent);
+}
+
+/// NEGATIVE CONTROL — the defect this whole subsystem exists to prevent.
+///
+/// The shell's legacy debug font used a **fixed advance** for every glyph, which
+/// is why "was slain by Spider" rendered with the wrong spacing even though every
+/// character was correct. A string-level `assert_eq!` on the decoded text cannot
+/// see that defect; only a width check can. This proves the gate has teeth: a
+/// fixed-advance model diverges from the sum of the real per-glyph advances, so
+/// the day someone regresses `actual_glyph_width` to a cell-width constant this
+/// fails. ('A'=6, 'B'=4, 'i'=2 — genuinely different widths.)
+#[test]
+fn negative_control_fixed_advance_diverges_from_true_width() {
+    let mgr = ascii_font();
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    let true_width = font.string_width("ABi"); // 6 + 4 + 2 = 12
+    let fixed_width = 3.0 * 6.0; // fixed 6px cell advance -> 18
+    assert_eq!(true_width, 12.0);
+    assert_ne!(
+        true_width, fixed_width,
+        "proportional advances must differ from a fixed-advance model"
+    );
+}
+
+/// The same control expressed as an *observed* failure: asserting the
+/// fixed-advance expectation against the real proportional widths panics. Kept
+/// as `should_panic` documentation that the width assertion genuinely breaks
+/// under the bug (a gate never seen to fail is not yet evidence).
+#[test]
+#[should_panic(expected = "fixed-advance model mis-measures")]
+fn negative_control_fixed_advance_assertion_breaks() {
+    let mgr = ascii_font();
+    let font = FontLoader::new(&mgr)
+        .load(&loc("minecraft:default"), &FontOptions::none())
+        .unwrap();
+    let true_width = font.string_width("ABi"); // 12
+    let fixed_width = 3.0 * 6.0; // 18
+    assert_eq!(
+        true_width, fixed_width,
+        "fixed-advance model mis-measures: true={true_width} fixed={fixed_width}"
+    );
 }
 
 #[test]
