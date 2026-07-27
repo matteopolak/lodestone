@@ -767,3 +767,41 @@ An earlier framing held that "multiplayer renders full-bright terrain". **That w
 MP terrain does not mesh at all. The distinction matters: "lit incorrectly" suggests a
 lighting fix, while "not meshed" points at the classifier. Chasing the former would have
 produced a vacuous green.
+
+## Addendum — the obvious `player_loaded` live gate is vacuous (design note)
+
+`PlayerLoaded` is now auto-sent (`06adf98`), policy-suppressible via `PlayerLoadedPolicy`
+(`a9ae6a2`), and re-armed on **`ClientEvent::Respawned`** as well as `Death` (`6613751`) so
+portal / dimension-change / `/respawn` no longer silently re-enter the ignore-movement
+window. Hermetic coverage: `cargo test -p lodestone-client --test driver` → 20/20, including
+`player_loaded_suppressed_under_manual_policy` and
+`player_loaded_rearms_on_respawn_without_death`.
+
+**The live gate is deliberately not written, and the intuitive design for it does not work.**
+
+The tempting gate is: "move immediately after join with `PlayerLoaded` suppressed, observe
+the server rubber-band us back." **It never fires.** When `hasClientLoaded()` is false,
+vanilla **silently drops** `MovePlayer` packets — it does *not* send a correcting teleport.
+So a lone walker observes **no correction at all** during the window: local prediction
+diverges freely while the server keeps us at spawn. A correction only appears *after* the
+window, when the accumulated catch-up move looks illegal (too fast).
+
+A gate built on the naive design therefore passes whether or not the fix works — the classic
+vacuous green.
+
+**Two designs that actually work:**
+
+1. **Second observer client** — confirm the *entity* did not move server-side during the
+   window, from a different connection. This is the stronger option, because it observes
+   authoritative state rather than inferring from our own packets.
+2. **Assert on the post-window catch-up correction spike** — real, but timing-sensitive;
+   gate carefully so it cannot pass merely on latency.
+
+`PlayerLoadedPolicy::Manual` is the negative-control lever. Put the gate in
+`live_physics_bot.rs` behind the `live-v770` feature.
+
+**General lesson worth carrying:** "the server will correct us if we're wrong" is an
+assumption, not a mechanism. Before building a gate on an expected server *reaction*,
+confirm vanilla actually reacts — several of its validation paths **drop silently** rather
+than responding, and a gate waiting for a response that never comes cannot distinguish
+success from failure.
