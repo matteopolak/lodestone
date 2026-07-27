@@ -639,3 +639,34 @@ hand-derived version was wrong four times, in four different ways.
 durability or max-stack. Drawing stays correct because container reconcile is
 server-authoritative; only *offline click-stacking prediction* is affected. Needs a
 component patch at the model event layer. Documented at the `From<&model::ItemStack>` impl.
+
+## Addendum — neighbour-aware relight is singleplayer-only (divergence trap)
+
+Caught during the lighting handover and worth preserving, because getting it wrong
+produces a bug that **survives every test in the suite**.
+
+On **multiplayer**, `merge_light` already carries the server's seam-complete,
+cross-chunk-propagated light — the server has the whole region loaded, so its values are
+authoritative and complete. Firing `compute_column_light_with_neighbours` on MP chunk
+arrival would **overwrite server-authoritative light with our own partial recompute**.
+That is a divergence bug, and it looks like a lighting *improvement* while it happens.
+
+The trigger predicate is therefore **"chunk arrived AND we generated its light"** (i.e.
+singleplayer / integrated server), **not** "chunk arrived".
+
+When the SP relight does get wired, its trigger is **bidirectional**: on column `N`
+arriving, relight `N` *and* every already-loaded orthogonal neighbour `A` — `A`'s facing
+seam was baked while `N` was absent (treated as opaque), so it is now stale. Miss that
+second half and you get a **permanent dark stripe on `A`'s face that never revisits**,
+survives every geometry test, and only shows up visually.
+
+A genuine loaded-edge (neighbour actually absent) staying dark is **correct**, and
+self-heals when that neighbour streams in — provided the bidirectional trigger exists.
+
+**What to watch:** `diff_column_light_full`'s split. Interior must stay `0`; an *edge*
+count that **changes on neighbour arrival** is the fix working, not a regression.
+
+**Routing, once light is visible and a seam artifact appears:** MP shadowed seams belong
+to `merge_light` plumbing / mesher sampling; SP seams belong to the neighbour-aware
+relight. Cost is ~12.5 ms/column, and the wire lives in the chunk-arrival/load path, not
+in the mesher — the mesher only reads whatever merged light the handle exposes.
