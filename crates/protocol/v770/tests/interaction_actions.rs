@@ -297,6 +297,7 @@ fn container_click_pickup_is_byte_exact_with_hashed_stacks() {
             item: Some(lodestone_model::ItemStack {
                 item: "minecraft:stone".parse().expect("valid identifier"),
                 count: 5,
+                components: lodestone_model::ItemComponents::default(),
             }),
         }],
         carried_item: None,
@@ -336,6 +337,7 @@ fn container_click_unknown_item_fails_loudly() {
                         .parse()
                         .expect("valid identifier"),
                     count: 1,
+                    components: lodestone_model::ItemComponents::default(),
                 }),
             },
         )
@@ -350,6 +352,7 @@ fn set_creative_mode_slot_with_item_is_byte_exact() {
         item: Some(lodestone_model::ItemStack {
             item: "minecraft:stone".parse().expect("valid identifier"),
             count: 64,
+            components: lodestone_model::ItemComponents::default(),
         }),
     });
     assert_eq!(id, play::serverbound::SET_CREATIVE_MODE_SLOT);

@@ -66,6 +66,12 @@ pub(crate) mod generated_menus;
 #[path = "generated/items.rs"]
 pub(crate) mod generated_items;
 
+/// Generated data-component-type id→name table (raw rodata statics). Use the
+/// [`data_component_types`] module for the lookup API; this holds only the
+/// array. Item stacks reference each patched component by its registry id.
+#[path = "generated/data_component_types.rs"]
+pub(crate) mod generated_data_component_types;
+
 /// Generated mob-effect id→name table (raw rodata statics). Use the
 /// [`mob_effects`] module for the lookup API; this holds only the array. See
 /// that file's header for why this table exists outside `xtask gen-registries`.
@@ -77,6 +83,7 @@ pub mod attribute_types;
 pub mod block_states;
 pub mod chunk_batch;
 pub mod collision_shapes;
+pub mod data_component_types;
 pub mod entity_dimensions;
 pub mod entity_types;
 pub mod entity_variants;
