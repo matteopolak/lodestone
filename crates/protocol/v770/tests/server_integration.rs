@@ -26,7 +26,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lodestone_client::{BlockPos, ClientBuilder, LoginProfile, ServerAddress};
+use lodestone_client::{
+    BlockPos, ChatKind, ClientBuilder, ClientEvent, LoginProfile, ServerAddress,
+};
 use lodestone_server::{ChunkSource, IntegratedServer, WorldgenChunkSource};
 use lodestone_v770::{V770ServerProtocol, adapter};
 use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
@@ -129,7 +131,7 @@ async fn real_client_and_real_v770_protocol_reach_play_with_worldgen_chunks() {
         IntegratedServer::open_in_memory(V770ServerProtocol, source, view_radius);
 
     // The *real* client, running the *real* v770 adapter, drives the other end.
-    let (handle, _events) =
+    let (handle, mut events) =
         ClientBuilder::new(address(), profile(), Box::new(adapter())).connect_with(client_io);
 
     // Wait for the chunk to arrive (poll; never assert immediately). A full
@@ -146,6 +148,14 @@ async fn real_client_and_real_v770_protocol_reach_play_with_worldgen_chunks() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(handle.loaded_chunk_count(), 1, "exactly one chunk expected");
+    // `SetHealth`, sent as part of the join sequence, is already fully
+    // decoded and folded by the client (`ClientEvent::HealthChanged` ->
+    // `PlayerSnapshot::health`) — connecting it costs one derived-struct send.
+    assert_eq!(
+        handle.health(),
+        Some(20.0),
+        "join sequence should report full health"
+    );
 
     // Block-for-block: every block the client decoded from the real
     // `level_chunk_with_light` wire format must equal what worldgen generated
@@ -190,7 +200,43 @@ async fn real_client_and_real_v770_protocol_reach_play_with_worldgen_chunks() {
         handle.loaded_chunk_count()
     );
 
+    // `welcome_message` exercises the newly landed `lodestone_core` NBT writer
+    // for real: the server encodes a `system_chat` packet with a network-form
+    // NBT text component, and the real client's `V770Adapter` decodes it back
+    // via `read_network_nbt`/`plain_text_from_nbt_component` — proving the
+    // writer/reader round-trip through the actual wire, not a unit test of
+    // either side alone.
+    let chat_deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut seen_welcome = false;
+    while std::time::Instant::now() < chat_deadline {
+        let Some(event) = tokio::time::timeout(Duration::from_millis(500), events.recv())
+            .await
+            .ok()
+            .flatten()
+        else {
+            continue;
+        };
+        if let ClientEvent::Chat { text, kind, .. } = event {
+            assert_eq!(
+                kind,
+                ChatKind::System,
+                "welcome message should be System chat, not overlay"
+            );
+            assert_eq!(
+                text.to_plain_string(),
+                "Welcome to Lodestone",
+                "welcome message text mismatch"
+            );
+            seen_welcome = true;
+            break;
+        }
+    }
+    assert!(
+        seen_welcome,
+        "never received the post-join system_chat welcome message within 30s"
+    );
+
     drop(handle);
-    drop(_events);
+    drop(events);
     server.shutdown().await;
 }
