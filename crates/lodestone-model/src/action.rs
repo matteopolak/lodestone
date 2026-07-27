@@ -279,6 +279,47 @@ pub enum ClientAction {
         /// redstone power.
         automatic: bool,
     },
+    /// Tell the server this client has finished loading the world and is
+    /// ready to have its movement validated.
+    ///
+    /// Vanilla's server seeds a ~60-tick (~3 s) `clientLoadedTimeoutTimer`
+    /// after join/respawn and silently ignores movement packets until it
+    /// elapses, *unless* the client sends this to zero it early
+    /// (`ServerGamePacketListenerImpl.hasClientLoaded()`). Sent once per
+    /// join/respawn, as soon as the client is actually ready to be moved.
+    PlayerLoaded,
+    /// Report which advancement tab is open, or that the advancements screen
+    /// was closed.
+    SeenAdvancements {
+        /// The opened tab's id, or `None` if the advancements screen was
+        /// closed.
+        tab: Option<ResourceKey>,
+    },
+    /// Request tab-completion suggestions for a partially typed command.
+    CommandSuggestion {
+        /// Transaction id echoed back in the server's suggestions response.
+        id: i32,
+        /// The command text typed so far, including the leading slash.
+        command: String,
+    },
+    /// Apply paddle input to a boat the player is riding.
+    PaddleBoat {
+        /// Whether the left paddle is being used.
+        left: bool,
+        /// Whether the right paddle is being used.
+        right: bool,
+    },
+    /// Report the locally authoritative position of the vehicle the player
+    /// is riding, once per tick while mounted (vanilla's
+    /// `LocalPlayer.tick()` passenger branch).
+    MoveVehicle {
+        /// Vehicle's absolute position.
+        pos: Vec3,
+        /// Vehicle's rotation.
+        rotation: Rotation,
+        /// Whether the vehicle is on the ground.
+        on_ground: bool,
+    },
 }
 
 /// Client display and locale settings, sent at join and whenever changed.

@@ -58,8 +58,12 @@ use uuid::Uuid;
 // `decode`/`handle_packet` are keyed on `(state, id)`.
 const HANDSHAKE: i32 = 0;
 const LOGIN_START: i32 = 0;
+const LOGIN_ACKNOWLEDGED: i32 = 3;
 const LOGIN_SUCCESS: i32 = 2;
+const FINISH_CONFIGURATION: i32 = 3;
+const CHUNK_BATCH_START: i32 = 10;
 const CHUNK: i32 = 0x27;
+const CHUNK_BATCH_FINISHED: i32 = 11;
 
 // Block-state ids carried in the stand-in chunk packet. `0` is air (elided);
 // any solid worldgen block is sent as `STONE`.
@@ -101,28 +105,59 @@ impl ServerProtocol for StandInProtocol {
             State::Login if packet_id == LOGIN_START => {
                 let mut r = Reader::new(payload);
                 let username = r.string(16).expect("username");
-                ServerBound::LoginStart { username }
+                ServerBound::LoginStart {
+                    username,
+                    uuid: Uuid::nil(),
+                }
+            }
+            State::Login if packet_id == LOGIN_ACKNOWLEDGED => ServerBound::LoginAcknowledged,
+            State::Configuration if packet_id == FINISH_CONFIGURATION => {
+                ServerBound::ConfigurationFinished
             }
             _ => ServerBound::Ignored,
         }
     }
 
-    fn login_sequence(&self, username: &str) -> Vec<ServerDirective> {
+    fn login_success(&self, username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
         let mut w = Writer::default();
         w.string(username);
-        vec![
-            ServerDirective::Send {
-                packet_id: LOGIN_SUCCESS,
-                payload: w.as_slice().to_vec(),
-            },
-            ServerDirective::SetState(State::Play),
-        ]
+        vec![ServerDirective::Send {
+            packet_id: LOGIN_SUCCESS,
+            payload: w.as_slice().to_vec(),
+        }]
+    }
+
+    fn begin_configuration(&self) -> Vec<ServerDirective> {
+        vec![ServerDirective::Send {
+            packet_id: FINISH_CONFIGURATION,
+            payload: Vec::new(),
+        }]
+    }
+
+    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+        Vec::new()
+    }
+
+    fn begin_chunk_batch(&self) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: CHUNK_BATCH_START,
+            payload: Vec::new(),
+        }
     }
 
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerColumn) -> ServerDirective {
         ServerDirective::Send {
             packet_id: CHUNK,
             payload: Self::encode_column(cx, cz, column),
+        }
+    }
+
+    fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(batch_size);
+        ServerDirective::Send {
+            packet_id: CHUNK_BATCH_FINISHED,
+            payload: w.as_slice().to_vec(),
         }
     }
 }
@@ -214,9 +249,20 @@ impl VersionAdapter for StandInAdapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         match state {
-            ConnectionState::Login if packet_id == LOGIN_SUCCESS => {
-                Ok(vec![Directive::SetState(ConnectionState::Play)])
-            }
+            ConnectionState::Login if packet_id == LOGIN_SUCCESS => Ok(vec![
+                Directive::Send {
+                    packet_id: LOGIN_ACKNOWLEDGED,
+                    payload: Vec::new(),
+                },
+                Directive::SetState(ConnectionState::Configuration),
+            ]),
+            ConnectionState::Configuration if packet_id == FINISH_CONFIGURATION => Ok(vec![
+                Directive::Send {
+                    packet_id: FINISH_CONFIGURATION,
+                    payload: Vec::new(),
+                },
+                Directive::SetState(ConnectionState::Play),
+            ]),
             ConnectionState::Play if packet_id == CHUNK => {
                 let (cx, cz, chunk) = Self::decode_column(payload);
                 world.load(WorldChunkPos::new(cx, cz), chunk);

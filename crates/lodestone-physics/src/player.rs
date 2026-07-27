@@ -15,7 +15,8 @@
 //! Every width (`f32` vs `f64`) and every operation order matches the reference
 //! source, because the server validates the resulting positions.
 
-use crate::collision::{CollisionView, collide};
+use crate::collision::CollisionView;
+use crate::entity::{EntityDimensions, EntityMotion, MoveContext, move_entity};
 use crate::fluid::apply_fluid_push;
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth::{self};
@@ -141,6 +142,15 @@ pub struct PlayerState {
     /// `sprinting` flag, so there is no double-count. Pass the raw `f64` — never
     /// a pre-cast `f32` — so the double→float rounding stays inside physics.
     pub movement_speed: Option<f64>,
+    /// Pending **"stuck in block" speed multiplier** (`Entity.stuckSpeedMultiplier`),
+    /// set last tick by the block we were inside and consumed at the top of the
+    /// next move (see [`CollisionView::stuck_multiplier`]). `ZERO` means "not
+    /// stuck"; vanilla treats `lengthSqr <= 1.0E-7` as unset. Cobweb, powder snow
+    /// and sweet berry bush write this; consumption multiplies the tick's
+    /// movement component-wise and then zeroes velocity, exactly as vanilla — the
+    /// one-tick delay between entering the block and being slowed is observable
+    /// and reproduced.
+    pub stuck_speed_multiplier: Vec3d,
 }
 
 impl PlayerState {
@@ -159,6 +169,7 @@ impl PlayerState {
             fall_flying: false,
             effects: StatusEffects::default(),
             movement_speed: None,
+            stuck_speed_multiplier: Vec3d::ZERO,
         }
     }
 
@@ -177,19 +188,16 @@ impl PlayerState {
         self
     }
 
-    /// The player's bounding box at its current position, using the profile's
-    /// standing dimensions.
+    /// The player's bounding box at its current position.
+    ///
+    /// The player's `0.6 × 1.8` hitbox is per-entity data ([`EntityDimensions`]),
+    /// not version data, so it no longer comes from the profile. The `profile`
+    /// parameter is retained (as `_profile`) purely for source compatibility with
+    /// existing callers; it is unused, and a caller may drop the argument once its
+    /// call sites are updated.
     #[must_use]
-    pub fn bounding_box(&self, profile: &PhysicsProfile) -> Aabb {
-        let half = f64::from(profile.width) / 2.0;
-        Aabb::new(
-            self.position.x - half,
-            self.position.y,
-            self.position.z - half,
-            self.position.x + half,
-            self.position.y + f64::from(profile.height),
-            self.position.z + half,
-        )
+    pub fn bounding_box(&self, _profile: &PhysicsProfile) -> Aabb {
+        EntityDimensions::PLAYER.bounding_box(self.position)
     }
 }
 
@@ -294,85 +302,49 @@ fn input_vector(strafe: f32, forward: f32, speed: f32, yaw: f32) -> Vec3d {
 ///
 /// For the common case (no fence/wall special-casing) this is the block at
 /// `(floor(x), floor(y - 0.500001), floor(z))`.
-fn friction_block(position: Vec3d) -> (i32, i32, i32) {
+pub(crate) fn friction_block(position: Vec3d) -> (i32, i32, i32) {
     let x = mth::floor(position.x);
     let y = mth::floor(position.y - f64::from(0.500001f32));
     let z = mth::floor(position.z);
     (x, y, z)
 }
 
-/// `Entity.move(MoverType.SELF, delta)` restricted to the parts that affect a
-/// player's reported position: collide, commit position, update collision
-/// flags, run `restituteMovementAfterCollisions`, and apply the block speed
-/// factor to the resulting velocity.
+/// The player's per-tick call into the shared entity move core
+/// ([`move_entity`]). Restricted, as vanilla's `Entity.move(MoverType.SELF, …)`
+/// is, to the parts that affect a player's reported position: collide, commit
+/// position, update collision flags, run `restituteMovementAfterCollisions`, and
+/// apply the block speed factor.
 ///
-/// `suppress_bounce` is `isSuppressingBounce()` (the player sneaking); it both
-/// zeroes the base entity restitution and vetoes the block-bounce branch.
+/// This is a thin wrapper: it lifts the player's motion into an [`EntityMotion`],
+/// supplies the player's [`EntityDimensions::PLAYER`] hitbox/step height and a
+/// [`MoveContext`] (Slow Falling, and `suppress_bounce` = the player sneaking,
+/// which both zeroes the base entity restitution and vetoes the block-bounce
+/// branch), runs the shared core, and writes the result back. A mob loop would
+/// call [`move_entity`] directly with its own dimensions and velocity — the
+/// arithmetic is identical, which is the whole point of the shared core.
 fn do_move(
     state: &mut PlayerState,
-    delta: Vec3d,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     suppress_bounce: bool,
 ) {
-    let bb = state.bounding_box(profile);
-    let resolved = collide(view, delta, bb, state.on_ground, profile.step_height);
-
-    let x_collision = !mth_equal(delta.x, resolved.x);
-    let z_collision = !mth_equal(delta.z, resolved.z);
-    state.horizontal_collision = x_collision || z_collision;
-
-    let moved_vertically = delta.y.abs() > 0.0;
-    let vertical_collision = delta.y != resolved.y;
-    let vertical_collision_below = vertical_collision && delta.y < 0.0;
-    state.on_ground = vertical_collision_below;
-
-    // Commit position (vanilla guards on a tiny-movement threshold, but adding
-    // the resolved movement is equivalent for non-degenerate deltas).
-    if resolved.length_sqr() > 1.0E-7 || delta.length_sqr() - resolved.length_sqr() < 1.0E-7 {
-        state.position = state.position.add(resolved);
-    }
-
-    // Vanilla keeps `deltaMovement == delta` through `collide`, then only
-    // `restituteMovementAfterCollisions` rewrites it — and *that* is what zeroes
-    // a blocked axis (restitution 0) or reverses it into a bounce (slime). The
-    // old `velocity = resolved` shortcut agreed only when a contact was flush
-    // (gap 0, so `resolved == 0` on that axis); it diverged on a fractional
-    // landing and could not express a bounce. Reproduce restitute faithfully.
-    let mut velocity = delta;
-    if (moved_vertically && vertical_collision) || state.horizontal_collision {
-        velocity = restitute_movement_after_collisions(
-            delta,
-            resolved,
-            x_collision,
-            z_collision,
-            vertical_collision,
-            vertical_collision_below,
-            state,
-            view,
-            profile,
-            suppress_bounce,
-        );
-    }
-    state.velocity = velocity;
-
-    // Block speed factor (soul sand 0.4, honey 0.4), applied last as in `move`.
-    // `getBlockSpeedFactor`: query `blockPosition()` (floor of the feet) first,
-    // and only if that is 1.0 fall through to the block below that affects
-    // movement (`getOnPos(0.500001)`).
-    let bx = mth::floor(state.position.x);
-    let by = mth::floor(state.position.y);
-    let bz = mth::floor(state.position.z);
-    let speed_factor_here = f64::from(view.speed_factor(bx, by, bz));
-    let block_speed_factor = if speed_factor_here == 1.0 {
-        let (fx, fy, fz) = friction_block(state.position);
-        f64::from(view.speed_factor(fx, fy, fz))
-    } else {
-        speed_factor_here
+    let mut motion = EntityMotion {
+        position: state.position,
+        velocity: state.velocity,
+        on_ground: state.on_ground,
+        horizontal_collision: state.horizontal_collision,
+        stuck_speed_multiplier: state.stuck_speed_multiplier,
     };
-    state.velocity = state
-        .velocity
-        .multiply_each(block_speed_factor, 1.0, block_speed_factor);
+    let ctx = MoveContext {
+        slow_falling: state.effects.slow_falling,
+        suppress_bounce,
+    };
+    move_entity(&mut motion, EntityDimensions::PLAYER, view, profile, ctx);
+    state.position = motion.position;
+    state.velocity = motion.velocity;
+    state.on_ground = motion.on_ground;
+    state.horizontal_collision = motion.horizontal_collision;
+    state.stuck_speed_multiplier = motion.stuck_speed_multiplier;
 }
 
 /// `Entity.restituteMovementAfterCollisions` — the post-collision velocity
@@ -383,14 +355,15 @@ fn do_move(
 /// zero base bounciness, so horizontal wall bounces never happen for a player;
 /// the only live branch is the vertical land-bounce off a bouncy block.
 #[allow(clippy::too_many_arguments)]
-fn restitute_movement_after_collisions(
+pub(crate) fn restitute_movement_after_collisions(
     current: Vec3d,
     resolved: Vec3d,
     x_collision: bool,
     z_collision: bool,
     vertical_collision: bool,
     vertical_collision_below: bool,
-    state: &PlayerState,
+    position: Vec3d,
+    slow_falling: bool,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
     suppress_bounce: bool,
@@ -411,14 +384,14 @@ fn restitute_movement_after_collisions(
     if vertical_collision {
         if vertical_collision_below {
             // Block at getOnPosLegacy() == getOnPos(0.2), from the post-move pos.
-            let ex = mth::floor(state.position.x);
-            let ey = mth::floor(state.position.y - f64::from(0.2f32));
-            let ez = mth::floor(state.position.z);
+            let ex = mth::floor(position.x);
+            let ey = mth::floor(position.y - f64::from(0.2f32));
+            let ez = mth::floor(position.z);
             let block_bounciness = f64::from(view.bounce_restitution(ex, ey, ez));
             let effective_gravity = effective_gravity(
                 f64::from(profile.gravity),
                 current.y <= 0.0,
-                state.effects.slow_falling,
+                slow_falling,
             );
             // `!(-current.y < effGravity)`: only a fast-enough landing bounces (a
             // resting entity does not jitter). Kept as vanilla's negated `<` rather
@@ -437,7 +410,7 @@ fn restitute_movement_after_collisions(
             let effective_gravity = effective_gravity(
                 f64::from(profile.gravity),
                 current.y <= 0.0,
-                state.effects.slow_falling,
+                slow_falling,
             );
             (
                 portion_with_movement * effective_gravity,
@@ -453,7 +426,7 @@ fn restitute_movement_after_collisions(
 }
 
 /// `Mth.equal(a, b)` → `Math.abs(b - a) < 1.0E-5F`.
-fn mth_equal(a: f64, b: f64) -> bool {
+pub(crate) fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < f64::from(1.0e-5f32)
 }
 
@@ -574,7 +547,7 @@ pub fn tick_air(
     if climbing {
         state.velocity = handle_on_climbable(state.velocity, input.sneak);
     }
-    do_move(state, state.velocity, view, profile, input.sneak);
+    do_move(state, view, profile, input.sneak);
     let mut movement = state.velocity;
     if (state.horizontal_collision || input.jump) && climbing {
         movement = Vec3d::new(movement.x, 0.2, movement.z);
@@ -807,7 +780,7 @@ pub fn tick_water(
 
     let accel = input_vector(xxa, zza, speed, state.yaw);
     state.velocity = state.velocity.add(accel);
-    do_move(state, state.velocity, view, profile, input.sneak);
+    do_move(state, view, profile, input.sneak);
 
     let movement = state.velocity.multiply_each(
         f64::from(slow_down),
@@ -883,7 +856,7 @@ pub fn tick_lava(
     // moveRelative(0.02) → move → scale(0.5) [deep] → -baseGravity/4.
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
     state.velocity = state.velocity.add(accel);
-    do_move(state, state.velocity, view, profile, input.sneak);
+    do_move(state, view, profile, input.sneak);
     state.velocity = state.velocity.scale(0.5);
     if base_gravity != 0.0 {
         state.velocity = state
@@ -1016,9 +989,50 @@ pub fn tick_elytra(
     let collapsed = Vec3d::new(dx, dy, dz);
 
     state.velocity = update_fall_flying_movement(state, profile, collapsed);
-    do_move(state, state.velocity, view, profile, false);
+    do_move(state, view, profile, false);
 }
 
+/// `Entity.checkInsideBlocks` → `Block.entityInside` → `makeStuckInBlock`: after
+/// the tick's movement, record the stuck-speed multiplier of whatever block the
+/// (deflated) bounding box is now inside, for the *next* move to consume. This is
+/// what produces the observable one-tick lag between entering a cobweb and being
+/// grabbed by it.
+///
+/// Vanilla walks the swept movement segment with the target bounding box deflated
+/// by `1.0E-5`; we sample that resting overlap at the final position, which is
+/// exact for the stationary/slow case (standing in, or walking into, a web) — the
+/// same coarse approximation the water/lava hooks document, and the common case
+/// for cobweb (mineshaft corridors) and powder snow. Blocks are *assigned* in
+/// vanilla, not accumulated, so the last intersected block wins; for the uniform
+/// volumes these blocks form, iteration order is immaterial.
+fn update_stuck_multiplier(
+    state: &mut PlayerState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    let bb = state.bounding_box(profile);
+    let min_x = mth::floor(bb.min_x + 1.0e-5);
+    let max_x = mth::floor(bb.max_x - 1.0e-5);
+    let min_y = mth::floor(bb.min_y + 1.0e-5);
+    let max_y = mth::floor(bb.max_y - 1.0e-5);
+    let min_z = mth::floor(bb.min_z + 1.0e-5);
+    let max_z = mth::floor(bb.max_z - 1.0e-5);
+    let mut found = Vec3d::ZERO;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                if let Some(m) = view.stuck_multiplier(x, y, z) {
+                    found = m;
+                }
+            }
+        }
+    }
+    state.stuck_speed_multiplier = found;
+}
+
+/// Advances the player one tick: dispatches to the fluid/elytra/air travel path
+/// exactly as vanilla's `LivingEntity.travel()`, then records any stuck-in-block
+/// multiplier for the next tick to consume (`Entity.checkInsideBlocks`).
 pub fn tick(
     state: &mut PlayerState,
     input: MovementInput,
@@ -1034,6 +1048,7 @@ pub fn tick(
     } else {
         tick_air(state, input, view, profile);
     }
+    update_stuck_multiplier(state, view, profile);
 }
 
 /// `LivingEntity.getFrictionInfluencedSpeed(blockFriction)`.

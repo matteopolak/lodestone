@@ -634,10 +634,9 @@ fn is_stone(s: &str) -> bool {
     !is_air(s) && !is_fluid(s)
 }
 
-/// Resolves a `{Name, Properties?}` block JSON to its full canonical string via
-/// the caller-supplied [`BlockCanon`] table (produced by vanilla's own
-/// `BlockState.CODEC`).
-fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
+/// The partial key (`name` + sorted specified `[k=v]`) for a `{Name, Properties?}`
+/// block JSON node — the lookup key into a [`BlockCanon`].
+fn block_json_key(node: &Value) -> String {
     let name = node["Name"].as_str().expect("block Name");
     let mut key = String::from(name);
     if let Some(props) = node.get("Properties").and_then(Value::as_object) {
@@ -659,8 +658,55 @@ fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
             key.push(']');
         }
     }
+    key
+}
+
+/// Resolves a `{Name, Properties?}` block JSON to its full canonical string via
+/// the caller-supplied [`BlockCanon`] table (produced by vanilla's own
+/// `BlockState.CODEC`).
+fn canonical_from_block_json(node: &Value, canon: &BlockCanon) -> String {
+    let key = block_json_key(node);
     canon
         .get(&key)
         .cloned()
         .unwrap_or_else(|| panic!("no canonical block for result_state key {key:?}"))
+}
+
+/// Builds an **identity** [`BlockCanon`] for a settings value by walking its
+/// `surface_rule` tree and `default_block`, mapping each result state's partial
+/// key to itself.
+///
+/// This exists so the composed generator ([`crate::overworld`]) can run without
+/// a JVM: 26.2's real `BlockState.CODEC` canonicalisation is the identity on
+/// every key the overworld surface rule emits (verified — every `canonmap.*`
+/// line in the surface parity fixtures has `value == key`, because the result
+/// states already carry their full property set). A version whose CODEC is
+/// non-identity would supply its own table instead of calling this. The
+/// per-stage `surface_parity` test still uses the JVM-dumped canon, so this
+/// helper's identity assumption is never what a parity claim rests on.
+#[must_use]
+pub fn identity_canon(settings: &Value) -> BlockCanon {
+    fn walk(node: &Value, canon: &mut BlockCanon) {
+        match node {
+            Value::Object(map) => {
+                if map.get("Name").and_then(Value::as_str).is_some() {
+                    let key = block_json_key(node);
+                    canon.entry(key.clone()).or_insert(key);
+                }
+                for v in map.values() {
+                    walk(v, canon);
+                }
+            }
+            Value::Array(items) => {
+                for v in items {
+                    walk(v, canon);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut canon = BlockCanon::new();
+    walk(&settings["surface_rule"], &mut canon);
+    walk(&settings["default_block"], &mut canon);
+    canon
 }

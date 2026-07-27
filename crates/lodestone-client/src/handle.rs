@@ -11,7 +11,7 @@ use crate::error::{BotError, ClientClosed, SessionOutcome, WaitError};
 use crate::scoreboard::{BossBar, Scoreboard};
 use crate::spawn::DriverTask;
 use crate::state::{EntityView, PlayerSnapshot, SharedState};
-use lodestone_world::ChunkSection;
+use lodestone_world::{ChunkSection, SectionLight};
 
 /// A handle to a running client session.
 ///
@@ -218,8 +218,8 @@ impl ClientHandle {
     /// [`block_at`](ClientHandle::block_at).
     ///
     /// This hands out block-state sections only. Lit meshing also needs the
-    /// column's light, which is not yet reachable lock-free from the client-owned
-    /// world; that is a pending `lodestone-world` seam (see crate docs).
+    /// column's light, served in parallel by [`light_at`](ClientHandle::light_at)
+    /// and [`lights_at`](ClientHandle::lights_at).
     #[must_use]
     pub fn section_at(
         &self,
@@ -243,6 +243,46 @@ impl ClientHandle {
         requests: &[(ChunkPos, usize)],
     ) -> Vec<Option<std::sync::Arc<ChunkSection>>> {
         self.state.sections_at(requests)
+    }
+
+    /// Returns an owned [`SectionLight`] snapshot of light section
+    /// `light_section_index` within the column at `pos`, or `None` if that chunk is
+    /// not loaded or the light section is out of range.
+    ///
+    /// This is the light-side companion to [`section_at`](ClientHandle::section_at),
+    /// so a mesher can read block state through one and light through the other. Two
+    /// things differ from `section_at` and both are deliberate:
+    ///
+    /// - **Indexing is light-section, not block-section.** Light section `0` is the
+    ///   boundary below the world and light section `i` covers block-section
+    ///   `i - 1`. That offset is what lets a mesher reach the boundary light
+    ///   sections above and below the build range — positions block-section index
+    ///   has no name for. Add one to a block-section index to get its light section.
+    /// - **An all-air section still has light.** Where `section_at` returns `None`
+    ///   for an elided (all-air) section, `light_at` returns `Some`: air carries
+    ///   light, and a face meshed against it must sample that light or render black.
+    ///
+    /// Like the section snapshot, the returned value carries no borrow into the
+    /// world and pins no lock: hold it across a whole mesh while streaming
+    /// continues. It is a cheap value (each light layer is `Arc`-backed
+    /// copy-on-write), so a later relight forks it and leaves your snapshot intact.
+    #[must_use]
+    pub fn light_at(&self, pos: ChunkPos, light_section_index: usize) -> Option<SectionLight> {
+        self.state.light_at(pos, light_section_index)
+    }
+
+    /// Returns one owned light snapshot per requested `(chunk, light_section_index)`,
+    /// in order, acquiring the internal world lock exactly once — the light-side
+    /// twin of [`sections_at`](ClientHandle::sections_at) for pulling a whole
+    /// meshing neighbourhood under a single lock.
+    ///
+    /// A request whose chunk is not loaded (or whose light section is out of range)
+    /// yields a `None` slot rather than being omitted, so the result stays aligned
+    /// with the input. Note that, unlike `sections_at`, an all-air section is
+    /// `Some` here (see [`light_at`](ClientHandle::light_at)).
+    #[must_use]
+    pub fn lights_at(&self, requests: &[(ChunkPos, usize)]) -> Vec<Option<SectionLight>> {
+        self.state.lights_at(requests)
     }
 
     /// Returns `(world_age, time_of_day)` as last reported by the server.

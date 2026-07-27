@@ -15,24 +15,55 @@
 //! entry is checked against the real texture PNG in `client.jar` by the
 //! `real_jar` coverage test, so a mistranscribed sheet size cannot pass silently.
 
-use crate::entity::{CubeDef, EntityModelDef, PartDef, PartPose, player_model};
+use crate::entity::{
+    CubeDef, EntityModelDef, EntityTexture, EntityVariant, PartDef, PartPose, Temperature,
+    player_model,
+};
 use std::f32::consts::PI;
 
-/// One ported entity model: a stable `name`, the default in-jar texture path
-/// (relative to `assets/<ns>/textures/`, no extension), and a builder that
-/// produces the bake-ready [`EntityModelDef`].
+/// One ported entity model: a stable `name`, its texture (fixed or
+/// variant-driven, see [`EntityTexture`]), and a builder that produces the
+/// bake-ready [`EntityModelDef`].
 ///
-/// The texture path is the *default* skin for biome-varying mobs — 26.2 split
-/// pig/cow/chicken into `_temperate`/`_cold`/`_warm` variants and removed the
-/// bare `pig.png`, so the temperate variant is the canonical default.
+/// 26.2 split pig/cow/chicken into `_temperate`/`_cold`/`_warm` variants and
+/// removed the bare `pig.png`, so those entries carry an [`EntityTexture::ByVariant`]
+/// selector with the temperate skin as the canonical default; invariant mobs are
+/// [`EntityTexture::Fixed`].
 #[derive(Clone, Debug)]
 pub struct EntityModelEntry {
     /// Stable identifier for the model (not necessarily the registry id).
     pub name: &'static str,
-    /// Default texture path, relative to `assets/<ns>/textures/`, without `.png`.
-    pub texture: &'static str,
+    /// The texture sheet(s) for this model, resolved via [`EntityTexture`].
+    pub texture: EntityTexture,
     /// Builds the bake-ready model.
     pub build: fn() -> EntityModelDef,
+}
+
+/// `_temperate`/`_cold`/`_warm` selector for a mob whose only variant axis is
+/// climate (pig, cow, chicken in 26.2). Each mob gets a named selector below
+/// because a `fn` pointer cannot capture per-mob path literals.
+fn pig_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Temperature(Temperature::Cold) => "entity/pig/pig_cold",
+        EntityVariant::Temperature(Temperature::Warm) => "entity/pig/pig_warm",
+        EntityVariant::Temperature(Temperature::Temperate) => "entity/pig/pig_temperate",
+    }
+}
+
+fn cow_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Temperature(Temperature::Cold) => "entity/cow/cow_cold",
+        EntityVariant::Temperature(Temperature::Warm) => "entity/cow/cow_warm",
+        EntityVariant::Temperature(Temperature::Temperate) => "entity/cow/cow_temperate",
+    }
+}
+
+fn chicken_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Temperature(Temperature::Cold) => "entity/chicken/chicken_cold",
+        EntityVariant::Temperature(Temperature::Warm) => "entity/chicken/chicken_warm",
+        EntityVariant::Temperature(Temperature::Temperate) => "entity/chicken/chicken_temperate",
+    }
 }
 
 fn cube(origin: [f32; 3], size: [f32; 3], tex: [f32; 2]) -> CubeDef {
@@ -1121,7 +1152,8 @@ pub fn hoglin_model() -> EntityModelDef {
 pub fn strider_model() -> EntityModelDef {
     // Each bristle is a flat (zero-height) plane; the three on the right are
     // mirrored. (origin, tex, mirrored, pose offset, zRot)
-    let bristles: [([f32; 3], [f32; 2], bool, [f32; 3], f32); 6] = [
+    type Bristle = ([f32; 3], [f32; 2], bool, [f32; 3], f32);
+    let bristles: [Bristle; 6] = [
         (
             [-12.0, 0.0, 0.0],
             [16.0, 65.0],
@@ -1337,6 +1369,330 @@ pub fn piglin_model() -> EntityModelDef {
     }
 
     model
+}
+
+/// `PhantomModel.createBodyLayer`: a body carrying a two-segment tail, two
+/// two-segment wings (right mirrored) and a head. Eight boxes, sheet 64x64.
+pub fn phantom_model() -> EntityModelDef {    let tail_tip = PartDef::new(PartPose::offset(0.0, 0.5, 6.0))
+        .with_cube(cube([-1.0, 0.0, 0.0], [1.0, 1.0, 6.0], [4.0, 29.0]));
+    let tail_base = PartDef::new(PartPose::offset(0.0, -2.0, 1.0))
+        .with_cube(cube([-2.0, 0.0, 0.0], [3.0, 2.0, 6.0], [3.0, 20.0]))
+        .with_child("tail_tip", tail_tip);
+
+    let left_wing_tip = PartDef::new(PartPose::offset_and_rotation(6.0, 0.0, 0.0, 0.0, 0.0, 0.1))
+        .with_cube(cube([0.0, 0.0, 0.0], [13.0, 1.0, 9.0], [16.0, 24.0]));
+    let left_wing_base = PartDef::new(PartPose::offset_and_rotation(2.0, -2.0, -8.0, 0.0, 0.0, 0.1))
+        .with_cube(cube([0.0, 0.0, 0.0], [6.0, 2.0, 9.0], [23.0, 12.0]))
+        .with_child("left_wing_tip", left_wing_tip);
+
+    let right_wing_tip = PartDef::new(PartPose::offset_and_rotation(-6.0, 0.0, 0.0, 0.0, 0.0, -0.1))
+        .with_cube(cube([-13.0, 0.0, 0.0], [13.0, 1.0, 9.0], [16.0, 24.0]).mirrored());
+    let right_wing_base =
+        PartDef::new(PartPose::offset_and_rotation(-3.0, -2.0, -8.0, 0.0, 0.0, -0.1))
+            .with_cube(cube([-6.0, 0.0, 0.0], [6.0, 2.0, 9.0], [23.0, 12.0]).mirrored())
+            .with_child("right_wing_tip", right_wing_tip);
+
+    let head = PartDef::new(PartPose::offset_and_rotation(0.0, 1.0, -7.0, 0.2, 0.0, 0.0))
+        .with_cube(cube([-4.0, -2.0, -5.0], [7.0, 3.0, 5.0], [0.0, 0.0]));
+
+    let body = PartDef::new(PartPose::rotation(-0.1, 0.0, 0.0))
+        .with_cube(cube([-3.0, -2.0, -8.0], [5.0, 3.0, 9.0], [0.0, 8.0]))
+        .with_child("tail_base", tail_base)
+        .with_child("left_wing_base", left_wing_base)
+        .with_child("right_wing_base", right_wing_base)
+        .with_child("head", head);
+
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child("body", body),
+    }
+}
+
+
+/// `WardenModel.createBodyLayer`: a rooted `bone` carrying the body (with two
+/// flat ribcage planes, a head bearing two flat tendrils, and two long arms)
+/// plus two legs. Ten boxes, sheet 128x128.
+pub fn warden_model() -> EntityModelDef {
+    let right_tendril = PartDef::new(PartPose::offset(-8.0, -12.0, 0.0))
+        .with_cube(cube([-16.0, -13.0, 0.0], [16.0, 16.0, 0.0], [52.0, 32.0]));
+    let left_tendril = PartDef::new(PartPose::offset(8.0, -12.0, 0.0))
+        .with_cube(cube([0.0, -13.0, 0.0], [16.0, 16.0, 0.0], [58.0, 0.0]));
+    let head = PartDef::new(PartPose::offset(0.0, -13.0, 0.0))
+        .with_cube(cube([-8.0, -16.0, -5.0], [16.0, 16.0, 10.0], [0.0, 32.0]))
+        .with_child("right_tendril", right_tendril)
+        .with_child("left_tendril", left_tendril);
+
+    let right_ribcage = PartDef::new(PartPose::offset(-7.0, -2.0, -4.0))
+        .with_cube(cube([-2.0, -11.0, -0.1], [9.0, 21.0, 0.0], [90.0, 11.0]));
+    let left_ribcage = PartDef::new(PartPose::offset(7.0, -2.0, -4.0))
+        .with_cube(cube([-7.0, -11.0, -0.1], [9.0, 21.0, 0.0], [90.0, 11.0]).mirrored());
+    let right_arm = PartDef::new(PartPose::offset(-13.0, -13.0, 1.0))
+        .with_cube(cube([-4.0, 0.0, -4.0], [8.0, 28.0, 8.0], [44.0, 50.0]));
+    let left_arm = PartDef::new(PartPose::offset(13.0, -13.0, 1.0))
+        .with_cube(cube([-4.0, 0.0, -4.0], [8.0, 28.0, 8.0], [0.0, 58.0]));
+
+    let body = PartDef::new(PartPose::offset(0.0, -21.0, 0.0))
+        .with_cube(cube([-9.0, -13.0, -4.0], [18.0, 21.0, 11.0], [0.0, 0.0]))
+        .with_child("right_ribcage", right_ribcage)
+        .with_child("left_ribcage", left_ribcage)
+        .with_child("head", head)
+        .with_child("right_arm", right_arm)
+        .with_child("left_arm", left_arm);
+
+    let right_leg = PartDef::new(PartPose::offset(-5.9, -13.0, 0.0))
+        .with_cube(cube([-3.1, 0.0, -3.0], [6.0, 13.0, 6.0], [76.0, 48.0]));
+    let left_leg = PartDef::new(PartPose::offset(5.9, -13.0, 0.0))
+        .with_cube(cube([-2.9, 0.0, -3.0], [6.0, 13.0, 6.0], [76.0, 76.0]));
+
+    let bone = PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+        .with_child("body", body)
+        .with_child("right_leg", right_leg)
+        .with_child("left_leg", left_leg);
+
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root: PartDef::new(PartPose::ZERO).with_child("bone", bone),
+    }
+}
+
+/// `WitherBossModel.createBodyLayer` at the base deformation: shoulders, a
+/// four-cube ribcage, a tail, and three heads. Nine boxes, sheet 64x64. The
+/// tail's rest pose is placed from `cos/sin(0.20420352)*10`, transcribed rather
+/// than pre-computed so it matches vanilla to the last bit.
+pub fn wither_model() -> EntityModelDef {
+    const RIBCAGE_X_ROT: f32 = 0.20420352;
+
+    let shoulders = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-10.0, 3.9, -0.5], [20.0, 3.0, 3.0], [0.0, 16.0]));
+
+    let ribcage = PartDef::new(PartPose::offset_and_rotation(
+        -2.0,
+        6.9,
+        -0.5,
+        RIBCAGE_X_ROT,
+        0.0,
+        0.0,
+    ))
+    .with_cube(cube([0.0, 0.0, 0.0], [3.0, 10.0, 3.0], [0.0, 22.0]))
+    .with_cube(cube([-4.0, 1.5, 0.5], [11.0, 2.0, 2.0], [24.0, 22.0]))
+    .with_cube(cube([-4.0, 4.0, 0.5], [11.0, 2.0, 2.0], [24.0, 22.0]))
+    .with_cube(cube([-4.0, 6.5, 0.5], [11.0, 2.0, 2.0], [24.0, 22.0]));
+
+    let tail = PartDef::new(PartPose::offset_and_rotation(
+        -2.0,
+        6.9 + RIBCAGE_X_ROT.cos() * 10.0,
+        -0.5 + RIBCAGE_X_ROT.sin() * 10.0,
+        0.83252203,
+        0.0,
+        0.0,
+    ))
+    .with_cube(cube([0.0, 0.0, 0.0], [3.0, 6.0, 3.0], [12.0, 22.0]));
+
+    let center_head = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, -4.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]));
+    let side_head = |x: f32| {
+        PartDef::new(PartPose::offset(x, 4.0, 0.0))
+            .with_cube(cube([-4.0, -4.0, -4.0], [6.0, 6.0, 6.0], [32.0, 0.0]))
+    };
+
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO)
+            .with_child("shoulders", shoulders)
+            .with_child("ribcage", ribcage)
+            .with_child("tail", tail)
+            .with_child("center_head", center_head)
+            .with_child("right_head", side_head(-8.0))
+            .with_child("left_head", side_head(10.0)),
+    }
+}
+
+/// `EnderDragonModel.createBodyLayer`: head+jaw, five neck segments and twelve
+/// tail segments (all sharing one two-cube "spine" mesh), a body, two wings
+/// (each a bone + a flat skin plane) and four three-segment legs. 65 boxes on a
+/// 256x256 sheet. The wings' `skin` planes use vanilla's negative `texOffs(-56,
+/// ..)` — legitimately off the left edge, which is why the UV gate is a gross
+/// sanity envelope, not a strict `[0, 1]` bound.
+pub fn ender_dragon_model() -> EntityModelDef {
+    // The shared neck/tail segment: a 10-cube plus a small dorsal scale.
+    let spine = |x: f32, y: f32, z: f32| {
+        PartDef::new(PartPose::offset(x, y, z))
+            .with_cube(cube([-5.0, -5.0, -5.0], [10.0, 10.0, 10.0], [192.0, 104.0]))
+            .with_cube(cube([-1.0, -9.0, -3.0], [2.0, 4.0, 6.0], [48.0, 0.0]))
+    };
+
+    let jaw = PartDef::new(PartPose::offset(0.0, 4.0, -8.0))
+        .with_cube(cube([-6.0, 0.0, -16.0], [12.0, 4.0, 16.0], [176.0, 65.0]));
+    let head = PartDef::new(PartPose::offset(0.0, 20.0, -62.0))
+        .with_cube(cube([-6.0, -1.0, -24.0], [12.0, 5.0, 16.0], [176.0, 44.0]))
+        .with_cube(cube([-8.0, -8.0, -10.0], [16.0, 16.0, 16.0], [112.0, 30.0]))
+        .with_cube(cube([-5.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0.0, 0.0]).mirrored())
+        .with_cube(cube([-5.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112.0, 0.0]).mirrored())
+        .with_cube(cube([3.0, -12.0, -4.0], [2.0, 4.0, 6.0], [0.0, 0.0]).mirrored())
+        .with_cube(cube([3.0, -3.0, -22.0], [2.0, 2.0, 4.0], [112.0, 0.0]).mirrored())
+        .with_child("jaw", jaw);
+
+    // One side's leg chain (hip -> tip -> foot). `s` is the x-sign: +1 left,
+    // -1 right. Vanilla mirrors by sign of the hip offset, not by tex mirror.
+    let leg = |s: f32| {
+        let front_foot = PartDef::new(PartPose::offset_and_rotation(0.0, 23.0, 0.0, 0.75, 0.0, 0.0))
+            .with_cube(cube([-4.0, 0.0, -12.0], [8.0, 4.0, 16.0], [144.0, 104.0]));
+        let front_tip = PartDef::new(PartPose::offset_and_rotation(0.0, 20.0, -1.0, -0.5, 0.0, 0.0))
+            .with_cube(cube([-3.0, -1.0, -3.0], [6.0, 24.0, 6.0], [226.0, 138.0]))
+            .with_child("front_foot", front_foot);
+        let front_leg =
+            PartDef::new(PartPose::offset_and_rotation(12.0 * s, 17.0, -6.0, 1.3, 0.0, 0.0))
+                .with_cube(cube([-4.0, -4.0, -4.0], [8.0, 24.0, 8.0], [112.0, 104.0]))
+                .with_child("front_tip", front_tip);
+
+        let hind_foot = PartDef::new(PartPose::offset_and_rotation(0.0, 31.0, 4.0, 0.75, 0.0, 0.0))
+            .with_cube(cube([-9.0, 0.0, -20.0], [18.0, 6.0, 24.0], [112.0, 0.0]));
+        let hind_tip = PartDef::new(PartPose::offset_and_rotation(0.0, 32.0, -4.0, 0.5, 0.0, 0.0))
+            .with_cube(cube([-6.0, -2.0, 0.0], [12.0, 32.0, 12.0], [196.0, 0.0]))
+            .with_child("hind_foot", hind_foot);
+        let hind_leg =
+            PartDef::new(PartPose::offset_and_rotation(16.0 * s, 13.0, 34.0, 1.0, 0.0, 0.0))
+                .with_cube(cube([-8.0, -4.0, -8.0], [16.0, 32.0, 16.0], [0.0, 0.0]))
+                .with_child("hind_tip", hind_tip);
+        (front_leg, hind_leg)
+    };
+
+    // Left wing bones are tex-mirrored and grow toward +x; right wing is not
+    // mirrored and grows toward -x (box origins already at -56).
+    let left_wing_tip = PartDef::new(PartPose::offset(56.0, 0.0, 0.0))
+        .with_cube(cube([0.0, -2.0, -2.0], [56.0, 4.0, 4.0], [112.0, 136.0]).mirrored())
+        .with_cube(cube([0.0, 0.0, 2.0], [56.0, 0.0, 56.0], [-56.0, 144.0]).mirrored());
+    let left_wing = PartDef::new(PartPose::offset(12.0, 2.0, -6.0))
+        .with_cube(cube([0.0, -4.0, -4.0], [56.0, 8.0, 8.0], [112.0, 88.0]).mirrored())
+        .with_cube(cube([0.0, 0.0, 2.0], [56.0, 0.0, 56.0], [-56.0, 88.0]).mirrored())
+        .with_child("left_wing_tip", left_wing_tip);
+
+    let right_wing_tip = PartDef::new(PartPose::offset(-56.0, 0.0, 0.0))
+        .with_cube(cube([-56.0, -2.0, -2.0], [56.0, 4.0, 4.0], [112.0, 136.0]))
+        .with_cube(cube([-56.0, 0.0, 2.0], [56.0, 0.0, 56.0], [-56.0, 144.0]));
+    let right_wing = PartDef::new(PartPose::offset(-12.0, 2.0, -6.0))
+        .with_cube(cube([-56.0, -4.0, -4.0], [56.0, 8.0, 8.0], [112.0, 88.0]))
+        .with_cube(cube([-56.0, 0.0, 2.0], [56.0, 0.0, 56.0], [-56.0, 88.0]))
+        .with_child("right_wing_tip", right_wing_tip);
+
+    let (left_front, left_hind) = leg(1.0);
+    let (right_front, right_hind) = leg(-1.0);
+    let body = PartDef::new(PartPose::offset(0.0, 3.0, 8.0))
+        .with_cube(cube([-12.0, 1.0, -16.0], [24.0, 24.0, 64.0], [0.0, 0.0]))
+        .with_cube(cube([-1.0, -5.0, -10.0], [2.0, 6.0, 12.0], [220.0, 53.0]))
+        .with_cube(cube([-1.0, -5.0, 10.0], [2.0, 6.0, 12.0], [220.0, 53.0]))
+        .with_cube(cube([-1.0, -5.0, 30.0], [2.0, 6.0, 12.0], [220.0, 53.0]))
+        .with_child("left_wing", left_wing)
+        .with_child("left_front_leg", left_front)
+        .with_child("left_hind_leg", left_hind)
+        .with_child("right_wing", right_wing)
+        .with_child("right_front_leg", right_front)
+        .with_child("right_hind_leg", right_hind);
+
+    let mut root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child("body", body);
+    for i in 0..5 {
+        root = root.with_child(&format!("neck{i}"), spine(0.0, 20.0, -12.0 - i as f32 * 10.0));
+    }
+    for i in 0..12 {
+        root = root.with_child(&format!("tail{i}"), spine(0.0, 10.0, 60.0 + i as f32 * 10.0));
+    }
+
+    EntityModelDef {
+        texture_width: 256,
+        texture_height: 256,
+        root,
+    }
+}
+
+/// `WitchModel.createBodyLayer`: the villager body (body+jacket, three-cube
+/// arms, two legs) and a head bearing the pointy witch hat (four stacked,
+/// progressively-rotated segments over the inherited villager hat brim) plus a
+/// nose with its mole. Fifteen boxes on a 64x128 sheet, baked at the villager
+/// `scaling(0.9375)`. Witch has a single texture (`witch.png`), so unlike the
+/// villager itself it needs no profession/type variant seam.
+pub fn witch_model() -> EntityModelDef {
+    // Villager body/arms/legs (VillagerModel.createBodyModel), unchanged.
+    let body = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, 0.0, -3.0], [8.0, 12.0, 6.0], [16.0, 20.0]))
+        .with_child(
+            "jacket",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-4.0, 0.0, -3.0], [8.0, 20.0, 6.0], [0.0, 38.0]).grown(0.5)),
+        );
+    let arms = PartDef::new(PartPose::offset_and_rotation(0.0, 3.0, -1.0, -0.75, 0.0, 0.0))
+        .with_cube(cube([-8.0, -2.0, -2.0], [4.0, 8.0, 4.0], [44.0, 22.0]))
+        .with_cube(cube([4.0, -2.0, -2.0], [4.0, 8.0, 4.0], [44.0, 22.0]).mirrored())
+        .with_cube(cube([-4.0, 2.0, -2.0], [8.0, 4.0, 4.0], [40.0, 38.0]));
+    let right_leg = PartDef::new(PartPose::offset(-2.0, 12.0, 0.0))
+        .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 22.0]));
+    let left_leg = PartDef::new(PartPose::offset(2.0, 12.0, 0.0))
+        .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 22.0]).mirrored());
+
+    // Witch head: the villager head cube, the witch hat (with the villager brim
+    // inherited beneath it via addOrReplaceChild's child merge), and the nose+mole.
+    let hat4 = PartDef::new(PartPose::offset_and_rotation(
+        1.75,
+        -2.0,
+        2.0,
+        -PI / 15.0,
+        0.0,
+        0.10471976,
+    ))
+    .with_cube(cube([0.0, 0.0, 0.0], [1.0, 2.0, 1.0], [0.0, 95.0]).grown(0.25));
+    let hat3 = PartDef::new(PartPose::offset_and_rotation(
+        1.75,
+        -4.0,
+        2.0,
+        -0.10471976,
+        0.0,
+        0.05235988,
+    ))
+    .with_cube(cube([0.0, 0.0, 0.0], [4.0, 4.0, 4.0], [0.0, 87.0]))
+    .with_child("hat4", hat4);
+    let hat2 = PartDef::new(PartPose::offset_and_rotation(
+        1.75,
+        -4.0,
+        2.0,
+        -0.05235988,
+        0.0,
+        0.02617994,
+    ))
+    .with_cube(cube([0.0, 0.0, 0.0], [7.0, 4.0, 7.0], [0.0, 76.0]))
+    .with_child("hat3", hat3);
+    let hat_rim = PartDef::new(PartPose::rotation(-PI / 2.0, 0.0, 0.0))
+        .with_cube(cube([-8.0, -8.0, -6.0], [16.0, 16.0, 1.0], [30.0, 47.0]));
+    let hat = PartDef::new(PartPose::offset(-5.0, -10.03125, -5.0))
+        .with_cube(cube([0.0, 0.0, 0.0], [10.0, 2.0, 10.0], [0.0, 64.0]))
+        .with_child("hat_rim", hat_rim)
+        .with_child("hat2", hat2);
+    let nose = PartDef::new(PartPose::offset(0.0, -2.0, 0.0))
+        .with_cube(cube([-1.0, -1.0, -6.0], [2.0, 4.0, 2.0], [24.0, 0.0]))
+        .with_child(
+            "mole",
+            PartDef::new(PartPose::offset(0.0, -2.0, 0.0))
+                .with_cube(cube([0.0, 3.0, -6.75], [1.0, 1.0, 1.0], [0.0, 0.0]).grown(-0.25)),
+        );
+    let head = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-4.0, -10.0, -4.0], [8.0, 10.0, 8.0], [0.0, 0.0]))
+        .with_child("hat", hat)
+        .with_child("nose", nose);
+
+    let model = EntityModelDef {
+        texture_width: 64,
+        texture_height: 128,
+        root: PartDef::new(PartPose::ZERO)
+            .with_child("head", head)
+            .with_child("body", body)
+            .with_child("arms", arms)
+            .with_child("right_leg", right_leg)
+            .with_child("left_leg", left_leg),
+    };
+    scaled(model, 0.9375)
 }
 
 // ============================================================================
@@ -1571,6 +1927,10 @@ pub fn chest_boat_model() -> EntityModelDef {
 /// `BoatModel` but a different hull shape (2 boxes, bamboo raft's flatter
 /// profile) and paddle texOffs. The `1.5708F` bottom x-rotation is transcribed
 /// verbatim (vanilla writes the literal, not `Math.PI / 2`).
+#[allow(
+    clippy::approx_constant,
+    reason = "1.5708 is vanilla's own literal in RaftModel.java, not Math.PI/2 — transcribed verbatim, not the nearby true constant"
+)]
 fn raft_hull() -> PartDef {
     PartDef::new(PartPose::ZERO)
         .with_child(
@@ -1699,6 +2059,10 @@ pub fn minecart_model() -> EntityModelDef {
 /// pivot-only leg-group nodes (`frontlegs`/`backlegs`/`right_hind_leg`/
 /// `left_hind_leg`) whose only cubes live on the leaf `*_leg`/`*_haunch`
 /// parts. Sheet 64×64.
+#[allow(
+    clippy::approx_constant,
+    reason = "the 0.3927/-0.3927 rotations are vanilla's own literals in AdultRabbitModel.java, not Math.PI/8 — transcribed verbatim"
+)]
 pub fn rabbit_model() -> EntityModelDef {
     let body = PartDef::new(PartPose::offset_and_rotation(
         0.0,
@@ -2158,7 +2522,7 @@ pub fn camel_model() -> EntityModelDef {
 /// that this offset addresses, and there is no non-wrapping `texOffs` vanilla
 /// could have chosen instead that keeps that rect on-sheet — see the same
 /// wraparound note on `salmon`'s `right_fin`. `every_uv_is_within_the_sheet`
-/// carries a named exception for `"cod"` for exactly this box. Sheet 32×32.
+/// allows a small texel margin that covers exactly this. Sheet 32×32.
 pub fn cod_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO)
         .with_child(
@@ -2772,6 +3136,10 @@ pub fn sniffer_model() -> EntityModelDef {
 /// a separate root-level `cube` (the rolled-up ball form; vanilla toggles its
 /// visibility with the roll animation state, baked unconditionally here since
 /// this registry has no per-part runtime visibility). Sheet 64×64.
+#[allow(
+    clippy::approx_constant,
+    reason = "-0.3927 is vanilla's own literal in AdultArmadilloModel.java, not Math.PI/8 — transcribed verbatim"
+)]
 pub fn armadillo_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, -2.0, -11.0))
         .with_child(
@@ -2860,52 +3228,61 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
     vec![
         EntityModelEntry {
             name: "player_wide",
-            texture: "entity/player/wide/steve",
+            texture: EntityTexture::Fixed("entity/player/wide/steve"),
             build: player_wide,
         },
         EntityModelEntry {
             name: "player_slim",
-            texture: "entity/player/slim/alex",
+            texture: EntityTexture::Fixed("entity/player/slim/alex"),
             build: player_slim,
         },
         EntityModelEntry {
             name: "zombie",
-            texture: "entity/zombie/zombie",
+            texture: EntityTexture::Fixed("entity/zombie/zombie"),
             build: zombie_model,
         },
         EntityModelEntry {
             name: "skeleton",
-            texture: "entity/skeleton/skeleton",
+            texture: EntityTexture::Fixed("entity/skeleton/skeleton"),
             build: skeleton_model,
         },
         EntityModelEntry {
             name: "creeper",
-            texture: "entity/creeper/creeper",
+            texture: EntityTexture::Fixed("entity/creeper/creeper"),
             build: creeper_model,
         },
         EntityModelEntry {
             name: "spider",
-            texture: "entity/spider/spider",
+            texture: EntityTexture::Fixed("entity/spider/spider"),
             build: spider_model,
         },
         EntityModelEntry {
             name: "pig",
-            texture: "entity/pig/pig_temperate",
+            texture: EntityTexture::ByVariant {
+                default: "entity/pig/pig_temperate",
+                select: pig_texture,
+            },
             build: pig_model,
         },
         EntityModelEntry {
             name: "cow",
-            texture: "entity/cow/cow_temperate",
+            texture: EntityTexture::ByVariant {
+                default: "entity/cow/cow_temperate",
+                select: cow_texture,
+            },
             build: cow_model,
         },
         EntityModelEntry {
             name: "sheep",
-            texture: "entity/sheep/sheep",
+            texture: EntityTexture::Fixed("entity/sheep/sheep"),
             build: sheep_model,
         },
         EntityModelEntry {
             name: "chicken",
-            texture: "entity/chicken/chicken_temperate",
+            texture: EntityTexture::ByVariant {
+                default: "entity/chicken/chicken_temperate",
+                select: chicken_texture,
+            },
             build: chicken_model,
         },
         // Tier 2: common overworld/hostile expansion. Texture-only variants reuse
@@ -2915,124 +3292,149 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // in `scaled(..)` so the geometry carries the same size.
         EntityModelEntry {
             name: "husk",
-            texture: "entity/zombie/husk",
+            texture: EntityTexture::Fixed("entity/zombie/husk"),
             build: husk_model,
         },
         EntityModelEntry {
             name: "stray",
-            texture: "entity/skeleton/stray",
+            texture: EntityTexture::Fixed("entity/skeleton/stray"),
             build: skeleton_model,
         },
         EntityModelEntry {
             name: "wither_skeleton",
-            texture: "entity/skeleton/wither_skeleton",
+            texture: EntityTexture::Fixed("entity/skeleton/wither_skeleton"),
             build: wither_skeleton_model,
         },
         EntityModelEntry {
             name: "cave_spider",
-            texture: "entity/spider/cave_spider",
+            texture: EntityTexture::Fixed("entity/spider/cave_spider"),
             build: cave_spider_model,
         },
         EntityModelEntry {
             name: "slime",
-            texture: "entity/slime/slime",
+            texture: EntityTexture::Fixed("entity/slime/slime"),
             build: slime_model,
         },
         EntityModelEntry {
             name: "magma_cube",
-            texture: "entity/slime/magmacube",
+            texture: EntityTexture::Fixed("entity/slime/magmacube"),
             build: magma_cube_model,
         },
         EntityModelEntry {
             name: "blaze",
-            texture: "entity/blaze/blaze",
+            texture: EntityTexture::Fixed("entity/blaze/blaze"),
             build: blaze_model,
         },
         EntityModelEntry {
             name: "squid",
-            texture: "entity/squid/squid",
+            texture: EntityTexture::Fixed("entity/squid/squid"),
             build: squid_model,
         },
         EntityModelEntry {
             name: "bat",
-            texture: "entity/bat/bat",
+            texture: EntityTexture::Fixed("entity/bat/bat"),
             build: bat_model,
         },
         EntityModelEntry {
             name: "enderman",
-            texture: "entity/enderman/enderman",
+            texture: EntityTexture::Fixed("entity/enderman/enderman"),
             build: enderman_model,
         },
         // Tier 3: monster/* remainder (impl-assets lane).
         EntityModelEntry {
             name: "drowned",
-            texture: "entity/zombie/drowned",
+            texture: EntityTexture::Fixed("entity/zombie/drowned"),
             build: drowned_model,
         },
         EntityModelEntry {
             name: "iron_golem",
-            texture: "entity/iron_golem/iron_golem",
+            texture: EntityTexture::Fixed("entity/iron_golem/iron_golem"),
             build: iron_golem_model,
         },
         EntityModelEntry {
             name: "snow_golem",
-            texture: "entity/snow_golem/snow_golem",
+            texture: EntityTexture::Fixed("entity/snow_golem/snow_golem"),
             build: snow_golem_model,
         },
         EntityModelEntry {
             name: "vex",
-            texture: "entity/illager/vex",
+            texture: EntityTexture::Fixed("entity/illager/vex"),
             build: vex_model,
         },
         EntityModelEntry {
             name: "silverfish",
-            texture: "entity/silverfish/silverfish",
+            texture: EntityTexture::Fixed("entity/silverfish/silverfish"),
             build: silverfish_model,
         },
         EntityModelEntry {
             name: "endermite",
-            texture: "entity/endermite/endermite",
+            texture: EntityTexture::Fixed("entity/endermite/endermite"),
             build: endermite_model,
         },
         EntityModelEntry {
             name: "piglin",
-            texture: "entity/piglin/piglin",
+            texture: EntityTexture::Fixed("entity/piglin/piglin"),
             build: piglin_model,
         },
         EntityModelEntry {
             name: "zombified_piglin",
-            texture: "entity/piglin/zombified_piglin",
+            texture: EntityTexture::Fixed("entity/piglin/zombified_piglin"),
             build: piglin_model,
         },
         EntityModelEntry {
             name: "piglin_brute",
-            texture: "entity/piglin/piglin_brute",
+            texture: EntityTexture::Fixed("entity/piglin/piglin_brute"),
             build: piglin_model,
         },
         EntityModelEntry {
             name: "ghast",
-            texture: "entity/ghast/ghast",
+            texture: EntityTexture::Fixed("entity/ghast/ghast"),
             build: ghast_model,
         },
         EntityModelEntry {
             name: "hoglin",
-            texture: "entity/hoglin/hoglin",
+            texture: EntityTexture::Fixed("entity/hoglin/hoglin"),
             build: hoglin_model,
         },
         EntityModelEntry {
             name: "zoglin",
-            texture: "entity/hoglin/zoglin",
+            texture: EntityTexture::Fixed("entity/hoglin/zoglin"),
             build: hoglin_model,
         },
         EntityModelEntry {
             name: "strider",
-            texture: "entity/strider/strider",
+            texture: EntityTexture::Fixed("entity/strider/strider"),
             build: strider_model,
         },
         EntityModelEntry {
             name: "guardian",
-            texture: "entity/guardian/guardian",
+            texture: EntityTexture::Fixed("entity/guardian/guardian"),
             build: guardian_model,
+        },
+        EntityModelEntry {
+            name: "phantom",
+            texture: EntityTexture::Fixed("entity/phantom/phantom"),
+            build: phantom_model,
+        },
+        EntityModelEntry {
+            name: "warden",
+            texture: EntityTexture::Fixed("entity/warden/warden"),
+            build: warden_model,
+        },
+        EntityModelEntry {
+            name: "wither",
+            texture: EntityTexture::Fixed("entity/wither/wither"),
+            build: wither_model,
+        },
+        EntityModelEntry {
+            name: "ender_dragon",
+            texture: EntityTexture::Fixed("entity/enderdragon/dragon"),
+            build: ender_dragon_model,
+        },
+        EntityModelEntry {
+            name: "witch",
+            texture: EntityTexture::Fixed("entity/witch/witch"),
+            build: witch_model,
         },
         // --- animal/npc/object half (owned by this agent). Horse family,
         // cat/wolf/ocelot and parrot are deferred pending the texture-variant
@@ -3044,87 +3446,87 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // block-model pipeline instead. ---
         EntityModelEntry {
             name: "armor_stand",
-            texture: "entity/armorstand/armorstand",
+            texture: EntityTexture::Fixed("entity/armorstand/armorstand"),
             build: armor_stand_model,
         },
         EntityModelEntry {
             name: "boat",
-            texture: "entity/boat/oak",
+            texture: EntityTexture::Fixed("entity/boat/oak"),
             build: boat_model,
         },
         EntityModelEntry {
             name: "chest_boat",
-            texture: "entity/chest_boat/oak",
+            texture: EntityTexture::Fixed("entity/chest_boat/oak"),
             build: chest_boat_model,
         },
         EntityModelEntry {
             name: "raft",
-            texture: "entity/boat/bamboo",
+            texture: EntityTexture::Fixed("entity/boat/bamboo"),
             build: raft_model,
         },
         EntityModelEntry {
             name: "chest_raft",
-            texture: "entity/chest_boat/bamboo",
+            texture: EntityTexture::Fixed("entity/chest_boat/bamboo"),
             build: chest_raft_model,
         },
         EntityModelEntry {
             name: "minecart",
-            texture: "entity/minecart/minecart",
+            texture: EntityTexture::Fixed("entity/minecart/minecart"),
             build: minecart_model,
         },
         EntityModelEntry {
             name: "end_crystal",
-            texture: "entity/end_crystal/end_crystal",
+            texture: EntityTexture::Fixed("entity/end_crystal/end_crystal"),
             build: end_crystal_model,
         },
         EntityModelEntry {
             name: "rabbit",
-            texture: "entity/rabbit/rabbit_brown",
+            texture: EntityTexture::Fixed("entity/rabbit/rabbit_brown"),
             build: rabbit_model,
         },
         EntityModelEntry {
             name: "fox",
-            texture: "entity/fox/fox",
+            texture: EntityTexture::Fixed("entity/fox/fox"),
             build: fox_model,
         },
         EntityModelEntry {
             name: "panda",
-            texture: "entity/panda/panda",
+            texture: EntityTexture::Fixed("entity/panda/panda"),
             build: panda_model,
         },
         EntityModelEntry {
             name: "goat",
-            texture: "entity/goat/goat",
+            texture: EntityTexture::Fixed("entity/goat/goat"),
             build: goat_model,
         },
         EntityModelEntry {
             name: "bee",
-            texture: "entity/bee/bee",
+            texture: EntityTexture::Fixed("entity/bee/bee"),
             build: bee_model,
         },
         EntityModelEntry {
             name: "turtle",
-            texture: "entity/turtle/turtle",
+            texture: EntityTexture::Fixed("entity/turtle/turtle"),
             build: turtle_model,
         },
         EntityModelEntry {
             name: "camel",
-            texture: "entity/camel/camel",
+            texture: EntityTexture::Fixed("entity/camel/camel"),
             build: camel_model,
         },
         EntityModelEntry {
             name: "cod",
-            texture: "entity/fish/cod",
+            texture: EntityTexture::Fixed("entity/fish/cod"),
             build: cod_model,
         },
         EntityModelEntry {
             name: "salmon",
-            texture: "entity/fish/salmon",
+            texture: EntityTexture::Fixed("entity/fish/salmon"),
             build: salmon_model,
         },
         EntityModelEntry {
             name: "pufferfish",
-            texture: "entity/fish/pufferfish",
+            texture: EntityTexture::Fixed("entity/fish/pufferfish"),
             build: pufferfish_model,
         },
         EntityModelEntry {
@@ -3134,37 +3536,37 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             // negative texOffs) with `tropical_b.png`, not `tropical_a.png`
             // (that's the small model's texture) — confirmed directly against
             // `TropicalFishRenderer.getTextureLocation`.
-            texture: "entity/fish/tropical_b",
+            texture: EntityTexture::Fixed("entity/fish/tropical_b"),
             build: tropical_fish_model,
         },
         EntityModelEntry {
             name: "dolphin",
-            texture: "entity/dolphin/dolphin",
+            texture: EntityTexture::Fixed("entity/dolphin/dolphin"),
             build: dolphin_model,
         },
         EntityModelEntry {
             name: "axolotl",
-            texture: "entity/axolotl/axolotl_lucy",
+            texture: EntityTexture::Fixed("entity/axolotl/axolotl_lucy"),
             build: axolotl_model,
         },
         EntityModelEntry {
             name: "frog",
-            texture: "entity/frog/frog_temperate",
+            texture: EntityTexture::Fixed("entity/frog/frog_temperate"),
             build: frog_model,
         },
         EntityModelEntry {
             name: "tadpole",
-            texture: "entity/tadpole/tadpole",
+            texture: EntityTexture::Fixed("entity/tadpole/tadpole"),
             build: tadpole_model,
         },
         EntityModelEntry {
             name: "sniffer",
-            texture: "entity/sniffer/sniffer",
+            texture: EntityTexture::Fixed("entity/sniffer/sniffer"),
             build: sniffer_model,
         },
         EntityModelEntry {
             name: "armadillo",
-            texture: "entity/armadillo/armadillo",
+            texture: EntityTexture::Fixed("entity/armadillo/armadillo"),
             build: armadillo_model,
         },
     ]

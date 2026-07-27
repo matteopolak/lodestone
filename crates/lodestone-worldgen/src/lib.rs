@@ -32,6 +32,7 @@ pub mod feature;
 pub mod hash;
 pub mod math;
 pub mod noise;
+pub mod overworld;
 pub mod rng;
 pub mod surface;
 

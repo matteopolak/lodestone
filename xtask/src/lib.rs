@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sha1::Digest;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::Write as _,
     fs::File,
     io::{Read as _, Write as _},
@@ -13,6 +13,7 @@ use std::{
 pub const DEFAULT_PACKET_IDS_OUT: &str = "crates/protocol/v770/src/generated/packet_ids.rs";
 /// Default output for the minecraft-data-sourced protocol 47 (Minecraft 1.8.x).
 pub const DEFAULT_PACKET_IDS_OUT_V47: &str = "crates/protocol/v47/src/generated/packet_ids.rs";
+pub const DEFAULT_CONNECTED_ALLOWLIST: &str = "xtask/check-connected.toml";
 
 /// Where a packet report is sourced from.
 ///
@@ -839,6 +840,9 @@ pub enum CliCommand {
         options: GenRegistriesOptions,
     },
     CheckIsolation,
+    CheckConnected {
+        allowlist: PathBuf,
+    },
     CheckDeletable {
         version: String,
     },
@@ -856,7 +860,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n        new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -878,6 +882,7 @@ where
         "fetch-assets" => parse_fetch_assets_args(&args[1..]),
         "gen-registries" => parse_gen_registries_args(&args[1..]),
         "check-isolation" => Ok(CliCommand::CheckIsolation),
+        "check-connected" => parse_check_connected_args(&args[1..]),
         "check-deletable" => parse_check_deletable_args(&args[1..]),
         "codegen-ratio" => Ok(CliCommand::CodegenRatio),
         "new-version" => parse_new_version_args(&args[1..]),
@@ -977,6 +982,16 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
                 bail!("{}", report.violation_summary());
             }
             println!("protocol version crate isolation check passed");
+            Ok(())
+        }
+        CliCommand::CheckConnected { allowlist } => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            let report = check_workspace_connected_with_allowlist(&workspace_root, &allowlist)?;
+            if report.has_violations() {
+                bail!("{}", report.violation_summary());
+            }
+            println!("{}", report.success_summary());
             Ok(())
         }
         CliCommand::CheckDeletable { version } => {
@@ -1219,6 +1234,26 @@ fn normalize_registry_key(key: &str) -> String {
     } else {
         format!("minecraft:{key}")
     }
+}
+
+fn parse_check_connected_args(args: &[String]) -> Result<CliCommand> {
+    let mut allowlist = PathBuf::from(DEFAULT_CONNECTED_ALLOWLIST);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--allowlist" => {
+                index += 1;
+                allowlist = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--allowlist requires a value"))?,
+                );
+            }
+            unknown => bail!("unknown check-connected option {unknown:?}"),
+        }
+        index += 1;
+    }
+    Ok(CliCommand::CheckConnected { allowlist })
 }
 
 fn parse_check_deletable_args(args: &[String]) -> Result<CliCommand> {
@@ -2045,6 +2080,436 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
     }
 
     Ok(IsolationReport { findings })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedReport {
+    pub roots: Vec<String>,
+    pub findings: Vec<ConnectedFinding>,
+    pub allowed: Vec<ConnectedAllowance>,
+}
+
+impl ConnectedReport {
+    pub fn violations(&self) -> impl Iterator<Item = &ConnectedFinding> {
+        self.findings.iter()
+    }
+
+    #[must_use]
+    pub fn has_violations(&self) -> bool {
+        !self.findings.is_empty()
+    }
+
+    #[must_use]
+    pub fn violation_summary(&self) -> String {
+        let mut summary = String::from(
+            "workspace connectivity violations found (crate is not reachable from any shipped binary/cdylib root through non-dev dependencies):",
+        );
+        for finding in &self.findings {
+            let _ = write!(summary, "\n- {}", finding.describe());
+        }
+        summary
+    }
+
+    #[must_use]
+    pub fn success_summary(&self) -> String {
+        format!(
+            "workspace connectivity check passed ({} shipped root(s), {} explicit exception(s))",
+            self.roots.len(),
+            self.allowed.len()
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedFinding {
+    pub crate_name: String,
+    pub reason: ConnectedReason,
+}
+
+impl ConnectedFinding {
+    fn describe(&self) -> String {
+        match &self.reason {
+            ConnectedReason::NoWorkspaceDependents => format!(
+                "{} is unreachable; it has no workspace dependents outside dev-dependencies",
+                self.crate_name
+            ),
+            ConnectedReason::OnlyDevDependents(dependents) => format!(
+                "{} is unreachable; it is only used by dev-dependencies from {}",
+                self.crate_name,
+                format_crate_list(dependents)
+            ),
+            ConnectedReason::OnlyUnreachableDependents(dependents) => {
+                let dependent_word = if dependents.len() == 1 {
+                    "dependent"
+                } else {
+                    "dependents"
+                };
+                let verb = if dependents.len() == 1 { "is" } else { "are" };
+                format!(
+                    "{} is unreachable; its non-dev workspace {dependent_word} {} {verb} also unreachable",
+                    self.crate_name,
+                    format_crate_list(dependents)
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConnectedReason {
+    NoWorkspaceDependents,
+    OnlyDevDependents(Vec<String>),
+    OnlyUnreachableDependents(Vec<String>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectedAllowance {
+    pub crate_name: String,
+    pub owner: String,
+    pub reason: String,
+}
+
+pub fn check_workspace_connected(workspace_root: &Path) -> Result<ConnectedReport> {
+    check_workspace_connected_with_allowlist(workspace_root, Path::new(DEFAULT_CONNECTED_ALLOWLIST))
+}
+
+pub fn check_workspace_connected_with_allowlist(
+    workspace_root: &Path,
+    allowlist_path: &Path,
+) -> Result<ConnectedReport> {
+    let metadata = cargo_metadata(workspace_root)?;
+    let allowlist = load_connected_allowlist(workspace_root, allowlist_path)?;
+    let allowed_names = allowlist
+        .iter()
+        .map(|allowance| allowance.crate_name.clone())
+        .collect::<BTreeSet<_>>();
+    let workspace_members = metadata
+        .get("workspace_members")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("cargo metadata did not include workspace_members"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let packages = metadata
+        .get("packages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("cargo metadata did not include packages"))?;
+
+    let mut workspace_packages = BTreeMap::new();
+    for package in packages {
+        let Some(package_id) = package.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !workspace_members.contains(package_id) {
+            continue;
+        }
+        let name = package_name(package)?;
+        workspace_packages.insert(name.to_owned(), package);
+    }
+
+    for allowance in &allowlist {
+        if !workspace_packages.contains_key(&allowance.crate_name) {
+            bail!(
+                "{} allowlists unknown crate {:?}",
+                resolve_allowlist_path(workspace_root, allowlist_path).display(),
+                allowance.crate_name
+            );
+        }
+    }
+
+    let workspace_names = workspace_packages.keys().cloned().collect::<BTreeSet<_>>();
+    let mut non_dev_reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut dev_reverse: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, package) in &workspace_packages {
+        for dependency in
+            workspace_dependency_names(package, &workspace_names, DependencyReach::NonDev)?
+        {
+            non_dev_reverse
+                .entry(dependency)
+                .or_default()
+                .push(name.clone());
+        }
+        for dependency in
+            workspace_dependency_names(package, &workspace_names, DependencyReach::Dev)?
+        {
+            dev_reverse
+                .entry(dependency)
+                .or_default()
+                .push(name.clone());
+        }
+    }
+
+    let mut roots = workspace_packages
+        .iter()
+        .filter_map(|(name, package)| {
+            (package_has_shipped_target(package) && !allowed_names.contains(name))
+                .then_some(name.clone())
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+
+    let mut reachable = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    for root in &roots {
+        if reachable.insert(root.clone()) {
+            queue.push_back(root.clone());
+        }
+    }
+    while let Some(crate_name) = queue.pop_front() {
+        let Some(package) = workspace_packages.get(&crate_name) else {
+            continue;
+        };
+        for dependency in
+            workspace_dependency_names(package, &workspace_names, DependencyReach::NonDev)?
+        {
+            if allowed_names.contains(&dependency) {
+                continue;
+            }
+            if reachable.insert(dependency.clone()) {
+                queue.push_back(dependency);
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    for name in workspace_packages.keys() {
+        if reachable.contains(name) || allowed_names.contains(name) {
+            continue;
+        }
+        findings.push(ConnectedFinding {
+            crate_name: name.clone(),
+            reason: connected_reason(name, &non_dev_reverse, &dev_reverse),
+        });
+    }
+
+    Ok(ConnectedReport {
+        roots,
+        findings,
+        allowed: allowlist,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DependencyReach {
+    NonDev,
+    Dev,
+}
+
+fn connected_reason(
+    name: &str,
+    non_dev_reverse: &BTreeMap<String, Vec<String>>,
+    dev_reverse: &BTreeMap<String, Vec<String>>,
+) -> ConnectedReason {
+    let mut non_dev_dependents = non_dev_reverse.get(name).cloned().unwrap_or_default();
+    non_dev_dependents.sort();
+    non_dev_dependents.dedup();
+    if !non_dev_dependents.is_empty() {
+        return ConnectedReason::OnlyUnreachableDependents(non_dev_dependents);
+    }
+    let mut dev_dependents = dev_reverse.get(name).cloned().unwrap_or_default();
+    dev_dependents.sort();
+    dev_dependents.dedup();
+    if !dev_dependents.is_empty() {
+        return ConnectedReason::OnlyDevDependents(dev_dependents);
+    }
+    ConnectedReason::NoWorkspaceDependents
+}
+
+fn workspace_dependency_names(
+    package: &Value,
+    workspace_names: &BTreeSet<String>,
+    reach: DependencyReach,
+) -> Result<Vec<String>> {
+    let Some(dependencies) = package.get("dependencies").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut names = Vec::new();
+    for dependency in dependencies {
+        let dependency_name = dependency
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("dependency is missing a name"))?;
+        if !workspace_names.contains(dependency_name) {
+            continue;
+        }
+        let kind = dependency_table_name(dependency.get("kind"));
+        let include = match reach {
+            DependencyReach::NonDev => kind != "dev-dependencies",
+            DependencyReach::Dev => kind == "dev-dependencies",
+        };
+        if include {
+            names.push(dependency_name.to_owned());
+        }
+    }
+    Ok(names)
+}
+
+fn package_has_shipped_target(package: &Value) -> bool {
+    package
+        .get("targets")
+        .and_then(Value::as_array)
+        .is_some_and(|targets| targets.iter().any(target_is_shipped_artifact))
+}
+
+fn target_is_shipped_artifact(target: &Value) -> bool {
+    target
+        .get("kind")
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| {
+            kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|kind| kind == "bin" || kind == "cdylib")
+        })
+        || target
+            .get("crate_types")
+            .and_then(Value::as_array)
+            .is_some_and(|types| {
+                types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|ty| ty == "cdylib")
+            })
+}
+
+fn package_name(package: &Value) -> Result<&str> {
+    package
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("workspace package is missing a name"))
+}
+
+fn format_crate_list(crates: &[String]) -> String {
+    match crates {
+        [] => String::new(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        many => {
+            let mut list = many[..many.len() - 1].join(", ");
+            let _ = write!(list, ", and {}", many[many.len() - 1]);
+            list
+        }
+    }
+}
+
+fn load_connected_allowlist(
+    workspace_root: &Path,
+    allowlist_path: &Path,
+) -> Result<Vec<ConnectedAllowance>> {
+    let path = resolve_allowlist_path(workspace_root, allowlist_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let contents =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    parse_connected_allowlist(&contents)
+        .map_err(|error| anyhow!("parse {}: {error:#}", path.display()))
+}
+
+fn resolve_allowlist_path(workspace_root: &Path, allowlist_path: &Path) -> PathBuf {
+    if allowlist_path.is_absolute() {
+        allowlist_path.to_owned()
+    } else {
+        workspace_root.join(allowlist_path)
+    }
+}
+
+fn parse_connected_allowlist(contents: &str) -> Result<Vec<ConnectedAllowance>> {
+    #[derive(Default)]
+    struct Builder {
+        crate_name: Option<String>,
+        owner: Option<String>,
+        reason: Option<String>,
+    }
+
+    fn finish(
+        builder: Builder,
+        index: usize,
+        allowances: &mut Vec<ConnectedAllowance>,
+    ) -> Result<()> {
+        let crate_name = builder.crate_name.unwrap_or_default();
+        let owner = builder.owner.unwrap_or_default();
+        let reason = builder.reason.unwrap_or_default();
+        let mut missing = Vec::new();
+        if crate_name.trim().is_empty() {
+            missing.push("crate");
+        }
+        if owner.trim().is_empty() {
+            missing.push("owner");
+        }
+        if reason.trim().is_empty() {
+            missing.push("reason");
+        }
+        if !missing.is_empty() {
+            bail!(
+                "allow entry {index} is missing non-empty {}",
+                missing.join(", ")
+            );
+        }
+        allowances.push(ConnectedAllowance {
+            crate_name,
+            owner,
+            reason,
+        });
+        Ok(())
+    }
+
+    let mut allowances = Vec::new();
+    let mut current: Option<Builder> = None;
+    let mut entry_index = 0;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "[[allow]]" {
+            if let Some(builder) = current.take() {
+                finish(builder, entry_index, &mut allowances)?;
+            }
+            entry_index += 1;
+            current = Some(Builder::default());
+            continue;
+        }
+        let Some(builder) = current.as_mut() else {
+            bail!("allowlist entries must start with [[allow]]");
+        };
+        let (key, value) = parse_key_value_string(trimmed)?;
+        match key {
+            "crate" => builder.crate_name = Some(value),
+            "owner" => builder.owner = Some(value),
+            "reason" => builder.reason = Some(value),
+            other => bail!("unsupported check-connected allowlist key {other:?}"),
+        }
+    }
+    if let Some(builder) = current {
+        finish(builder, entry_index, &mut allowances)?;
+    }
+
+    let mut seen = BTreeSet::new();
+    for allowance in &allowances {
+        if !seen.insert(allowance.crate_name.as_str()) {
+            bail!(
+                "duplicate check-connected allowlist entry for {:?}",
+                allowance.crate_name
+            );
+        }
+    }
+    Ok(allowances)
+}
+
+fn parse_key_value_string(line: &str) -> Result<(&str, String)> {
+    let (key, value) = line
+        .split_once('=')
+        .ok_or_else(|| anyhow!("expected key = \"value\", got {line:?}"))?;
+    let key = key.trim();
+    let value = value.trim();
+    let Some(value) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        bail!("expected string value for {key:?}");
+    };
+    Ok((key, value.to_owned()))
 }
 
 /// One dependency edge that points at the version family being deleted.
@@ -3391,6 +3856,15 @@ pub fn run_conformance(
         outcome: ConformanceOutcome::Passed,
     });
 
+    let connected = check_workspace_connected(workspace_root)?;
+    if connected.has_violations() {
+        bail!("{}", connected.violation_summary());
+    }
+    steps.push(ConformanceStep {
+        name: "check-connected".to_owned(),
+        outcome: ConformanceOutcome::Passed,
+    });
+
     if options.skip_cargo {
         steps.push(ConformanceStep {
             name: "cargo test/clippy".to_owned(),
@@ -4590,6 +5064,23 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_check_connected_command() -> Result<()> {
+        let command = parse_cli_args([
+            "check-connected",
+            "--allowlist",
+            "xtask/custom-connected.toml",
+        ])?;
+
+        assert_eq!(
+            command,
+            CliCommand::CheckConnected {
+                allowlist: PathBuf::from("xtask/custom-connected.toml"),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
     fn conformance_skip_cargo_checks_packet_ids_and_skips_absent_registry_report() -> Result<()> {
         let workspace = isolation_fixture(
             "conformance",
@@ -4605,6 +5096,16 @@ mod tests {
         let cache_dir = workspace.join(".cache/mc/test/generated/reports");
         std::fs::create_dir_all(&cache_dir)?;
         std::fs::write(cache_dir.join("packets.json"), packet_report_json)?;
+        std::fs::create_dir_all(workspace.join("xtask"))?;
+        std::fs::write(
+            workspace.join(DEFAULT_CONNECTED_ALLOWLIST),
+            r#"
+[[allow]]
+crate = "lodestone-v999"
+owner = "xtask-test"
+reason = "fixture has no shipped binary root"
+"#,
+        )?;
 
         let report = parse_packet_report(packet_report_json, "test", 999)?;
         let generated_dir = workspace.join("crates/protocol/v999/src/generated");
@@ -4651,6 +5152,10 @@ mod tests {
                 },
                 ConformanceStep {
                     name: "shape-review".to_owned(),
+                    outcome: ConformanceOutcome::Passed,
+                },
+                ConformanceStep {
+                    name: "check-connected".to_owned(),
                     outcome: ConformanceOutcome::Passed,
                 },
                 ConformanceStep {
@@ -5666,6 +6171,126 @@ reviewed = false
     }
 
     #[test]
+    fn check_connected_reports_orphan_chain_and_ignores_dev_dependencies() -> Result<()> {
+        let workspace = connected_fixture(
+            "connected-orphans",
+            &[(
+                "apps/lodestone",
+                "lodestone-shell",
+                true,
+                r#"
+[dev-dependencies]
+lodestone-entity = { path = "../../crates/lodestone-entity" }
+"#,
+            )],
+            &[
+                (
+                    "crates/lodestone-server",
+                    "lodestone-server",
+                    false,
+                    r#"
+[dependencies]
+lodestone-worldgen = { path = "../lodestone-worldgen" }
+"#,
+                ),
+                ("crates/lodestone-worldgen", "lodestone-worldgen", false, ""),
+                ("crates/lodestone-entity", "lodestone-entity", false, ""),
+            ],
+            "",
+        )?;
+
+        let report = check_workspace_connected(&workspace)?;
+        assert!(report.has_violations());
+        let rendered = report.violation_summary();
+        assert!(
+            rendered.contains("lodestone-server is unreachable"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("lodestone-worldgen is unreachable; its non-dev workspace dependent lodestone-server is also unreachable"),
+            "{rendered}"
+        );
+        assert!(
+            rendered
+                .contains("lodestone-entity is unreachable; it is only used by dev-dependencies"),
+            "{rendered}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn check_connected_counts_optional_non_dev_dependencies_as_reachable() -> Result<()> {
+        let workspace = connected_fixture(
+            "connected-optional",
+            &[(
+                "apps/lodestone",
+                "lodestone-shell",
+                true,
+                r#"
+[dependencies]
+lodestone-registry = { path = "../../crates/lodestone-registry" }
+"#,
+            )],
+            &[
+                (
+                    "crates/lodestone-registry",
+                    "lodestone-registry",
+                    false,
+                    r#"
+[dependencies]
+lodestone-v770 = { path = "../protocol/v770", optional = true }
+"#,
+                ),
+                ("crates/protocol/v770", "lodestone-v770", false, ""),
+            ],
+            "",
+        )?;
+
+        let report = check_workspace_connected(&workspace)?;
+        assert!(
+            !report
+                .violations()
+                .any(|finding| finding.crate_name == "lodestone-v770"),
+            "{}",
+            report.violation_summary()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn check_connected_requires_allowlist_reason_and_owner() -> Result<()> {
+        let workspace = connected_fixture(
+            "connected-allowlist",
+            &[("apps/lodestone", "lodestone-shell", true, "")],
+            &[("xtask", "xtask", true, "")],
+            r#"
+[[allow]]
+crate = "xtask"
+owner = "impl-xtask"
+reason = "build tool, not shipped runtime artifact"
+"#,
+        )?;
+
+        let report = check_workspace_connected(&workspace)?;
+        assert!(!report.has_violations(), "{}", report.violation_summary());
+
+        std::fs::write(
+            workspace.join(DEFAULT_CONNECTED_ALLOWLIST),
+            r#"
+[[allow]]
+crate = "xtask"
+reason = ""
+"#,
+        )?;
+        let error = check_workspace_connected(&workspace)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("owner"), "{error}");
+        assert!(error.contains("reason"), "{error}");
+        Ok(())
+    }
+
+    #[test]
     fn registry_required_version_dependency_is_still_a_violation() -> Result<()> {
         // Safety valve: the registry role only downgrades OPTIONAL edges. A
         // *required* version dependency — even on the designated registry — would
@@ -6281,6 +6906,50 @@ live-v1 = ["lodestone-registry/v1"]
             )?;
         }
 
+        Ok(workspace)
+    }
+
+    fn connected_fixture(
+        name: &str,
+        roots: &[(&str, &str, bool, &str)],
+        crates: &[(&str, &str, bool, &str)],
+        allowlist: &str,
+    ) -> Result<TestWorkspace> {
+        let workspace = fresh_test_workspace(name)?;
+        let all = roots.iter().chain(crates.iter()).collect::<Vec<_>>();
+        let members = all
+            .iter()
+            .map(|(path, _, _, _)| format!("\"{path}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            format!("[workspace]\nresolver = \"3\"\nmembers = [{members}]\n"),
+        )?;
+
+        for (path, crate_name, has_bin, extra_manifest) in all {
+            let manifest_dir = workspace.join(path);
+            std::fs::create_dir_all(manifest_dir.join("src"))?;
+            let target_section = if *has_bin {
+                std::fs::write(manifest_dir.join("src/main.rs"), "fn main() {}\n")?;
+                ""
+            } else {
+                std::fs::write(manifest_dir.join("src/lib.rs"), "")?;
+                ""
+            };
+            std::fs::write(
+                manifest_dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{crate_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n{target_section}{extra_manifest}\n"
+                ),
+            )?;
+        }
+
+        if !allowlist.trim().is_empty() {
+            let allowlist_path = workspace.join(DEFAULT_CONNECTED_ALLOWLIST);
+            std::fs::create_dir_all(allowlist_path.parent().expect("allowlist path has parent"))?;
+            std::fs::write(allowlist_path, allowlist)?;
+        }
         Ok(workspace)
     }
 

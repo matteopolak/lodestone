@@ -8,14 +8,14 @@ use lodestone_core::{
 };
 use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor,
-    BossOverlay, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings,
-    CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType, ContainerSlotChange,
-    Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment, EntityInteraction,
-    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand, NumberFormat,
-    ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand, PlayerInput,
-    PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, SoundCategory,
-    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
-    VersionAdapter, Visibility, WorldSink,
+    BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
+    ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
+    ContainerSlotChange, Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment,
+    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
+    MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand,
+    PlayerInput, PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress,
+    SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3,
+    Vec3f, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
@@ -38,14 +38,15 @@ use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
     AcceptTeleportation, Attack, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
     COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChatAck, ChatCommand, ChatMessage, ChunkBatchFinished,
-    ChunkBatchReceived, ClientCommand, ClientTickEnd, ConfigurationAcknowledged,
+    ChunkBatchReceived, ClientCommand, ClientTickEnd, CommandSuggestion, ConfigurationAcknowledged,
     ContainerButtonClick, ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent,
-    LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION, MOVE_FLAG_ON_GROUND, MovePlayerPosRot,
-    PickItemFromBlock, PickItemFromEntity,
-    PlayerAbilities, PlayerAction, PlayerCommand as PlayerCommandPacket,
-    PlayerInput as PlayerInputPacket, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING,
-    SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock,
-    SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing, UseItem, UseItemOn,
+    LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION, MOVE_FLAG_ON_GROUND, MoveVehicle,
+    MovePlayerPos, MovePlayerPosRot, MovePlayerRot, MovePlayerStatusOnly, PaddleBoat,
+    PickItemFromBlock, PickItemFromEntity, PlayerAbilities, PlayerAction,
+    PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket, PlayerLoaded,
+    RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectTrade, ServerboundPlayerAbilities,
+    SetCarriedItem, SetCommandBlock, SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing,
+    UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
@@ -184,6 +185,104 @@ impl V770Adapter {
             .lock()
             .map(|shape| shape.clone())
             .unwrap_or_else(|_| ChunkShape::overworld_1_21())
+    }
+
+    /// Chooses which `move_player_*` packet, if any, this tick's movement
+    /// produces, and updates the send-tracking state accordingly.
+    ///
+    /// Mirrors vanilla's `LocalPlayer.sendPosition()` exactly (see
+    /// `ServerboundMovePlayerPacket` for the wire shapes it selects between):
+    /// position is "dirty" when the squared distance from the last **sent**
+    /// position exceeds `(2e-4)²`, or every 20 ticks regardless of movement
+    /// (the periodic forced update); rotation is dirty on *any* nonzero yaw
+    /// or pitch delta from the last sent rotation. Both-dirty sends
+    /// `PosRot`; position-only sends `Pos`; rotation-only sends `Rot`;
+    /// neither, but on-ground or horizontal-collision changed since last
+    /// tick, sends `StatusOnly`; otherwise nothing is sent this tick — a
+    /// deliberate, vanilla-faithful `None`, not a bug.
+    ///
+    /// `on_ground` and `horizontal_collision` are simulation outputs
+    /// supplied by the caller (see [`ClientAction::Move`]); this method only
+    /// ever compares and forwards them, never derives them.
+    fn select_move_packet(
+        &self,
+        pos: Vec3,
+        rotation: Rotation,
+        on_ground: bool,
+        horizontal_collision: bool,
+    ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+        let mut state = self
+            .movement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let delta_x = pos.x - state.last_pos.x;
+        let delta_y = pos.y - state.last_pos.y;
+        let delta_z = pos.z - state.last_pos.z;
+        let delta_yaw = f64::from(rotation.yaw) - f64::from(state.last_yaw);
+        let delta_pitch = f64::from(rotation.pitch) - f64::from(state.last_pitch);
+
+        state.position_reminder += 1;
+        let moved = delta_x * delta_x + delta_y * delta_y + delta_z * delta_z > 4.0e-8
+            || state.position_reminder >= 20;
+        let rotated = delta_yaw != 0.0 || delta_pitch != 0.0;
+
+        let flags = (if on_ground { MOVE_FLAG_ON_GROUND } else { 0 })
+            | (if horizontal_collision {
+                MOVE_FLAG_HORIZONTAL_COLLISION
+            } else {
+                0
+            });
+
+        let packet = if moved && rotated {
+            let body = MovePlayerPosRot {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                flags,
+            };
+            Some((play::serverbound::MOVE_PLAYER_POS_ROT, encode_body(&body)?))
+        } else if moved {
+            let body = MovePlayerPos {
+                x: pos.x,
+                y: pos.y,
+                z: pos.z,
+                flags,
+            };
+            Some((play::serverbound::MOVE_PLAYER_POS, encode_body(&body)?))
+        } else if rotated {
+            let body = MovePlayerRot {
+                yaw: rotation.yaw,
+                pitch: rotation.pitch,
+                flags,
+            };
+            Some((play::serverbound::MOVE_PLAYER_ROT, encode_body(&body)?))
+        } else if state.last_on_ground != on_ground
+            || state.last_horizontal_collision != horizontal_collision
+        {
+            let body = MovePlayerStatusOnly { flags };
+            Some((
+                play::serverbound::MOVE_PLAYER_STATUS_ONLY,
+                encode_body(&body)?,
+            ))
+        } else {
+            None
+        };
+
+        if moved {
+            state.last_pos = pos;
+            state.position_reminder = 0;
+        }
+        if rotated {
+            state.last_yaw = rotation.yaw;
+            state.last_pitch = rotation.pitch;
+        }
+        state.last_on_ground = on_ground;
+        state.last_horizontal_collision = horizontal_collision;
+
+        Ok(packet)
     }
 }
 
@@ -444,6 +543,71 @@ fn read_sound_category(reader: &mut Reader<'_>) -> Result<SoundCategory, Adapter
         .ok_or_else(|| AdapterError::Decode(format!("invalid sound source ordinal {ordinal}")))
 }
 
+/// Consumes a packed `LastSeenMessages` collection: a VarInt count (capped at
+/// 20 by vanilla) then that many packed message signatures. Each packed
+/// signature is a VarInt: `0` is followed by a full 256-byte signature (a
+/// newly-seen message), and any positive value references a cached signature by
+/// index and carries no further bytes.
+fn read_last_seen_packed(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid last-seen count {count}")))?;
+    for _ in 0..count {
+        if reader.var_i32().map_err(dec_err)? == 0 {
+            reader.bytes(256).map_err(dec_err)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads a `FilterMask` and returns whether the message is shown to the player.
+///
+/// Ordinal: `0` = pass-through (shown), `1` = fully filtered (hidden), `2` =
+/// partially filtered (shown) followed by a `BitSet` of filtered word indices
+/// (a VarInt long-count then that many `i64` words).
+fn read_filter_mask(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
+    let ordinal = reader.var_i32().map_err(dec_err)?;
+    match ordinal {
+        0 => Ok(true),
+        1 => Ok(false),
+        2 => {
+            let words = reader.var_i32().map_err(dec_err)?;
+            let words = usize::try_from(words).map_err(|_| {
+                AdapterError::Decode(format!("invalid filter mask bitset length {words}"))
+            })?;
+            for _ in 0..words {
+                reader.i64().map_err(dec_err)?;
+            }
+            Ok(true)
+        }
+        other => Err(AdapterError::Decode(format!(
+            "invalid filter mask ordinal {other}"
+        ))),
+    }
+}
+
+/// Consumes a `ChatType.Bound`: a `Holder<ChatType>`, a trusted NBT name
+/// component, and an optional trusted NBT target-name component.
+///
+/// The holder is a VarInt: `0` would introduce an inline chat-type definition
+/// (decoration plus style), which vanilla servers never send in chat packets
+/// and which Phase 1 does not model; any positive value references the
+/// `minecraft:chat_type` registry at index `value - 1` and carries no further
+/// bytes. An inline holder fails loudly rather than misparsing the rest of the
+/// stream.
+fn read_chat_type_bound(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+    if reader.var_i32().map_err(dec_err)? == 0 {
+        return Err(AdapterError::Decode(
+            "inline chat_type definitions are not supported".to_owned(),
+        ));
+    }
+    read_network_nbt(reader).map_err(dec_err)?;
+    if reader.bool().map_err(dec_err)? {
+        read_network_nbt(reader).map_err(dec_err)?;
+    }
+    Ok(())
+}
+
 /// Parses a `minecraft:*` identifier into a canonical [`ResourceKey`],
 /// attributing a decode error to `what` on failure.
 fn parse_key(name: &str, what: &str) -> Result<ResourceKey, AdapterError> {
@@ -578,6 +742,25 @@ fn encode_set_beacon(
     let mut w = Writer::default();
     write_optional_mob_effect(&mut w, primary)?;
     write_optional_mob_effect(&mut w, secondary)?;
+    Ok(w.into_vec())
+}
+
+/// Encodes the serverbound `seen_advancements` packet body
+/// (`ServerboundSeenAdvancementsPacket`): a VarInt `Action` ordinal
+/// (`OPENED_TAB` = 0, `CLOSED_SCREEN` = 1, via `FriendlyByteBuf.writeEnum`),
+/// followed *only when opening a tab* by that tab's `minecraft:*` identifier
+/// string (`writeIdentifier` = `writeUtf(id.toString())`). Closing writes
+/// nothing further — the identifier's presence depends on the ordinal, so
+/// this can't be a plain derived struct.
+fn encode_seen_advancements(tab: Option<&ResourceKey>) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    match tab {
+        Some(key) => {
+            w.var_i32(0); // OPENED_TAB
+            w.string(&key.to_string());
+        }
+        None => w.var_i32(1), // CLOSED_SCREEN
+    }
     Ok(w.into_vec())
 }
 
@@ -1416,6 +1599,56 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::DISCONNECT {
             return Ok(vec![Directive::Disconnect(nbt_reason_text(payload)?)]);
+        }
+        if packet_id == play::clientbound::PLAYER_CHAT {
+            let mut reader = Reader::new(payload);
+            let global_index = reader.var_i32().map_err(dec_err)?;
+            let _sender = reader.uuid().map_err(dec_err)?;
+            let _index = reader.var_i32().map_err(dec_err)?;
+            let signature = if reader.bool().map_err(dec_err)? {
+                reader.bytes(256).map_err(dec_err)?.to_vec()
+            } else {
+                Vec::new()
+            };
+            // SignedMessageBody.Packed: raw content, timestamp, salt, last-seen.
+            let content = reader.string(256).map_err(dec_err)?;
+            let _timestamp = reader.i64().map_err(dec_err)?;
+            let _salt = reader.i64().map_err(dec_err)?;
+            read_last_seen_packed(&mut reader)?;
+            let unsigned = if reader.bool().map_err(dec_err)? {
+                Some(read_network_nbt(&mut reader).map_err(dec_err)?)
+            } else {
+                None
+            };
+            let was_shown = read_filter_mask(&mut reader)?;
+            read_chat_type_bound(&mut reader)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            // The server-decorated form (if any) is preferred for display; a
+            // plain signed message carries only its raw content.
+            let text = match unsigned {
+                Some(component) => plain_text_from_nbt_component(&component),
+                None => content,
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::literal(text),
+                kind: ChatKind::Chat,
+                ack: Some(ChatAckInfo {
+                    signature,
+                    global_index,
+                    was_shown,
+                }),
+            })]);
+        }
+        if packet_id == play::clientbound::DISGUISED_CHAT {
+            let mut reader = Reader::new(payload);
+            let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+            read_chat_type_bound(&mut reader)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::literal(plain_text_from_nbt_component(&component)),
+                kind: ChatKind::Chat,
+                ack: None,
+            })]);
         }
         if packet_id == play::clientbound::SYSTEM_CHAT {
             let mut reader = Reader::new(payload);
@@ -2406,29 +2639,7 @@ impl VersionAdapter for V770Adapter {
                 on_ground,
                 horizontal_collision,
             } if state == ConnectionState::Play => {
-                // Both position and rotation are always supplied, so this maps
-                // to `move_player_pos_rot`. The on-ground and horizontal-collision
-                // simulation outputs are packed into the flags byte exactly as
-                // vanilla's `packFlags` does.
-                let mut flags = 0;
-                if *on_ground {
-                    flags |= MOVE_FLAG_ON_GROUND;
-                }
-                if *horizontal_collision {
-                    flags |= MOVE_FLAG_HORIZONTAL_COLLISION;
-                }
-                let body = MovePlayerPosRot {
-                    x: pos.x,
-                    y: pos.y,
-                    z: pos.z,
-                    yaw: rotation.yaw,
-                    pitch: rotation.pitch,
-                    flags,
-                };
-                Ok(Some((
-                    play::serverbound::MOVE_PLAYER_POS_ROT,
-                    encode_body(&body)?,
-                )))
+                self.select_move_packet(*pos, *rotation, *on_ground, *horizontal_collision)
             }
             ClientAction::SwingArm { hand } if state == ConnectionState::Play => {
                 let body = Swing {
@@ -2848,6 +3059,46 @@ impl VersionAdapter for V770Adapter {
                     play::serverbound::SET_COMMAND_BLOCK,
                     encode_body(&body)?,
                 )))
+            }
+            ClientAction::PlayerLoaded if state == ConnectionState::Play => Ok(Some((
+                play::serverbound::PLAYER_LOADED,
+                encode_body(&PlayerLoaded)?,
+            ))),
+            ClientAction::SeenAdvancements { tab } if state == ConnectionState::Play => Ok(Some((
+                play::serverbound::SEEN_ADVANCEMENTS,
+                encode_seen_advancements(tab.as_ref())?,
+            ))),
+            ClientAction::CommandSuggestion { id, command } if state == ConnectionState::Play => {
+                let body = CommandSuggestion {
+                    id: *id,
+                    command: command.clone(),
+                };
+                Ok(Some((
+                    play::serverbound::COMMAND_SUGGESTION,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::PaddleBoat { left, right } if state == ConnectionState::Play => {
+                let body = PaddleBoat {
+                    left: *left,
+                    right: *right,
+                };
+                Ok(Some((play::serverbound::PADDLE_BOAT, encode_body(&body)?)))
+            }
+            ClientAction::MoveVehicle {
+                pos,
+                rotation,
+                on_ground,
+            } if state == ConnectionState::Play => {
+                let body = MoveVehicle {
+                    x: pos.x,
+                    y: pos.y,
+                    z: pos.z,
+                    yaw: rotation.yaw,
+                    pitch: rotation.pitch,
+                    on_ground: *on_ground,
+                };
+                Ok(Some((play::serverbound::MOVE_VEHICLE, encode_body(&body)?)))
             }
             _ => Ok(None),
         }

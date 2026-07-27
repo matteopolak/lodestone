@@ -12,6 +12,7 @@ use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick}
 use lodestone_render::Camera;
 use lodestone_world::{ChunkPos, World};
 
+use crate::audio::ShellAudio;
 use crate::blocks::id;
 use crate::camera_rig::build_camera;
 use crate::chat::{ChatLog, compose_chat_action};
@@ -79,6 +80,10 @@ pub struct Sim {
     phase: SessionPhase,
     /// Received chat/system lines (bounded scrollback), rendered by the HUD.
     chat_log: ChatLog,
+    /// Monotonic wall-clock seconds since the sim started, accumulated from the
+    /// real per-frame `dt` in [`Sim::step`]. Stamps chat arrivals so the HUD can
+    /// age lines for the vanilla fade-out without reaching for a clock itself.
+    clock_secs: f64,
     /// Latest server-reported health in `0..=20`, `None` until the server sends
     /// one (i.e. on the local dev world it stays `None` and no bar is drawn).
     health: Option<f32>,
@@ -91,6 +96,10 @@ pub struct Sim {
     /// input the player drives (number keys / scroll), echoed to the server via
     /// [`ClientAction::SetCarriedItem`]. Defaults to slot 0, matching vanilla.
     selected_slot: usize,
+    /// Live audio, or `None` when disabled (no asset root, no device — see
+    /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
+    /// disabled engine is simply silent, never a crash.
+    audio: Option<ShellAudio>,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -168,10 +177,12 @@ impl Sim {
             pending_removals: Vec::new(),
             phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
+            clock_secs: 0.0,
             health: None,
             food: None,
             entity_interp: EntityInterpolator::new(),
             selected_slot: 0,
+            audio: ShellAudio::from_env(),
         }
     }
 
@@ -188,10 +199,17 @@ impl Sim {
         &self.phase
     }
 
-    /// The most recent chat/system lines (oldest-first) for the HUD to draw.
+    /// The most recent chat/system lines (oldest-first) for the HUD to draw,
+    /// each paired with its **age in seconds** (now − arrival) so the HUD can
+    /// apply the vanilla fade-out. Lines carry legacy `§` colour codes.
     #[must_use]
-    pub fn recent_chat(&self, n: usize) -> Vec<&str> {
-        self.chat_log.recent(n)
+    pub fn recent_chat(&self, n: usize) -> Vec<(&str, f32)> {
+        let now = self.clock_secs;
+        self.chat_log
+            .recent(n)
+            .into_iter()
+            .map(|(line, at)| (line, (now - at).max(0.0) as f32))
+            .collect()
     }
 
     /// Server-reported health in `0..=20`, or `None` off a live survival server.
@@ -365,6 +383,7 @@ impl Sim {
     /// interpolates between ticks via [`Sim::interp_alpha`].
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
+        self.clock_secs += dt.max(0.0);
         self.accumulator += dt.clamp(0.0, 0.25);
 
         let intent = movement_intent(&self.input);
@@ -632,8 +651,15 @@ impl Sim {
     }
 
     fn poll_net(&mut self) {
-        let Some(net) = &self.net else { return };
-        for update in net.poll() {
+        // Collect owned updates first so the immutable borrow of `self.net`
+        // ends before the loop — the sound arms need `&mut self.audio` and (for
+        // entity sounds) a fresh read of `self.net` for positions, neither of
+        // which can coexist with a borrow held across the loop.
+        let updates = match &self.net {
+            Some(net) => net.poll(),
+            None => return,
+        };
+        for update in updates {
             match update {
                 NetUpdate::Connecting => {
                     self.status = "connecting…".into();
@@ -655,7 +681,7 @@ impl Sim {
                 }
                 NetUpdate::Chat(msg) => {
                     tracing::info!(target: "chat", "{msg}");
-                    self.chat_log.push(msg);
+                    self.chat_log.push(msg, self.clock_secs);
                 }
                 NetUpdate::Health { health, food } => {
                     self.health = Some(health);
@@ -668,6 +694,34 @@ impl Sim {
                     self.status = "server: died".into();
                     self.phase = SessionPhase::Ended("player died".into());
                 }
+                NetUpdate::Sound {
+                    name,
+                    category,
+                    pos,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    if let Some(audio) = &mut self.audio {
+                        let pos = glam::Vec3::new(pos.x as f32, pos.y as f32, pos.z as f32);
+                        audio.play_sound(&name, category, pos, volume, pitch, seed);
+                    }
+                }
+                NetUpdate::EntitySound {
+                    name,
+                    category,
+                    entity_id,
+                    volume,
+                    pitch,
+                    seed,
+                } => {
+                    // Resolve the entity's live position *before* borrowing the
+                    // audio engine mutably (disjoint, sequential borrows).
+                    let pos = self.entity_sound_position(entity_id);
+                    if let Some(audio) = &mut self.audio {
+                        audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
+                    }
+                }
                 NetUpdate::Disconnected(reason) => {
                     self.status = format!("disconnected: {reason}");
                     self.phase = SessionPhase::Ended(format!("disconnected: {reason}"));
@@ -677,6 +731,33 @@ impl Sim {
                     self.phase = SessionPhase::Ended(format!("net error: {e}"));
                 }
             }
+        }
+    }
+
+    /// World-space origin for an entity-attached sound: the entity's live feet
+    /// position raised half a block so the source sits at body centre. Falls
+    /// back to the player's current position if the entity is unknown (so the
+    /// sound is still heard rather than dropped) — the same "audible, not
+    /// silent" preference the live gate encodes.
+    fn entity_sound_position(&self, entity_id: i32) -> glam::Vec3 {
+        if let Some(net) = &self.net
+            && let Some(snap) = net
+                .entity_snapshots()
+                .into_iter()
+                .find(|s| s.id == entity_id)
+        {
+            return snap.feet + glam::Vec3::new(0.0, 0.5, 0.0);
+        }
+        let p = self.player.position;
+        glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32)
+    }
+
+    /// Push the listener transform to the audio engine from the render camera.
+    /// Called once per frame by [`crate::app`] with the exact interpolated
+    /// camera it renders, so what the player hears matches what they see.
+    pub fn set_audio_listener(&self, camera: &Camera) {
+        if let Some(audio) = &self.audio {
+            audio.set_listener(camera);
         }
     }
 
@@ -879,8 +960,9 @@ mod tests {
         // Inbound server chat must surface in the HUD log (not merely logged).
         feed.send(NetUpdate::Chat("hello world".into())).unwrap();
         sim.poll_net();
+        let lines: Vec<&str> = sim.recent_chat(10).into_iter().map(|(l, _)| l).collect();
         assert_eq!(
-            sim.recent_chat(10),
+            lines,
             vec!["hello world"],
             "inbound chat must reach the display log"
         );
@@ -905,6 +987,27 @@ mod tests {
                 },
             ],
             "exactly the two non-blank lines route, with the command slash stripped"
+        );
+    }
+
+    #[test]
+    fn chat_lines_age_as_the_clock_advances() {
+        use crate::net::NetUpdate;
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+
+        feed.send(NetUpdate::Chat("aged line".into())).unwrap();
+        sim.poll_net();
+        // Freshly received: age is ~0.
+        assert!(sim.recent_chat(1)[0].1 < 0.001, "a just-received line is young");
+
+        // Advancing the sim clock ages the line by real elapsed time.
+        sim.step(2.5);
+        let age = sim.recent_chat(1)[0].1;
+        assert!(
+            (2.4..=2.6).contains(&age),
+            "line age must track the sim clock, got {age}"
         );
     }
 

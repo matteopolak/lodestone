@@ -884,6 +884,23 @@ impl VersionAdapter for V340Adapter {
             ClientAction::SetCommandBlock { .. } => Err(AdapterError::Unsupported(
                 "protocol 340 set command block encoding is not yet implemented".to_owned(),
             )),
+            ClientAction::PlayerLoaded => Err(AdapterError::Unsupported(
+                "protocol 340 predates the player_loaded packet (added in 1.20.2)".to_owned(),
+            )),
+            ClientAction::SeenAdvancements { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 advancements encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::CommandSuggestion { .. } => Err(AdapterError::Unsupported(
+                "protocol 340's tab-complete packet has a different wire shape and is not yet \
+                 implemented"
+                    .to_owned(),
+            )),
+            ClientAction::PaddleBoat { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 paddle boat encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::MoveVehicle { .. } => Err(AdapterError::Unsupported(
+                "protocol 340 move vehicle encoding is not yet implemented".to_owned(),
+            )),
 
             _ => Ok(None),
         }

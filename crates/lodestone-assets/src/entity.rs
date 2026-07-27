@@ -228,6 +228,85 @@ pub struct EntityModelDef {
     pub root: PartDef,
 }
 
+/// The runtime state that selects an entity's texture variant, for mobs whose
+/// skin depends on more than their type: the temperature/biome family (26.2's
+/// `_temperate`/`_cold`/`_warm` split of pig/cow/chicken/…), dye colour (sheep,
+/// collars), breed (cat, wolf), profession/type (villager), and so on.
+///
+/// This is a **primitive owned by `lodestone-assets`** on purpose: it lets the
+/// per-mob data in `entity_models.rs` stay a pure data module (no reach into
+/// `lodestone-model`, `-net`, or the shell), so that module remains a one-file
+/// move into a version crate. The consumer (the shell) maps its own
+/// `EntityView`/entity metadata onto this enum at the boundary. Each arm carries
+/// a small typed value rather than a raw int so a selector can be written total.
+///
+/// New variant axes are added here as they are wired; a selector only matches
+/// the axis it cares about and falls through to its default for the rest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EntityVariant {
+    /// The climate family a mob spawned into. 26.2 gave pigs, cows, chickens and
+    /// several others per-temperature skins instead of one universal sheet.
+    Temperature(Temperature),
+}
+
+/// The three climate families 26.2 ships variant skins for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Temperature {
+    /// The default/overworld skin (`*_temperate`).
+    Temperate,
+    /// Cold biomes (`*_cold`).
+    Cold,
+    /// Warm biomes (`*_warm`).
+    Warm,
+}
+
+/// How an entry resolves its texture: a single fixed sheet, or a selector over
+/// [`EntityVariant`] carrying an explicit default so a consumer can render (or
+/// cache) it without first synthesising a variant.
+///
+/// One uniform representation for every entry — `Fixed` for the invariant mobs,
+/// `ByVariant` for the rest — so the consumer never has to special-case two
+/// mechanisms. The `default` sheet is what the shell uses today, where entity
+/// skins are still synthetic tints and no runtime variant is plumbed yet.
+#[derive(Clone, Copy, Debug)]
+pub enum EntityTexture {
+    /// A single texture path (relative to `assets/<ns>/textures/`, no extension).
+    Fixed(&'static str),
+    /// A variant-driven texture: `default` is the canonical sheet, `select`
+    /// maps a runtime [`EntityVariant`] to the right one.
+    ByVariant {
+        /// The sheet used when no variant is known (the canonical/`_temperate` skin).
+        default: &'static str,
+        /// Maps a runtime variant to its texture path. Written total.
+        select: fn(EntityVariant) -> &'static str,
+    },
+}
+
+impl EntityTexture {
+    /// The canonical sheet, ignoring any variant — what to load when the runtime
+    /// variant is unknown (as it is in the shell today).
+    pub fn default_path(&self) -> &'static str {
+        match self {
+            EntityTexture::Fixed(p) => p,
+            EntityTexture::ByVariant { default, .. } => default,
+        }
+    }
+
+    /// The sheet for a specific runtime variant. `Fixed` ignores the variant.
+    pub fn resolve(&self, variant: EntityVariant) -> &'static str {
+        match self {
+            EntityTexture::Fixed(p) => p,
+            EntityTexture::ByVariant { select, .. } => select(variant),
+        }
+    }
+
+    /// Whether this entry's skin depends on a runtime variant. Lets a consumer
+    /// decide up front whether its texture cache needs a variant dimension.
+    pub fn is_variant(&self) -> bool {
+        matches!(self, EntityTexture::ByVariant { .. })
+    }
+}
+
 /// One baked quad of an entity model: four corners in world units (model texels
 /// divided by 16, with the full part transform applied), UVs normalised to
 /// `[0, 1]` against the texture sheet, and the outward face direction.

@@ -31,3 +31,5 @@
 
 # stray per-run logs from live gates
 **/.session_*.log
+lodestone-frame.ppm
+*.ppm

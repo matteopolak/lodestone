@@ -17,6 +17,7 @@ lodestone-world  = { path = "crates/lodestone-world" }
 lodestone-net    = { path = "crates/lodestone-net" }
 lodestone-client = { path = "crates/lodestone-client" }
 lodestone-assets = { path = "crates/lodestone-assets" }
+lodestone-sound  = { path = "crates/lodestone-sound" }
 lodestone-registry = { path = "crates/lodestone-registry" }
 lodestone-testsupport = { path = "crates/lodestone-testsupport" }
 lodestone-v770   = { path = "crates/protocol/v770" }

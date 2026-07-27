@@ -188,6 +188,16 @@ pub enum ClientActionKind {
     SignUpdate,
     /// [`ClientAction::SetCommandBlock`].
     SetCommandBlock,
+    /// [`ClientAction::PlayerLoaded`].
+    PlayerLoaded,
+    /// [`ClientAction::SeenAdvancements`].
+    SeenAdvancements,
+    /// [`ClientAction::CommandSuggestion`].
+    CommandSuggestion,
+    /// [`ClientAction::PaddleBoat`].
+    PaddleBoat,
+    /// [`ClientAction::MoveVehicle`].
+    MoveVehicle,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -231,6 +241,11 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::EditBook { .. } => Self::EditBook,
             ClientAction::SignUpdate { .. } => Self::SignUpdate,
             ClientAction::SetCommandBlock { .. } => Self::SetCommandBlock,
+            ClientAction::PlayerLoaded => Self::PlayerLoaded,
+            ClientAction::SeenAdvancements { .. } => Self::SeenAdvancements,
+            ClientAction::CommandSuggestion { .. } => Self::CommandSuggestion,
+            ClientAction::PaddleBoat { .. } => Self::PaddleBoat,
+            ClientAction::MoveVehicle { .. } => Self::MoveVehicle,
         }
     }
 }

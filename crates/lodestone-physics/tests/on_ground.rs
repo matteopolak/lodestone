@@ -34,7 +34,7 @@
 use std::collections::HashSet;
 
 use lodestone_physics::{
-    Aabb, CollisionView, MovementInput, PhysicsProfile, PlayerState, Vec3d, tick,
+    Aabb, CollisionView, EntityDimensions, MovementInput, PhysicsProfile, PlayerState, Vec3d, tick,
 };
 
 /// The server's flying-kick threshold at default gravity
@@ -342,6 +342,5 @@ fn spectator_or_passenger_note() {
     // No behaviour to assert in the pure engine; this is a living contract note.
     // If riding state is ever added to PlayerState, replace this with a real
     // assertion that mounted => transmitted on_ground is false.
-    let profile = PhysicsProfile::mc_1_21();
-    assert!(profile.step_height >= 0.0);
+    assert!(EntityDimensions::PLAYER.step_height >= 0.0);
 }

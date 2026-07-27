@@ -27,10 +27,10 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_model::{
     BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityEquipment,
-    EntityMetadataUpdate, EntityMovement, EntityPose, GameMode, PlayerListEntry, ResourceKey,
-    Rotation, Vec3,
+    EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode, PlayerListEntry,
+    ResourceKey, Rotation, Vec3,
 };
-use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, World};
+use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -123,6 +123,15 @@ pub struct EntityView {
     pub health: Option<f32>,
     /// Whether the entity is a baby, once reported (ageable mobs only).
     pub baby: Option<bool>,
+    /// The entity's cosmetic variant (sheep colour, villager profession, horse
+    /// colour/markings, biome-specific animal variant, …), once the version
+    /// adapter has raised one from a metadata packet.
+    ///
+    /// `None` means the server has sent no variant override — the renderer
+    /// should draw the entity type's vanilla default variant, which is a
+    /// different state from a known-but-plain variant. Do not treat `None` as
+    /// "unknown".
+    pub variant: Option<EntityVariant>,
     /// The entity's attributes, keyed by canonical id, as last reported by
     /// `update_attributes`. Later snapshots for the same attribute replace
     /// earlier ones.
@@ -279,9 +288,9 @@ impl SharedState {
     /// off a stable snapshot while chunk streaming continues. A later edit forks
     /// that section copy-on-write, leaving the snapshot untouched.
     ///
-    /// Note: this hands out block-state sections only. Lit meshing also needs the
-    /// column's light, which is not yet reachable lock-free (see the crate-level
-    /// world-query notes); that is a pending `lodestone-world` seam.
+    /// Note: this hands out block-state sections only. The column's light — which
+    /// lit meshing also needs — is served in parallel by [`light_at`](Self::light_at)
+    /// and [`lights_at`](Self::lights_at).
     #[must_use]
     pub(crate) fn section_at(
         &self,
@@ -307,6 +316,41 @@ impl SharedState {
         requests
             .iter()
             .map(|(pos, index)| world.section(to_world_pos(*pos), *index))
+            .collect()
+    }
+
+    /// Returns an owned [`SectionLight`] snapshot of light section
+    /// `light_section_index` within the chunk at `pos`, or `None` if the chunk is
+    /// not loaded or that light section is out of range.
+    ///
+    /// This is the light-side companion to [`section_at`](Self::section_at). Light
+    /// is indexed in its native *light-section* space (`0` is the section below the
+    /// world; light section `i` covers world block-section `i - 1`), which is what
+    /// lets a mesher reach the boundary light sections above and below the build
+    /// range. Unlike [`section_at`](Self::section_at) an all-air (elided) block
+    /// section still yields `Some` light: air carries light a face must sample.
+    #[must_use]
+    pub(crate) fn light_at(
+        &self,
+        pos: ChunkPos,
+        light_section_index: usize,
+    ) -> Option<SectionLight> {
+        self.world
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .section_light(to_world_pos(pos), light_section_index)
+    }
+
+    /// Returns one owned light snapshot per requested `(chunk, light_section_index)`,
+    /// in order, taking the world read lock exactly once — the light-side twin of
+    /// [`sections_at`](Self::sections_at) for pulling a whole meshing neighbourhood
+    /// under a single brief lock.
+    #[must_use]
+    pub(crate) fn lights_at(&self, requests: &[(ChunkPos, usize)]) -> Vec<Option<SectionLight>> {
+        let world = self.world.read().unwrap_or_else(|e| e.into_inner());
+        requests
+            .iter()
+            .map(|(pos, index)| world.section_light(to_world_pos(*pos), *index))
             .collect()
     }
 
@@ -498,6 +542,7 @@ impl Inner {
                         pose: None,
                         health: None,
                         baby: None,
+                        variant: None,
                         attributes: Vec::new(),
                         equipment: Vec::new(),
                     },
@@ -662,5 +707,8 @@ fn apply_metadata(entity: &mut EntityView, metadata: &EntityMetadataUpdate) {
     }
     if let Some(baby) = metadata.baby {
         entity.baby = Some(baby);
+    }
+    if let Some(variant) = &metadata.variant {
+        entity.variant = Some(variant.clone());
     }
 }

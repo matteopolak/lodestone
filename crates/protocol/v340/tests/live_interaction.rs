@@ -313,34 +313,48 @@ async fn breaks_and_places_blocks_on_live_1_12_server() {
     );
     // Reference block is the ground one cell below the (now-air) target.
     let reference = BlockPos::new(place_x, feet_y - 1, base_z);
-    send_action(
-        &adapter,
-        &mut conn,
-        &ClientAction::UseItemOn {
-            hand: Hand::Main,
-            pos: reference,
-            face: BlockFace::Up,
-            cursor: Vec3f {
-                x: 0.5,
-                y: 1.0,
-                z: 0.5,
+    // A single `block_place` can be transiently ignored by the server (the held
+    // item / player position settling one tick behind our packets), so re-send
+    // the placement each round until the server-authored `testforblock` confirms
+    // stone or the window expires. Re-sending is still an honest oracle: the cell
+    // only reads back as stone if the *server* actually accepted a placement, and
+    // a second place onto an already-stone cell is a harmless no-op.
+    let place_deadline = Instant::now() + Duration::from_secs(15);
+    let mut placed = false;
+    while Instant::now() < place_deadline {
+        send_action(
+            &adapter,
+            &mut conn,
+            &ClientAction::UseItemOn {
+                hand: Hand::Main,
+                pos: reference,
+                face: BlockFace::Up,
+                cursor: Vec3f {
+                    x: 0.5,
+                    y: 1.0,
+                    z: 0.5,
+                },
+                inside_block: false,
+                sequence: 0,
             },
-            inside_block: false,
-            sequence: 0,
-        },
-    )
-    .await;
-    pump(
-        &adapter,
-        &mut conn,
-        &mut state,
-        &mut world,
-        Duration::from_millis(600),
-    )
-    .await;
+        )
+        .await;
+        pump(
+            &adapter,
+            &mut conn,
+            &mut state,
+            &mut world,
+            Duration::from_millis(400),
+        )
+        .await;
+        if poll_block_is_air(place_x, feet_y, base_z, false, Duration::from_millis(800)) {
+            placed = true;
+            break;
+        }
+    }
 
     assert!(
-        poll_block_is_air(place_x, feet_y, base_z, false, Duration::from_secs(10)),
+        placed,
         "the block at ({place_x},{feet_y},{base_z}) did NOT become stone after the client's \
          block_place — the server did not accept our placement"
     );

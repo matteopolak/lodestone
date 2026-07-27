@@ -33,6 +33,8 @@ pub mod id {
     pub const LEAVES: u32 = 7;
     /// Bedrock.
     pub const BEDROCK: u32 = 8;
+    /// Gravel (ocean floor / surface-rule result).
+    pub const GRAVEL: u32 = 9;
 }
 
 /// Sprite (atlas tile) indices. One per distinct texture.
@@ -47,7 +49,8 @@ mod sprite {
     pub const LOG_TOP: u16 = 7;
     pub const LEAVES: u16 = 8;
     pub const BEDROCK: u16 = 9;
-    pub const COUNT: u16 = 10;
+    pub const GRAVEL: u16 = 10;
+    pub const COUNT: u16 = 11;
 }
 
 /// Face order matches [`lodestone_render::Face`]:
@@ -103,6 +106,7 @@ const PALETTE: &[Block] = &[
     },
     uniform("leaves", id::LEAVES, sprite::LEAVES),
     uniform("bedrock", id::BEDROCK, sprite::BEDROCK),
+    uniform("gravel", id::GRAVEL, sprite::GRAVEL),
 ];
 
 /// The demo palette (all non-air blocks).
@@ -162,6 +166,7 @@ fn base_color(s: u16) -> [u8; 3] {
         sprite::LOG_TOP => [160, 130, 86],
         sprite::LEAVES => [56, 110, 46],
         sprite::BEDROCK => [64, 64, 68],
+        sprite::GRAVEL => [126, 120, 116],
         _ => [255, 0, 255],
     }
 }

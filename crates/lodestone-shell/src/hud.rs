@@ -186,8 +186,10 @@ pub struct HudFrame<'a> {
     pub show_debug: bool,
     /// Whether to draw the centre crosshair (suppressed on menus/pause).
     pub crosshair: bool,
-    /// Recent chat lines, oldest-first; the last few are drawn bottom-left.
-    pub chat: &'a [&'a str],
+    /// Recent chat lines, oldest-first; drawn bottom-left. Each is a legacy
+    /// `§`-code string paired with its **age in seconds**, which drives the
+    /// vanilla fade-out (older lines dim, then vanish, while the box is closed).
+    pub chat: &'a [(&'a str, f32)],
     /// The in-progress chat input line, `Some` only while the chat box is open.
     pub chat_input: Option<&'a str>,
     /// Formatted player-list rows, `Some` only while the tab overlay is held.
@@ -263,12 +265,16 @@ impl HudGeometry {
         }
 
         // Chat, bottom-left: an optional input line at the very bottom, with the
-        // received log stacked above it.
+        // received log stacked above it. Received lines carry legacy `§` colour
+        // codes (rendered as coloured runs) and fade out with age like vanilla
+        // once the box is closed; while it's open, the full history stays lit.
+        let chat_open = frame.chat_input.is_some();
         let input_y = b.h - margin - glyph_h * scale;
         if let Some(input) = frame.chat_input {
             // A translucent strip so text stays legible over bright terrain.
             b.rect_px(0.0, input_y - 3.0, b.w * 0.6, line_h, [0.0, 0.0, 0.0, 0.55]);
-            // A trailing underscore stands in for a caret (no blink).
+            // A trailing underscore stands in for a caret (no blink). The typed
+            // line is always plain (input filters `§`), so a flat draw is right.
             b.text(
                 &format!("> {input}_"),
                 margin,
@@ -277,20 +283,24 @@ impl HudGeometry {
                 [1.0, 1.0, 1.0, 1.0],
             );
         }
-        let chat_bottom = if frame.chat_input.is_some() {
-            input_y
-        } else {
-            b.h - margin
-        };
+        let chat_bottom = if chat_open { input_y } else { b.h - margin };
         // Show more history while actively typing than during play.
-        let max_lines = if frame.chat_input.is_some() { 18 } else { 8 };
-        for (i, line) in frame.chat.iter().rev().take(max_lines).enumerate() {
+        let max_lines = if chat_open { 18 } else { 10 };
+        for (i, (line, age)) in frame.chat.iter().rev().take(max_lines).enumerate() {
+            // While open, every line is fully lit; while closed, lines fade over
+            // their last two seconds of a ten-second life and then disappear.
+            let alpha = if chat_open { 1.0 } else { chat_line_alpha(*age) };
+            if alpha <= 0.0 {
+                // Older-than-visible lines end the stack: everything above is
+                // older still, so there is nothing more to draw.
+                break;
+            }
             let y = chat_bottom - (i as f32 + 1.0) * line_h;
             if y < margin {
                 break;
             }
-            b.rect_px(0.0, y - 1.0, b.w * 0.6, line_h, [0.0, 0.0, 0.0, 0.4]);
-            b.text(line, margin, y, scale, [0.92, 0.94, 1.0, 1.0]);
+            b.rect_px(0.0, y - 1.0, b.w * 0.6, line_h, [0.0, 0.0, 0.0, 0.4 * alpha]);
+            b.text_legacy(line, margin, y, scale, [0.92, 0.94, 1.0], alpha);
         }
 
         // Crosshair: a white plus at the centre.
@@ -437,6 +447,53 @@ fn text_w(s: &str, scale: f32) -> f32 {
     s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0) * scale
 }
 
+/// A chat line is fully lit for most of its life, then fades over its last
+/// [`CHAT_FADE_SECS`] before disappearing at [`CHAT_VISIBLE_SECS`] — matching
+/// vanilla's "recent messages fade out when the box is closed" behaviour. Only
+/// used while the chat box is closed; open, every line is drawn at full alpha.
+fn chat_line_alpha(age: f32) -> f32 {
+    const CHAT_VISIBLE_SECS: f32 = 10.0;
+    const CHAT_FADE_SECS: f32 = 2.0;
+    if age <= CHAT_VISIBLE_SECS - CHAT_FADE_SECS {
+        1.0
+    } else if age >= CHAT_VISIBLE_SECS {
+        0.0
+    } else {
+        (CHAT_VISIBLE_SECS - age) / CHAT_FADE_SECS
+    }
+}
+
+/// The RGB of one of the sixteen legacy `§` colour codes (`0`..=`9`, `a`..=`f`),
+/// or `None` for a format/reset code. These are the standard Minecraft chat
+/// foreground colours; the shell paints them locally, which is a rendering
+/// concern (how to colour a run), not protocol knowledge.
+fn legacy_rgb(code: char) -> Option<[f32; 3]> {
+    let hex: u32 = match code.to_ascii_lowercase() {
+        '0' => 0x000000,
+        '1' => 0x0000aa,
+        '2' => 0x00aa00,
+        '3' => 0x00aaaa,
+        '4' => 0xaa0000,
+        '5' => 0xaa00aa,
+        '6' => 0xffaa00,
+        '7' => 0xaaaaaa,
+        '8' => 0x555555,
+        '9' => 0x5555ff,
+        'a' => 0x55ff55,
+        'b' => 0x55ffff,
+        'c' => 0xff5555,
+        'd' => 0xff55ff,
+        'e' => 0xffff55,
+        'f' => 0xffffff,
+        _ => return None,
+    };
+    Some([
+        ((hex >> 16) & 0xff) as f32 / 255.0,
+        ((hex >> 8) & 0xff) as f32 / 255.0,
+        (hex & 0xff) as f32 / 255.0,
+    ])
+}
+
 struct Builder {
     w: f32,
     h: f32,
@@ -486,23 +543,64 @@ impl Builder {
         let advance = (font::GLYPH_W as f32 + 1.0) * scale;
         let mut cursor = x;
         for ch in s.chars() {
-            if ch != ' ' {
-                let rows = font::glyph_rows(ch);
-                for (ry, row) in rows.iter().enumerate() {
-                    for rx in 0..font::GLYPH_W {
-                        let bit = (row >> (font::GLYPH_W - 1 - rx)) & 1;
-                        if bit == 1 {
-                            self.rect_px(
-                                cursor + rx as f32 * scale,
-                                y + ry as f32 * scale,
-                                scale,
-                                scale,
-                                c,
-                            );
-                        }
-                    }
+            self.glyph(ch, cursor, y, scale, c);
+            cursor += advance;
+        }
+    }
+
+    /// Draw a single glyph with its top-left at `(x, y)`. Space and unknown
+    /// handling match [`font::glyph_rows`]; blanks emit no quads.
+    fn glyph(&mut self, ch: char, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        if ch == ' ' {
+            return;
+        }
+        let rows = font::glyph_rows(ch);
+        for (ry, row) in rows.iter().enumerate() {
+            for rx in 0..font::GLYPH_W {
+                let bit = (row >> (font::GLYPH_W - 1 - rx)) & 1;
+                if bit == 1 {
+                    self.rect_px(
+                        x + rx as f32 * scale,
+                        y + ry as f32 * scale,
+                        scale,
+                        scale,
+                        c,
+                    );
                 }
             }
+        }
+    }
+
+    /// Emit a string carrying legacy `§` colour/format codes as coloured runs.
+    /// Colour codes (`§0`..=`§f`) recolour the following text; `§r` resets to
+    /// `base`; format codes (`§k`/`l`/`m`/`n`/`o`) are consumed but not styled
+    /// (the shell's bitmap font has no bold/italic variants). Each code pair is
+    /// **zero-width**, matching vanilla's "`§` codes are 2 chars / 0 width", so
+    /// coloured and plain text of the same visible length line up exactly.
+    /// `alpha` scales every run for the fade-out.
+    fn text_legacy(&mut self, s: &str, x: f32, y: f32, scale: f32, base: [f32; 3], alpha: f32) {
+        let advance = (font::GLYPH_W as f32 + 1.0) * scale;
+        let mut cursor = x;
+        let mut rgb = base;
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{00a7}' {
+                // A colour/format code: consume the following selector, adjust
+                // state, and advance the cursor by nothing.
+                match chars.next() {
+                    Some(code) => {
+                        if let Some(c) = legacy_rgb(code) {
+                            rgb = c;
+                        } else if code.eq_ignore_ascii_case(&'r') {
+                            rgb = base;
+                        }
+                        // Format codes (k/l/m/n/o) and unknowns: swallowed.
+                    }
+                    None => break,
+                }
+                continue;
+            }
+            self.glyph(ch, cursor, y, scale, [rgb[0], rgb[1], rgb[2], alpha]);
             cursor += advance;
         }
     }
@@ -734,7 +832,7 @@ mod tests {
     fn chat_input_and_log_add_geometry() {
         let stats = DebugStats::default();
         let base = HudGeometry::build(&HudFrame::new(&stats), 640, 480).vertex_count();
-        let chat = ["<a> hi", "<b> yo"];
+        let chat = [("<a> hi", 0.0_f32), ("<b> yo", 0.0)];
         let frame = HudFrame {
             chat: &chat,
             chat_input: Some("hello"),
@@ -742,6 +840,92 @@ mod tests {
         };
         let with_chat = HudGeometry::build(&frame, 640, 480).vertex_count();
         assert!(with_chat > base, "chat log + input line must add geometry");
+    }
+
+    #[test]
+    fn chat_colour_codes_are_zero_width_and_recolour_runs() {
+        let stats = DebugStats::default();
+        // A `§c` prefix must not add glyph geometry (codes are 2 chars / 0 width):
+        // "§chi" and "hi" draw the same number of lit pixels.
+        let plain = [("hi", 0.0_f32)];
+        let coded = [("\u{00a7}chi", 0.0_f32)];
+        let plain_geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &plain,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        let coded_geo = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &coded,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        );
+        assert_eq!(
+            plain_geo.vertex_count(),
+            coded_geo.vertex_count(),
+            "a colour code must draw no glyphs of its own"
+        );
+        // …but the pixels must be a different colour, so the code isn't ignored.
+        assert_ne!(
+            plain_geo.verts, coded_geo.verts,
+            "a colour code must recolour the run, not merely be stripped"
+        );
+    }
+
+    #[test]
+    fn chat_lines_fade_out_with_age_when_closed() {
+        let stats = DebugStats::default();
+        // A fresh line draws; a line older than the visible window draws nothing.
+        let fresh = [("hello", 0.0_f32)];
+        let stale = [("hello", 30.0_f32)];
+        let fresh_n = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &fresh,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        )
+        .vertex_count();
+        let stale_n = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &stale,
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        )
+        .vertex_count();
+        assert!(fresh_n > 0, "a fresh chat line must be visible");
+        assert_eq!(stale_n, 0, "a line past its lifetime must vanish when closed");
+
+        // Opening the box (a chat_input present) resurrects the stale line.
+        let opened = HudGeometry::build(
+            &HudFrame {
+                crosshair: false,
+                show_debug: false,
+                chat: &stale,
+                chat_input: Some(""),
+                ..HudFrame::new(&stats)
+            },
+            640,
+            480,
+        )
+        .vertex_count();
+        assert!(opened > 0, "an open chat box shows history regardless of age");
     }
 
     #[test]

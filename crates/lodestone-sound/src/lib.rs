@@ -49,4 +49,22 @@
 
 mod driver;
 
-pub use driver::{DriverError, SoundDriver};
+pub use driver::{DriverError, SoundDriver, SoundResolver};
+
+/// The native, device-backed engine ([`AudioEngine`]) and the audio types a
+/// consumer needs to drive it, re-exported so a caller depends on this one crate
+/// rather than reaching into [`lodestone-audio`](lodestone_audio) directly.
+///
+/// Native-only by `cfg`, mirroring the `cpal` sink it wraps: the browser has no
+/// `AudioEngine` (its `AudioWorklet` calls the mixer directly), so this whole
+/// surface is structurally absent from the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+mod engine;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use engine::AudioEngine;
+
+/// Audio types re-exported for consumers of [`AudioEngine`]. `AudioError` is the
+/// device-open failure type; `PlayHandle` identifies a live voice.
+#[cfg(not(target_arch = "wasm32"))]
+pub use lodestone_audio::{AudioError, PlayHandle};

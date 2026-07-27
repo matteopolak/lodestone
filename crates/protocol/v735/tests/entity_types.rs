@@ -168,12 +168,21 @@ fn table_is_non_empty_and_out_of_range_is_none() {
 fn known_ids_resolve_to_well_formed_identifiers() {
     // Spot 1.16 unified ids the live seam relies on; a transposed table fails
     // instantly.
-    assert_eq!(entity_types::entity_type_name(12), Some("minecraft:creeper"));
+    assert_eq!(
+        entity_types::entity_type_name(12),
+        Some("minecraft:creeper")
+    );
     assert_eq!(entity_types::entity_type_name(59), Some("minecraft:pig"));
-    assert_eq!(entity_types::entity_type_name(102), Some("minecraft:zombie"));
+    assert_eq!(
+        entity_types::entity_type_name(102),
+        Some("minecraft:zombie")
+    );
     assert_eq!(entity_types::entity_type_name(2), Some("minecraft:arrow"));
     assert_eq!(entity_types::entity_type_name(6), Some("minecraft:boat"));
-    assert_eq!(entity_types::entity_type_name(106), Some("minecraft:player"));
+    assert_eq!(
+        entity_types::entity_type_name(106),
+        Some("minecraft:player")
+    );
     // Both spawn aliases index the unified registry in 1.16.
     assert_eq!(entity_types::mob_type_name(59), Some("minecraft:pig"));
     assert_eq!(entity_types::object_type_name(6), Some("minecraft:boat"));

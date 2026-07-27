@@ -15,7 +15,7 @@ use lodestone_macros::{Decode, Encode, Packet};
 /// show death screen, boolean limited crafting, then the spawn info prefix of
 /// varint dimension-type holder id, string dimension name, big-endian 64-bit
 /// hashed seed, and unsigned byte game type.
-#[derive(Debug, Clone, PartialEq, Eq, Decode, Packet)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct GameLogin {
     /// Local player entity id.
@@ -257,6 +257,130 @@ pub struct MovePlayerPosRot {
     /// Movement flags (see [`MOVE_FLAG_ON_GROUND`] /
     /// [`MOVE_FLAG_HORIZONTAL_COLLISION`]).
     pub flags: u8,
+}
+
+/// Serverbound `move_player_pos` packet.
+///
+/// Sent when position moved but rotation did not (vanilla's
+/// `LocalPlayer.sendPosition` when only position is dirty).
+///
+/// Wire layout: big-endian `f64` x, y, z, then a single flags byte — bit 0
+/// ([`MOVE_FLAG_ON_GROUND`]) and bit 1 ([`MOVE_FLAG_HORIZONTAL_COLLISION`]),
+/// matching vanilla's `packFlags`. No rotation fields at all.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:move_player_pos", state = Play, bound = Server)]
+pub struct MovePlayerPos {
+    /// Absolute x position.
+    pub x: f64,
+    /// Absolute y position (feet).
+    pub y: f64,
+    /// Absolute z position.
+    pub z: f64,
+    /// Movement flags (see [`MOVE_FLAG_ON_GROUND`] /
+    /// [`MOVE_FLAG_HORIZONTAL_COLLISION`]).
+    pub flags: u8,
+}
+
+/// Serverbound `move_player_rot` packet.
+///
+/// Sent when rotation changed but position did not (vanilla's
+/// `LocalPlayer.sendPosition` when only look is dirty).
+///
+/// Wire layout: big-endian `f32` yaw and pitch, then a single flags byte —
+/// bit 0 ([`MOVE_FLAG_ON_GROUND`]) and bit 1
+/// ([`MOVE_FLAG_HORIZONTAL_COLLISION`]), matching vanilla's `packFlags`. No
+/// position fields at all.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:move_player_rot", state = Play, bound = Server)]
+pub struct MovePlayerRot {
+    /// Yaw in degrees.
+    pub yaw: f32,
+    /// Pitch in degrees.
+    pub pitch: f32,
+    /// Movement flags (see [`MOVE_FLAG_ON_GROUND`] /
+    /// [`MOVE_FLAG_HORIZONTAL_COLLISION`]).
+    pub flags: u8,
+}
+
+/// Serverbound `move_player_status_only` packet.
+///
+/// Sent when neither position nor rotation changed enough to be "dirty", but
+/// on-ground or horizontal-collision status flipped since the last tick
+/// (vanilla's `LocalPlayer.sendPosition` fallback branch). Carries no pose
+/// data at all — just the flags byte.
+///
+/// Wire layout: a single flags byte — bit 0 ([`MOVE_FLAG_ON_GROUND`]) and bit
+/// 1 ([`MOVE_FLAG_HORIZONTAL_COLLISION`]), matching vanilla's `packFlags`.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:move_player_status_only", state = Play, bound = Server)]
+pub struct MovePlayerStatusOnly {
+    /// Movement flags (see [`MOVE_FLAG_ON_GROUND`] /
+    /// [`MOVE_FLAG_HORIZONTAL_COLLISION`]).
+    pub flags: u8,
+}
+
+/// Serverbound `move_vehicle` packet.
+///
+/// Sent once per tick while riding a vehicle (`ServerboundMoveVehiclePacket`).
+/// Unlike player movement, there is no dirty-tracking selection and no
+/// horizontal-collision flag: vanilla always sends the full shape and packs
+/// only `onGround` as a plain trailing boolean, not a bitset.
+///
+/// Wire layout: `Vec3.STREAM_CODEC` (big-endian `f64` x, y, z), big-endian
+/// `f32` yaw then pitch, then a single boolean byte for `onGround`.
+#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:move_vehicle", state = Play, bound = Server)]
+pub struct MoveVehicle {
+    /// Vehicle's absolute x position.
+    pub x: f64,
+    /// Vehicle's absolute y position.
+    pub y: f64,
+    /// Vehicle's absolute z position.
+    pub z: f64,
+    /// Yaw in degrees.
+    pub yaw: f32,
+    /// Pitch in degrees.
+    pub pitch: f32,
+    /// Whether the vehicle is on the ground.
+    pub on_ground: bool,
+}
+
+/// Serverbound `paddle_boat` packet (boat paddle animation input).
+///
+/// Wire layout: two plain booleans, `left` then `right`
+/// (`ServerboundPaddleBoatPacket`'s `writeBoolean` pair).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:paddle_boat", state = Play, bound = Server)]
+pub struct PaddleBoat {
+    /// Whether the left paddle is in use.
+    pub left: bool,
+    /// Whether the right paddle is in use.
+    pub right: bool,
+}
+
+/// Serverbound `player_loaded` packet with an empty body
+/// (`ServerboundPlayerLoadedPacket`, `StreamCodec.unit`).
+///
+/// Zeroes the server's `clientLoadedTimeoutTimer` early so movement is
+/// validated immediately instead of being silently ignored for the first
+/// ~60 ticks after join/respawn.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:player_loaded", state = Play, bound = Server)]
+pub struct PlayerLoaded;
+
+/// Serverbound `command_suggestion` packet (tab-completion request).
+///
+/// Wire layout: a VarInt transaction id, then a VarInt-length-prefixed UTF-8
+/// command string (`ServerboundCommandSuggestionPacket`'s `readUtf(32500)` /
+/// `writeUtf`).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:command_suggestion", state = Play, bound = Server)]
+pub struct CommandSuggestion {
+    /// Transaction id echoed back in the server's suggestions response.
+    #[mc(varint)]
+    pub id: i32,
+    /// The command text typed so far, including the leading slash.
+    pub command: String,
 }
 
 /// Serverbound `swing` packet (arm-swing animation).
