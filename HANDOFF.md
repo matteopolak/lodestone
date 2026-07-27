@@ -883,3 +883,32 @@ cargo test -p lodestone-shell --features live --test live_world_mesh -- --ignore
 Needs the flat-creative 26.2 oracle on :25570 (RCON :25571) and a vanilla pack under
 `.cache/mc/<version>` (or `LODESTONE_ASSETS`). Per §12.52 it **fails loudly** when those are
 absent rather than skipping, and the failure message names the fix.
+
+## Recreating the test oracles
+
+Every live gate needs a real vanilla server; none of them mock the wire format, deliberately
+(see "when we own both sides of a round-trip test, it cannot detect a shared misunderstanding
+of the wire format"). The containers are **not** part of the repo state — recreate them:
+
+```
+./scripts/live-oracles/creative.sh   # :25570 game, :25571 RCON — flat/creative/peaceful
+./scripts/live-oracles/terrain.sh    # :25580 — normal terrain, for light gates
+```
+
+Both run `--rm` and bind-mount their world from `.cache/mc/<name>`, which is gitignored and
+**deliberately preserved** by `cleanup.sh` (expensive to refetch; `terrain.sh` also copies its
+`server.jar` from the creative world, so removing `.cache/mc/creative` breaks both).
+
+Verified end-to-end: `docker rm -f lodestone-creative`, re-ran `creative.sh`, then re-ran the
+live-world gate — passed, and on a *different* spawn chunk (`-1,-1` rather than `0,0`), which
+also shows the gate isn't coupled to a fixed location.
+
+Why flat/creative/peaceful for the primary oracle: tests need to *cause* an exact block
+arrangement over RCON without worldgen noise or mobs perturbing it. When a gate genuinely
+needs hills, caves and section seams, use the terrain oracle rather than converting this one
+— superflat makes some light gates vacuous (§12.82).
+
+**Cleanup** (`files/cleanup.sh`, outside the repo): `--status` reports, no args removes
+containers, `--images` also drops the pulled JDK images, `--deep` also drops repo scratch. It
+names lodestone-owned resources explicitly and never prunes, because this host carries an
+unrelated project.
