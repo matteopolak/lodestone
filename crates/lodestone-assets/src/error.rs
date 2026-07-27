@@ -220,6 +220,14 @@ pub enum AtlasError {
     Empty,
 }
 
+/// Errors produced while building the flat item-sprite atlas.
+#[derive(Debug, thiserror::Error)]
+pub enum ItemAtlasError {
+    /// The underlying sprite atlas failed to stitch.
+    #[error("item atlas: {0}")]
+    Atlas(#[from] AtlasError),
+}
+
 /// Errors produced while baking a resolved model into renderer-ready geometry.
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {

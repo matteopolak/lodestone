@@ -81,6 +81,7 @@ pub mod font;
 pub mod gui;
 pub mod icon;
 pub mod item;
+pub mod item_atlas;
 pub mod item_model;
 pub mod lang;
 mod location;
@@ -107,10 +108,11 @@ pub use blockstate::{
 pub use error::AtlasSourceError;
 pub use error::{
     AssetError, AtlasError, BakeError, BlockStateError, FontError, GuiError, IconError,
-    ItemModelError, ModelError, ParticleError, ResourceLocationError, SoundError, TextureError,
-    TintError,
+    ItemAtlasError, ItemModelError, ModelError, ParticleError, ResourceLocationError, SoundError,
+    TextureError, TintError,
 };
 pub use icon::{DefaultItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
+pub use item_atlas::{ItemAtlas, ItemAtlasReport};
 pub use lang::Language;
 pub use item_model::{
     ItemModel, ItemModelNode, ItemModelOutput, ItemPropertyContext, RangeEntry, SelectCase,
