@@ -1,13 +1,12 @@
 //! Hermetic byte-exact tests for the serverbound interaction encoders:
 //! `player_action`, `use_item_on`, `use_item`, `attack`, `interact`,
-//! `player_input`, `player_command`, `set_carried_item` and `container_close`.
+//! `player_input`, `player_command`, `set_carried_item`, `container_close`,
+//! `container_click`, and `set_creative_mode_slot`.
 //!
 //! Expected payloads are built from the wire specification with independent
 //! VarInt / big-endian encoders (never the adapter's own codec), so a symmetric
 //! bug cannot pass. Layouts are verified against 26.2's `Serverbound*Packet`
-//! stream codecs. The two `ItemStack`-bearing actions (`container_click`,
-//! `set_creative_mode_slot`) are asserted to fail loudly rather than emit wrong
-//! bytes, because their wire shapes are not yet expressible from the model.
+//! stream codecs.
 
 use lodestone_model::{
     AdapterError, BlockActionKind, BlockFace, ClientAction, ConnectionState, EntityInteraction,
@@ -285,7 +284,42 @@ fn container_close_is_varint_window_id() {
 }
 
 #[test]
-fn container_click_fails_loudly_rather_than_encoding_wrong_bytes() {
+fn container_click_pickup_is_byte_exact_with_hashed_stacks() {
+    let (id, bytes) = encode(&ClientAction::ContainerClick {
+        window_id: 1,
+        state_id: 7,
+        slot: 36,
+        button: 0,
+        click_type: lodestone_model::ContainerClickType::Pickup,
+        changed_slots: vec![lodestone_model::ContainerSlotChange {
+            slot: 36,
+            item: Some(lodestone_model::ItemStack {
+                item: "minecraft:stone".parse().expect("valid identifier"),
+                count: 5,
+            }),
+        }],
+        carried_item: None,
+    });
+    assert_eq!(id, play::serverbound::CONTAINER_CLICK);
+    let mut want = Vec::new();
+    want.extend_from_slice(&varint(1)); // container id
+    want.extend_from_slice(&varint(7)); // state id
+    want.extend_from_slice(&36i16.to_be_bytes()); // slot num
+    want.push(0); // button num
+    want.extend_from_slice(&varint(0)); // ContainerInput.PICKUP
+    want.extend_from_slice(&varint(1)); // one changed slot
+    want.extend_from_slice(&36i16.to_be_bytes()); // changed slot key
+    want.push(1); // HashedStack present
+    want.extend_from_slice(&varint(1)); // minecraft:stone item id
+    want.extend_from_slice(&varint(5)); // count
+    want.extend_from_slice(&varint(0)); // added components
+    want.extend_from_slice(&varint(0)); // removed components
+    want.push(0); // carried item HashedStack: absent
+    assert_eq!(bytes, want);
+}
+
+#[test]
+fn container_click_unknown_item_fails_loudly() {
     let err = V770Adapter::new()
         .encode_action(
             ConnectionState::Play,
@@ -296,25 +330,46 @@ fn container_click_fails_loudly_rather_than_encoding_wrong_bytes() {
                 button: 0,
                 click_type: lodestone_model::ContainerClickType::Pickup,
                 changed_slots: Vec::new(),
-                carried_item: None,
+                carried_item: Some(lodestone_model::ItemStack {
+                    item: "minecraft:does_not_exist".parse().expect("valid identifier"),
+                    count: 1,
+                }),
             },
         )
-        .expect_err("container_click must not silently succeed");
-    assert!(matches!(err, AdapterError::Unsupported(_)), "got {err:?}");
+        .expect_err("an unknown item key must not silently encode as some wrong id");
+    assert!(matches!(err, AdapterError::Encode(_)), "got {err:?}");
 }
 
 #[test]
-fn set_creative_mode_slot_fails_loudly() {
-    let err = V770Adapter::new()
-        .encode_action(
-            ConnectionState::Play,
-            &ClientAction::SetCreativeModeSlot {
-                slot: 36,
-                item: None,
-            },
-        )
-        .expect_err("set_creative_mode_slot must not silently succeed");
-    assert!(matches!(err, AdapterError::Unsupported(_)), "got {err:?}");
+fn set_creative_mode_slot_with_item_is_byte_exact() {
+    let (id, bytes) = encode(&ClientAction::SetCreativeModeSlot {
+        slot: 36,
+        item: Some(lodestone_model::ItemStack {
+            item: "minecraft:stone".parse().expect("valid identifier"),
+            count: 64,
+        }),
+    });
+    assert_eq!(id, play::serverbound::SET_CREATIVE_MODE_SLOT);
+    let mut want = Vec::new();
+    want.extend_from_slice(&36i16.to_be_bytes()); // slot num
+    want.extend_from_slice(&varint(64)); // count (non-empty since > 0)
+    want.extend_from_slice(&varint(1)); // minecraft:stone item id
+    want.extend_from_slice(&varint(0)); // added components
+    want.extend_from_slice(&varint(0)); // removed components
+    assert_eq!(bytes, want);
+}
+
+#[test]
+fn set_creative_mode_slot_empty_is_a_single_zero_count() {
+    let (id, bytes) = encode(&ClientAction::SetCreativeModeSlot {
+        slot: 36,
+        item: None,
+    });
+    assert_eq!(id, play::serverbound::SET_CREATIVE_MODE_SLOT);
+    let mut want = Vec::new();
+    want.extend_from_slice(&36i16.to_be_bytes()); // slot num
+    want.extend_from_slice(&varint(0)); // empty stack: count <= 0
+    assert_eq!(bytes, want);
 }
 
 #[test]

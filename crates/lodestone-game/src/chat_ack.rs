@@ -195,7 +195,7 @@ impl LastSeenTracker {
             return false;
         }
         self.last_tracked = Some(signature.clone());
-        let entry = was_shown.then(|| TrackedEntry {
+        let entry = was_shown.then_some(TrackedEntry {
             signature,
             pending: true,
         });

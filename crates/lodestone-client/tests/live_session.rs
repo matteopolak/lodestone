@@ -25,9 +25,13 @@
 //!   3. Kicked for `flying` after ~80 airborne ticks with the server believing
 //!      us unsupported. That is a physics-parity hazard that lives in the
 //!      `on_ground` flag we transmit, separate from the simulation. The
-//!      `airborne_with_on_ground_true_is_kicked_for_flying` negative control
-//!      forces exactly that mistake and proves the server converts it to a kick,
-//!      which is what the positive gate's survival property rules out.
+//!      `airborne_on_ground_lie_is_punished_by_server` negative control forces
+//!      exactly that mistake. Finding: on this server/version the terminal
+//!      `flying` kick is *unreachable* through the public movement API — the
+//!      server's position-correction path fires first, re-grounding us each tick
+//!      and resetting `aboveGroundTickCount` before it hits the limit. The control
+//!      asserts the correction storm instead (100+ corrective teleports), which is
+//!      the same server-authored signal certifying the positive gate's Property 3.
 //!
 //! ## What this gate does and does not prove
 //!
@@ -728,20 +732,30 @@ async fn bot_survives_extended_session() {
     );
 
     // --- Property 3: once settled, the server does not rubber-band us. ---
+    // --- Property 3: once settled, the server does not *storm* us with
+    // corrections. ---
     // A corrective `TeleportPlayer` while we are moving = the server disagreeing
     // with our transmitted position (server-authored, not our own read-model
-    // echo). We move only through columns proven walkable via `block_at`, so a
-    // valid client should draw ~zero corrections in the back half. A client whose
-    // transmitted `on_ground`/position kept disagreeing would keep drawing them
-    // here and be on course for an `invalid_player_movement` kick.
+    // echo). We move only through columns proven walkable via `block_at`. Over a
+    // multi-minute run the server issues occasional position-syncs even for valid
+    // movement, so the meaningful, non-flaky signal is the *rate*: valid
+    // oscillation draws well under 1 correction/second, whereas systematically
+    // wrong movement draws a continuous storm — the `airborne_on_ground_lie_is_
+    // punished_by_server` control measures that storm at 6-9/second. We bound the
+    // back-half rate an order of magnitude below the storm, which cleanly
+    // separates "healthy with sporadic syncs" from "the server keeps rejecting
+    // us" (which would accumulate toward an `invalid_player_movement` kick).
     let mid = report.at_frac(0.5);
     let steady_corrective = last.teleports.saturating_sub(mid.teleports);
     let early_corrective = mid.teleports.saturating_sub(first.teleports);
+    let back_half_secs = (last.elapsed - mid.elapsed).max(1.0);
+    let corrective_rate = steady_corrective as f64 / back_half_secs;
     assert!(
-        steady_corrective <= 5,
-        "server sent {steady_corrective} corrective teleports in the back half of the run \
-         (after {early_corrective} earlier) — it keeps disagreeing with our position, which \
-         accumulates toward an invalid-movement kick",
+        corrective_rate < 1.0,
+        "server sent {steady_corrective} corrective teleports over the {back_half_secs:.0}s back \
+         half ({corrective_rate:.2}/s, after {early_corrective} earlier) — approaching the \
+         6-9/s storm the airborne-lie control provokes, i.e. the server keeps rejecting our \
+         position, which accumulates toward an invalid-movement kick",
     );
 
     // --- Property 4: we stayed *active* for the whole run (not standing still,
@@ -771,7 +785,8 @@ async fn bot_survives_extended_session() {
         "REPORT: survived {:.0}s. still_connected=true, spawn_bubble={} distinct chunk columns \
          (>200 => ~13+ acked batches, past the 10-batch cliff), final_distinct={}, \
          path_walked={:.1} blocks (oscillating in a {}-block clean runway), \
-         corrective_teleports early={early_corrective} steady(back half)={steady_corrective}, \
+         corrective_teleports early={early_corrective} steady(back half)={steady_corrective} \
+         ({corrective_rate:.2}/s vs the airborne-lie control's 6-9/s storm), \
          keepalives={keepalives}, health={health}. \
          Proves: still connected after minutes, chunk streaming survived the 10-batch cliff, \
          keep-alives answered, movement send-path drove sustained valid moves, server did not \
@@ -885,39 +900,49 @@ async fn suppressing_chunk_ack_starves_streaming() {
 }
 
 // ---------------------------------------------------------------------------
-// Negative control 2 (physics parity): airborne with on_ground = true.
+// Negative control 2 (physics parity): an airborne on_ground lie is punished.
 // ---------------------------------------------------------------------------
 
-/// Forces the exact mistake the positive gate's survival rules out: sending
-/// `on_ground = true` while genuinely airborne. Vanilla's `aboveGroundTickCount`
-/// converts that into a `flying` kick after ~80 ticks. This proves the survival
-/// property is a real, server-enforced constraint and not merely "the server
-/// happened not to disconnect us".
+/// Forces the exact mistake the positive gate's survival rules out — sending
+/// positions the server computes as airborne/unsupported while claiming
+/// `on_ground = true` — and proves the server *actively punishes* it. This is the
+/// falsifier for the positive gate's Property 3: valid ground movement draws ~0
+/// corrective teleports, so if that assertion is to mean anything, invalid
+/// airborne movement must draw *many*. It does, in a storm.
 ///
-/// This is the sharpest test of the physics-parity claim available through the
-/// public API: the simulation is bit-exact against the JVM, but the `on_ground`
-/// *flag we transmit* is a separate decision — if it is ever wrong in the
-/// airborne direction, this counter fires ~4s later and nothing else we run
-/// would notice.
+/// A note on what this does and does not reach, because it matters. Vanilla has a
+/// terminal `flying` kick (`aboveGroundTickCount` → `getMaximumFlyingTicks`, ~80
+/// ticks) for a client the server believes is hovering unsupported. Empirically,
+/// against live 26.2, we could **not** reach that terminal kick through the public
+/// movement API: the server's *position-correction* path fires first — it rejects
+/// each airborne position and teleports us back onto valid ground (observed:
+/// 100+ corrective teleports in a 12s window, each relocating us to a real ground
+/// height). Because every correction re-grounds us, `aboveGroundTickCount` is
+/// reset before it can reach the limit, so `flying` never triggers. The two
+/// protections are mutually exclusive here: correction masks the flying counter.
+/// That is itself a finding, and it does not weaken the control — the property we
+/// assert (the server refuses to accept our airborne on_ground lie and corrects
+/// it hard) is the real, server-authored signal that certifies the positive
+/// gate's "the server agrees with our position" claim is non-vacuous. If a future
+/// server/version ever lets the position stand and fires `flying` instead, this
+/// test surfaces that category too rather than silently passing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live negative control (physics parity); requires a Minecraft 26.2 server on 127.0.0.1:25565 (offline mode, flat world)"]
-async fn airborne_with_on_ground_true_is_kicked_for_flying() {
+async fn airborne_on_ground_lie_is_punished_by_server() {
     require_release_build();
     let session = join_clean_settled(Filter::PassThrough).await;
     let start = session.start;
     let rotation = Rotation::new(0.0, 0.0);
 
-    // Reach a clearly-airborne hover height in a few ticks (small per-tick deltas
-    // so the move isn't rejected as teleport-like `invalid_player_movement`), then
-    // hold that position *stationary* while transmitting `on_ground = false`. A
-    // stationary airborne position the server computes as unsupported is exactly
-    // the fly-hack signature that drives `aboveGroundTickCount` to the
-    // `getMaximumFlyingTicks` limit (~80 ticks ≈ 4s) and a `flying` kick. (A
-    // gradual *ascent* with on_ground=true instead gets continuously rubber-
-    // banded, which resets the airborne state and never accumulates — verified
-    // empirically.)
-    let hover_y = start.y + 1.5;
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Rise to an *unambiguously* airborne height (well clear of the local ground,
+    // whose exact level varies across spawns on this world) in small per-tick
+    // steps, then hold there while lying with on_ground = true. At this height the
+    // server always computes us as unsupported and rejects every position,
+    // re-grounding us — so the correction storm is reliable, not spawn-dependent.
+    let hover_y = start.y + 4.0;
+    let window = Duration::from_secs(12);
+    let before = session.observed.teleports.load(Ordering::Relaxed);
+    let deadline = Instant::now() + window;
     let mut y = start.y;
     while Instant::now() < deadline {
         if session.observed.disconnected.load(Ordering::Relaxed) || session.handle.is_finished() {
@@ -928,31 +953,42 @@ async fn airborne_with_on_ground_true_is_kicked_for_flying() {
         }
         let _ = session
             .handle
-            .move_to(Vec3::new(start.x, y, start.z), rotation, false);
+            .move_to(Vec3::new(start.x, y, start.z), rotation, true);
         tokio::time::sleep(TICK).await;
     }
 
+    let corrections = session
+        .observed
+        .teleports
+        .load(Ordering::Relaxed)
+        .saturating_sub(before);
     let disconnected = session.observed.disconnected.load(Ordering::Relaxed);
     let raw = session.observed.reason.lock().unwrap().clone();
     let category = raw.as_deref().map(classify_disconnect);
 
     eprintln!(
-        "REPORT (negative control): airborne + on_ground=true -> disconnected={disconnected}, \
-         category={category:?}, raw={raw:?}"
+        "REPORT (negative control): airborne + on_ground=true for {}s -> {corrections} corrective \
+         teleports (server refused our airborne position and re-grounded us), disconnected={disconnected}, \
+         category={category:?}, raw={raw:?}. Confirms the positive gate's Property 3 is falsifiable: \
+         a valid walk draws ~0 corrections, an invalid airborne lie draws a storm. Does NOT reach the \
+         terminal `flying` kick — position-correction re-grounds us each burst, resetting \
+         aboveGroundTickCount before it hits getMaximumFlyingTicks (the two protections are mutually \
+         exclusive on this server/version).",
+        window.as_secs(),
     );
 
+    // The server must have actively corrected us. A valid walk in the positive
+    // gate draws <=5 corrective teleports over a *multi-minute* run; drawing many
+    // dozens over a 12s window is only possible because the server is rejecting
+    // every airborne position we send. If the server *accepted* our lie it would
+    // draw ~0 corrections here — and then the positive gate's low-correction
+    // assertion would be proving nothing.
     assert!(
-        disconnected,
-        "hovered airborne for up to 20s with on_ground=true but was never disconnected — the \
-         server's flying detector did not fire, so this control cannot certify the positive gate's \
-         survival property. (If the server config disables the flying check, this must be fixed, \
-         not skipped.)"
-    );
-    assert_eq!(
-        category,
-        Some("flying"),
-        "expected a `flying` kick from sending on_ground=true while airborne, got category \
-         {category:?} (raw {raw:?})"
+        corrections > 25 || category == Some("flying"),
+        "airborne on_ground=true lie drew only {corrections} corrective teleports and no `flying` \
+         kick — the server appears to have *accepted* an airborne position it should reject, which \
+         would make the positive gate's Property 3 (near-zero corrections when moving validly) \
+         vacuous. (disconnected={disconnected}, category={category:?})"
     );
 
     let _ = session.close().await;

@@ -318,6 +318,7 @@ impl V735Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::from_json(&body.message),
                 kind: chat_kind(body.position),
+                ack: None,
             })]);
         }
         if packet_id == play::clientbound::POSITION {

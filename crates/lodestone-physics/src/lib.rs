@@ -24,6 +24,7 @@
 mod sin_table;
 
 pub mod collision;
+pub mod effect;
 pub mod fluid;
 pub mod geometry;
 pub mod mth;
@@ -31,6 +32,7 @@ pub mod player;
 pub mod profile;
 
 pub use collision::CollisionView;
+pub use effect::{DirectEffect, MovementEffect, classify, movement_speed_modifier};
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{

@@ -82,16 +82,14 @@ async fn bot_joins_reads_world_and_acts() {
     //    so surface health in the failure message.
     //
     //    NOTE ON COUNT: vanilla streams chunks in *batches*, sending
-    //    `chunk_batch_finished` after each and withholding the next until the
-    //    client returns a `chunk_batch_received` ACK. That ACK is version-
-    //    specific flow-control that belongs behind `VersionAdapter` (as a
-    //    `Directive::Send`), and the v770 adapter does not yet model it — so
-    //    through the public client only the first batch (a 3x3 = 9 chunk
-    //    neighbourhood here) arrives, and the stream plateaus. The restated
-    //    "225 chunks" gate is reachable through this exact client the moment the
-    //    adapter ACKs batches, with no change here; reported separately. Until
-    //    then this asserts what genuinely crosses the public API: real decoded
-    //    terrain, queried by block.
+    //    `chunk_batch_finished` after each and withholding the next once ten go
+    //    unacknowledged, until the client returns a `chunk_batch_received` ACK.
+    //    That ACK is version-specific flow-control behind `VersionAdapter` (as a
+    //    `Directive::Send`), and the v770 adapter now models it — so the stream
+    //    continues well past the first batch. This test deliberately asserts only
+    //    the minimum (`>= 1` chunk) because its subject is decoded terrain queried
+    //    by block, not streaming volume; the batch-ack cliff and multi-hundred-
+    //    chunk streaming are gated separately by `live_session.rs`.
     let chunks_result = handle.wait_for_chunks(1, Duration::from_secs(30)).await;
     assert!(
         chunks_result.is_ok(),

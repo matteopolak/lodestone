@@ -1,23 +1,29 @@
-//! The 1.12.2 (protocol 340) `entityMetadata` wire type — an indexed,
+//! The 1.16.5 (protocol 754) `entityMetadata` wire type — an indexed,
 //! self-terminating list of typed entity data-watcher values.
 //!
 //! # Why this is hand-written and why it is *duplicated* rather than shared
 //!
 //! Entity metadata is one of the most version-divergent surfaces in the whole
-//! protocol. This modern encoding shares almost nothing with 1.8's:
+//! protocol, and the serializer **type table is renumbered between families**:
+//! 1.13 inserted `OptChat` at index 5, pushing `Slot`, `Boolean`, `Rotation`
+//! and every later type up by one relative to 1.12, and later versions appended
+//! `Particle`, `VillagerData`, `OptVarInt` and `Pose`. A shared enum would have
+//! to carry a per-version discriminant map; the project blesses duplicating the
+//! whole codec per version instead, so this table is exactly 1.16.5's.
 //!
-//! * **Header.** 1.12 sends a `key: u8` then a separate `type: varint`; 1.8
-//!   packs both into one byte as `(type << 5) | key`.
-//! * **Terminator.** 1.12 ends the list with `0xFF`; 1.8 uses `0x7F`.
-//! * **Type table.** 1.12 renumbers everything, drops 1.8's `short`/`int`, and
-//!   adds `bool`, an `i64`-**packed** position, several `Option<_>` types, a
-//!   UUID, a block-state id and NBT — none of which 1.8 can express. 1.8's
-//!   *unpacked* `(i32,i32,i32)` position has no 1.12 equivalent either.
+//! * **Header.** `key: u8` then a separate `type: varint`; the list ends with a
+//!   `0xFF` key.
+//! * **Type table (1.16.5).** `0 Byte, 1 VarInt, 2 Float, 3 String, 4 Chat,
+//!   5 OptChat, 6 Slot, 7 Boolean, 8 Rotation, 9 Position, 10 OptPosition,
+//!   11 Direction, 12 OptUUID, 13 OptBlockID, 14 NBT, 15 Particle,
+//!   16 VillagerData, 17 OptVarInt, 18 Pose`.
 //!
-//! There is no lossless common representation across the two, so — as the
-//! project explicitly blessed for exactly this case — each version crate carries
-//! its own `MetadataValue` enum and codec. See the v47 crate for the legacy
-//! table.
+//! `Particle` (type 15) needs a particle-id registry with per-particle payloads
+//! that no crate carries yet, so it is **not** modeled: decoding a particle
+//! entry fails loudly with [`Error::InvalidEnumVariant`] rather than silently
+//! misparsing. This packet is not currently dispatched by the adapter, so that
+//! gap is unreachable in the live path; it is documented rather than papered
+//! over.
 //!
 //! Because these types implement `Encode`/`Decode`, packets that carry metadata
 //! still derive their own codecs and simply hold an [`EntityMetadata`] field.
@@ -28,18 +34,17 @@ use uuid::Uuid;
 use super::position::Position;
 use super::slot::Slot;
 
-/// Sentinel byte marking the end of a 1.12 metadata list.
+/// Sentinel byte marking the end of a metadata list.
 const END: u8 = 0xFF;
 
 /// Upper bound on a metadata string, matching the vanilla limit.
 const MAX_STRING: usize = 32_767;
 
-/// A single typed value in a 1.12.2 entity-metadata list.
+/// A single typed value in a 1.16.5 entity-metadata list.
 ///
-/// The variant set is exactly 1.12.2's serializer table. Note `Position` is a
-/// **packed** `i64` block position (unlike 1.8's unpacked triple), and several
-/// variants (`Bool`, the `Opt*` options, `Uuid`, `Nbt`) have no 1.8 counterpart
-/// at all.
+/// The variant set matches 1.16.5's serializer table. `Position` is a packed
+/// `i64` block position; several variants (`OptChat`, the `Opt*` options,
+/// `VillagerData`, `Pose`) are 1.13+/1.14+ additions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetadataValue {
     /// Type 0: signed byte.
@@ -52,11 +57,13 @@ pub enum MetadataValue {
     String(String),
     /// Type 4: chat component (JSON string).
     Chat(String),
-    /// Type 5: item slot.
+    /// Type 5: optional chat component (added 1.13).
+    OptChat(Option<String>),
+    /// Type 6: item slot.
     Slot(Slot),
-    /// Type 6: boolean.
+    /// Type 7: boolean.
     Bool(bool),
-    /// Type 7: rotation as three floats `(pitch, yaw, roll)`.
+    /// Type 8: rotation as three floats `(pitch, yaw, roll)`.
     Rotation {
         /// Rotation about X.
         pitch: f32,
@@ -65,22 +72,36 @@ pub enum MetadataValue {
         /// Rotation about Z.
         roll: f32,
     },
-    /// Type 8: packed `i64` block position.
+    /// Type 9: packed `i64` block position.
     Position(Position),
-    /// Type 9: optional packed block position.
+    /// Type 10: optional packed block position.
     OptPosition(Option<Position>),
-    /// Type 10: VarInt facing direction.
+    /// Type 11: VarInt facing direction.
     Direction(i32),
-    /// Type 11: optional UUID.
+    /// Type 12: optional UUID.
     OptUuid(Option<Uuid>),
-    /// Type 12: VarInt block-state id (`0` = absent/air).
+    /// Type 13: VarInt block-state id (`0` = absent/air).
     BlockId(i32),
-    /// Type 13: NBT tag, stored as raw bytes (`None` = the `TAG_End` marker).
+    /// Type 14: NBT tag, stored as raw bytes (`None` = the `TAG_End` marker).
     Nbt(Option<Vec<u8>>),
+    /// Type 16: villager data — three VarInts `(type, profession, level)`.
+    VillagerData {
+        /// Villager type id.
+        kind: i32,
+        /// Villager profession id.
+        profession: i32,
+        /// Villager level.
+        level: i32,
+    },
+    /// Type 17: optional VarInt (`0` = absent, otherwise `value + 1` on the
+    /// wire); modeled as the already-decoded logical value.
+    OptVarInt(Option<i32>),
+    /// Type 18: VarInt pose id.
+    Pose(i32),
 }
 
 impl MetadataValue {
-    /// The 1.12 serializer type id.
+    /// The 1.16.5 serializer type id.
     const fn type_id(&self) -> i32 {
         match self {
             MetadataValue::Byte(_) => 0,
@@ -88,26 +109,40 @@ impl MetadataValue {
             MetadataValue::Float(_) => 2,
             MetadataValue::String(_) => 3,
             MetadataValue::Chat(_) => 4,
-            MetadataValue::Slot(_) => 5,
-            MetadataValue::Bool(_) => 6,
-            MetadataValue::Rotation { .. } => 7,
-            MetadataValue::Position(_) => 8,
-            MetadataValue::OptPosition(_) => 9,
-            MetadataValue::Direction(_) => 10,
-            MetadataValue::OptUuid(_) => 11,
-            MetadataValue::BlockId(_) => 12,
-            MetadataValue::Nbt(_) => 13,
+            MetadataValue::OptChat(_) => 5,
+            MetadataValue::Slot(_) => 6,
+            MetadataValue::Bool(_) => 7,
+            MetadataValue::Rotation { .. } => 8,
+            MetadataValue::Position(_) => 9,
+            MetadataValue::OptPosition(_) => 10,
+            MetadataValue::Direction(_) => 11,
+            MetadataValue::OptUuid(_) => 12,
+            MetadataValue::BlockId(_) => 13,
+            MetadataValue::Nbt(_) => 14,
+            MetadataValue::VillagerData { .. } => 16,
+            MetadataValue::OptVarInt(_) => 17,
+            MetadataValue::Pose(_) => 18,
         }
     }
 
     fn encode_value(&self, w: &mut Writer, ctx: Ctx) -> Result<()> {
         match self {
             MetadataValue::Byte(v) => w.i8(*v),
-            MetadataValue::VarInt(v) | MetadataValue::Direction(v) | MetadataValue::BlockId(v) => {
+            MetadataValue::VarInt(v)
+            | MetadataValue::Direction(v)
+            | MetadataValue::BlockId(v)
+            | MetadataValue::Pose(v) => {
                 w.var_i32(*v);
             }
             MetadataValue::Float(v) => w.f32(*v),
             MetadataValue::String(v) | MetadataValue::Chat(v) => w.string(v),
+            MetadataValue::OptChat(opt) => match opt {
+                Some(text) => {
+                    w.bool(true);
+                    w.string(text);
+                }
+                None => w.bool(false),
+            },
             MetadataValue::Slot(v) => v.encode(w, ctx)?,
             MetadataValue::Bool(v) => w.bool(*v),
             MetadataValue::Rotation { pitch, yaw, roll } => {
@@ -134,6 +169,20 @@ impl MetadataValue {
                 None => w.u8(0), // TAG_End
                 Some(raw) => w.bytes(raw),
             },
+            MetadataValue::VillagerData {
+                kind,
+                profession,
+                level,
+            } => {
+                w.var_i32(*kind);
+                w.var_i32(*profession);
+                w.var_i32(*level);
+            }
+            // Wire form: `0` = absent, else logical value + 1.
+            MetadataValue::OptVarInt(opt) => match opt {
+                Some(v) => w.var_i32(v.wrapping_add(1)),
+                None => w.var_i32(0),
+            },
         }
         Ok(())
     }
@@ -145,24 +194,41 @@ impl MetadataValue {
             2 => MetadataValue::Float(r.f32()?),
             3 => MetadataValue::String(r.string(MAX_STRING)?),
             4 => MetadataValue::Chat(r.string(MAX_STRING)?),
-            5 => MetadataValue::Slot(Slot::decode(r, ctx)?),
-            6 => MetadataValue::Bool(r.bool()?),
-            7 => MetadataValue::Rotation {
+            5 => MetadataValue::OptChat(if r.bool()? {
+                Some(r.string(MAX_STRING)?)
+            } else {
+                None
+            }),
+            6 => MetadataValue::Slot(Slot::decode(r, ctx)?),
+            7 => MetadataValue::Bool(r.bool()?),
+            8 => MetadataValue::Rotation {
                 pitch: r.f32()?,
                 yaw: r.f32()?,
                 roll: r.f32()?,
             },
-            8 => MetadataValue::Position(Position::decode(r, ctx)?),
-            9 => MetadataValue::OptPosition(if r.bool()? {
+            9 => MetadataValue::Position(Position::decode(r, ctx)?),
+            10 => MetadataValue::OptPosition(if r.bool()? {
                 Some(Position::decode(r, ctx)?)
             } else {
                 None
             }),
-            10 => MetadataValue::Direction(r.var_i32()?),
-            11 => MetadataValue::OptUuid(if r.bool()? { Some(r.uuid()?) } else { None }),
-            12 => MetadataValue::BlockId(r.var_i32()?),
-            13 => MetadataValue::Nbt(decode_optional_nbt(r)?),
+            11 => MetadataValue::Direction(r.var_i32()?),
+            12 => MetadataValue::OptUuid(if r.bool()? { Some(r.uuid()?) } else { None }),
+            13 => MetadataValue::BlockId(r.var_i32()?),
+            14 => MetadataValue::Nbt(decode_optional_nbt(r)?),
+            16 => MetadataValue::VillagerData {
+                kind: r.var_i32()?,
+                profession: r.var_i32()?,
+                level: r.var_i32()?,
+            },
+            17 => {
+                let raw = r.var_i32()?;
+                MetadataValue::OptVarInt(if raw == 0 { None } else { Some(raw - 1) })
+            }
+            18 => MetadataValue::Pose(r.var_i32()?),
             other => {
+                // Type 15 (Particle) and any unknown id fall here: no registry
+                // to model them, so fail loudly rather than misparse.
                 return Err(Error::InvalidEnumVariant {
                     name: "v735 metadata type",
                     value: other,
@@ -197,7 +263,7 @@ pub struct MetadataEntry {
     pub value: MetadataValue,
 }
 
-/// A complete 1.12.2 entity-metadata list, terminated on the wire by `0xFF`.
+/// A complete 1.16.5 entity-metadata list, terminated on the wire by `0xFF`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntityMetadata(pub Vec<MetadataEntry>);
 

@@ -19,6 +19,23 @@ pub enum ChatKind {
     GameInfo,
 }
 
+/// A signed player-chat acknowledgement input.
+///
+/// Only signed player chat carries this. System chat, disguised chat, and older
+/// protocols should use `None` on [`ClientEvent::Chat`]. A filtered message still
+/// carries `Some(Self { was_shown: false, .. })`: it advances the vanilla
+/// last-seen window and burns an acknowledgement offset even though it did not
+/// render to the user.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChatAckInfo {
+    /// Raw message signature bytes.
+    pub signature: Vec<u8>,
+    /// Server-global signed-chat index.
+    pub global_index: i32,
+    /// Whether the message was shown to the user after filtering.
+    pub was_shown: bool,
+}
+
 /// Relative components of a player teleport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TeleportFlags {
@@ -629,6 +646,9 @@ pub enum ClientEvent {
         text: Text,
         /// Message kind.
         kind: ChatKind,
+        /// Signed-chat acknowledgement metadata, when this chat contributes to
+        /// the last-seen acknowledgement window.
+        ack: Option<ChatAckInfo>,
     },
     /// The server disconnected the client.
     Disconnect {

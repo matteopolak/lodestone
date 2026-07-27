@@ -1,9 +1,9 @@
-//! Hermetic dispatch tests for protocol 340 entity movement, velocity,
+//! Hermetic dispatch tests for protocol 754 entity movement, velocity,
 //! teleport, spawn and destroy packets.
 //!
 //! Like the v47 equivalent these are *seam* tests through the real
 //! [`VersionAdapter::handle_packet`], with anti-vacuous scaling assertions: the
-//! 1.12 delta scale is `1/4096` (not 1.8's `1/32`), so a divisor mix-up is off
+//! 1.16 delta scale is `1/4096` (not 1.8's `1/32`), so a divisor mix-up is off
 //! by 128× and cannot pass. Written independently of v47 — the two families are
 //! deliberately not unified.
 
@@ -16,7 +16,7 @@ use lodestone_v735::packets::entity::{
 };
 use lodestone_world::World;
 
-const CTX: Ctx = Ctx { version: 340 };
+const CTX: Ctx = Ctx { version: 754 };
 
 fn encode<T: Encode>(value: &T) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -129,7 +129,7 @@ fn entity_move_look_dispatches_delta_and_rotation() {
 
 #[test]
 fn entity_teleport_dispatches_absolute_f64_position() {
-    // 1.12 sends absolute f64 directly — no fixed-point conversion.
+    // 1.16 sends absolute f64 directly — no fixed-point conversion.
     let payload = encode(&EntityTeleport {
         entity_id: 99,
         x: 64.5,
@@ -182,7 +182,7 @@ fn entity_velocity_dispatches_in_eight_thousandths() {
 }
 
 // ---------------------------------------------------------------------------
-// Spawns (1.12 carries UUIDs and f64 coordinates)
+// Spawns (1.16 carries UUIDs and f64 coordinates)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -191,7 +191,7 @@ fn spawn_entity_living_resolves_mob_type_uuid_and_f64_coords() {
     let mut w = Writer::default();
     w.var_i32(42);
     w.uuid(uuid);
-    w.var_i32(50); // creeper (unified id)
+    w.var_i32(12); // creeper (unified 1.16 id)
     w.f64(10.5);
     w.f64(64.0);
     w.f64(-3.0);
@@ -201,7 +201,6 @@ fn spawn_entity_living_resolves_mob_type_uuid_and_f64_coords() {
     w.i16(0);
     w.i16(0);
     w.i16(0);
-    w.bytes(&[0xFF]); // 1.13-less metadata terminator (0xff for 1.12)
     let payload = w.into_vec();
     match dispatch(play::clientbound::SPAWN_ENTITY_LIVING, &payload).as_slice() {
         [
@@ -229,7 +228,7 @@ fn spawn_object_resolves_type_and_carries_uuid() {
     let mut w = Writer::default();
     w.var_i32(1000);
     w.uuid(uuid);
-    w.i8(60); // arrow
+    w.var_i32(2); // arrow (unified 1.16 id)
     w.f64(5.0);
     w.f64(65.0);
     w.f64(-8.0);
@@ -264,7 +263,7 @@ fn spawn_object_stationary_omits_velocity() {
     let mut w = Writer::default();
     w.var_i32(1001);
     w.uuid(uuid::Uuid::nil());
-    w.i8(1); // boat
+    w.var_i32(6); // boat (unified 1.16 id)
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);
@@ -301,7 +300,6 @@ fn named_entity_spawn_resolves_player_and_uuid() {
     w.f64(2.0);
     w.i8(0);
     w.i8(0);
-    w.bytes(&[0xFF]); // metadata terminator (consumed by the derived codec)
     let payload = w.into_vec();
     match dispatch(play::clientbound::NAMED_ENTITY_SPAWN, &payload).as_slice() {
         [
@@ -327,7 +325,7 @@ fn spawn_object_unknown_type_is_a_clean_error() {
     let mut w = Writer::default();
     w.var_i32(1);
     w.uuid(uuid::Uuid::nil());
-    w.i8(120); // absent from the 1.12 object table
+    w.var_i32(120); // absent from the 1.16 entity table (max id 107)
     w.f64(0.0);
     w.f64(0.0);
     w.f64(0.0);

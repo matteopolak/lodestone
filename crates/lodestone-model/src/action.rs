@@ -22,6 +22,12 @@ pub enum ClientAction {
         /// Command text without a leading slash.
         command: String,
     },
+    /// Acknowledge signed chat messages without sending a chat body.
+    ChatAck {
+        /// Number of signed messages added to the last-seen window since the
+        /// previous acknowledgement.
+        offset: i32,
+    },
     /// Send player movement.
     Move {
         /// Player position.

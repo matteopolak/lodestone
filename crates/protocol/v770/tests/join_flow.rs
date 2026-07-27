@@ -426,6 +426,7 @@ fn system_chat_emits_chat_event() {
         vec![Directive::Emit(ClientEvent::Chat {
             text: Text::literal("hello"),
             kind: ChatKind::System,
+            ack: None,
         })]
     );
 }
@@ -447,6 +448,7 @@ fn system_chat_overlay_is_game_info() {
         vec![Directive::Emit(ClientEvent::Chat {
             text: Text::literal("hi"),
             kind: ChatKind::GameInfo,
+            ack: None,
         })]
     );
 }
