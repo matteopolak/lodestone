@@ -105,9 +105,9 @@ pub use lodestone_world::{ChunkSection, LightData, SectionLight};
 // Re-export the model types a client user needs so they can build a session and
 // use the bot API without depending on `lodestone-model` directly.
 pub use lodestone_model::{
-    BlockPos, BossAction, BossColor, BossOverlay, ChunkPos, ClientAction, ClientEvent,
-    CollisionRule, ConnectionState, DimensionId, Directive, DisplaySlot, GameMode, Hand,
-    LoginProfile, NumberFormat, ObjectiveMode, ObjectiveRenderType, PlayerListEntry, ResourceKey,
-    Rotation, ServerAddress, TeamAction, TeamColor, TeamParameters, Text, Vec3, VersionAdapter,
-    Visibility,
+    BlockPos, BossAction, BossColor, BossOverlay, ChatAckInfo, ChatKind, ChunkPos, ClientAction,
+    ClientEvent, CollisionRule, ConnectionState, DimensionId, Directive, DisplaySlot, GameMode,
+    Hand, LoginProfile, NumberFormat, ObjectiveMode, ObjectiveRenderType, PlayerListEntry,
+    ResourceKey, Rotation, ServerAddress, TeamAction, TeamColor, TeamParameters, Text, Vec3,
+    VersionAdapter, Visibility,
 };
