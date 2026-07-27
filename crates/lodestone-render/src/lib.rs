@@ -44,6 +44,7 @@ pub mod driver;
 pub mod entity;
 pub mod entity_pipeline;
 pub mod frame;
+pub mod gui_atlas;
 pub mod mesh;
 pub mod mesher;
 pub mod model_pipeline;
@@ -80,6 +81,7 @@ pub use entity_pipeline::{EntityInstanceRaw, EntityPipeline, GpuEntityModel, upl
 #[cfg(not(target_arch = "wasm32"))]
 pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
+pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
 pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simple};
 pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,

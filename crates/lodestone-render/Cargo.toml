@@ -64,5 +64,6 @@ rayon.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true
+png.workspace = true
 lodestone-model.workspace = true
 lodestone-testsupport.workspace = true
