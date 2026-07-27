@@ -18,9 +18,11 @@ lodestone-net    = { path = "crates/lodestone-net" }
 lodestone-client = { path = "crates/lodestone-client" }
 lodestone-game   = { path = "crates/lodestone-game" }
 lodestone-assets = { path = "crates/lodestone-assets" }
+lodestone-particle = { path = "crates/lodestone-particle" }
 lodestone-sound  = { path = "crates/lodestone-sound" }
 lodestone-registry = { path = "crates/lodestone-registry" }
 lodestone-testsupport = { path = "crates/lodestone-testsupport" }
+lodestone-physics = { path = "crates/lodestone-physics" }
 lodestone-v770   = { path = "crates/protocol/v770" }
 lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
