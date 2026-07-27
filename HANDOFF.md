@@ -670,3 +670,60 @@ count that **changes on neighbour arrival** is the fix working, not a regression
 to `merge_light` plumbing / mesher sampling; SP seams belong to the neighbour-aware
 relight. Cost is ~12.5 ms/column, and the wire lives in the chunk-arrival/load path, not
 in the mesher — the mesher only reads whatever merged light the handle exposes.
+
+## Addendum — traps found during final wrap-up
+
+### `UseItemOn` needs the 26.2 `world_border_hit` bool
+
+`use_item_on` in v770 requires a trailing `world_border_hit` boolean added in 26.2.
+**Without it the live server disconnects on decode.** This is a wire-format bug that only
+a live server surfaces — a hermetic round-trip test passes happily, because our encoder and
+decoder agree with each other while both disagreeing with vanilla. Fixed and covered by
+`use_item_on_is_byte_exact`.
+
+Generalisation worth keeping: for any packet where we control **both** sides of a
+round-trip test, the test cannot detect a shared misunderstanding of the wire format. Only
+a real server can. Prefer at least one live assertion per packet family.
+
+### `V770ServerProtocol` must stay stateless (aliasing trap)
+
+`IntegratedServer::bind` wraps the protocol in `Arc<P>` and clones **that same `Arc`** into
+every accepted connection's spawned task. Any interior-mutable "last sent" state placed
+inside `V770ServerProtocol` would therefore be **silently shared across independent
+clients**.
+
+This passes every test today, because singleplayer has exactly one connection — and
+corrupts as soon as a second player joins. The fix already applied: keep the protocol a
+zero-sized stateless unit struct and pass `(prev, current)` snapshots as parameters, with
+the caller owning per-connection state:
+
+```rust
+fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective;
+fn encode_entity_update(&self, prev: Option<&EntitySnapshot>, current: &EntitySnapshot)
+    -> Vec<ServerDirective>;
+fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective;  // batched, matches REMOVE_ENTITIES
+```
+
+`encode_remove_entity` takes a slice and returns **one** directive because `REMOVE_ENTITIES`
+is genuinely batched on the wire (VarInt count + VarInt ids) — one packet per id would be
+valid but wrong-shaped.
+
+### An empty UI panel may legitimately draw
+
+The tab list's empty-state control is **not zero** — the empty panel itself renders a
+background. Its pixel gate therefore asserts a populated-vs-empty **delta**
+(`552 → 1380` bright pixels), not an absolute zero.
+
+This matters because the intuitive gate ("expect 0 pixels when empty") **fails against
+correct code**, and the natural response is to "fix" the renderer to satisfy it — removing
+a background that vanilla actually draws. Check what the surface is supposed to look like
+when empty before choosing between a delta assertion and an absolute one.
+
+Surfaces proven to pixels so far, with their evidence:
+
+| surface | populated | empty control | corner control |
+|---|---|---|---|
+| status effects | 2160 px in rect | 0 (whole frame) | 0 |
+| tab list | 1380 bright px | 552 (panel draws) | — |
+| scoreboard | 7216 px | 0 | — |
+| container (chest) | 23271 px in rect | 0 | 0 |
