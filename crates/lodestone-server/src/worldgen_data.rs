@@ -107,6 +107,18 @@ pub fn overworld_generator(seed: i64) -> OverworldGenerator {
     )
 }
 
+/// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`.
+///
+/// This is the terrain source the **integrated server** serves to a real client
+/// (and the path `ServerProtocol::encode_chunk` drives). It wraps the same
+/// [`overworld_generator`] the shell calls directly, so both the direct
+/// singleplayer path and the loopback-server path produce identical, verified
+/// block states — no simplified second generator lives one layer in.
+#[must_use]
+pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
+    crate::chunk::OverworldChunkSource::new(overworld_generator(seed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +171,57 @@ mod tests {
         assert!(
             kinds.len() >= 3,
             "expected shape+fluid+surface variety, got only {kinds:?}"
+        );
+    }
+
+    /// The integrated server's chunk source must serve the **real** generator
+    /// block-for-block — no simplified terrain one layer in. This diffs the
+    /// [`crate::ChunkSource`] output against the generator over a whole column
+    /// and floors on fluid + surface presence so it can't pass on empty air.
+    #[test]
+    fn chunk_source_serves_generator_block_for_block() {
+        use crate::ChunkSource;
+
+        let seed = 42; // chunk (0,0) is a submerged ocean column at this seed.
+        let generator = overworld_generator(seed);
+        let source = overworld_chunk_source(seed);
+        let expected = generator.column(0, 0);
+        let served = source.column(0, 0);
+
+        assert_eq!(served.min_y, expected.min_y());
+        assert_eq!(served.height, expected.height());
+
+        let mut checked = 0usize;
+        let mut water = 0usize;
+        let mut surface = 0usize; // non-stone solid: grass/dirt/sand/gravel/…
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for y in served.min_y..served.min_y + served.height {
+                    let want = expected.block_state(lx as usize, y, lz as usize);
+                    let got = served.block_state(lx, y, lz);
+                    assert_eq!(got, want, "served/generated mismatch at ({lx},{y},{lz})");
+                    checked += 1;
+                    match got.split('[').next().unwrap_or(got) {
+                        "minecraft:water" => water += 1,
+                        "minecraft:air"
+                        | "minecraft:cave_air"
+                        | "minecraft:void_air"
+                        | "minecraft:lava"
+                        | "minecraft:stone"
+                        | "minecraft:bedrock" => {}
+                        _ => surface += 1,
+                    }
+                }
+            }
+        }
+        // The comparison loop covered the whole column (not a short-circuit).
+        assert_eq!(checked, 16 * 16 * served.height as usize);
+        // Fluid fill survived into the served chunk (this ocean column is wet).
+        assert!(water > 0, "served ocean chunk has no water — fluid stage lost");
+        // Surface rules survived too (gravel/dirt on the ocean floor).
+        assert!(
+            surface > 0,
+            "served chunk has no surface material — surface stage lost"
         );
     }
 }

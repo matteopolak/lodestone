@@ -13,8 +13,11 @@
 //!
 //! This crate is **version-free**, exactly like [`lodestone_worldgen`]. It owns:
 //!
-//! * [`ChunkSource`] — how the server obtains terrain for a chunk column, with
-//!   [`WorldgenChunkSource`] backing it by the density-function noise router.
+//! * [`ChunkSource`] — how the server obtains terrain for a chunk column.
+//!   [`OverworldChunkSource`] (built by [`overworld_chunk_source`]) backs it
+//!   with the composed, JVM-verified overworld generator, so a served chunk
+//!   carries real vanilla block states; [`WorldgenChunkSource`] is a
+//!   solidity-only stand-in kept only for the transport tests.
 //! * [`ServerProtocol`] — the **seam** a protocol/version crate must implement
 //!   to lower client-bound packets and lift server-bound ones. It is the mirror
 //!   of the client's `VersionAdapter`: this crate never names a wire format,
@@ -51,7 +54,7 @@ mod server;
 mod spawn;
 mod worldgen_data;
 
-pub use chunk::{ChunkColumn, ChunkSource, WorldgenChunkSource};
+pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
 pub use integrated::IntegratedServer;
 pub use mob_spawn::{
     DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
@@ -60,7 +63,7 @@ pub use mob_spawn::{
 pub use mobs::{ChunkWorld, MobSim, SimMob};
 pub use protocol::{ServerBound, ServerDirective, ServerProtocol};
 pub use server::{ServeSummary, ServerError, serve_connection};
-pub use worldgen_data::overworld_generator;
+pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.
