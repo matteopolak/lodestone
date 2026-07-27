@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use lodestone_render::{BlockAtlas, BlockClassifier, Cell, SpriteId, Surface};
+use lodestone_render::{BlockAtlas, BlockClassifier, BlockModels, Cell, SpriteId, Surface};
 use lodestone_world::LightProperties;
 
 /// Block-state ids used by [`crate::worldgen`]. These are the shell's own tiny
@@ -219,6 +219,18 @@ impl ShellClassifier {
     #[must_use]
     pub fn is_vanilla(&self) -> bool {
         matches!(self, ShellClassifier::Vanilla(_))
+    }
+
+    /// The baked per-state model geometry for the live world, or `None` on the
+    /// demo palette. The mesher branches on this: `Some` meshes the vanilla world
+    /// through the model path ([`crate::mesher::mesh_snapshot_models`]); `None`
+    /// meshes the demo world through the packed full-cube path.
+    #[must_use]
+    pub fn models(&self) -> Option<&BlockModels> {
+        match self {
+            ShellClassifier::Demo(_) => None,
+            ShellClassifier::Vanilla(a) => a.models(),
+        }
     }
 }
 

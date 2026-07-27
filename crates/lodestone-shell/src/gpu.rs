@@ -12,14 +12,14 @@ use std::collections::HashMap;
 
 use lodestone_render::{
     BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet,
-    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, Mesh,
+    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh, ModelPipeline,
     block::{camera_buffer, sprite_uv_buffer},
-    plan_entities, upload_instances,
+    model_camera_buffer, plan_entities, upload_instances,
     vertex::vram_bytes,
 };
 
 use crate::entities::EntityDraw;
-use crate::mesher::SectionKey;
+use crate::mesher::{SectionGeometry, SectionKey};
 
 /// The 12 edges of a unit cube as pairs of corner indices (line list).
 const CUBE_EDGES: [(usize, usize); 12] = [
@@ -236,6 +236,32 @@ struct SectionGpu {
     cam_bind_group: wgpu::BindGroup,
 }
 
+/// One uploaded section of wide baked-model geometry (the vanilla path). Mirrors
+/// [`SectionGpu`] but holds a [`GpuModelMesh`] and draws through the
+/// [`ModelPipeline`].
+#[derive(Debug)]
+struct ModelSectionGpu {
+    mesh: GpuModelMesh,
+    quad_count: usize,
+    origin: [f32; 3],
+    cam_buffer: wgpu::Buffer,
+    cam_bind_group: wgpu::BindGroup,
+}
+
+/// GPU resources for the model render pass: the model pipeline, the complete
+/// stitched block atlas it samples (distinct from the packed cube atlas — its
+/// UVs are what the baked quads index), and a per-section table of uploaded
+/// model meshes. Present only on the live vanilla path; `None` on the demo path,
+/// which meshes full cubes through the packed [`BlockPipeline`].
+#[derive(Debug)]
+struct ModelRenderer {
+    pipeline: ModelPipeline,
+    #[allow(dead_code)]
+    atlas: GpuAtlas,
+    atlas_bind_group: wgpu::BindGroup,
+    sections: HashMap<SectionKey, ModelSectionGpu>,
+}
+
 /// GPU resources for the entity pass: the instanced pipeline, one uploaded mesh
 /// per model type, a per-model synthetic texture bind group, and a persistent
 /// camera uniform rewritten each frame. Owns the version-free
@@ -373,6 +399,7 @@ pub struct RenderState {
     atlas_bind_group: wgpu::BindGroup,
     depth: DepthBuffer,
     sections: HashMap<SectionKey, SectionGpu>,
+    model: Option<ModelRenderer>,
     outline: OutlineRenderer,
     entities: EntityRenderer,
     clear: wgpu::Color,
@@ -419,6 +446,22 @@ impl RenderState {
         let outline = OutlineRenderer::new(device, color_format);
         let entities = EntityRenderer::new(device, queue, color_format);
 
+        // The live vanilla atlas carries baked model geometry; build the model
+        // render pass over its *complete* atlas (whose UVs the baked quads index,
+        // distinct from the cube atlas bound above). The demo path has no models,
+        // so this stays `None` and terrain draws through the packed pipeline.
+        let model = vanilla.and_then(BlockAtlas::models).map(|models| {
+            let pipeline = ModelPipeline::new(device, color_format);
+            let atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
+            let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
+            ModelRenderer {
+                pipeline,
+                atlas,
+                atlas_bind_group,
+                sections: HashMap::new(),
+            }
+        });
+
         Self {
             pipeline,
             atlas,
@@ -426,6 +469,7 @@ impl RenderState {
             atlas_bind_group,
             depth,
             sections: HashMap::new(),
+            model,
             outline,
             entities,
             // A calm sky blue, so terrain reads clearly against it.
@@ -449,7 +493,60 @@ impl RenderState {
     }
 
     /// Upload (or replace) a section's mesh. An empty mesh removes the section.
-    pub fn upload_section(&mut self, device: &wgpu::Device, key: SectionKey, mesh: &Mesh) {
+    ///
+    /// Dispatches on the geometry variant: packed full-cube meshes (demo world)
+    /// go to the packed [`BlockPipeline`] table; wide baked-model meshes (live
+    /// vanilla world) go to the [`ModelRenderer`] table. A `Model` upload with no
+    /// model renderer present (never happens in a consistent session, since the
+    /// vanilla classifier and the model renderer are built from the same atlas)
+    /// is a no-op.
+    pub fn upload_section(
+        &mut self,
+        device: &wgpu::Device,
+        key: SectionKey,
+        mesh: &SectionGeometry,
+    ) {
+        match mesh {
+            SectionGeometry::Packed(mesh) => self.upload_packed_section(device, key, mesh),
+            SectionGeometry::Model(mesh) => {
+                let Some(model) = self.model.as_mut() else {
+                    return;
+                };
+                let origin = key.origin();
+                let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
+                match GpuModelMesh::upload(device, mesh) {
+                    None => {
+                        model.sections.remove(&key);
+                    }
+                    Some(gpu_mesh) => {
+                        // Placeholder uniform; overwritten every frame with the live camera.
+                        let cam_buffer = model_camera_buffer(
+                            device,
+                            CameraUniform {
+                                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                                section_origin: [origin_f[0], origin_f[1], origin_f[2], 0.0],
+                            },
+                        );
+                        let cam_bind_group =
+                            model.pipeline.camera_bind_group(device, &cam_buffer);
+                        model.sections.insert(
+                            key,
+                            ModelSectionGpu {
+                                mesh: gpu_mesh,
+                                quad_count: mesh.quad_count(),
+                                origin: origin_f,
+                                cam_buffer,
+                                cam_bind_group,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Upload a packed full-cube section (the demo path).
+    fn upload_packed_section(&mut self, device: &wgpu::Device, key: SectionKey, mesh: &Mesh) {
         match GpuMesh::upload(device, mesh) {
             None => {
                 self.sections.remove(&key);
@@ -483,18 +580,26 @@ impl RenderState {
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
         self.sections.remove(key);
+        if let Some(model) = self.model.as_mut() {
+            model.sections.remove(key);
+        }
     }
 
     /// Number of uploaded (non-empty) sections.
     #[must_use]
     pub fn section_count(&self) -> usize {
-        self.sections.len()
+        self.sections.len() + self.model.as_ref().map_or(0, |m| m.sections.len())
     }
 
     /// Total merged quads currently resident on the GPU.
     #[must_use]
     pub fn total_quads(&self) -> usize {
-        self.sections.values().map(|s| s.quad_count).sum()
+        let packed: usize = self.sections.values().map(|s| s.quad_count).sum();
+        let model: usize = self
+            .model
+            .as_ref()
+            .map_or(0, |m| m.sections.values().map(|s| s.quad_count).sum());
+        packed + model
     }
 
     /// Render every section into `view` using `camera`. Writes all section
@@ -518,6 +623,22 @@ impl RenderState {
                 section_origin: [section.origin[0], section.origin[1], section.origin[2], 0.0],
             };
             queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
+        }
+
+        // Same for the model sections (live vanilla path).
+        if let Some(model) = &self.model {
+            for section in model.sections.values() {
+                let uniform = CameraUniform {
+                    view_proj,
+                    section_origin: [
+                        section.origin[0],
+                        section.origin[1],
+                        section.origin[2],
+                        0.0,
+                    ],
+                };
+                queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
+            }
         }
 
         // Outline vertices/uniform must be written before the pass opens.
@@ -569,6 +690,26 @@ impl RenderState {
                 stats.sections_drawn += 1;
                 stats.draw_calls += 1;
                 stats.total_quads += section.quad_count;
+            }
+
+            // Live vanilla terrain: wide baked-model geometry through the model
+            // pipeline (cross-plants, slabs, stairs, tinted grass, cutout via the
+            // shader's alpha discard). Shares the terrain depth buffer.
+            if let Some(model) = &self.model {
+                pass.set_pipeline(&model.pipeline.pipeline);
+                pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                for section in model.sections.values() {
+                    pass.set_bind_group(0, &section.cam_bind_group, &[]);
+                    pass.set_vertex_buffer(0, section.mesh.vertices.slice(..));
+                    pass.set_index_buffer(
+                        section.mesh.indices.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..section.mesh.index_count, 0, 0..1);
+                    stats.sections_drawn += 1;
+                    stats.draw_calls += 1;
+                    stats.total_quads += section.quad_count;
+                }
             }
 
             // Entities share the terrain depth buffer (depth test + write on, so
@@ -708,7 +849,11 @@ mod tests {
                         let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
                         total_quads += mesh.quad_count();
                         sections += 1;
-                        state.upload_section(device, key, &mesh);
+                        state.upload_section(
+                            device,
+                            key,
+                            &crate::mesher::SectionGeometry::Packed(mesh),
+                        );
                     }
                 }
             }
@@ -821,7 +966,11 @@ mod tests {
                     };
                     if let Some(snap) = crate::mesher::snapshot_section(&world, key) {
                         let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
-                        state.upload_section(device, key, &mesh);
+                        state.upload_section(
+                            device,
+                            key,
+                            &crate::mesher::SectionGeometry::Packed(mesh),
+                        );
                     }
                 }
             }

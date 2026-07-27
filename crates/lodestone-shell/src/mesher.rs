@@ -26,9 +26,11 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 
 use lodestone_render::{
-    BlockClassifier, ChunkSectionView, Mesh, SectionLight, SectionNeighborhood, SkyDefault,
-    UniformLight, WorldSectionLight, mesh_simple,
+    BlockClassifier, BlockModels, ChunkSectionView, Mesh, ModelMesh, ModelSectionView,
+    SectionLight, SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, mesh_models,
+    mesh_simple,
 };
+use lodestone_assets::BakedQuad;
 use lodestone_world::{
     ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
@@ -373,13 +375,107 @@ pub fn mesh_snapshot<C: BlockClassifier>(snapshot: &SectionSnapshot, classifier:
     mesh_simple(&hood)
 }
 
+/// A [`ModelSectionView`] over a [`SectionSnapshot`], driving the model mesh
+/// path for the live vanilla world.
+///
+/// `quads_at`/`occludes_at` read vanilla block-state ids straight out of the
+/// snapshot's paletted sections and look up baked geometry/occlusion in
+/// [`BlockModels`]; `light_at` reads the centre section's real sky/block light.
+/// This is the model-path counterpart to the packed [`ChunkSectionView`].
+struct SnapshotModelView<'a> {
+    snapshot: &'a SectionSnapshot,
+    models: &'a BlockModels,
+    light: SnapLight<'a>,
+}
+
+/// Split a signed section coordinate into a neighbour offset (`dx ∈ {-1,0,1}`)
+/// and a section-local index (`0..16`). Used to resolve a `cullface` probe that
+/// steps one block past a section edge into the adjacent snapshot section.
+fn split16(v: i32) -> (i32, usize) {
+    (v.div_euclid(16), v.rem_euclid(16) as usize)
+}
+
+impl ModelSectionView for SnapshotModelView<'_> {
+    fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        self.models.quads(id)
+    }
+
+    fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        // Only the 3×3×3 neighbourhood is snapshotted; a probe further out (never
+        // emitted by a single one-block cullface step) reads as non-occluding.
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return false;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        self.models.occludes(id)
+    }
+
+    fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        let sky = SectionLight::sky_light(&self.light, x, y, z);
+        let block = SectionLight::block_light(&self.light, x, y, z);
+        (sky << 4) | block
+    }
+}
+
+/// Mesh a snapshot into wide baked-model geometry — the live vanilla path.
+///
+/// Every block (full cubes included) is emitted from its baked model quads,
+/// face-culled against neighbours' [`BlockModels::occludes`]. This is what lets
+/// cross-plants, slabs, stairs and translucent blocks render as their true
+/// geometry instead of synthetic full cubes. Pure and thread-safe like
+/// [`mesh_snapshot`].
+#[must_use]
+pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) -> ModelMesh {
+    let light = match snapshot.light_at(0, 0, 0) {
+        Some(world_light) => {
+            SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
+        }
+        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
+    };
+    let view = SnapshotModelView {
+        snapshot,
+        models,
+        light,
+    };
+    mesh_models(&view)
+}
+
+/// The geometry a worker produced for one section.
+///
+/// The demo world meshes to a packed full-cube [`Mesh`]; the live vanilla world
+/// meshes to wide baked-model [`ModelMesh`] geometry. The two never mix within a
+/// session (the classifier picks one id space), but both flow through the same
+/// [`Meshed`]/upload seam so the GPU side can dispatch on the variant.
+#[derive(Debug)]
+pub enum SectionGeometry {
+    /// Packed full-cube geometry (demo world).
+    Packed(Mesh),
+    /// Wide baked-model geometry (live vanilla world).
+    Model(ModelMesh),
+}
+
+impl SectionGeometry {
+    /// The merged quad count, for stats/overlay parity across both paths.
+    #[must_use]
+    pub fn quad_count(&self) -> usize {
+        match self {
+            SectionGeometry::Packed(m) => m.quad_count(),
+            SectionGeometry::Model(m) => m.quad_count(),
+        }
+    }
+}
+
 /// A finished mesh with its key, handed back from a worker.
 #[derive(Debug)]
 pub struct Meshed {
     /// Which section this mesh is for.
     pub key: SectionKey,
-    /// The geometry.
-    pub mesh: Mesh,
+    /// The geometry (packed demo cubes or vanilla baked models).
+    pub mesh: SectionGeometry,
 }
 
 enum Job {
@@ -423,7 +519,15 @@ impl MeshScheduler {
                     };
                     match job {
                         Ok(Job::Mesh(snap)) => {
-                            let mesh = mesh_snapshot(&snap, &classifier);
+                            // The vanilla classifier carries baked models → mesh
+                            // through the model path; the demo classifier has none
+                            // → mesh through the packed full-cube path.
+                            let mesh = match classifier.models() {
+                                Some(models) => {
+                                    SectionGeometry::Model(mesh_snapshot_models(&snap, models))
+                                }
+                                None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
+                            };
                             if result_tx
                                 .send(Meshed {
                                     key: snap.key,
@@ -513,6 +617,19 @@ mod tests {
         // Compile-time proof that snapshots can cross to worker threads.
         assert_send::<SectionSnapshot>();
         assert_send::<Meshed>();
+    }
+
+    #[test]
+    fn split16_maps_signed_probes_to_neighbour_and_local() {
+        // In-section coordinates stay in the centre neighbour (offset 0).
+        assert_eq!(split16(0), (0, 0));
+        assert_eq!(split16(15), (0, 15));
+        // One block below/west of the section wraps into the -1 neighbour at
+        // local index 15 — exactly the cullface probe across a section edge.
+        assert_eq!(split16(-1), (-1, 15));
+        // One block past the far edge wraps into the +1 neighbour at local 0.
+        assert_eq!(split16(16), (1, 0));
+        assert_eq!(split16(17), (1, 1));
     }
 
     #[test]

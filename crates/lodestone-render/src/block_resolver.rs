@@ -51,6 +51,7 @@ use lodestone_assets::{
 };
 use lodestone_model::{BlockStateRegistry, Identifier};
 
+use crate::block_models::BlockModels;
 use crate::section::{Cell, Face, SpriteId, Surface};
 use crate::world::BlockClassifier;
 
@@ -121,6 +122,16 @@ pub struct BlockAtlas {
     /// `"minecraft:grass_block[snowy=false]"`) can resolve it to the id the
     /// classifier keys on. See [`state_id_of`](BlockAtlas::state_id_of).
     name_to_id: HashMap<(Identifier, BTreeMap<String, String>), u32>,
+    /// The baked per-state *model* geometry for the same registry, attached
+    /// after [`build`](BlockAtlas::build) via [`with_models`](BlockAtlas::with_models).
+    ///
+    /// The cube-projection [`classes`](Self::classes) above drive the legacy
+    /// packed (full-cube) path; this carries the real model quads
+    /// (cross-plants, slabs, stairs, translucency) for the model render path.
+    /// `None` until attached — the caller with the concrete registry builds and
+    /// attaches it, which is why it is not built in `build` (see
+    /// [`with_models`](BlockAtlas::with_models)).
+    models: Option<BlockModels>,
 }
 
 /// A resolved per-face texture reference: the concrete texture location plus the
@@ -303,7 +314,30 @@ impl BlockAtlas {
             classes,
             missing,
             name_to_id,
+            models: None,
         })
+    }
+
+    /// Attach baked per-state [`BlockModels`] geometry to this atlas, consumed by
+    /// the model render path.
+    ///
+    /// Kept separate from [`build`](Self::build) because [`BlockModels::build`]
+    /// needs a `&dyn BlockStateRegistry` (an object-safe borrow), while `build`
+    /// is generic over `?Sized` registries that cannot always coerce to `&dyn`.
+    /// The caller that owns the concrete registry (the shell's resource loader)
+    /// builds the models and attaches them here, so both the cube-projection and
+    /// the model geometry share one stitched-registry lifetime.
+    #[must_use]
+    pub fn with_models(mut self, models: BlockModels) -> Self {
+        self.models = Some(models);
+        self
+    }
+
+    /// The baked per-state model geometry, if [`with_models`](Self::with_models)
+    /// attached it. `None` on a cube-only atlas (e.g. the demo/legacy path).
+    #[must_use]
+    pub fn models(&self) -> Option<&BlockModels> {
+        self.models.as_ref()
     }
 
     /// The stitched atlas, for [`GpuAtlas::from_atlas`](crate::GpuAtlas::from_atlas).
