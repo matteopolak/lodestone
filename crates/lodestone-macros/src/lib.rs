@@ -784,7 +784,7 @@ fn decode_value(crate_path: &Path, ty: &Type, attrs: &FieldAttr) -> syn::Result<
             let __mc_nbt_before_len = __mc_nbt_before.len();
             #crate_path::read_named_nbt(r)?;
             let __mc_nbt_len = __mc_nbt_before_len - r.remaining();
-            __mc_nbt_before[..1].to_vec()
+            __mc_nbt_before[..__mc_nbt_len].to_vec()
         }});
     }
 
@@ -1652,20 +1652,19 @@ fn parse_field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             "#[mc(present_if = ...)] cannot be combined with #[mc(skip)]",
         ));
     }
-    if out.nbt {
-        if out.fixed.is_some()
+    if out.nbt
+        && (out.fixed.is_some()
             || out.remaining
             || out.len_explicit
             || out.max.is_some()
             || out.var_encoding != VarEncoding::Fixed
             || out.decode_with.is_some()
-            || out.bits.is_some()
-        {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "#[mc(nbt)] cannot be combined with other wire-format field attributes",
-            ));
-        }
+            || out.bits.is_some())
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "#[mc(nbt)] cannot be combined with other wire-format field attributes",
+        ));
     }
     if out.fixed.is_some() {
         if out.remaining {

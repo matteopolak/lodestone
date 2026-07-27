@@ -5,7 +5,7 @@
 //! adapter lowers `set_health`, `set_experience`, `player_abilities`,
 //! `change_difficulty`, the title packets, and friends into mutations here.
 
-use lodestone_model::{Difficulty, GameMode, Text};
+use lodestone_model::{ClientEvent, Difficulty, GameMode, Text};
 
 /// Player vitals and progression shown on the HUD.
 #[derive(Debug, Clone, PartialEq)]
@@ -125,6 +125,48 @@ impl HudState {
     #[must_use]
     pub fn is_dead(&self) -> bool {
         self.dead || self.health <= 0.0
+    }
+
+    /// Folds a [`ClientEvent`] into the HUD state, returning `true` if the event
+    /// was one this state owns. A driver fans each event across the game
+    /// aggregates and stops at the first that claims it (the same contract as
+    /// [`Scoreboard::apply`](crate::scoreboard::Scoreboard::apply)).
+    ///
+    /// Owns the vitals / progression / game-mode / difficulty / held-slot
+    /// family. `air` is intentionally *not* folded here: it arrives inside the
+    /// local player's entity metadata (`EntityMetadataUpdated`), which needs
+    /// entity-id resolution the caller must do before calling
+    /// [`set_air`](Self::set_air). Respawn is likewise driver-owned — the wire
+    /// respawn arrives as a login/respawn packet, not a distinct HUD event.
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::HealthChanged {
+                health,
+                food,
+                saturation,
+            } => self.set_health(*health, *food, *saturation),
+            ClientEvent::ExperienceChanged {
+                progress,
+                level,
+                total,
+            } => self.set_experience(*progress, *level, *total),
+            ClientEvent::GameModeChanged { game_mode } => self.set_game_mode(*game_mode),
+            ClientEvent::HeldSlotChanged { slot } => {
+                // The wire value is an i32; `select_slot` drops anything `>= 9`,
+                // so mapping out-of-range values (negative, or `> u8::MAX`) to
+                // `u8::MAX` lets it reject them without a panicking cast.
+                self.select_slot(u8::try_from(*slot).unwrap_or(u8::MAX));
+            }
+            ClientEvent::DifficultyChanged { difficulty, locked } => {
+                self.difficulty = *difficulty;
+                self.difficulty_locked = *locked;
+            }
+            ClientEvent::Death { .. } => {
+                self.dead = true;
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -278,6 +320,33 @@ impl TitleState {
             TitlePhase::Done => 0.0,
         }
     }
+
+    /// Folds a [`ClientEvent`] into the title overlay, returning `true` if the
+    /// event was one this state owns. Same fan-out contract as
+    /// [`HudState::apply`].
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::TitleText { text } => self.set_title(text.clone()),
+            ClientEvent::SubtitleText { text } => self.set_subtitle(text.clone()),
+            ClientEvent::TitlesAnimation {
+                fade_in,
+                stay,
+                fade_out,
+            } => self.set_times(TitleTimes {
+                fade_in: *fade_in,
+                stay: *stay,
+                fade_out: *fade_out,
+            }),
+            ClientEvent::TitlesCleared { reset_times } => {
+                self.clear();
+                if *reset_times {
+                    self.times = TitleTimes::default();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
 }
 
 /// The action-bar overlay message. Vanilla shows it for a fixed 60 ticks and
@@ -337,5 +406,167 @@ impl ActionBar {
         } else {
             self.remaining as f32 / Self::FADE_TICKS as f32
         }
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    #[test]
+    fn health_fold_sets_each_field_at_its_own_position() {
+        let mut hud = HudState::new();
+        // Distinct values so a health/food/saturation transposition is caught.
+        assert!(hud.apply(&ClientEvent::HealthChanged {
+            health: 6.0,
+            food: 15,
+            saturation: 3.5,
+        }));
+        assert_eq!(hud.health, 6.0);
+        assert_eq!(hud.food, 15);
+        assert_eq!(hud.saturation, 3.5);
+        assert!(!hud.is_dead());
+
+        assert!(hud.apply(&ClientEvent::HealthChanged {
+            health: 0.0,
+            food: 0,
+            saturation: 0.0,
+        }));
+        assert!(hud.is_dead());
+    }
+
+    #[test]
+    fn experience_fold_keeps_level_and_total_distinct() {
+        let mut hud = HudState::new();
+        assert!(hud.apply(&ClientEvent::ExperienceChanged {
+            progress: 0.5,
+            level: 7,
+            total: 130,
+        }));
+        assert_eq!(hud.xp_progress, 0.5);
+        assert_eq!(hud.xp_level, 7);
+        assert_eq!(hud.xp_total, 130);
+    }
+
+    #[test]
+    fn game_mode_fold_records_previous() {
+        let mut hud = HudState::new();
+        assert_eq!(hud.game_mode, GameMode::Survival);
+        assert!(hud.apply(&ClientEvent::GameModeChanged {
+            game_mode: GameMode::Creative,
+        }));
+        assert_eq!(hud.game_mode, GameMode::Creative);
+        assert_eq!(hud.previous_game_mode, Some(GameMode::Survival));
+    }
+
+    #[test]
+    fn held_slot_fold_rejects_out_of_range() {
+        let mut hud = HudState::new();
+        assert!(hud.apply(&ClientEvent::HeldSlotChanged { slot: 3 }));
+        assert_eq!(hud.selected_slot, 3);
+        // Out-of-range values (>= 9, negative, or > u8::MAX) leave it unchanged.
+        for bad in [9_i32, -1, 300, i32::MAX] {
+            assert!(hud.apply(&ClientEvent::HeldSlotChanged { slot: bad }));
+            assert_eq!(hud.selected_slot, 3);
+        }
+    }
+
+    #[test]
+    fn difficulty_fold_sets_value_and_lock() {
+        let mut hud = HudState::new();
+        assert!(hud.apply(&ClientEvent::DifficultyChanged {
+            difficulty: Difficulty::Hard,
+            locked: true,
+        }));
+        assert_eq!(hud.difficulty, Difficulty::Hard);
+        assert!(hud.difficulty_locked);
+    }
+
+    #[test]
+    fn death_fold_marks_dead() {
+        let mut hud = HudState::new();
+        assert!(hud.apply(&ClientEvent::Death {
+            message: Text::literal("slain"),
+        }));
+        assert!(hud.is_dead());
+    }
+
+    #[test]
+    fn hud_apply_ignores_unowned_event() {
+        let mut hud = HudState::new();
+        let before = hud.clone();
+        assert!(!hud.apply(&ClientEvent::TitleText {
+            text: Text::literal("hi"),
+        }));
+        assert_eq!(hud, before);
+    }
+
+    #[test]
+    fn title_and_subtitle_fold() {
+        let mut title = TitleState::new();
+        assert!(title.apply(&ClientEvent::TitleText {
+            text: Text::literal("Round 1"),
+        }));
+        assert_eq!(title.title(), Some(&Text::literal("Round 1")));
+        assert!(title.apply(&ClientEvent::SubtitleText {
+            text: Text::literal("Fight!"),
+        }));
+        assert_eq!(title.subtitle(), Some(&Text::literal("Fight!")));
+    }
+
+    #[test]
+    fn titles_animation_fold_sets_times() {
+        let mut title = TitleState::new();
+        assert!(title.apply(&ClientEvent::TitlesAnimation {
+            fade_in: 5,
+            stay: 40,
+            fade_out: 8,
+        }));
+        title.apply(&ClientEvent::TitleText {
+            text: Text::literal("go"),
+        });
+        assert_eq!(
+            title.times,
+            TitleTimes {
+                fade_in: 5,
+                stay: 40,
+                fade_out: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn titles_cleared_resets_times_only_when_requested() {
+        let mut title = TitleState::new();
+        title.apply(&ClientEvent::TitlesAnimation {
+            fade_in: 5,
+            stay: 40,
+            fade_out: 8,
+        });
+        title.apply(&ClientEvent::TitleText {
+            text: Text::literal("go"),
+        });
+
+        // reset_times: false clears text but keeps custom timings.
+        assert!(title.apply(&ClientEvent::TitlesCleared { reset_times: false }));
+        assert_eq!(title.title(), None);
+        assert_eq!(title.times.stay, 40);
+
+        // reset_times: true restores the vanilla defaults.
+        title.apply(&ClientEvent::TitleText {
+            text: Text::literal("go"),
+        });
+        assert!(title.apply(&ClientEvent::TitlesCleared { reset_times: true }));
+        assert_eq!(title.times, TitleTimes::default());
+    }
+
+    #[test]
+    fn title_apply_ignores_unowned_event() {
+        let mut title = TitleState::new();
+        assert!(!title.apply(&ClientEvent::HealthChanged {
+            health: 1.0,
+            food: 1,
+            saturation: 1.0,
+        }));
     }
 }

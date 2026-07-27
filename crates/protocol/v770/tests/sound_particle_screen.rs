@@ -1,5 +1,5 @@
 //! Hermetic tests for the protocol 776 `sound`, `sound_entity`,
-//! `level_particles`, and `open_screen` packets.
+//! `level_particles`, `open_screen`, and `stop_sound` packets.
 //!
 //! Golden byte vectors are hand-assembled from the wire specification
 //! (behavioural reference only), so a symmetric encode/decode bug cannot pass
@@ -247,4 +247,92 @@ fn open_screen_rejects_unknown_menu() {
         &bytes,
     );
     assert!(result.is_err(), "an unknown menu id must be rejected");
+}
+
+// ---- stop_sound -------------------------------------------------------
+
+#[test]
+fn stop_sound_decodes_neither_source_nor_name() {
+    let adapter = V770Adapter::new();
+    let directives = handle(&adapter, play::clientbound::STOP_SOUND, &[0x00]);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SoundStopped {
+            sound: None,
+            category: None,
+        })]
+    );
+}
+
+#[test]
+fn stop_sound_decodes_source_only() {
+    let adapter = V770Adapter::new();
+    // flags 0x1 (source present), SoundSource ordinal 5 = Hostile.
+    let directives = handle(&adapter, play::clientbound::STOP_SOUND, &[0x01, 0x05]);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SoundStopped {
+            sound: None,
+            category: Some(SoundCategory::Hostile),
+        })]
+    );
+}
+
+#[test]
+fn stop_sound_decodes_name_only() {
+    let adapter = V770Adapter::new();
+    let mut bytes = vec![0x02]; // flags 0x2 (name present)
+    let name = "minecraft:entity.pig.ambient";
+    bytes.push(u8::try_from(name.len()).unwrap());
+    bytes.extend_from_slice(name.as_bytes());
+    let directives = handle(&adapter, play::clientbound::STOP_SOUND, &bytes);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SoundStopped {
+            sound: Some(key(name)),
+            category: None,
+        })]
+    );
+}
+
+#[test]
+fn stop_sound_decodes_source_and_name() {
+    let adapter = V770Adapter::new();
+    let mut bytes = vec![0x03, 0x07]; // flags 0x3, SoundSource ordinal 7 = Player
+    let name = "minecraft:entity.pig.ambient";
+    bytes.push(u8::try_from(name.len()).unwrap());
+    bytes.extend_from_slice(name.as_bytes());
+    let directives = handle(&adapter, play::clientbound::STOP_SOUND, &bytes);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SoundStopped {
+            sound: Some(key(name)),
+            category: Some(SoundCategory::Player),
+        })]
+    );
+}
+
+#[test]
+fn stop_sound_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::STOP_SOUND,
+        &[0x00, 0xFF],
+    );
+    assert!(result.is_err(), "a trailing byte must be rejected");
+}
+
+#[test]
+fn stop_sound_rejects_truncated_source() {
+    let adapter = V770Adapter::new();
+    // flags promises a source but the buffer ends before it arrives.
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::STOP_SOUND,
+        &[0x01],
+    );
+    assert!(result.is_err(), "a truncated source must be rejected");
 }

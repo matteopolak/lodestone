@@ -133,10 +133,13 @@ for entry in "${CRATES[@]}"; do
     printf '%s\n' "$out" \
       | grep -E "^error|could not compile|is not supported|cannot find (function|type|crate)|unresolved import|native" \
       | head -6 | sed 's/^/      │ /'
-    echo "      └─ likely cause: a dependency pulled '$pkg' onto native-only code"
-    echo "         (threads / std::fs / OS sockets / OS audio like cpal). Fix: gate that"
-    echo "         dep or call behind cfg(not(target_arch = \"wasm32\")) or an off-by-default"
-    echo "         feature. Reproduce: cargo build -p $pkg --target $TARGET $extra"
+    echo "      └─ two common causes: (a) a dependency pulled '$pkg' onto native-only"
+    echo "         code (threads / std::fs / OS sockets / OS audio like cpal) — fix by gating"
+    echo "         that dep or call behind cfg(not(target_arch = \"wasm32\")) or an"
+    echo "         off-by-default feature; or (b) a plain compile error in '$pkg' or a crate"
+    echo "         it depends on — which, in this shared workspace, is often a sibling crate"
+    echo "         mid-edit (see the named crate in the error above): wait and re-run."
+    echo "         Reproduce: cargo build -p $pkg --target $TARGET $extra"
   fi
 done
 

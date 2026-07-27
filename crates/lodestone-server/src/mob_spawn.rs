@@ -29,8 +29,66 @@
 //! mob at 40 blocks immortal, which is wrong and invisible in a short test. See
 //! [`check_despawn`].
 
+use std::str::FromStr;
+
+use lodestone_entity::AttributeMap;
 use lodestone_entity::pathfinding::MobShape;
-use lodestone_model::Vec3;
+use lodestone_model::adapter::VersionAdapter;
+use lodestone_model::{Identifier, Vec3};
+
+/// Folds a version's **base** entity dimensions with the mob's resolved
+/// attribute map into a pathfinding [`MobShape`] — the per-spawn consumer of the
+/// dimension census.
+///
+/// The seam is split so this version-free crate never embeds a dimension table:
+///
+/// - **width / height** come from `adapter.entity_dimensions(entity_type_id)` —
+///   the census, base geometry at scale 1 — then multiplied by the `SCALE`
+///   attribute. The census is scale-1 by construction, so `SCALE` is folded here
+///   (caller-side), never baked into the table.
+/// - **`max_up_step`** comes from the *resolved* `STEP_HEIGHT` attribute
+///   (post-modifier-fold), **not** the census geometry. Vanilla
+///   `Entity.maxUpStep()` returns `getAttributeValue(STEP_HEIGHT)`
+///   (`LivingEntity.java:3976`); sourcing it from static geometry would silently
+///   disagree with the pathfinder the moment any modifier existed. The `as f32`
+///   is that call site's `(float)` cast.
+///
+/// `entity_type_id` is the version's numeric network id (what `entity_dimensions`
+/// is keyed by, and what an `add_entity` packet carries). Resolving a
+/// [`ResourceKey`](lodestone_model::ResourceKey) such as `minecraft:zombie` to
+/// that id is version knowledge and stays on the version-aware caller's side (it
+/// asks the registry for the adapter), exactly like the rest of the version half
+/// of [`SpawnCandidate`] — this crate only ever names the version-free
+/// [`VersionAdapter`] trait.
+///
+/// Returns `None` when the adapter reports no census for `entity_type_id` (an
+/// unknown type, or a version that has not homed a census); the caller chooses
+/// the fallback rather than receiving a guessed box.
+#[must_use]
+pub fn resolve_mob_shape(
+    adapter: &dyn VersionAdapter,
+    entity_type_id: i32,
+    attributes: &AttributeMap,
+) -> Option<MobShape> {
+    let base = adapter.entity_dimensions(entity_type_id)?;
+    let scale = attribute_value(attributes, "minecraft:scale", 1.0) as f32;
+    let step_height = attribute_value(attributes, "minecraft:step_height", 0.6) as f32;
+    let mut shape = MobShape::land(base.width * scale, base.height * scale);
+    shape.max_up_step = step_height;
+    Some(shape)
+}
+
+/// Reads a computed attribute value by key, falling back to `fallback` only when
+/// the key is not a registered attribute at all. A registered-but-absent
+/// attribute already resolves to its registry default inside
+/// [`AttributeMap::value`], so `scale`/`step_height` return 1.0 / 0.6 for a
+/// default map without the fallback ever engaging.
+fn attribute_value(attributes: &AttributeMap, key: &str, fallback: f64) -> f64 {
+    Identifier::from_str(key)
+        .ok()
+        .and_then(|id| attributes.value(&id))
+        .unwrap_or(fallback)
+}
 
 /// Vanilla's `NaturalSpawner.MAGIC_NUMBER`: `17² = 289`. The per-category global
 /// cap is `max_per_chunk * spawnable_chunks / MAGIC_NUMBER`, so a single player
@@ -449,5 +507,134 @@ mod tests {
         // Misc is excluded from the spawning set.
         assert!(!MobCategory::SPAWNING.contains(&MobCategory::Misc));
         assert_eq!(MobCategory::SPAWNING.len(), 7);
+    }
+
+    // --- dimension-census fold (`resolve_mob_shape`) ---------------------
+
+    use lodestone_entity::AttributeMap;
+    use lodestone_model::action::ClientAction;
+    use lodestone_model::adapter::{
+        AdapterError, ConnectionState, Directive, EntityBaseDimensions, LoginProfile,
+        ServerAddress, VersionAdapter, WorldSink,
+    };
+
+    /// A minimal [`VersionAdapter`] that answers `entity_dimensions` from a fixed
+    /// table and panics on every other method — the fold only ever calls
+    /// `entity_dimensions`, so a real adapter (which impls the whole trait) slots
+    /// in unchanged. The table holds *real* census numbers so the fold is proven
+    /// against the geometry the live server actually reports.
+    #[derive(Debug)]
+    struct CensusStub(std::collections::HashMap<i32, EntityBaseDimensions>);
+
+    impl CensusStub {
+        fn with(pairs: &[(i32, f32, f32)]) -> Self {
+            Self(
+                pairs
+                    .iter()
+                    .map(|&(id, width, height)| (id, EntityBaseDimensions { width, height }))
+                    .collect(),
+            )
+        }
+    }
+
+    impl VersionAdapter for CensusStub {
+        fn protocol_version(&self) -> i32 {
+            0
+        }
+        fn minecraft_versions(&self) -> &'static [&'static str] {
+            &[]
+        }
+        fn supports(&self, _protocol: i32) -> bool {
+            false
+        }
+        fn begin_login(
+            &self,
+            _profile: &LoginProfile,
+            _server: &ServerAddress,
+        ) -> Result<Vec<Directive>, AdapterError> {
+            unimplemented!("census stub")
+        }
+        fn handle_packet(
+            &self,
+            _world: &mut dyn WorldSink,
+            _state: ConnectionState,
+            _packet_id: i32,
+            _payload: &[u8],
+        ) -> Result<Vec<Directive>, AdapterError> {
+            unimplemented!("census stub")
+        }
+        fn encode_action(
+            &self,
+            _state: ConnectionState,
+            _action: &ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+            unimplemented!("census stub")
+        }
+        fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
+            self.0.get(&entity_type_id).copied()
+        }
+    }
+
+    fn scale_key() -> Identifier {
+        Identifier::from_str("minecraft:scale").unwrap()
+    }
+
+    fn step_key() -> Identifier {
+        Identifier::from_str("minecraft:step_height").unwrap()
+    }
+
+    /// The census width/height reach the shape and `SCALE`/`STEP_HEIGHT` default
+    /// through the attribute registry (1.0 / 0.6) when the map carries no
+    /// override. Real zombie geometry: 0.6 × 1.95.
+    #[test]
+    fn resolve_folds_census_geometry_with_default_attributes() {
+        let adapter = CensusStub::with(&[(151, 0.6, 1.95)]);
+        let attrs = AttributeMap::new();
+        let shape = resolve_mob_shape(&adapter, 151, &attrs).expect("known type");
+        assert_eq!(shape.width, 0.6);
+        assert_eq!(shape.height, 1.95);
+        // STEP_HEIGHT comes from the attribute registry default (0.6), not the
+        // MobShape::land literal — here they coincide, the next test separates
+        // them.
+        assert_eq!(shape.max_up_step, 0.6);
+        // Cell extent a real zombie occupies: 1 wide, 2 tall.
+        assert_eq!(shape.cell_width(), 1);
+        assert_eq!(shape.cell_height(), 2);
+    }
+
+    /// `SCALE` multiplies width and height (the census is scale-1), so a baby /
+    /// scaled mob resizes both axes.
+    #[test]
+    fn resolve_folds_scale_into_both_axes() {
+        let adapter = CensusStub::with(&[(151, 0.6, 1.95)]);
+        let mut attrs = AttributeMap::new();
+        attrs.get_or_default(&scale_key()).set_base_value(2.0);
+        let shape = resolve_mob_shape(&adapter, 151, &attrs).expect("known type");
+        assert!((shape.width - 1.2).abs() < 1e-6, "width = {}", shape.width);
+        assert!((shape.height - 3.9).abs() < 1e-6, "height = {}", shape.height);
+    }
+
+    /// `max_up_step` is sourced from the *attribute map*, not the census
+    /// geometry: raising `STEP_HEIGHT` to 1.0 must change the shape even though
+    /// the census (and `MobShape::land`'s 0.6 literal) never move. This is the
+    /// silent-disagreement guard from the task.
+    #[test]
+    fn step_height_comes_from_attributes_not_census() {
+        let adapter = CensusStub::with(&[(151, 0.6, 1.95)]);
+        let mut attrs = AttributeMap::new();
+        attrs.get_or_default(&step_key()).set_base_value(1.0);
+        let shape = resolve_mob_shape(&adapter, 151, &attrs).expect("known type");
+        assert_eq!(shape.max_up_step, 1.0);
+        // Geometry is untouched by a step-height change.
+        assert_eq!(shape.height, 1.95);
+    }
+
+    /// An unknown network id yields `None` (the census reports "unknown", never a
+    /// guessed box) — the caller owns the fallback.
+    #[test]
+    fn resolve_unknown_type_is_none() {
+        let adapter = CensusStub::with(&[(151, 0.6, 1.95)]);
+        let attrs = AttributeMap::new();
+        assert!(resolve_mob_shape(&adapter, 9999, &attrs).is_none());
     }
 }

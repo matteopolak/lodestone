@@ -22,8 +22,8 @@
 use lodestone_core::{Reader, State, Writer};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, ServerBound, ServerDirective, ServerProtocol, WorldgenChunkSource,
-    serve_connection,
+    ChunkColumn, ChunkSource, EntitySnapshot, EntitySource, NoEntities, ServerBound,
+    ServerDirective, ServerProtocol, WorldgenChunkSource, serve_connection,
 };
 use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
 use serde_json::Value;
@@ -38,6 +38,12 @@ const FINISH_CONFIGURATION: i32 = 3;
 const CHUNK_BATCH_START: i32 = 10;
 const CHUNK: i32 = 0x27;
 const CHUNK_BATCH_FINISHED: i32 = 11;
+const ADD_ENTITY: i32 = 20;
+const ENTITY_UPDATE: i32 = 21;
+const REMOVE_ENTITIES: i32 = 22;
+/// A packet the client sends during Play (a keep-alive stand-in). `FakeProtocol`
+/// decodes it to `Ignored`, which is enough to drive an entity streaming pass.
+const CLIENT_TICK: i32 = 99;
 
 /// A stand-in protocol with a trivial, self-describing wire format.
 struct FakeProtocol;
@@ -121,6 +127,47 @@ impl ServerProtocol for FakeProtocol {
             payload: w.as_slice().to_vec(),
         }
     }
+
+    fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(entity.id);
+        w.string(&entity.entity_type.to_string());
+        w.f64(entity.position.x);
+        w.f64(entity.position.y);
+        w.f64(entity.position.z);
+        ServerDirective::Send {
+            packet_id: ADD_ENTITY,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    fn encode_entity_update(
+        &self,
+        _prev: Option<&EntitySnapshot>,
+        current: &EntitySnapshot,
+    ) -> Vec<ServerDirective> {
+        let mut w = Writer::default();
+        w.var_i32(current.id);
+        w.f64(current.position.x);
+        w.f64(current.position.y);
+        w.f64(current.position.z);
+        vec![ServerDirective::Send {
+            packet_id: ENTITY_UPDATE,
+            payload: w.as_slice().to_vec(),
+        }]
+    }
+
+    fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(ids.len() as i32);
+        for id in ids {
+            w.var_i32(*id);
+        }
+        ServerDirective::Send {
+            packet_id: REMOVE_ENTITIES,
+            payload: w.as_slice().to_vec(),
+        }
+    }
 }
 
 /// Filesystem resolver over the worldgen crate's checked-in vanilla JSON.
@@ -191,7 +238,7 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
 
     let server = tokio::spawn(async move {
         let mut conn = Connection::new(server_end);
-        serve_connection(&mut conn, &FakeProtocol, &source, view_radius)
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, view_radius)
             .await
             .expect("serve")
     });
@@ -283,4 +330,208 @@ async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
     // The seeded overworld router must actually produce terrain, not empty air.
     assert!(total_solid > 0, "worldgen produced no solid blocks");
     println!("served {received} chunks over in-memory transport; {total_solid} solid blocks total");
+}
+
+/// The entity-encoder trait methods land as no-op defaults so the trait shell
+/// compiles and existing `ServerProtocol` implementors are unaffected until a
+/// version crate fills them in. This pins that contract: a protocol that does
+/// **not** override them emits nothing — no bogus packet, no panic — for spawn,
+/// update (with and without a previous snapshot), and batched removal.
+#[test]
+fn entity_encoder_defaults_are_harmless_noops() {
+    use lodestone_model::{Rotation, Vec3};
+
+    // A protocol that overrides only the required methods, leaving the entity
+    // encoders at their trait defaults. (`FakeProtocol` overrides them, so it
+    // can't stand in for "a protocol that hasn't implemented entities yet".)
+    struct DefaultsProtocol;
+    impl ServerProtocol for DefaultsProtocol {
+        fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
+            unimplemented!()
+        }
+        fn login_success(&self, _u: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_play(&self, _r: i32) -> Vec<ServerDirective> {
+            unimplemented!()
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            unimplemented!()
+        }
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _c: &ChunkColumn) -> ServerDirective {
+            unimplemented!()
+        }
+        fn end_chunk_batch(&self, _n: i32) -> ServerDirective {
+            unimplemented!()
+        }
+    }
+
+    let proto = DefaultsProtocol;
+    let snap = EntitySnapshot {
+        id: 7,
+        uuid: Uuid::nil(),
+        entity_type: "minecraft:zombie".parse().unwrap(),
+        position: Vec3::new(1.0, 2.0, 3.0),
+        rotation: Rotation::new(90.0, 0.0),
+        head_yaw: 45.0,
+        velocity: Vec3::new(0.1, 0.0, 0.0),
+    };
+
+    assert_eq!(proto.encode_add_entity(&snap), ServerDirective::None);
+    assert!(proto.encode_entity_update(None, &snap).is_empty());
+    assert!(proto.encode_entity_update(Some(&snap), &snap).is_empty());
+    assert_eq!(
+        proto.encode_remove_entity(&[7, 8, 9]),
+        ServerDirective::None
+    );
+}
+
+/// A shared, mutable view of the world's entities. The test holds one clone and
+/// mutates it between client packets; the server task holds another and reads it
+/// each streaming pass — mirroring the real seam where the simulation loop owns
+/// the entities and `serve_connection` only reads a snapshot of them.
+#[derive(Clone, Default)]
+struct SharedEntities(std::sync::Arc<std::sync::Mutex<Vec<EntitySnapshot>>>);
+
+impl SharedEntities {
+    fn set(&self, entities: Vec<EntitySnapshot>) {
+        *self.0.lock().unwrap() = entities;
+    }
+}
+
+impl EntitySource for SharedEntities {
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// End-to-end proof that `serve_connection` actually *streams* entities: an
+/// entity present at join reaches the client as a real `ADD_ENTITY` packet over
+/// the memory transport, a mutation to the shared world produces an
+/// `ENTITY_UPDATE`, and clearing it produces a batched `REMOVE_ENTITIES` — all
+/// decoded back through the same framing/codec a live client uses, and asserted
+/// against known values (id, type string, position). This exercises the whole
+/// diff/spawn/despawn loop the integrated server owns, not just the pure core.
+#[tokio::test]
+async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
+    use lodestone_model::{Rotation, Vec3};
+
+    let view_radius = 0;
+
+    // The world starts with one pig; a `WorldgenChunkSource` is overkill here, so
+    // reuse an all-air flat column source via a trivial ChunkSource.
+    struct FlatAir;
+    impl ChunkSource for FlatAir {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 1)
+        }
+    }
+
+    let entities = SharedEntities::default();
+    let pig = |x: f64| EntitySnapshot {
+        id: 42,
+        uuid: Uuid::from_u128(0x1234),
+        entity_type: "minecraft:pig".parse().unwrap(),
+        position: Vec3::new(x, 64.0, 0.0),
+        rotation: Rotation::new(0.0, 0.0),
+        head_yaw: 0.0,
+        velocity: Vec3::new(0.0, 0.0, 0.0),
+    };
+    entities.set(vec![pig(0.0)]);
+
+    let (client_end, server_end) = memory_pair();
+    let server_entities = entities.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &FlatAir, &server_entities, view_radius)
+            .await
+            .expect("serve")
+    });
+
+    let mut client = Connection::new(client_end);
+
+    // Drive the join sequence (identical to the chunk test).
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("SinglePlayer");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS);
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+
+    // The join view: batch start, one chunk, batch finished.
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK_BATCH_START);
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK);
+    let (id, _) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, CHUNK_BATCH_FINISHED);
+
+    // Immediately after the view, the join-time entities are streamed: our pig
+    // spawns exactly once, with its real type and position.
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, ADD_ENTITY, "pig present at join must spawn");
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().unwrap(), 42);
+    assert_eq!(r.string(64).unwrap(), "minecraft:pig");
+    assert_eq!(r.f64().unwrap(), 0.0);
+    assert_eq!(r.f64().unwrap(), 64.0);
+    assert_eq!(r.f64().unwrap(), 0.0);
+    assert_eq!(r.remaining(), 0, "trailing bytes after ADD_ENTITY");
+
+    // Move the pig, then poke the server with a client-tick packet. The next
+    // streaming pass sees the changed snapshot and emits a single update.
+    entities.set(vec![pig(5.0)]);
+    client
+        .write_packet(CLIENT_TICK, &[])
+        .await
+        .expect("client tick");
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, ENTITY_UPDATE, "moved pig must update");
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().unwrap(), 42);
+    assert_eq!(r.f64().unwrap(), 5.0);
+    let _ = r.f64().unwrap();
+    let _ = r.f64().unwrap();
+    assert_eq!(r.remaining(), 0, "trailing bytes after ENTITY_UPDATE");
+
+    // An unchanged world must be silent: poke again, then remove the pig and poke
+    // once more. The client should read exactly the REMOVE next — proving the
+    // no-change pass emitted nothing between the update and the removal.
+    client
+        .write_packet(CLIENT_TICK, &[])
+        .await
+        .expect("client tick");
+    entities.set(vec![]);
+    client
+        .write_packet(CLIENT_TICK, &[])
+        .await
+        .expect("client tick");
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(
+        id, REMOVE_ENTITIES,
+        "an unchanged pass is silent, so the next packet is the removal"
+    );
+    let mut r = Reader::new(&payload);
+    assert_eq!(r.var_i32().unwrap(), 1, "one id removed");
+    assert_eq!(r.var_i32().unwrap(), 42);
+    assert_eq!(r.remaining(), 0, "trailing bytes after REMOVE_ENTITIES");
+
+    drop(client);
+    let summary = server.await.expect("join");
+    assert_eq!(summary.username, "SinglePlayer");
+    println!("streamed pig lifecycle: spawn -> update -> remove over memory transport");
 }

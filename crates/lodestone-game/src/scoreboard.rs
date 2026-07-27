@@ -16,7 +16,8 @@
 
 use std::collections::HashMap;
 
-use lodestone_model::{Text, TextColor};
+use lodestone_model::event as m;
+use lodestone_model::{ClientEvent, Text, TextColor};
 
 /// How a score is rendered in a slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -482,5 +483,459 @@ impl Scoreboard {
             Some(team) => team.decorate(holder),
             None => Text::literal(holder),
         }
+    }
+}
+
+// --- ClientEvent fold -------------------------------------------------------
+//
+// These conversions and `apply` methods are the seam that lets a driver fold a
+// version-free `ClientEvent` stream (as produced by `lodestone-client`) into
+// this state without the driver re-implementing the fold. They translate the
+// model's parallel enums (which the wire adapters target) into this crate's
+// richer types. The model type is imported as `m` so its enums do not collide
+// with the same-named types defined above.
+
+impl From<m::ObjectiveRenderType> for RenderType {
+    fn from(rt: m::ObjectiveRenderType) -> Self {
+        match rt {
+            m::ObjectiveRenderType::Integer => RenderType::Integer,
+            m::ObjectiveRenderType::Hearts => RenderType::Hearts,
+        }
+    }
+}
+
+impl From<&m::NumberFormat> for NumberFormat {
+    fn from(nf: &m::NumberFormat) -> Self {
+        match nf {
+            m::NumberFormat::Default => NumberFormat::Default,
+            m::NumberFormat::Blank => NumberFormat::Blank,
+            m::NumberFormat::Fixed(t) => NumberFormat::Fixed(t.clone()),
+            m::NumberFormat::Styled(c) => NumberFormat::Styled(*c),
+        }
+    }
+}
+
+impl From<m::TeamColor> for TeamColor {
+    fn from(c: m::TeamColor) -> Self {
+        match c {
+            m::TeamColor::Black => TeamColor::Black,
+            m::TeamColor::DarkBlue => TeamColor::DarkBlue,
+            m::TeamColor::DarkGreen => TeamColor::DarkGreen,
+            m::TeamColor::DarkAqua => TeamColor::DarkAqua,
+            m::TeamColor::DarkRed => TeamColor::DarkRed,
+            m::TeamColor::DarkPurple => TeamColor::DarkPurple,
+            m::TeamColor::Gold => TeamColor::Gold,
+            m::TeamColor::Gray => TeamColor::Gray,
+            m::TeamColor::DarkGray => TeamColor::DarkGray,
+            m::TeamColor::Blue => TeamColor::Blue,
+            m::TeamColor::Green => TeamColor::Green,
+            m::TeamColor::Aqua => TeamColor::Aqua,
+            m::TeamColor::Red => TeamColor::Red,
+            m::TeamColor::LightPurple => TeamColor::LightPurple,
+            m::TeamColor::Yellow => TeamColor::Yellow,
+            m::TeamColor::White => TeamColor::White,
+        }
+    }
+}
+
+impl From<m::DisplaySlot> for DisplaySlot {
+    fn from(s: m::DisplaySlot) -> Self {
+        match s {
+            m::DisplaySlot::List => DisplaySlot::List,
+            m::DisplaySlot::Sidebar => DisplaySlot::Sidebar,
+            m::DisplaySlot::BelowName => DisplaySlot::BelowName,
+            m::DisplaySlot::TeamSidebar(c) => DisplaySlot::TeamSidebar(c.into()),
+        }
+    }
+}
+
+impl From<m::Visibility> for Visibility {
+    fn from(v: m::Visibility) -> Self {
+        match v {
+            m::Visibility::Always => Visibility::Always,
+            m::Visibility::Never => Visibility::Never,
+            m::Visibility::HideForOtherTeams => Visibility::HideForOtherTeams,
+            m::Visibility::HideForOwnTeam => Visibility::HideForOwnTeam,
+        }
+    }
+}
+
+impl From<m::CollisionRule> for CollisionRule {
+    fn from(r: m::CollisionRule) -> Self {
+        match r {
+            m::CollisionRule::Always => CollisionRule::Always,
+            m::CollisionRule::Never => CollisionRule::Never,
+            m::CollisionRule::PushOtherTeams => CollisionRule::PushOtherTeams,
+            m::CollisionRule::PushOwnTeam => CollisionRule::PushOwnTeam,
+        }
+    }
+}
+
+/// Builds a [`Team`] from the model's team parameters. `death_message_visibility`
+/// has no counterpart in the modern `set_player_team` packet (that flag was
+/// removed), so it keeps its vanilla default; every other field is carried.
+fn team_from_params(name: &str, p: &m::TeamParameters) -> Team {
+    Team {
+        name: name.to_string(),
+        display_name: p.display_name.clone(),
+        prefix: p.prefix.clone(),
+        suffix: p.suffix.clone(),
+        color: p.color.map(Into::into),
+        friendly_fire: p.friendly_fire,
+        see_friendly_invisibles: p.see_friendly_invisibles,
+        name_tag_visibility: p.name_tag_visibility.into(),
+        death_message_visibility: Visibility::Always,
+        collision_rule: p.collision_rule.into(),
+        members: Vec::new(),
+    }
+}
+
+impl Scoreboard {
+    /// Folds a scoreboard-family [`ClientEvent`] into this state, returning
+    /// whether the event was one this aggregate owns. Non-scoreboard events
+    /// return `false` unchanged, so a driver can fan a single event out to
+    /// several aggregates and let each claim its own.
+    ///
+    /// The clientbound `set_objective` packet carries no criterion (criteria is
+    /// serverbound only), so a folded [`Objective`] has an empty `criteria`; its
+    /// render type comes from the packet instead. A [`Change`](m::ObjectiveMode::Change)
+    /// on an unknown objective upserts it — the server treats a late change as
+    /// authoritative and dropping it would silently lose the objective.
+    ///
+    /// A [`ScoreUpdate`](ClientEvent::ScoreUpdate) for an objective this board
+    /// has never seen is dropped, matching this crate's objective-gated
+    /// [`set_score_entry`](Self::set_score_entry): vanilla always sends the
+    /// objective before its scores, so the drop is unreachable in practice and
+    /// preferred over silently inventing an objective-less score bucket. This is
+    /// a deliberate divergence from `lodestone-client`'s create-on-demand fold,
+    /// noted so a future reconciliation of the two does not "fix" it blindly.
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::ObjectiveUpdate {
+                name,
+                mode,
+                display_name,
+                render_type,
+                number_format,
+            } => {
+                match mode {
+                    m::ObjectiveMode::Add | m::ObjectiveMode::Change => {
+                        let mut obj = Objective::new(
+                            name.clone(),
+                            "",
+                            display_name
+                                .clone()
+                                .unwrap_or_else(|| Text::literal(name.clone())),
+                        );
+                        if let Some(rt) = render_type {
+                            obj.render_type = (*rt).into();
+                        }
+                        if let Some(nf) = number_format {
+                            obj.number_format = nf.into();
+                        }
+                        self.add_objective(obj);
+                    }
+                    m::ObjectiveMode::Remove => self.remove_objective(name),
+                }
+                true
+            }
+            ClientEvent::DisplayObjective { slot, objective } => {
+                self.set_display((*slot).into(), objective.as_deref());
+                true
+            }
+            ClientEvent::ScoreUpdate {
+                holder,
+                objective,
+                value,
+                display,
+                number_format,
+            } => {
+                self.set_score_entry(
+                    objective,
+                    holder.clone(),
+                    ScoreEntry {
+                        value: *value,
+                        display_name: display.clone(),
+                        number_format: number_format.as_ref().map(Into::into).unwrap_or_default(),
+                    },
+                );
+                true
+            }
+            ClientEvent::ScoreReset { holder, objective } => {
+                match objective {
+                    Some(name) => self.reset_score(name, holder),
+                    // Reset the holder from every objective. Touches private
+                    // state directly because the objective-scoped public
+                    // `reset_score` cannot express "all objectives".
+                    None => {
+                        for map in self.scores.values_mut() {
+                            map.remove(holder);
+                        }
+                    }
+                }
+                true
+            }
+            ClientEvent::TeamUpdate { name, action } => {
+                self.fold_team(name, action);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Folds a [`TeamUpdate`](ClientEvent::TeamUpdate) action. `Update` rebuilds
+    /// the team from new parameters while preserving its current membership,
+    /// since the update action carries no member list.
+    fn fold_team(&mut self, name: &str, action: &m::TeamAction) {
+        match action {
+            m::TeamAction::Create { params, members } => {
+                let mut team = team_from_params(name, params);
+                team.members = members.clone();
+                self.add_team(team);
+            }
+            m::TeamAction::Remove => self.remove_team(name),
+            m::TeamAction::Update { params } => {
+                if let Some(existing) = self.teams.get(name) {
+                    let members = existing.members.clone();
+                    let mut team = team_from_params(name, params);
+                    team.members = members;
+                    self.add_team(team);
+                }
+            }
+            m::TeamAction::AddMembers(members) => {
+                for holder in members {
+                    self.add_member(name, holder.clone());
+                }
+            }
+            m::TeamAction::RemoveMembers(members) => {
+                for holder in members {
+                    self.remove_member(holder);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn objective_add(name: &str, render: m::ObjectiveRenderType) -> ClientEvent {
+        ClientEvent::ObjectiveUpdate {
+            name: name.to_string(),
+            mode: m::ObjectiveMode::Add,
+            display_name: Some(Text::literal("Kills")),
+            render_type: Some(render),
+            number_format: None,
+        }
+    }
+
+    #[test]
+    fn objective_add_is_readable_through_public_api() {
+        let mut sb = Scoreboard::new();
+        assert!(sb.apply(&objective_add("kills", m::ObjectiveRenderType::Hearts)));
+        let obj = sb.objective("kills").expect("objective present after add");
+        assert_eq!(obj.name, "kills");
+        assert_eq!(obj.render_type, RenderType::Hearts);
+        assert_eq!(obj.display_name, Text::literal("Kills"));
+        // The clientbound packet carries no criterion.
+        assert_eq!(obj.criteria, "");
+    }
+
+    #[test]
+    fn change_on_unknown_objective_upserts() {
+        let mut sb = Scoreboard::new();
+        let ev = ClientEvent::ObjectiveUpdate {
+            name: "late".to_string(),
+            mode: m::ObjectiveMode::Change,
+            display_name: Some(Text::literal("Late")),
+            render_type: Some(m::ObjectiveRenderType::Integer),
+            number_format: None,
+        };
+        assert!(sb.apply(&ev));
+        assert!(sb.objective("late").is_some());
+    }
+
+    #[test]
+    fn remove_objective_clears_scores_and_display() {
+        let mut sb = Scoreboard::new();
+        sb.apply(&objective_add("kills", m::ObjectiveRenderType::Integer));
+        sb.apply(&ClientEvent::ScoreUpdate {
+            holder: "Alice".into(),
+            objective: "kills".into(),
+            value: 7,
+            display: None,
+            number_format: None,
+        });
+        sb.apply(&ClientEvent::DisplayObjective {
+            slot: m::DisplaySlot::Sidebar,
+            objective: Some("kills".into()),
+        });
+        assert_eq!(sb.score("kills", "Alice").map(|s| s.value), Some(7));
+        assert_eq!(sb.displayed(DisplaySlot::Sidebar), Some("kills"));
+
+        sb.apply(&ClientEvent::ObjectiveUpdate {
+            name: "kills".into(),
+            mode: m::ObjectiveMode::Remove,
+            display_name: None,
+            render_type: None,
+            number_format: None,
+        });
+        assert!(sb.objective("kills").is_none());
+        assert!(sb.score("kills", "Alice").is_none());
+        assert_eq!(sb.displayed(DisplaySlot::Sidebar), None);
+    }
+
+    #[test]
+    fn display_slot_team_colour_maps_and_clears() {
+        let mut sb = Scoreboard::new();
+        sb.apply(&objective_add("k", m::ObjectiveRenderType::Integer));
+        sb.apply(&ClientEvent::DisplayObjective {
+            slot: m::DisplaySlot::TeamSidebar(m::TeamColor::Red),
+            objective: Some("k".into()),
+        });
+        assert_eq!(
+            sb.displayed(DisplaySlot::TeamSidebar(TeamColor::Red)),
+            Some("k")
+        );
+        assert_eq!(sb.sidebar_for_color(Some(TeamColor::Red)), Some("k"));
+        // Clear it.
+        sb.apply(&ClientEvent::DisplayObjective {
+            slot: m::DisplaySlot::TeamSidebar(m::TeamColor::Red),
+            objective: None,
+        });
+        assert_eq!(sb.displayed(DisplaySlot::TeamSidebar(TeamColor::Red)), None);
+    }
+
+    #[test]
+    fn score_for_unknown_objective_is_dropped() {
+        // Deliberate objective-gated divergence from lodestone-client.
+        let mut sb = Scoreboard::new();
+        assert!(sb.apply(&ClientEvent::ScoreUpdate {
+            holder: "Bob".into(),
+            objective: "ghost".into(),
+            value: 3,
+            display: None,
+            number_format: None,
+        }));
+        assert!(sb.score("ghost", "Bob").is_none());
+    }
+
+    #[test]
+    fn score_reset_scopes_to_one_or_all_objectives() {
+        let mut sb = Scoreboard::new();
+        sb.apply(&objective_add("a", m::ObjectiveRenderType::Integer));
+        sb.apply(&objective_add("b", m::ObjectiveRenderType::Integer));
+        for obj in ["a", "b"] {
+            sb.apply(&ClientEvent::ScoreUpdate {
+                holder: "Zoe".into(),
+                objective: obj.into(),
+                value: 1,
+                display: None,
+                number_format: None,
+            });
+        }
+        // Scoped reset touches only "a".
+        sb.apply(&ClientEvent::ScoreReset {
+            holder: "Zoe".into(),
+            objective: Some("a".into()),
+        });
+        assert!(sb.score("a", "Zoe").is_none());
+        assert!(sb.score("b", "Zoe").is_some());
+        // All-objective reset clears the rest.
+        sb.apply(&ClientEvent::ScoreReset {
+            holder: "Zoe".into(),
+            objective: None,
+        });
+        assert!(sb.score("b", "Zoe").is_none());
+    }
+
+    fn red_params() -> Box<m::TeamParameters> {
+        Box::new(m::TeamParameters {
+            display_name: Text::literal("Red Team"),
+            prefix: Text::literal("["),
+            suffix: Text::literal("]"),
+            name_tag_visibility: m::Visibility::HideForOtherTeams,
+            collision_rule: m::CollisionRule::PushOwnTeam,
+            color: Some(m::TeamColor::Red),
+            friendly_fire: false,
+            see_friendly_invisibles: true,
+        })
+    }
+
+    #[test]
+    fn team_create_maps_params_and_seeds_membership() {
+        let mut sb = Scoreboard::new();
+        assert!(sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::Create {
+                params: red_params(),
+                members: vec!["Alice".into()],
+            },
+        }));
+        let team = sb.team("red").expect("team present");
+        assert_eq!(team.prefix, Text::literal("["));
+        assert_eq!(team.suffix, Text::literal("]"));
+        assert_eq!(team.color, Some(TeamColor::Red));
+        assert!(!team.friendly_fire);
+        assert_eq!(team.name_tag_visibility, Visibility::HideForOtherTeams);
+        assert_eq!(team.collision_rule, CollisionRule::PushOwnTeam);
+        // Reverse index resolves membership.
+        assert_eq!(sb.team_of("Alice").map(|t| t.name.as_str()), Some("red"));
+    }
+
+    #[test]
+    fn team_update_preserves_membership() {
+        let mut sb = Scoreboard::new();
+        sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::Create {
+                params: red_params(),
+                members: vec!["Alice".into()],
+            },
+        });
+        let mut updated = red_params();
+        updated.prefix = Text::literal("<<");
+        sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::Update { params: updated },
+        });
+        let team = sb.team("red").expect("team present");
+        assert_eq!(team.prefix, Text::literal("<<"));
+        assert_eq!(team.members, vec!["Alice".to_string()]);
+        assert_eq!(sb.team_of("Alice").map(|t| t.name.as_str()), Some("red"));
+    }
+
+    #[test]
+    fn team_member_add_and_remove() {
+        let mut sb = Scoreboard::new();
+        sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::Create {
+                params: red_params(),
+                members: vec![],
+            },
+        });
+        sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::AddMembers(vec!["Bob".into(), "Cara".into()]),
+        });
+        assert_eq!(sb.team_of("Bob").map(|t| t.name.as_str()), Some("red"));
+        assert_eq!(sb.team_of("Cara").map(|t| t.name.as_str()), Some("red"));
+        sb.apply(&ClientEvent::TeamUpdate {
+            name: "red".into(),
+            action: m::TeamAction::RemoveMembers(vec!["Bob".into()]),
+        });
+        assert!(sb.team_of("Bob").is_none());
+        assert!(sb.team_of("Cara").is_some());
+    }
+
+    #[test]
+    fn non_scoreboard_event_is_not_claimed() {
+        let mut sb = Scoreboard::new();
+        let ev = ClientEvent::PlayerListRemove {
+            profile_ids: vec![],
+        };
+        assert!(!sb.apply(&ev));
     }
 }

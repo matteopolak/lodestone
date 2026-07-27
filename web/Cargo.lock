@@ -1030,6 +1030,7 @@ name = "lodestone-client"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
+ "lodestone-game",
  "lodestone-model",
  "lodestone-net",
  "lodestone-registry",
@@ -1059,6 +1060,14 @@ dependencies = [
 
 [[package]]
 name = "lodestone-entity"
+version = "0.1.0"
+dependencies = [
+ "lodestone-model",
+ "uuid",
+]
+
+[[package]]
+name = "lodestone-game"
 version = "0.1.0"
 dependencies = [
  "lodestone-model",

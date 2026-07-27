@@ -5,8 +5,8 @@
 //! fetched to `.cache/mc/<version>/client.jar` (see `xtask fetch-assets`).
 
 use lodestone_assets::{
-    Atlas, AtlasBuilder, BlockBaker, BlockStateDefinition, BlockStates, FirstWeight, ModelResolver,
-    ResourceLocation, ResourceManager, TextureBinding, ZipSource,
+    Atlas, AtlasBuilder, BlockBaker, BlockStateDefinition, BlockStates, FirstWeight, IconPart,
+    ItemIconBuilder, ModelResolver, ResourceLocation, ResourceManager, TextureBinding, ZipSource,
 };
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 use std::collections::{BTreeMap, BTreeSet};
@@ -745,8 +745,89 @@ fn entity_textures_resolve() {
 #[ignore = "requires a fetched vanilla client.jar"]
 fn entity_models_whole_corpus_coverage() {
     use lodestone_assets::Image;
-    use lodestone_assets::entity::{EntityVariant, Temperature, bake_entity};
+    use lodestone_assets::entity::{
+        CatCoat, EntityVariant, HorseColor, LlamaColor, MooshroomColor, ParrotColor, Temperature,
+        WolfCoat, WolfState, bake_entity,
+    };
     use lodestone_assets::entity_models::entity_models;
+
+    // Every registered ByVariant entry's own variant axis, probed with every
+    // real variant value it has (not just Temperature) — otherwise a
+    // ByVariant entry for e.g. horse colour would only ever get its default
+    // sheet checked three times, and a wrong horse_black.png path would pass
+    // silently. Panics on an unrecognised variant-driven name so a future
+    // ByVariant entry can't be added without extending this list.
+    fn variant_probes_for(name: &str) -> Vec<EntityVariant> {
+        match name {
+            "pig" | "cow" | "chicken" => vec![
+                EntityVariant::Temperature(Temperature::Temperate),
+                EntityVariant::Temperature(Temperature::Cold),
+                EntityVariant::Temperature(Temperature::Warm),
+            ],
+            "horse" => vec![
+                EntityVariant::HorseColor(HorseColor::White),
+                EntityVariant::HorseColor(HorseColor::Creamy),
+                EntityVariant::HorseColor(HorseColor::Chestnut),
+                EntityVariant::HorseColor(HorseColor::Brown),
+                EntityVariant::HorseColor(HorseColor::Black),
+                EntityVariant::HorseColor(HorseColor::Gray),
+                EntityVariant::HorseColor(HorseColor::DarkBrown),
+            ],
+            "llama" | "trader_llama" => vec![
+                EntityVariant::Llama(LlamaColor::Creamy),
+                EntityVariant::Llama(LlamaColor::White),
+                EntityVariant::Llama(LlamaColor::Brown),
+                EntityVariant::Llama(LlamaColor::Gray),
+            ],
+            "cat" => vec![
+                EntityVariant::Cat(CatCoat::Tabby),
+                EntityVariant::Cat(CatCoat::Black),
+                EntityVariant::Cat(CatCoat::Red),
+                EntityVariant::Cat(CatCoat::Siamese),
+                EntityVariant::Cat(CatCoat::BritishShorthair),
+                EntityVariant::Cat(CatCoat::Calico),
+                EntityVariant::Cat(CatCoat::Persian),
+                EntityVariant::Cat(CatCoat::Ragdoll),
+                EntityVariant::Cat(CatCoat::White),
+                EntityVariant::Cat(CatCoat::Jellie),
+                EntityVariant::Cat(CatCoat::AllBlack),
+            ],
+            "wolf" => {
+                let mut v = Vec::new();
+                for coat in [
+                    WolfCoat::Pale,
+                    WolfCoat::Spotted,
+                    WolfCoat::Snowy,
+                    WolfCoat::Black,
+                    WolfCoat::Ashen,
+                    WolfCoat::Rusty,
+                    WolfCoat::Woods,
+                    WolfCoat::Chestnut,
+                    WolfCoat::Striped,
+                ] {
+                    for state in [WolfState::Wild, WolfState::Tame, WolfState::Angry] {
+                        v.push(EntityVariant::Wolf { coat, state });
+                    }
+                }
+                v
+            }
+            "parrot" => vec![
+                EntityVariant::Parrot(ParrotColor::RedBlue),
+                EntityVariant::Parrot(ParrotColor::Blue),
+                EntityVariant::Parrot(ParrotColor::Green),
+                EntityVariant::Parrot(ParrotColor::YellowBlue),
+                EntityVariant::Parrot(ParrotColor::Gray),
+            ],
+            "mooshroom" => vec![
+                EntityVariant::Mooshroom(MooshroomColor::Red),
+                EntityVariant::Mooshroom(MooshroomColor::Brown),
+            ],
+            other => panic!(
+                "{other}: ByVariant entry has no variant-probe list in the real-jar coverage \
+                 test — add one covering its variant axis"
+            ),
+        }
+    }
 
     if client_jar().is_none() {
         panic!(
@@ -769,6 +850,7 @@ fn entity_models_whole_corpus_coverage() {
 
     let models = entity_models();
     let mut verified = 0usize;
+    let mut variant_sheets_verified = 0usize;
     for e in &models {
         let model = (e.build)();
         let tex_path = e.texture.default_path();
@@ -786,21 +868,24 @@ fn entity_models_whole_corpus_coverage() {
 
         // A variant-driven entry must have *every* variant sheet present in the
         // jar, not just its default — otherwise ByVariant is a latent 404. Prove
-        // it non-vacuously against the real PNGs across all temperature families.
+        // it non-vacuously against the real PNGs, probing this entry's own
+        // variant axis (temperature, horse colour, llama, cat, wolf, parrot —
+        // not just temperature for every entry).
         if e.texture.is_variant() {
-            for t in [Temperature::Temperate, Temperature::Cold, Temperature::Warm] {
-                let vpath = e.texture.resolve(EntityVariant::Temperature(t));
+            for v in variant_probes_for(e.name) {
+                let vpath = e.texture.resolve(v);
                 let vloc = ResourceLocation::parse(&format!("minecraft:{}", vpath)).unwrap();
                 let vbytes = manager
                     .read_asset(&vloc, "textures", "png")
                     .unwrap_or_else(|| {
                         panic!(
-                            "{}: variant texture {} ({t:?}) not found in client.jar",
+                            "{}: variant texture {} ({v:?}) not found in client.jar",
                             e.name, vpath
                         )
                     });
                 Image::decode_png(&vbytes)
                     .unwrap_or_else(|_| panic!("{}: decode variant {}", e.name, vpath));
+                variant_sheets_verified += 1;
             }
         }
 
@@ -871,7 +956,8 @@ fn entity_models_whole_corpus_coverage() {
     }
 
     eprintln!(
-        "entity model coverage: {verified}/{} ported models verified against real PNGs; \
+        "entity model coverage: {verified}/{} ported models verified against real PNGs \
+         ({variant_sheets_verified} variant sheets across all ByVariant entries also verified); \
          {} entity texture dirs in jar",
         models.len(),
         entity_dirs.len()
@@ -996,6 +1082,147 @@ fn item_models_whole_corpus_coverage() {
     assert_eq!(errors, 0, "every item model should resolve without error");
     assert!(baked_ok > 0, "at least some generated items should bake");
 }
+
+/// The higher-value instrument: drive the full item -> drawable-icon pipeline
+/// over the real `items/*.json` corpus (the true inventory item set, including
+/// the ex-`builtin/entity` items that only surface as `special` there), and
+/// report how many produce a *drawable* icon whose sprites actually decode.
+///
+/// "Drawable" is verified concretely, not just classified: a `Sprite` part's
+/// every layer texture must decode as a PNG, and a `Special` part's base model
+/// must resolve. That end-to-end check is what turns a silent gap (a definition
+/// naming a texture the pack lacks) into a named failure and a percentage.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar"]
+fn item_icons_whole_corpus_coverage() {
+    use lodestone_assets::Image;
+    let manager = manager();
+    let builder = ItemIconBuilder::new(&manager);
+    let resolver = ModelResolver::new(&manager);
+
+    // Enumerate the item-definition corpus deterministically (sorted, deduped;
+    // never read_dir order — a fixture-by-name discipline, per the mip test that
+    // once passed green on a degenerate single-sprite atlas).
+    let prefix = "assets/minecraft/items/";
+    let mut ids: Vec<String> = manager
+        .list(prefix)
+        .into_iter()
+        .filter_map(|p| {
+            p.strip_prefix(prefix)
+                .and_then(|r| r.strip_suffix(".json"))
+                .map(str::to_string)
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let total = ids.len();
+    assert!(total > 100, "expected a large item corpus, got {total}");
+
+    let (mut sprite, mut model, mut special, mut empty) = (0usize, 0usize, 0usize, 0usize);
+    let mut drawable = 0usize;
+    // Classified named failures: (id, class, reason).
+    let mut failures: Vec<(String, &'static str, String)> = Vec::new();
+    let mut empty_samples: Vec<String> = Vec::new();
+    // A verifier over one part; returns Err(reason) when the part cannot draw.
+    let verify_part = |part: &IconPart| -> Result<(), String> {
+        match part {
+            IconPart::Sprite { layers } => {
+                for layer in layers {
+                    let bytes = manager
+                        .read_asset(&layer.sprite, "textures", "png")
+                        .ok_or_else(|| format!("missing texture {}", layer.sprite))?;
+                    Image::decode_png(&bytes)
+                        .map_err(|e| format!("undecodable texture {}: {e}", layer.sprite))?;
+                }
+                Ok(())
+            }
+            // A Model part was already resolved with elements during building; a
+            // Special part must have a resolvable base sprite model.
+            IconPart::Model { .. } => Ok(()),
+            IconPart::Special { base, .. } => resolver
+                .resolve(base)
+                .map(|_| ())
+                .map_err(|e| format!("special base {base} unresolved: {e}")),
+        }
+    };
+
+    for id in &ids {
+        let loc = ResourceLocation::parse(id).unwrap();
+        let icon = match builder.icon(&loc) {
+            Ok(icon) => icon,
+            Err(e) => {
+                if failures.len() < 40 {
+                    failures.push((id.clone(), "build", e.to_string()));
+                }
+                continue;
+            }
+        };
+        if !icon.is_drawable() {
+            empty += 1;
+            if empty_samples.len() < 40 {
+                empty_samples.push(id.clone());
+            }
+            continue;
+        }
+        // Tally the dominant class of the icon (its first part) for the census.
+        match &icon.parts[0] {
+            IconPart::Sprite { .. } => sprite += 1,
+            IconPart::Model { .. } => model += 1,
+            IconPart::Special { .. } => special += 1,
+        }
+        // Concretely verify every part draws.
+        let mut ok = true;
+        for part in &icon.parts {
+            if let Err(reason) = verify_part(part) {
+                ok = false;
+                let class = match part {
+                    IconPart::Sprite { .. } => "sprite",
+                    IconPart::Model { .. } => "model",
+                    IconPart::Special { .. } => "special",
+                };
+                if failures.len() < 40 {
+                    failures.push((id.clone(), class, reason));
+                }
+                break;
+            }
+        }
+        if ok {
+            drawable += 1;
+        }
+    }
+
+    eprintln!("== item icon whole-corpus coverage ==");
+    eprintln!("total={total} drawable={drawable} empty={empty}");
+    eprintln!("  sprite={sprite} model={model} special={special}");
+    eprintln!(
+        "drawable: {drawable}/{total} = {:.2}%",
+        100.0 * drawable as f64 / total as f64
+    );
+    for (id, class, reason) in &failures {
+        eprintln!("  FAIL [{class}] {id}: {reason}");
+    }
+    for id in &empty_samples {
+        eprintln!("  EMPTY {id}");
+    }
+
+    // Correctness gate: nothing that classified as drawable may fail to draw.
+    // A moved/renamed sprite or a new texture object form surfaces here as a
+    // named FAIL rather than a silent gap — the check that has repeatedly caught
+    // regressions hand-picked fixtures missed.
+    assert_eq!(
+        failures.len(),
+        0,
+        "some items classified as drawable but failed verification (see FAIL lines)"
+    );
+    // Coverage gate: essentially every item draws. The only expected non-drawable
+    // item is `air` (no visual); a mass regression (a class of items resolving to
+    // empty) drops the ratio below this floor and trips the assert.
+    assert!(
+        drawable > 0 && drawable * 1000 >= total * 999,
+        "item icon coverage regressed: {drawable}/{total} drawable (see EMPTY/FAIL lines)"
+    );
+}
+
 
 #[test]
 #[ignore = "requires a fetched vanilla client.jar"]

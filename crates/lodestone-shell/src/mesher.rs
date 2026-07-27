@@ -91,6 +91,32 @@ impl SectionSnapshot {
         let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
         self.lights[i].as_ref()
     }
+
+    /// The number of merged quads this snapshot would emit — a cheap coverage
+    /// proxy for gates that need to prove a live neighbourhood produced
+    /// non-trivial geometry (an empty world meshes to zero).
+    #[must_use]
+    pub fn quad_count<C: BlockClassifier>(&self, classifier: &C) -> usize {
+        mesh_snapshot(self, classifier).quad_count()
+    }
+
+    /// A copy of this snapshot with **all light stripped** (every neighbour slot
+    /// `None`), so [`mesh_snapshot`] falls back to the full-bright
+    /// [`UniformLight::pre_light_bridge`] for the whole neighbourhood.
+    ///
+    /// This is the *control* for lighting gates: it reproduces exactly what the
+    /// retired full-bright path rendered, letting a test prove that real light
+    /// differs from it (the shadowed-darker-than-open-sky assertion the bridge
+    /// cannot satisfy). It carries no meaning on the render path.
+    #[must_use]
+    pub fn full_bright_control(&self) -> SectionSnapshot {
+        SectionSnapshot {
+            key: self.key,
+            sections: self.sections.clone(),
+            lights: (0..self.sections.len()).map(|_| None).collect(),
+            sky_default: self.sky_default,
+        }
+    }
 }
 
 fn air_section() -> ChunkSection {

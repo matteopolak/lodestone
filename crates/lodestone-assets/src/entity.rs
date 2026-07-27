@@ -270,6 +270,10 @@ pub enum EntityVariant {
     },
     /// A parrot's plumage colour (`Parrot.Variant`).
     Parrot(ParrotColor),
+    /// A mooshroom's mushroom colour (`MushroomCow.Variant`), reusing the
+    /// plain cow mesh — an independent axis from `Temperature`, since a
+    /// mooshroom is never re-skinned by climate.
+    Mooshroom(MooshroomColor),
 }
 
 /// The three climate families 26.2 ships variant skins for.
@@ -410,6 +414,16 @@ pub enum ParrotColor {
     /// `entity/parrot/parrot_grey` — note the vanilla file uses British
     /// spelling despite the enum case matching `Parrot.Variant.GRAY`.
     Gray,
+}
+
+/// A mooshroom's mushroom colour (`MushroomCow.Variant`,
+/// `MushroomCowRenderer.TEXTURES`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MooshroomColor {
+    /// `entity/cow/mooshroom_red`, vanilla's default.
+    Red,
+    /// `entity/cow/mooshroom_brown`.
+    Brown,
 }
 
 /// How an entry resolves its texture: a single fixed sheet, or a selector over

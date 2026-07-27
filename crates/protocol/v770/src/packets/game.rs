@@ -394,6 +394,107 @@ pub struct Swing {
     #[mc(varint)]
     pub hand: i32,
 }
+
+/// Serverbound `select_bundle_item` packet.
+///
+/// Highlights which stack inside a bundle's tooltip preview is selected
+/// (`ServerboundSelectBundleItemPacket`). Wire layout: VarInt slot id, then
+/// VarInt selected item index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:select_bundle_item", state = Play, bound = Server)]
+pub struct SelectBundleItem {
+    /// Slot id holding the bundle.
+    #[mc(varint)]
+    pub slot_id: i32,
+    /// Highlighted stack's index within the bundle, or `-1` for none.
+    #[mc(varint)]
+    pub selected_item_index: i32,
+}
+
+/// Serverbound `container_slot_state_changed` packet.
+///
+/// Toggles a container slot's enabled state, e.g. a crafter's per-slot
+/// disable toggle (`ServerboundContainerSlotStateChangedPacket`). Wire
+/// layout: VarInt slot id, VarInt container id, then a trailing boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:container_slot_state_changed", state = Play, bound = Server)]
+pub struct ContainerSlotStateChanged {
+    /// Slot index within the container.
+    #[mc(varint)]
+    pub slot_id: i32,
+    /// Open container id.
+    #[mc(varint)]
+    pub container_id: i32,
+    /// New enabled/disabled state.
+    pub new_state: bool,
+}
+
+/// Serverbound `recipe_book_change_settings` packet.
+///
+/// Wire layout: VarInt `RecipeBookType` ordinal (`writeEnum`), then two
+/// trailing booleans, open then filtering
+/// (`ServerboundRecipeBookChangeSettingsPacket`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:recipe_book_change_settings", state = Play, bound = Server)]
+pub struct RecipeBookChangeSettings {
+    /// `RecipeBookType` ordinal: 0 crafting, 1 furnace, 2 blast furnace, 3
+    /// smoker.
+    #[mc(varint)]
+    pub book_type: i32,
+    /// Whether the book is open.
+    pub is_open: bool,
+    /// Whether the "only craftable" filter is active.
+    pub is_filtering: bool,
+}
+
+/// Serverbound `recipe_book_seen_recipe` packet.
+///
+/// Marks a recipe as seen, clearing its "new" highlight
+/// (`ServerboundRecipeBookSeenRecipePacket`). Wire layout: a single VarInt
+/// `RecipeDisplayId` index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:recipe_book_seen_recipe", state = Play, bound = Server)]
+pub struct RecipeBookSeenRecipe {
+    /// The recipe's display index.
+    #[mc(varint)]
+    pub recipe: i32,
+}
+
+/// Serverbound `place_recipe` packet.
+///
+/// Auto-places a recipe book entry's ingredients into an open crafting
+/// container (`ServerboundPlaceRecipePacket`). Wire layout: VarInt container
+/// id, VarInt `RecipeDisplayId` index, then a trailing boolean for
+/// "use max items".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:place_recipe", state = Play, bound = Server)]
+pub struct PlaceRecipe {
+    /// Open container id.
+    #[mc(varint)]
+    pub container_id: i32,
+    /// The recipe's display index.
+    #[mc(varint)]
+    pub recipe: i32,
+    /// Whether to place the maximum possible quantity rather than one set of
+    /// ingredients.
+    pub use_max_items: bool,
+}
+
+/// Serverbound `change_game_mode` packet.
+///
+/// Sent by the singleplayer/LAN cheats-enabled F4 game-mode switcher
+/// (`ServerboundChangeGameModePacket`). Wire layout: a single VarInt
+/// `GameType` id via `ByteBufCodecs.idMapper` (`0` survival, `1` creative,
+/// `2` adventure, `3` spectator) — the server remains authoritative and may
+/// ignore this if the requester lacks permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:change_game_mode", state = Play, bound = Server)]
+pub struct ChangeGameMode {
+    /// `GameType` id.
+    #[mc(varint)]
+    pub mode: i32,
+}
+
 /// Serverbound `accept_teleportation` packet.
 ///
 /// Sent in reply to a clientbound `player_position`, echoing its teleport id.

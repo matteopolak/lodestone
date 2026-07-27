@@ -7,7 +7,8 @@
 
 use std::collections::HashMap;
 
-use lodestone_model::Text;
+use lodestone_model::event as m;
+use lodestone_model::{ClientEvent, Text};
 use uuid::Uuid;
 
 /// Boss bar colour.
@@ -202,5 +203,203 @@ impl BossBarSet {
     #[must_use]
     pub fn any_fog(&self) -> bool {
         self.bars.values().any(|b| b.create_fog)
+    }
+}
+
+// --- ClientEvent fold -------------------------------------------------------
+//
+// Translates the model's parallel boss-bar enums into this crate's types and
+// folds a `BossBarUpdate` into the set. The model type is imported as `m`.
+
+impl From<m::BossColor> for BossBarColor {
+    fn from(c: m::BossColor) -> Self {
+        match c {
+            m::BossColor::Pink => BossBarColor::Pink,
+            m::BossColor::Blue => BossBarColor::Blue,
+            m::BossColor::Red => BossBarColor::Red,
+            m::BossColor::Green => BossBarColor::Green,
+            m::BossColor::Yellow => BossBarColor::Yellow,
+            m::BossColor::Purple => BossBarColor::Purple,
+            m::BossColor::White => BossBarColor::White,
+        }
+    }
+}
+
+impl From<m::BossOverlay> for BossBarOverlay {
+    fn from(o: m::BossOverlay) -> Self {
+        match o {
+            m::BossOverlay::Progress => BossBarOverlay::Progress,
+            m::BossOverlay::Notched6 => BossBarOverlay::Notched6,
+            m::BossOverlay::Notched10 => BossBarOverlay::Notched10,
+            m::BossOverlay::Notched12 => BossBarOverlay::Notched12,
+            m::BossOverlay::Notched20 => BossBarOverlay::Notched20,
+        }
+    }
+}
+
+impl BossBarSet {
+    /// Folds a [`BossBarUpdate`](ClientEvent::BossBarUpdate) into the set,
+    /// returning whether the event was a boss-bar one. `Add` inserts or replaces
+    /// the bar in place (preserving its render order); every partial update is a
+    /// no-op if no bar with that id is present, matching the server's contract
+    /// that updates follow an add.
+    pub fn apply(&mut self, event: &ClientEvent) -> bool {
+        let ClientEvent::BossBarUpdate { id, action } = event else {
+            return false;
+        };
+        match action {
+            m::BossAction::Add {
+                title,
+                progress,
+                color,
+                overlay,
+                darken,
+                music,
+                fog,
+            } => {
+                self.add(
+                    *id,
+                    BossBar {
+                        title: (**title).clone(),
+                        progress: progress.clamp(0.0, 1.0),
+                        color: (*color).into(),
+                        overlay: (*overlay).into(),
+                        darken_screen: *darken,
+                        play_music: *music,
+                        create_fog: *fog,
+                    },
+                );
+            }
+            m::BossAction::Remove => self.remove(id),
+            m::BossAction::UpdateProgress(p) => {
+                if let Some(bar) = self.get_mut(id) {
+                    bar.set_progress(*p);
+                }
+            }
+            m::BossAction::UpdateName(title) => {
+                if let Some(bar) = self.get_mut(id) {
+                    bar.title = (**title).clone();
+                }
+            }
+            m::BossAction::UpdateStyle { color, overlay } => {
+                if let Some(bar) = self.get_mut(id) {
+                    bar.color = (*color).into();
+                    bar.overlay = (*overlay).into();
+                }
+            }
+            m::BossAction::UpdateFlags { darken, music, fog } => {
+                if let Some(bar) = self.get_mut(id) {
+                    bar.darken_screen = *darken;
+                    bar.play_music = *music;
+                    bar.create_fog = *fog;
+                }
+            }
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    fn id() -> Uuid {
+        Uuid::from_u128(0x1234)
+    }
+
+    fn add_event(progress: f32) -> ClientEvent {
+        ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::Add {
+                title: Box::new(Text::literal("Ender Dragon")),
+                progress,
+                color: m::BossColor::Red,
+                overlay: m::BossOverlay::Notched6,
+                darken: true,
+                music: false,
+                fog: true,
+            },
+        }
+    }
+
+    #[test]
+    fn add_is_readable_and_progress_clamped() {
+        let mut bars = BossBarSet::new();
+        assert!(bars.apply(&add_event(2.0)));
+        let bar = bars.get(&id()).expect("bar present after add");
+        assert_eq!(bar.title, Text::literal("Ender Dragon"));
+        assert_eq!(bar.progress, 1.0); // clamped from 2.0
+        assert_eq!(bar.color, BossBarColor::Red);
+        assert_eq!(bar.overlay, BossBarOverlay::Notched6);
+        assert!(bar.darken_screen);
+        assert!(!bar.play_music);
+        assert!(bar.create_fog);
+    }
+
+    #[test]
+    fn partial_updates_mutate_in_place() {
+        let mut bars = BossBarSet::new();
+        bars.apply(&add_event(1.0));
+        bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::UpdateProgress(0.25),
+        });
+        bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::UpdateName(Box::new(Text::literal("Wither"))),
+        });
+        bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::UpdateStyle {
+                color: m::BossColor::Purple,
+                overlay: m::BossOverlay::Notched20,
+            },
+        });
+        bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::UpdateFlags {
+                darken: false,
+                music: true,
+                fog: false,
+            },
+        });
+        let bar = bars.get(&id()).expect("bar present");
+        assert_eq!(bar.progress, 0.25);
+        assert_eq!(bar.title, Text::literal("Wither"));
+        assert_eq!(bar.color, BossBarColor::Purple);
+        assert_eq!(bar.overlay, BossBarOverlay::Notched20);
+        assert!(!bar.darken_screen);
+        assert!(bar.play_music);
+        assert!(!bar.create_fog);
+    }
+
+    #[test]
+    fn remove_drops_the_bar() {
+        let mut bars = BossBarSet::new();
+        bars.apply(&add_event(1.0));
+        assert_eq!(bars.len(), 1);
+        bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::Remove,
+        });
+        assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn update_for_absent_bar_is_a_noop() {
+        let mut bars = BossBarSet::new();
+        assert!(bars.apply(&ClientEvent::BossBarUpdate {
+            id: id(),
+            action: m::BossAction::UpdateProgress(0.5),
+        }));
+        assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn non_bossbar_event_is_not_claimed() {
+        let mut bars = BossBarSet::new();
+        assert!(!bars.apply(&ClientEvent::PlayerListRemove {
+            profile_ids: vec![],
+        }));
     }
 }

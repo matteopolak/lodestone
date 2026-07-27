@@ -222,6 +222,17 @@ fn quad_counts_match_vanilla_box_counts() {
         ("ocelot", 11),    // feline base, unscaled
         ("wolf", 11), // real_head(4), body, upper_body, 4 legs, real_tail (head/tail parts are empty pivots)
         ("parrot", 11), // body, tail, 2 wings, head tree(5: head/head2/beak1/beak2/feather), 2 legs
+        ("polar_bear", 10), // head(4: main/mouth/2 ears), body(2), 4 legs
+        ("pillager", 12), // head/hat/nose(3), body(2), arms/left_shoulder(3), 2 legs, 2 arms
+        ("vindicator", 12), // same illager mesh
+        ("evoker", 12),     // same illager mesh
+        ("illusioner", 12), // same illager mesh
+        ("ravager", 12), // neck/head/2 horns/mouth(5)+head main box(1)=6, body(2), 4 legs
+        ("allay", 7),    // head, body(2: main+lower)+2 arms+2 wings
+        ("shulker", 3),  // lid, base, head
+        ("glow_squid", 9), // same mesh as squid
+        ("wandering_trader", 11), // same mesh as villager
+        ("mooshroom", 10), // same mesh as cow
     ];
     let models = entity_models();
     for (name, boxes) in expected {
@@ -377,7 +388,9 @@ fn variant_textures_resolve_distinctly() {
     // entry's axis is looked up by name rather than assumed to be Temperature,
     // since 26.2 grew independent axes for horse colour, llama, cat, wolf and
     // parrot alongside the original pig/cow/chicken temperature axis.
-    use lodestone_assets::entity::{CatCoat, HorseColor, LlamaColor, ParrotColor, WolfCoat, WolfState};
+    use lodestone_assets::entity::{
+        CatCoat, HorseColor, LlamaColor, MooshroomColor, ParrotColor, WolfCoat, WolfState,
+    };
 
     for e in &models {
         if e.texture.is_variant() {
@@ -467,6 +480,10 @@ fn variant_textures_resolve_distinctly() {
                     EntityVariant::Parrot(ParrotColor::Green),
                     EntityVariant::Parrot(ParrotColor::YellowBlue),
                     EntityVariant::Parrot(ParrotColor::Gray),
+                ],
+                "mooshroom" => vec![
+                    EntityVariant::Mooshroom(MooshroomColor::Red),
+                    EntityVariant::Mooshroom(MooshroomColor::Brown),
                 ],
                 other => panic!(
                     "{other}: ByVariant entry has no probe set in this test — add one \

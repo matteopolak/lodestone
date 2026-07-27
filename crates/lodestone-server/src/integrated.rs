@@ -44,7 +44,7 @@ use tokio::sync::Notify;
 
 use crate::chunk::ChunkSource;
 use crate::protocol::ServerProtocol;
-use crate::server::serve_connection;
+use crate::server::{EntitySource, NoEntities, serve_connection};
 use crate::spawn::{Task, spawn};
 
 /// A running integrated server that owns its serving task(s).
@@ -77,6 +77,27 @@ impl IntegratedServer {
         P: ServerProtocol + 'static,
         S: ChunkSource + 'static,
     {
+        Self::open_in_memory_with_entities(protocol, source, NoEntities, view_radius)
+    }
+
+    /// Like [`open_in_memory`](Self::open_in_memory) but also streams entities:
+    /// once the client reaches Play, each of its inbound packets drives a diff of
+    /// `entities.snapshots()` against what this connection was last sent, emitting
+    /// spawn / update / remove packets (see [`serve_connection`]). The `entities`
+    /// source is a read-only view; the caller still owns the simulation and its
+    /// tick, so a shared world can back both this and the sim loop.
+    #[must_use]
+    pub fn open_in_memory_with_entities<P, S, E>(
+        protocol: P,
+        source: S,
+        entities: E,
+        view_radius: i32,
+    ) -> (Self, DuplexStream)
+    where
+        P: ServerProtocol + 'static,
+        S: ChunkSource + 'static,
+        E: EntitySource + 'static,
+    {
         let (client_end, server_end) = memory_pair();
         let shutdown = Arc::new(Notify::new());
         let signal = shutdown.clone();
@@ -88,7 +109,7 @@ impl IntegratedServer {
             // thus the client's read side) is dropped on the way out.
             tokio::select! {
                 _ = signal.notified() => {}
-                _ = serve_connection(&mut conn, &protocol, &source, view_radius) => {}
+                _ = serve_connection(&mut conn, &protocol, &source, &entities, view_radius) => {}
             }
         });
 
@@ -149,7 +170,7 @@ impl IntegratedServer {
                         drop(spawn(async move {
                             let mut conn = Connection::new(socket);
                             let _ = serve_connection(
-                                &mut conn, &*protocol, &*source, view_radius,
+                                &mut conn, &*protocol, &*source, &NoEntities, view_radius,
                             )
                             .await;
                         }));

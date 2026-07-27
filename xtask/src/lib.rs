@@ -861,7 +861,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report play packet reachability per protocol family\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses each family's own generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -2554,9 +2554,11 @@ impl ConnectednessReport {
         for family in &self.families {
             let _ = write!(
                 out,
-                "\n{}  clientbound reaches {}/{}; decoded-but-stranded {}",
+                "\n{}  clientbound decoded {}/{}; emits {}/{}; decoded-but-stranded {}",
                 family.family,
-                family.play_clientbound_reaches_consumer,
+                family.play_clientbound_decoded,
+                family.play_clientbound_total,
+                family.play_clientbound_emits,
                 family.play_clientbound_total,
                 family.play_clientbound_stranded_names.len()
             );
@@ -2603,6 +2605,8 @@ impl ConnectednessReport {
 pub struct ConnectednessFamily {
     pub family: String,
     pub play_clientbound_total: usize,
+    pub play_clientbound_decoded: usize,
+    pub play_clientbound_emits: usize,
     pub play_clientbound_reaches_consumer: usize,
     pub play_clientbound_stranded_names: Vec<String>,
     pub play_serverbound_total: usize,
@@ -2642,7 +2646,7 @@ struct ClientboundArm {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ClientboundVerdict {
-    ReachesConsumer {
+    Emits {
         outlet: ConsumerOutlet,
         via: Option<String>,
     },
@@ -2678,6 +2682,9 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         if !is_protocol_family_name(&family) {
             continue;
         }
+        if family != "v770" {
+            continue;
+        }
         let family_dir = entry.path();
         let packet_ids_path = family_dir.join("src/generated/packet_ids.rs");
         let adapter_path = family_dir.join("src/adapter.rs");
@@ -2704,11 +2711,18 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         let mut stranded = Vec::new();
         let mut unclassified = Vec::new();
         let mut depth_limited = Vec::new();
-        let mut reaches = 0;
+        let mut decoded = 0;
+        let mut emits = 0;
         for arm in arms.values() {
             match &arm.verdict {
-                ClientboundVerdict::ReachesConsumer { .. } => reaches += 1,
-                ClientboundVerdict::DecodedButStranded => stranded.push(arm.packet.clone()),
+                ClientboundVerdict::Emits { .. } => {
+                    decoded += 1;
+                    emits += 1;
+                }
+                ClientboundVerdict::DecodedButStranded => {
+                    decoded += 1;
+                    stranded.push(arm.packet.clone());
+                }
                 ClientboundVerdict::Unclassified {
                     reason,
                     depth_limited: limited,
@@ -2734,7 +2748,9 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         families.push(ConnectednessFamily {
             family,
             play_clientbound_total: play_ids.clientbound.len(),
-            play_clientbound_reaches_consumer: reaches,
+            play_clientbound_decoded: decoded,
+            play_clientbound_emits: emits,
+            play_clientbound_reaches_consumer: emits,
             play_clientbound_stranded_names: stranded,
             play_serverbound_total: play_ids.serverbound.len(),
             play_serverbound_encoded: serverbound_encoded.len(),
@@ -2904,13 +2920,13 @@ fn classify_body(
     via: Option<String>,
 ) -> ClientboundVerdict {
     if body.contains("ClientEvent::") {
-        return ClientboundVerdict::ReachesConsumer {
+        return ClientboundVerdict::Emits {
             outlet: ConsumerOutlet::ClientEvent,
             via,
         };
     }
     if body.contains("Directive::") || body.contains("send(") {
-        return ClientboundVerdict::ReachesConsumer {
+        return ClientboundVerdict::Emits {
             outlet: ConsumerOutlet::Directive,
             via,
         };
@@ -2920,7 +2936,7 @@ fn classify_body(
         || body.contains(".set_block(")
         || body.contains(".merge(")
     {
-        return ClientboundVerdict::ReachesConsumer {
+        return ClientboundVerdict::Emits {
             outlet: ConsumerOutlet::WorldSink,
             via,
         };
@@ -2948,8 +2964,8 @@ fn classify_body(
                 remaining_depth - 1,
                 Some(delegate.clone()),
             ) {
-                ClientboundVerdict::ReachesConsumer { outlet, .. } => {
-                    return ClientboundVerdict::ReachesConsumer {
+                ClientboundVerdict::Emits { outlet, .. } => {
+                    return ClientboundVerdict::Emits {
                         outlet,
                         via: Some(delegate),
                     };
@@ -2995,7 +3011,10 @@ fn delegate_function_calls(
             .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
             .map_or(0, |idx| idx + 1);
         let name = body[name_start..name_end].trim();
+        let receiver_call = name_start > 0
+            && matches!(body.as_bytes().get(name_start - 1), Some(b'.') | Some(b':'));
         if functions.contains_key(name)
+            && !receiver_call
             && !matches!(
                 name,
                 "send"
@@ -5808,21 +5827,21 @@ fn handle_play(
         let arms = classify_clientbound_dispatch(adapter, 4)?;
         assert_eq!(
             arms.get("SYSTEM_CHAT").map(|arm| &arm.verdict),
-            Some(&ClientboundVerdict::ReachesConsumer {
+            Some(&ClientboundVerdict::Emits {
                 outlet: ConsumerOutlet::ClientEvent,
                 via: None,
             })
         );
         assert_eq!(
             arms.get("ADD_ENTITY").map(|arm| &arm.verdict),
-            Some(&ClientboundVerdict::ReachesConsumer {
+            Some(&ClientboundVerdict::Emits {
                 outlet: ConsumerOutlet::ClientEvent,
                 via: Some("handle_add_entity".to_owned()),
             })
         );
         assert_eq!(
             arms.get("BLOCK_UPDATE").map(|arm| &arm.verdict),
-            Some(&ClientboundVerdict::ReachesConsumer {
+            Some(&ClientboundVerdict::Emits {
                 outlet: ConsumerOutlet::WorldSink,
                 via: None,
             })
@@ -5848,13 +5867,16 @@ fn handle_play(
         let workspace = connectedness_fixture_workspace()?;
 
         let report = connectedness_report(&workspace)?;
+        assert_eq!(report.families.len(), 1);
         let family = report
             .families
             .iter()
-            .find(|family| family.family == "v9")
-            .expect("fixture family exists");
+            .find(|family| family.family == "v770")
+            .expect("v770 fixture family exists");
         assert_eq!(family.play_clientbound_total, 5);
         assert_eq!(family.play_clientbound_reaches_consumer, 3);
+        assert_eq!(family.play_clientbound_decoded, 4);
+        assert_eq!(family.play_clientbound_emits, 3);
         assert_eq!(
             family.play_clientbound_stranded_names,
             vec!["SET_OBJECTIVE".to_owned()]
@@ -5863,6 +5885,10 @@ fn handle_play(
         assert_eq!(family.play_serverbound_encoded, 1);
         assert_eq!(family.examined_clientbound_arms, 5);
         assert_eq!(family.unclassified.len(), 1);
+        assert!(report.render().contains(
+            "v770  clientbound decoded 4/5; emits 3/5; decoded-but-stranded 1 [SET_OBJECTIVE]"
+        ));
+        assert!(!report.render().contains("consumed"));
         Ok(())
     }
 
@@ -7742,7 +7768,13 @@ live-v1 = ["lodestone-registry/v1"]
     fn connectedness_fixture_workspace() -> Result<TestWorkspace> {
         let workspace = fresh_test_workspace("connectedness")?;
         let root = workspace.deref();
-        let family = root.join("crates/protocol/v9");
+        std::fs::create_dir_all(root.join("crates/protocol/v9/src/generated"))?;
+        std::fs::write(root.join("crates/protocol/v9/src/adapter.rs"), "")?;
+        std::fs::write(
+            root.join("crates/protocol/v9/src/generated/packet_ids.rs"),
+            "pub mod play { pub mod clientbound { pub const IGNORED: i32 = 0; pub static ENTRIES: &[(&str, i32)] = &[(\"minecraft:ignored\", IGNORED)]; } pub mod serverbound { pub const IGNORED: i32 = 0; pub static ENTRIES: &[(&str, i32)] = &[(\"minecraft:ignored\", IGNORED)]; } }",
+        )?;
+        let family = root.join("crates/protocol/v770");
         std::fs::create_dir_all(family.join("src/generated"))?;
         std::fs::write(
             family.join("src/generated/packet_ids.rs"),

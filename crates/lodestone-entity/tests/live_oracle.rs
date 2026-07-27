@@ -69,10 +69,19 @@ use lodestone_entity::attribute::{default_attributes, default_def};
 use lodestone_model::Identifier;
 use lodestone_testsupport::RconClient;
 use std::str::FromStr;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const RCON_ADDR: &str = "127.0.0.1:25575";
 const RCON_PASSWORD: &str = "lodestone";
+
+/// Serialises the `#[ignore]`d oracle tests. `cargo test` runs test functions
+/// on parallel threads, and multiple RCON connections hammering the one shared
+/// oracle server concurrently desync (a query reads back a value from a
+/// different exchange even though world state is tag-isolated). Holding this for
+/// each test's duration makes exactly one test talk to the server at a time,
+/// which is reliable; the isolated harness has no other contention.
+static ORACLE_LOCK: Mutex<()> = Mutex::new(());
 
 struct Rcon {
     inner: RconClient,
@@ -152,48 +161,46 @@ fn approx(a: f64, b: f64) {
 #[test]
 #[ignore = "needs the isolated lodestone-entity-oracle Docker server with RCON"]
 fn live_attribute_defaults_match_our_table() {
+    let _guard = ORACLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut rcon = Rcon::connect();
-    rcon.cmd("kill @e[type=pig]");
-    rcon.cmd("summon minecraft:pig 0 -60 0 {NoAI:1b,NoGravity:1b}");
-    let sel = "@e[type=pig,limit=1]";
-    rcon.wait_for_entity(sel);
+    let tag = "lodestone_oracle_defaults";
+    let sel = rcon.summon_tagged("pig", tag);
 
     // Attributes a pig does NOT override expose the game's RangedAttribute
     // default. These validate our `default_def` table against the running game.
     for path in ["step_height", "knockback_resistance", "gravity"] {
         let key = Identifier::from_str(&format!("minecraft:{path}")).unwrap();
         let ours = default_def(&key).unwrap().default;
-        let live = rcon.base_value(sel, &format!("minecraft:{path}"));
+        let live = rcon.base_value(&sel, &format!("minecraft:{path}"));
         approx(live, ours);
     }
 
     // Attributes a pig DOES override: these are mob-specific base values, not
     // the attribute default. We assert the real vanilla numbers so a future
     // per-mob base table can be checked against them.
-    approx(rcon.base_value(sel, "minecraft:movement_speed"), 0.25);
-    approx(rcon.base_value(sel, "minecraft:max_health"), 10.0);
-    approx(rcon.base_value(sel, "minecraft:follow_range"), 16.0);
+    approx(rcon.base_value(&sel, "minecraft:movement_speed"), 0.25);
+    approx(rcon.base_value(&sel, "minecraft:max_health"), 10.0);
+    approx(rcon.base_value(&sel, "minecraft:follow_range"), 16.0);
 
-    rcon.cmd("kill @e[type=pig]");
+    rcon.kill_tagged(tag);
 }
 
 #[test]
 #[ignore = "needs the isolated lodestone-entity-oracle Docker server with RCON"]
 fn live_zombie_step_height_and_speed() {
+    let _guard = ORACLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut rcon = Rcon::connect();
     rcon.cmd("difficulty easy"); // monsters cannot spawn on peaceful
-    rcon.cmd("kill @e[type=zombie]");
-    rcon.cmd("summon minecraft:zombie 0 -60 0 {NoAI:1b,NoGravity:1b}");
-    let sel = "@e[type=zombie,limit=1]";
-    rcon.wait_for_entity(sel);
+    let tag = "lodestone_oracle_zombie";
+    let sel = rcon.summon_tagged("zombie", tag);
 
     // Step height is the STEP_HEIGHT attribute default (0.6), shared by our
     // MobShape::land default `max_up_step`; a zombie does not override it.
-    approx(rcon.base_value(sel, "minecraft:step_height"), 0.6);
+    approx(rcon.base_value(&sel, "minecraft:step_height"), 0.6);
     // Zombie movement speed base is 0.23 in vanilla.
-    approx(rcon.base_value(sel, "minecraft:movement_speed"), 0.23);
+    approx(rcon.base_value(&sel, "minecraft:movement_speed"), 0.23);
 
-    rcon.cmd("kill @e[type=zombie]");
+    rcon.kill_tagged(tag);
 }
 
 /// The strong version of the oracle: for each rendered mob type, build our
@@ -205,6 +212,7 @@ fn live_zombie_step_height_and_speed() {
 #[test]
 #[ignore = "needs the isolated lodestone-entity-oracle Docker server with RCON"]
 fn our_supplier_matches_the_live_server_for_every_rendered_mob() {
+    let _guard = ORACLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut rcon = Rcon::connect();
     rcon.cmd("difficulty easy"); // monsters cannot spawn/persist on peaceful
 
@@ -224,17 +232,13 @@ fn our_supplier_matches_the_live_server_for_every_rendered_mob() {
     ];
 
     let mut checked_attributes = 0usize;
+    let tag = "lodestone_oracle_allmobs";
     for ty in types {
         let type_key = Identifier::from_str(&format!("minecraft:{ty}")).unwrap();
         let ours = default_attributes(&type_key)
             .unwrap_or_else(|| panic!("no supplier for {ty}"));
 
-        rcon.cmd(&format!("kill @e[type={ty}]"));
-        rcon.cmd(&format!(
-            "summon minecraft:{ty} 0 -60 0 {{NoAI:1b,NoGravity:1b}}"
-        ));
-        let sel = format!("@e[type={ty},limit=1]");
-        rcon.wait_for_entity(&sel);
+        let sel = rcon.summon_tagged(ty, tag);
 
         for (key, instance) in ours.iter() {
             let attr = key.to_string();
@@ -247,7 +251,7 @@ fn our_supplier_matches_the_live_server_for_every_rendered_mob() {
             checked_attributes += 1;
         }
 
-        rcon.cmd(&format!("kill @e[type={ty}]"));
+        rcon.kill_tagged(tag);
     }
 
     // Guard against a vacuously-passing loop: every mob has >=27 attributes, so

@@ -98,7 +98,14 @@ impl Aabb {
 /// Coordinates are block coordinates. Only [`base_path_type`](PathWorld::base_path_type)
 /// and [`collides`](PathWorld::collides) encode version/registry knowledge; the
 /// rest of the pathfinder is built on them.
-pub trait PathWorld {
+///
+/// `Send + Sync` mirrors the other cross-crate world seams (`CollisionView`,
+/// `ChunkSource`): a `NavigatingMob`/`MobSim` borrows a `&dyn PathWorld`, and
+/// the integrated server hands the sim to a `tokio::spawn`ed task, which
+/// requires everything it captures — including that borrow — to be `Send`
+/// (`&dyn T: Send` needs `T: Sync`). Real world adapters are plain terrain
+/// stores, so this is free.
+pub trait PathWorld: Send + Sync {
     /// The world's minimum block Y (`level.getMinY()`), the floor of downward
     /// searches.
     fn min_y(&self) -> i32;

@@ -280,3 +280,77 @@ fn disguised_chat_rejects_trailing_bytes() {
     );
     assert!(result.is_err(), "trailing byte must fail, got {result:?}");
 }
+
+/// A network-NBT compound text component `{"text": <text>, "color": <color>}`.
+/// Root compound has no name (network NBT), one `text` and one `color` string
+/// field, then `TAG_End`. Used to prove the adapter preserves colour/style
+/// instead of flattening the component to a bare literal.
+fn nbt_colored_component(text: &str, color: &str) -> Vec<u8> {
+    fn named_string(name: &str, value: &str) -> Vec<u8> {
+        let mut out = vec![0x08];
+        out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+        out
+    }
+    let mut out = vec![0x0A]; // TAG_Compound, nameless root
+    out.extend_from_slice(&named_string("text", text));
+    out.extend_from_slice(&named_string("color", color));
+    out.push(0x00); // TAG_End
+    out
+}
+
+#[test]
+fn system_chat_preserves_component_colour() {
+    // Regression: the adapter used to flatten styled components to a bare
+    // literal, dropping colour before it crossed `ClientEvent::Chat`.
+    let adapter = V770Adapter::new();
+    let mut payload = nbt_colored_component("hi", "red");
+    payload.push(0x00); // overlay = false
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::SYSTEM_CHAT,
+            &payload,
+        )
+        .expect("handle system_chat");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::Chat { text, .. })] => {
+            assert_eq!(text.to_plain_string(), "hi");
+            assert!(
+                text.to_legacy_string().starts_with("§c"),
+                "red colour must survive, got {:?}",
+                text.to_legacy_string()
+            );
+        }
+        other => panic!("expected one system chat event, got {other:?}"),
+    }
+}
+
+#[test]
+fn disguised_chat_preserves_component_colour() {
+    let adapter = V770Adapter::new();
+    let mut payload = nbt_colored_component("psst", "gold");
+    payload.extend_from_slice(&chat_type_bound("Server"));
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::DISGUISED_CHAT,
+            &payload,
+        )
+        .expect("handle disguised_chat");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::Chat { text, .. })] => {
+            assert_eq!(text.to_plain_string(), "psst");
+            assert!(
+                text.to_legacy_string().starts_with("§6"),
+                "gold colour must survive, got {:?}",
+                text.to_legacy_string()
+            );
+        }
+        other => panic!("expected one disguised chat event, got {other:?}"),
+    }
+}

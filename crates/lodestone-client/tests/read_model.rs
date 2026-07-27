@@ -13,8 +13,8 @@ use std::time::Duration;
 use lodestone_client::{
     BlockPos, BossAction, BossColor, BossOverlay, ChunkPos, ClientBuilder, ClientEvent,
     CollisionRule, ConnectionState, Directive, DisplaySlot, LoginProfile, NumberFormat,
-    ObjectiveMode, ObjectiveRenderType, Rotation, ServerAddress, TeamAction, TeamParameters, Vec3,
-    Visibility, WaitError,
+    ObjectiveMode, ObjectiveRenderType, OpenMenuSnapshot, Rotation, ServerAddress, TeamAction,
+    TeamParameters, Vec3, Visibility, WaitError,
 };
 use lodestone_model::event::{
     ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
@@ -184,6 +184,13 @@ fn dim(path: &str) -> Identifier {
     Identifier::new("minecraft", path).unwrap()
 }
 
+fn stack(path: &str, count: u32) -> ItemStack {
+    ItemStack {
+        item: dim(path),
+        count,
+    }
+}
+
 fn start(
     adapter: FakeAdapter,
 ) -> (
@@ -314,6 +321,133 @@ async fn read_model_folds_player_state() {
     assert!(handle.is_alive());
 
     drop(handle);
+}
+
+/// [`ClientEvent::ExperienceChanged`] folds into the player snapshot and is
+/// readable from `ClientHandle` accessors before any event is received (all
+/// `None`) and after (all `Some`) — the HUD's XP bar reads real numbers rather
+/// than nothing at all.
+#[tokio::test]
+async fn read_model_folds_experience() {
+    const TRIGGER: i32 = 1;
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![Directive::Emit(ClientEvent::ExperienceChanged {
+                progress: 0.375,
+                level: 12,
+                total: 289,
+            })],
+        );
+    let (handle, mut events, mut peer) = start(adapter);
+
+    // Unknown before the server has said anything.
+    assert_eq!(handle.experience_progress(), None);
+    assert_eq!(handle.experience_level(), None);
+    assert_eq!(handle.total_experience(), None);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    events.recv().await.unwrap();
+
+    assert_eq!(handle.experience_progress(), Some(0.375));
+    assert_eq!(handle.experience_level(), Some(12));
+    assert_eq!(handle.total_experience(), Some(289));
+
+    drop(handle);
+}
+
+#[tokio::test]
+async fn read_model_folds_window_zero_inventory_into_player_menu() {
+    const TRIGGER: i32 = 1;
+    let mut items = vec![None; 46];
+    items[36] = Some(stack("diamond", 5));
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![Directive::Emit(ClientEvent::ContainerContent {
+                window_id: 0,
+                state_id: 7,
+                items,
+                carried_item: None,
+            })],
+        );
+    let (handle, mut events, mut peer) = start(adapter);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    events.recv().await.unwrap();
+
+    let menu = handle.player_menu();
+    let held = menu.slot_item(36).expect("main-hand slot should be filled");
+    assert_eq!(held.item().path(), "diamond");
+    assert_eq!(held.count(), 5);
+    assert_eq!(menu.state_id(), 7);
+    assert!(
+        menu.slot_item(40).is_none(),
+        "an untouched slot must stay empty so slot indexing is observable"
+    );
+    assert!(
+        handle.open_menu().is_none(),
+        "window 0 content updates must not pretend an external container is open"
+    );
+}
+
+#[tokio::test]
+async fn read_model_folds_generic_container_with_player_inventory_tail() {
+    const TRIGGER: i32 = 1;
+    let mut items = vec![None; 27 + 36];
+    items[0] = Some(stack("chest", 1));
+    items[27 + 27] = Some(stack("apple", 3));
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![
+                Directive::Emit(ClientEvent::ScreenOpened {
+                    window_id: 4,
+                    menu_type: dim("generic_9x3"),
+                    title: Text::literal("Chest"),
+                }),
+                Directive::Emit(ClientEvent::ContainerContent {
+                    window_id: 4,
+                    state_id: 3,
+                    items,
+                    carried_item: None,
+                }),
+            ],
+        );
+    let (handle, mut events, mut peer) = start(adapter);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    events.recv().await.unwrap();
+    events.recv().await.unwrap();
+
+    let OpenMenuSnapshot {
+        window_id,
+        menu_type,
+        title,
+        menu,
+    } = handle
+        .open_menu()
+        .expect("generic container should be open");
+    assert_eq!(window_id, 4);
+    assert_eq!(menu_type.path(), "generic_9x3");
+    assert_eq!(title.to_plain_string(), "Chest");
+    assert_eq!(menu.slot_count(), 63);
+    assert_eq!(menu.slot_item(0).unwrap().item().path(), "chest");
+    assert_eq!(
+        menu.slot_item(54).unwrap().item().path(),
+        "apple",
+        "generic hotbar starts at n + 27, not at absolute slot 36"
+    );
+    assert!(
+        menu.slot_item(36).is_none(),
+        "generic slot 36 is player main inventory, not the first hotbar slot"
+    );
 }
 
 /// A relative teleport adds to the previous position rather than replacing it.
@@ -917,7 +1051,8 @@ async fn entity_head_yaw_and_equipment_are_tracked() {
     let (handle, mut events, mut peer) = start(adapter);
 
     peer.write_packet(TRIGGER, &[]).await.unwrap();
-    for _ in 0..6 {
+    // 1 spawn + 2 head-rotation updates + 2 equipment updates.
+    for _ in 0..5 {
         events.recv().await.unwrap();
     }
 

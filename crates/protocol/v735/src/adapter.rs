@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, ChatKind, ChunkPos, ClientAction, ClientEvent,
-    ConnectionState, Directive, EntityInteraction, EntityMovement, GameMode, Hand, LoginProfile,
-    PlayerCommand, Rotation, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter, WorldSink,
+    AdapterError, BlockActionKind, BlockFace, ChatKind, ChatMode, ChunkPos, ClientAction,
+    ClientEvent, ClientSettings, ConnectionState, Directive, DisplayedSkinParts, EntityInteraction,
+    EntityMovement, GameMode, Hand, LoginProfile, MainHand, PlayerCommand,
+    ResourcePackResponseKind, Rotation, ServerAddress, TeleportFlags, Text, Vec3, VersionAdapter,
+    WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
@@ -26,8 +28,11 @@ use crate::packets::game::{
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
 use crate::packets::position::Position;
+use crate::packets::settings::{BrandPayload, PlayerAbilities, ResourcePackReceive, Settings};
 use crate::packets::slot::Slot;
-use crate::packets::window::{ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot};
+use crate::packets::window::{
+    EnchantItem, ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
+};
 
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 754;
@@ -211,6 +216,38 @@ const fn hand_ordinal(hand: Hand) -> i32 {
         Hand::Off => 1,
     }
 }
+
+/// Packs a [`DisplayedSkinParts`] into the skin-parts bitmask.
+const fn skin_parts_bits(parts: DisplayedSkinParts) -> u8 {
+    (parts.cape as u8)
+        | ((parts.jacket as u8) << 1)
+        | ((parts.left_sleeve as u8) << 2)
+        | ((parts.right_sleeve as u8) << 3)
+        | ((parts.left_pants_leg as u8) << 4)
+        | ((parts.right_pants_leg as u8) << 5)
+        | ((parts.hat as u8) << 6)
+}
+
+/// Maps a canonical [`ChatMode`] to the wire chat-visibility value
+/// (`0` full, `1` commands only, `2` hidden).
+const fn chat_mode_value(mode: ChatMode) -> i32 {
+    match mode {
+        ChatMode::Full => 0,
+        ChatMode::CommandsOnly => 1,
+        ChatMode::Hidden => 2,
+    }
+}
+
+/// Maps a canonical [`MainHand`] to the wire value (`0` left, `1` right).
+const fn main_hand_value(hand: MainHand) -> i32 {
+    match hand {
+        MainHand::Left => 0,
+        MainHand::Right => 1,
+    }
+}
+
+/// The vanilla flying-ability flag bit set when the client is flying.
+const ABILITY_FLYING: i8 = 0x02;
 
 impl V735Adapter {
     /// Handles a clientbound packet while in the login state.
@@ -810,11 +847,19 @@ impl VersionAdapter for V735Adapter {
                     encode_body(&body)?,
                 )))
             }
-            // Inventory clicks predate the modern `state_id` reconciliation and
-            // need the item registry to encode carried/changed stacks.
+            // Container clicks predate the modern `state_id` reconciliation.
+            // Faithfully encoding 1.16's `window_click` needs a client-tracked
+            // transaction id (the `action` counter, absent from the model which
+            // carries only the 1.17+ `state_id`; this adapter is stateless) and
+            // an item registry (`ResourceKey` -> numeric id) for the clicked
+            // stack. 1.16 slots are flattened, so unlike v47/v340 there is no
+            // item-metadata gap — but the transaction id and registry alone are
+            // enough to make an encoded click be rejected by a live server (via a
+            // failed transaction) rather than silently applied. Refused loudly.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 ContainerClick requires an item registry and transaction id that are \
-                 not yet available"
+                "protocol 754 ContainerClick needs a client-tracked transaction id (model carries \
+                 only the 1.17+ state_id) and an item registry; refused rather than sending bytes \
+                 a live server rejects via a failed transaction"
                     .to_owned(),
             )),
 
@@ -828,28 +873,87 @@ impl VersionAdapter for V735Adapter {
                 "protocol 754 has no player-input packet".to_owned(),
             )),
 
-            // Newly modelled actions not yet wired up for this adapter.
-            // Rejected loudly rather than silently dropped.
-            ClientAction::SetClientSettings(_) => Err(AdapterError::Unsupported(
-                "protocol 735 client settings encoding is not yet implemented".to_owned(),
-            )),
-            ClientAction::SendBrand { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 brand payload encoding is not yet implemented".to_owned(),
-            )),
+            // Newly modelled actions that 1.16 genuinely carries. Encoded
+            // faithfully against the minecraft-data wire shapes.
+            ClientAction::SetClientSettings(settings) => {
+                let ClientSettings {
+                    locale,
+                    view_distance,
+                    chat_mode,
+                    chat_colors,
+                    skin_parts,
+                    main_hand,
+                    // 1.16 predates these fields; dropped deliberately.
+                    text_filtering: _,
+                    allow_server_listing: _,
+                    particle_status: _,
+                } = settings;
+                let body = Settings {
+                    locale: locale.clone(),
+                    view_distance: *view_distance,
+                    chat_flags: chat_mode_value(*chat_mode),
+                    chat_colors: *chat_colors,
+                    skin_parts: skin_parts_bits(*skin_parts),
+                    main_hand: main_hand_value(*main_hand),
+                };
+                Ok(Some((play::serverbound::SETTINGS, encode_body(&body)?)))
+            }
+            ClientAction::SendBrand { brand } => {
+                let body = BrandPayload {
+                    channel: "minecraft:brand".to_owned(),
+                    brand: brand.clone(),
+                };
+                Ok(Some((
+                    play::serverbound::CUSTOM_PAYLOAD,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::ContainerButtonClick {
+                window_id,
+                button_id,
+            } => {
+                let window_id = i8::try_from(*window_id).map_err(|_| {
+                    AdapterError::Encode(format!("window id {window_id} overflows i8"))
+                })?;
+                let button = i8::try_from(*button_id).map_err(|_| {
+                    AdapterError::Encode(format!("button id {button_id} overflows i8"))
+                })?;
+                let body = EnchantItem { window_id, button };
+                Ok(Some((play::serverbound::ENCHANT_ITEM, encode_body(&body)?)))
+            }
+            ClientAction::SetFlying { flying } => {
+                // 1.16 reduced serverbound abilities to a single flags byte.
+                let body = PlayerAbilities {
+                    flags: if *flying { ABILITY_FLYING } else { 0 },
+                };
+                Ok(Some((play::serverbound::ABILITIES, encode_body(&body)?)))
+            }
+            ClientAction::ResourcePackResponse { response, .. } => {
+                // 1.16 `resource_pack_receive` sends only the result varint (no
+                // pack hash), so the four legacy outcomes map cleanly. The
+                // 1.20.3+ outcomes have no 1.16 result code and are refused.
+                let result = match response {
+                    ResourcePackResponseKind::SuccessfullyLoaded => 0,
+                    ResourcePackResponseKind::Declined => 1,
+                    ResourcePackResponseKind::FailedDownload => 2,
+                    ResourcePackResponseKind::Accepted => 3,
+                    other => {
+                        return Err(AdapterError::Unsupported(format!(
+                            "protocol 754 resource_pack_receive has no result code for {other:?}"
+                        )));
+                    }
+                };
+                let body = ResourcePackReceive { result };
+                Ok(Some((
+                    play::serverbound::RESOURCE_PACK_RECEIVE,
+                    encode_body(&body)?,
+                )))
+            }
             ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 pong response encoding is not yet implemented".to_owned(),
-            )),
-            ClientAction::ResourcePackResponse { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 resource pack response encoding is not yet implemented".to_owned(),
+                "protocol 754 predates the play ping/pong packets (added in 1.17)".to_owned(),
             )),
             ClientAction::EndClientTick => Err(AdapterError::Unsupported(
-                "protocol 735 has no client_tick_end packet".to_owned(),
-            )),
-            ClientAction::ContainerButtonClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 container button click encoding is not yet implemented".to_owned(),
-            )),
-            ClientAction::SetFlying { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 player abilities encoding is not yet implemented".to_owned(),
+                "protocol 754 has no client_tick_end packet".to_owned(),
             )),
             ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
                 "protocol 735 rename item encoding is not yet implemented".to_owned(),

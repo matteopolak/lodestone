@@ -92,7 +92,41 @@ It is synchronous, so it blocks the event loop while it runs — a 5×5 view is
 off the main thread (a Web Worker, or the `wasm-bindgen-rayon` path the COOP/COEP
 headers above already enable), **not** on the transport, which is proven.
 
-## Layout
+## Guarding the browser build — `scripts/wasm-check.sh`
+
+`cargo test --workspace` is **structurally blind** to wasm breakage: it builds
+for the host, so any crate that gains a native-only dependency (threads, filesystem,
+OS sockets, OS audio like `cpal`) still passes there while the browser build is
+broken, and nothing tells the author. `scripts/wasm-check.sh` closes that gap.
+
+Run it whenever a dependency is added or bumped **anywhere** in the workspace:
+
+```sh
+scripts/wasm-check.sh
+```
+
+It does two things a host build cannot:
+
+1. **Compiles the wasm crate subset** for `wasm32-unknown-unknown`, one crate at a
+   time, and on failure prints the offending crate and the fix (the captured
+   cargo error usually names the actual native-only dependency).
+2. **Runs confinement greps** for the "compiles on wasm, panics at runtime" family
+   (`std::fs`, `Instant::now`, `std::thread::spawn`, `tokio::time`, `cpal`) that
+   the compile pass is blind to — each owning crate confines its hazard to one
+   `cfg(not(target_arch = "wasm32"))`-gated file, and the grep fails (naming
+   file:line) if the symbol reappears anywhere else.
+
+The final step builds the browser app **through trunk** (cargo → wasm →
+wasm-bindgen), so a wasm-bindgen-level break is caught too.
+
+**Prerequisites are verified, not assumed.** If `wasm32-unknown-unknown` or `trunk`
+is missing, the script exits non-zero with the install command rather than passing
+quietly — a check that cannot run must fail, not skip.
+
+> Note on cost: the check is CPU-cheap (~20 s of actual work), but wall-time is
+> dominated by contention on the shared `target/` build lock when many agents
+> build at once. Uncontended it is ~1–2 min; warm and cached it is seconds.
+
 
 ```
 web/

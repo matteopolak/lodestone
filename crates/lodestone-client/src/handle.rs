@@ -137,6 +137,29 @@ impl ClientHandle {
         self.state.player().alive
     }
 
+    /// Returns the player's progress toward the next level (`0.0..1.0`), or
+    /// `None` if the server has not reported it yet.
+    #[must_use]
+    pub fn experience_progress(&self) -> Option<f32> {
+        let player = self.state.player();
+        player.xp_known.then_some(player.xp_progress)
+    }
+
+    /// Returns the player's current experience level, or `None` if unknown yet.
+    #[must_use]
+    pub fn experience_level(&self) -> Option<i32> {
+        let player = self.state.player();
+        player.xp_known.then_some(player.xp_level)
+    }
+
+    /// Returns the player's total accumulated experience points, or `None` if
+    /// unknown yet.
+    #[must_use]
+    pub fn total_experience(&self) -> Option<i32> {
+        let player = self.state.player();
+        player.xp_known.then_some(player.xp_total)
+    }
+
     /// Returns the player's current game mode, or `None` if unknown yet.
     #[must_use]
     pub fn game_mode(&self) -> Option<GameMode> {

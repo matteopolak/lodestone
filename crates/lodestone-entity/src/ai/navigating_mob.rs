@@ -83,6 +83,20 @@ pub struct NavigatingMob<'w> {
     /// recompute A\* every tick (vanilla `PathNavigation.recomputePath` refuses
     /// to recompute within 20 ticks — `MAX_TIME_RECOMPUTE`).
     last_search_tick: Option<u64>,
+    /// The actual position delta applied on the last [`advance`], i.e. the mob's
+    /// velocity in **blocks per tick** (vanilla `getDeltaMovement`). Zero when the
+    /// follower did not move this tick.
+    velocity: Vec3,
+    /// The mob's body yaw in degrees, derived from its horizontal movement
+    /// direction and retained across idle ticks (vanilla `yBodyRot`).
+    body_yaw: f32,
+}
+
+/// Minecraft body yaw (degrees) for a horizontal movement delta: 0 = +Z (south),
+/// −90 = +X (east), 90 = −X (west), 180 = −Z (north). Mirrors vanilla's
+/// `atan2(dz, dx) * 180/PI - 90` idiom used when a mob faces its motion.
+fn movement_yaw(dx: f64, dz: f64) -> f32 {
+    (dz.atan2(dx).to_degrees() - 90.0) as f32
 }
 
 impl std::fmt::Debug for NavigatingMob<'_> {
@@ -133,6 +147,8 @@ impl<'w> NavigatingMob<'w> {
             path_searches: 0,
             tick_count: 0,
             last_search_tick: None,
+            velocity: Vec3::new(0.0, 0.0, 0.0),
+            body_yaw: 0.0,
         }
     }
 
@@ -180,6 +196,35 @@ impl<'w> NavigatingMob<'w> {
         self.last_look
     }
 
+    /// The mob's velocity in **blocks per tick** — the position delta applied on
+    /// the last [`advance`]. Zero when the mob did not move. This is the unit
+    /// vanilla's wire packing assumes, so it can be encoded directly.
+    #[must_use]
+    pub fn velocity(&self) -> Vec3 {
+        self.velocity
+    }
+
+    /// The mob's body yaw in degrees (vanilla `yBodyRot`), derived from its
+    /// movement direction and retained while idle.
+    #[must_use]
+    pub fn body_yaw(&self) -> f32 {
+        self.body_yaw
+    }
+
+    /// The mob's head yaw in degrees: the direction toward its current look
+    /// target if a goal set one, otherwise the body yaw.
+    #[must_use]
+    pub fn head_yaw(&self) -> f32 {
+        if let Some(look) = self.last_look {
+            let dx = look.x - self.pos.x;
+            let dz = look.z - self.pos.z;
+            if dx * dx + dz * dz > 1e-12 {
+                return movement_yaw(dx, dz);
+            }
+        }
+        self.body_yaw
+    }
+
     /// Whether a goal has the mob holding jump this tick.
     #[must_use]
     pub fn is_jumping(&self) -> bool {
@@ -203,7 +248,9 @@ impl<'w> NavigatingMob<'w> {
     /// caller running its own goal loop can drive movement explicitly.
     pub fn advance(&mut self) {
         self.tick_count += 1;
+        let old = self.pos;
         let Some(waypoint) = self.navigator.tick(self.pos) else {
+            self.velocity = Vec3::new(0.0, 0.0, 0.0);
             return;
         };
         let dx = waypoint.x - self.pos.x;
@@ -219,6 +266,14 @@ impl<'w> NavigatingMob<'w> {
         }
         // Grounded follower: snap the vertical to the waypoint's floor.
         self.pos.y = waypoint.y;
+        // Record the applied delta as blocks/tick velocity, and face the
+        // horizontal motion (retaining the last body yaw while stationary).
+        let moved_x = self.pos.x - old.x;
+        let moved_z = self.pos.z - old.z;
+        self.velocity = Vec3::new(moved_x, self.pos.y - old.y, moved_z);
+        if moved_x * moved_x + moved_z * moved_z > 1e-12 {
+            self.body_yaw = movement_yaw(moved_x, moved_z);
+        }
     }
 }
 

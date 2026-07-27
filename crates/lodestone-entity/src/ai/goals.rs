@@ -640,6 +640,81 @@ impl Goal for FollowParentGoal {
     }
 }
 
+/// Two in-love adults of the same kind seek each other out and breed.
+///
+/// Vanilla `BreedGoal` (flags MOVE, LOOK). It starts when this animal is in love
+/// and a free partner exists (also in love, within 8 blocks, not panicking), and
+/// continues while that partner stays a valid mate and `love_time < 60`. Once the
+/// pair has spent 60 ticks within 3 blocks of each other (`distSqr < 9`), a child
+/// is spawned and both leave love mode.
+///
+/// The partner filter (`canMate`, range, line-of-sight) is version/type-specific
+/// and lives behind the [`MobController`] seam, so this goal holds only the
+/// scheduler-visible timing state.
+#[derive(Debug)]
+pub struct BreedGoal {
+    speed: f64,
+    love_time: i32,
+}
+
+impl BreedGoal {
+    /// Ticks the pair must stay together before a child spawns (vanilla's 60).
+    const BREED_TIME: i32 = 60;
+    /// Squared distance within which breeding completes (vanilla's `9.0`).
+    const BREED_RANGE_SQR: f64 = 9.0;
+
+    /// Creates the goal with the given approach `speed`.
+    #[must_use]
+    pub fn new(speed: f64) -> Self {
+        Self {
+            speed,
+            love_time: 0,
+        }
+    }
+}
+
+impl Goal for BreedGoal {
+    fn flags(&self) -> FlagSet {
+        FlagSet::of(&[Flag::Move, Flag::Look])
+    }
+
+    fn can_use(&mut self, mob: &mut dyn MobController) -> bool {
+        if !mob.is_in_love() {
+            return false;
+        }
+        mob.find_love_partner().is_some()
+    }
+
+    fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
+        // `love_partner_position` folds vanilla's partner alive/in-love/not-
+        // panicking checks: it returns `None` the instant the mate is ineligible.
+        mob.love_partner_position().is_some() && self.love_time < Self::BREED_TIME
+    }
+
+    fn start(&mut self, _mob: &mut dyn MobController) {
+        self.love_time = 0;
+    }
+
+    fn stop(&mut self, mob: &mut dyn MobController) {
+        mob.clear_love_partner();
+        self.love_time = 0;
+    }
+
+    fn tick(&mut self, mob: &mut dyn MobController) {
+        let Some(partner) = mob.love_partner_position() else {
+            return;
+        };
+        mob.look_at(partner);
+        mob.move_to(partner, self.speed);
+        self.love_time += 1;
+        if self.love_time >= Self::BREED_TIME
+            && distance_sqr(partner, mob.position()) < Self::BREED_RANGE_SQR
+        {
+            mob.breed();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::goal::GoalSelector;
@@ -660,6 +735,11 @@ mod tests {
         tempt: Option<Vec3>,
         parent: Option<Vec3>,
         baby: bool,
+        in_love: bool,
+        love_partner: Option<Vec3>,
+        partner_valid: bool,
+        bred: u32,
+        partner_cleared: u32,
         f32_queue: std::collections::VecDeque<f32>,
         i32_val: i32,
         jumped: u32,
@@ -723,6 +803,32 @@ mod tests {
         }
         fn parent_position(&self) -> Option<Vec3> {
             self.parent
+        }
+        fn is_in_love(&self) -> bool {
+            self.in_love
+        }
+        fn find_love_partner(&mut self) -> Option<Vec3> {
+            if self.love_partner.is_some() {
+                self.partner_valid = true;
+            }
+            self.love_partner
+        }
+        fn love_partner_position(&self) -> Option<Vec3> {
+            if self.partner_valid {
+                self.love_partner
+            } else {
+                None
+            }
+        }
+        fn breed(&mut self) {
+            self.bred += 1;
+            self.in_love = false;
+            self.partner_valid = false;
+        }
+        fn clear_love_partner(&mut self) {
+            self.partner_cleared += 1;
+            self.love_partner = None;
+            self.partner_valid = false;
         }
         fn attack(&mut self, _t: Vec3) {
             self.attacked += 1;
@@ -906,5 +1012,80 @@ mod tests {
         goal.start(&mut far);
         goal.tick(&mut far);
         assert_eq!(far.move_calls, 1);
+    }
+
+    #[test]
+    fn breed_requires_love_and_a_partner() {
+        let mut goal = BreedGoal::new(1.0);
+        // In love but no partner nearby: cannot start.
+        let mut lonely = ScriptMob {
+            in_love: true,
+            love_partner: None,
+            ..Default::default()
+        };
+        assert!(!goal.can_use(&mut lonely));
+        // Partner present but this animal is not in love: cannot start.
+        let mut unwilling = ScriptMob {
+            in_love: false,
+            love_partner: Some(Vec3::new(1.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(!goal.can_use(&mut unwilling));
+        // Both conditions met: starts, and the partner is now remembered.
+        let mut ready = ScriptMob {
+            in_love: true,
+            love_partner: Some(Vec3::new(1.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut ready));
+        assert!(ready.partner_valid);
+    }
+
+    #[test]
+    fn breed_spawns_a_child_after_sixty_ticks_in_range() {
+        let mut goal = BreedGoal::new(1.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            in_love: true,
+            love_partner: Some(Vec3::new(1.0, 64.0, 0.0)), // distSqr 1 < 9
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        // No child before the 60-tick timer elapses.
+        for _ in 0..59 {
+            assert!(goal.can_continue_to_use(&mut mob));
+            goal.tick(&mut mob);
+        }
+        assert_eq!(mob.bred, 0);
+        // The 60th tick breeds exactly once and clears love mode.
+        goal.tick(&mut mob);
+        assert_eq!(mob.bred, 1);
+        assert!(!mob.in_love);
+        // With love spent, the goal no longer continues, and stopping forgets
+        // the partner.
+        assert!(!goal.can_continue_to_use(&mut mob));
+        goal.stop(&mut mob);
+        assert_eq!(mob.partner_cleared, 1);
+    }
+
+    #[test]
+    fn breed_stops_when_the_partner_becomes_ineligible() {
+        let mut goal = BreedGoal::new(1.0);
+        let mut mob = ScriptMob {
+            pos: Vec3::new(0.0, 64.0, 0.0),
+            in_love: true,
+            love_partner: Some(Vec3::new(1.0, 64.0, 0.0)),
+            ..Default::default()
+        };
+        assert!(goal.can_use(&mut mob));
+        goal.start(&mut mob);
+        // Partner wanders off / stops loving: host reports it invalid.
+        mob.partner_valid = false;
+        assert!(!goal.can_continue_to_use(&mut mob));
+        // A tick in that state is a no-op — no movement, no child.
+        goal.tick(&mut mob);
+        assert_eq!(mob.move_calls, 0);
+        assert_eq!(mob.bred, 0);
     }
 }

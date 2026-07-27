@@ -45,9 +45,15 @@
 //! ```
 #![cfg(feature = "live-scoreboard")]
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
+use lodestone_game::bossbar::{BossBarColor as GBossColor, BossBarSet as GameBossBars};
+use lodestone_game::scoreboard::{
+    DisplaySlot as GDisplaySlot, RenderType as GRenderType, Scoreboard as GameScoreboard,
+    TeamColor as GTeamColor,
+};
 use lodestone_model::{BossColor, DisplaySlot, ObjectiveRenderType, TeamColor};
 use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
 use uuid::Uuid;
@@ -95,8 +101,24 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
     // The driver pushes events onto a *bounded* channel, so something must keep
     // draining it or the driver backpressures and stops folding. A background
     // task drains forever; the main flow observes state through the public API.
+    //
+    // Crucially, this task ALSO folds the exact same live `ClientEvent` stream
+    // through `lodestone-game`'s own `Scoreboard`/`BossBarSet` via their
+    // `apply()` seam. That is what grounds this crate's fold directly against the
+    // server: the positive assertions below read game state that was built only
+    // from real server packets, so a bug in game's fold fails against server
+    // truth — not merely against the client's parallel fold. It also doubles as
+    // the reference for how `lodestone-shell` will fold the stream (step 2 of the
+    // de-duplication: shell folds `ClientEvent` through game, reads game types).
+    let game_state = Arc::new(Mutex::new((GameScoreboard::new(), GameBossBars::new())));
+    let game_fold = Arc::clone(&game_state);
     let drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
+            {
+                let mut g = game_fold.lock().expect("game fold mutex not poisoned");
+                g.0.apply(&event);
+                g.1.apply(&event);
+            }
             if let ClientEvent::Disconnect { reason } = event {
                 eprintln!("driver saw disconnect: {}", reason.to_plain_string());
                 break;
@@ -250,6 +272,119 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
     assert_eq!(snap.boss_color, BossColor::Red, "boss bar colour");
     checked += 1;
 
+    // --- Same server truth, read through `lodestone-game`'s own fold ---------
+    //
+    // Everything above went through `ClientHandle::scoreboard()` (the client's
+    // read-model). Now assert the identical server-set values through the game
+    // `Scoreboard`/`BossBarSet` that the drain task folded from the same live
+    // packets. This is the assertion that actually protects this crate: it fails
+    // if game's `apply()` transposes a field, drops an update, or mis-maps an
+    // enum — against the server, not against the client. Poll because the fold
+    // runs in the background task and may lag the client's snapshot by a tick.
+    struct GameSnapshot {
+        objective_display: String,
+        render_type: GRenderType,
+        score: i32,
+        displayed: Option<String>,
+        team_color: Option<GTeamColor>,
+        team_prefix: String,
+        team_has_member: bool,
+        boss_title: String,
+        boss_progress: f32,
+        boss_color: GBossColor,
+    }
+
+    let gsnap = poll_until(
+        Duration::from_secs(30),
+        Duration::from_millis(150),
+        || async {
+            let g = game_state.lock().expect("game fold mutex not poisoned");
+            let (sb, bars) = &*g;
+            let obj = sb.objective(&objective)?;
+            let score = sb.score(&objective, &holder)?;
+            let team = sb.team(&team)?;
+            let (_, bar_state) = bars
+                .iter()
+                .find(|(_, b)| b.title.to_plain_string() == "LodeBoss")?;
+            Some(GameSnapshot {
+                objective_display: obj.display_name.to_plain_string(),
+                render_type: obj.render_type,
+                score: score.value,
+                displayed: sb.displayed(GDisplaySlot::Sidebar).map(str::to_owned),
+                team_color: team.color,
+                team_prefix: team.prefix.to_plain_string(),
+                team_has_member: team.members.iter().any(|m| m == &holder),
+                boss_title: bar_state.title.to_plain_string(),
+                boss_progress: bar_state.progress,
+                boss_color: bar_state.color,
+            })
+        },
+    )
+    .await
+    .unwrap_or_else(|| {
+        panic!(
+            "scoreboard/team/bossbar state never reached lodestone-game's fold within 30s \
+             (alive={}); objective={objective} team={team} bar={bar}",
+            handle.is_alive()
+        )
+    });
+
+    assert_eq!(
+        gsnap.objective_display, "LodeBoard",
+        "objective display name via lodestone_game::Scoreboard"
+    );
+    checked += 1;
+    assert_eq!(
+        gsnap.render_type,
+        GRenderType::Integer,
+        "dummy criterion renders as integer (game fold)"
+    );
+    checked += 1;
+    assert_eq!(gsnap.score, 42, "score value (game fold)");
+    checked += 1;
+    assert_eq!(
+        gsnap.displayed.as_deref(),
+        Some(objective.as_str()),
+        "sidebar display slot (game fold)"
+    );
+    checked += 1;
+    assert_eq!(
+        gsnap.team_color,
+        Some(GTeamColor::Red),
+        "team colour red (game fold)"
+    );
+    checked += 1;
+    assert_eq!(gsnap.team_prefix, "[L] ", "team prefix (game fold)");
+    checked += 1;
+    assert!(gsnap.team_has_member, "player joined team (game fold)");
+    checked += 1;
+    assert_eq!(gsnap.boss_title, "LodeBoss", "boss title (game fold)");
+    checked += 1;
+    assert!(
+        (gsnap.boss_progress - 0.7).abs() < 1e-4,
+        "boss progress 0.7 (game fold), got {}",
+        gsnap.boss_progress
+    );
+    checked += 1;
+    assert_eq!(gsnap.boss_color, GBossColor::Red, "boss colour (game fold)");
+    checked += 1;
+
+    // Game-fold negative controls, in-phase (state known present).
+    {
+        let g = game_state.lock().expect("game fold mutex not poisoned");
+        assert_eq!(
+            g.0.score(&objective, "player.we.never.set"),
+            None,
+            "unscored holder absent in game fold — proves score() keys on holder"
+        );
+        checked += 1;
+        assert!(
+            g.0.team("team.we.never.created").is_none(),
+            "uncreated team absent in game fold — proves team() keys on name"
+        );
+        checked += 1;
+    }
+
     // Negative controls, in-phase: prove the read-model *discriminates* rather
     // than returning `Some(_)` for everything. These run while the objective and
     // team are known-present, so a `None` here is a genuine "not found", not a
@@ -297,6 +432,29 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
         handle.is_alive()
     );
     checked += 1;
+    // Same transition through game's fold: RESET_SCORE must clear the score here too.
+    let game_score_cleared = poll_until(
+        Duration::from_secs(15),
+        Duration::from_millis(150),
+        || async {
+            match game_state
+                .lock()
+                .expect("game fold mutex not poisoned")
+                .0
+                .score(&objective, &holder)
+            {
+                None => Some(()),
+                Some(_) => None,
+            }
+        },
+    )
+    .await;
+    assert!(
+        game_score_cleared.is_some(),
+        "score for {holder} never cleared in game's fold after `players reset` — RESET_SCORE \
+         not applied by lodestone_game::Scoreboard::apply"
+    );
+    checked += 1;
 
     let remove_resp = rcon
         .cmd(&format!("scoreboard objectives remove {objective}"))
@@ -320,9 +478,33 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
         handle.is_alive()
     );
     checked += 1;
+    // Same transition through game's fold: ObjectiveMode::Remove must delete it here too.
+    let game_objective_removed = poll_until(
+        Duration::from_secs(15),
+        Duration::from_millis(150),
+        || async {
+            match game_state
+                .lock()
+                .expect("game fold mutex not poisoned")
+                .0
+                .objective(&objective)
+            {
+                None => Some(()),
+                Some(_) => None,
+            }
+        },
+    )
+    .await;
+    assert!(
+        game_objective_removed.is_some(),
+        "objective {objective} never removed in game's fold after `objectives remove` — \
+         ObjectiveMode::Remove not applied by lodestone_game::Scoreboard::apply"
+    );
+    checked += 1;
 
     // Anti-vacuity floor: if a refactor silently drops assertions, this bites.
-    const EXPECTED_CHECKS: usize = 14;
+    // 14 through the client read-model + 14 through lodestone-game's own fold.
+    const EXPECTED_CHECKS: usize = 28;
     assert!(
         checked >= EXPECTED_CHECKS,
         "anti-vacuity floor: only {checked} comparisons ran, expected >= {EXPECTED_CHECKS} — \
@@ -336,8 +518,9 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
 
     println!(
         "=== SCOREBOARD ORACLE PASSED: {checked} comparisons (positive values + negative \
-         controls + present->absent transitions) through ClientHandle::scoreboard() + \
-         boss_bars() ==="
+         controls + present->absent transitions) through BOTH ClientHandle::scoreboard()/\
+         boss_bars() AND lodestone_game::Scoreboard/BossBarSet folded from the same live \
+         stream ==="
     );
     handle.shutdown();
     drain.abort();

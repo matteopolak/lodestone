@@ -204,4 +204,21 @@ impl ClientMenu {
         self.predicted.set_state_id(state_id);
         self.confirmed.set_state_id(state_id);
     }
+
+    /// Applies a direct server set of a player-inventory slot addressed by
+    /// *native* index (the `set_player_inventory` packet), overwriting both the
+    /// prediction and the confirmation. Returns whether it diverged from the
+    /// prediction.
+    ///
+    /// Native indexing (`0..=8` hotbar, `9..=35` main, `36..=39` armour, `40`
+    /// off-hand) is a **different** numbering from the window-0 menu order, so
+    /// this must not be routed through [`reconcile`](Self::reconcile)'s
+    /// menu-indexed [`SetSlot`](ServerUpdate::SetSlot) — doing so would transpose
+    /// hotbar and crafting/armour slots.
+    pub fn set_player_native(&mut self, native_index: usize, item: Option<ItemStack>) -> bool {
+        let diverged = self.predicted.player_native(native_index).cloned() != item;
+        self.confirmed.set_player_native(native_index, item.clone());
+        self.predicted.set_player_native(native_index, item);
+        diverged
+    }
 }

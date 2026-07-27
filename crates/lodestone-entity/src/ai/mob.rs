@@ -132,6 +132,38 @@ pub trait MobController {
     fn is_panicking(&self) -> bool {
         false
     }
+
+    /// Whether this animal is in "love mode" (fed a breeding item and looking
+    /// for a mate). Gates [`BreedGoal`](crate::ai::goals::BreedGoal).
+    fn is_in_love(&self) -> bool {
+        false
+    }
+
+    /// Selects and remembers a free breeding partner — another in-love animal of
+    /// the same kind, within range and not panicking — returning its position if
+    /// one was found. Mirrors vanilla's `getFreePartner`: the host performs the
+    /// version/type-specific `canMate` filter and holds the chosen partner so
+    /// [`love_partner_position`] can track it.
+    ///
+    /// [`love_partner_position`]: MobController::love_partner_position
+    fn find_love_partner(&mut self) -> Option<Vec3> {
+        None
+    }
+
+    /// The current position of the remembered breeding partner, but only while
+    /// it stays a valid mate (alive, still in love, not panicking). Returns
+    /// `None` the moment the partner becomes ineligible, which ends the goal.
+    fn love_partner_position(&self) -> Option<Vec3> {
+        None
+    }
+
+    /// Spawns a child from this animal and its partner and clears love mode on
+    /// both (vanilla's `spawnChildFromBreeding`).
+    fn breed(&mut self) {}
+
+    /// Forgets the currently-selected breeding partner (called when the goal
+    /// stops), mirroring vanilla clearing `this.partner = null`.
+    fn clear_love_partner(&mut self) {}
 }
 
 /// Squared horizontal+vertical distance between two points.
