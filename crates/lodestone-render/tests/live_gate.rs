@@ -934,10 +934,10 @@ async fn collect_sections(
 /// above), and among those we take the densest so the frame fills with terrain.
 async fn collect_terrain_section()
 -> Result<(ChunkPos, usize, Arc<ChunkSection>, SectionLight), String> {
+    type SectionEntry = (ChunkPos, usize, Arc<ChunkSection>, SectionLight);
     let sections = collect_sections(1).await?;
     // Highest populated section per column keyed by (x, z).
-    let mut top: HashMap<(i32, i32), (ChunkPos, usize, Arc<ChunkSection>, SectionLight)> =
-        HashMap::new();
+    let mut top: HashMap<(i32, i32), SectionEntry> = HashMap::new();
     for (pos, index, section, light) in sections {
         top.entry((pos.x, pos.z))
             .and_modify(|entry| {
