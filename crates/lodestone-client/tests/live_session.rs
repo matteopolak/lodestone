@@ -106,11 +106,6 @@ const STEP: f64 = 0.1;
 /// (confirmed empirically by the sibling physics gate: `block_at` returns
 /// `Some(0)` for air above the surface and a non-zero solid id below the feet).
 const AIR_STATE_ID: u32 = 0;
-/// After the join teleport the server ignores our movement until its
-/// `clientLoadedTimeoutTimer` (~60 ticks) expires; we cannot send `player_loaded`
-/// through the public API, so we wait this long before moving. Moving inside the
-/// window is silently rejected and rubber-banded (mirrors the physics gate).
-const LOAD_SETTLE: Duration = Duration::from_secs(5);
 /// How far (blocks) each way we probe for a clean, walkable runway from spawn.
 const RUNWAY_PROBE: i32 = 24;
 /// Minimum total clean runway required to accept a spawn; below this we retry.
@@ -601,12 +596,23 @@ async fn join_clean_settled(filter: Filter) -> Session {
             continue;
         }
 
-        // Wait out the server's client-load window before moving; moving inside
-        // it is silently rejected and rubber-banded.
-        tokio::time::sleep(LOAD_SETTLE).await;
+        // The driver auto-sends `player_loaded` on the first placement teleport,
+        // which zeroes the server's client-load timer — so we no longer wait the
+        // window out, we only need the placement teleport itself before moving.
+        if handle
+            .wait_for(Duration::from_secs(10), |h| h.position().is_some())
+            .await
+            .is_err()
+        {
+            last_reason = format!("attempt {attempt}: server never placed us");
+            handle.shutdown();
+            let _ = handle.join().await;
+            drain.abort();
+            continue;
+        }
 
         let Some(start) = handle.position() else {
-            last_reason = format!("attempt {attempt}: no position after settle");
+            last_reason = format!("attempt {attempt}: no position after placement");
             handle.shutdown();
             let _ = handle.join().await;
             drain.abort();

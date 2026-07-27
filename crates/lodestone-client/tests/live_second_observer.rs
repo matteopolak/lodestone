@@ -313,11 +313,13 @@ async fn join_walker(server: &ServerAddress) -> Option<Walker> {
         abort(handle, drain).await;
         return None;
     }
-    // Wait out the 60-tick client-load window (the public API cannot send
-    // `player_loaded`); ~5 s is comfortably past it even below 20 TPS.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // The driver auto-sends `player_loaded` on the placement teleport waited on
+    // just above, zeroing the server's client-load timer — so the walker's
+    // movement is validated immediately with no window left to wait out. (The
+    // observer's own settle and the entity-propagation waits downstream are
+    // separate conditions and are unaffected.)
     if corrections.disconnected.load(Ordering::SeqCst) {
-        eprintln!("walker: disconnected during settle; retrying");
+        eprintln!("walker: disconnected before walking; retrying");
         abort(handle, drain).await;
         return None;
     }

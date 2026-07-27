@@ -11,7 +11,7 @@ use lodestone_client::{
     ChatAckInfo, ChatKind, ClientAction, ClientBuilder, ClientEvent, ConnectionState, Directive,
     KeepAlivePolicy, LoginProfile, RespawnPolicy, ServerAddress, SessionOutcome, VersionAdapter,
 };
-use lodestone_model::{AdapterError, GameMode, Identifier, Text};
+use lodestone_model::{AdapterError, GameMode, Identifier, Rotation, TeleportFlags, Text, Vec3};
 use lodestone_net::{Connection, memory_pair};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -30,6 +30,8 @@ struct FakeAdapter {
     fail: HashSet<(ConnectionState, i32)>,
     keepalive_resp_id: i32,
     respawn_resp_id: Option<i32>,
+    player_loaded_resp_id: Option<i32>,
+    brand_resp_id: Option<i32>,
     calls: Arc<Mutex<Vec<(ConnectionState, i32)>>>,
 }
 
@@ -65,6 +67,21 @@ impl FakeAdapter {
     /// visible on the wire; without this it stays unrepresentable (`Ok(None)`).
     fn respawn_to(mut self, id: i32) -> Self {
         self.respawn_resp_id = Some(id);
+        self
+    }
+
+    /// Makes `PlayerLoaded` encode to an observable packet so the driver's
+    /// automatic client-loaded signal is visible on the wire; without this it
+    /// stays unrepresentable (`Ok(None)`).
+    fn player_loaded_to(mut self, id: i32) -> Self {
+        self.player_loaded_resp_id = Some(id);
+        self
+    }
+
+    /// Makes `SendBrand` encode to an observable packet (id, brand-bytes) so the
+    /// automatic brand announcement is visible on the wire.
+    fn brand_to(mut self, id: i32) -> Self {
+        self.brand_resp_id = Some(id);
         self
     }
 
@@ -149,6 +166,17 @@ impl VersionAdapter for FakeAdapter {
             ClientAction::Respawn => {
                 Ok(self.respawn_resp_id.map(|id| (id, vec![state_code(state)])))
             }
+            // Observable only when a test opts in via `player_loaded_to`; the
+            // payload carries the encode-time state so tests can prove the state
+            // it was sent under.
+            ClientAction::PlayerLoaded => Ok(self
+                .player_loaded_resp_id
+                .map(|id| (id, vec![state_code(state)]))),
+            // Observable only when a test opts in via `brand_to`; the payload is
+            // the raw brand bytes so a test can assert the announced string.
+            ClientAction::SendBrand { brand } => Ok(self
+                .brand_resp_id
+                .map(|id| (id, brand.clone().into_bytes()))),
             _ => Ok(None),
         }
     }
@@ -190,6 +218,32 @@ fn signed_chat(signature: Vec<u8>, was_shown: bool) -> Directive {
             was_shown,
         }),
     })
+}
+
+/// The `Login` event that puts us in the world (entering Play). The driver arms
+/// its client-loaded latch on this.
+fn login_event() -> ClientEvent {
+    ClientEvent::Login {
+        entity_id: 1,
+        game_mode: GameMode::Survival,
+        dimension: Identifier::new("minecraft", "overworld").unwrap(),
+    }
+}
+
+/// The server's placement teleport. The first one after a `Login` (or after a
+/// respawn) is the driver's "ready to be moved" trigger for `player_loaded`.
+fn teleport_event() -> ClientEvent {
+    ClientEvent::TeleportPlayer {
+        pos: Vec3::new(0.0, 64.0, 0.0),
+        rotation: Rotation::new(0.0, 0.0),
+        flags: TeleportFlags {
+            relative_x: false,
+            relative_y: false,
+            relative_z: false,
+            relative_yaw: false,
+            relative_pitch: false,
+        },
+    }
 }
 
 fn start(
@@ -397,6 +451,206 @@ async fn death_manual_does_not_respawn() {
     assert!(
         nothing.is_err(),
         "expected no respawn packet in manual mode"
+    );
+
+    drop(handle);
+}
+
+/// Automatic client-loaded signal. Vanilla's `ServerGamePacketListenerImpl`
+/// silently ignores our movement until its `clientLoadedTimeoutTimer` (~60
+/// ticks) expires, unless the client zeroes it early with `player_loaded`. The
+/// driver must send it on its own — otherwise every session's first ~3 s of
+/// movement is discarded and a gate that measures movement in that window
+/// measures nothing (a false green). The trigger is the first `TeleportPlayer`
+/// after entering the world (`Login`): that teleport is the server placing us,
+/// i.e. the moment we are genuinely ready to be moved (sending it the instant
+/// `Login` arrives, before placement, would be too early). The send precedes the
+/// surfaced teleport event, like the other auto-responders.
+#[tokio::test]
+async fn player_loaded_auto_sent_on_first_teleport_after_login() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    assert_eq!(events.recv().await, Some(login_event()));
+
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    // player_loaded is written before the teleport event is surfaced.
+    let (id, _payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(
+        id, PLAYER_LOADED_ID,
+        "driver should auto-send player_loaded on the first placement teleport"
+    );
+    assert_eq!(events.recv().await, Some(teleport_event()));
+
+    drop(handle);
+}
+
+/// The signal fires exactly once per load-epoch and re-arms on respawn. The
+/// server re-seeds the load timer whenever it respawns us, so a client that only
+/// sent `player_loaded` at join would have its post-respawn movement ignored.
+/// A second teleport in the same epoch must NOT re-send it (otherwise we would
+/// spam the server); a `Death` re-arms so the next placement teleport does.
+#[tokio::test]
+async fn player_loaded_fires_once_then_rearms_on_death() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const DEATH_PKT: i32 = 0x52;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .respawn_to(RESPAWN_RESP_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            DEATH_PKT,
+            vec![Directive::Emit(ClientEvent::Death {
+                message: Text::literal("slain"),
+            })],
+        );
+
+    let (handle, mut events, mut peer) = start_with(
+        adapter,
+        KeepAlivePolicy::Automatic,
+        RespawnPolicy::Automatic,
+    );
+
+    // Join: login + first teleport => exactly one player_loaded.
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Login
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(
+        peer.read_packet().await.unwrap().unwrap().0,
+        PLAYER_LOADED_ID
+    );
+    let _ = events.recv().await; // TeleportPlayer
+
+    // A second teleport in the same epoch sends nothing; the next wire packet is
+    // therefore the respawn produced by the following Death. If the epoch guard
+    // were missing, a stray player_loaded would appear here instead.
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // TeleportPlayer
+    peer.write_packet(DEATH_PKT, &[]).await.unwrap();
+    assert_eq!(
+        peer.read_packet().await.unwrap().unwrap().0,
+        RESPAWN_RESP_ID,
+        "second teleport must not re-send player_loaded; respawn is the next packet"
+    );
+    let _ = events.recv().await; // Death
+
+    // Death re-armed the latch, so the respawn's placement teleport re-sends it.
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(
+        peer.read_packet().await.unwrap().unwrap().0,
+        PLAYER_LOADED_ID,
+        "player_loaded should re-fire on the post-respawn placement teleport"
+    );
+
+    drop(handle);
+}
+
+/// A teleport before any `Login` must not trigger `player_loaded`: the latch is
+/// disarmed until we actually enter the world, so a stray pre-Play teleport
+/// cannot make us announce readiness prematurely.
+#[tokio::test]
+async fn player_loaded_not_sent_before_login() {
+    const TP_PKT: i32 = 0x40;
+    const KEEPALIVE_PKT: i32 = 0x41;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            KEEPALIVE_PKT,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 9 })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // TeleportPlayer (no player_loaded)
+
+    // The keep-alive response is the first packet on the wire, which is only true
+    // if no stray player_loaded preceded it.
+    peer.write_packet(KEEPALIVE_PKT, &[]).await.unwrap();
+    let (id, _payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(
+        id, KEEPALIVE_RESP_ID,
+        "no player_loaded should be sent before entering the world"
+    );
+
+    drop(handle);
+}
+
+/// The client announces its brand on entering Configuration, as vanilla does.
+/// This is protocol hygiene with no game/UI input; the driver injects it on the
+/// state transition, and `encode_action` maps it to the state-appropriate packet
+/// (older protocols with no Configuration state simply never hit this path).
+#[tokio::test]
+async fn brand_announced_on_entering_configuration() {
+    const LOGIN_SUCCESS: i32 = 0x02;
+    const BRAND_ID: i32 = 0x0D;
+    const LOGIN_ACK_ID: i32 = 0xF2;
+
+    let adapter = FakeAdapter::new()
+        .brand_to(BRAND_ID)
+        .begin(vec![Directive::SetState(ConnectionState::Login)])
+        .on(
+            ConnectionState::Login,
+            LOGIN_SUCCESS,
+            vec![
+                send(LOGIN_ACK_ID, b"ack"),
+                Directive::SetState(ConnectionState::Configuration),
+            ],
+        );
+
+    let (handle, _events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    peer.write_packet(LOGIN_SUCCESS, &[]).await.unwrap();
+
+    // login-acknowledged goes out first (still in Login state), then the brand is
+    // announced immediately on entering Configuration.
+    assert_eq!(peer.read_packet().await.unwrap().unwrap().0, LOGIN_ACK_ID);
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(
+        id, BRAND_ID,
+        "brand should be announced on entering Configuration"
+    );
+    assert_eq!(
+        payload, b"vanilla",
+        "default brand is the vanilla-compatible string"
     );
 
     drop(handle);

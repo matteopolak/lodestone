@@ -41,13 +41,13 @@
 //! which is `clientLoadedTimeoutTimer <= 0`; the constructor seeds that timer to
 //! `CLIENT_LOADED_TIMEOUT_TIME = 60` ticks and decrements it once per tick, so
 //! the server *silently ignores* our movement for the first ~60 ticks (~3 s)
-//! unless the client sends `player_loaded` to zero it early. The public
-//! `ClientAction` enum has **no `player_loaded` variant** (packet id 44 exists in
-//! the registry but no action encodes it), so this bot cannot short-circuit the
-//! window — it simply waits it out before asserting anything about validation.
-//! The impossible-move control below is what *confirms* the window has elapsed:
-//! if the server were still ignoring us, that control would fail loudly rather
-//! than let the gate pass on an unvalidated walk.
+//! unless the client sends `player_loaded` to zero it early. The driver now
+//! sends `player_loaded` automatically on the first placement teleport (the
+//! point the server has placed us), so the window is already zeroed by the time
+//! `position()` is known and this bot moves immediately instead of waiting it
+//! out. The impossible-move control below still *confirms* validation is live:
+//! if the server were somehow still ignoring us, that control would fail loudly
+//! rather than let the gate pass on an unvalidated walk.
 //!
 //! ## `position()` is optimistic local prediction
 //!
@@ -237,14 +237,13 @@ async fn join_with_clean_lane(server: &ServerAddress) -> Option<Joined> {
         return None;
     }
 
-    // Wait out the client-load window. The server ignores movement until
-    // `clientLoadedTimeoutTimer` (seeded to 60 ticks) decrements to zero; we
-    // cannot send `player_loaded` through the public API, so we wait ~5 s, which
-    // is comfortably past 60 ticks even on a server below 20 TPS. The
-    // impossible-move control at the end of the test *verifies* this elapsed.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // The driver auto-sends `player_loaded` on the first placement teleport,
+    // zeroing the server's `clientLoadedTimeoutTimer` before `position()` (waited
+    // on above) is known — so movement is validated from here on and there is no
+    // client-load window left to wait out. The impossible-move control at the end
+    // of the test *verifies* validation is live.
     if corrections.disconnected.load(Ordering::SeqCst) {
-        eprintln!("attempt: disconnected during settle; retrying");
+        eprintln!("attempt: disconnected before walking; retrying");
         abort(handle, drain).await;
         return None;
     }
