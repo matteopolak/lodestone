@@ -344,6 +344,40 @@ pub trait ModelSectionView {
 /// Mesh the non-cube geometry of a section, emitting each visible baked quad
 /// once, never merged. A quad is culled only when it carries a `cullface` and
 /// the neighbouring block in that direction fully occludes it.
+///
+/// # Lighting: flat today, smooth-capable tomorrow
+///
+/// Every vertex of a quad currently receives the **same** two values: the
+/// block's single packed sky/block light ([`ModelSectionView::light_at`]) and a
+/// constant per-face directional shade (see `emit_baked_quad`, carried in the
+/// `ao` slot). That is correct but flat — it has no ambient occlusion and no
+/// smooth (per-vertex interpolated) light, which is one of the most recognisable
+/// "not Minecraft" tells once the geometry itself is right.
+///
+/// Making it smooth is a **per-vertex, not per-block** change, and the mesh
+/// format already has room for it (`ao` is a per-vertex `f32`, `light` a
+/// per-vertex byte). What it would take:
+///
+/// 1. A neighbourhood light/opacity sampler: for each of a quad's four corners,
+///    read the four blocks meeting at that corner in the quad's facing plane
+///    (the face neighbour, the two edge neighbours, and the diagonal) — exactly
+///    the 3×3×3 snapshot the mesher already clones, so no new data crosses the
+///    thread boundary.
+/// 2. Vanilla AO: count how many of the three occluding corner neighbours are
+///    solid and map `{0,1,2,3}` occluders to the vanilla `{1.0, 0.8, 0.6, 0.5}`
+///    ratios (with the "two side blocks ⇒ fully dark corner" special case),
+///    writing a distinct value into each corner's `ao`.
+/// 3. Smooth light: average the sky and block light of the same four corner
+///    cells (skipping fully opaque ones) and write the per-corner packed result
+///    into each vertex's `light` instead of the single block value.
+/// 4. Anisotropy fix: because corners then differ, split each quad along the
+///    diagonal whose two shared corners are darker, or the interpolation flips
+///    the gradient across the quad (vanilla's "flip triangulation" rule).
+///
+/// None of that changes the pipeline, the vertex layout, or the shader (which
+/// already multiplies `ao * light_term` per vertex) — it is purely a richer
+/// fill in `emit_baked_quad`'s inner loop plus the corner sampler. The fluid
+/// path ([`mesh_fluids`]) would stay flat by design (`shade:false`).
 #[must_use]
 pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
     let mut mesh = ModelMesh::default();
