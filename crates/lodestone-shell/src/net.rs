@@ -156,6 +156,12 @@ pub enum NetUpdate {
         /// Server RNG seed for variant selection.
         seed: i64,
     },
+    /// A tab-list delta for the shell-owned [`lodestone_game::tablist::TabList`]
+    /// fold.
+    TabListEvent(ClientEvent),
+    /// A scoreboard delta for the shell-owned
+    /// [`lodestone_game::scoreboard::Scoreboard`] fold.
+    ScoreboardEvent(ClientEvent),
     /// The session ended (clean or with a reason).
     Disconnected(String),
     /// A transport or setup error.
@@ -493,6 +499,14 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             pitch,
             seed,
         },
+        event @ (ClientEvent::PlayerListUpdate { .. } | ClientEvent::PlayerListRemove { .. }) => {
+            NetUpdate::TabListEvent(event)
+        }
+        event @ (ClientEvent::ObjectiveUpdate { .. }
+        | ClientEvent::DisplayObjective { .. }
+        | ClientEvent::ScoreUpdate { .. }
+        | ClientEvent::ScoreReset { .. }
+        | ClientEvent::TeamUpdate { .. }) => NetUpdate::ScoreboardEvent(event),
         // §12.24: the shell treats `ChunkLoaded` as a *dirty-region signal* and
         // ignores any payload — the ruling is that decoded chunks live in a
         // client-owned `World` that consumers query, not in the (bounded,

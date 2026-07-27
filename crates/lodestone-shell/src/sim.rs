@@ -80,6 +80,10 @@ pub struct Sim {
     phase: SessionPhase,
     /// Received chat/system lines (bounded scrollback), rendered by the HUD.
     chat_log: ChatLog,
+    /// Folded server tab-list state; rendered while Tab is held.
+    tab_list: lodestone_game::tablist::TabList,
+    /// Folded server scoreboard state; rendered as the right-edge sidebar.
+    scoreboard: lodestone_game::scoreboard::Scoreboard,
     /// Monotonic wall-clock seconds since the sim started, accumulated from the
     /// real per-frame `dt` in [`Sim::step`]. Stamps chat arrivals so the HUD can
     /// age lines for the vanilla fade-out without reaching for a clock itself.
@@ -177,6 +181,8 @@ impl Sim {
             pending_removals: Vec::new(),
             phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
+            tab_list: lodestone_game::tablist::TabList::new(),
+            scoreboard: lodestone_game::scoreboard::Scoreboard::new(),
             clock_secs: 0.0,
             health: None,
             food: None,
@@ -225,33 +231,17 @@ impl Sim {
     }
 
     /// The current tab-list, formatted as `NAME  <latency>ms` rows sorted by
-    /// name. Empty off a live server. Reads the client-owned player list through
-    /// the net handle each call (cheap; only invoked while Tab is held).
+    /// vanilla display order. Empty until the server sends player-list data.
     #[must_use]
     pub fn player_rows(&self) -> Vec<String> {
-        let Some(net) = &self.net else {
-            return Vec::new();
-        };
-        let mut rows: Vec<String> = net
-            .players()
-            .into_iter()
-            .map(|p| {
-                let name = p.name.unwrap_or_else(|| "?".to_string());
-                match p.latency {
-                    Some(ms) if ms >= 0 => format!("{name}  {ms}ms"),
-                    _ => format!("{name}  --"),
-                }
-            })
-            .collect();
-        rows.sort();
-        rows
+        crate::tablist::player_rows(&self.tab_list)
     }
 
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
-    /// a live server). Folded from the client snapshot through [`crate::overlay`].
+    /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
     pub fn sidebar(&self) -> Option<Sidebar> {
-        self.net.as_ref().and_then(NetClient::sidebar)
+        crate::scoreboard::sidebar_from(&self.scoreboard)
     }
 
     /// The active boss bars to draw, in render order. Empty off a live server.
@@ -723,6 +713,12 @@ impl Sim {
                     if let Some(audio) = &mut self.audio {
                         audio.play_entity_sound(&name, category, pos, volume, pitch, seed);
                     }
+                }
+                NetUpdate::TabListEvent(event) => {
+                    let _ = self.tab_list.apply(&event);
+                }
+                NetUpdate::ScoreboardEvent(event) => {
+                    let _ = self.scoreboard.apply(&event);
                 }
                 NetUpdate::Disconnected(reason) => {
                     self.status = format!("disconnected: {reason}");
