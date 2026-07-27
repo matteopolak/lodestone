@@ -20,9 +20,16 @@ use crate::entity::{
     AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
 };
 use crate::fluid::apply_fluid_push;
+use crate::fluid_state::{FluidState, compute_fluid_state};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth::{self};
 use crate::profile::{FluidModel, InputModel, PhysicsProfile};
+
+/// `Avatar.DEFAULT_EYE_HEIGHT` — the player standing eye offset (`1.62F`), used
+/// as the default pose [`eye height`](PlayerState::eye_height). The swimming /
+/// crawling / gliding pose lowers it to `0.4`, crouching to `1.27`; a driver
+/// modelling those poses sets [`PlayerState::eye_height`] accordingly.
+pub const DEFAULT_EYE_HEIGHT: f32 = 1.62;
 
 /// Raw player intent for one tick, before any client-side transformation.
 ///
@@ -153,6 +160,26 @@ pub struct PlayerState {
     /// one-tick delay between entering the block and being slowed is observable
     /// and reproduced.
     pub stuck_speed_multiplier: Vec3d,
+    /// Pose **eye height** (`getEyeHeight`), the offset from feet to eye used by
+    /// [`crate::compute_fluid_state`] to decide eye-in-fluid. Standing is
+    /// `1.62` (`Avatar.DEFAULT_EYE_HEIGHT`); the swimming/crawling/gliding pose is
+    /// `0.4`, crouching `1.27`. It is an **input**: the pose layer sets it (see
+    /// [`Self::with_eye_height`]) so the eye check tracks the pose the box does.
+    /// `getEyeY()` widens it to `double` and adds `position.y`, reproduced exactly.
+    pub eye_height: f32,
+    /// **Output.** `isEyeInFluid(WATER)` from the last [`tick`], i.e. the eye
+    /// block-column held water spanning the eye Y. Combine with in-water via
+    /// [`Self::eye_in_water`] + fluid presence for `isUnderWater`; the shell reads
+    /// this for submerged fog, the underwater overlay, and `ambient.underwater.*`.
+    pub eye_in_water: bool,
+    /// **Output.** `isEyeInFluid(LAVA)` from the last [`tick`].
+    pub eye_in_lava: bool,
+    /// **Output.** `Entity.isSwimming()` after the last [`tick`]'s
+    /// `updateSwimming`: sprint-swimming, entered when sprinting while submerged in
+    /// water and sustained while sprinting in water. This is a **pose the server
+    /// tracks**, so a driver must transmit it (via `SetPlayerInput`) — computing it
+    /// without sending it makes the server treat the action as a normal sprint.
+    pub swimming: bool,
 }
 
 impl PlayerState {
@@ -172,7 +199,19 @@ impl PlayerState {
             effects: StatusEffects::default(),
             movement_speed: None,
             stuck_speed_multiplier: Vec3d::ZERO,
+            eye_height: DEFAULT_EYE_HEIGHT,
+            eye_in_water: false,
+            eye_in_lava: false,
+            swimming: false,
         }
+    }
+
+    /// Returns a copy of this state with the pose [`eye height`](Self::eye_height)
+    /// set (e.g. `0.4` for the swimming/crawling pose, `1.62` standing).
+    #[must_use]
+    pub fn with_eye_height(mut self, eye_height: f32) -> Self {
+        self.eye_height = eye_height;
+        self
     }
 
     /// Returns a copy of this state with the given status effects applied.
@@ -589,33 +628,6 @@ pub(crate) fn handle_on_climbable(delta: Vec3d, sneaking: bool) -> Vec3d {
     }
     Vec3d::new(xd, yd, zd)
 }
-///
-/// Vanilla derives this from `updateFluidHeightAndDoFluidPushing` over the whole
-/// (deflated) AABB and a per-block fluid *height*. We approximate it as "the
-/// block cells the bounding box occupies contain water", which is exact for a
-/// player fully inside a water volume — the case this water path is built for.
-#[must_use]
-fn is_in_water(state: &PlayerState, view: &dyn CollisionView, profile: &PhysicsProfile) -> bool {
-    let bb = state.bounding_box(profile);
-    // Deflate like vanilla (`0.001`) before sampling, then test each occupied
-    // block cell for water.
-    let min_x = mth::floor(bb.min_x + 0.001);
-    let max_x = mth::floor(bb.max_x - 0.001);
-    let min_y = mth::floor(bb.min_y + 0.001);
-    let max_y = mth::floor(bb.max_y - 0.001);
-    let min_z = mth::floor(bb.min_z + 0.001);
-    let max_z = mth::floor(bb.max_z - 0.001);
-    for x in min_x..=max_x {
-        for y in min_y..=max_y {
-            for z in min_z..=max_z {
-                if view.is_water(x, y, z) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
 
 /// `LivingEntity.getEffectiveGravity()` — Slow Falling reduces gravity to
 /// `min(gravity, 0.01)` while descending; otherwise it is the base gravity.
@@ -633,26 +645,7 @@ pub(crate) fn effective_gravity(base_gravity: f64, falling: bool, slow_falling: 
     }
 }
 
-/// `Entity.isInLava()` — coarse deep-lava analogue of [`is_in_water`].
-fn is_in_lava(state: &PlayerState, view: &dyn CollisionView, profile: &PhysicsProfile) -> bool {
-    let bb = state.bounding_box(profile);
-    let min_x = mth::floor(bb.min_x + 0.001);
-    let max_x = mth::floor(bb.max_x - 0.001);
-    let min_y = mth::floor(bb.min_y + 0.001);
-    let max_y = mth::floor(bb.max_y - 0.001);
-    let min_z = mth::floor(bb.min_z + 0.001);
-    let max_z = mth::floor(bb.max_z - 0.001);
-    for x in min_x..=max_x {
-        for y in min_y..=max_y {
-            for z in min_z..=max_z {
-                if view.is_lava(x, y, z) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
+/// `LivingEntity.getFluidFallingAdjustedMovement(gravity, falling, movement)`.
 ///
 /// Applies the buoyant slow-descent: normally `y - baseGravity/16`, but when
 /// already sinking near terminal it clamps to `-0.003` (the famous slow-sink).
@@ -1026,9 +1019,23 @@ pub fn tick(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
-    if is_in_water(state, view, profile) {
+    // `Entity.baseTick` computes the fluid summary from the *pre-move* box, before
+    // `travel` reads `isInWater`/`isInLava`. Do the same: one source of truth for
+    // eye/box submersion, recorded on the state for the swimming pose and for the
+    // shell's fog / overlay / ambient-sound consumers.
+    let fluid = compute_fluid_state(
+        state.bounding_box(profile),
+        state.position,
+        state.eye_height,
+        view,
+    );
+    state.eye_in_water = fluid.eye_in_water;
+    state.eye_in_lava = fluid.eye_in_lava;
+    state.swimming = update_swimming(state.swimming, state.sprinting, &fluid, view, state.position);
+
+    if fluid.in_water() {
         tick_water(state, input, view, profile);
-    } else if is_in_lava(state, view, profile) {
+    } else if fluid.in_lava() {
         tick_lava(state, input, view, profile);
     } else if state.fall_flying {
         tick_elytra(state, input, view, profile);
@@ -1036,6 +1043,40 @@ pub fn tick(
         tick_air(state, input, view, profile);
     }
     update_stuck_multiplier(state, view, profile);
+}
+
+/// `Entity.updateSwimming()` — the sprint-swimming pose state machine.
+///
+/// Entering requires being **under water** (eye submerged) *and* the block at the
+/// feet holding water; once swimming, it is sustained merely by sprinting while
+/// **in** water (box touching water), so you keep swimming as you break the
+/// surface. Passenger/vehicle state is not modelled here (this engine has none),
+/// matching the `!isPassenger()` guard being vacuously true.
+fn update_swimming(
+    swimming: bool,
+    sprinting: bool,
+    fluid: &FluidState,
+    view: &dyn CollisionView,
+    position: Vec3d,
+) -> bool {
+    if swimming {
+        sprinting && fluid.in_water()
+    } else {
+        sprinting && fluid.under_water() && water_at_block(view, position)
+    }
+}
+
+/// `level.getFluidState(blockPosition).is(WATER)` — water at the entity's own
+/// block position (`floor` of each coordinate), fine-then-coarse like the rest of
+/// the fluid state.
+fn water_at_block(view: &dyn CollisionView, position: Vec3d) -> bool {
+    let bx = mth::floor(position.x);
+    let by = mth::floor(position.y);
+    let bz = mth::floor(position.z);
+    match view.fluid_at(bx, by, bz) {
+        Some(cell) => cell.kind == crate::fluid::FluidKind::Water,
+        None => view.is_water(bx, by, bz),
+    }
 }
 
 /// `LivingEntity.getFrictionInfluencedSpeed(blockFriction)`.
@@ -1242,6 +1283,59 @@ mod tests {
             "terminal vy = {}",
             s.velocity.y
         );
+    }
+
+    #[test]
+    fn tick_sets_swimming_and_eye_in_water_when_sprinting_submerged() {
+        // The real consumer of the eye-in-fluid state inside physics:
+        // `updateSwimming`. A sprinting player fully under water enters the
+        // sprint-swimming pose, and the eye/box submersion flags are recorded on
+        // the state for the shell (fog / overlay / ambient sound) to read.
+        let p = PhysicsProfile::mc_1_21();
+        let view = WaterEverywhere;
+        let mut s = PlayerState::at(Vec3d::new(0.5, 95.0, 0.5), 0.0);
+        s.sprinting = true;
+        tick(&mut s, MovementInput::NONE, &view, &p);
+        assert!(s.eye_in_water, "eye is submerged");
+        assert!(s.swimming, "sprinting + underwater => swimming pose");
+    }
+
+    #[test]
+    fn tick_does_not_swim_when_sprinting_in_air() {
+        // Negative control: sprinting with no water must not set the swim pose,
+        // and must not spuriously report the eye in water.
+        struct Air;
+        impl CollisionView for Air {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
+        }
+        let p = PhysicsProfile::mc_1_21();
+        let mut s = PlayerState::at(Vec3d::new(0.5, 100.0, 0.5), 0.0);
+        s.sprinting = true;
+        tick(&mut s, MovementInput::NONE, &Air, &p);
+        assert!(!s.eye_in_water && !s.swimming);
+    }
+
+    #[test]
+    fn swimming_is_sustained_while_sprinting_in_water_even_when_eye_surfaces() {
+        // Once swimming, the pose persists on `sprinting && isInWater()` alone —
+        // you keep swimming as you break the surface (eye leaves the water) until
+        // you stop sprinting or leave the water. Uses a one-block-deep pool so the
+        // box is in water but the eye (feet + 1.62) is above it.
+        struct ShallowPool;
+        impl CollisionView for ShallowPool {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<Aabb>) {}
+            fn is_water(&self, _x: i32, y: i32, _z: i32) -> bool {
+                y == 94
+            }
+        }
+        let p = PhysicsProfile::mc_1_21();
+        let view = ShallowPool;
+        let mut s = PlayerState::at(Vec3d::new(0.5, 94.0, 0.5), 0.0);
+        s.sprinting = true;
+        s.swimming = true; // already swimming from a prior submerged tick
+        tick(&mut s, MovementInput::NONE, &view, &p);
+        assert!(!s.eye_in_water, "eye is above the one-deep pool");
+        assert!(s.swimming, "swim pose sustained by sprinting-in-water");
     }
 
     #[test]

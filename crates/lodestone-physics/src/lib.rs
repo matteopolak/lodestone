@@ -31,6 +31,7 @@ pub mod collision;
 pub mod effect;
 pub mod entity;
 pub mod fluid;
+pub mod fluid_state;
 pub mod geometry;
 pub mod mth;
 pub mod player;
@@ -42,6 +43,7 @@ pub use entity::{
     AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
 };
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
+pub use fluid_state::{FluidState, compute_fluid_state};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
     MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air, tick_elytra,
