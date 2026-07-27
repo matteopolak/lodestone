@@ -939,3 +939,60 @@ needs hills, caves and section seams, use the terrain oracle rather than convert
 containers, `--images` also drops the pulled JDK images, `--deep` also drops repo scratch. It
 names lodestone-owned resources explicitly and never prunes, because this host carries an
 unrelated project.
+
+## Addendum — found by *playing* the client (2026-07-27)
+
+Three defects surfaced in minutes of real play that a green test suite had not caught. Recorded
+together because the common cause is the same: **every gate we had read settled state or drew
+near the origin.**
+
+### 1. Columns dropped during the join burst (live terrain invisible up close)
+
+Symptoms: standing on **invisible blocks** with correct collision hitboxes; the column renders
+correctly **the moment a block in it is broken**; terrain **farther away renders fine**.
+
+`Sim::mark_column_dirty` takes the live branch only when the vanilla atlas, the net client, and
+`world_dimensions()` are all present — and `ClientHandle::world_dimensions`' own docstring says
+it returns `None` **pre-login / pre-first-chunk**. When the guard fails it falls through to the
+demo path, which returns immediately for any column far from origin. **The column is then
+dropped permanently: nothing retries it and nothing re-dirties it.** Chunks stream
+*nearest-first*, so the earliest burst at join is exactly the set at risk; breaking a block
+calls `mark_column_dirty` again, which then succeeds.
+
+A second candidate has the identical failure mode and may also be present: `NetUpdate::Chunk`
+is only a dirty *signal*, so if it is emitted before the decoded chunk is applied to the
+client's `World`, `snapshot_section_live` sees an all-air centre and the key goes to
+`pending_removals` — **also a permanent silent drop**.
+
+**The defect class, which matters more than either trigger: a column that fails to mesh at
+event time is discarded forever.** The fix must make meshing failures retryable.
+
+**Why `live_world_mesh.rs` passed anyway:** it reads *settled* state — connects a fresh client,
+waits, then meshes an explicitly chosen column — and only ever used chunks `(0,0)` and
+`(-1,-1)`. It never exercises the event-driven path during the join burst, which is where the
+bug lives. Any replacement gate must drive the real join path, spawn far from origin, and be
+**observed failing before the fix**.
+
+### 2. The HUD ignores the resource pack
+
+Hearts, hunger, XP bar and hotbar draw as procedural coloured quads. `lodestone-assets::gui` is
+**complete and good** — `stretch` / `tile` / `nine_slice`, `.png.mcmeta` parsing, and
+`GuiScaling::geometry` mirroring vanilla's `GuiGraphics` blit decomposition, tested against the
+real jar — but `grep` shows **its only consumers are its own test files**. Classic island: a
+correct producer that never reaches a pixel. What's missing is a GUI atlas over
+`assets/<ns>/textures/gui/sprites/**` and a render path that uses it. Note 26.2 uses the modern
+per-sprite layout, **not** the legacy `icons.png` sheet.
+
+### 3. Mining does not exist
+
+`PlayerAction` (the dig packet) is defined, and ids exist for `BLOCK_DESTRUCTION` and
+`TAKE_ITEM_ENTITY`, but **nothing drives them**: no break-time model, no destroy progress, no
+dig state machine, no pickup handling. Inventory/container state, by contrast, is substantial
+(`container.rs`, `menu.rs`, `click.rs`, `item.rs`, `recipe.rs`, `reconcile.rs`) — though it
+should be checked for the same island problem before more is added.
+
+### The transferable lesson
+
+Gates that read settled state cannot see ordering bugs, and gates near the origin cannot see
+placement or distance bugs. **Playing the client for five minutes found three defects that
+26 green suites did not.** Keep a manual-play pass in the loop; it is not redundant with tests.
