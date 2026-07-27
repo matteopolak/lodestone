@@ -39,8 +39,9 @@
 //! transparent* layer across a block's sprites so a block with one translucent
 //! face lands on the translucent pass.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::{
     Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker, BlockStates, FirstWeight,
     ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
@@ -49,6 +50,100 @@ use lodestone_model::BlockStateRegistry;
 
 use crate::models::is_full_cube;
 use crate::translucency::RenderLayer;
+
+/// Which fluid occupies a cell. Water renders translucent and biome-tinted; lava
+/// renders opaque and full-bright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FluidKind {
+    /// Water (`minecraft:water`, or the fluid of any `waterlogged` block).
+    Water,
+    /// Lava (`minecraft:lava`).
+    Lava,
+}
+
+/// A fluid occupying a cell: its [`FluidKind`] and dynamic [`FluidState`]
+/// (amount + falling), resolved from a block state's `level`/`waterlogged`
+/// properties.
+///
+/// Vanilla does not render fluids through the block-model pipeline — their
+/// blockstate models are empty — so [`BlockModels::quads`] returns nothing for a
+/// fluid state. The mesher instead reads this classification, gathers the
+/// neighbourhood a fluid's shape depends on, and bakes the surface through
+/// [`lodestone_assets::fluid::bake_fluid`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FluidCell {
+    /// Which fluid this is.
+    pub kind: FluidKind,
+    /// The fluid's amount (`1..=8`) and falling flag.
+    pub state: FluidState,
+}
+
+/// The still + flow sprite UV rects of one fluid, resolved once from the stitched
+/// atlas so the mesher can pass them straight to
+/// [`bake_fluid`](lodestone_assets::fluid::bake_fluid).
+#[derive(Debug, Clone, Copy)]
+pub struct FluidSprites {
+    /// The `*_still` sprite (level surfaces, bottom face).
+    pub still: SpriteUv,
+    /// The `*_flow` sprite (flowing surfaces, side faces).
+    pub flow: SpriteUv,
+}
+
+/// Maps a fluid block's `level` property to its [`FluidState`], matching vanilla
+/// `LiquidBlock.getFluidState`: `level 0` is a full source (`amount 8`), `1..=7`
+/// are flowing (`amount = 8 - level`, taller near the source), and `>= 8` are
+/// falling (`amount 8`).
+fn fluid_state_from_level(level: u8) -> FluidState {
+    if level == 0 {
+        FluidState::source()
+    } else if level >= 8 {
+        FluidState::new(8, true)
+    } else {
+        FluidState::new(8 - level, false)
+    }
+}
+
+/// Classify a block state into the fluid it exposes, if any.
+///
+/// `minecraft:water`/`minecraft:lava` carry the fluid directly (via their `level`
+/// property); any other block with `waterlogged=true` (kelp, seagrass, stairs,
+/// slabs…) carries a water **source**. Everything else is `None`. Pure over the
+/// resolved block path + properties, so it is unit-tested without a jar.
+fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<FluidCell> {
+    let level = || {
+        props
+            .get("level")
+            .and_then(|s| s.parse::<u8>().ok())
+            .unwrap_or(0)
+    };
+    match block_path {
+        "water" => Some(FluidCell {
+            kind: FluidKind::Water,
+            state: fluid_state_from_level(level()),
+        }),
+        "lava" => Some(FluidCell {
+            kind: FluidKind::Lava,
+            state: fluid_state_from_level(level()),
+        }),
+        _ if props.get("waterlogged").is_some_and(|v| v == "true") => Some(FluidCell {
+            kind: FluidKind::Water,
+            state: FluidState::source(),
+        }),
+        _ => None,
+    }
+}
+
+/// The `block/` texture locations of a fluid's still and flow sprites.
+fn fluid_texture_locations(kind: FluidKind) -> [ResourceLocation; 2] {
+    let (still, flow) = match kind {
+        FluidKind::Water => ("minecraft:block/water_still", "minecraft:block/water_flow"),
+        FluidKind::Lava => ("minecraft:block/lava_still", "minecraft:block/lava_flow"),
+    };
+    [
+        still.parse().expect("valid fluid texture location"),
+        flow.parse().expect("valid fluid texture location"),
+    ]
+}
 
 /// Errors from [`BlockModels::build`].
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +187,12 @@ pub struct BlockModels {
     atlas: Atlas,
     models: Vec<StateModel>,
     empty: StateModel,
+    /// Per-state fluid classification (`None` for non-fluids). Parallel to
+    /// `models`; a state can be *both* a model (a waterlogged stair) and a fluid.
+    fluids: Vec<Option<FluidCell>>,
+    /// Resolved still/flow UVs for water and lava, from the stitched atlas.
+    water_sprites: FluidSprites,
+    lava_sprites: FluidSprites,
 }
 
 impl BlockModels {
@@ -132,6 +233,7 @@ impl BlockModels {
         let baker = BlockBaker::new(manager, &resolver, &atlas);
         let count = registry.state_count();
         let mut models = Vec::with_capacity(count as usize);
+        let mut fluids = Vec::with_capacity(count as usize);
         for id in 0..count {
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
                 Ok(model) if !model.quads.is_empty() => {
@@ -146,12 +248,23 @@ impl BlockModels {
                 _ => StateModel::empty(),
             };
             models.push(sm);
+
+            let fluid = registry
+                .resolve(id)
+                .and_then(|r| classify_fluid(r.block.path(), r.properties));
+            fluids.push(fluid);
         }
+
+        let water_sprites = resolve_fluid_sprites(&atlas, FluidKind::Water);
+        let lava_sprites = resolve_fluid_sprites(&atlas, FluidKind::Lava);
 
         Ok(Self {
             atlas,
             models,
             empty: StateModel::empty(),
+            fluids,
+            water_sprites,
+            lava_sprites,
         })
     }
 
@@ -194,6 +307,49 @@ impl BlockModels {
     pub fn state_count(&self) -> usize {
         self.models.len()
     }
+
+    /// The fluid a state exposes, if any (water/lava blocks, or any waterlogged
+    /// block). Fluids have empty [`quads`](Self::quads); the mesher renders them
+    /// from this classification via [`bake_fluid`](lodestone_assets::fluid::bake_fluid).
+    #[must_use]
+    pub fn fluid(&self, state_id: u32) -> Option<FluidCell> {
+        self.fluids.get(state_id as usize).copied().flatten()
+    }
+
+    /// The still + flow sprite UVs for a fluid kind, into [`atlas`](Self::atlas).
+    #[must_use]
+    pub fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites {
+        match kind {
+            FluidKind::Water => self.water_sprites,
+            FluidKind::Lava => self.lava_sprites,
+        }
+    }
+}
+
+/// Resolve a fluid's still/flow sprite UV rects (first animation frame) from the
+/// stitched atlas. Falls back to a zero rect if the texture is missing, which
+/// bakes the fluid with a degenerate UV rather than aborting the world.
+fn resolve_fluid_sprites(atlas: &Atlas, kind: FluidKind) -> FluidSprites {
+    let [still_loc, flow_loc] = fluid_texture_locations(kind);
+    FluidSprites {
+        still: sprite_uv(atlas, &still_loc),
+        flow: sprite_uv(atlas, &flow_loc),
+    }
+}
+
+/// The first-frame UV rect of an atlas sprite as a [`SpriteUv`], or a zero rect
+/// when the sprite is absent.
+fn sprite_uv(atlas: &Atlas, loc: &ResourceLocation) -> SpriteUv {
+    atlas
+        .sprite(loc)
+        .and_then(|s| s.frame_uv(0, atlas.width, atlas.height))
+        .map_or(
+            SpriteUv {
+                min: [0.0, 0.0],
+                max: [0.0, 0.0],
+            },
+            |(min, max)| SpriteUv { min, max },
+        )
 }
 
 /// A sprite's UV rectangle plus its precomputed render layer, for mapping a baked
@@ -240,6 +396,13 @@ fn build_complete_atlas(
         // atlas packed, and a hard fault (below) aborts. Vanilla likewise renders
         // a missing texture rather than crashing.
         let _ = builder.load(manager, loc);
+    }
+    // Fluids have no blockstate model, so their textures are never collected
+    // above; add them explicitly so `bake_fluid`'s UVs resolve into this atlas.
+    for kind in [FluidKind::Water, FluidKind::Lava] {
+        for loc in fluid_texture_locations(kind) {
+            let _ = builder.load(manager, &loc);
+        }
     }
     builder.build()
 }
@@ -381,5 +544,59 @@ mod tests {
         assert!(!e.occludes);
         assert!(e.quads.is_empty());
         assert_eq!(e.layer, RenderLayer::Solid);
+    }
+
+    fn props(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn water_source_and_flowing_levels_classify() {
+        let source = classify_fluid("water", &props(&[("level", "0")])).expect("water is a fluid");
+        assert_eq!(source.kind, FluidKind::Water);
+        assert_eq!(source.state, FluidState::source());
+
+        // Flowing level 1 is nearly full (amount 7), level 7 nearly empty (amount 1).
+        assert_eq!(
+            classify_fluid("water", &props(&[("level", "1")]))
+                .unwrap()
+                .state,
+            FluidState::new(7, false)
+        );
+        assert_eq!(
+            classify_fluid("water", &props(&[("level", "7")]))
+                .unwrap()
+                .state,
+            FluidState::new(1, false)
+        );
+        // Falling variants (level >= 8) are full and falling.
+        assert_eq!(
+            classify_fluid("water", &props(&[("level", "8")]))
+                .unwrap()
+                .state,
+            FluidState::new(8, true)
+        );
+    }
+
+    #[test]
+    fn lava_classifies_as_lava() {
+        let lava = classify_fluid("lava", &props(&[("level", "0")])).expect("lava is a fluid");
+        assert_eq!(lava.kind, FluidKind::Lava);
+        assert_eq!(lava.state, FluidState::source());
+    }
+
+    #[test]
+    fn waterlogged_blocks_carry_a_water_source() {
+        let kelp = classify_fluid("kelp", &props(&[("waterlogged", "true")]))
+            .expect("a waterlogged block carries water");
+        assert_eq!(kelp.kind, FluidKind::Water);
+        assert_eq!(kelp.state, FluidState::source());
+
+        // A non-waterlogged, non-fluid block exposes no fluid.
+        assert!(classify_fluid("stone", &props(&[])).is_none());
+        assert!(classify_fluid("oak_stairs", &props(&[("waterlogged", "false")])).is_none());
     }
 }
