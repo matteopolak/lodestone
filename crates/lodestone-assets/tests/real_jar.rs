@@ -6,7 +6,8 @@
 
 use lodestone_assets::{
     Atlas, AtlasBuilder, BlockBaker, BlockStateDefinition, BlockStates, FirstWeight, IconPart,
-    ItemIconBuilder, ModelResolver, ResourceLocation, ResourceManager, TextureBinding, ZipSource,
+    ItemAtlas, ItemIconBuilder, ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
+    ZipSource,
 };
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 use std::collections::{BTreeMap, BTreeSet};
@@ -2335,4 +2336,63 @@ fn cross_version_asset_drift_census() {
          .cache/mc/<VER>/client.jar)"
     );
     assert_eq!(measured, 3, "expected exactly the three target versions");
+}
+
+/// Whole-corpus census of the flat item-sprite atlas built from the real jar.
+/// Reports how many of the ~1500 item definitions produce a drawable icon and
+/// how many flat sprites were stitched, naming any missing textures. A blank
+/// count would pass a "not empty" check, so this asserts named-failure counts.
+#[test]
+#[ignore = "requires client.jar"]
+fn item_atlas_whole_corpus_coverage() {
+    let manager = manager();
+    let (atlas, report) = ItemAtlas::build_reported(&manager).expect("build item atlas");
+
+    eprintln!("== item atlas whole-corpus coverage ==");
+    eprintln!(
+        "items={} drawable={} (sprite={} model={} special={}) sprites_stitched={}",
+        report.items,
+        report.drawable,
+        report.sprite_items,
+        report.model_items,
+        report.special_items,
+        report.sprites,
+    );
+    eprintln!("unresolved items ({}): {:?}", report.unresolved_items.len(), report.unresolved_items);
+    let mut missing = report.missing_textures.clone();
+    missing.sort();
+    eprintln!("missing flat sprites ({}): {:?}", missing.len(), missing);
+    let mut parked = report.missing_special_bases.clone();
+    parked.sort();
+    eprintln!("parked special bases ({}): {:?}", parked.len(), parked);
+
+    // Spot-check a flat item resolves and its sprite is present with a real UV.
+    let diamond = ResourceLocation::parse("minecraft:diamond").unwrap();
+    let icon = atlas.icon(&diamond).expect("diamond icon cached");
+    let sprite_loc = match &icon.parts[0] {
+        IconPart::Sprite { layers } => layers[0].sprite.clone(),
+        other => panic!("diamond should be a flat sprite, got {other:?}"),
+    };
+    let sprite = atlas.sprite(&sprite_loc).expect("diamond sprite stitched");
+    assert!(sprite.uv_max[0] > sprite.uv_min[0] && sprite.uv_max[1] > sprite.uv_min[1]);
+
+    // A block item (stone) is a Model part and is deliberately NOT in the flat
+    // atlas (its faces live in the block atlas the 3-D path samples).
+    let stone = ResourceLocation::parse("minecraft:stone").unwrap();
+    let stone_icon = atlas.icon(&stone).expect("stone icon cached");
+    assert!(matches!(stone_icon.parts[0], IconPart::Model { .. }));
+
+    // Correctness gate: every flat sprite an icon references must have stitched
+    // (no missing textures), and essentially every item must be drawable.
+    assert!(
+        report.missing_textures.is_empty(),
+        "flat item sprites must all stitch; missing: {missing:?}"
+    );
+    assert!(report.items > 1000, "expected the full item corpus");
+    assert!(
+        report.drawable * 100 >= report.items * 99,
+        "expected >=99% of items drawable ({}/{} )",
+        report.drawable,
+        report.items
+    );
 }
