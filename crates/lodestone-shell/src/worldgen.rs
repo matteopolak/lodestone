@@ -42,10 +42,10 @@ use std::sync::OnceLock;
 
 use lodestone_server::{OverworldGenerator, overworld_generator};
 use lodestone_world::{
-    ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
+    ChunkColumn, ChunkPos, Heightmaps, LoadedChunk, PaletteKind, World, compute_column_light,
 };
 
-use crate::blocks::id;
+use crate::blocks::{DemoLightProps, id};
 
 /// Fixed world seed. Chosen so the origin column is pleasant dry grassland
 /// (surface ≈ y70) rather than mid-ocean, which seed 42's origin happens to be.
@@ -148,9 +148,15 @@ pub fn generate_column(cx: i32, cz: i32) -> LoadedChunk {
         }
     }
 
-    // The shell has no server light for a local world; full sky light is a fine
-    // approximation and matches how meshing treats above-ground air.
-    let light = ColumnLight::new(SECTION_COUNT);
+    // Compute real column light from the demo palette's opacity/emission so the
+    // local world carries genuine sky-light gradients (caves and overhang cells
+    // go dark; open sky stays 15). This is isolated per column — exact on open
+    // terrain, and the honest, self-healing result at true chunk seams — and is
+    // what makes the light-aware mesher non-vacuous. Feeding an all-`Missing`
+    // `ColumnLight::new` here (the old behaviour) would leave every cell at the
+    // dimension default and render flat full-bright, indistinguishable from the
+    // retired `UniformLight` bridge.
+    let light = compute_column_light(&column, &DemoLightProps);
     let heightmaps = Heightmaps::new();
     LoadedChunk::new(column, light, heightmaps, Vec::new())
 }
