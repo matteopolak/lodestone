@@ -89,6 +89,18 @@ live-chat = [
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
+# Wires block placement / item use end to end through the real client against
+# the SURVIVAL oracle (:25565, RCON :25566): seed a block item, drive
+# `Placement::use_on` -> `ClientAction::UseItemOn` via `ClientHandle::send_action`,
+# then assert the server reports the placed block at the predicted position (read
+# over RCON on a force-loaded chunk — server truth, not our prediction). Also
+# gates a rejected placement rolling back and the sneak-vs-interact ordering.
+# `#[ignore]`d.
+live-place = [
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
 
 [dev-dependencies]
 serde_json = { workspace = true }

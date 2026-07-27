@@ -25,6 +25,10 @@
 //! * [`click`] — the full container click state machine, including the
 //!   multi-stage drag-distribute protocol.
 //! * [`reconcile`] — the optimistic predict-then-reconcile seam.
+//! * [`mining`] — block breaking, the dig state machine and item pickup.
+//! * [`placement`] — block placement / item use: the interaction-vs-placement
+//!   ordering, target resolution, geometry-derived block state, and its own
+//!   predict-then-reconcile seam.
 //! * [`recipe`] — shaped/shapeless/… recipes, tag resolution, and grid
 //!   matching. JSON loading of Mojang data lives in [`recipe_json`] behind the
 //!   `json` feature.
@@ -47,6 +51,7 @@ pub mod menu;
 pub mod menus;
 pub mod mining;
 pub mod player_state;
+pub mod placement;
 pub mod progress;
 pub mod recipe;
 #[cfg(feature = "json")]
