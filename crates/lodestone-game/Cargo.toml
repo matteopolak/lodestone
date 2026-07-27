@@ -66,6 +66,17 @@ live-inventory = [
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
+# Wires block breaking end to end through the real client against the SURVIVAL
+# oracle (:25565, RCON :25566): drive `ClientAction::BlockAction` start/stop via
+# `ClientHandle::send_action`, then assert the server reports the block as air
+# (read over RCON — server truth, not our prediction). Also gates the vanilla
+# break-*timing* (stone bare-handed vs a diamond pickaxe, and instant break on
+# START). `#[ignore]`d.
+live-mining = [
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
 
 [dev-dependencies]
 serde_json = { workspace = true }
@@ -80,6 +91,9 @@ lodestone-testsupport = { workspace = true }
 # tests, so it belongs here: dev-deps do not count toward the dependency cycle,
 # so `lodestone-client`/`lodestone-shell` can now depend on this crate cleanly.
 lodestone-client = { workspace = true }
+# Used only by the live oracle tests to surface the driver's internal tracing
+# (e.g. a fatal "adapter rejected packet" with its packet id) to stderr.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true
