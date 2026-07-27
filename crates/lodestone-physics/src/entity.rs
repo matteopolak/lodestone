@@ -44,6 +44,17 @@ use crate::profile::PhysicsProfile;
 /// attribute respectively — both keyed on entity *type*, not on game version. A
 /// caller supplies the concrete values for whatever it is moving; the player path
 /// supplies [`Self::PLAYER`], a mob supplies its own hitbox and step height.
+///
+/// **Sourcing (settled with `impl-entity`).** These three fields come from *two*
+/// different origins, and a caller must not collapse them into one table:
+/// * `width`/`height` are the entity type's **base** `EntityDimensions`. Any
+///   `SCALE`-attribute fold is applied by the caller *before* constructing this
+///   struct — the geometry table holds base dims, never scaled ones.
+/// * `step_height` is the **resolved** `STEP_HEIGHT` attribute value *after* the
+///   modifier fold (vanilla `Entity.maxUpStep()` = `(float) getAttributeValue(
+///   STEP_HEIGHT)`), not a static per-type constant. Populate it from the entity's
+///   attribute map at spawn so a step-height modifier is honoured; sourcing it
+///   from the static geometry census would silently disagree the moment one exists.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EntityDimensions {
     /// Standing bounding-box width (the box is `width` on both horizontal axes).
@@ -51,8 +62,11 @@ pub struct EntityDimensions {
     /// Standing bounding-box height.
     pub height: f32,
     /// Auto-step height — how far up a ledge the entity climbs without jumping.
-    /// Vanilla's `STEP_HEIGHT` attribute (`0.6` for a player, `1.0` for e.g. a
-    /// horse, `0.0` for most mobs).
+    /// The **resolved** `STEP_HEIGHT` attribute, narrowed to `f32` exactly as
+    /// vanilla's `maxUpStep()` `(float)` cast does. The `RangedAttribute` default
+    /// is `0.6` (so an ordinary mob steps like a player, not `0.0`); some types
+    /// raise it (a horse is `1.0`), and a modifier can shift it further — which is
+    /// why this is sourced from the attribute map, not a static table.
     pub step_height: f32,
 }
 
