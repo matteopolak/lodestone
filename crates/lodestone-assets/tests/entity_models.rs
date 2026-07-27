@@ -104,6 +104,12 @@ fn quad_counts_match_vanilla_box_counts() {
         ("squid", 9),        // body + 8 tentacles
         ("bat", 9),          // body, head, 2 ears, 2 wings, 2 tips, feet
         ("enderman", 7),     // head, hat, body, 2 arms, 2 legs
+        ("drowned", 7),      // zombie mesh, retextured left limbs
+        ("iron_golem", 8),   // head+nose, body+belt, 2 arms, 2 legs
+        ("snow_golem", 5),   // head, 2 arms, 2 stacked snow spheres
+        ("vex", 7),          // head, 2-box body, 2 arms, 2 wings
+        ("silverfish", 10),  // 7 segments + 3 raised plates
+        ("endermite", 4),    // 4 segments
     ];
     let models = entity_models();
     for (name, boxes) in expected {

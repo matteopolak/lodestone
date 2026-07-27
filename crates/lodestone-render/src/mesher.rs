@@ -196,6 +196,19 @@ pub struct SectionSnapshot {
 /// readable (and clippy quiet about the nested array type).
 type ViewGrid<'a, C, L> = [[[Option<ChunkSectionView<'a, C, L>>; 3]; 3]; 3];
 
+/// Per-section light for a 3×3×3 neighbourhood, indexed `[dx+1][dy+1][dz+1]` to
+/// match [`SectionSnapshot`]'s section grid.
+///
+/// Each present section is lit by *its own* source — real light is per-section
+/// and the smooth-lighting corner blend reads *neighbours'* light across seams,
+/// so one shared source cannot express it. A `None` slot means that section
+/// contributes no light and is dropped from meshing (it then reads as
+/// [`Cell::EMPTY`](crate::section::Cell) at seams); callers must therefore supply
+/// a light entry for every section they want meshed. For the pre-light bridge
+/// every slot points at one [`UniformLight`]; for real light every present
+/// section carries its own [`WorldSectionLight`](crate::world::WorldSectionLight).
+pub type LightGrid<'a, L> = [[[Option<&'a L>; 3]; 3]; 3];
+
 impl SectionSnapshot {
     /// Build a snapshot directly from a filled `[dx+1][dy+1][dz+1]` grid.
     #[must_use]
@@ -234,24 +247,36 @@ impl SectionSnapshot {
 
     /// Mesh the centre section against its neighbours.
     ///
-    /// `light` supplies per-cell light; today that is [`UniformLight`] (see the
-    /// module docs), but the signature takes any [`SectionLight`] so real light
-    /// drops in unchanged. `greedy` selects the merging mesher over the
-    /// reference per-face one.
+    /// `lights` supplies light **per section**, indexed the same way as the
+    /// snapshot's grid: slot `[dx+1][dy+1][dz+1]` lights the section at offset
+    /// `(dx,dy,dz)` with its own source, so the smooth-lighting corner blend
+    /// reads each neighbour's real light across seams. Today the live caller
+    /// fills every slot with one [`UniformLight::pre_light_bridge`] (see the
+    /// module docs); the signature takes any [`SectionLight`] per slot, so real
+    /// per-section light (each present section a
+    /// [`WorldSectionLight`](crate::world::WorldSectionLight)) drops in without
+    /// touching the mesher. A present section whose light slot is `None` is
+    /// dropped from meshing — callers must light every section they mesh.
+    /// `greedy` selects the merging mesher over the reference per-face one.
     #[must_use]
     pub fn build_mesh<C: BlockClassifier, L: SectionLight>(
         &self,
         classifier: &C,
-        light: &L,
+        lights: &LightGrid<'_, L>,
         greedy: bool,
     ) -> Mesh {
-        // Views borrow into the held `Arc`s; both live for this call.
+        // Views borrow into the held `Arc`s and the per-section light; all live
+        // for this call. A section is meshed only when it has *both* geometry and
+        // a light source for its slot.
         let views: ViewGrid<'_, C, L> = core::array::from_fn(|ix| {
             core::array::from_fn(|iy| {
                 core::array::from_fn(|iz| {
-                    self.sections[ix][iy][iz]
-                        .as_ref()
-                        .map(|arc| ChunkSectionView::new(arc.as_ref(), classifier, light))
+                    match (self.sections[ix][iy][iz].as_ref(), lights[ix][iy][iz]) {
+                        (Some(arc), Some(light)) => {
+                            Some(ChunkSectionView::new(arc.as_ref(), classifier, light))
+                        }
+                        _ => None,
+                    }
                 })
             })
         });
@@ -339,15 +364,19 @@ pub fn build_batch<C: BlockClassifier + Sync>(
     greedy: bool,
 ) -> Vec<BuiltSection> {
     // PRE-LIGHT BRIDGE — not real light. Named (rather than `default()`) so this
-    // masquerade is unmistakable on a read of the meshing path. When real light
-    // lands it enters per-section via each `MeshJob` snapshot, replacing this one
-    // shared source; the canary test `pre_light_bridge_is_the_declared_full_bright_source`
-    // guards the swap.
-    let light = UniformLight::pre_light_bridge();
+    // masquerade is unmistakable on a read of the meshing path. Every
+    // neighbourhood slot is lit by this one full-bright source until real light
+    // is wired; when it lands, each present section instead carries its own
+    // `WorldSectionLight` (from the driver's `section_light` snapshot) in the
+    // per-section grid, and the canary test
+    // `pre_light_bridge_is_the_declared_full_bright_source` guards the swap.
+    let bridge = UniformLight::pre_light_bridge();
+    let lights: LightGrid<'_, UniformLight> =
+        core::array::from_fn(|_| core::array::from_fn(|_| core::array::from_fn(|_| Some(&bridge))));
     let build = |job: MeshJob| BuiltSection {
         coord: job.coord,
-        mesh: job.snapshot.build_mesh(classifier, &light, greedy),
-        visibility: job.snapshot.centre_visibility(classifier, &light),
+        mesh: job.snapshot.build_mesh(classifier, &lights, greedy),
+        visibility: job.snapshot.centre_visibility(classifier, &bridge),
     };
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -393,6 +422,79 @@ mod tests {
             (d.sky_light(0, 0, 0), d.block_light(0, 0, 0)),
             (bridge.sky_light(0, 0, 0), bridge.block_light(0, 0, 0)),
             "default() delegates to the named bridge (one source of truth)"
+        );
+    }
+
+    /// Anti-vacuity: proves per-section light actually reaches the vertices, via
+    /// real `lodestone-world` snapshots through [`WorldSectionLight`]. The centre
+    /// section is stored *dim* (sky 4) while every neighbour is full-bright, so
+    /// the centre's top face — which samples the air directly above it, in the
+    /// centre section — must carry sky 4 where the uniform bridge carries 15.
+    ///
+    /// The old single-shared-light signature structurally could not express a
+    /// centre that differs from its neighbours; this is the test that would have
+    /// stayed green against the bridge and so is the one that guards the swap.
+    #[test]
+    fn build_mesh_lights_each_section_from_its_own_source() {
+        use crate::world::{SkyDefault, WorldSectionLight};
+        use lodestone_world::{LightData, SectionLight as WorldLight};
+
+        let centre = floor_section();
+        let air = air_section();
+        let grid: [[[Option<Arc<ChunkSection>>; 3]; 3]; 3] = core::array::from_fn(|ix| {
+            core::array::from_fn(|iy| {
+                core::array::from_fn(|iz| {
+                    if (ix, iy, iz) == (1, 1, 1) {
+                        Some(centre.clone())
+                    } else {
+                        Some(air.clone())
+                    }
+                })
+            })
+        });
+        let snap = SectionSnapshot::from_grid(grid);
+
+        // Centre stored dim; neighbours full-bright — a per-section distinction a
+        // single shared light source cannot represent.
+        let dim = WorldLight {
+            sky: LightData::Uniform(4),
+            block: LightData::Uniform(0),
+        };
+        let bright = WorldLight {
+            sky: LightData::Uniform(15),
+            block: LightData::Uniform(0),
+        };
+        let dim_light = WorldSectionLight::new(&dim, SkyDefault::None);
+        let bright_light = WorldSectionLight::new(&bright, SkyDefault::None);
+        let per_section: LightGrid<'_, WorldSectionLight> = core::array::from_fn(|ix| {
+            core::array::from_fn(|iy| {
+                core::array::from_fn(|iz| {
+                    Some(if (ix, iy, iz) == (1, 1, 1) {
+                        &dim_light
+                    } else {
+                        &bright_light
+                    })
+                })
+            })
+        });
+
+        // The live default: one full-bright bridge for every slot.
+        let bridge = UniformLight::pre_light_bridge();
+        let uniform: LightGrid<'_, UniformLight> = core::array::from_fn(|_| {
+            core::array::from_fn(|_| core::array::from_fn(|_| Some(&bridge)))
+        });
+
+        let per = snap.build_mesh(&SimpleClassifier, &per_section, true);
+        let flat = snap.build_mesh(&SimpleClassifier, &uniform, true);
+
+        assert_eq!(
+            per.quad_count(),
+            flat.quad_count(),
+            "identical geometry — only the lighting differs"
+        );
+        assert_ne!(
+            per.vertices, flat.vertices,
+            "per-section light must change the vertex lighting the bridge cannot"
         );
     }
 
