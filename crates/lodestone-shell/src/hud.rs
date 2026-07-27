@@ -1069,7 +1069,11 @@ mod tests {
         };
         let frame = HudFrame {
             sidebar: Some(&side),
-            ..base
+            ..HudFrame {
+                crosshair: false,
+                show_debug: false,
+                ..HudFrame::new(&stats)
+            }
         };
         let with = HudGeometry::build(&frame, 640, 480);
         assert!(
@@ -1095,7 +1099,11 @@ mod tests {
         };
         let frame_scoreless = HudFrame {
             sidebar: Some(&scoreless),
-            ..base
+            ..HudFrame {
+                crosshair: false,
+                show_debug: false,
+                ..HudFrame::new(&stats)
+            }
         };
         let without_scores = HudGeometry::build(&frame_scoreless, 640, 480).vertex_count();
         assert!(
@@ -1122,7 +1130,11 @@ mod tests {
         }];
         let frame_full = HudFrame {
             boss_bars: &full,
-            ..base
+            ..HudFrame {
+                crosshair: false,
+                show_debug: false,
+                ..HudFrame::new(&stats)
+            }
         };
         let with_full = HudGeometry::build(&frame_full, 640, 480);
         assert!(
@@ -1140,7 +1152,11 @@ mod tests {
         }];
         let frame_empty = HudFrame {
             boss_bars: &empty,
-            ..base
+            ..HudFrame {
+                crosshair: false,
+                show_debug: false,
+                ..HudFrame::new(&stats)
+            }
         };
         let with_empty = HudGeometry::build(&frame_empty, 640, 480);
         assert_ne!(
