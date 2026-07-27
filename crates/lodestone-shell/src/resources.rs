@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-use lodestone_render::{BlockAtlas, GuiAtlas, blocks_json_registry};
+use lodestone_render::{BlockAtlas, BlockModels, GuiAtlas, blocks_json_registry};
 
 use crate::blocks::{DemoClassifier, ShellClassifier};
 
@@ -91,8 +91,14 @@ impl BlockResources {
         let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
         let registry =
             blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?;
-        BlockAtlas::build(&manager, &registry)
-            .map_err(|e| format!("build atlas from {}: {e}", root.display()))
+        let atlas = BlockAtlas::build(&manager, &registry)
+            .map_err(|e| format!("build atlas from {}: {e}", root.display()))?;
+        // Bake the per-state model geometry (cross-plants, slabs, stairs,
+        // translucency) against the same registry and attach it, so the model
+        // render path resolves state ids to real quads instead of full cubes.
+        let models = BlockModels::build(&manager, &registry)
+            .map_err(|e| format!("build models from {}: {e}", root.display()))?;
+        Ok(atlas.with_models(models))
     }
 }
 
