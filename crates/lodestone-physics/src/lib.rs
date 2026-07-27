@@ -16,8 +16,9 @@
 //!   [`collision::CollisionView`] trait (so physics stays decoupled from the
 //!   world crate and testable against synthetic worlds).
 //! * [`profile`] — [`profile::PhysicsProfile`], the version-parameterised knobs.
-//! * [`entity`] — the entity-agnostic move core ([`entity::move_entity`]) shared
-//!   by players and mobs, parameterised by [`entity::EntityDimensions`].
+//! * [`entity`] — the entity-agnostic move core ([`entity::move_entity`]) and the
+//!   gravity + drag + input-assembly seam ([`entity::travel_in_air`]), both shared
+//!   by players and mobs and parameterised by [`entity::EntityDimensions`].
 //! * [`player`] — the per-tick player movement pipeline (a thin caller of the
 //!   entity core).
 //!
@@ -37,7 +38,9 @@ pub mod profile;
 
 pub use collision::CollisionView;
 pub use effect::{DirectEffect, MovementEffect, classify, movement_speed_modifier};
-pub use entity::{EntityDimensions, EntityMotion, MoveContext, move_entity};
+pub use entity::{
+    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
+};
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
