@@ -233,7 +233,12 @@ impl Sim {
             interp_alpha: 0.0,
             tick_count: 0,
             frame_count: 0,
-            fly: false,
+            // Live sessions default to free-fly: the shell has no collision
+            // geometry for the live server world yet (physics collide against the
+            // demo world, which does not extend to a far spawn), so physics-walk
+            // there would fall through. Free-fly keeps the synced camera parked on
+            // the server's spawn so the streamed world is viewable and navigable.
+            fly: render_live,
             pending_removals: Vec::new(),
             vanilla_atlas: resources.vanilla_atlas,
             asset_banner: resources.banner,
@@ -275,6 +280,14 @@ impl Sim {
         self.net = Some(net);
         self.status = "connecting…".into();
         self.phase = SessionPhase::Connecting;
+    }
+
+    /// The live connection, when one is attached. Lets a harness read the
+    /// client-owned world (`loaded_chunks`, `sections_and_light_at`,
+    /// `world_dimensions`) to check the shell's live mesh against ground truth.
+    #[must_use]
+    pub fn net(&self) -> Option<&NetClient> {
+        self.net.as_ref()
     }
 
     /// The coarse session phase, for the menu state machine.
@@ -852,6 +865,52 @@ impl Sim {
                     // (+ `world_dimensions` for geometry). `mark_column_dirty`
                     // meshes live columns through the vanilla classifier.
                     self.mark_column_dirty(x, z);
+                }
+                NetUpdate::Teleport {
+                    pos,
+                    rotation,
+                    flags,
+                } => {
+                    // Adopt the server's authoritative placement. The shell runs
+                    // its own physics and streams an optimistic position every
+                    // tick from the demo spawn; on a server whose spawn is far
+                    // from the origin the server ignores that bogus claim and
+                    // keeps us at the real spawn, streaming chunks there. Snap the
+                    // camera onto it (resolving any relative components against the
+                    // current pose) so it sits where the world actually is instead
+                    // of stranded over the unmeshed demo platform. `prev_position`
+                    // is moved with it so the frame interpolator does not smear the
+                    // camera across the teleport.
+                    let base = self.player.position;
+                    self.player.position = Vec3d::new(
+                        if flags.relative_x {
+                            base.x + pos.x
+                        } else {
+                            pos.x
+                        },
+                        if flags.relative_y {
+                            base.y + pos.y
+                        } else {
+                            pos.y
+                        },
+                        if flags.relative_z {
+                            base.z + pos.z
+                        } else {
+                            pos.z
+                        },
+                    );
+                    self.player.yaw = if flags.relative_yaw {
+                        self.player.yaw + rotation.yaw
+                    } else {
+                        rotation.yaw
+                    };
+                    self.player.pitch = if flags.relative_pitch {
+                        self.player.pitch + rotation.pitch
+                    } else {
+                        rotation.pitch
+                    };
+                    self.player.velocity = Vec3d::ZERO;
+                    self.prev_position = self.player.position;
                 }
                 NetUpdate::Chat { text, player } => {
                     tracing::info!(target: "chat", "{}", text.to_legacy_string());

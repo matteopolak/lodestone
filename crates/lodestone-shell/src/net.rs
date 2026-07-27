@@ -99,7 +99,7 @@ use std::time::Duration;
 
 use lodestone_client::{
     ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
-    LoginProfile, OpenMenuSnapshot, PlayerListEntry, SectionLight, ServerAddress, Vec3,
+    LoginProfile, OpenMenuSnapshot, PlayerListEntry, Rotation, SectionLight, ServerAddress, Vec3,
     WorldDimensions,
 };
 use lodestone_game::menu::Menu;
@@ -248,6 +248,24 @@ pub enum NetUpdate {
     Disconnected(String),
     /// A transport or setup error.
     Error(String),
+    /// The server placed or relocated the player (`TeleportPlayer`): the
+    /// authoritative position/rotation the shell's camera must adopt. The shell
+    /// runs its own physics and streams an optimistic position every tick, so on
+    /// a server whose spawn is far from the origin the first thing that reaches
+    /// the wire is a bogus "I'm at my demo spawn" claim; the server ignores it and
+    /// keeps us at the real spawn, streaming chunks *there*. Without consuming this
+    /// event the camera is stranded at the demo spawn while the world renders
+    /// hundreds of blocks away — the "standing on invisible blocks" bug. `flags`
+    /// marks any component that is a *delta* from the current pose rather than
+    /// absolute; the shell resolves them against its own camera state.
+    Teleport {
+        /// Target position, or per-axis delta where `flags` marks it relative.
+        pos: Vec3,
+        /// Target rotation, or per-component delta where `flags` marks it relative.
+        rotation: Rotation,
+        /// Which components of `pos`/`rotation` are relative to the current pose.
+        flags: lodestone_model::event::TeleportFlags,
+    },
 }
 
 /// A live client running on a background thread. Drop to request shutdown.
@@ -684,8 +702,20 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         // event to also carry `column`; we deliberately do not consume it, both
         // to honour the ruling and to stay robust if that field is reverted.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
-        // Everything else (keep-alive, entities, time, teleport, player list,
-        // chunk unloads) isn't needed by the shell yet.
+        // The server placing/relocating the player. The shell camera must adopt
+        // this authoritative pose — the read-model's own `position()` is an
+        // optimistic echo of our outbound moves, so it cannot substitute here.
+        ClientEvent::TeleportPlayer {
+            pos,
+            rotation,
+            flags,
+        } => NetUpdate::Teleport {
+            pos,
+            rotation,
+            flags,
+        },
+        // Everything else (keep-alive, entities, time, player list, chunk
+        // unloads) isn't needed by the shell yet.
         _ => return Ok(()),
     };
     tx.send(update).map_err(|_| ())
