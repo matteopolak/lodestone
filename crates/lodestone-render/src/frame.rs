@@ -337,7 +337,7 @@ mod tests {
         // (banned pattern, files where it is permitted)
         let rules: [(&str, &[&str]); 4] = [
             (instant_now.as_str(), &["frame_native.rs"]),
-            (fs_call.as_str(), &[]),
+            (fs_call.as_str(), &["blocks_json_native.rs"]),
             (thread_spawn.as_str(), &[]),
             (tokio_time.as_str(), &[]),
         ];
