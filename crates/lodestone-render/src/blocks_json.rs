@@ -13,7 +13,6 @@
 //! [`BlockAtlas::state_id_of`]: crate::BlockAtlas::state_id_of
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 
@@ -110,18 +109,13 @@ impl BlocksJsonRegistry {
     }
 }
 
-/// Loads a [`BlocksJsonRegistry`] from a `blocks.json` file on disk.
-///
-/// # Errors
-/// Returns [`BlocksJsonError::Read`] if the file cannot be read, or a parse
-/// error from [`BlocksJsonRegistry::from_slice`].
-pub fn blocks_json_registry(path: &Path) -> Result<BlocksJsonRegistry, BlocksJsonError> {
-    let bytes = std::fs::read(path).map_err(|source| BlocksJsonError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    BlocksJsonRegistry::from_slice(&bytes)
-}
+/// Native-only disk loader, confined to its own wholly-gated file so `std::fs`
+/// cannot leak onto the wasm path. Re-exported below on non-wasm targets.
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "blocks_json_native.rs"]
+mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::blocks_json_registry;
 
 impl BlockStateRegistry for BlocksJsonRegistry {
     fn resolve(&self, id: u32) -> Option<ResolvedBlockState<'_>> {

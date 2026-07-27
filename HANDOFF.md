@@ -727,3 +727,43 @@ Surfaces proven to pixels so far, with their evidence:
 | tab list | 1380 bright px | 552 (panel draws) | — |
 | scoreboard | 7216 px | 0 | — |
 | container (chest) | 23271 px in rect | 0 | 0 |
+
+## Addendum — THE BIGGEST ISLAND: live server terrain never renders
+
+**Read this before believing any screenshot.** When the client is run with `--window --live`,
+the terrain on screen is the **locally generated demo world**, not the server's. The live
+connection streams events (entities, chat, health, sounds) correctly and independently, but
+**the server's chunks are never meshed**.
+
+Two independent causes, and the second is the real one:
+
+1. `Sim::mark_column_dirty` early-returns for live columns; the meshing pipeline reads
+   `self.world`, which is the singleplayer worldgen world.
+2. **The shell meshes with `DemoClassifier`, whose palette is block ids `0..=9`**
+   (`AIR`, `STONE`, `DIRT`, `GRASS`, `SAND`, `WATER`, `LOG`, …). A live 26.2 server streams
+   *vanilla* block-state ids in the tens of thousands. `block(id)` returns `None` for all of
+   them, which `DemoClassifier::classify` maps to a **non-occluding, surface-less cell** —
+   i.e. air. Meshing live chunks through it renders **near-nothing**.
+
+**The trap, and it is a serious one:** wiring live meshing *without* first swapping the
+classifier produces a pipeline that runs, produces no geometry, and **passes a lighting gate
+vacuously** — an empty world is trivially "not full-bright". Any gate over live terrain must
+therefore first assert *non-trivial geometry exists* (quad count, coverage) before asserting
+anything about its lighting.
+
+**Correct order:** vanilla `state_id → sprite` classifier first (`impl-render`'s
+`blocks_json_registry` + `BlockAtlas`, both landed and ready — see Island 2), then the
+`mark_column_dirty` live rewrite. Lighting then rides along for free, because the light read
+(`sections_and_light_at`) and column geometry (`world_dimensions`) are already wired.
+
+**What is genuinely done:** singleplayer terrain is meshed *and correctly lit* as of `3870ae1`,
+gated by `shadowed_meshes_darker_than_open_sky_and_the_bridge_cannot_tell` — a test whose
+full-bright control renders shadowed and open cells identically at 255 and therefore fails.
+That is real, verified lighting; it just currently applies to the generated world only.
+
+### Correction to an earlier belief in this document
+
+An earlier framing held that "multiplayer renders full-bright terrain". **That was wrong** —
+MP terrain does not mesh at all. The distinction matters: "lit incorrectly" suggests a
+lighting fix, while "not meshed" points at the classifier. Chasing the former would have
+produced a vacuous green.
