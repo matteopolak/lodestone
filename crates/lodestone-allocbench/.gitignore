@@ -1,3 +1,5 @@
 /bin/
 /*.csv
 /.time.err
+/target/
+/target-*/

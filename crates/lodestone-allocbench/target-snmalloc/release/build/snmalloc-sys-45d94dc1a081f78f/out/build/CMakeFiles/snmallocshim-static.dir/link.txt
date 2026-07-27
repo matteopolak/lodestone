@@ -1,2 +1,0 @@
-/usr/bin/ar qc libsnmallocshim-static.a "CMakeFiles/snmallocshim-static.dir/src/snmalloc/override/malloc.cc.o" "CMakeFiles/snmallocshim-static.dir/src/snmalloc/override/new.cc.o"
-/opt/homebrew/opt/llvm/bin/llvm-ranlib libsnmallocshim-static.a

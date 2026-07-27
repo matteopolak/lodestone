@@ -57,7 +57,7 @@ fn build_section(rng: &mut Rng, distinct: usize) -> ChunkSection {
     let mut values = vec![0u32; 4096];
     for (i, v) in values.iter_mut().enumerate() {
         // ~20% air so non_air_count is realistic; the rest cycle the palette.
-        *v = if rng.next() % 5 == 0 {
+        *v = if rng.next().is_multiple_of(5) {
             AIR_ID
         } else {
             1 + (i as u32 % distinct as u32)

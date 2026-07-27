@@ -1,1 +1,0 @@
-/opt/homebrew/opt/llvm/bin/clang++  -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w -O3 -DNDEBUG -arch arm64 -dynamiclib -Wl,-headerpad_max_install_names -static-libstdc++ -o libsnmalloc-minimal.dylib -install_name @rpath/libsnmalloc-minimal.dylib "CMakeFiles/snmalloc-minimal.dir/src/snmalloc/override/malloc.cc.o"
