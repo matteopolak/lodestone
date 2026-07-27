@@ -352,7 +352,7 @@ impl EquipmentSlot {
 }
 
 /// One entity equipment slot update.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityEquipment {
     /// Updated equipment slot.
     pub slot: EquipmentSlot,

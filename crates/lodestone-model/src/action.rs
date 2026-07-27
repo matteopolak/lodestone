@@ -578,7 +578,7 @@ pub enum ContainerClickType {
 }
 
 /// One predicted slot update included with a container click.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerSlotChange {
     /// Menu slot index.
     pub slot: i32,
