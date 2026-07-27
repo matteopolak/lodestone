@@ -13,10 +13,10 @@
 //! This implements the minimum sequence needed for a client to reach
 //! [`State::Play`] and receive a rendered view: handshake, login, the
 //! (empty) configuration phase, the play join sequence (join game, default
-//! spawn, initial teleport, chunk-cache center), and
-//! `level_chunk_with_light` for every column in the initial view. It does
-//! not yet cover keep-alives, entity spawn/move, time, or health — those are
-//! follow-up work once the join+chunk path is proven (see the crate's
+//! spawn, initial teleport, chunk-cache center), `level_chunk_with_light`
+//! for every column in the initial view, a post-join welcome chat, and
+//! entity spawn/update/remove for the mob simulation. It does not yet cover
+//! keep-alives or time — those are follow-up work (see the crate's
 //! `tests/server_integration.rs`).
 //!
 //! # Why hand-written encoding is correct, not just convenient
@@ -32,18 +32,20 @@
 //! [`V770Adapter`]'s own decode logic for those same packets, which is the
 //! best available specification for their wire layout.
 
-use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
+use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
 use lodestone_server::{
-    ChunkColumn as ServerChunkColumn, ServerBound, ServerDirective, ServerProtocol,
+    ChunkColumn as ServerChunkColumn, EntitySnapshot, ServerBound, ServerDirective, ServerProtocol,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
 
 use crate::block_states::block_name;
+use crate::entity_types::entity_type_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::configuration::FinishConfiguration;
-use crate::packets::game::{GameLogin, GlobalPos, SetDefaultSpawnPosition};
+use crate::packets::entity::{pack_degrees, write_lp_vec3};
+use crate::packets::game::{GameLogin, GlobalPos, SetDefaultSpawnPosition, SetHealth};
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
 
@@ -139,6 +141,96 @@ fn encode_chunk_cache_center(cx: i32, cz: i32) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(cx);
     w.var_i32(cz);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `system_chat` packet, which has no
+/// existing struct because it is currently only ever *decoded* (see
+/// `V770Adapter::handle_play`'s `SYSTEM_CHAT` arm). Wire layout (mirrors the
+/// decode side exactly): a network-form NBT text component (root tag id +
+/// payload, no root name — vanilla's `ComponentSerialization.TRUSTED_STREAM_CODEC`),
+/// then a big-endian `bool` overlay flag (`false` selects normal chat history,
+/// `true` the action-bar overlay).
+fn encode_system_chat(message: &str, overlay: bool) -> Vec<u8> {
+    let component = Nbt::Compound(vec![("text".to_owned(), Nbt::String(message.to_owned()))]);
+    let mut w = Writer::default();
+    write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
+    w.bool(overlay);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `add_entity` packet, which has no
+/// existing struct because it is currently only ever *decoded* (see
+/// `V770Adapter::handle_add_entity`, the exact mirror of this wire layout).
+///
+/// Wire layout: VarInt id, UUID, VarInt entity-type id, position `f64`×3,
+/// low-precision velocity ([`write_lp_vec3`]), then three signed-byte angles
+/// in **pitch, yaw, head_yaw** order (note: this order is reversed from
+/// `move_entity`'s yaw-then-pitch), then a trailing VarInt `data` field
+/// (vanilla sends `0` for ordinary mobs).
+///
+/// An `entity_type` with no match in this version's registry (a typo, or a
+/// key from a version this table doesn't cover) falls back to network id `0`
+/// rather than failing the whole spawn — a wrong model is recoverable, a
+/// dropped connection is not.
+fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
+    let type_id = entity_type_id(&entity.entity_type.to_string()).unwrap_or(0);
+    let mut w = Writer::default();
+    w.var_i32(entity.id);
+    w.uuid(entity.uuid);
+    w.var_i32(type_id);
+    w.f64(entity.position.x);
+    w.f64(entity.position.y);
+    w.f64(entity.position.z);
+    write_lp_vec3(
+        &mut w,
+        entity.velocity.x,
+        entity.velocity.y,
+        entity.velocity.z,
+    );
+    w.i8(pack_degrees(entity.rotation.pitch));
+    w.i8(pack_degrees(entity.rotation.yaw));
+    w.i8(pack_degrees(entity.head_yaw));
+    w.var_i32(0);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `teleport_entity` packet (the
+/// entity-position analogue of [`encode_player_position_teleport`]), which has
+/// no existing struct because it is currently only ever *decoded* (see
+/// `V770Adapter::handle_entity_position`).
+///
+/// Wire layout: VarInt id, position `f64`×3, delta-movement `f64`×3 (zero —
+/// an absolute update carries no velocity here; velocity travels separately
+/// via `set_entity_motion`), yaw/pitch as **`f32`** (unlike `add_entity`'s
+/// signed-byte angles), a trailing big-endian `i32` relative-flags bit set
+/// (`0` — every field is absolute), then a `bool` on-ground flag. All mobs
+/// the sim currently spawns are land-walkers (`MobShape::land`), so on-ground
+/// is hardcoded `true`; `EntitySnapshot` carries no on-ground field yet to
+/// derive this from.
+fn encode_teleport_entity(entity: &EntitySnapshot) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(entity.id);
+    w.f64(entity.position.x);
+    w.f64(entity.position.y);
+    w.f64(entity.position.z);
+    w.f64(0.0);
+    w.f64(0.0);
+    w.f64(0.0);
+    w.f32(entity.rotation.yaw);
+    w.f32(entity.rotation.pitch);
+    w.i32(0);
+    w.bool(true);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `rotate_head` packet: VarInt id
+/// then one signed-byte angle ([`pack_degrees`]), the exact mirror of the
+/// inline `ROTATE_HEAD` decode arm in `V770Adapter::handle_play`.
+fn encode_rotate_head(entity_id: i32, head_yaw: f32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.var_i32(entity_id);
+    w.i8(pack_degrees(head_yaw));
     w.into_vec()
 }
 
@@ -388,6 +480,18 @@ impl ServerProtocol for V770ServerProtocol {
                 packet_id: play::clientbound::SET_CHUNK_CACHE_CENTER,
                 payload: cache_center_payload,
             },
+            // Vanilla fresh-spawn defaults. Without this the client's
+            // `PlayerSnapshot::health` stays `None` (never having received a
+            // `SetHealth`), which a HUD would show as absent/dead rather than
+            // full health.
+            send(
+                play::clientbound::SET_HEALTH,
+                &SetHealth {
+                    health: 20.0,
+                    food: 20,
+                    saturation: 5.0,
+                },
+            ),
         ]
     }
 
@@ -414,5 +518,57 @@ impl ServerProtocol for V770ServerProtocol {
             play::clientbound::CHUNK_BATCH_FINISHED,
             &ChunkBatchFinished { batch_size },
         )
+    }
+
+    fn welcome_message(&self) -> Vec<ServerDirective> {
+        vec![ServerDirective::Send {
+            packet_id: play::clientbound::SYSTEM_CHAT,
+            payload: encode_system_chat("Welcome to Lodestone", false),
+        }]
+    }
+
+    fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::ADD_ENTITY,
+            payload: encode_add_entity_body(entity),
+        }
+    }
+
+    fn encode_entity_update(
+        &self,
+        _prev: Option<&EntitySnapshot>,
+        current: &EntitySnapshot,
+    ) -> Vec<ServerDirective> {
+        // MVP: always send an absolute position/rotation update rather than
+        // computing a relative delta. `V770ServerProtocol` is a zero-sized,
+        // stateless unit struct shared (via `Arc`) across every connection
+        // (see `IntegratedServer::bind`), so it cannot safely hold per-entity
+        // "last-sent" state itself — and vanilla's own `TELEPORT_ENTITY`
+        // decodes into the exact same `ClientEvent::EntityMoved` a relative
+        // move packet would produce, so this is 100% wire-valid, just not
+        // bandwidth-optimal. `_prev` is accepted (unused for now) so a future
+        // delta-encoding pass can use it without another signature change.
+        vec![
+            ServerDirective::Send {
+                packet_id: play::clientbound::TELEPORT_ENTITY,
+                payload: encode_teleport_entity(current),
+            },
+            ServerDirective::Send {
+                packet_id: play::clientbound::ROTATE_HEAD,
+                payload: encode_rotate_head(current.id, current.head_yaw),
+            },
+        ]
+    }
+
+    fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(ids.len() as i32);
+        for &id in ids {
+            w.var_i32(id);
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::REMOVE_ENTITIES,
+            payload: w.into_vec(),
+        }
     }
 }

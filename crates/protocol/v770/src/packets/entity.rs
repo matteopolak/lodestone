@@ -2,20 +2,24 @@
 //!
 //! The entity packets themselves are decoded inline in [`crate::adapter`] (they
 //! lift straight into canonical [`lodestone_model::ClientEvent`]s), but two
-//! encodings are subtle enough to isolate and unit-test here:
+//! codecs are subtle enough to isolate and unit-test here, each with both a
+//! decode and an encode side (the latter for `server_protocol`'s entity
+//! encoders):
 //!
-//! * **Low-precision velocity ([`read_lp_vec3`]).** 26.2 replaced the old
-//!   three-`i16` movement encoding with a packed variable-length one (see
-//!   `net.minecraft.network.LpVec3`): a leading byte of `0` means the zero
-//!   vector, otherwise a byte + byte + big-endian `u32` pack three 15-bit
-//!   quantised components plus a 2-bit scale, with an optional trailing varint
-//!   carrying the high bits of a larger scale. Getting the bit layout wrong
-//!   misaligns every following field, so this is exactly the kind of codec the
-//!   project pins with independently computed known-answer vectors.
-//! * **Angle bytes ([`unpack_degrees`]).** Rotations travel as a signed byte
-//!   where the full circle is 256 steps (`Mth.unpackDegrees`).
+//! * **Low-precision velocity ([`read_lp_vec3`]/[`write_lp_vec3`]).** 26.2
+//!   replaced the old three-`i16` movement encoding with a packed
+//!   variable-length one (see `net.minecraft.network.LpVec3`): a leading byte
+//!   of `0` means the zero vector, otherwise a byte + byte + big-endian `u32`
+//!   pack three 15-bit quantised components plus a 2-bit scale, with an
+//!   optional trailing varint carrying the high bits of a larger scale.
+//!   Getting the bit layout wrong misaligns every following field, so this is
+//!   exactly the kind of codec the project pins with independently computed
+//!   known-answer vectors.
+//! * **Angle bytes ([`unpack_degrees`]/[`pack_degrees`]).** Rotations travel
+//!   as a signed byte where the full circle is 256 steps (`Mth.unpackDegrees`/
+//!   `Mth.packDegrees`).
 
-use lodestone_core::{Reader, Result};
+use lodestone_core::{Reader, Result, Writer};
 
 /// Reads a low-precision velocity vector, returning `(x, y, z)` in blocks/tick.
 ///
@@ -62,45 +66,51 @@ pub fn unpack_degrees(packed: i8) -> f32 {
     f32::from(packed) * 360.0 / 256.0
 }
 
+/// Converts a degree angle to vanilla's signed-byte wire form, the exact
+/// inverse of [`unpack_degrees`] (`Mth.packDegrees`): the full circle is 256
+/// steps, and the result wraps modulo 360° the same way the byte itself does.
+#[must_use]
+pub fn pack_degrees(degrees: f32) -> i8 {
+    ((degrees * 256.0 / 360.0).round() as i32 & 0xFF) as u8 as i8
+}
+
+/// Writes a low-precision velocity vector, the encode-side mirror of
+/// [`read_lp_vec3`] (`LpVec3.write`): a single `0` byte for the (near-)zero
+/// vector, otherwise a packed 48-bit buffer (two bytes plus a big-endian
+/// `u32`) carrying three 15-bit quantised components and a 2-bit scale, with
+/// a trailing scale varint when the scale overflows those two bits.
+pub fn write_lp_vec3(w: &mut Writer, x: f64, y: f64, z: f64) {
+    let chess = x.abs().max(y.abs()).max(z.abs());
+    if chess < 3.051_944_088_384_301E-5 {
+        w.u8(0);
+        return;
+    }
+    let scale = chess.ceil() as i64;
+    let is_partial = (scale & 3) != scale;
+    let markers = if is_partial { (scale & 3) | 4 } else { scale };
+    let pack = |v: f64| {
+        ((v / scale as f64) * 0.5 + 0.5)
+            .mul_add(32766.0, 0.0)
+            .round() as i64
+    };
+    let buffer = markers | (pack(x) << 3) | (pack(y) << 18) | (pack(z) << 33);
+    w.u8(buffer as u8);
+    w.u8((buffer >> 8) as u8);
+    w.u32((buffer >> 16) as u32);
+    if is_partial {
+        w.var_i32((scale >> 2) as i32);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodestone_core::Reader;
+    use lodestone_core::{Reader, Writer};
 
-    /// Rust port of `LpVec3.write`, used only to round-trip in tests. Kept out
-    /// of production because nothing Lodestone sends encodes velocity yet.
-    fn write_lp_vec3(out: &mut Vec<u8>, x: f64, y: f64, z: f64) {
-        let chess = x.abs().max(y.abs()).max(z.abs());
-        if chess < 3.051_944_088_384_301E-5 {
-            out.push(0);
-            return;
-        }
-        let scale = chess.ceil() as i64;
-        let is_partial = (scale & 3) != scale;
-        let markers = if is_partial { (scale & 3) | 4 } else { scale };
-        let pack = |v: f64| {
-            ((v / scale as f64) * 0.5 + 0.5)
-                .mul_add(32766.0, 0.0)
-                .round() as i64
-        };
-        let buffer = markers | (pack(x) << 3) | (pack(y) << 18) | (pack(z) << 33);
-        out.push(buffer as u8);
-        out.push((buffer >> 8) as u8);
-        out.extend_from_slice(&((buffer >> 16) as u32).to_be_bytes());
-        if is_partial {
-            // varint of scale >> 2
-            let mut s = (scale >> 2) as u32;
-            loop {
-                let byte = (s & 0x7F) as u8;
-                s >>= 7;
-                if s != 0 {
-                    out.push(byte | 0x80);
-                } else {
-                    out.push(byte);
-                    break;
-                }
-            }
-        }
+    fn write_lp_vec3(x: f64, y: f64, z: f64) -> Vec<u8> {
+        let mut w = Writer::default();
+        super::write_lp_vec3(&mut w, x, y, z);
+        w.into_vec()
     }
 
     fn decode(bytes: &[u8]) -> ((f64, f64, f64), usize) {
@@ -161,8 +171,7 @@ mod tests {
             (-1.25, 2.5, -7.0),
             (100.0, -0.01, 42.0),
         ] {
-            let mut bytes = Vec::new();
-            write_lp_vec3(&mut bytes, x, y, z);
+            let bytes = write_lp_vec3(x, y, z);
             let ((dx, dy, dz), rest) = decode(&bytes);
             assert_eq!(rest, 0, "trailing bytes after ({x},{y},{z})");
             // Quantisation error scales with the chessboard magnitude.
@@ -178,5 +187,37 @@ mod tests {
         assert_eq!(unpack_degrees(0), 0.0);
         assert_eq!(unpack_degrees(64), 90.0);
         assert_eq!(unpack_degrees(-128), -180.0);
+    }
+
+    #[test]
+    fn pack_degrees_is_the_inverse_of_unpack_degrees() {
+        assert_eq!(pack_degrees(0.0), 0);
+        assert_eq!(pack_degrees(90.0), 64);
+        assert_eq!(pack_degrees(-180.0), -128);
+        // Every representable byte round-trips through degrees and back.
+        for packed in i8::MIN..=i8::MAX {
+            assert_eq!(
+                pack_degrees(unpack_degrees(packed)),
+                packed,
+                "byte {packed}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_lp_vec3_reproduces_the_known_wire_bytes() {
+        // Same vectors `read_lp_vec3`'s known-answer tests above decode from
+        // real vanilla bytes — asserting the encoder reproduces those exact
+        // bytes (not just that decode(encode(x)) == x) catches a codec that
+        // agrees with itself but not with the wire.
+        assert_eq!(write_lp_vec3(0.0, 0.0, 0.0), vec![0]);
+        assert_eq!(
+            write_lp_vec3(0.5, -0.3, 1.0),
+            vec![249, 255, 255, 252, 179, 50]
+        );
+        assert_eq!(
+            write_lp_vec3(3.9, -3.9, 0.0),
+            vec![36, 243, 127, 254, 6, 107, 1]
+        );
     }
 }
