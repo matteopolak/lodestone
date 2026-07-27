@@ -80,6 +80,42 @@ These are current, reproduced-on-screen defects, not speculation:
   picture and the block edit was incidental. If a remesh is still being missed on the normal path,
   that bug is masked rather than fixed.
 
+- **Mobs: three different problems that look like one.** Reported as "no textures, no animations,
+  no interpolation"; each has a different cause and they are worth keeping separate.
+  - **Textures — not implemented.** `shell/gpu.rs:342 synthetic_entity_texture` gives every model
+    a **2×2 solid colour** keyed off the model name, so mob types are merely distinguishable.
+    Real mob skins are never loaded, though `lodestone-assets` can already source
+    `textures/entity/**` from the jar.
+  - **Animation — built, not wired.** `lodestone-entity/src/pose.rs` has `limb_swing`,
+    `limb_swing_amount` and walk smoothing with partial-tick lerps, unit-tested. Nothing consumes
+    it: `render/entity.rs` emits **one matrix per entity**, so there is no per-part articulation.
+    Wiring it requires a real decision about the instancing scheme (bone palette vs per-part
+    instances vs CPU-baked vertices), not a tweak.
+  - **Interpolation — wired, but the window is wrong.** `shell/entities.rs:26` uses
+    `const TICK: f32 = 0.05` — **one** tick. Vanilla eases entity movement over **three**. Since
+    the server only sends movement when it changes, our ease finishes in 50 ms and the mob then
+    sits still until the next packet: move, freeze, move, freeze. That reads as "not interpolated"
+    even though interpolation is running. Head yaw is tracked in the client (`state.rs`) but the
+    shell's `Track` interpolates body yaw only.
+
+### The island pattern — the most expensive recurring failure here
+
+A well-tested library lands, and **nothing calls it**. Every test is green, the HUD counter looks
+plausible, and the screen is wrong. Five confirmed instances:
+
+| island | built | actually consumed |
+|---|---|---|
+| GUI atlas / `gui.scaling` | `lodestone-assets::gui`, gated against the real jar | only by its own tests |
+| block models, layers, translucency | `render/{models,model_pipeline,translucency}.rs` | nothing — mesher emitted full cubes |
+| mining + placement | `lodestone-game`, live-gated over RCON | nothing — shell edited its local copy |
+| vanilla font loader | `lodestone-assets::font`, complete since the first commit | nothing — shell drew a 5×7 debug font |
+| entity pose / walk animation | `lodestone-entity::pose` | nothing — renderer draws a rigid lump |
+
+The common cause is that a crate's own test suite is a **closed loop**: it can be entirely green
+while the crate is dead code. The counter-measure that has actually worked is to require that
+**something on screen changes** before a piece is called done — a screenshot, or a measurement
+taken from a running client, not from a unit test.
+
 ### Fixed since that play-test
 
 - **Death is no longer terminal** (`44a8ec3`). My diagnosis was wrong in an instructive way: I
