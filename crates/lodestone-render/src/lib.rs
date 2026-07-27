@@ -81,7 +81,8 @@ pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
     EntityBatch, EntityCullStats, EntityFrame, EntityInstance, EntityMesh, EntityModelSet,
-    EntitySpawn, MODEL_FEET_OFFSET, entity_model_matrix, model_for_type, plan_entities,
+    EntitySpawn, MODEL_FEET_OFFSET, entity_model_matrix, entity_texture_candidates, model_for_type,
+    plan_entities,
 };
 pub use entity_pipeline::{EntityInstanceRaw, EntityPipeline, GpuEntityModel, upload_instances};
 #[cfg(not(target_arch = "wasm32"))]
@@ -93,7 +94,7 @@ pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
     dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
-pub use model_pipeline::{GpuModelMesh, ModelPipeline, model_camera_buffer};
+pub use model_pipeline::{GpuModelMesh, ModelPipeline, model_camera_buffer, model_palette_buffer};
 pub use models::{
     FluidMeshes, FluidSectionView, ModelMesh, ModelSectionView, ModelVertex, face_of_direction,
     is_full_cube, is_packed_cube, mesh_fluids, mesh_models,

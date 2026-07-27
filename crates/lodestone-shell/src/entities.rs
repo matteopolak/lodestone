@@ -4,11 +4,28 @@
 //!
 //! The server reports entity positions at tick rate (20 Hz); the shell draws at
 //! 50–120 fps. Snapping each mob to its latest reported position would stutter
-//! visibly, so — exactly as vanilla does — we render one tick *behind* the
-//! latest snapshot and ease from the previous position to the current one over a
-//! tick. When a fresh position arrives we start the new interpolation from where
-//! the mob is *currently being drawn*, not from the stale target, so motion is
-//! C0-continuous and never jumps.
+//! visibly, so — exactly as vanilla does — we render *behind* the latest
+//! snapshot and ease from the previous position to the current one over a fixed
+//! window. When a fresh position arrives we start the new interpolation from
+//! where the mob is *currently being drawn*, not from the stale target, so
+//! motion is C0-continuous and never jumps.
+//!
+//! # Why the window is three ticks, not one
+//!
+//! Vanilla eases entity movement over **three** ticks, not one. Its
+//! `InterpolationHandler` (26.2 client) sets `DEFAULT_INTERPOLATION_STEPS = 3`
+//! and `interpolateTo` resets the step counter to 3 on every position packet,
+//! then `interpolate()` consumes `1/steps` of the remaining gap each of the next
+//! three client ticks. The consequence is load-bearing: the server only sends a
+//! movement packet when a mob's position *changes*, so packets routinely arrive
+//! less often than once per tick. If the ease completes in a single tick (50 ms)
+//! the mob reaches its target and then **sits frozen** until the next packet —
+//! move, freeze, move, freeze — which reads as "not interpolated" even though
+//! interpolation is running. A three-tick (150 ms) window keeps the mob gliding
+//! across the gap between sparse packets, matching vanilla's feel. A continuous
+//! linear ease over three ticks is the faithful continuous form of vanilla's
+//! discrete `alpha = 1/steps` schedule (its per-tick positions land on 1/3, 2/3,
+//! 1 — linearly spaced).
 //!
 //! This module is deliberately GPU-free and depends only on `glam`, so the
 //! interpolation is unit-testable without a device or a server: the sim converts
@@ -21,15 +38,25 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 
-/// One physics tick, in seconds. Interpolation eases over exactly this window,
-/// so a mob reaches its newest reported position one tick after it arrives.
+/// One physics tick, in seconds.
 const TICK: f32 = 0.05;
+
+/// Vanilla's `InterpolationHandler::DEFAULT_INTERPOLATION_STEPS`: entity moves
+/// ease over three ticks, not one. See the module docs for why a one-tick window
+/// reads as "not interpolated" against the server's sparse move packets.
+const INTERP_STEPS: f32 = 3.0;
+
+/// The interpolation window in seconds: `TICK * INTERP_STEPS` (150 ms). A fresh
+/// snapshot is reached this long after it arrives, re-anchored from the current
+/// render pose so motion stays continuous.
+const INTERP_WINDOW: f32 = TICK * INTERP_STEPS;
 
 /// Position change (blocks) below which a snapshot is treated as "no movement",
 /// so idle mobs don't restart their interpolation clock every frame.
 const POS_EPS: f32 = 1.0e-4;
 
-/// Yaw change (degrees) below which a snapshot is treated as "no turn".
+/// Yaw change (degrees) below which a snapshot is treated as "no turn". Applies
+/// to body yaw, head yaw and pitch alike.
 const YAW_EPS: f32 = 1.0e-2;
 
 /// A version-free entity snapshot as reported by the client for one tick. Built
@@ -46,6 +73,12 @@ pub struct EntitySnapshot {
     pub feet: Vec3,
     /// Body yaw in degrees.
     pub yaw: f32,
+    /// Head yaw in degrees (absolute). Tracked separately from the body: a
+    /// walking mob keeps its body facing its movement while its head turns to
+    /// track a target, so this is never derived from `yaw`.
+    pub head_yaw: f32,
+    /// Head pitch in degrees (look up/down).
+    pub pitch: f32,
     /// Uniform render scale (baby mobs are drawn smaller).
     pub scale: f32,
 }
@@ -61,6 +94,10 @@ pub struct EntityDraw {
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
     pub yaw: f32,
+    /// Interpolated head yaw in degrees (absolute), for head tracking.
+    pub head_yaw: f32,
+    /// Interpolated head pitch in degrees.
+    pub pitch: f32,
     /// Uniform render scale.
     pub scale: f32,
 }
@@ -76,14 +113,18 @@ struct Track {
     curr: Vec3,
     prev_yaw: f32,
     curr_yaw: f32,
-    /// Seconds since `curr` was set, capped at [`TICK`].
+    prev_head_yaw: f32,
+    curr_head_yaw: f32,
+    prev_pitch: f32,
+    curr_pitch: f32,
+    /// Seconds since the ease was last re-anchored, capped at [`INTERP_WINDOW`].
     t: f32,
 }
 
 impl Track {
-    /// The fraction `[0, 1]` through the current tick's interpolation.
+    /// The fraction `[0, 1]` through the current interpolation window.
     fn alpha(&self) -> f32 {
-        (self.t / TICK).clamp(0.0, 1.0)
+        (self.t / INTERP_WINDOW).clamp(0.0, 1.0)
     }
 
     /// The currently-drawn position: `prev` eased toward `curr` by `alpha`.
@@ -95,6 +136,17 @@ impl Track {
     /// 360° (e.g. 350°→10°) turns +20° rather than −340°.
     fn render_yaw(&self) -> f32 {
         lerp_angle(self.prev_yaw, self.curr_yaw, self.alpha())
+    }
+
+    /// The currently-drawn head yaw, shortest-arc like the body yaw.
+    fn render_head_yaw(&self) -> f32 {
+        lerp_angle(self.prev_head_yaw, self.curr_head_yaw, self.alpha())
+    }
+
+    /// The currently-drawn head pitch. Pitch is bounded to ±90° and never wraps,
+    /// so a plain linear ease is correct.
+    fn render_pitch(&self) -> f32 {
+        self.prev_pitch + (self.curr_pitch - self.prev_pitch) * self.alpha()
     }
 }
 
@@ -120,9 +172,9 @@ impl EntityInterpolator {
     /// run to completion.
     pub fn update(&mut self, snapshots: &[EntitySnapshot], dt: f32) {
         // Advance existing clocks first, so a snapshot that resets `t` to 0 this
-        // frame starts the new tick from exactly its previous render pose.
+        // frame starts the new window from exactly its previous render pose.
         for track in self.tracks.values_mut() {
-            track.t = (track.t + dt).min(TICK);
+            track.t = (track.t + dt).min(INTERP_WINDOW);
         }
 
         for snap in snapshots {
@@ -138,7 +190,11 @@ impl EntityInterpolator {
                             curr: snap.feet,
                             prev_yaw: snap.yaw,
                             curr_yaw: snap.yaw,
-                            t: TICK,
+                            prev_head_yaw: snap.head_yaw,
+                            curr_head_yaw: snap.head_yaw,
+                            prev_pitch: snap.pitch,
+                            curr_pitch: snap.pitch,
+                            t: INTERP_WINDOW,
                         },
                     );
                 }
@@ -147,12 +203,19 @@ impl EntityInterpolator {
                     track.scale = snap.scale;
                     let moved = (snap.feet - track.curr).length() > POS_EPS;
                     let turned = angle_diff(snap.yaw, track.curr_yaw).abs() > YAW_EPS;
-                    if moved || turned {
+                    let head_turned =
+                        angle_diff(snap.head_yaw, track.curr_head_yaw).abs() > YAW_EPS;
+                    let pitched = (snap.pitch - track.curr_pitch).abs() > YAW_EPS;
+                    if moved || turned || head_turned || pitched {
                         // Re-anchor the ease at where the mob is drawn right now.
                         track.prev = track.render_pos();
                         track.prev_yaw = track.render_yaw();
+                        track.prev_head_yaw = track.render_head_yaw();
+                        track.prev_pitch = track.render_pitch();
                         track.curr = snap.feet;
                         track.curr_yaw = snap.yaw;
+                        track.curr_head_yaw = snap.head_yaw;
+                        track.curr_pitch = snap.pitch;
                         track.t = 0.0;
                     }
                 }
@@ -174,6 +237,8 @@ impl EntityInterpolator {
                 type_path: t.type_path.clone(),
                 feet: t.render_pos(),
                 yaw: t.render_yaw(),
+                head_yaw: t.render_head_yaw(),
+                pitch: t.render_pitch(),
                 scale: t.scale,
             })
             .collect()
@@ -218,6 +283,8 @@ mod tests {
             type_path: "pig".into(),
             feet,
             yaw,
+            head_yaw: yaw,
+            pitch: 0.0,
             scale: 1.0,
         }
     }
@@ -236,7 +303,7 @@ mod tests {
     fn movement_interpolates_rather_than_snapping() {
         let mut interp = EntityInterpolator::new();
         // Establish the entity at the origin, its ease already complete.
-        interp.update(&[snap(1, Vec3::ZERO, 0.0)], TICK);
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
         // A new position arrives 4 blocks along +X.
         let target = Vec3::new(4.0, 0.0, 0.0);
         interp.update(&[snap(1, target, 0.0)], 0.0);
@@ -250,21 +317,63 @@ mod tests {
             "on a fresh snapshot the mob must start from its old pose, was x={x0}"
         );
 
-        // Half a tick later it must be strictly between old and new — a snap
+        // Half the window later it must be strictly between old and new — a snap
         // (jump straight to 4) or a freeze (stuck at 0) both fail this.
-        interp.update(&[snap(1, target, 0.0)], TICK / 2.0);
+        interp.update(&[snap(1, target, 0.0)], INTERP_WINDOW / 2.0);
         let xm = interp.draws()[0].feet.x;
         assert!(
             xm > 0.5 && xm < 3.5,
-            "half a tick in, the mob should be mid-way, was x={xm}"
+            "half the window in, the mob should be mid-way, was x={xm}"
         );
 
-        // A full tick after the snapshot it reaches the target.
-        interp.update(&[snap(1, target, 0.0)], TICK);
+        // A full window after the snapshot it reaches the target.
+        interp.update(&[snap(1, target, 0.0)], INTERP_WINDOW);
         let xf = interp.draws()[0].feet.x;
         assert!(
             (xf - 4.0).abs() < 1.0e-3,
-            "after a tick it arrives, was x={xf}"
+            "after the window it arrives, was x={xf}"
+        );
+    }
+
+    #[test]
+    fn a_single_tick_move_keeps_gliding_between_sparse_packets() {
+        // The bug this module was fixed for: with a one-tick ease window, a mob
+        // whose move packets arrive less often than every tick reaches its target
+        // in 50 ms and then freezes until the next packet — a visible stutter.
+        // With vanilla's three-tick window it must still be advancing a full tick
+        // after the last packet. This is the regression guard on INTERP_STEPS.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        // One packet: the mob steps one block. No further packets arrive.
+        interp.update(&[snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)], 0.0);
+
+        // Sample the drawn x each render frame for the next three ticks at 60 fps
+        // and require it to keep increasing well past the first tick — a one-tick
+        // window would have plateaued at x=1 by 50 ms.
+        let frame = 1.0 / 60.0;
+        let mut last = interp.draws()[0].feet.x;
+        let mut advanced_after_one_tick = false;
+        let mut elapsed = 0.0;
+        while elapsed < INTERP_WINDOW - 1.0e-4 {
+            interp.update(&[snap(1, Vec3::new(1.0, 0.0, 0.0), 0.0)], frame);
+            elapsed += frame;
+            let x = interp.draws()[0].feet.x;
+            assert!(
+                x + 1.0e-4 >= last,
+                "drawn x must never step backwards, {last} -> {x}"
+            );
+            if elapsed > TICK + frame && x > last + 1.0e-5 {
+                advanced_after_one_tick = true;
+            }
+            last = x;
+        }
+        assert!(
+            advanced_after_one_tick,
+            "the mob must still be moving after the first tick (was it, x plateaued at {last}?)"
+        );
+        assert!(
+            (last - 1.0).abs() < 1.0e-3,
+            "after the full window the mob should have reached the target, was {last}"
         );
     }
 
@@ -282,15 +391,52 @@ mod tests {
     #[test]
     fn yaw_interpolates_along_the_shortest_arc_across_the_wrap() {
         let mut interp = EntityInterpolator::new();
-        interp.update(&[snap(1, Vec3::ZERO, 350.0)], TICK);
+        interp.update(&[snap(1, Vec3::ZERO, 350.0)], INTERP_WINDOW);
         // Turn to 10°: the short way is +20° through 360/0, not −340° through 180.
         interp.update(&[snap(1, Vec3::ZERO, 10.0)], 0.0);
-        interp.update(&[snap(1, Vec3::ZERO, 10.0)], TICK / 2.0);
+        interp.update(&[snap(1, Vec3::ZERO, 10.0)], INTERP_WINDOW / 2.0);
         let y = interp.draws()[0].yaw;
         // Halfway along the +20° arc from 350° is 360° ≡ 0°. Reject the long-way
         // answer (~180°), which is what naive linear lerp would give.
         let near_zero = y.rem_euclid(360.0);
         let dist = near_zero.min(360.0 - near_zero);
         assert!(dist < 5.0, "yaw should pass through ~0°, was {y}");
+    }
+
+    #[test]
+    fn head_yaw_interpolates_independently_of_the_body() {
+        // A mob can turn its head without turning its body; the interpolator must
+        // ease head yaw separately and along the shortest arc. A snapshot that
+        // changes only head yaw (body and position unchanged) must still animate.
+        let mut interp = EntityInterpolator::new();
+        let mut s = snap(1, Vec3::ZERO, 0.0);
+        s.head_yaw = 350.0;
+        interp.update(std::slice::from_ref(&s), INTERP_WINDOW);
+        // Head turns to 10° (short arc +20° through 0), body stays at 0.
+        s.head_yaw = 10.0;
+        interp.update(std::slice::from_ref(&s), 0.0);
+        interp.update(std::slice::from_ref(&s), INTERP_WINDOW / 2.0);
+        let d = &interp.draws()[0];
+        assert!(
+            d.yaw.abs() < 1.0e-3,
+            "body yaw must stay put while only the head turns, was {}",
+            d.yaw
+        );
+        let near_zero = d.head_yaw.rem_euclid(360.0);
+        let dist = near_zero.min(360.0 - near_zero);
+        assert!(dist < 5.0, "head yaw should pass through ~0°, was {}", d.head_yaw);
+    }
+
+    #[test]
+    fn pitch_interpolates_linearly() {
+        let mut interp = EntityInterpolator::new();
+        let mut s = snap(1, Vec3::ZERO, 0.0);
+        s.pitch = -30.0;
+        interp.update(std::slice::from_ref(&s), INTERP_WINDOW);
+        s.pitch = 30.0;
+        interp.update(std::slice::from_ref(&s), 0.0);
+        interp.update(std::slice::from_ref(&s), INTERP_WINDOW / 2.0);
+        let p = interp.draws()[0].pitch;
+        assert!(p.abs() < 1.0, "half the window from -30 to 30 is ~0, was {p}");
     }
 }

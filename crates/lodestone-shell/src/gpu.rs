@@ -268,19 +268,25 @@ struct ModelRenderer {
     #[allow(dead_code)]
     atlas: GpuAtlas,
     atlas_bind_group: wgpu::BindGroup,
+    /// The tint palette (group 2) uploaded once: one RGBA multiplier per palette
+    /// index, resolved from the pack's real colormaps. The model shader looks it
+    /// up per tinted quad so grass, foliage and every other source get their own
+    /// colour instead of one hardcoded green.
+    palette_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
 }
 
 /// GPU resources for the entity pass: the instanced pipeline, one uploaded mesh
-/// per model type, a per-model synthetic texture bind group, and a persistent
-/// camera uniform rewritten each frame. Owns the version-free
-/// [`EntityModelSet`] so it can resolve a live entity type into a renderable
-/// instance without the shell naming a mob model directly.
+/// per model type, a per-model texture bind group, and a persistent camera
+/// uniform rewritten each frame. Owns the version-free [`EntityModelSet`] so it
+/// can resolve a live entity type into a renderable instance without the shell
+/// naming a mob model directly.
 ///
-/// Textures are **synthetic solid colours**, one per model type, matching the
-/// shell's existing block atlas (which is also procedurally coloured, not
-/// resource-pack art). Real mob-skin loading through the resource pack is a
-/// follow-up shared with the block-atlas work, not something this pass fakes.
+/// Textures are the **real per-mob sheets** from `client.jar` when a vanilla
+/// pack is present (loaded via [`crate::resources::load_entity_textures`]); a
+/// model whose sheet is missing, or the offline demo world with no pack, falls
+/// back to a synthetic solid colour so the mob stays visible and distinguishable
+/// rather than invisible.
 #[derive(Debug)]
 struct EntityRenderer {
     pipeline: EntityPipeline,
@@ -305,11 +311,18 @@ impl EntityRenderer {
 
         let mut gpu_models = HashMap::new();
         let mut textures = HashMap::new();
+        // Real per-mob sheets from client.jar, keyed by model name. Empty (and so
+        // every model falls back to a synthetic placeholder) when no pack is
+        // present — e.g. the offline demo world or a headless test.
+        let real = crate::resources::load_entity_textures();
         for (name, mesh) in models.iter() {
             if let Some(gpu) = GpuEntityModel::upload(device, mesh) {
                 gpu_models.insert(name, gpu);
             }
-            let (view, _tex) = synthetic_entity_texture(device, queue, name);
+            let view = match real.get(name) {
+                Some(img) => entity_texture_from_image(device, queue, img),
+                None => synthetic_entity_texture(device, queue, name).0,
+            };
             let bg = pipeline.texture_bind_group(device, &view, &sampler);
             textures.insert(name, bg);
         }
@@ -333,6 +346,77 @@ impl EntityRenderer {
             cam_bind_group,
         }
     }
+}
+
+#[cfg(test)]
+impl EntityRenderer {
+    /// Test-only: rebind every mob to the flat [`synthetic_entity_texture`]
+    /// placeholder. A texture-correctness gate renders the *same* mob once with
+    /// the real jar sheet and once after this call, so the negative control is
+    /// baked into the test and cannot rot: whatever the real sheet does that the
+    /// placeholder can't (multiple hues on one mob) has to survive this swap
+    /// collapsing to a single hue, or the gate reddens.
+    fn force_synthetic_textures(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lodestone-entity-sampler-synthetic"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let names: Vec<&'static str> = self.textures.keys().copied().collect();
+        for name in names {
+            let view = synthetic_entity_texture(device, queue, name).0;
+            let bg = self.pipeline.texture_bind_group(device, &view, &sampler);
+            self.textures.insert(name, bg);
+        }
+    }
+}
+
+/// Upload a decoded RGBA8 entity sheet (a real per-mob texture from the jar) as
+/// a GPU texture and return its view. The baked entity quads already carry the
+/// per-cuboid UVs that address this sheet, so binding the real PNG is all that
+/// stands between the placeholder and a recognisable mob skin. The `wgpu`
+/// texture is kept alive by the returned view (and, in turn, the bind group),
+/// so it is not returned separately.
+fn entity_texture_from_image(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    img: &lodestone_assets::Image,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("lodestone-entity-sheet"),
+        size: wgpu::Extent3d {
+            width: img.width,
+            height: img.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &img.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(img.width * 4),
+            rows_per_image: Some(img.height),
+        },
+        wgpu::Extent3d {
+            width: img.width,
+            height: img.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Build a 2×2 solid-colour RGBA texture for one entity model, tinted
@@ -464,11 +548,15 @@ impl RenderState {
             let water_pipeline = ModelPipeline::for_fluid(device, color_format);
             let atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
             let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
+            let palette_buffer =
+                lodestone_render::model_palette_buffer(device, models.tint_palette());
+            let palette_bind_group = pipeline.palette_bind_group(device, &palette_buffer);
             ModelRenderer {
                 pipeline,
                 water_pipeline,
                 atlas,
                 atlas_bind_group,
+                palette_bind_group,
                 sections: HashMap::new(),
             }
         });
@@ -712,6 +800,7 @@ impl RenderState {
             if let Some(model) = &self.model {
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                pass.set_bind_group(2, &model.palette_bind_group, &[]);
                 for section in model.sections.values() {
                     let Some(mesh) = section.mesh.as_ref() else {
                         continue;
@@ -1331,6 +1420,8 @@ mod tests {
                 type_path: "pig".to_owned(),
                 feet: pig_feet,
                 yaw: 0.0,
+                head_yaw: 0.0,
+                pitch: 0.0,
                 scale: 1.0,
             },
             // A second pig behind the camera so frustum culling has something
@@ -1339,6 +1430,8 @@ mod tests {
                 type_path: "pig".to_owned(),
                 feet: glam::Vec3::new(0.0, 0.0, -12.0),
                 yaw: 0.0,
+                head_yaw: 0.0,
+                pitch: 0.0,
                 scale: 1.0,
             },
         ];
@@ -1419,6 +1512,137 @@ mod tests {
         assert_eq!(
             corner_px, 0,
             "the frame corners should stay sky, but {corner_px} corner px read as mob"
+        );
+    }
+
+    /// Headless GPU texture-correctness gate. The placeholder
+    /// (`synthetic_entity_texture`) paints an entire mob a *single* flat hue
+    /// (`model_tint`), varying only in brightness under lighting. A real per-mob
+    /// sheet from `client.jar` carries several hues on one body — the zombie's
+    /// green skin, teal shirt and dark-blue legs. So "a meaningful share of one
+    /// mob's pixels sit at a hue far from any single flat tint" is a signal only
+    /// the real sheet can produce. This renders the *same* zombie twice — once
+    /// with the jar sheet, once forced back to the placeholder — and asserts the
+    /// real render is markedly more multi-hued. If texture loading regresses to
+    /// the fallback, the two renders converge and this reddens.
+    ///
+    /// This is the screen-capture-free stand-in for "look at the screenshot":
+    /// screencapture needs Screen Recording permission the CI/agent host lacks,
+    /// so instead of eyeballing the window we read the drawn pixels back and
+    /// assert the mob's *colour* — not merely that something drew.
+    #[test]
+    #[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+    fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
+             here would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (320u32, 240u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+
+        let mut state = RenderState::new(device, queue, format, w, h, None);
+
+        // One zombie centred in front of a south-looking camera, framed on its
+        // torso and head where the shirt/skin hues live.
+        let camera = Camera {
+            position: glam::Vec3::new(0.0, 1.4, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+            aspect: w as f32 / h as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+        let draws = vec![EntityDraw {
+            type_path: "zombie".to_owned(),
+            feet: glam::Vec3::new(0.0, 0.0, 3.0),
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+        }];
+
+        // Fraction of a mob's bright pixels whose *hue direction* is far from the
+        // model's single flat placeholder tint. Brightness scaling (lighting)
+        // leaves the direction unchanged, so under the placeholder this is ~0; a
+        // real multi-hue sheet pushes it up.
+        let off_hue_fraction = |pixels: &[u8]| -> (usize, f64) {
+            let sky = [135f32, 181.0, 235.0];
+            let tint = model_tint("zombie");
+            let tv = glam::Vec3::new(tint[0] as f32, tint[1] as f32, tint[2] as f32).normalize();
+            let mut mob = 0usize;
+            let mut off = 0usize;
+            for px in pixels.chunks_exact(4) {
+                let c = glam::Vec3::new(px[0] as f32, px[1] as f32, px[2] as f32);
+                let d = (c.x - sky[0]).abs() + (c.y - sky[1]).abs() + (c.z - sky[2]).abs();
+                if d <= 60.0 {
+                    continue; // sky
+                }
+                mob += 1;
+                // Skip near-black shadow pixels where a hue direction is noise.
+                if c.x + c.y + c.z < 60.0 {
+                    continue;
+                }
+                let dir = c.normalize();
+                if dir.dot(tv) < 0.95 {
+                    off += 1;
+                }
+            }
+            let frac = if mob == 0 { 0.0 } else { off as f64 / mob as f64 };
+            (mob, frac)
+        };
+
+        // Real jar sheet first.
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, &draws);
+        let real_px = target.read_texels(device, queue);
+        let (mob_real, off_real) = off_hue_fraction(&real_px);
+        assert_eq!(
+            stats.entities_drawn, 1,
+            "the zombie should draw exactly once (drawn={})",
+            stats.entities_drawn
+        );
+
+        // Same mob, forced back to the flat placeholder — the built-in control.
+        state.entities.force_synthetic_textures(device, queue);
+        let frame = target.acquire().expect("headless acquire");
+        state.render(device, queue, frame.view(), &camera, None, &draws);
+        let syn_px = target.read_texels(device, queue);
+        let (mob_syn, off_syn) = off_hue_fraction(&syn_px);
+
+        eprintln!("=== zombie texture-correctness gate ===");
+        eprintln!("real: mob_px={mob_real} off_hue={:.1}%", off_real * 100.0);
+        eprintln!("synth: mob_px={mob_syn} off_hue={:.1}%", off_syn * 100.0);
+
+        assert!(
+            mob_real > 300 && mob_syn > 300,
+            "both renders must actually put the zombie on screen (real={mob_real}, \
+             synth={mob_syn}) — otherwise the comparison is vacuous"
+        );
+        assert!(
+            off_syn < 0.05,
+            "the flat placeholder is a single hue, so its off-hue fraction must be \
+             ~0, got {:.1}% — the control isn't controlling",
+            off_syn * 100.0
+        );
+        assert!(
+            off_real > 0.20,
+            "the real zombie sheet should paint a substantial share of the body at \
+             hues away from any single tint (green skin / teal shirt / dark legs), \
+             got only {:.1}% — textures likely fell back to the placeholder",
+            off_real * 100.0
+        );
+        assert!(
+            off_real > off_syn * 4.0,
+            "the real sheet must be markedly more multi-hued than the placeholder \
+             (real {:.1}% vs synth {:.1}%) — if they're close, the real path is a \
+             no-op and mobs are still flat",
+            off_real * 100.0,
+            off_syn * 100.0
         );
     }
 }

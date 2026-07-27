@@ -62,12 +62,12 @@ pub const MAX_SPRITES: usize = 2048;
 
 /// Plains biome climate, used to sample the grass/foliage colormaps for the fixed
 /// default tint. Matches vanilla's plains `temperature`/`downfall`.
-const PLAINS_TEMPERATURE: f32 = 0.8;
-const PLAINS_DOWNFALL: f32 = 0.4;
+pub(crate) const PLAINS_TEMPERATURE: f32 = 0.8;
+pub(crate) const PLAINS_DOWNFALL: f32 = 0.4;
 
 /// Vanilla's default water tint (`BiomeSpecialEffects` water colour), used where
 /// no colormap applies.
-const DEFAULT_WATER_TINT: u32 = 0x003F_76E4;
+pub(crate) const DEFAULT_WATER_TINT: u32 = 0x003F_76E4;
 
 /// Errors from [`BlockAtlas::build`].
 #[derive(Debug, thiserror::Error)]
@@ -653,14 +653,14 @@ fn missing_image() -> Image {
 /// The fixed default (plains) tint colours, sampled from the real colormap PNGs
 /// when present and falling back to Mojang's documented constants otherwise.
 #[derive(Debug)]
-struct DefaultTints {
+pub(crate) struct DefaultTints {
     grass: Option<Colormap>,
     foliage: Option<Colormap>,
     dry_foliage: Option<Colormap>,
 }
 
 impl DefaultTints {
-    fn load(manager: &ResourceManager) -> Self {
+    pub(crate) fn load(manager: &ResourceManager) -> Self {
         let load = |path: &str, default: u32| -> Option<Colormap> {
             let loc = ResourceLocation::parse(path).ok()?;
             let bytes = manager.read_asset(&loc, "textures", "png")?;
@@ -679,7 +679,7 @@ impl DefaultTints {
 
     /// The fixed default tint colour for a [`TintKind`], or `None` if the kind is
     /// untinted.
-    fn color(&self, kind: TintKind) -> Option<u32> {
+    pub(crate) fn color(&self, kind: TintKind) -> Option<u32> {
         let sample = |map: &Option<Colormap>, fallback: u32| {
             map.as_ref()
                 .map_or(fallback, |m| m.sample(PLAINS_TEMPERATURE, PLAINS_DOWNFALL))

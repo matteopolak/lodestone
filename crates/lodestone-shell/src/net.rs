@@ -760,6 +760,8 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
             view.position.z as f32,
         ),
         yaw: view.rotation.yaw,
+        head_yaw: view.head_yaw,
+        pitch: view.rotation.pitch,
         scale,
     }
 }

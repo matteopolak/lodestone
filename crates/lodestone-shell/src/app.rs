@@ -23,10 +23,11 @@ use crate::config::{Config, Mode};
 use crate::container::{ContainerFrame, ContainerRenderer};
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
-use crate::hud::{HudFrame, HudRenderer};
+use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
 use crate::menu::UiState;
 use crate::net::NetClient;
 use crate::sim::Sim;
+use lodestone_assets::ResourceLocation;
 use lodestone_controller::Action;
 
 /// Entry point: dispatch on the configured mode.
@@ -371,6 +372,34 @@ impl WindowApp {
         let boss_bars = self.sim.boss_bars();
         let crosshair = self.ui.is_playing();
 
+        // Snapshot the player's nine hotbar slots into owned draw records. The
+        // owned `Menu` is dropped once the icons are built; `hotbar_records`
+        // outlives `hud.render` below because the frame borrows it.
+        let player_menu = self.sim.player_menu();
+        let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
+            .map(|i| {
+                player_menu.player_native(i).and_then(|st| {
+                    let item = ResourceLocation::parse(&st.item().to_string()).ok()?;
+                    let damage = st
+                        .components()
+                        .get_int(lodestone_game::item::DAMAGE_COMPONENT)
+                        .and_then(|v| u32::try_from(v).ok());
+                    let max_damage = st
+                        .components()
+                        .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
+                        .and_then(|v| u32::try_from(v).ok());
+                    Some(HotbarSlot {
+                        item,
+                        count: st.count().max(0) as u32,
+                        damage,
+                        max_damage,
+                        enchanted: false,
+                    })
+                })
+            })
+            .collect();
+        drop(player_menu);
+
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
         hud_frame.crosshair = crosshair;
@@ -382,6 +411,7 @@ impl WindowApp {
         hud_frame.health = health;
         hud_frame.food = food;
         hud_frame.hotbar = crosshair.then(|| self.sim.selected_slot());
+        hud_frame.hotbar_items = crosshair.then_some(hotbar_records.as_slice());
         hud_frame.xp = self.sim.xp();
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
@@ -445,6 +475,11 @@ impl ApplicationHandler for WindowApp {
         // procedural fallback.
         if let Some(gui) = crate::resources::load_gui_atlas() {
             hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
+        }
+        // Attach the flat item-sprite atlas so hotbar/container slots draw real
+        // item icons; jar-less runs leave this `None` and slots stay empty wells.
+        if let Some(items) = crate::resources::load_item_atlas() {
+            hud.attach_items(gpu.device(), gpu.queue(), format, items);
         }
         let effects = EffectsRenderer::new(gpu.device(), format);
         let container = ContainerRenderer::new(gpu.device(), format);

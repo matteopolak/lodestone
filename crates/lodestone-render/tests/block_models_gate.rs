@@ -238,3 +238,95 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
         FluidKind::Lava
     );
 }
+
+/// The single tinted colour every tinted quad of `state_id` resolves to (its
+/// palette entry), asserting the block is a single tint *source* so the number
+/// is unambiguous. Panics if the state has no tinted quad.
+fn one_tint_colour(models: &BlockModels, state_id: u32, name: &str) -> [f32; 4] {
+    let palette = models.tint_palette();
+    let colours: Vec<[f32; 4]> = models
+        .quads(state_id)
+        .iter()
+        .filter_map(|q| q.tint_index.map(|i| palette[i as usize]))
+        .collect();
+    assert!(
+        !colours.is_empty(),
+        "{name} must have at least one tinted quad (tint_index set)"
+    );
+    for c in &colours {
+        assert_eq!(
+            *c, colours[0],
+            "{name}'s tinted quads must all resolve to one source colour"
+        );
+    }
+    colours[0]
+}
+
+/// Tint gate: grass and foliage tint from **distinct sources**, not one shared
+/// green.
+///
+/// The user measured the defect by location: every `tint_index` quad — grass
+/// tops, tall grass and tree leaves — rendered at G/R ≈ 1.13, because the model
+/// shader multiplied *all* of them by one hardcoded plains-grass constant. Grass
+/// and foliage are different colours in vanilla (`#91BD59` G/R 1.30 vs `#77AB2F`
+/// G/R 1.44); collapsing both to one constant is the bug. This asserts the two
+/// blocks now resolve to their own per-source colour.
+///
+/// # Negative control (observed)
+///
+/// The pre-fix path made grass and foliage identical (one constant). This gate
+/// asserts they now **differ** by a real margin, so a regression to a single
+/// tint constant — the exact thing the user caught — fails it. Observed failing
+/// by forcing every tint kind to grass before landing (leaves collapse to grass,
+/// the delta vanishes, this assertion trips).
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn grass_and_foliage_tint_from_distinct_sources() {
+    let (models, _mgr, reg) = build_models();
+
+    let grass_id = find_state(reg.as_ref(), "minecraft:grass_block", &[("snowy", "false")])
+        .expect("grass_block[snowy=false] in registry");
+    let leaves_id =
+        find_state(reg.as_ref(), "minecraft:oak_leaves", &[]).expect("oak_leaves in registry");
+    let plant_id =
+        find_state(reg.as_ref(), "minecraft:short_grass", &[]).expect("short_grass in registry");
+
+    let grass = one_tint_colour(&models, grass_id, "grass_block");
+    let foliage = one_tint_colour(&models, leaves_id, "oak_leaves");
+    let plant = one_tint_colour(&models, plant_id, "short_grass");
+    let gr = |c: [f32; 4]| c[1] / c[0];
+
+    // Vanilla plains grass `#91BD59` → G/R 1.303; foliage `#77AB2F` → G/R 1.437.
+    // The colormap sample at plains climate lands on these to within a texel.
+    assert!(
+        (gr(grass) - 1.303).abs() < 0.06,
+        "grass tint G/R should be ~1.30 (vanilla #91BD59), got {} from {grass:?}",
+        gr(grass)
+    );
+    assert!(
+        (gr(foliage) - 1.437).abs() < 0.08,
+        "foliage tint G/R should be ~1.44 (vanilla #77AB2F), got {} from {foliage:?}",
+        gr(foliage)
+    );
+
+    // The user measured grass block tops and short_grass plants getting *different*
+    // tints (1.6 vs 1.12) though both are the grass colormap. They must now be the
+    // same source colour — the cross-plant is no longer under-tinted.
+    assert_eq!(
+        grass, plant,
+        "grass block and short_grass share the grass colormap, so must tint identically"
+    );
+
+    // Negative control: the pre-fix single hardcoded green made these equal.
+    assert_ne!(
+        grass, foliage,
+        "grass and foliage must not share one tint colour (the collapsed-source bug)"
+    );
+    assert!(
+        gr(foliage) > gr(grass) + 0.08,
+        "leaves must tint greener than grass — distinct sources, not one constant: \
+         foliage {} vs grass {}",
+        gr(foliage),
+        gr(grass)
+    );
+}
