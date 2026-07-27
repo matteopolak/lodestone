@@ -67,6 +67,18 @@ These are current, reproduced-on-screen defects, not speculation:
   Correct, but one of the most recognisable "not Minecraft" tells now that geometry is right.
 - **Block placement does not exist.** `ClientAction::UseItemOn` is modeled and wired through the
   adapter, but nothing in `lodestone-game` produces it. Mining works; the inverse does not.
+  *(Update: the game layer now exists — `e339e06` — but nothing calls it; see next item.)*
+- **The shell's dig and place are demo-world code running on the multiplayer path.**
+  `sim.rs:877 break_block()` sets the block to air in *our* copy and remeshes; `sim.rs:890
+  place_block()` writes a hardcoded `PLACE_BLOCK` constant. **Neither sends anything to the
+  server**, so on a live server the block simply returns on the next chunk update — while a
+  complete, live-gated mining (`bd7c51c`) and placement (`e339e06`) game layer sits entirely
+  unused. Another island, and the most consequential one found so far.
+
+  This is very likely the real explanation of the early *"the chunk only renders properly when I
+  break something"* report: `break_block` calls `remesh_around`, so the **remesh** fixed the
+  picture and the block edit was incidental. If a remesh is still being missed on the normal path,
+  that bug is masked rather than fixed.
 
 ### Fixed since that play-test
 
@@ -87,6 +99,21 @@ These are current, reproduced-on-screen defects, not speculation:
   than a new formatter. Still parked: the shell doesn't consume it yet (`chat.rs:88`), and
   `TextContent` models only `Literal`/`Translate`, so keybind/score are dropped before they reach
   the resolver.
+- **Block placement, at the game layer** (`e339e06`). `placement.rs` mirrors vanilla's
+  `BlockPlaceContext`/`performUseItemOn`: replaceable target → place in-place, else adjacent;
+  interactable block wins over placement unless sneaking; `Direction.fromYRot` and
+  `orderedByNearest` reproduced exactly; predict-then-reconcile over the same sequence ledger as
+  mining. **Honestly bounded:** facing/axis/half/pillar/stairs resolve exactly; stair *shape*,
+  waterlogging, multi-part (doors/beds), rotation-16 (signs/banners) and wall-vs-floor variants
+  fall back to a default.
+
+  **The finding worth keeping:** its live gate initially failed on sneak-placement, because
+  setting a sneaking flag *in our own context* only drives *our own* decision — the server derives
+  sneak from `setShiftKeyDown(input.shift())`, so without a real `SetPlayerInput { shift: true }`
+  on the wire the server treated the sneak-placement as an interaction and re-opened the chest.
+  A design that trusts only its own sneak flag **passes hermetically and desyncs live**. This is
+  the third distinct instance on this project of the same rule: *state the server derives from our
+  input must be driven through the wire, not asserted locally.*
 
 The other big gaps are under [Never started](#7-never-started): per-entity mesh geometry (the
 *mechanism* is proven via pig; the other 87 meshes are not individually verified) and chat/HUD
