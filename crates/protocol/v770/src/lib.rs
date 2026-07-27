@@ -41,6 +41,8 @@ pub(crate) mod generated_path_types;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 
+#[path = "generated/entity_dimensions.rs"]
+pub(crate) mod generated_entity_dimensions;
 /// Generated attribute id→name table (raw rodata statics). Use the
 /// [`attribute_types`] module for the lookup API; this holds only the array.
 #[path = "generated/attribute_types.rs"]
@@ -75,7 +77,9 @@ pub mod attribute_types;
 pub mod block_states;
 pub mod chunk_batch;
 pub mod collision_shapes;
+pub mod entity_dimensions;
 pub mod entity_types;
+pub mod entity_variants;
 pub mod items;
 pub mod menus;
 pub mod mob_effects;

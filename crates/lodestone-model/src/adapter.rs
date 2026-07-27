@@ -250,6 +250,29 @@ impl From<&ClientAction> for ClientActionKind {
     }
 }
 
+/// The version-free base hitbox of an entity type: the standing bounding-box
+/// `width` and `height` in blocks, at scale 1.
+///
+/// This is the [`VersionAdapter::entity_dimensions`] seam's return type. It
+/// carries *base* geometry only — deliberately **not** `step_height` (the
+/// resolved `STEP_HEIGHT` attribute, folded from the entity's attribute map)
+/// nor any `SCALE`-attribute fold. A consumer combines this base box with those
+/// attribute-sourced values at spawn; baking either in here would silently
+/// disagree with the attribute pipeline the moment a modifier exists.
+///
+/// The numbers are version data (pose boxes shifted across the 1.9/1.14
+/// refactors), so they originate in a version crate's generated table and reach
+/// version-free consumers only through this seam — never a direct edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityBaseDimensions {
+    /// Standing bounding-box width, in blocks (the box is `width` on both
+    /// horizontal axes). Vanilla `EntityDimensions.width()` at scale 1.
+    pub width: f32,
+    /// Standing bounding-box height, in blocks. Vanilla
+    /// `EntityDimensions.height()` at scale 1.
+    pub height: f32,
+}
+
 /// Adapter implemented by protocol crates to lift packets into this canonical
 /// model and lower canonical actions back into packets.
 ///
@@ -368,5 +391,23 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         Err(AdapterError::Unsupported(
             "online-mode encryption is not implemented for this protocol version".to_owned(),
         ))
+    }
+
+    /// Resolves an entity type's **base** hitbox from its network registry id
+    /// (the varint `add_entity` carries), if this version knows the type.
+    ///
+    /// The id space is version-specific — ids reshuffle as the registry grows —
+    /// so this is the sanctioned route for a version-free consumer (the
+    /// integrated server, entity navigation) to read per-type geometry without
+    /// naming a version crate: it asks the registry for an adapter and calls
+    /// this. Returns [`EntityBaseDimensions`] (base `width`/`height` only); the
+    /// caller folds in the `SCALE` and `STEP_HEIGHT` attributes from the entity's
+    /// attribute map at spawn.
+    ///
+    /// The default returns `None`: a version that has not homed a dimension
+    /// census simply reports "unknown", never a guessed box.
+    fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
+        let _ = entity_type_id;
+        None
     }
 }
