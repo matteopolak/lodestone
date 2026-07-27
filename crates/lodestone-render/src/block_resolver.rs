@@ -49,7 +49,7 @@ use lodestone_assets::{
     ModelError, ModelResolver, ResolvedModel, ResourceLocation, ResourceManager,
     tint::{self, Colormap, TintKind, vanilla_tint_kind},
 };
-use lodestone_model::BlockStateRegistry;
+use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::section::{Cell, Face, SpriteId, Surface};
 use crate::world::BlockClassifier;
@@ -115,6 +115,12 @@ pub struct BlockAtlas {
     uv_table: Vec<[f32; 4]>,
     classes: Vec<StateClass>,
     missing: SpriteId,
+    /// Forward index: a canonical `(block, sorted properties)` key → global state
+    /// id, inverted from the reverse-only [`BlockStateRegistry`] so callers who
+    /// hold a block-state *string* (e.g. a world generator emitting
+    /// `"minecraft:grass_block[snowy=false]"`) can resolve it to the id the
+    /// classifier keys on. See [`state_id_of`](BlockAtlas::state_id_of).
+    name_to_id: HashMap<(Identifier, BTreeMap<String, String>), u32>,
 }
 
 /// A resolved per-face texture reference: the concrete texture location plus the
@@ -159,6 +165,12 @@ impl BlockAtlas {
 
         let count = registry.state_count();
         let mut projected: Vec<Option<Projected>> = Vec::with_capacity(count as usize);
+        // Forward name→id index, inverted from the reverse-only registry. Built
+        // over every resolvable id independent of whether its model projects, so a
+        // block whose geometry fails to resolve still maps its string to the right
+        // id (the classifier renders it lit-empty, but the id stays correct).
+        let mut name_to_id: HashMap<(Identifier, BTreeMap<String, String>), u32> =
+            HashMap::with_capacity(count as usize);
 
         // Texture sets to stitch: raw block textures plus tinted duplicates keyed
         // by (source location, tint colour).
@@ -170,6 +182,7 @@ impl BlockAtlas {
                 projected.push(None);
                 continue;
             };
+            name_to_id.insert((state.block.clone(), state.properties.clone()), id);
             let block_key = state.block.to_string();
 
             let blockstates = bs_cache
@@ -289,6 +302,7 @@ impl BlockAtlas {
             uv_table,
             classes,
             missing,
+            name_to_id,
         })
     }
 
@@ -316,6 +330,57 @@ impl BlockAtlas {
     pub fn missing_sprite(&self) -> SpriteId {
         self.missing
     }
+
+    /// The vanilla global block-state id for a generator block-state string, or
+    /// `None` if it names no known state.
+    ///
+    /// This is the forward companion to the reverse-only [`BlockStateRegistry`]:
+    /// a world generator that emits real vanilla state *strings*
+    /// (`"minecraft:grass_block[snowy=false]"`, or a bare `"minecraft:stone"`)
+    /// resolves them here to the id the [`BlockClassifier`] keys on, so blocks and
+    /// atlas share one id space with no lossy demo palette in between.
+    ///
+    /// Matching is **exact and structural**: the string is parsed into a
+    /// `(block, properties)` pair and looked up against the registry's own
+    /// `(block, full-property-set)` entries — property order and whitespace do not
+    /// matter, but a *partial* property set (relying on omitted defaults) will not
+    /// match, because the registry stores each state's complete property set. An
+    /// unrecognised or partial string returns `None` **loudly** rather than
+    /// resolving to a plausible-but-wrong id — the caller decides how to handle a
+    /// miss (log, fall back), and no silent mis-mapping is possible. Vanilla's own
+    /// `BlockState` string form always lists every property, so a faithful
+    /// generator string round-trips exactly.
+    #[must_use]
+    pub fn state_id_of(&self, block_state: &str) -> Option<u32> {
+        let key = parse_state_key(block_state)?;
+        self.name_to_id.get(&key).copied()
+    }
+}
+
+/// Parse a block-state string such as `"minecraft:oak_log[axis=y]"` (or a bare
+/// `"minecraft:stone"`) into the canonical `(block, sorted properties)` key used
+/// by the forward index. Returns `None` if the block identifier is malformed or a
+/// property clause is not `key=value`.
+fn parse_state_key(block_state: &str) -> Option<(Identifier, BTreeMap<String, String>)> {
+    let trimmed = block_state.trim();
+    let (name, props) = match trimmed.split_once('[') {
+        Some((name, rest)) => {
+            let inner = rest.strip_suffix(']')?;
+            let mut map = BTreeMap::new();
+            for clause in inner.split(',') {
+                let clause = clause.trim();
+                if clause.is_empty() {
+                    continue;
+                }
+                let (k, v) = clause.split_once('=')?;
+                map.insert(k.trim().to_string(), v.trim().to_string());
+            }
+            (name.trim(), map)
+        }
+        None => (trimmed, BTreeMap::new()),
+    };
+    let ident = name.parse::<Identifier>().ok()?;
+    Some((ident, props))
 }
 
 impl BlockClassifier for BlockAtlas {
@@ -331,7 +396,7 @@ impl BlockClassifier for BlockAtlas {
             },
             Some(c) => Cell {
                 occludes: c.occludes,
-                surface: c.surface.clone(),
+                surface: c.surface,
                 block_light,
                 sky_light,
             },
@@ -356,10 +421,17 @@ fn project_state(
     model_cache: &mut HashMap<ResourceLocation, Option<ResolvedModel>>,
     colormaps: &DefaultTints,
 ) -> Option<Projected> {
-    // Cube-first: take the first applicable model reference (first weight). This
-    // covers `variants` and the common single-`apply` multipart cube; genuine
+    // Cube-first: take the first applicable model reference for *this state's
+    // properties* (first weight). `applicable_models` selects the matching
+    // `variants` key or the applicable `multipart` cases — selecting by property
+    // is essential: `oak_log` has axis=x/y/z variants and picking the file-first
+    // one (axis=x, rotated) would map the top face to a side texture. Genuine
     // multipart geometry (fences, walls) falls through to the deferred path.
-    let model_ref = blockstates.model_refs().next()?;
+    let model_ref = blockstates
+        .applicable_models(props)
+        .into_iter()
+        .flat_map(<[_]>::iter)
+        .next()?;
 
     let resolved = model_cache
         .entry(model_ref.model.clone())
@@ -395,7 +467,16 @@ fn project_state(
         }
         // Deferred non-cube geometry: render a non-occluding cube of the particle
         // texture so it stays visible without punching holes in its neighbours.
+        // But a model with *no elements at all* is genuinely empty — air,
+        // barrier, light, structure_void — and must render nothing. Vanilla's
+        // `air` model carries `particle: missingno` with zero elements; treating
+        // that as a particle cube fills the world with the missing-texture
+        // sprite. Only defer when there is real (non-cube) geometry to stand in
+        // for.
         None => {
+            if resolved.elements.is_empty() {
+                return None;
+            }
             let particle = resolved.resolve_texture("particle")?;
             let ft = FaceTex {
                 loc: particle.clone(),
@@ -707,5 +788,43 @@ mod tests {
         };
         let out = tint_image(&img, 0x80_40_20);
         assert_eq!(out.rgba, vec![0x80, 0x40, 0x20, 200], "alpha is preserved");
+    }
+
+    #[test]
+    fn parse_state_key_reads_name_and_properties() {
+        let (block, props) = parse_state_key("minecraft:grass_block[snowy=false]").unwrap();
+        assert_eq!(block.to_string(), "minecraft:grass_block");
+        assert_eq!(props.get("snowy").map(String::as_str), Some("false"));
+        assert_eq!(props.len(), 1);
+    }
+
+    #[test]
+    fn parse_state_key_bare_name_has_no_properties() {
+        let (block, props) = parse_state_key("minecraft:stone").unwrap();
+        assert_eq!(block.to_string(), "minecraft:stone");
+        assert!(props.is_empty());
+        // Default namespace is applied, so a bare path resolves too.
+        let (bare, _) = parse_state_key("stone").unwrap();
+        assert_eq!(bare.to_string(), "minecraft:stone");
+    }
+
+    #[test]
+    fn parse_state_key_is_order_and_whitespace_insensitive() {
+        // Property order and surrounding whitespace must not change the key, so a
+        // generator string and the registry's sorted BTreeMap compare equal.
+        let a = parse_state_key("minecraft:oak_fence[north=true,east=false]").unwrap();
+        let b = parse_state_key("minecraft:oak_fence[ east=false , north=true ]").unwrap();
+        assert_eq!(a, b, "property order/whitespace must not affect the key");
+    }
+
+    #[test]
+    fn parse_state_key_rejects_malformed_input() {
+        // A property clause without '=' is malformed and must fail loudly rather
+        // than resolve to a plausible-but-wrong key.
+        assert!(parse_state_key("minecraft:oak_log[axis]").is_none());
+        // An unterminated property list is malformed.
+        assert!(parse_state_key("minecraft:oak_log[axis=y").is_none());
+        // An empty identifier is malformed.
+        assert!(parse_state_key("").is_none());
     }
 }
