@@ -184,6 +184,16 @@ impl ModelMesh {
     pub fn quad_count(&self) -> usize {
         self.indices.len() / 6
     }
+
+    /// Append `other`'s geometry into `self`, rebasing its indices onto the
+    /// current vertex count. Used to fold lava (which meshes through the fluid
+    /// path) into the opaque model mesh it shares a pass with.
+    pub fn merge(&mut self, other: &ModelMesh) {
+        let base = self.vertices.len() as u32;
+        self.vertices.extend_from_slice(&other.vertices);
+        self.indices
+            .extend(other.indices.iter().map(|&i| i + base));
+    }
 }
 
 /// Bytes per wide model vertex (asserted to be 28). This is the format the

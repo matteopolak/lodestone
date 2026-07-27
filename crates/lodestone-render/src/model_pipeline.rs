@@ -100,9 +100,29 @@ impl ModelPipeline {
         layer: RenderLayer,
     ) -> Self {
         let translucent = layer == RenderLayer::Translucent;
+        Self::build(device, color_format, MODEL_WGSL, translucent)
+    }
+
+    /// Build the translucent **fluid** pipeline: like a `Translucent` model
+    /// pipeline (alpha blending, no depth writes, no back-face culling) but with
+    /// a shader that does **not** cutout-discard (water is a smooth alpha, not a
+    /// mask) and tints `tint_index` quads with the water colour instead of
+    /// foliage green. Drawn after opaque terrain so the sea floor already in the
+    /// depth buffer shows through.
+    #[must_use]
+    pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::build(device, color_format, FLUID_WGSL, true)
+    }
+
+    fn build(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        shader_src: &str,
+        translucent: bool,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
-            source: wgpu::ShaderSource::Wgsl(MODEL_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
 
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -299,6 +319,60 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Plains foliage green for tinted quads until per-biome tint is wired.
     let grass = vec3<f32>(0.5686, 0.7411, 0.349);
     let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), grass, in.tinted);
+    return vec4<f32>(tex.rgb * tint_col * in.shade, tex.a);
+}
+";
+
+// The fluid (water) shader. Unlike the model shader it does **not** discard on
+// low alpha — water is a smooth translucent surface, not a cutout mask — and it
+// tints `tint_index` quads with the default water colour (#3F76E4) rather than
+// foliage green. Water's greyscale texture becomes blue here.
+const FLUID_WGSL: &str = r"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    section_origin: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(1) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(1) @binding(1) var atlas_smp: sampler;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) shade: f32,
+    @location(2) tinted: f32,
+};
+
+@vertex
+fn vs_main(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) ao: f32,
+    @location(3) packed: vec4<u32>,
+) -> VsOut {
+    let light_byte = packed.x;
+    let sky = f32((light_byte >> 4u) & 15u) / 15.0;
+    let block = f32(light_byte & 15u) / 15.0;
+    let tint_idx = packed.y;
+
+    let world = position + camera.section_origin.xyz;
+    let light_term = 0.2 + 0.8 * max(sky, block);
+
+    var out: VsOut;
+    out.clip = camera.view_proj * vec4<f32>(world, 1.0);
+    out.uv = uv;
+    out.shade = ao * light_term;
+    out.tinted = select(0.0, 1.0, tint_idx != 255u);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    // Default water colour (#3F76E4); untinted quads keep their own colour.
+    let water = vec3<f32>(0.247, 0.463, 0.894);
+    let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
     return vec4<f32>(tex.rgb * tint_col * in.shade, tex.a);
 }
 ";
