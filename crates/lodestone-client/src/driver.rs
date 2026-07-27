@@ -349,6 +349,14 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::Respawn);
                 }
             }
+            ClientEvent::Respawned { .. } => {
+                // Any respawn — death, portal travel, dimension change, `/respawn`
+                // — re-seeds the server's load-timeout timer, so re-arm for the
+                // post-respawn placement teleport. `Death` also re-arms above, but
+                // that only covers death-respawn; this covers every non-death
+                // transition, which emits `Respawned` with no preceding `Death`.
+                self.awaiting_player_load = true;
+            }
             ClientEvent::Chat {
                 ack: Some(info), ..
             } => {
