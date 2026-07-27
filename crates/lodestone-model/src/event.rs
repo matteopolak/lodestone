@@ -1,0 +1,961 @@
+use uuid::Uuid;
+
+use crate::{
+    common::GameMode,
+    ids::{DimensionId, Identifier, ResourceKey},
+    item::ItemStack,
+    math::{BlockPos, ChunkPos, Rotation, Vec3, Vec3f},
+    text::{Text, TextColor},
+};
+
+/// The semantic kind of an incoming chat component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChatKind {
+    /// Player or signed chat message.
+    Chat,
+    /// System message.
+    System,
+    /// Game information, such as action-bar text.
+    GameInfo,
+}
+
+/// Relative components of a player teleport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TeleportFlags {
+    /// X position is relative to the current position.
+    pub relative_x: bool,
+    /// Y position is relative to the current position.
+    pub relative_y: bool,
+    /// Z position is relative to the current position.
+    pub relative_z: bool,
+    /// Yaw is relative to the current rotation.
+    pub relative_yaw: bool,
+    /// Pitch is relative to the current rotation.
+    pub relative_pitch: bool,
+}
+
+/// A semantic entity movement payload.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EntityMovement {
+    /// New absolute position.
+    Absolute(Vec3),
+    /// Delta from the entity's current position.
+    Relative(Vec3),
+}
+
+/// A version-free entity pose.
+///
+/// A version adapter maps its protocol's numeric pose enum onto these stable
+/// names. The set is `non_exhaustive` and carries an [`Other`](EntityPose::Other)
+/// escape hatch so a pose a version has that this list does not can still travel
+/// as its raw id rather than being dropped or misclassified.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntityPose {
+    /// Standing upright (the default).
+    Standing,
+    /// Gliding with an elytra.
+    FallFlying,
+    /// Sleeping in a bed.
+    Sleeping,
+    /// Swimming (also crawling).
+    Swimming,
+    /// Riptide spin attack.
+    SpinAttack,
+    /// Crouching / sneaking.
+    Crouching,
+    /// Mid long-jump (e.g. a ravager).
+    LongJumping,
+    /// Dying.
+    Dying,
+    /// Sitting.
+    Sitting,
+    /// A pose this version has that the shared set does not name, kept as its
+    /// raw protocol id.
+    Other(u32),
+}
+
+/// An incremental, version-free update to an entity's metadata.
+///
+/// Vanilla transmits metadata as a sparse `(index, value)` list applied
+/// cumulatively, where the *index* of each semantic field and the *serializer*
+/// used to encode it are version-specific. A version adapter resolves those
+/// per-version details and produces this struct holding only the fields that a
+/// given packet actually carried — every field is `Option`, and `None` means
+/// "this packet did not mention it", not "cleared".
+///
+/// The one field that is itself optional on the wire, the custom name, uses a
+/// nested `Option`: the outer `Option` is "did this packet include the field",
+/// the inner is "is a name currently set".
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EntityMetadataUpdate {
+    /// The shared entity flags byte (on-fire / crouching / sprinting / swimming
+    /// / invisible / glowing / fall-flying), when present. Bit meanings are
+    /// stable across modern versions.
+    pub flags: Option<u8>,
+    /// The custom name, when the field was present. Inner `None` clears it.
+    pub custom_name: Option<Option<String>>,
+    /// Whether the custom name renders above the entity, when present.
+    pub custom_name_visible: Option<bool>,
+    /// The entity pose, when present.
+    pub pose: Option<EntityPose>,
+    /// Current health, when present (living entities only).
+    pub health: Option<f32>,
+    /// Whether the entity is a baby, when present (ageable mobs only).
+    pub baby: Option<bool>,
+}
+
+impl EntityMetadataUpdate {
+    /// Whether this update carries no fields at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.flags.is_none()
+            && self.custom_name.is_none()
+            && self.custom_name_visible.is_none()
+            && self.pose.is_none()
+            && self.health.is_none()
+            && self.baby.is_none()
+    }
+}
+
+/// A single attribute modifier in an [`EntityAttributeSnapshot`].
+///
+/// `operation` is the vanilla wire id: `0` = add value, `1` = add multiplied
+/// base, `2` = add multiplied total. The shared model deliberately keeps it as a
+/// raw id rather than an enum so it carries no application behaviour; the entity
+/// layer maps it onto its own `Operation` when folding modifiers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityAttributeModifier {
+    /// Stable modifier identity.
+    pub id: Identifier,
+    /// Modifier amount, interpreted per `operation`.
+    pub amount: f64,
+    /// Vanilla operation wire id (`0`/`1`/`2`).
+    pub operation: u8,
+}
+
+/// A snapshot of one of an entity's attributes: its base value and the modifiers
+/// currently applied to it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityAttributeSnapshot {
+    /// The attribute's canonical id (e.g. `minecraft:movement_speed`).
+    pub attribute: Identifier,
+    /// The base value before modifiers.
+    pub base: f64,
+    /// The modifiers applied to this attribute.
+    pub modifiers: Vec<EntityAttributeModifier>,
+}
+
+/// A semantic equipment slot on an entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EquipmentSlot {
+    /// The entity's main-hand item.
+    MainHand,
+    /// The entity's off-hand item.
+    OffHand,
+    /// Boots / feet armor.
+    Feet,
+    /// Leggings / leg armor.
+    Legs,
+    /// Chestplate / chest armor.
+    Chest,
+    /// Helmet / head armor.
+    Head,
+    /// Animal body armor.
+    Body,
+    /// Saddle slot.
+    Saddle,
+}
+
+impl EquipmentSlot {
+    /// Slots in vanilla `EquipmentSlot` declaration order.
+    ///
+    /// Protocol adapters that decode raw enum ordinals should index through this
+    /// table rather than duplicating the order.
+    pub const ALL: [Self; 8] = [
+        Self::MainHand,
+        Self::OffHand,
+        Self::Feet,
+        Self::Legs,
+        Self::Chest,
+        Self::Head,
+        Self::Body,
+        Self::Saddle,
+    ];
+
+    /// Returns the slot for a vanilla `EquipmentSlot` ordinal.
+    #[must_use]
+    pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
+        match ordinal {
+            0 => Some(Self::MainHand),
+            1 => Some(Self::OffHand),
+            2 => Some(Self::Feet),
+            3 => Some(Self::Legs),
+            4 => Some(Self::Chest),
+            5 => Some(Self::Head),
+            6 => Some(Self::Body),
+            7 => Some(Self::Saddle),
+            _ => None,
+        }
+    }
+
+    /// Returns this slot's vanilla `EquipmentSlot` ordinal.
+    #[must_use]
+    pub const fn ordinal(self) -> u8 {
+        match self {
+            Self::MainHand => 0,
+            Self::OffHand => 1,
+            Self::Feet => 2,
+            Self::Legs => 3,
+            Self::Chest => 4,
+            Self::Head => 5,
+            Self::Body => 6,
+            Self::Saddle => 7,
+        }
+    }
+}
+
+/// One entity equipment slot update.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EntityEquipment {
+    /// Updated equipment slot.
+    pub slot: EquipmentSlot,
+    /// New item in the slot, or `None` when the slot was cleared.
+    pub item: Option<ItemStack>,
+}
+
+/// One entry in a player list update.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerListEntry {
+    /// Player profile UUID.
+    pub uuid: Uuid,
+    /// Player name when present in the update.
+    pub name: Option<String>,
+    /// Current game mode when present in the update.
+    pub game_mode: Option<GameMode>,
+    /// Reported latency in milliseconds when present in the update.
+    pub latency: Option<i32>,
+    /// Display name when present in the update.
+    pub display_name: Option<Text>,
+    /// Whether the player should be listed when present in the update.
+    pub listed: Option<bool>,
+}
+
+/// A Minecraft sound source category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SoundCategory {
+    /// Master volume category.
+    Master,
+    /// Music category.
+    Music,
+    /// Record / jukebox category.
+    Record,
+    /// Weather category.
+    Weather,
+    /// Block sound category.
+    Block,
+    /// Hostile entity category.
+    Hostile,
+    /// Neutral entity category.
+    Neutral,
+    /// Player sound category.
+    Player,
+    /// Ambient sound category.
+    Ambient,
+    /// Voice category.
+    Voice,
+    /// User-interface sound category.
+    Ui,
+}
+
+impl SoundCategory {
+    /// Categories in vanilla `SoundSource` declaration order.
+    ///
+    /// Protocol adapters that decode raw enum ordinals should index through this
+    /// table rather than duplicating the order.
+    pub const ALL: [Self; 11] = [
+        Self::Master,
+        Self::Music,
+        Self::Record,
+        Self::Weather,
+        Self::Block,
+        Self::Hostile,
+        Self::Neutral,
+        Self::Player,
+        Self::Ambient,
+        Self::Voice,
+        Self::Ui,
+    ];
+
+    /// Returns the category for a vanilla `SoundSource` ordinal.
+    #[must_use]
+    pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
+        match ordinal {
+            0 => Some(Self::Master),
+            1 => Some(Self::Music),
+            2 => Some(Self::Record),
+            3 => Some(Self::Weather),
+            4 => Some(Self::Block),
+            5 => Some(Self::Hostile),
+            6 => Some(Self::Neutral),
+            7 => Some(Self::Player),
+            8 => Some(Self::Ambient),
+            9 => Some(Self::Voice),
+            10 => Some(Self::Ui),
+            _ => None,
+        }
+    }
+
+    /// Returns this category's vanilla `SoundSource` ordinal.
+    #[must_use]
+    pub const fn ordinal(self) -> u8 {
+        match self {
+            Self::Master => 0,
+            Self::Music => 1,
+            Self::Record => 2,
+            Self::Weather => 3,
+            Self::Block => 4,
+            Self::Hostile => 5,
+            Self::Neutral => 6,
+            Self::Player => 7,
+            Self::Ambient => 8,
+            Self::Voice => 9,
+            Self::Ui => 10,
+        }
+    }
+}
+
+/// Objective update mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObjectiveMode {
+    /// Add a new objective.
+    Add,
+    /// Remove an existing objective.
+    Remove,
+    /// Change an existing objective.
+    Change,
+}
+
+/// How objective scores should render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ObjectiveRenderType {
+    /// Render as a plain integer.
+    Integer,
+    /// Render as hearts.
+    Hearts,
+}
+
+/// Optional scoreboard number formatting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumberFormat {
+    /// Use the objective or client default.
+    Default,
+    /// Render no number.
+    Blank,
+    /// Render this fixed text instead of the number.
+    Fixed(Box<Text>),
+    /// Render the number styled with this colour.
+    Styled(TextColor),
+}
+
+/// The sixteen named team colours.
+///
+/// These are the named text colours that can be used as team colours and as
+/// coloured sidebar display-slot selectors. RGB text colours are intentionally
+/// excluded because teams can only use the named set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TeamColor {
+    /// Black.
+    Black,
+    /// Dark blue.
+    DarkBlue,
+    /// Dark green.
+    DarkGreen,
+    /// Dark aqua.
+    DarkAqua,
+    /// Dark red.
+    DarkRed,
+    /// Dark purple.
+    DarkPurple,
+    /// Gold.
+    Gold,
+    /// Gray.
+    Gray,
+    /// Dark gray.
+    DarkGray,
+    /// Blue.
+    Blue,
+    /// Green.
+    Green,
+    /// Aqua.
+    Aqua,
+    /// Red.
+    Red,
+    /// Light purple.
+    LightPurple,
+    /// Yellow.
+    Yellow,
+    /// White.
+    White,
+}
+
+impl TeamColor {
+    /// Converts this team colour to the matching text colour.
+    #[must_use]
+    pub const fn as_text_color(self) -> TextColor {
+        match self {
+            Self::Black => TextColor::Black,
+            Self::DarkBlue => TextColor::DarkBlue,
+            Self::DarkGreen => TextColor::DarkGreen,
+            Self::DarkAqua => TextColor::DarkAqua,
+            Self::DarkRed => TextColor::DarkRed,
+            Self::DarkPurple => TextColor::DarkPurple,
+            Self::Gold => TextColor::Gold,
+            Self::Gray => TextColor::Gray,
+            Self::DarkGray => TextColor::DarkGray,
+            Self::Blue => TextColor::Blue,
+            Self::Green => TextColor::Green,
+            Self::Aqua => TextColor::Aqua,
+            Self::Red => TextColor::Red,
+            Self::LightPurple => TextColor::LightPurple,
+            Self::Yellow => TextColor::Yellow,
+            Self::White => TextColor::White,
+        }
+    }
+}
+
+/// A scoreboard display slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DisplaySlot {
+    /// Tab-list player slot.
+    List,
+    /// Plain sidebar.
+    Sidebar,
+    /// Below-name slot.
+    BelowName,
+    /// Sidebar shown to members of a team with the given colour.
+    TeamSidebar(TeamColor),
+}
+
+/// Name-tag visibility rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Visibility {
+    /// Always visible.
+    Always,
+    /// Never visible.
+    Never,
+    /// Hidden from players on other teams.
+    HideForOtherTeams,
+    /// Hidden from players on the same team.
+    HideForOwnTeam,
+}
+
+/// Team collision rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CollisionRule {
+    /// Always collide.
+    Always,
+    /// Never collide.
+    Never,
+    /// Push only members of other teams.
+    PushOtherTeams,
+    /// Push only members of the same team.
+    PushOwnTeam,
+}
+
+/// Shared parameters for team create/update actions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamParameters {
+    /// Shown team display name.
+    pub display_name: Text,
+    /// Prefix prepended to member names.
+    pub prefix: Text,
+    /// Suffix appended to member names.
+    pub suffix: Text,
+    /// Name-tag visibility rule.
+    pub name_tag_visibility: Visibility,
+    /// Collision rule.
+    pub collision_rule: CollisionRule,
+    /// Optional team colour.
+    pub color: Option<TeamColor>,
+    /// Whether members can damage each other.
+    pub friendly_fire: bool,
+    /// Whether members can see invisible teammates.
+    pub see_friendly_invisibles: bool,
+}
+
+/// Team update action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TeamAction {
+    /// Create a team with parameters and initial members.
+    Create {
+        /// Team parameters.
+        params: Box<TeamParameters>,
+        /// Initial member holder names.
+        members: Vec<String>,
+    },
+    /// Remove a team.
+    Remove,
+    /// Update team parameters.
+    Update {
+        /// New team parameters.
+        params: Box<TeamParameters>,
+    },
+    /// Add members to the team.
+    AddMembers(Vec<String>),
+    /// Remove members from the team.
+    RemoveMembers(Vec<String>),
+}
+
+/// Boss bar colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BossColor {
+    /// Pink.
+    Pink,
+    /// Blue.
+    Blue,
+    /// Red.
+    Red,
+    /// Green.
+    Green,
+    /// Yellow.
+    Yellow,
+    /// Purple.
+    Purple,
+    /// White.
+    White,
+}
+
+/// Boss bar overlay/division style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BossOverlay {
+    /// Continuous progress bar.
+    Progress,
+    /// Six notches.
+    Notched6,
+    /// Ten notches.
+    Notched10,
+    /// Twelve notches.
+    Notched12,
+    /// Twenty notches.
+    Notched20,
+}
+
+/// Boss bar update action.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BossAction {
+    /// Add a boss bar.
+    Add {
+        /// Displayed title.
+        title: Box<Text>,
+        /// Current progress, normally `0.0..=1.0`.
+        progress: f32,
+        /// Bar colour.
+        color: BossColor,
+        /// Bar overlay/division style.
+        overlay: BossOverlay,
+        /// Whether the sky should darken.
+        darken: bool,
+        /// Whether boss music should play.
+        music: bool,
+        /// Whether world fog should appear.
+        fog: bool,
+    },
+    /// Remove the boss bar.
+    Remove,
+    /// Update progress.
+    UpdateProgress(f32),
+    /// Update title.
+    UpdateName(Box<Text>),
+    /// Update colour and overlay.
+    UpdateStyle {
+        /// New bar colour.
+        color: BossColor,
+        /// New overlay/division style.
+        overlay: BossOverlay,
+    },
+    /// Update visual/audio flags.
+    UpdateFlags {
+        /// Whether the sky should darken.
+        darken: bool,
+        /// Whether boss music should play.
+        music: bool,
+        /// Whether world fog should appear.
+        fog: bool,
+    },
+}
+
+/// Things that happen to the client after a version adapter lifts a packet into
+/// the canonical model.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClientEvent {
+    /// The client entered the game world.
+    Login {
+        /// Local player entity id.
+        entity_id: i32,
+        /// Current game mode.
+        game_mode: GameMode,
+        /// Current dimension.
+        dimension: DimensionId,
+    },
+    /// Chat or system text was received.
+    Chat {
+        /// Message text.
+        text: Text,
+        /// Message kind.
+        kind: ChatKind,
+    },
+    /// The server disconnected the client.
+    Disconnect {
+        /// Disconnect reason.
+        reason: Text,
+    },
+    /// A keep-alive challenge was received.
+    KeepAlive {
+        /// Keep-alive id.
+        id: i64,
+    },
+    /// A ping challenge was received (distinct from keep-alive; used for
+    /// latency measurement outside the tick-driven keep-alive cadence).
+    Ping {
+        /// Id that must be echoed back via [`crate::ClientAction::PongResponse`].
+        id: i32,
+    },
+    /// The player was teleported.
+    TeleportPlayer {
+        /// Target position or relative delta indicated by `flags`.
+        pos: Vec3,
+        /// Target rotation or relative rotation indicated by `flags`.
+        rotation: Rotation,
+        /// Relative component flags.
+        flags: TeleportFlags,
+    },
+    /// An entity appeared in the world.
+    EntitySpawned {
+        /// Entity id.
+        entity_id: i32,
+        /// Entity UUID when known.
+        uuid: Option<Uuid>,
+        /// Canonical entity type key.
+        entity_type: ResourceKey,
+        /// Spawn position.
+        pos: Vec3,
+        /// Spawn rotation.
+        rotation: Rotation,
+        /// Spawn velocity when known.
+        velocity: Option<Vec3>,
+    },
+    /// An entity moved or rotated.
+    EntityMoved {
+        /// Entity id.
+        entity_id: i32,
+        /// Movement payload.
+        movement: EntityMovement,
+        /// New rotation when included.
+        rotation: Option<Rotation>,
+        /// Whether the entity is on the ground.
+        on_ground: bool,
+    },
+    /// An entity's velocity changed.
+    EntityVelocity {
+        /// Entity id.
+        entity_id: i32,
+        /// Velocity vector.
+        velocity: Vec3,
+    },
+    /// One or more entities were removed.
+    EntityRemoved {
+        /// Removed entity ids.
+        entity_ids: Vec<i32>,
+    },
+    /// An entity's metadata changed (spawn-time or incremental).
+    ///
+    /// The adapter has already resolved the version-specific indices and
+    /// serializers into the version-free [`EntityMetadataUpdate`]; only the
+    /// fields the packet carried are `Some`.
+    EntityMetadataUpdated {
+        /// Entity id.
+        entity_id: i32,
+        /// The fields this packet updated.
+        metadata: EntityMetadataUpdate,
+    },
+    /// An entity's attributes were (re)published.
+    ///
+    /// Each snapshot fully replaces the named attribute's base value and modifier
+    /// set for that entity; attributes not named are left unchanged.
+    EntityAttributesUpdated {
+        /// Entity id.
+        entity_id: i32,
+        /// The attributes carried by this packet.
+        attributes: Vec<EntityAttributeSnapshot>,
+    },
+    /// One or more equipment slots changed on an entity.
+    EntityEquipmentUpdated {
+        /// Entity id.
+        entity_id: i32,
+        /// Updated equipment slots.
+        equipment: Vec<EntityEquipment>,
+    },
+    /// Player health, food, or saturation changed.
+    HealthChanged {
+        /// Current health.
+        health: f32,
+        /// Current food level.
+        food: i32,
+        /// Current saturation.
+        saturation: f32,
+    },
+    /// The player died. The server holds a dead player on the death screen and
+    /// stops streaming chunks until it receives a respawn request, so a headless
+    /// client must react to this (see the client's respawn policy).
+    Death {
+        /// The death message shown on the death screen.
+        message: Text,
+    },
+    /// World time changed.
+    TimeChanged {
+        /// Total world age.
+        world_age: i64,
+        /// Current time of day.
+        time_of_day: i64,
+    },
+    /// Weather state or intensity changed.
+    ///
+    /// Fields are optional because the server can send one aspect at a time:
+    /// start/stop raining, rain level, or thunder level.
+    WeatherChanged {
+        /// Whether rain is now active, when that changed.
+        raining: Option<bool>,
+        /// Rain intensity, when that changed.
+        rain_level: Option<f32>,
+        /// Thunder intensity, when that changed.
+        thunder_level: Option<f32>,
+    },
+    /// The local player's game mode changed.
+    GameModeChanged {
+        /// New game mode.
+        game_mode: GameMode,
+    },
+    /// The world's default spawn position changed.
+    SpawnPositionChanged {
+        /// Dimension containing the spawn position.
+        dimension: DimensionId,
+        /// New default spawn block position.
+        pos: BlockPos,
+        /// Spawn yaw in degrees.
+        angle: f32,
+        /// Spawn pitch in degrees.
+        pitch: f32,
+    },
+    /// The local player's ability flags or movement speeds changed.
+    AbilitiesChanged {
+        /// Whether the player is invulnerable.
+        invulnerable: bool,
+        /// Whether the player is currently flying.
+        flying: bool,
+        /// Whether the player may fly.
+        can_fly: bool,
+        /// Whether the player may instantly build/break.
+        instabuild: bool,
+        /// Flying speed multiplier.
+        flying_speed: f32,
+        /// Walking speed multiplier.
+        walking_speed: f32,
+    },
+    /// A positioned sound should play.
+    Sound {
+        /// Canonical sound event key.
+        sound: ResourceKey,
+        /// Sound source category.
+        category: SoundCategory,
+        /// Sound origin.
+        pos: Vec3,
+        /// Volume multiplier.
+        volume: f32,
+        /// Pitch multiplier.
+        pitch: f32,
+        /// Optional fixed audible range overriding the volume-derived default.
+        fixed_range: Option<f32>,
+        /// Random seed for deterministic sound variant selection.
+        seed: i64,
+    },
+    /// A sound attached to an entity should play.
+    EntitySound {
+        /// Canonical sound event key.
+        sound: ResourceKey,
+        /// Sound source category.
+        category: SoundCategory,
+        /// Entity id the sound follows.
+        entity_id: i32,
+        /// Volume multiplier.
+        volume: f32,
+        /// Pitch multiplier.
+        pitch: f32,
+        /// Optional fixed audible range overriding the volume-derived default.
+        fixed_range: Option<f32>,
+        /// Random seed for deterministic sound variant selection.
+        seed: i64,
+    },
+    /// A level event occurred at a block position.
+    ///
+    /// The event code is Mojang's gameplay-level event code. It is not a
+    /// registry id for blocks, items, entities, or sounds.
+    LevelEvent {
+        /// Gameplay event code.
+        event: i32,
+        /// Event block position.
+        pos: BlockPos,
+        /// Event-specific data.
+        data: i32,
+        /// Whether the event is global rather than distance-limited.
+        global: bool,
+    },
+    /// Particles should spawn.
+    Particles {
+        /// Canonical particle type key.
+        particle: ResourceKey,
+        /// Whether the particles should be visible at long distance.
+        long_distance: bool,
+        /// Particle origin.
+        pos: Vec3,
+        /// Randomized offset bounds.
+        offset: Vec3f,
+        /// Particle speed parameter.
+        max_speed: f32,
+        /// Number of particles to spawn.
+        count: i32,
+    },
+    /// A container's full content changed.
+    ContainerContent {
+        /// Window/container id.
+        window_id: i32,
+        /// Container synchronization state id.
+        state_id: i32,
+        /// Slot contents in container order.
+        items: Vec<Option<ItemStack>>,
+        /// Item carried by the cursor.
+        carried_item: Option<ItemStack>,
+    },
+    /// A single container slot changed.
+    ContainerSlot {
+        /// Window/container id.
+        window_id: i32,
+        /// Container synchronization state id.
+        state_id: i32,
+        /// Slot index.
+        slot: i32,
+        /// New slot contents.
+        item: Option<ItemStack>,
+    },
+    /// A container/menu property changed.
+    ///
+    /// These property ids are menu-local channels such as furnace progress,
+    /// brewing progress, or enchantment costs. They are not registry ids.
+    ContainerData {
+        /// Window/container id.
+        window_id: i32,
+        /// Menu-local property id.
+        property: i32,
+        /// New property value.
+        value: i32,
+    },
+    /// The server closed a container/menu screen.
+    ScreenClosed {
+        /// Window/container id.
+        window_id: i32,
+    },
+    /// A container/menu screen opened.
+    ScreenOpened {
+        /// Window/container id.
+        window_id: i32,
+        /// Canonical menu type key.
+        menu_type: ResourceKey,
+        /// Screen title.
+        title: Text,
+    },
+    /// A scoreboard objective was added, removed, or changed.
+    ObjectiveUpdate {
+        /// Objective name.
+        name: String,
+        /// Update mode.
+        mode: ObjectiveMode,
+        /// Display name for add/change; absent for remove.
+        display_name: Option<Text>,
+        /// Render type for add/change; absent for remove.
+        render_type: Option<ObjectiveRenderType>,
+        /// Objective default number format for add/change.
+        number_format: Option<NumberFormat>,
+    },
+    /// A scoreboard display slot changed.
+    DisplayObjective {
+        /// Display slot being assigned.
+        slot: DisplaySlot,
+        /// Objective name, or `None` to clear the slot.
+        objective: Option<String>,
+    },
+    /// A score was added or changed.
+    ScoreUpdate {
+        /// Score holder name.
+        holder: String,
+        /// Objective name.
+        objective: String,
+        /// Score value.
+        value: i32,
+        /// Optional display override for the holder.
+        display: Option<Text>,
+        /// Optional per-score number format.
+        number_format: Option<NumberFormat>,
+    },
+    /// A score was reset.
+    ScoreReset {
+        /// Score holder name.
+        holder: String,
+        /// Objective to reset, or `None` to reset all objectives for the holder.
+        objective: Option<String>,
+    },
+    /// A team was created, removed, changed, or had membership changed.
+    TeamUpdate {
+        /// Team name.
+        name: String,
+        /// Team action.
+        action: TeamAction,
+    },
+    /// A boss bar was added, removed, or changed.
+    BossBarUpdate {
+        /// Boss bar id.
+        id: Uuid,
+        /// Boss bar action.
+        action: BossAction,
+    },
+    /// The player list changed.
+    PlayerListUpdate {
+        /// Updated player entries.
+        entries: Vec<PlayerListEntry>,
+    },
+    /// A chunk's data at `pos` became available or was replaced.
+    ///
+    /// This is a lightweight *notification*, not a data carrier. The adapter
+    /// applies the fully decoded, version-free chunk (block-state and biome
+    /// sections, light, heightmaps, block entities) directly into the
+    /// client-owned [`World`](lodestone_world::World) as it decodes the packet;
+    /// consumers read that data by querying the world, keyed by `pos`.
+    ///
+    /// Deliberately carrying only the position keeps this event cheap and, more
+    /// importantly, keeps world correctness independent of consumer liveness:
+    /// the event travels a bounded channel, so a payload here could be dropped
+    /// under backpressure, and a dropped `ChunkLoaded` would be an unrecoverable
+    /// hole. As a bare signal it is idempotent and safe to coalesce — treat it
+    /// as "the region at `pos` is dirty; re-read or re-mesh it."
+    ChunkLoaded {
+        /// Chunk position; look the data up in the world by this key.
+        pos: ChunkPos,
+    },
+    /// A chunk became unavailable. The adapter has already removed it from the
+    /// client-owned world; this notifies consumers to drop anything derived
+    /// from `pos` (a mesh, a collision cache).
+    ChunkUnloaded {
+        /// Chunk position.
+        pos: ChunkPos,
+    },
+}

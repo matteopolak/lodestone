@@ -1,0 +1,33 @@
+[package]
+name = "lodestone-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Protocol-blind WebSocket-to-TCP relay for reaching Minecraft servers from a browser build."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lodestone-relay"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+tokio-tungstenite = "0.24"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[dev-dependencies]
+# The end-to-end proof: a *native* client joins a real server through the relay
+# over a WebSocket transport. The registry's `v770` family is enabled here
+# (dev-only) so the test can resolve the adapter; none of this touches the
+# default workspace build.
+lodestone-client = { workspace = true }
+lodestone-net = { workspace = true, features = ["ws-native"] }
+lodestone-registry = { workspace = true, features = ["v770"] }
+lodestone-testsupport = { workspace = true }
+uuid = { workspace = true }

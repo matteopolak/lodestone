@@ -1,0 +1,28 @@
+[package]
+name = "lodestone-allocbench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "allocbench"
+path = "src/main.rs"
+
+# One global allocator per binary, selected at compile time by exactly one of
+# these features. `alloc-system` is the implicit default (no crate pulled in).
+# Enabling more than one non-system allocator is a compile error (see main.rs).
+[features]
+default = ["alloc-system"]
+alloc-system = []
+alloc-mimalloc = ["dep:mimalloc"]
+alloc-snmalloc = ["dep:snmalloc-rs"]
+alloc-jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+mimalloc = { version = "0.1.52", optional = true }
+snmalloc-rs = { version = "0.7.4", optional = true }
+tikv-jemallocator = { version = "0.7.0", optional = true }

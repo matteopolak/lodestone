@@ -1,0 +1,51 @@
+[package]
+name = "lodestone-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lodestone integrated server (singleplayer + open-to-LAN) over the shared Connection/Transport seam."
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { path = "../lodestone-core" }
+lodestone-net = { path = "../lodestone-net" }
+lodestone-worldgen = { path = "../lodestone-worldgen" }
+thiserror = { workspace = true }
+
+# --- Native (non-wasm) target dependencies ---
+# Native tokio keeps the full workspace feature set (including `net` and
+# `rt-multi-thread`); `IntegratedServer::bind`'s TCP path is `cfg`-gated to this
+# target. Splitting the dependency by target is a build-configuration change
+# only — native behaviour is byte-for-byte unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+# --- wasm32 target dependencies ---
+# `wasm32-unknown-unknown` cannot build `mio` (hence tokio's `net`), so tokio
+# takes only the features it supports there (`io-util, rt, macros, sync, time`),
+# exactly as `lodestone-net` does. This is the whole unlock: with it a browser
+# can run `IntegratedServer::open_in_memory` singleplayer *in-process* over the
+# same `DuplexStream` transport `ClientBuilder::connect_with` already accepts —
+# no relay, no socket, no server at all (plan §8, §16). `wasm-bindgen-futures`
+# backs the task spawner, because a browser has no blocking tokio runtime to
+# `tokio::spawn` into.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "io-util",
+    "rt",
+    "macros",
+    "sync",
+    "time",
+] }
+wasm-bindgen-futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+lodestone-client = { path = "../lodestone-client" }
+lodestone-model = { path = "../lodestone-model" }
+lodestone-world = { path = "../lodestone-world" }
+uuid = { workspace = true }

@@ -1,0 +1,30 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Fetched / generated inputs — recreate with `cargo xtask`
+/vendor/
+/.cache/
+
+# Downloaded tooling (trunk et al) — recreate with scripts/
+/.tooling/
+
+# Scratch capture workspace — not part of the build
+/.capture/
+
+# Deletion-drill scratch (see plan §3.2); recreate with `cargo xtask check-deletable`
+/.deletion-drill-backup/
+
+# Debug artifacts from headless/window render runs — regenerate on demand,
+# never commit. These are outputs of tests, not inputs to them.
+/*.png
+/*.ppm
+/*.log
+
+# Decompiled reference source: NEVER commit (Mojang-copyrighted)
+**/mc/*/src/
+**/mc/*/client-src/
+*.jar
+
+# OS
+.DS_Store

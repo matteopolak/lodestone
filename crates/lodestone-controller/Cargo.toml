@@ -1,0 +1,21 @@
+# The wasm-safe player-controller core, shared by the native (winit) shell and
+# the browser (web-sys) client so movement has exactly one implementation.
+#
+# Depends only on `lodestone-physics` (bit-exact movement) and `lodestone-client`
+# (for the version-free `ClientAction`/`Rotation`/`Vec3` it lowers to). Both are
+# wasm-safe: `lodestone-client` gates its tokio `net`/`mio` deps behind
+# `cfg(not(target_arch = "wasm32"))`. This crate itself touches no clock, fs,
+# net, or thread APIs — the `no_wasm_trap_symbols_are_confined` guard test
+# enforces that so the shared pipeline can never quietly regain a wasm trap.
+[package]
+name = "lodestone-controller"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-physics = { path = "../lodestone-physics" }
+lodestone-client = { workspace = true }

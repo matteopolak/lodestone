@@ -1,0 +1,35 @@
+[package]
+name = "lodestone-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# This crate is the single, intended aggregation point that maps a protocol
+# number to a concrete `VersionAdapter`. It is the ONE shared crate allowed to
+# name version crates, and it may only do so through OPTIONAL, feature-gated
+# dependencies so that deleting any version family stays a one-folder-plus-one-
+# line operation. The isolation lint recognises this role via the metadata key
+# below; see `xtask`'s isolation check for how the exemption is kept safe.
+[package.metadata.lodestone-isolation]
+role = "version-registry"
+
+[dependencies]
+lodestone-model = { workspace = true }
+
+# One optional dependency per version family. Adding a family is one line here
+# plus one line in `[features]`; deleting a family is deleting its folder and
+# removing those two lines. These are never required, so the default build is
+# version-free and every family stays independently deletable.
+lodestone-v47 = { workspace = true, optional = true }
+lodestone-v770 = { workspace = true, optional = true }
+lodestone-v340 = { workspace = true, optional = true }
+
+[features]
+# One feature per version family. Enabling a feature compiles that family in and
+# registers its adapter. No family is enabled by default.
+v47 = ["dep:lodestone-v47"]
+v770 = ["dep:lodestone-v770"]
+v340 = ["dep:lodestone-v340"]

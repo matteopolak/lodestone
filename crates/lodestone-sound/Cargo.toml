@@ -1,0 +1,55 @@
+# The bridge between the version-free game event stream and the device-free
+# audio engine. It is the one place that knows *both* `lodestone-model`'s
+# `ClientEvent::Sound` and `lodestone-audio`'s `Mixer`, plus `lodestone-assets`'
+# `sounds.json` resolver. Keeping this glue in its own crate is deliberate:
+# `lodestone-audio` stays a standalone, asset-free, device-free core (which is
+# what let it port to the browser for free), and `lodestone-client`/`-shell`
+# don't have to grow an audio+assets dependency to play a sound.
+[package]
+name = "lodestone-sound"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The device-free core. Referenced by path (it is not a workspace.dependency) —
+# the same shape `lodestone-shell` uses for `lodestone-render`.
+lodestone-audio = { path = "../lodestone-audio" }
+# The `sounds.json` resolver: weighted selection + `type: event` chaining +
+# cycle guard already live here, and `resolve` takes exactly the `roll` closure
+# our `JavaRandom` provides.
+lodestone-assets = { workspace = true }
+# The version-free carriers: `ClientEvent::Sound` / `EntitySound`, `SoundCategory`.
+lodestone-model = { workspace = true }
+glam = { workspace = true }
+thiserror = { workspace = true }
+
+# Live-gate-only dependencies (a native integration test that drives real
+# packets from a running server). Optional so the *default* build and
+# `cargo test -p lodestone-sound` stay version-free (no protocol family pulled
+# in) and wasm-safe (no tokio-net / client stack). Enabled by `live-v770`,
+# mirroring `lodestone-client`'s proven pattern.
+lodestone-client = { workspace = true, optional = true }
+lodestone-registry = { workspace = true, optional = true }
+lodestone-testsupport = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+# Turn on the v770 family inside the registry and pull the live-test stack. The
+# live gate is additionally `#[ignore]`d, so even with this feature the default
+# run stays hermetic; you opt in with `--ignored`.
+live-v770 = [
+    "dep:lodestone-client",
+    "dep:lodestone-registry",
+    "dep:lodestone-testsupport",
+    "dep:tokio",
+    "dep:uuid",
+    "dep:serde_json",
+    "lodestone-registry/v770",
+]

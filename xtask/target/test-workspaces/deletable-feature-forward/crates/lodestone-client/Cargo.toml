@@ -1,0 +1,11 @@
+[package]
+name = "lodestone-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lodestone-registry = { path = "../lodestone-registry" }
+
+[features]
+live-v1 = ["lodestone-registry/v1"]
+

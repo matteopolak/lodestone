@@ -1,0 +1,58 @@
+[package]
+name = "lodestone-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The crate is named `lodestone-shell` so the workspace's `crates/lodestone-*`
+# glob picks it up without editing the root manifest, but the artefacts it
+# produces are just `lodestone`: the runnable binary and the testable library.
+[lib]
+name = "lodestone"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lodestone"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Library seams the shell is a thin client over.
+lodestone-client = { workspace = true }
+lodestone-model = { workspace = true }
+lodestone-world = { workspace = true }
+lodestone-registry = { workspace = true }
+lodestone-render = { path = "../lodestone-render", features = ["window"] }
+lodestone-physics = { path = "../lodestone-physics" }
+# The wasm-safe controller core, shared with the browser client so movement has
+# one implementation. The shell adds only the winit key/mouse mapping on top.
+lodestone-controller = { path = "../lodestone-controller" }
+lodestone-testsupport = { workspace = true }
+
+# GPU / windowing / math.
+wgpu = { workspace = true }
+winit = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+
+# Async runtime for the live client, logging, errors, ids.
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+# Cross-platform resident-set-size (RSS) reader for the debug overlay's memory
+# gauge. Wraps the platform syscall (task_info on macOS, /proc on Linux) so the
+# shell stays within the workspace's `deny(unsafe_code)` — the unsafe FFI lives
+# in the dependency, not here. A zero-reading gauge is worse than none (§12).
+memory-stats = "1"
+
+[features]
+# Version-free by default. `live` compiles the vanilla-26.2 (protocol 776)
+# family into the registry so `--connect`/`--live` can resolve an adapter. The
+# shell still names no version in code — only the feature name selects a family.
+default = []
+live = ["lodestone-registry/v770"]

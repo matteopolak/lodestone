@@ -1,0 +1,16 @@
+[package]
+name = "lodestone-worldgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Version-free Minecraft world-generation engine (RNG, noise, density-function interpreter)."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "lodestone-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+glam.workspace = true
+# Pure-Rust Ogg Vorbis decoder. No C deps, compiles to wasm32 cleanly, so it
+# lives in the device-free core alongside the mixer.
+lewton = "0.10"
+
+# The audio *device* is a native-only concern. cpal drives CoreAudio/WASAPI/ALSA
+# on native targets; the browser path never links it (see `sink`/`backend_native`
+# docs). Gating on `cfg(target_arch)` — not a Cargo feature — is deliberate:
+# feature unification lets any consumer silently re-enable a default-on feature
+# graph-wide, but a `cfg(target_arch)` boundary cannot be re-enabled by anyone.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18"
