@@ -91,8 +91,8 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
                 _ => {}
             }
         }
-        rows = tablist::player_rows(&tabs);
-        sidebar = scoreboard::sidebar_from(&scores);
+        rows = tablist::player_rows(&tabs, &|_: &str| None);
+        sidebar = scoreboard::sidebar_from(&scores, &|_: &str| None);
         if !rows.is_empty()
             && sidebar
                 .as_ref()

@@ -6,14 +6,16 @@
 
 use lodestone_game::tablist::TabList;
 
-/// Formats the listed players in vanilla display order as HUD rows.
+/// Formats the listed players in vanilla display order as HUD rows, resolving
+/// any `translate` components in a player's display name against `translate`.
 #[must_use]
-pub fn player_rows(tab_list: &TabList) -> Vec<String> {
+pub fn player_rows(tab_list: &TabList, translate: &dyn Fn(&str) -> Option<String>) -> Vec<String> {
     tab_list
         .ordered()
         .into_iter()
         .map(|entry| {
-            let name = entry.effective_name().to_plain_string();
+            let name =
+                lodestone_game::text::resolve(&entry.effective_name(), translate).to_plain_string();
             if entry.latency >= 0 {
                 format!("{name}  {}ms", entry.latency)
             } else {
@@ -37,6 +39,11 @@ mod tests {
         entry
     }
 
+    /// A translator that resolves nothing (the demo-palette case).
+    fn no_tr(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn rows_use_game_tablist_order_and_display_names() {
         let mut tabs = TabList::new();
@@ -46,8 +53,24 @@ mod tests {
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
 
         assert_eq!(
-            player_rows(&tabs),
+            player_rows(&tabs, &no_tr),
             vec!["Alice  12ms".to_string(), "Bob AFK  30ms".to_string()]
+        );
+    }
+
+    #[test]
+    fn rows_resolve_translate_display_names_through_the_translator() {
+        let mut tabs = TabList::new();
+        let mut e = entry(1, "Steve", 20, GameMode::Survival);
+        e.display_name = Some(Text::translate("entity.minecraft.spider", vec![]));
+        tabs.insert(e);
+
+        let tr = |key: &str| (key == "entity.minecraft.spider").then(|| "Spider".to_string());
+        assert_eq!(player_rows(&tabs, &tr), vec!["Spider  20ms".to_string()]);
+        // Negative control: no table leaks the raw key.
+        assert_eq!(
+            player_rows(&tabs, &no_tr),
+            vec!["entity.minecraft.spider  20ms".to_string()]
         );
     }
 
@@ -71,7 +94,7 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(entry(1, "Alice", 12, GameMode::Survival));
         tabs.insert(entry(2, "Bob", 30, GameMode::Survival));
-        let rows = player_rows(&tabs);
+        let rows = player_rows(&tabs, &no_tr);
 
         let mut render = |players: Option<&[String]>| -> usize {
             let frame = target.acquire().expect("headless acquire");

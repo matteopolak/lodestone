@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+use lodestone_assets::{Language, ResourceManager, ResourceSource, ZipSource};
 use lodestone_render::{BlockAtlas, BlockModels, GuiAtlas, blocks_json_registry};
 
 use crate::blocks::{DemoClassifier, ShellClassifier};
@@ -31,6 +31,12 @@ pub struct BlockResources {
     /// back, naming the cause. `None` on success or when vanilla was never
     /// attempted.
     pub banner: Option<String>,
+    /// The vanilla `en_us.json` language table, loaded from the same pack, for
+    /// resolving server-authored `translate` components (death messages,
+    /// scoreboard titles, tab-list names, …) into words. `None` on the demo
+    /// palette or when the pack has no language file — resolution then falls
+    /// back to the component's own `fallback`/key, never an error.
+    pub language: Option<Arc<Language>>,
 }
 
 impl BlockResources {
@@ -43,17 +49,19 @@ impl BlockResources {
             return Self::demo(None);
         }
         match Self::try_vanilla() {
-            Ok(atlas) => {
+            Ok((atlas, language)) => {
                 let atlas = Arc::new(atlas);
                 tracing::info!(
                     target: "assets",
                     sprites = atlas.sprite_count(),
+                    lang_keys = language.as_ref().map_or(0, Language::len),
                     "loaded vanilla block atlas for the live world"
                 );
                 Self {
                     classifier: ShellClassifier::Vanilla(Arc::clone(&atlas)),
                     vanilla_atlas: Some(atlas),
                     banner: None,
+                    language: language.map(Arc::new),
                 }
             }
             Err(reason) => Self::demo(Some(reason)),
@@ -68,14 +76,17 @@ impl BlockResources {
             classifier: ShellClassifier::Demo(DemoClassifier),
             vanilla_atlas: None,
             banner,
+            language: None,
         }
     }
 
     /// Load the real vanilla assets: the block registry from
     /// `generated/reports/blocks.json` and every model/texture from `client.jar`,
-    /// stitched into a [`BlockAtlas`]. Errors are stringified with the offending
-    /// path so the fallback banner names the fix.
-    fn try_vanilla() -> Result<BlockAtlas, String> {
+    /// stitched into a [`BlockAtlas`]. The `en_us.json` language table rides along
+    /// from the same jar (absent is not an error — it just disables translation).
+    /// Errors are stringified with the offending path so the fallback banner
+    /// names the fix.
+    fn try_vanilla() -> Result<(BlockAtlas, Option<Language>), String> {
         let root = asset_root().ok_or_else(|| {
             "no vanilla resource pack found — set LODESTONE_ASSETS to a pack root \
              containing client.jar + generated/reports/blocks.json (live world uses \
@@ -98,7 +109,18 @@ impl BlockResources {
         // render path resolves state ids to real quads instead of full cubes.
         let models = BlockModels::build(&manager, &registry)
             .map_err(|e| format!("build models from {}: {e}", root.display()))?;
-        Ok(atlas.with_models(models))
+        // The language table shares the jar; a missing or malformed file just
+        // disables translation rather than failing the whole live load.
+        let language = manager
+            .read(&Language::resource_path("minecraft", "en_us"))
+            .and_then(|bytes| match Language::from_json_bytes(&bytes) {
+                Ok(lang) => Some(lang),
+                Err(e) => {
+                    tracing::warn!(target: "assets", "parse en_us.json: {e}");
+                    None
+                }
+            });
+        Ok((atlas.with_models(models), language))
     }
 }
 
@@ -197,4 +219,39 @@ fn best_pack_in(cache_dir: &Path) -> Option<PathBuf> {
         .collect();
     entries.sort();
     entries.pop()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The vanilla load must carry a real `en_us.json` that resolves known keys,
+    /// proving the shell's classifier and its translation table come from the
+    /// same pack. Ignored without assets so a missing pack fails loud rather than
+    /// masquerading as a pass.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn vanilla_load_carries_a_resolving_language_table() {
+        let resources = BlockResources::load(true);
+        assert!(
+            resources.vanilla_atlas.is_some(),
+            "vanilla assets did not load; set LODESTONE_ASSETS to a pack root with \
+             client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        );
+        let lang = resources
+            .language
+            .expect("vanilla load produced no language table");
+        assert!(
+            lang.len() > 1000,
+            "en_us.json looks truncated: {} keys",
+            lang.len()
+        );
+        // A raw key the death message uses must lower to real words.
+        assert_eq!(lang.get("entity.minecraft.spider"), Some("Spider"));
+        assert!(
+            lang.get("death.attack.mob").is_some(),
+            "the death-message format key is missing from the loaded table"
+        );
+    }
 }
