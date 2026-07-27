@@ -219,9 +219,14 @@ async fn drive_flow(ack_enabled: bool, stop_after_batches: Option<usize>) -> Flo
             break;
         }
 
-        // Keep nudging so the run stays alive and the player keeps moving.
+        // Keep nudging so the run stays alive. Rotate only — do not drift the
+        // position: the server's own collision/on-ground check does not know
+        // about our claimed position, and a long enough straight-line walk
+        // eventually crosses a ledge or an un-flat spot and trips vanilla's
+        // "floating too long" kick (`ServerGamePacketListenerImpl.tickPlayer`),
+        // which has nothing to do with the property under test and previously
+        // aborted only the (much longer) negative-control run.
         if reached_play && have_pos && Instant::now() >= next_move {
-            pos[0] += 0.15;
             yaw = (yaw + 3.0) % 360.0;
             send_move(&mut conn, pos, yaw).await;
             next_move = Instant::now() + Duration::from_millis(250);
