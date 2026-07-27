@@ -40,12 +40,20 @@
 //! ```
 #![cfg(feature = "live")]
 
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
 use lodestone::net::NetClient;
 use lodestone::sim::Sim;
+use lodestone_controller::Action;
 use lodestone_testsupport::RconClient;
+
+/// Both live gates join the oracle under the *same* player name and both
+/// `setworldspawn`, so they must never run concurrently — a second join with a
+/// duplicate name is kicked by the server. `cargo test` runs `#[test]`s in
+/// parallel by default; serialize them through one process-wide lock.
+static SERVER_LOCK: Mutex<()> = Mutex::new(());
 
 const HOST: &str = "127.0.0.1";
 /// The survival 26.2 oracle: game on `:25565`, RCON on `:25566`. Named only as a
@@ -55,12 +63,13 @@ const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
 const PROTOCOL: i32 = 776;
 
-/// A deterministically far-from-origin world spawn — the region the user actually
-/// hit on seed `lodestone`. `Y` is chosen high enough that a `setworldspawn`
-/// resolves onto the real surface below it.
-const SPAWN_X: i32 = -237;
-const SPAWN_Y: i32 = 100;
-const SPAWN_Z: i32 = -217;
+/// A deterministically land spawn on plains — the director moved world spawn
+/// here (the old ocean spawn meshed water as opaque cubes and had no walkable
+/// surface). Ground is at y≈69–70; `Y` is set a little above so the join resolves
+/// onto the real surface.
+const SPAWN_X: i32 = -45;
+const SPAWN_Y: i32 = 72;
+const SPAWN_Z: i32 = -377;
 
 /// Ticks to observe after the server places the player.
 const OBSERVE_TICKS: usize = 80;
@@ -91,6 +100,7 @@ struct Settle {
 #[test]
 #[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
 fn player_stands_on_the_server_ground_not_the_demo_world() {
+    let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // The vanilla atlas must load, or `Sim` takes the demo path and never
     // exercises live collision. Fail loud rather than pass vacuously.
     let probe = Sim::new(live_config());
@@ -119,7 +129,8 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
     );
 
     // --- Negative control: pre-fix demo-world collision on the live path. ------
-    let control = join_and_settle(false);
+    let (control_sim, control) = join_and_settle(false);
+    drop(control_sim);
     let control_drop = control.y_placed - control.y_min;
     eprintln!(
         "[negative control · demo-world collision] placed y={:.2}, min y={:.2}, final y={:.2}, \
@@ -144,7 +155,8 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
     std::thread::sleep(Duration::from_secs(2));
 
     // --- The invariant: live collision stands on the server's ground. ----------
-    let live = join_and_settle(true);
+    let (live_sim, live) = join_and_settle(true);
+    drop(live_sim);
     let live_drop = live.y_placed - live.y_min;
     eprintln!(
         "[live collision] placed y={:.2}, min y={:.2}, final y={:.2}, drop={:.2}, \
@@ -198,8 +210,9 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
 
 /// Drive the real join path once and observe the player's vertical motion after
 /// the server places them. `collide_live=false` forces the pre-fix demo-world
-/// collision (the negative control).
-fn join_and_settle(collide_live: bool) -> Settle {
+/// collision (the negative control). Returns the still-connected `Sim` so the
+/// caller can keep driving it (e.g. to observe a jump on the same session).
+fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
     let mut sim = Sim::new(live_config());
     sim.collide_against_live_world = collide_live;
     let demo_spawn = sim.player.position;
@@ -278,7 +291,7 @@ fn join_and_settle(collide_live: bool) -> Settle {
         .net()
         .map(|n| n.loaded_chunks())
         .is_some_and(|cols| cols.iter().any(|c| c.x == pcx && c.z == pcz));
-    Settle {
+    let settle = Settle {
         y_placed,
         y_min,
         y_final,
@@ -287,7 +300,196 @@ fn join_and_settle(collide_live: bool) -> Settle {
         loaded,
         mesh_drops,
         player_chunk_loaded,
+    };
+    (sim, settle)
+}
+
+/// The vertical arc of a single jump observed on an already-settled session.
+struct JumpArc {
+    /// Feet-`y` the instant before the jump input is applied (the ground we
+    /// leave from and must return to).
+    ground_y: f64,
+    /// Highest feet-`y` reached during the arc.
+    apex_y: f64,
+    /// Lowest feet-`y` seen during the arc — the value that exposes a
+    /// "glitch down" *below* the launch ground.
+    min_y: f64,
+    /// Feet-`y` once the arc has fully completed.
+    final_y: f64,
+    /// Whether the player is `on_ground` on the final tick.
+    on_ground_final: bool,
+    /// Server `TeleportPlayer` corrections adopted between launch and landing.
+    /// A clean vanilla jump draws none; a non-zero count is the fingerprint of
+    /// the server rejecting the ascent and snapping the camera down.
+    teleports_during: usize,
+}
+
+/// Ticks to observe the jump arc. A vanilla jump rises ~1.25 blocks over ~11
+/// ticks and returns over ~11 more; 40 leaves margin for the landing.
+const JUMP_TICKS: usize = 40;
+
+/// Launch a single jump on an already-driven session and observe the full arc.
+/// The caller passes a `Sim` that has just been settled by [`join_and_settle`];
+/// `ground_y` is sampled at the moment of launch, so this is meaningful on both
+/// the live (on-ground) session and the demo negative control (mid-fall).
+fn observe_jump(sim: &mut Sim) -> JumpArc {
+    let ground_y = sim.player.position.y;
+    let tp_before = sim.teleport_count;
+
+    // Vanilla jump is edge-triggered on a grounded tick: hold Space for exactly
+    // one tick, then release so the arc is a single clean parabola rather than a
+    // repeated bunny-hop.
+    sim.input.set(Action::Jump, true);
+    sim.step(1.0 / 20.0);
+    let _ = sim.drain_meshes();
+    let _ = sim.drain_removals();
+    sim.input.set(Action::Jump, false);
+
+    let mut apex_y = sim.player.position.y.max(ground_y);
+    let mut min_y = sim.player.position.y.min(ground_y);
+    for _ in 0..JUMP_TICKS {
+        sim.step(1.0 / 20.0);
+        let _ = sim.drain_meshes();
+        let _ = sim.drain_removals();
+        let y = sim.player.position.y;
+        apex_y = apex_y.max(y);
+        min_y = min_y.min(y);
+        std::thread::sleep(Duration::from_millis(20));
     }
+
+    JumpArc {
+        ground_y,
+        apex_y,
+        min_y,
+        final_y: sim.player.position.y,
+        on_ground_final: sim.player.on_ground,
+        teleports_during: (sim.teleport_count - tp_before) as usize,
+    }
+}
+
+/// A jump on live-server terrain rises, peaks, and lands back on the *same*
+/// ground with no net downward displacement and no dip below the launch height.
+///
+/// This is the gate for the user's "jumping makes me glitch down" report. The
+/// suspected mechanism was that adopting a server `TeleportPlayer` mid-ascent
+/// (landed in `8ca2d6c`) zeroes velocity and snaps the camera down — so the arc
+/// records how many teleports were adopted during the jump and asserts the
+/// trajectory is a clean vanilla parabola regardless.
+#[test]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+fn a_jump_returns_to_the_same_ground_without_glitching_down() {
+    let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let probe = Sim::new(live_config());
+    assert!(
+        probe.vanilla_atlas().is_some(),
+        "vanilla assets did not load, so Sim would run the demo path instead of the \
+         live server world. Banner: {:?}.",
+        probe.asset_banner()
+    );
+    drop(probe);
+
+    let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
+        panic!(
+            "cannot reach RCON at {RCON_ADDR}: {e}. Fix: start the survival 26.2 oracle \
+             with `./scripts/live-oracles/survival.sh` and run with `--features live`."
+        )
+    });
+    let reply = rcon.cmd(&format!("setworldspawn {SPAWN_X} {SPAWN_Y} {SPAWN_Z}"));
+    assert!(
+        reply.to_lowercase().contains("set the world spawn"),
+        "RCON setworldspawn did not take: {reply:?}"
+    );
+
+    // --- Negative control: jump on the pre-fix demo-collision path. -------------
+    // With collision reading the absent demo world the player is already falling,
+    // so the jump neither arrests nor recovers — it keeps drifting down. This is
+    // exactly "today's behaviour" the fix must beat.
+    let (mut control_sim, _control_settle) = join_and_settle(false);
+    let control_jump = observe_jump(&mut control_sim);
+    drop(control_sim);
+    eprintln!(
+        "[negative control · demo-world jump] ground y={:.2}, apex y={:.2}, min y={:.2}, \
+         final y={:.2}, on_ground_final={}, teleports_during={}",
+        control_jump.ground_y,
+        control_jump.apex_y,
+        control_jump.min_y,
+        control_jump.final_y,
+        control_jump.on_ground_final,
+        control_jump.teleports_during,
+    );
+    assert!(
+        !control_jump.on_ground_final || control_jump.final_y < control_jump.ground_y - 1.0,
+        "the negative control did NOT reproduce the fall: it ended on_ground={} at final \
+         y={:.2} vs launch y={:.2}. Expected the demo-collision player to keep sinking \
+         through absent ground. Without a reproduced failure this gate proves nothing.",
+        control_jump.on_ground_final,
+        control_jump.final_y,
+        control_jump.ground_y,
+    );
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    // --- The invariant: a real jump on live terrain is a clean vanilla arc. -----
+    let (mut live_sim, settle) = join_and_settle(true);
+    assert!(
+        settle.player_chunk_loaded && settle.on_ground_final,
+        "precondition failed: the player must be standing on loaded server ground before \
+         we can judge a jump (on_ground_final={}, player_chunk_loaded={}).",
+        settle.on_ground_final,
+        settle.player_chunk_loaded,
+    );
+    let jump = observe_jump(&mut live_sim);
+    drop(live_sim);
+    eprintln!(
+        "[live collision · jump] ground y={:.2}, apex y={:.2} (rise {:.2}), min y={:.2}, \
+         final y={:.2} (net {:+.2}), on_ground_final={}, teleports_during={}",
+        jump.ground_y,
+        jump.apex_y,
+        jump.apex_y - jump.ground_y,
+        jump.min_y,
+        jump.final_y,
+        jump.final_y - jump.ground_y,
+        jump.on_ground_final,
+        jump.teleports_during,
+    );
+
+    assert!(
+        jump.apex_y - jump.ground_y > 0.9,
+        "the jump barely lifted (apex {:.2}, ground {:.2}, rise {:.2}). A vanilla jump rises \
+         ~1.25 blocks; a suppressed rise means the ascent was cancelled — check whether a \
+         server teleport ({} adopted during the jump) or the collision hold-path zeroed the \
+         upward velocity.",
+        jump.apex_y,
+        jump.ground_y,
+        jump.apex_y - jump.ground_y,
+        jump.teleports_during,
+    );
+    assert!(
+        jump.min_y > jump.ground_y - 0.3,
+        "the player glitched DOWN through the launch ground during the jump (min y={:.2} vs \
+         ground y={:.2}). This is the reported 'jumping makes me glitch down' defect — the \
+         arc dipped below where it started. {} server teleport(s) were adopted mid-jump.",
+        jump.min_y,
+        jump.ground_y,
+        jump.teleports_during,
+    );
+    assert!(
+        (jump.final_y - jump.ground_y).abs() < 0.2,
+        "the jump did not return to the launch ground (final y={:.2}, ground y={:.2}, net \
+         {:+.2}). A clean jump lands where it left; a net displacement means the arc was \
+         corrupted (teleports adopted during jump: {}).",
+        jump.final_y,
+        jump.ground_y,
+        jump.final_y - jump.ground_y,
+        jump.teleports_during,
+    );
+    assert!(
+        jump.on_ground_final,
+        "player is not on_ground after the jump arc (final y={:.2}); the jump should end \
+         standing on the same ground.",
+        jump.final_y,
+    );
 }
 
 fn live_config() -> Config {

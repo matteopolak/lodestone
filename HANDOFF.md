@@ -18,30 +18,72 @@ same mistakes being made again.
 
 ---
 
-## Where the client actually is (last verified 2026-07-29)
+## Where the client actually is (last verified 2026-07-30)
 
-Run it — both of these were executed, not inferred:
+Run it — this was executed and screenshotted, not inferred:
 
 ```
-./scripts/live-oracles/creative.sh                                        # start the oracle
-cargo build --release --features live --bin lodestone
-./target/release/lodestone --window --live --host 127.0.0.1 --port 25570  # flat creative
-./target/release/lodestone --window --live --host 127.0.0.1 --port 25565  # real 26.2 (cave spawn)
+./scripts/live-oracles/survival.sh                                        # survival, normal terrain
+cargo build --release --bin lodestone --features live
+./target/release/lodestone --window --live --host 127.0.0.1 --port 25565
 ```
 
-Observed against the flat-creative oracle: `loaded vanilla block atlas … sprites=929`,
-`live_cols=329`, `sections=334`, `quads=210124`, **120 fps / 8.0 ms frame / 94 MB RSS**. The
-world on screen is the **server's**, meshed through the vanilla classifier and lit by the
-server's own light data.
+**`--features live` is mandatory.** Without it the binary still starts, renders the demo world,
+and only whispers `no version family compiled in for protocol 776` into the log while the HUD
+shows a plausible-looking `chunks=169`. It looks like it is working. It is not.
 
-Working end to end: join → chunk stream → vanilla-textured meshed terrain → server lighting →
-movement → chat → tab list → scoreboard → containers → entity spawn/despawn. Clientbound packet
-coverage is **108/141 decoded**, serverbound **53/69**.
+Observed at the plains spawn `(-45, 71, -377)`: camera adopts the server spawn, `live_cols=360`,
+`sections=2641`, `quads=1490562`, `entities=4`, `drops=0`, **~73 fps / 13 ms frame / 142 MB RSS**.
+On screen: real terrain, grass blocks with green tops and dirt sides, tree trunks with cutout
+leaf canopies, and **short_grass as see-through cross-plants**. The world is the *server's*,
+meshed through per-state vanilla block models and lit by the server's own light data.
 
-The three biggest known gaps are listed under [Never started](#7-never-started) and in the
-addenda: `ItemStack` components (no custom names/enchants/durability), per-entity mesh geometry
-(the *mechanism* is proven via pig; the other 87 meshes are not individually verified), and
-chat/HUD pixel gates.
+Working end to end: join → chunk stream → model-meshed vanilla terrain → server lighting →
+movement with live-world collision → chat → tab list → scoreboard → containers → entity
+spawn/despawn → mining. Clientbound packet coverage is **108/141 decoded**, serverbound **53/69**.
+
+### Known-wrong things you will see immediately
+
+These are current, reproduced-on-screen defects, not speculation:
+
+- **Water and lava render as nothing.** `bake_state` emits 0 quads for fluids and the translucent
+  pass is not wired, so an ocean is an invisible pit. This is a *regression in appearance* from
+  the old grey-blob look and is the largest open rendering gap.
+- **Cross-plants are not biome-tinted.** Measured on one frame: grass block tops sit at G/R ≈ 1.6
+  while short_grass sits at G/R ≈ 1.12 (untinted greyscale would be 1.0). Same biome, same
+  `tint_index` path — so tint is reaching block faces and missing plant quads. Vanilla plains
+  grass is `#91BD59`, G/R ≈ 1.30.
+- **The hotbar is a placeholder bar**, while hearts and hunger beside it are pixel-correct vanilla
+  sprites — so the GUI atlas and `gui.scaling` model are fine and the fault is isolated to the
+  hotbar widget.
+- **Death is terminal.** `sim.rs` sets the status string `server: player dead (no chunks)` and
+  never sends `ClientAction::Respawn`, which exists and is wired in the adapter. Die once and the
+  session is functionally over.
+- **Chat renders raw translation keys, upper-cased**: `E00109223M WAS SLAIN BY
+  ENTITY.MINECRAFT.SPIDER` where vanilla says `Lodestone was slain by Spider`. Chat components
+  (`translate` + `with`, nested `extra`, inherited style) are not resolved against `en_us.json`.
+- **No smooth lighting / AO on the model path** — flat per-block light plus directional shade.
+  Correct, but one of the most recognisable "not Minecraft" tells now that geometry is right.
+
+The other big gaps are under [Never started](#7-never-started): per-entity mesh geometry (the
+*mechanism* is proven via pig; the other 87 meshes are not individually verified) and chat/HUD
+pixel gates.
+
+### How these were found, which matters more than the list
+
+Every single defect above was found by **launching the client and looking at a screenshot**, after
+26 green test suites and hours of HUD counters had found none of them. Two of the sharpest
+diagnoses came from the user playing for a few minutes ("I'm standing on invisible blocks", "the
+grass is not transparent — I think you assume every block is a full block"), and both were
+correct while my own counter-driven hypotheses were wrong.
+
+```
+RUST_LOG=warn nohup ./target/release/lodestone --window --live --host 127.0.0.1 --port 25565 &
+sleep 25 && screencapture -x -o /tmp/shot.png     # then crop/zoom with PIL
+```
+
+Pixel *measurements* beat impressions: the tint defect above is a claim that survives
+disagreement precisely because it is two channel ratios, not "looks a bit pale".
 
 ---
 
@@ -660,12 +702,36 @@ about it looks wrong on inspection, which is why it survives review.
 Corollary: prefer `cargo xtask connectedness` over any hand-derived coverage number. The
 hand-derived version was wrong four times, in four different ways.
 
-## Addendum — model-layer gap: `ItemStack` has no components
+## Addendum — CLOSED: `ItemStack` components (and the fail-closed lesson that outlives it)
 
-`lodestone_model::ItemStack` carries **no components** — no custom name, enchantments,
-durability or max-stack. Drawing stays correct because container reconcile is
-server-authoritative; only *offline click-stacking prediction* is affected. Needs a
-component patch at the model event layer. Documented at the `From<&model::ItemStack>` impl.
+`lodestone_model::ItemStack` now carries decoded components: `custom_name` (network NBT),
+`damage`/durability, `enchantments`, and `count`. Component types resolve through a generated
+111-entry `data_component_type` id↔name table rather than hardcoded ids.
+
+**This started as a benign-sounding model gap and was in fact a session-killer.** Equipping any
+tool makes the server send `container_set_slot` carrying a component patch; v770's
+`read_item_stack` fail-closed on it and the driver treated that decode error as *fatal*. In 26.2
+essentially every real item carries components, so **picking up an item, opening a chest, or being
+handed a tool ended the session.** The disconnect was reproduced as a negative control before the
+fix — `failed to decode packet: item data components are not supported` — then re-verified live.
+
+Three lessons worth more than the fix:
+
+1. **Fail-closed on a forward-compatible, open-ended wire structure turns every future server-side
+   addition into an outage.** The driver seam now logs loudly and *drops the single packet* on
+   `AdapterError::Decode`; packets are transport-framed, so an unparsable payload never desyncs the
+   next one. `Unsupported`/`Encode` stay fatal, because those are structural.
+2. **A round-trip test where we own both sides cannot detect a shared misunderstanding of the wire
+   format.** A self-round-trip of our own encoder passed happily while the real server disconnected
+   us. This is the second time this exact rule has bitten; it is why the gates are live.
+3. The clientbound patch is the *trusted, non-delimited* codec — an unknown component's payload is
+   **not** length-prefixed and therefore genuinely cannot be skipped in place. Decode reads modeled
+   components and, at the first unmodeled one, keeps what it has, flags `has_unmodeled`, and
+   abandons the rest of that one packet.
+
+**Still open here:** `set_creative_mode_slot` still *encodes* an empty patch, so components are
+dropped serverbound on creative slot-set. That is the single extension point. Enchantment ids are
+session-scoped network ids from the dynamic registry, not stable across versions.
 
 ## Addendum — neighbour-aware relight is singleplayer-only (divergence trap)
 
