@@ -98,10 +98,36 @@ These are current, reproduced-on-screen defects, not speculation:
     even though interpolation is running. Head yaw is tracked in the client (`state.rs`) but the
     shell's `Track` interpolates body yaw only.
 
+### Interaction feedback — full audit (what you see when you hit a block)
+
+Audited in code on 2026-07-30, one entry per thing a player actually notices. The pattern is
+consistent enough to be worth stating up front: **the logic is almost always present and correct,
+and the pixels are almost always missing.**
+
+| what the player expects | state | where |
+|---|---|---|
+| Block actually breaks on the server | **game layer done, shell not wired** | `lodestone-game` mining (`bd7c51c`); `sim.rs:877` still edits the local copy |
+| Crack overlay on the block you're mining | **state computed, never drawn** | `mining.rs:263 destroy_stage()` returns 0–9 exactly per `getDestroyStage` |
+| Crack overlay for *other* players' digs | **state computed, never drawn** | `mining.rs:420 BlockDestructionOverlays`, whose own doc says "rendering the crack is someone else's job" |
+| Your arm visible in first person | **does not exist** | no first-person/held-item renderer anywhere in the tree |
+| Your arm swinging when you hit | **does not exist, and not even sent** | `ClientAction::SwingArm` exists and `net.rs` can encode it, but `sim.rs` never sends it on dig — so *other* players don't see us swing either |
+| Other mobs' attack swing | **timer exists, not articulated** | `entity/pose.rs` tracks the swing; renderer emits one matrix per entity |
+| Broken block drops a visible item | **lifecycle done, never drawn** | `entity/item_entity.rs` (age, despawn, pickup delay, merge sentinel `32767`); no item-entity rendering |
+| Item flies to you when picked up | **not handled** | no `TakeItemEntity` consumer |
+| Item appears in your hotbar slot | **resolver done, never drawn** | `assets/icon.rs` turns an `ItemStack` into a drawable `ItemIcon`; `hud.rs:402` says "icons are deferred (no item atlas yet) so the cells are empty wells" |
+| Break particles | **does not exist** | no particle system in the renderer; `show_particles` in `effects.rs` is potion-effect metadata, unrelated |
+| Break/place sounds | **appears wired** | server sound events reach `audio.play_sound` (`sim.rs:1223`) |
+
+Two things follow from the table. First, **the shortest path to a client that *feels* right is
+renderers, not logic** — crack overlay, item entities, item icons and a first-person arm are all
+blocked on drawing, not on understanding. Second, `assets/icon.rs` and `assets/item_model.rs`
+(the 1.21.4+ selector-tree item definitions) are the **sixth island**, and were built to completion
+before anything could consume them.
+
 ### The island pattern — the most expensive recurring failure here
 
 A well-tested library lands, and **nothing calls it**. Every test is green, the HUD counter looks
-plausible, and the screen is wrong. Five confirmed instances:
+plausible, and the screen is wrong. Six confirmed instances:
 
 | island | built | actually consumed |
 |---|---|---|
@@ -110,6 +136,7 @@ plausible, and the screen is wrong. Five confirmed instances:
 | mining + placement | `lodestone-game`, live-gated over RCON | nothing — shell edited its local copy |
 | vanilla font loader | `lodestone-assets::font`, complete since the first commit | nothing — shell drew a 5×7 debug font |
 | entity pose / walk animation | `lodestone-entity::pose` | nothing — renderer draws a rigid lump |
+| item icons / item definitions | `lodestone-assets::{icon,item_model}` | nothing — hotbar cells are empty wells |
 
 The common cause is that a crate's own test suite is a **closed loop**: it can be entirely green
 while the crate is dead code. The counter-measure that has actually worked is to require that
