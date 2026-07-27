@@ -1,0 +1,15 @@
+[package]
+name = "lodestone-particle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Collision only. Particles resolve movement with `Entity.collideBoundingBox`,
+# which is the same swept-AABB code the player uses minus the auto-step, so this
+# reuses it rather than growing a second, silently-diverging copy.
+lodestone-physics = { workspace = true }
