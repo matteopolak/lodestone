@@ -2,6 +2,7 @@ use uuid::Uuid;
 
 use crate::{
     common::Hand,
+    ids::ResourceKey,
     item::ItemStack,
     math::{BlockPos, Rotation, Vec3, Vec3f},
 };
@@ -217,6 +218,49 @@ pub enum ClientAction {
         /// Whether to include the entity's data in the picked stack.
         include_data: bool,
     },
+    /// Confirm the primary/secondary power selection in an open beacon.
+    SetBeaconEffects {
+        /// Chosen primary effect, or `None` to clear it.
+        primary: Option<ResourceKey>,
+        /// Chosen secondary effect, or `None` to clear it.
+        secondary: Option<ResourceKey>,
+    },
+    /// Submit the pages (and, if publishing, the title) of a written book being
+    /// edited in a lectern or writable-book slot.
+    EditBook {
+        /// Slot holding the book being edited.
+        slot: i32,
+        /// Page contents, in order.
+        pages: Vec<String>,
+        /// Title to publish under, if the player is signing (not just saving a
+        /// draft).
+        title: Option<String>,
+    },
+    /// Submit the text of a sign being edited.
+    SignUpdate {
+        /// Target sign's block position.
+        pos: BlockPos,
+        /// Whether the front (vs. back) text is being edited.
+        is_front_text: bool,
+        /// The sign's four text lines.
+        lines: [String; 4],
+    },
+    /// Program an open command block.
+    SetCommandBlock {
+        /// Target command-block position.
+        pos: BlockPos,
+        /// Command text to run.
+        command: String,
+        /// Execution mode.
+        mode: CommandBlockMode,
+        /// Whether the block's last-output line is tracked.
+        track_output: bool,
+        /// Whether the block is conditional on the block behind it.
+        conditional: bool,
+        /// Whether the block runs automatically every tick rather than on
+        /// redstone power.
+        automatic: bool,
+    },
 }
 
 /// Client display and locale settings, sent at join and whenever changed.
@@ -311,6 +355,17 @@ pub enum ResourcePackResponseKind {
     FailedReload,
     /// The pack was discarded (superseded or connection ended).
     Discarded,
+}
+
+/// Command-block execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CommandBlockMode {
+    /// Runs the tick after the block preceding it in the chain runs.
+    Sequence,
+    /// Runs every tick regardless of redstone power.
+    Auto,
+    /// Runs only when powered by redstone.
+    Redstone,
 }
 
 /// A cardinal block face.

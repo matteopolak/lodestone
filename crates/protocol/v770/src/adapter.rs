@@ -7,23 +7,27 @@ use lodestone_core::{
     Ctx, Decode, Encode, Reader, Writer, plain_text_from_nbt_component, read_network_nbt,
 };
 use lodestone_model::{
-    AdapterError, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor, BossOverlay,
-    ChatKind, ChunkPos, ClientAction, ClientEvent, CollisionRule, ConnectionState, Directive,
-    DisplaySlot, EntityInteraction, EntityMovement, EquipmentSlot, EntityEquipment, GameMode, Hand,
-    ItemStack, LoginProfile, NumberFormat, ObjectiveMode, ObjectiveRenderType, PlayerCommand,
-    PlayerInput, PlayerListEntry, ResourceKey, Rotation, ServerAddress, SoundCategory, TeamAction,
-    TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f, VersionAdapter,
-    Visibility, WorldSink,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor,
+    BossOverlay, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings,
+    CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType, ContainerSlotChange,
+    Difficulty, Directive, DisplayedSkinParts, DisplaySlot, EntityInteraction, EntityMovement,
+    EquipmentSlot, EntityEquipment, GameMode, Hand, ItemStack, LoginProfile, MainHand,
+    NumberFormat, ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand, PlayerInput,
+    PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress,
+    SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3,
+    Vec3f, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
+use crate::block_states::block_type_name;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
 use crate::entity_types::entity_type_name;
-use crate::items::item_name;
+use crate::items::{item_id, item_name};
 use crate::menus::menu_name;
+use crate::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use crate::packets::common::{ClientInformation, KeepAlive};
+use crate::packets::common::{BrandPayload, ClientInformation, KeepAlive, Pong, ResourcePackResponse};
 use crate::packets::configuration::{
     AcceptCodeOfConduct, FinishConfiguration, ServerboundKnownPacks,
 };
@@ -31,10 +35,14 @@ use crate::packets::entity::{read_lp_vec3, unpack_degrees};
 use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
     AcceptTeleportation, Attack, ChatCommand, ChatMessage, ChunkBatchFinished, ChunkBatchReceived,
-    ClientCommand, ConfigurationAcknowledged, ContainerClose, GameEvent, GameLogin, LevelEvent,
-    LevelParticles, MOVE_FLAG_ON_GROUND, MovePlayerPosRot, PlayerAbilities, PlayerAction,
-    PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket, Respawn, SetCarriedItem,
-    SetDefaultSpawnPosition, SetHealth, Swing, UseItem, UseItemOn,
+    ClientCommand, ClientTickEnd, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
+    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ConfigurationAcknowledged, ContainerButtonClick,
+    ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent, LevelParticles,
+    MOVE_FLAG_ON_GROUND, MovePlayerPosRot, PickItemFromBlock, PickItemFromEntity, PlayerAbilities,
+    PlayerAction, PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket,
+    RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectTrade, ServerboundPlayerAbilities,
+    SetCarriedItem, SetCommandBlock, SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing,
+    UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
@@ -284,6 +292,63 @@ fn encode_interact(entity_id: i32, hand: Hand, location: Option<Vec3>, sneaking:
     w.into_vec()
 }
 
+/// Maps a container click mode to `ContainerInput`'s ordinal
+/// (`ByteBufCodecs.idMapper`, a direct VarInt id: `0` pickup … `6` pickup_all).
+fn container_input_ordinal(click_type: ContainerClickType) -> i32 {
+    match click_type {
+        ContainerClickType::Pickup => 0,
+        ContainerClickType::QuickMove => 1,
+        ContainerClickType::Swap => 2,
+        ContainerClickType::Clone => 3,
+        ContainerClickType::Throw => 4,
+        ContainerClickType::QuickCraft => 5,
+        ContainerClickType::PickupAll => 6,
+    }
+}
+
+/// Encodes the serverbound `container_click` packet body.
+///
+/// Wire layout (`ServerboundContainerClickPacket`): VarInt container id, VarInt
+/// state id, big-endian `short` slot, big-endian `byte` button,
+/// `ContainerInput` ordinal (VarInt), a changed-slots map (VarInt entry count,
+/// then per entry a big-endian `short` slot key and a `HashedStack` value),
+/// then the carried cursor stack, also a `HashedStack`. Map iteration order is
+/// not semantically significant (vanilla holds it in a hash map), so the
+/// model's `Vec` order is used as-is.
+fn encode_container_click(
+    window_id: i32,
+    state_id: i32,
+    slot: i32,
+    button: i32,
+    click_type: ContainerClickType,
+    changed_slots: &[ContainerSlotChange],
+    carried_item: Option<&ItemStack>,
+) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    w.var_i32(window_id);
+    w.var_i32(state_id);
+    let slot_i16 = i16::try_from(slot)
+        .map_err(|_| AdapterError::Encode(format!("container click slot {slot} overflows i16")))?;
+    w.i16(slot_i16);
+    let button_i8 = i8::try_from(button).map_err(|_| {
+        AdapterError::Encode(format!("container click button {button} overflows i8"))
+    })?;
+    w.i8(button_i8);
+    w.var_i32(container_input_ordinal(click_type));
+    let count = i32::try_from(changed_slots.len())
+        .map_err(|_| AdapterError::Encode("too many changed slots in container click".to_owned()))?;
+    w.var_i32(count);
+    for change in changed_slots {
+        let change_slot = i16::try_from(change.slot).map_err(|_| {
+            AdapterError::Encode(format!("changed slot {} overflows i16", change.slot))
+        })?;
+        w.i16(change_slot);
+        write_hashed_stack(&mut w, change.item.as_ref())?;
+    }
+    write_hashed_stack(&mut w, carried_item)?;
+    Ok(w.into_vec())
+}
+
 /// Maps a vanilla game-mode ordinal to the canonical [`GameMode`], if valid.
 fn game_mode_from_ordinal(ordinal: i32) -> Option<GameMode> {
     match ordinal {
@@ -379,6 +444,132 @@ fn read_item_stack(reader: &mut Reader<'_>) -> Result<Option<ItemStack>, Adapter
     }))
 }
 
+/// Resolves an [`ItemStack`]'s canonical item key to protocol 776's numeric
+/// item-registry id, attributing an unknown item loudly rather than silently
+/// substituting a placeholder.
+fn item_registry_id(stack: &ItemStack) -> Result<i32, AdapterError> {
+    item_id(&stack.item.to_string())
+        .ok_or_else(|| AdapterError::Encode(format!("unknown item key {}", stack.item)))
+}
+
+/// Writes a serverbound `set_creative_mode_slot` item
+/// (`ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`): a VarInt count (`<= 0` is the
+/// empty stack), then, only if non-empty, the item registry id as a VarInt and
+/// an empty `DataComponentPatch` (VarInt `0` added, VarInt `0` removed).
+///
+/// The canonical [`ItemStack`] carries no components, so it always encodes the
+/// empty patch — exactly the shape [`read_item_stack`] already accepts on
+/// decode, keeping both directions of this codec symmetric.
+fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), AdapterError> {
+    match item {
+        None => w.var_i32(0),
+        Some(stack) => {
+            let count = i32::try_from(stack.count)
+                .map_err(|_| AdapterError::Encode(format!("item count {} overflows i32", stack.count)))?;
+            w.var_i32(count);
+            w.var_i32(item_registry_id(stack)?);
+            w.var_i32(0); // added components
+            w.var_i32(0); // removed components
+        }
+    }
+    Ok(())
+}
+
+/// Writes a serverbound container-click item as a `HashedStack`
+/// (`ByteBufCodecs.optional(HashedStack.ActualItem.STREAM_CODEC)`): a bool
+/// presence flag, then, only if present, the item registry id as a VarInt, the
+/// count as a VarInt, and an empty `HashedPatchMap` (VarInt `0` added, VarInt
+/// `0` removed).
+///
+/// The canonical [`ItemStack`] carries no components, so the patch is always
+/// empty — the only shape this model can produce, and the common case for a
+/// plain vanilla stack.
+fn write_hashed_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), AdapterError> {
+    match item {
+        None => w.bool(false),
+        Some(stack) => {
+            w.bool(true);
+            w.var_i32(item_registry_id(stack)?);
+            let count = i32::try_from(stack.count)
+                .map_err(|_| AdapterError::Encode(format!("item count {} overflows i32", stack.count)))?;
+            w.var_i32(count);
+            w.var_i32(0); // added components
+            w.var_i32(0); // removed components
+        }
+    }
+    Ok(())
+}
+
+/// Writes an `Optional<Holder<MobEffect>>` for the serverbound `set_beacon`
+/// packet (`ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`): a bool presence
+/// flag, then, only if present, the effect's `minecraft:mob_effect` registry
+/// id as a direct VarInt (`holderRegistry`, unlike the sound-holder codec, has
+/// no inline-definition escape id).
+fn write_optional_mob_effect(w: &mut Writer, effect: Option<&ResourceKey>) -> Result<(), AdapterError> {
+    match effect {
+        None => w.bool(false),
+        Some(key) => {
+            w.bool(true);
+            let id = mob_effect_id(&key.to_string())
+                .ok_or_else(|| AdapterError::Encode(format!("unknown mob effect {key}")))?;
+            w.var_i32(id);
+        }
+    }
+    Ok(())
+}
+
+/// Encodes the serverbound `set_beacon` packet body: two `Optional<Holder<MobEffect>>`
+/// values (primary then secondary power), each written by
+/// [`write_optional_mob_effect`].
+fn encode_set_beacon(
+    primary: Option<&ResourceKey>,
+    secondary: Option<&ResourceKey>,
+) -> Result<Vec<u8>, AdapterError> {
+    let mut w = Writer::default();
+    write_optional_mob_effect(&mut w, primary)?;
+    write_optional_mob_effect(&mut w, secondary)?;
+    Ok(w.into_vec())
+}
+
+/// Maps a [`ResourcePackResponseKind`] to `ServerboundResourcePackPacket.Action`'s
+/// ordinal, matching its declared enum order.
+fn resource_pack_response_ordinal(kind: ResourcePackResponseKind) -> i32 {
+    match kind {
+        ResourcePackResponseKind::SuccessfullyLoaded => 0,
+        ResourcePackResponseKind::Declined => 1,
+        ResourcePackResponseKind::FailedDownload => 2,
+        ResourcePackResponseKind::Accepted => 3,
+        ResourcePackResponseKind::Downloaded => 4,
+        ResourcePackResponseKind::InvalidUrl => 5,
+        ResourcePackResponseKind::FailedReload => 6,
+        ResourcePackResponseKind::Discarded => 7,
+    }
+}
+
+/// Maps a [`CommandBlockMode`] to `CommandBlockEntity.Mode`'s ordinal
+/// (`0` sequence, `1` auto, `2` redstone).
+fn command_block_mode_ordinal(mode: CommandBlockMode) -> i32 {
+    match mode {
+        CommandBlockMode::Sequence => 0,
+        CommandBlockMode::Auto => 1,
+        CommandBlockMode::Redstone => 2,
+    }
+}
+
+/// Packs [`DisplayedSkinParts`] into vanilla's `client_information`
+/// model-customisation bitmask (`PlayerModelPart`'s bit order): cape `0x01`,
+/// jacket `0x02`, left sleeve `0x04`, right sleeve `0x08`, left pants leg
+/// `0x10`, right pants leg `0x20`, hat `0x40`.
+fn skin_parts_bitmask(parts: DisplayedSkinParts) -> u8 {
+    u8::from(parts.cape)
+        | (u8::from(parts.jacket) << 1)
+        | (u8::from(parts.left_sleeve) << 2)
+        | (u8::from(parts.right_sleeve) << 3)
+        | (u8::from(parts.left_pants_leg) << 4)
+        | (u8::from(parts.right_pants_leg) << 5)
+        | (u8::from(parts.hat) << 6)
+}
+
 /// Decodes `sound`: a sound holder, a source category, a fixed-point position,
 /// volume, pitch, and the server-rolled variant seed (forwarded untouched — the
 /// variant is resolved client-side from the same seed so all clients agree).
@@ -443,6 +634,42 @@ fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         title: Text::literal(plain_text_from_nbt_component(&title)),
     })])
 }
+
+/// Decodes `damage_event`: entity id, a `minecraft:damage_type` registry id
+/// (`ByteBufCodecs.holderRegistry`, a plain VarInt — carried raw, see
+/// [`ClientEvent::EntityDamaged`] for why), then the cause/direct entity ids
+/// each wire-encoded as `id + 1` (so `0` means "none", decoded here back to
+/// `-1` via `varint - 1` to match vanilla's own `readOptionalEntityId`), and
+/// finally a self-contained `Optional<Vec3>` (a bool presence flag then, only
+/// if set, three plain `f64`s) — the one shape in this packet the `Decode`
+/// derive's `present_if` (which only reads a *prior named field*, not an
+/// inline bool) cannot express, so it is read by hand like the rest of this
+/// packet.
+fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let entity_id = reader.var_i32().map_err(dec_err)?;
+    let damage_type_id = reader.var_i32().map_err(dec_err)?;
+    let cause_id = reader.var_i32().map_err(dec_err)? - 1;
+    let direct_id = reader.var_i32().map_err(dec_err)? - 1;
+    let has_pos = reader.bool().map_err(dec_err)?;
+    let source_pos = if has_pos {
+        let x = reader.f64().map_err(dec_err)?;
+        let y = reader.f64().map_err(dec_err)?;
+        let z = reader.f64().map_err(dec_err)?;
+        Some(Vec3 { x, y, z })
+    } else {
+        None
+    };
+    reader.ensure_empty().map_err(dec_err)?;
+    Ok(vec![Directive::Emit(ClientEvent::EntityDamaged {
+        entity_id,
+        damage_type_id,
+        cause_id: (cause_id != -1).then_some(cause_id),
+        direct_id: (direct_id != -1).then_some(direct_id),
+        source_pos,
+    })])
+}
+
 
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
@@ -1045,6 +1272,10 @@ impl V770Adapter {
                 &keep_alive,
             )?]);
         }
+        if packet_id == configuration::clientbound::PING {
+            let ping: Pong = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
+        }
         if packet_id == configuration::clientbound::CODE_OF_CONDUCT {
             return Ok(vec![send(
                 configuration::serverbound::ACCEPT_CODE_OF_CONDUCT,
@@ -1081,6 +1312,10 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::KeepAlive {
                 id: keep_alive.id,
             })]);
+        }
+        if packet_id == play::clientbound::PING {
+            let ping: Pong = decode_body(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
         }
         if packet_id == play::clientbound::CHUNK_BATCH_START {
             // Empty packet; it only marks the start of a batch for rate timing.
@@ -1148,6 +1383,43 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::literal(text),
                 kind: ChatKind::GameInfo,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_TITLE_TEXT {
+            let mut reader = Reader::new(payload);
+            let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TitleText {
+                text: Text::literal(plain_text_from_nbt_component(&component)),
+            })]);
+        }
+        if packet_id == play::clientbound::SET_SUBTITLE_TEXT {
+            let mut reader = Reader::new(payload);
+            let component = read_network_nbt(&mut reader).map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::SubtitleText {
+                text: Text::literal(plain_text_from_nbt_component(&component)),
+            })]);
+        }
+        if packet_id == play::clientbound::CLEAR_TITLES {
+            let mut reader = Reader::new(payload);
+            let reset_times = reader.bool().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TitlesCleared {
+                reset_times,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_TITLES_ANIMATION {
+            // All three fields are raw `int`s (`readInt`), not VarInts.
+            let mut reader = Reader::new(payload);
+            let fade_in = reader.i32().map_err(dec_err)?;
+            let stay = reader.i32().map_err(dec_err)?;
+            let fade_out = reader.i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::TitlesAnimation {
+                fade_in,
+                stay,
+                fade_out,
             })]);
         }
         if packet_id == play::clientbound::CONTAINER_SET_CONTENT {
@@ -1237,6 +1509,82 @@ impl V770Adapter {
                 saturation: body.saturation,
             })]);
         }
+        if packet_id == play::clientbound::SET_HELD_SLOT {
+            let mut reader = Reader::new(payload);
+            let slot = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::HeldSlotChanged { slot })]);
+        }
+        if packet_id == play::clientbound::SET_EXPERIENCE {
+            // Field order on the wire is progress (float), level, then total —
+            // not alphabetical/declaration order.
+            let mut reader = Reader::new(payload);
+            let progress = reader.f32().map_err(dec_err)?;
+            let level = reader.var_i32().map_err(dec_err)?;
+            let total = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ExperienceChanged {
+                progress,
+                level,
+                total,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_CURSOR_ITEM {
+            let mut reader = Reader::new(payload);
+            let item = read_item_stack(&mut reader)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged {
+                item,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_PLAYER_INVENTORY {
+            let mut reader = Reader::new(payload);
+            let slot = reader.var_i32().map_err(dec_err)?;
+            let item = read_item_stack(&mut reader)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
+                slot,
+                item,
+            })]);
+        }
+        if packet_id == play::clientbound::COOLDOWN {
+            // `Identifier.STREAM_CODEC` is `STRING_UTF8.map(Identifier::parse, ...)`
+            // — a single length-prefixed "namespace:path" string, the same shape
+            // `parse_key` already expects, not a separate namespace/path pair.
+            let mut reader = Reader::new(payload);
+            let group = reader.string(32767).map_err(dec_err)?;
+            let duration_ticks = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ItemCooldown {
+                group: parse_key(&group, "cooldown group")?,
+                duration_ticks,
+            })]);
+        }
+        if packet_id == play::clientbound::CHANGE_DIFFICULTY {
+            // `Difficulty.STREAM_CODEC` wraps out-of-range ids in vanilla
+            // (`ByIdMap.OutOfBoundsStrategy.WRAP`); this adapter instead treats an
+            // id outside `0..=3` as an explicit decode error rather than silently
+            // aliasing it to a different difficulty.
+            let mut reader = Reader::new(payload);
+            let difficulty_id = reader.var_i32().map_err(dec_err)?;
+            let locked = reader.bool().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let difficulty = match difficulty_id {
+                0 => Difficulty::Peaceful,
+                1 => Difficulty::Easy,
+                2 => Difficulty::Normal,
+                3 => Difficulty::Hard,
+                other => {
+                    return Err(AdapterError::Decode(format!(
+                        "unknown difficulty id {other}"
+                    )));
+                }
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::DifficultyChanged {
+                difficulty,
+                locked,
+            })]);
+        }
         if packet_id == play::clientbound::PLAYER_COMBAT_KILL {
             let mut reader = Reader::new(payload);
             // VarInt player id, then a network-NBT text component death message.
@@ -1277,16 +1625,12 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::PLAYER_INFO_REMOVE {
-            // Decoded to validate the wire (a misparse would leave trailing
-            // bytes) even though the canonical model carries no removal event
-            // yet — that seam is reported to the model/client owners.
-            let mut reader = Reader::new(payload);
-            PlayerInfoRemove::decode(&mut reader, CTX)
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            reader
-                .ensure_empty()
-                .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            return Ok(Vec::new());
+            // The zero-trailing check still guards the wire: a misparse of the
+            // UUID list would leave bytes that ensure_empty rejects.
+            let remove: PlayerInfoRemove = decode_play(payload)?;
+            return Ok(vec![Directive::Emit(ClientEvent::PlayerListRemove {
+                profile_ids: remove.uuids,
+            })]);
         }
         if packet_id == play::clientbound::SET_OBJECTIVE {
             // Conditional body: the display-name/render-type/number-format tail
@@ -1477,6 +1821,96 @@ impl V770Adapter {
             world.set_blocks(section_x, section_y, section_z, &blocks);
             return Ok(Vec::new());
         }
+        if packet_id == play::clientbound::BLOCK_ENTITY_DATA {
+            // A packed BlockPos long, a `registry(BLOCK_ENTITY_TYPE)` VarInt, then
+            // the block entity's nameless network NBT compound (its "update tag",
+            // not necessarily the full save tag). Mutates the world directly,
+            // mirroring BLOCK_UPDATE/SECTION_BLOCKS_UPDATE: a no-op if the owning
+            // chunk is not currently loaded.
+            let mut reader = Reader::new(payload);
+            let packed = reader.i64().map_err(dec_err)?;
+            let type_id = reader.var_i32().map_err(dec_err)?;
+            let type_id = u32::try_from(type_id).map_err(|_| {
+                AdapterError::Decode(format!("negative block entity type id {type_id}"))
+            })?;
+            let nbt = read_network_nbt(&mut reader).map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let pos = unpack_block_pos(packed);
+            world.set_block_entity(pos.x, pos.y, pos.z, type_id, nbt);
+            return Ok(Vec::new());
+        }
+        if packet_id == play::clientbound::BLOCK_EVENT {
+            // A packed BlockPos long, two opaque parameter bytes, then a
+            // `registry(BLOCK)` VarInt naming the block type the parameters apply
+            // to (needed by the consumer to interpret b0/b1 — e.g. a note pitch
+            // vs. a piston direction — which the adapter itself does not).
+            let mut reader = Reader::new(payload);
+            let packed = reader.i64().map_err(dec_err)?;
+            let b0 = reader.u8().map_err(dec_err)?;
+            let b1 = reader.u8().map_err(dec_err)?;
+            let block_id = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let block_id = u32::try_from(block_id)
+                .map_err(|_| AdapterError::Decode(format!("negative block id {block_id}")))?;
+            let name = block_type_name(block_id)
+                .ok_or_else(|| AdapterError::Decode(format!("unknown block id {block_id}")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
+                pos: unpack_block_pos(packed),
+                b0,
+                b1,
+                block: parse_key(name, "block")?,
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_DESTRUCTION {
+            // A VarInt breaker entity id, a packed BlockPos long, then the raw
+            // break-stage byte. The stage's exact visual meaning beyond the wire
+            // (which values clear the overlay) is a rendering concern, not
+            // decoded here.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let packed = reader.i64().map_err(dec_err)?;
+            let progress = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::BlockDestruction {
+                entity_id,
+                pos: unpack_block_pos(packed),
+                progress,
+            })]);
+        }
+        if packet_id == play::clientbound::BLOCK_CHANGED_ACK {
+            let mut reader = Reader::new(payload);
+            let sequence = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::BlockChangedAck {
+                sequence,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_CHUNK_CACHE_CENTER {
+            let mut reader = Reader::new(payload);
+            let x = reader.var_i32().map_err(dec_err)?;
+            let z = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ChunkCacheCenterChanged {
+                x,
+                z,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_CHUNK_CACHE_RADIUS {
+            let mut reader = Reader::new(payload);
+            let radius = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ChunkCacheRadiusChanged {
+                radius,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_SIMULATION_DISTANCE {
+            let mut reader = Reader::new(payload);
+            let distance = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(
+                ClientEvent::SimulationDistanceChanged { distance },
+            )]);
+        }
         if packet_id == play::clientbound::PLAYER_POSITION {
             return handle_player_position(payload);
         }
@@ -1509,6 +1943,156 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::UPDATE_ATTRIBUTES {
             return Ok(handle_update_attributes(payload));
+        }
+        if packet_id == play::clientbound::ENTITY_EVENT {
+            // Raw `int` entity id (NOT a VarInt — one of the few remaining
+            // fixed-width ids in play) then a raw status byte.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.i32().map_err(dec_err)?;
+            let status = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityStatus {
+                entity_id,
+                status,
+            })]);
+        }
+        if packet_id == play::clientbound::ROTATE_HEAD {
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let packed = reader.i8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityHeadRotation {
+                entity_id,
+                head_yaw: unpack_degrees(packed),
+            })]);
+        }
+        if packet_id == play::clientbound::SET_PASSENGERS {
+            // A VarInt vehicle id then a VarInt-length-prefixed VarInt array —
+            // `readVarIntArray`, not the general `Vec<T>` derive shape, so read
+            // by hand.
+            let mut reader = Reader::new(payload);
+            let vehicle_id = reader.var_i32().map_err(dec_err)?;
+            let count = reader.var_i32().map_err(dec_err)?;
+            let count = usize::try_from(count)
+                .map_err(|_| AdapterError::Decode(format!("negative passenger count {count}")))?;
+            let mut passenger_ids = Vec::with_capacity(count.min(4096));
+            for _ in 0..count {
+                passenger_ids.push(reader.var_i32().map_err(dec_err)?);
+            }
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityPassengersChanged {
+                vehicle_id,
+                passenger_ids,
+            })]);
+        }
+        if packet_id == play::clientbound::SET_ENTITY_LINK {
+            // Two raw `int`s (source, dest); dest `0` means "no holder", matching
+            // vanilla's own sentinel (entity id 0 is never a valid entity).
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.i32().map_err(dec_err)?;
+            let holder_id = reader.i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityLeashed {
+                entity_id,
+                holder_id: (holder_id != 0).then_some(holder_id),
+            })]);
+        }
+        if packet_id == play::clientbound::TAKE_ITEM_ENTITY {
+            let mut reader = Reader::new(payload);
+            let item_entity_id = reader.var_i32().map_err(dec_err)?;
+            let player_id = reader.var_i32().map_err(dec_err)?;
+            let amount = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::ItemPickup {
+                item_entity_id,
+                player_id,
+                amount,
+            })]);
+        }
+        if packet_id == play::clientbound::DAMAGE_EVENT {
+            return decode_damage_event(payload);
+        }
+        if packet_id == play::clientbound::HURT_ANIMATION {
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let yaw = reader.f32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::EntityHurtAnimation {
+                entity_id,
+                yaw,
+            })]);
+        }
+        if packet_id == play::clientbound::ANIMATE {
+            // A fixed, sparse set of named action constants (`1` is reserved and
+            // never sent); anything else travels through `Other` rather than
+            // being rejected, since a future action byte is still meaningful to
+            // a consumer even if this table does not name it.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let action = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let action = match action {
+                0 => AnimationAction::SwingMainHand,
+                2 => AnimationAction::WakeUp,
+                3 => AnimationAction::SwingOffHand,
+                4 => AnimationAction::CriticalHit,
+                5 => AnimationAction::MagicCriticalHit,
+                other => AnimationAction::Other(other),
+            };
+            return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
+                entity_id,
+                action,
+            })]);
+        }
+        if packet_id == play::clientbound::UPDATE_MOB_EFFECT {
+            // entity id, a `minecraft:mob_effect` registry VarInt id (a fixed,
+            // built-in registry — unlike damage_type — so resolved to a name via
+            // the generated table), amplifier, duration, then a bitset byte.
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let effect_id = reader.var_i32().map_err(dec_err)?;
+            let amplifier = reader.var_i32().map_err(dec_err)?;
+            let duration_ticks = reader.var_i32().map_err(dec_err)?;
+            let flags = reader.u8().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let name = mob_effect_name(effect_id)
+                .ok_or_else(|| AdapterError::Decode(format!("unknown mob effect id {effect_id}")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
+                entity_id,
+                effect: parse_key(name, "mob effect")?,
+                amplifier,
+                duration_ticks,
+                ambient: flags & 0x1 != 0,
+                visible: flags & 0x2 != 0,
+                show_icon: flags & 0x4 != 0,
+                blend: flags & 0x8 != 0,
+            })]);
+        }
+        if packet_id == play::clientbound::REMOVE_MOB_EFFECT {
+            let mut reader = Reader::new(payload);
+            let entity_id = reader.var_i32().map_err(dec_err)?;
+            let effect_id = reader.var_i32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            let name = mob_effect_name(effect_id)
+                .ok_or_else(|| AdapterError::Decode(format!("unknown mob effect id {effect_id}")))?;
+            return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
+                entity_id,
+                effect: parse_key(name, "mob effect")?,
+            })]);
+        }
+        if packet_id == play::clientbound::MOVE_VEHICLE {
+            let mut reader = Reader::new(payload);
+            let x = reader.f64().map_err(dec_err)?;
+            let y = reader.f64().map_err(dec_err)?;
+            let z = reader.f64().map_err(dec_err)?;
+            let yaw = reader.f32().map_err(dec_err)?;
+            let pitch = reader.f32().map_err(dec_err)?;
+            reader.ensure_empty().map_err(dec_err)?;
+            return Ok(vec![Directive::Emit(ClientEvent::VehicleMoved {
+                pos: Vec3 { x, y, z },
+                yaw,
+                pitch,
+            })]);
         }
         if packet_id == play::clientbound::RESPAWN {
             // A dimension change (or post-death respawn) resets the build-height
@@ -1936,26 +2520,242 @@ impl VersionAdapter for V770Adapter {
                     encode_body(&body)?,
                 )))
             }
-            ClientAction::ContainerClick { .. } if state == ConnectionState::Play => {
-                // 26.2's `container_click` encodes slot contents as `HashedStack`
-                // (item id, count, and a CRC32 hash of the component patch), not
-                // a full `ItemStack`. The canonical model's `ItemStack` is
-                // item+count only and cannot reproduce those hashes, so encoding
-                // this now would send wrong bytes rather than none.
-                Err(AdapterError::Unsupported(
-                    "container_click (26.2 HashedStack component hashing is not yet modelled)"
-                        .to_owned(),
-                ))
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                click_type,
+                changed_slots,
+                carried_item,
+            } if state == ConnectionState::Play => {
+                let payload = encode_container_click(
+                    *window_id,
+                    *state_id,
+                    *slot,
+                    *button,
+                    *click_type,
+                    changed_slots,
+                    carried_item.as_ref(),
+                )?;
+                Ok(Some((play::serverbound::CONTAINER_CLICK, payload)))
             }
-            ClientAction::SetCreativeModeSlot { .. } if state == ConnectionState::Play => {
-                // Needs the full `ItemStack.OPTIONAL_UNTRUSTED_STREAM_CODEC`: a
-                // numeric item-registry id plus a data-component patch. There is
-                // no generated item registry in this crate and the model omits
-                // components, so a faithful encoding is not yet possible.
-                Err(AdapterError::Unsupported(
-                    "set_creative_mode_slot (no item registry table and ItemStack components are not yet modelled)"
-                        .to_owned(),
-                ))
+            ClientAction::SetCreativeModeSlot { slot, item } if state == ConnectionState::Play => {
+                let mut w = Writer::default();
+                let slot_i16 = i16::try_from(*slot).map_err(|_| {
+                    AdapterError::Encode(format!("creative slot {slot} overflows i16"))
+                })?;
+                w.i16(slot_i16);
+                write_optional_item_stack(&mut w, item.as_ref())?;
+                Ok(Some((
+                    play::serverbound::SET_CREATIVE_MODE_SLOT,
+                    w.into_vec(),
+                )))
+            }
+            ClientAction::SetClientSettings(settings)
+                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+            {
+                let ClientSettings {
+                    locale,
+                    view_distance,
+                    chat_mode,
+                    chat_colors,
+                    skin_parts,
+                    main_hand,
+                    text_filtering,
+                    allow_server_listing,
+                    particle_status,
+                } = settings;
+                let body = ClientInformation {
+                    language: locale.clone(),
+                    view_distance: *view_distance,
+                    chat_visibility: match chat_mode {
+                        ChatMode::Full => 0,
+                        ChatMode::CommandsOnly => 1,
+                        ChatMode::Hidden => 2,
+                    },
+                    chat_colors: *chat_colors,
+                    model_customization: skin_parts_bitmask(*skin_parts),
+                    main_hand: match main_hand {
+                        MainHand::Left => 0,
+                        MainHand::Right => 1,
+                    },
+                    text_filtering: *text_filtering,
+                    allows_listing: *allow_server_listing,
+                    particle_status: match particle_status {
+                        ParticleStatus::All => 0,
+                        ParticleStatus::Decreased => 1,
+                        ParticleStatus::Minimal => 2,
+                    },
+                };
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::CLIENT_INFORMATION,
+                    _ => play::serverbound::CLIENT_INFORMATION,
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
+            }
+            ClientAction::SendBrand { brand }
+                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+            {
+                let body = BrandPayload {
+                    channel: "minecraft:brand".to_owned(),
+                    brand: brand.clone(),
+                };
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::CUSTOM_PAYLOAD,
+                    _ => play::serverbound::CUSTOM_PAYLOAD,
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
+            }
+            ClientAction::PongResponse { id }
+                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+            {
+                let body = Pong { id: *id };
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::PONG,
+                    _ => play::serverbound::PONG,
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
+            }
+            ClientAction::ResourcePackResponse { id, response }
+                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+            {
+                let body = ResourcePackResponse {
+                    id: *id,
+                    action: resource_pack_response_ordinal(*response),
+                };
+                let packet_id = match state {
+                    ConnectionState::Configuration => configuration::serverbound::RESOURCE_PACK,
+                    _ => play::serverbound::RESOURCE_PACK,
+                };
+                Ok(Some((packet_id, encode_body(&body)?)))
+            }
+            ClientAction::EndClientTick if state == ConnectionState::Play => Ok(Some((
+                play::serverbound::CLIENT_TICK_END,
+                encode_body(&ClientTickEnd)?,
+            ))),
+            ClientAction::ContainerButtonClick {
+                window_id,
+                button_id,
+            } if state == ConnectionState::Play => {
+                let body = ContainerButtonClick {
+                    window_id: *window_id,
+                    button_id: *button_id,
+                };
+                Ok(Some((
+                    play::serverbound::CONTAINER_BUTTON_CLICK,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetFlying { flying } if state == ConnectionState::Play => {
+                let flags = if *flying {
+                    SERVERBOUND_ABILITY_FLAG_FLYING
+                } else {
+                    0
+                };
+                let body = ServerboundPlayerAbilities { flags };
+                Ok(Some((
+                    play::serverbound::PLAYER_ABILITIES,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::RenameItem { name } if state == ConnectionState::Play => {
+                let body = RenameItem { name: name.clone() };
+                Ok(Some((play::serverbound::RENAME_ITEM, encode_body(&body)?)))
+            }
+            ClientAction::SelectTrade { index } if state == ConnectionState::Play => {
+                let body = SelectTrade { index: *index };
+                Ok(Some((
+                    play::serverbound::SELECT_TRADE,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::PickItemFromBlock { pos, include_data } if state == ConnectionState::Play => {
+                let body = PickItemFromBlock {
+                    pos: pack_block_pos(*pos),
+                    include_data: *include_data,
+                };
+                Ok(Some((
+                    play::serverbound::PICK_ITEM_FROM_BLOCK,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::PickItemFromEntity {
+                entity_id,
+                include_data,
+            } if state == ConnectionState::Play => {
+                let body = PickItemFromEntity {
+                    entity_id: *entity_id,
+                    include_data: *include_data,
+                };
+                Ok(Some((
+                    play::serverbound::PICK_ITEM_FROM_ENTITY,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetBeaconEffects { primary, secondary } if state == ConnectionState::Play => {
+                let payload = encode_set_beacon(primary.as_ref(), secondary.as_ref())?;
+                Ok(Some((play::serverbound::SET_BEACON, payload)))
+            }
+            ClientAction::EditBook {
+                slot,
+                pages,
+                title,
+            } if state == ConnectionState::Play => {
+                let body = EditBook {
+                    slot: *slot,
+                    pages: pages.clone(),
+                    title: title.clone(),
+                };
+                Ok(Some((play::serverbound::EDIT_BOOK, encode_body(&body)?)))
+            }
+            ClientAction::SignUpdate {
+                pos,
+                is_front_text,
+                lines,
+            } if state == ConnectionState::Play => {
+                let [line0, line1, line2, line3] = lines.clone();
+                let body = SignUpdate {
+                    pos: pack_block_pos(*pos),
+                    is_front_text: *is_front_text,
+                    line0,
+                    line1,
+                    line2,
+                    line3,
+                };
+                Ok(Some((play::serverbound::SIGN_UPDATE, encode_body(&body)?)))
+            }
+            ClientAction::SetCommandBlock {
+                pos,
+                command,
+                mode,
+                track_output,
+                conditional,
+                automatic,
+            } if state == ConnectionState::Play => {
+                let flags = (if *track_output {
+                    COMMAND_BLOCK_FLAG_TRACK_OUTPUT
+                } else {
+                    0
+                }) | (if *conditional {
+                    COMMAND_BLOCK_FLAG_CONDITIONAL
+                } else {
+                    0
+                }) | (if *automatic {
+                    COMMAND_BLOCK_FLAG_AUTOMATIC
+                } else {
+                    0
+                });
+                let body = SetCommandBlock {
+                    pos: pack_block_pos(*pos),
+                    command: command.clone(),
+                    mode: command_block_mode_ordinal(*mode),
+                    flags,
+                };
+                Ok(Some((
+                    play::serverbound::SET_COMMAND_BLOCK,
+                    encode_body(&body)?,
+                )))
             }
             _ => Ok(None),
         }

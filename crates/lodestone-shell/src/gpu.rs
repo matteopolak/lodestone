@@ -11,11 +11,14 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuAtlas, GpuMesh, Mesh,
+    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet, EntityPipeline,
+    GpuAtlas, GpuEntityModel, GpuMesh, Mesh,
     block::{camera_buffer, sprite_uv_buffer},
+    plan_entities, upload_instances,
     vertex::vram_bytes,
 };
 
+use crate::entities::EntityDraw;
 use crate::mesher::SectionKey;
 
 /// The 12 edges of a unit cube as pairs of corner indices (line list).
@@ -218,6 +221,10 @@ pub struct RenderStats {
     pub draw_calls: usize,
     /// Approximate mesh VRAM in bytes.
     pub vram_bytes: usize,
+    /// Entity instances drawn this frame (post-frustum-cull).
+    pub entities_drawn: usize,
+    /// Entity instances frustum-culled this frame.
+    pub entities_culled: usize,
 }
 
 #[derive(Debug)]
@@ -227,6 +234,132 @@ struct SectionGpu {
     origin: [f32; 3],
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
+}
+
+/// GPU resources for the entity pass: the instanced pipeline, one uploaded mesh
+/// per model type, a per-model synthetic texture bind group, and a persistent
+/// camera uniform rewritten each frame. Owns the version-free
+/// [`EntityModelSet`] so it can resolve a live entity type into a renderable
+/// instance without the shell naming a mob model directly.
+///
+/// Textures are **synthetic solid colours**, one per model type, matching the
+/// shell's existing block atlas (which is also procedurally coloured, not
+/// resource-pack art). Real mob-skin loading through the resource pack is a
+/// follow-up shared with the block-atlas work, not something this pass fakes.
+#[derive(Debug)]
+struct EntityRenderer {
+    pipeline: EntityPipeline,
+    models: EntityModelSet,
+    gpu_models: HashMap<&'static str, GpuEntityModel>,
+    textures: HashMap<&'static str, wgpu::BindGroup>,
+    cam_buffer: wgpu::Buffer,
+    cam_bind_group: wgpu::BindGroup,
+}
+
+impl EntityRenderer {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, color_format: wgpu::TextureFormat) -> Self {
+        let pipeline = EntityPipeline::new(device, color_format);
+        let models = EntityModelSet::load();
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lodestone-entity-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let mut gpu_models = HashMap::new();
+        let mut textures = HashMap::new();
+        for (name, mesh) in models.iter() {
+            if let Some(gpu) = GpuEntityModel::upload(device, mesh) {
+                gpu_models.insert(name, gpu);
+            }
+            let (view, _tex) = synthetic_entity_texture(device, queue, name);
+            let bg = pipeline.texture_bind_group(device, &view, &sampler);
+            textures.insert(name, bg);
+        }
+
+        // A persistent camera uniform, rewritten every frame before the pass.
+        let cam_buffer = camera_buffer(
+            device,
+            CameraUniform {
+                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                section_origin: [0.0, 0.0, 0.0, 0.0],
+            },
+        );
+        let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
+
+        Self {
+            pipeline,
+            models,
+            gpu_models,
+            textures,
+            cam_buffer,
+            cam_bind_group,
+        }
+    }
+}
+
+/// Build a 2×2 solid-colour RGBA texture for one entity model, tinted
+/// deterministically from the model name so distinct mob types are
+/// distinguishable on screen. Opaque, so the shader's alpha cutout keeps every
+/// texel. Returns the view and the texture (kept alive by the caller).
+fn synthetic_entity_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    model_name: &str,
+) -> (wgpu::TextureView, wgpu::Texture) {
+    let [r, g, b] = model_tint(model_name);
+    const N: u32 = 2;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("lodestone-entity-synthetic-sheet"),
+        size: wgpu::Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let pixels: Vec<u8> = (0..N * N).flat_map(|_| [r, g, b, 255]).collect();
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &pixels,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(N * 4),
+            rows_per_image: Some(N),
+        },
+        wgpu::Extent3d {
+            width: N,
+            height: N,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (view, texture)
+}
+
+/// A deterministic, reasonably-separated RGB tint from a model name (FNV-1a over
+/// the bytes, spread across channels). Kept bright (each channel ≥ 80) so mobs
+/// read against both sky and terrain.
+fn model_tint(name: &str) -> [u8; 3] {
+    let mut h: u32 = 0x811c_9dc5;
+    for byte in name.bytes() {
+        h ^= u32::from(byte);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    let chan = |shift: u32| -> u8 { 80 + ((h >> shift) as u8 % 176) };
+    [chan(0), chan(8), chan(16)]
 }
 
 /// Owns all GPU resources needed to render the world.
@@ -241,6 +374,7 @@ pub struct RenderState {
     depth: DepthBuffer,
     sections: HashMap<SectionKey, SectionGpu>,
     outline: OutlineRenderer,
+    entities: EntityRenderer,
     clear: wgpu::Color,
 }
 
@@ -269,6 +403,7 @@ impl RenderState {
         let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas, &uv_buffer);
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
+        let entities = EntityRenderer::new(device, queue, color_format);
 
         Self {
             pipeline,
@@ -278,6 +413,7 @@ impl RenderState {
             depth,
             sections: HashMap::new(),
             outline,
+            entities,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: 0.53,
@@ -357,6 +493,7 @@ impl RenderState {
         view: &wgpu::TextureView,
         camera: &Camera,
         outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
     ) -> RenderStats {
         let view_proj = camera.view_projection().to_cols_array_2d();
 
@@ -374,10 +511,16 @@ impl RenderState {
             self.outline.prepare(queue, &view_proj, block);
         }
 
+        // Resolve, frustum-cull and upload entity instances *before* the pass —
+        // buffers can't be created mid-pass, and the entity camera uniform (no
+        // section origin; the world position lives in each instance matrix) must
+        // be written first too.
+        let mut stats = RenderStats::default();
+        let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
-        let mut stats = RenderStats::default();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass"),
@@ -413,6 +556,29 @@ impl RenderState {
                 stats.draw_calls += 1;
                 stats.total_quads += section.quad_count;
             }
+
+            // Entities share the terrain depth buffer (depth test + write on, so
+            // a mob behind a wall is correctly occluded and vice versa), drawn
+            // after terrain in the same pass so no second clear touches depth.
+            if !entity_batches.is_empty() {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                for batch in &entity_batches {
+                    let Some(model) = self.entities.gpu_models.get(batch.model) else {
+                        continue;
+                    };
+                    let Some(texture) = self.entities.textures.get(batch.model) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_vertex_buffer(1, batch.instances.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..model.index_count, 0, 0..batch.count);
+                    stats.draw_calls += 1;
+                }
+            }
+
             if outline.is_some() {
                 self.outline.draw(&mut pass);
             }
@@ -422,6 +588,68 @@ impl RenderState {
         stats.vram_bytes = vram_bytes(stats.total_quads);
         stats
     }
+
+    /// Resolve each interpolated entity into a renderable instance, frustum-cull
+    /// and group them by model, upload one instance buffer per surviving model,
+    /// and record draw/cull counts. Runs before the render pass so every GPU
+    /// buffer it creates outlives the pass that reads it.
+    fn prepare_entities(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<EntityDrawBatch> {
+        if entities.is_empty() {
+            return Vec::new();
+        }
+
+        // Rewrite the entity camera uniform (world position lives per-instance,
+        // so the section origin stays zero).
+        queue.write_buffer(
+            &self.entities.cam_buffer,
+            0,
+            bytemuck::bytes_of(&CameraUniform {
+                view_proj: camera.view_projection().to_cols_array_2d(),
+                section_origin: [0.0, 0.0, 0.0, 0.0],
+            }),
+        );
+
+        let instances: Vec<_> = entities
+            .iter()
+            .filter_map(|e| {
+                self.entities
+                    .models
+                    .resolve(&e.type_path, e.feet, e.yaw, e.scale)
+            })
+            .collect();
+
+        let frame = plan_entities(&instances, &camera.frustum());
+        stats.entities_drawn = frame.stats.drawn;
+        stats.entities_culled = frame.stats.culled_frustum;
+
+        frame
+            .batches
+            .iter()
+            .filter_map(|batch| {
+                let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
+                upload_instances(device, &batch.transforms).map(|instances| EntityDrawBatch {
+                    model: batch.model,
+                    count,
+                    instances,
+                })
+            })
+            .collect()
+    }
+}
+
+/// One model type's uploaded instance buffer for a frame.
+#[derive(Debug)]
+struct EntityDrawBatch {
+    model: &'static str,
+    count: u32,
+    instances: wgpu::Buffer,
 }
 
 #[cfg(test)]
@@ -495,6 +723,7 @@ mod tests {
             frame.view(),
             &camera,
             Some([0, feet[1] as i32, 0]),
+            &[],
         );
         let pixels = target.read_texels(device, queue);
         let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -600,11 +829,11 @@ mod tests {
         };
 
         let frame = target.acquire().expect("acquire");
-        state.render(device, queue, frame.view(), &camera, None);
+        state.render(device, queue, frame.view(), &camera, None, &[]);
         let plain = target.read_texels(device, queue);
 
         let frame = target.acquire().expect("acquire");
-        state.render(device, queue, frame.view(), &camera, Some(target_block));
+        state.render(device, queue, frame.view(), &camera, Some(target_block), &[]);
         let outlined = target.read_texels(device, queue);
 
         // The only thing that changed between the two frames is the outline, so
@@ -854,6 +1083,138 @@ mod tests {
             side_lit > 200,
             "the sidebar title, labels and scores should rasterize a substantial run \
              of glyph pixels, only {side_lit} lit — the fold or text path may be a no-op"
+        );
+    }
+
+    /// Headless GPU test: render a single entity (no terrain) through the real
+    /// [`RenderState::render`] path — the same call the live frame loop uses —
+    /// and read pixels back to prove a mob reaches the screen. This is the
+    /// shell-level analogue of `lodestone-render`'s `entity_gate`, but it drives
+    /// the *shell's* wiring: `EntityDraw` → resolve → `plan_entities` → upload →
+    /// instanced draw, sharing the terrain depth buffer.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn entity_renders_to_pixels_through_shell_path() {
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
+             here would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (320u32, 240u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+
+        let state = RenderState::new(device, queue, format, w, h);
+
+        // A pig standing just in front of the camera, which looks south (+Z,
+        // yaw 0) at eye level with the pig's body — mirrors the render-crate
+        // gate's geometry so a regression there shows up here too.
+        let pig_feet = glam::Vec3::new(0.0, 0.0, 4.0);
+        let camera = Camera {
+            position: glam::Vec3::new(0.0, 0.9, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+            aspect: w as f32 / h as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+
+        let draws = vec![
+            EntityDraw {
+                type_path: "pig".to_owned(),
+                feet: pig_feet,
+                yaw: 0.0,
+                scale: 1.0,
+            },
+            // A second pig behind the camera so frustum culling has something
+            // real to remove — the anti-vacuity guard on the cull path.
+            EntityDraw {
+                type_path: "pig".to_owned(),
+                feet: glam::Vec3::new(0.0, 0.0, -12.0),
+                yaw: 0.0,
+                scale: 1.0,
+            },
+        ];
+
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, &draws);
+        let pixels = target.read_texels(device, queue);
+
+        assert_eq!(
+            stats.entities_drawn, 1,
+            "exactly the front pig should draw; the one behind the camera must cull \
+             (drawn={}, culled={})",
+            stats.entities_drawn, stats.entities_culled
+        );
+        assert!(
+            stats.entities_culled >= 1,
+            "the pig behind the camera should have been frustum-culled, but culled={}",
+            stats.entities_culled
+        );
+
+        // The synthetic pig texture is a solid tint; count pixels that clearly
+        // differ from the sky clear colour, and confirm they cluster in the
+        // centre (where the pig is) rather than smeared across the frame.
+        let sky = [135u8, 181, 235];
+        let is_mob = |px: &[u8]| -> bool {
+            let d = (i32::from(px[0]) - i32::from(sky[0])).abs()
+                + (i32::from(px[1]) - i32::from(sky[1])).abs()
+                + (i32::from(px[2]) - i32::from(sky[2])).abs();
+            d > 60
+        };
+
+        let mut mob_px = 0usize;
+        let mut centre_px = 0usize;
+        let mut corner_px = 0usize;
+        for (i, px) in pixels.chunks_exact(4).enumerate() {
+            let x = (i as u32) % w;
+            let y = (i as u32) / w;
+            if is_mob(px) {
+                mob_px += 1;
+            }
+            let cx = x >= w / 4 && x < 3 * w / 4;
+            let cy = y >= h / 4 && y < 3 * h / 4;
+            if cx && cy && is_mob(px) {
+                centre_px += 1;
+            }
+            let corner = (x < w / 8 || x >= 7 * w / 8) && (y < h / 8 || y >= 7 * h / 8);
+            if corner && is_mob(px) {
+                corner_px += 1;
+            }
+        }
+        let coverage = mob_px as f64 / (w * h) as f64;
+
+        eprintln!("=== shell entity render (headless) ===");
+        eprintln!("entities drawn  = {}", stats.entities_drawn);
+        eprintln!("entities culled = {}", stats.entities_culled);
+        eprintln!("mob coverage    = {:.2}%", coverage * 100.0);
+        eprintln!("centre mob px   = {centre_px}");
+        eprintln!("corner mob px   = {corner_px}");
+
+        // Two-sided: the pig must reach pixels (not a blank frame) but not fill
+        // the screen (a broken clear or a mob glued to the camera), and it must
+        // be centred (the corners stay sky).
+        assert!(
+            mob_px > 200,
+            "expected the pig to reach pixels, only {mob_px} non-sky px ({:.2}%)",
+            coverage * 100.0
+        );
+        assert!(
+            coverage < 0.6,
+            "the pig should not fill the frame ({:.1}% non-sky) — a mob glued to the \
+             near plane or a broken clear",
+            coverage * 100.0
+        );
+        assert!(
+            centre_px > 100,
+            "the pig should sit in the centre of the frame, only {centre_px} centre px"
+        );
+        assert_eq!(
+            corner_px, 0,
+            "the frame corners should stay sky, but {corner_px} corner px read as mob"
         );
     }
 }

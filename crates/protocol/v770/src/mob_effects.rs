@@ -23,3 +23,17 @@ pub fn mob_effect_name(id: i32) -> Option<&'static str> {
         .ok()
         .and_then(|index| MOB_EFFECT_NAMES.get(index).copied())
 }
+
+/// Resolves a canonical `minecraft:*` mob-effect identifier to its network
+/// registry id for protocol 776.
+///
+/// The reverse of [`mob_effect_name`], needed to encode the serverbound
+/// `set_beacon` packet's chosen effects. A linear scan is fine: this runs once
+/// per beacon confirmation, not per tick.
+#[must_use]
+pub fn mob_effect_id(name: &str) -> Option<i32> {
+    MOB_EFFECT_NAMES
+        .iter()
+        .position(|candidate| *candidate == name)
+        .and_then(|index| i32::try_from(index).ok())
+}

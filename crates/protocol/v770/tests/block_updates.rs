@@ -1,5 +1,5 @@
-//! Hermetic tests for the protocol 776 `block_update` and
-//! `section_blocks_update` packets.
+//! Hermetic tests for the protocol 776 `block_update`, `section_blocks_update`,
+//! and `block_entity_data` packets.
 //!
 //! These packets mutate the client-owned world rather than emitting events, so
 //! the assertions run against a recording [`WorldSink`] that captures the exact
@@ -19,6 +19,7 @@ use lodestone_world::{ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink}
 struct RecordingSink {
     set_block: Vec<(i32, i32, i32, u32)>,
     set_blocks: Vec<SectionWrite>,
+    set_block_entity: Vec<(i32, i32, i32, u32, Nbt)>,
 }
 
 /// One recorded `set_blocks` call: the section grid coordinates and the
@@ -43,7 +44,9 @@ impl WorldSink for RecordingSink {
     }
     fn merge_light(&mut self, _pos: ChunkPos, _patch: LightPatch) {}
     fn unload(&mut self, _pos: ChunkPos) {}
-    fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _type_id: u32, _nbt: Nbt) {}
+    fn set_block_entity(&mut self, x: i32, y: i32, z: i32, type_id: u32, nbt: Nbt) {
+        self.set_block_entity.push((x, y, z, type_id, nbt));
+    }
 }
 
 /// Independently packs a `BlockPos` the way vanilla `BlockPos.asLong` does:
@@ -238,5 +241,74 @@ fn section_blocks_update_rejects_truncated_change_list() {
     assert!(
         result.is_err(),
         "a truncated change list must be rejected, not panic"
+    );
+}
+
+// ---- block_entity_data ------------------------------------------------
+
+/// Nameless network NBT for an empty compound: `TAG_Compound` root, then
+/// immediately `TAG_End`.
+fn empty_compound() -> Vec<u8> {
+    vec![0x0A, 0x00]
+}
+
+#[test]
+fn block_entity_data_routes_set_block_entity() {
+    let adapter = V770Adapter::new();
+    let mut sink = RecordingSink::default();
+    let mut payload = pack_block_pos(5, 64, -8).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(1)); // block entity type id 1 (unresolved raw id; carried opaque)
+    payload.extend_from_slice(&empty_compound());
+
+    dispatch(
+        &mut sink,
+        &adapter,
+        play::clientbound::BLOCK_ENTITY_DATA,
+        &payload,
+    );
+    assert_eq!(
+        sink.set_block_entity,
+        vec![(5, 64, -8, 1, Nbt::Compound(vec![]))]
+    );
+    assert!(sink.set_block.is_empty());
+    assert!(sink.set_blocks.is_empty());
+}
+
+#[test]
+fn block_entity_data_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut sink = RecordingSink::default();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(0));
+    payload.extend_from_slice(&empty_compound());
+    payload.push(0x00);
+    let result = adapter.handle_packet(
+        &mut sink,
+        ConnectionState::Play,
+        play::clientbound::BLOCK_ENTITY_DATA,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned block_entity_data must be rejected"
+    );
+}
+
+#[test]
+fn block_entity_data_rejects_truncated_nbt() {
+    let adapter = V770Adapter::new();
+    let mut sink = RecordingSink::default();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(0));
+    payload.push(0x0A); // compound tag id, but no TAG_End follows
+    let result = adapter.handle_packet(
+        &mut sink,
+        ConnectionState::Play,
+        play::clientbound::BLOCK_ENTITY_DATA,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a truncated block_entity_data must be rejected, not panic"
     );
 }

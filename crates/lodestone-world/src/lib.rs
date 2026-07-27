@@ -81,6 +81,7 @@ mod column;
 mod container;
 mod heightmap;
 mod light;
+mod lighting;
 mod packed;
 mod section;
 mod world;
@@ -90,6 +91,9 @@ pub use column::ChunkColumn;
 pub use container::{LongArrayFraming, PaletteKind, PalettedContainer};
 pub use heightmap::{Heightmap, Heightmaps, height_bits};
 pub use light::{ColumnLight, LightData, NibbleArray, SectionLight};
+pub use lighting::{
+    BlockVolume, LightDiff, LightProperties, compute_column_light, diff_column_light,
+};
 pub use packed::PackedArray;
 pub use section::ChunkSection;
 pub use world::{ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink};

@@ -198,7 +198,7 @@ impl LightData {
     /// collapsing common full-bright and fully-dark sections to a tag.
     ///
     /// [`Uniform`]: LightData::Uniform
-    fn from_array(arr: NibbleArray) -> Self {
+    pub(crate) fn from_array(arr: NibbleArray) -> Self {
         match arr.uniform_value() {
             Some(v) => LightData::Uniform(v),
             None => LightData::Values(arr),
@@ -258,6 +258,36 @@ pub struct SectionLight {
     pub sky: LightData,
     /// Block light for this section.
     pub block: LightData,
+}
+
+impl SectionLight {
+    /// Resolved sky-light level (`0..=15`) at section-local `(x, y, z)`, unpacking
+    /// the nibble.
+    ///
+    /// [`Missing`](LightData::Missing) resolves to `0`. A caller that needs
+    /// vanilla's *above-the-world* sky default of `15` must branch on the public
+    /// [`sky`](SectionLight::sky) field itself, because that default depends on
+    /// dimension (there is no sky light in the nether/end) and on whether the
+    /// section sits above the heightmap — neither of which a section-local
+    /// accessor can know.
+    ///
+    /// # Panics
+    /// Panics if any coordinate is outside `0..16`.
+    #[must_use]
+    pub fn sky_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.sky.get(NibbleArray::index(x, y, z)).unwrap_or(0)
+    }
+
+    /// Resolved block-light level (`0..=15`) at section-local `(x, y, z)`,
+    /// unpacking the nibble. [`Missing`](LightData::Missing) resolves to `0`,
+    /// which is the correct default for block light everywhere.
+    ///
+    /// # Panics
+    /// Panics if any coordinate is outside `0..16`.
+    #[must_use]
+    pub fn block_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.block.get(NibbleArray::index(x, y, z)).unwrap_or(0)
+    }
 }
 
 /// Sky and block light for a whole column, spanning `section_count + 2` light
@@ -659,6 +689,38 @@ mod tests {
             }
             other => panic!("expected Values, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn section_light_accessors_unpack_the_right_nibble_by_yzx() {
+        let mut sky = NibbleArray::filled(0);
+        let mut block = NibbleArray::filled(0);
+        // A distinct cell so a swapped x/z or a wrong nibble half is caught.
+        sky.set(NibbleArray::index(3, 5, 7), 12);
+        block.set(NibbleArray::index(3, 5, 7), 9);
+        let light = SectionLight {
+            sky: LightData::Values(sky),
+            block: LightData::Values(block),
+        };
+
+        assert_eq!(light.sky_at(3, 5, 7), 12, "sky nibble read back");
+        assert_eq!(light.block_at(3, 5, 7), 9, "block nibble read back");
+        assert_eq!(light.sky_at(7, 5, 3), 0, "x/z are not interchangeable");
+        assert_eq!(light.sky_at(0, 0, 0), 0, "untouched cell is zero");
+    }
+
+    #[test]
+    fn section_light_accessors_resolve_uniform_and_missing() {
+        let light = SectionLight {
+            sky: LightData::Uniform(15),
+            block: LightData::Missing,
+        };
+        assert_eq!(light.sky_at(1, 2, 3), 15, "uniform resolves everywhere");
+        assert_eq!(
+            light.block_at(1, 2, 3),
+            0,
+            "missing light resolves to 0; above-world sky defaulting is the caller's job"
+        );
     }
 
     #[test]

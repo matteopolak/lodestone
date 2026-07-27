@@ -1,42 +1,128 @@
-//! Play-state packets for protocol 340.
+//! Play-state packets for protocol 754 (Minecraft 1.16.5).
 
+use lodestone_core::{Ctx, Reader, Result, Writer, read_named_nbt};
 use lodestone_macros::{Decode, Encode, Packet};
+use uuid::Uuid;
 
 use crate::packets::position::Position;
 
-/// Clientbound `login` (game-join) packet.
+/// Clientbound `login` (game-join) packet for 1.16.5.
 ///
 /// # Architectural notes
 ///
-/// * `dimension` is a **numeric signed byte** (`-1` nether, `0` overworld, `1`
-///   end), not the modern namespaced dimension identifier string. The adapter
-///   maps this byte onto the canonical `DimensionId` identifier.
-/// * `game_mode` is a `u8` whose `0x8` bit flags a hardcore world; the low two
-///   bits carry the mode. There is no separate hardcore boolean as in modern
-///   join.
+/// 1.16 rewrote join substantially, and it is the clearest place the version
+/// isolation earns its keep:
 ///
-/// Wire layout: signed int entity id, unsigned byte game mode (bit `0x8` =
-/// hardcore), signed byte dimension, unsigned byte difficulty, unsigned byte
-/// max players, string level type, boolean reduced debug info.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+/// * The current dimension is no longer a numeric byte (`-1`/`0`/`1`); it is a
+///   **namespaced world name string** (`world_name`, e.g. `minecraft:overworld`)
+///   plus two inline **NBT** blobs — a `dimension_codec` registry and the
+///   per-world `dimension` type. This crate consumes both NBT blobs (there is no
+///   registry consumer yet) and maps `world_name` onto the canonical
+///   `DimensionId`.
+/// * `game_mode` is a plain `u8` (0..=3); hardcore is a **separate** boolean
+///   (`is_hardcore`), unlike pre-1.16 where the `0x8` bit of the mode byte
+///   flagged it.
+///
+/// Because the wire carries NBT (which the derive macro cannot express) and a
+/// `worldNames` string array, this is a hand-written [`lodestone_core::Decode`]
+/// (and a matching [`lodestone_core::Encode`] used only by hermetic tests, which
+/// writes each NBT blob as a lone `TAG_End` — a valid empty named tag that the
+/// decoder consumes symmetrically).
+#[derive(Debug, Clone, PartialEq, Eq, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct JoinGame {
     /// Local player entity id.
     pub entity_id: i32,
-    /// Packed game mode: low two bits are the mode, `0x8` marks hardcore.
+    /// Whether the world is hardcore (a separate field since 1.16).
+    pub is_hardcore: bool,
+    /// Game mode (`0` survival, `1` creative, `2` adventure, `3` spectator).
     pub game_mode: u8,
-    /// Numeric dimension (`-1` nether, `0` overworld, `1` end). Widened from a
-    /// signed byte in 1.8 to a full `i32` in 1.9+ (protocol 340 is 1.12.2).
-    pub dimension: i32,
-    /// World difficulty (`0` peaceful .. `3` hard).
-    pub difficulty: u8,
-    /// Maximum player count (legacy hint, unused by the client).
-    pub max_players: u8,
-    /// Level type string, such as `default` or `flat`.
-    #[mc(max = 16)]
-    pub level_type: String,
+    /// Previous game mode (`255`/`-1` when there is none).
+    pub previous_game_mode: u8,
+    /// Names of every world on the server (namespaced identifiers).
+    pub world_names: Vec<String>,
+    /// Namespaced identifier of the world the player is joining.
+    pub world_name: String,
+    /// Hashed world seed (for client-side biome noise).
+    pub hashed_seed: i64,
+    /// Legacy max-players hint.
+    pub max_players: i32,
+    /// Server view distance in chunks.
+    pub view_distance: i32,
     /// Whether reduced debug info is in effect.
     pub reduced_debug_info: bool,
+    /// Whether the respawn screen is shown on death.
+    pub enable_respawn_screen: bool,
+    /// Whether this is a debug world.
+    pub is_debug: bool,
+    /// Whether this is a superflat world.
+    pub is_flat: bool,
+}
+
+impl lodestone_core::Decode for JoinGame {
+    fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
+        let entity_id = r.i32()?;
+        let is_hardcore = r.bool()?;
+        let game_mode = r.u8()?;
+        let previous_game_mode = r.u8()?;
+        let count = r.var_i32()?;
+        if count < 0 {
+            return Err(lodestone_core::Error::NegativeLength(count));
+        }
+        let mut world_names = Vec::with_capacity(count.min(1024) as usize);
+        for _ in 0..count {
+            world_names.push(r.string(32767)?);
+        }
+        read_named_nbt(r)?; // dimension_codec registry — consumed, not retained
+        read_named_nbt(r)?; // current dimension type — consumed, not retained
+        let world_name = r.string(32767)?;
+        let hashed_seed = r.i64()?;
+        let max_players = r.var_i32()?;
+        let view_distance = r.var_i32()?;
+        let reduced_debug_info = r.bool()?;
+        let enable_respawn_screen = r.bool()?;
+        let is_debug = r.bool()?;
+        let is_flat = r.bool()?;
+        Ok(Self {
+            entity_id,
+            is_hardcore,
+            game_mode,
+            previous_game_mode,
+            world_names,
+            world_name,
+            hashed_seed,
+            max_players,
+            view_distance,
+            reduced_debug_info,
+            enable_respawn_screen,
+            is_debug,
+            is_flat,
+        })
+    }
+}
+
+impl lodestone_core::Encode for JoinGame {
+    fn encode(&self, w: &mut Writer, _ctx: Ctx) -> Result<()> {
+        w.i32(self.entity_id);
+        w.bool(self.is_hardcore);
+        w.u8(self.game_mode);
+        w.u8(self.previous_game_mode);
+        w.var_i32(self.world_names.len() as i32);
+        for name in &self.world_names {
+            w.string(name);
+        }
+        w.u8(0); // dimension_codec: empty named NBT (TAG_End)
+        w.u8(0); // dimension: empty named NBT (TAG_End)
+        w.string(&self.world_name);
+        w.i64(self.hashed_seed);
+        w.var_i32(self.max_players);
+        w.var_i32(self.view_distance);
+        w.bool(self.reduced_debug_info);
+        w.bool(self.enable_respawn_screen);
+        w.bool(self.is_debug);
+        w.bool(self.is_flat);
+        Ok(())
+    }
 }
 
 /// Clientbound `chat` packet.
@@ -45,10 +131,11 @@ pub struct JoinGame {
 ///
 /// The message is a **JSON string**, not the modern NBT text component. The
 /// shared [`lodestone_model::Text::from_json`] front-end parses it into the same
-/// format-agnostic tree that modern NBT chat decodes to.
+/// format-agnostic tree that modern NBT chat decodes to. 1.16 appended a
+/// `sender` UUID (the source player, or the nil UUID for system messages).
 ///
 /// Wire layout: string message (JSON), signed byte position (`0` chat, `1`
-/// system, `2` action bar / game info).
+/// system, `2` action bar / game info), 128-bit sender uuid.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:chat", state = Play, bound = Client)]
 pub struct ClientboundChat {
@@ -56,6 +143,8 @@ pub struct ClientboundChat {
     pub message: String,
     /// Chat slot: `0` chat, `1` system, `2` action bar.
     pub position: i8,
+    /// UUID of the sending player (nil for system/server messages).
+    pub sender: Uuid,
 }
 
 /// Serverbound `chat` packet.
@@ -147,22 +236,66 @@ pub struct UpdateHealth {
     pub food_saturation: f32,
 }
 
-/// Clientbound `respawn` packet.
+/// Clientbound `respawn` packet for 1.16.5.
 ///
-/// Wire layout: signed int dimension, unsigned byte difficulty, unsigned byte
-/// game mode, string level type.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+/// Like [`JoinGame`], 1.16 replaced the numeric dimension with a namespaced
+/// `world_name` string plus an inline **NBT** dimension type, so this is a
+/// hand-written codec that consumes the NBT blob. It is not on the join-and-stay
+/// critical path (respawn fires only on death / dimension change), but the shape
+/// is migrated for correctness.
+///
+/// Wire layout: nbt dimension, string world name, i64 hashed seed, u8 game mode,
+/// u8 previous game mode, bool is-debug, bool is-flat, bool copy-metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Packet)]
 #[mc(name = "minecraft:respawn", state = Play, bound = Client)]
 pub struct Respawn {
-    /// Numeric dimension the player respawns into.
-    pub dimension: i32,
-    /// World difficulty.
-    pub difficulty: u8,
-    /// Packed game mode.
+    /// Namespaced identifier of the world respawned into.
+    pub world_name: String,
+    /// Game mode after respawn.
     pub game_mode: u8,
-    /// Level type string.
-    #[mc(max = 16)]
-    pub level_type: String,
+    /// Previous game mode.
+    pub previous_game_mode: u8,
+    /// Whether this is a debug world.
+    pub is_debug: bool,
+    /// Whether this is a superflat world.
+    pub is_flat: bool,
+    /// Whether to keep entity metadata / attributes across the respawn.
+    pub copy_metadata: bool,
+}
+
+impl lodestone_core::Decode for Respawn {
+    fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
+        read_named_nbt(r)?; // dimension type — consumed, not retained
+        let world_name = r.string(32767)?;
+        let _hashed_seed = r.i64()?;
+        let game_mode = r.u8()?;
+        let previous_game_mode = r.u8()?;
+        let is_debug = r.bool()?;
+        let is_flat = r.bool()?;
+        let copy_metadata = r.bool()?;
+        Ok(Self {
+            world_name,
+            game_mode,
+            previous_game_mode,
+            is_debug,
+            is_flat,
+            copy_metadata,
+        })
+    }
+}
+
+impl lodestone_core::Encode for Respawn {
+    fn encode(&self, w: &mut Writer, _ctx: Ctx) -> Result<()> {
+        w.u8(0); // dimension: empty named NBT (TAG_End)
+        w.string(&self.world_name);
+        w.i64(0); // hashed seed (not retained)
+        w.u8(self.game_mode);
+        w.u8(self.previous_game_mode);
+        w.bool(self.is_debug);
+        w.bool(self.is_flat);
+        w.bool(self.copy_metadata);
+        Ok(())
+    }
 }
 
 /// Clientbound `kick_disconnect` packet sent during play.
@@ -307,42 +440,60 @@ pub struct BlockDig {
 
 /// Serverbound `block_place` (player block placement / item use on a block).
 ///
-/// # 1.12 divergence
+/// # 1.14+ shape
 ///
-/// Unlike 1.8, 1.12 does **not** carry the held item stack inline: it sends a
-/// `hand` index (0 main, 1 off), a varint `direction`, and a **float** cursor.
-/// The server resolves the actual item from its own inventory view. Because
-/// there is no inline stack, placement needs no item registry (contrast
-/// protocol 47's inline `slot`). There is no block-prediction `sequence`.
+/// 1.16.5 sends `hand` **first**, then the packed `position`, a varint
+/// `direction`, three `f32` cursor coordinates, and an `inside_block` boolean
+/// (added 1.14, true when the player's head is inside the targeted block). It
+/// does **not** carry the held item stack inline (contrast pre-1.13, which sent
+/// a full `slot`): the server resolves the item from its own inventory view,
+/// so placement needs no item registry. There is no block-prediction `sequence`
+/// (added 1.19).
 ///
-/// Using an item in the air is expressed with `location = (-1,-1,-1)` and
-/// `direction = -1`.
+/// Using an item **in the air** is a separate [`UseItem`] packet in 1.14+, not a
+/// sentinel `block_place` as in the legacy protocols.
 ///
-/// Wire layout: packed `position`, varint direction, varint hand, three f32
-/// cursor coordinates.
+/// Wire layout: varint hand, packed `position`, varint direction, three f32
+/// cursor coordinates, bool inside-block.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:block_place", state = Play, bound = Server)]
 pub struct BlockPlace {
-    /// Target block position (or `(-1,-1,-1)` for use-in-air).
-    pub location: Position,
-    /// Face being placed against (`0..=5`, or `-1` for use-in-air).
-    #[mc(varint)]
-    pub direction: i32,
     /// Hand used (`0` main, `1` off).
     #[mc(varint)]
     pub hand: i32,
+    /// Target block position.
+    pub location: Position,
+    /// Face being placed against (`0..=5`).
+    #[mc(varint)]
+    pub direction: i32,
     /// Cursor X within the face (`0.0..=1.0`).
     pub cursor_x: f32,
     /// Cursor Y within the face (`0.0..=1.0`).
     pub cursor_y: f32,
     /// Cursor Z within the face (`0.0..=1.0`).
     pub cursor_z: f32,
+    /// Whether the player's head is inside the targeted block.
+    pub inside_block: bool,
+}
+
+/// Serverbound `use_item` — use the held item in the air (1.14+).
+///
+/// In the legacy protocols this was expressed as a sentinel `block_place`; from
+/// 1.14 it is a dedicated packet carrying only the hand.
+///
+/// Wire layout: a single varint hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:use_item", state = Play, bound = Server)]
+pub struct UseItem {
+    /// Hand used (`0` main, `1` off).
+    #[mc(varint)]
+    pub hand: i32,
 }
 
 /// Serverbound `use_entity` for an **attack** (mouse `1`): no hand, no hit
 /// location.
 ///
-/// Wire layout: varint target, varint mouse.
+/// Wire layout: varint target, varint mouse, bool sneaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:use_entity", state = Play, bound = Server)]
 pub struct UseEntity {
@@ -352,17 +503,19 @@ pub struct UseEntity {
     /// Interaction kind (always `1`).
     #[mc(varint)]
     pub mouse: i32,
+    /// Whether the player was sneaking (added 1.16).
+    pub sneaking: bool,
 }
 
 /// Serverbound `use_entity` for a plain **interact** (mouse `0`).
 ///
-/// # 1.12 divergence
+/// # 1.9+ shape
 ///
-/// 1.9+ added an off-hand, so unlike protocol 47 the interact form carries a
-/// `hand` field. Kept as a distinct struct so it remains a plain derived struct
-/// rather than needing a `switch`-on-`mouse` conditional.
+/// 1.9+ added an off-hand, so the interact form carries a `hand` field; 1.16
+/// appended a trailing `sneaking` boolean. Kept as a distinct struct so it
+/// remains a plain derived struct rather than needing a `switch`-on-`mouse`.
 ///
-/// Wire layout: varint target, varint mouse (`0`), varint hand.
+/// Wire layout: varint target, varint mouse (`0`), varint hand, bool sneaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:use_entity", state = Play, bound = Server)]
 pub struct UseEntityInteract {
@@ -375,12 +528,15 @@ pub struct UseEntityInteract {
     /// Hand used (`0` main, `1` off).
     #[mc(varint)]
     pub hand: i32,
+    /// Whether the player was sneaking (added 1.16).
+    pub sneaking: bool,
 }
 
 /// Serverbound `use_entity` with a precise hit location (mouse `2`,
-/// interact-at), carrying the hand (1.9+).
+/// interact-at), carrying the hand (1.9+) and the 1.16 `sneaking` flag.
 ///
-/// Wire layout: varint target, varint mouse (`2`), f32 x/y/z, varint hand.
+/// Wire layout: varint target, varint mouse (`2`), f32 x/y/z, varint hand, bool
+/// sneaking.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:use_entity", state = Play, bound = Server)]
 pub struct UseEntityAt {
@@ -399,6 +555,8 @@ pub struct UseEntityAt {
     /// Hand used (`0` main, `1` off).
     #[mc(varint)]
     pub hand: i32,
+    /// Whether the player was sneaking (added 1.16).
+    pub sneaking: bool,
 }
 
 /// Serverbound `entity_action` (player command) — sneak, sprint, leave bed, and

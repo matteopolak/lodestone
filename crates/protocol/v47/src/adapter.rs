@@ -915,6 +915,58 @@ impl VersionAdapter for V47Adapter {
                 "protocol 47 has no player-input packet".to_owned(),
             )),
 
+            // Newly modelled actions (client settings/brand/pong/resource pack,
+            // container button click, beacon, book/sign editing, command block,
+            // player abilities, trade/pick-item) are not yet wired up for
+            // protocol 47. Rejected loudly rather than silently dropped.
+            ClientAction::SetClientSettings(_) => Err(AdapterError::Unsupported(
+                "protocol 47 client settings encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SendBrand { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 brand payload encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 has no configuration/play ping-pong handshake".to_owned(),
+            )),
+            ClientAction::ResourcePackResponse { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 resource pack response encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::EndClientTick => Err(AdapterError::Unsupported(
+                "protocol 47 has no client_tick_end packet".to_owned(),
+            )),
+            ClientAction::ContainerButtonClick { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 container button click encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SetFlying { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 player abilities encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 rename item encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SelectTrade { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 select trade encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::PickItemFromBlock { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 has no pick_item_from_block packet".to_owned(),
+            )),
+            ClientAction::PickItemFromEntity { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 has no pick_item_from_entity packet".to_owned(),
+            )),
+            ClientAction::SetBeaconEffects { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 set beacon encoding requires a mob-effect registry that is not yet \
+                 available"
+                    .to_owned(),
+            )),
+            ClientAction::EditBook { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 edit book encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SignUpdate { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 sign update encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SetCommandBlock { .. } => Err(AdapterError::Unsupported(
+                "protocol 47 set command block encoding is not yet implemented".to_owned(),
+            )),
+
             _ => Ok(None),
         }
     }

@@ -58,6 +58,9 @@ pub struct DebugStats {
     pub flying: bool,
     /// The block currently targeted by the view ray, if any.
     pub target: Option<[i32; 3]>,
+    /// Entity instances drawn this frame (post-frustum-cull). `0` while
+    /// disconnected or when no mobs are in view.
+    pub entities_drawn: usize,
     /// A short connection/status line ("local world", "connecting…", …).
     pub status: String,
 }
@@ -112,7 +115,7 @@ impl DebugStats {
                 "CHUNKS {} SECTIONS {} QUADS {}",
                 self.chunk_count, self.section_count, self.quads
             ),
-            format!("LIVE COLS {}", self.live_columns),
+            format!("LIVE COLS {} ENTITIES {}", self.live_columns, self.entities_drawn),
             format!(
                 "MESH VRAM {} KB WORLD {} KB RSS {} MB",
                 self.vram_bytes / 1024,
@@ -127,7 +130,7 @@ impl DebugStats {
     #[must_use]
     pub fn one_line(&self) -> String {
         format!(
-            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} sections={} quads={} vram={}KB world={}KB rss={}MB {}",
+            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} entities={} sections={} quads={} vram={}KB world={}KB rss={}MB {}",
             self.position[0],
             self.position[1],
             self.position[2],
@@ -142,6 +145,7 @@ impl DebugStats {
             self.frame_ms,
             self.chunk_count,
             self.live_columns,
+            self.entities_drawn,
             self.section_count,
             self.quads,
             self.vram_bytes / 1024,

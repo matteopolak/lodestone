@@ -560,3 +560,156 @@ pub struct ChunkBatchReceived {
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:configuration_acknowledged", state = Play, bound = Server)]
 pub struct ConfigurationAcknowledged;
+
+/// Serverbound `container_button_click` packet.
+///
+/// Wire layout: VarInt container id, VarInt button id.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:container_button_click", state = Play, bound = Server)]
+pub struct ContainerButtonClick {
+    /// Open container/window id.
+    #[mc(varint)]
+    pub window_id: i32,
+    /// Button id defined by the open menu type.
+    #[mc(varint)]
+    pub button_id: i32,
+}
+
+/// Serverbound `pick_item_from_block` packet (middle-click a block).
+///
+/// Wire layout: packed `BlockPos` long, then a boolean requesting the block
+/// entity's data be copied onto the picked stack.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:pick_item_from_block", state = Play, bound = Server)]
+pub struct PickItemFromBlock {
+    /// Packed `BlockPos` long of the targeted block.
+    pub pos: i64,
+    /// Whether to include the block entity's data.
+    pub include_data: bool,
+}
+
+/// Serverbound `pick_item_from_entity` packet (middle-click an entity).
+///
+/// Wire layout: VarInt target entity id, then a boolean requesting the
+/// entity's data be copied onto the picked stack.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:pick_item_from_entity", state = Play, bound = Server)]
+pub struct PickItemFromEntity {
+    /// Targeted entity id.
+    #[mc(varint)]
+    pub entity_id: i32,
+    /// Whether to include the entity's data.
+    pub include_data: bool,
+}
+
+/// Serverbound `rename_item` packet (anvil name field).
+///
+/// Wire layout: a single UTF string, the new item name.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:rename_item", state = Play, bound = Server)]
+pub struct RenameItem {
+    /// New item name.
+    pub name: String,
+}
+
+/// Serverbound `select_trade` packet (merchant trade-offer selection).
+///
+/// Wire layout: a single VarInt trade-offer index.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:select_trade", state = Play, bound = Server)]
+pub struct SelectTrade {
+    /// Index into the open merchant's offer list.
+    #[mc(varint)]
+    pub index: i32,
+}
+
+/// Serverbound `edit_book` packet.
+///
+/// Wire layout: VarInt slot, a VarInt-counted list of UTF page strings (each
+/// max 1024 chars, list max 100 entries), then an optional UTF title (max 32
+/// chars) present only when the player is signing rather than saving a draft.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:edit_book", state = Play, bound = Server)]
+pub struct EditBook {
+    /// Slot holding the book being edited.
+    #[mc(varint)]
+    pub slot: i32,
+    /// Page contents, in order.
+    #[mc(max = 100)]
+    pub pages: Vec<String>,
+    /// Title to publish under, present only when signing.
+    pub title: Option<String>,
+}
+
+/// Serverbound `sign_update` packet.
+///
+/// Wire layout: packed `BlockPos` long, a boolean selecting the front (vs.
+/// back) text, then the sign's four text lines as unconditional UTF strings
+/// (max 384 chars each).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:sign_update", state = Play, bound = Server)]
+pub struct SignUpdate {
+    /// Packed `BlockPos` long of the target sign.
+    pub pos: i64,
+    /// Whether the front (vs. back) text is being edited.
+    pub is_front_text: bool,
+    /// First text line.
+    pub line0: String,
+    /// Second text line.
+    pub line1: String,
+    /// Third text line.
+    pub line2: String,
+    /// Fourth text line.
+    pub line3: String,
+}
+
+/// Flag bit set when a command block's output line is tracked.
+pub const COMMAND_BLOCK_FLAG_TRACK_OUTPUT: u8 = 0x01;
+/// Flag bit set when a command block is conditional on the block behind it.
+pub const COMMAND_BLOCK_FLAG_CONDITIONAL: u8 = 0x02;
+/// Flag bit set when a command block runs automatically every tick.
+pub const COMMAND_BLOCK_FLAG_AUTOMATIC: u8 = 0x04;
+
+/// Serverbound `set_command_block` packet.
+///
+/// Wire layout: packed `BlockPos` long, UTF command string, VarInt
+/// `CommandBlockEntity.Mode` ordinal (`0` sequence, `1` auto, `2` redstone),
+/// then a single flags byte (see the `COMMAND_BLOCK_FLAG_*` constants).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:set_command_block", state = Play, bound = Server)]
+pub struct SetCommandBlock {
+    /// Packed `BlockPos` long of the target command block.
+    pub pos: i64,
+    /// Command text to run.
+    pub command: String,
+    /// Execution mode ordinal (`0` sequence, `1` auto, `2` redstone).
+    #[mc(varint)]
+    pub mode: i32,
+    /// Packed output-tracking/conditional/automatic flags.
+    pub flags: u8,
+}
+
+/// Flag bit set when the client reports it is currently flying, in the
+/// serverbound `player_abilities` packet.
+pub const SERVERBOUND_ABILITY_FLAG_FLYING: u8 = 0x02;
+
+/// Serverbound `player_abilities` packet.
+///
+/// Wire layout: a single flags byte with only bit `1`
+/// ([`SERVERBOUND_ABILITY_FLAG_FLYING`]) meaningful; all other bits are always
+/// `0`. Unlike the clientbound packet of the same name, it carries no speed
+/// fields.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:player_abilities", state = Play, bound = Server)]
+pub struct ServerboundPlayerAbilities {
+    /// Packed ability flags; only [`SERVERBOUND_ABILITY_FLAG_FLYING`] is used.
+    pub flags: u8,
+}
+
+/// Serverbound `client_tick_end` packet with an empty body.
+///
+/// Sent once per client tick, after that tick's movement packet, so the server
+/// can align world ticking with the client's tick boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:client_tick_end", state = Play, bound = Server)]
+pub struct ClientTickEnd;

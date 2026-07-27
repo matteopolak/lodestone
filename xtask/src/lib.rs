@@ -856,7 +856,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a new protocol version family (crate, packet ids, registry wiring)\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n        new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -1811,18 +1811,25 @@ pub struct IsolationFinding {
     pub rule: IsolationRule,
     /// Whether the edge fails the check or is merely surfaced.
     pub severity: Severity,
+    /// Extra evidence for the finding, when a static rule explanation is not
+    /// specific enough.
+    pub detail: Option<String>,
 }
 
 impl IsolationFinding {
     fn describe(&self) -> String {
         let optional = if self.optional { ", optional" } else { "" };
-        format!(
+        let mut description = format!(
             "{} -> {} (in [{}]{optional}): {}",
             self.crate_name,
             self.dependency_name,
             self.dependency_table,
             self.rule.explanation(),
-        )
+        );
+        if let Some(detail) = &self.detail {
+            let _ = write!(description, " ({detail})");
+        }
+        description
     }
 }
 
@@ -1848,6 +1855,9 @@ pub enum IsolationRule {
     /// The designated version registry depends on a version crate through an
     /// optional, feature-gated edge — the intended aggregation point.
     RegistryAggregatesVersion,
+    /// The version registry is trying to aggregate a family whose generated
+    /// shape-review checklist still has unreviewed entries.
+    RegistryAggregatesUnreviewedVersion,
 }
 
 impl IsolationRule {
@@ -1861,6 +1871,9 @@ impl IsolationRule {
             }
             IsolationRule::RegistryAggregatesVersion => {
                 "the version registry aggregates this version through an optional, feature-gated edge; deleting the version stays a matter of removing its folder plus that one feature line"
+            }
+            IsolationRule::RegistryAggregatesUnreviewedVersion => {
+                "the version registry must not advertise a family while SHAPE_REVIEW.toml still has unreviewed packet shape deltas"
             }
         }
     }
@@ -1882,6 +1895,7 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
 
     let mut workspace_member_names = BTreeSet::new();
     let mut version_crate_names = BTreeSet::new();
+    let mut version_crate_shape_review_violations = BTreeMap::new();
     let mut registry_crate_names = BTreeSet::new();
     let mut member_packages = Vec::new();
     let canonical_root = workspace_root.canonicalize().with_context(|| {
@@ -1910,6 +1924,25 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
         // covered automatically without editing this lint.
         if package_manifest_is_under_protocol(&canonical_root, package)? {
             version_crate_names.insert(package_name.to_owned());
+            let manifest_path = package
+                .get("manifest_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("workspace package is missing manifest_path"))?;
+            let manifest_dir = Path::new(manifest_path)
+                .parent()
+                .ok_or_else(|| anyhow!("{manifest_path} has no parent directory"))?;
+            let review_path = manifest_dir.join("SHAPE_REVIEW.toml");
+            if review_path.exists() {
+                let family = manifest_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(package_name);
+                let violations = shape_review_violations(family, &review_path)?;
+                if !violations.is_empty() {
+                    version_crate_shape_review_violations
+                        .insert(package_name.to_owned(), violations.join("; "));
+                }
+            }
         }
         // The version registry opts in structurally via a metadata role, not by
         // name. This exemption is deliberately narrow (see the finding loop): it
@@ -1968,6 +2001,7 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                     optional,
                     rule: IsolationRule::VersionDependsOnVersion,
                     severity: Severity::Violation,
+                    detail: None,
                 });
             } else {
                 // Rule 2: shared -> version. A *required* edge makes the version
@@ -1975,7 +2009,15 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                 // surfaced wart (warning) because the version can still be
                 // dropped by deleting its folder plus one feature-gated line.
                 let is_soft = optional || dependency_table != "dependencies";
-                let (rule, severity) = if crate_is_registry && is_soft {
+                let detail = version_crate_shape_review_violations
+                    .get(dependency_name)
+                    .cloned();
+                let (rule, severity) = if crate_is_registry && is_soft && detail.is_some() {
+                    (
+                        IsolationRule::RegistryAggregatesUnreviewedVersion,
+                        Severity::Violation,
+                    )
+                } else if crate_is_registry && is_soft {
                     // The designated registry is the ONE shared crate allowed to
                     // name versions, and only through optional/feature-gated
                     // edges. Downgrade this from a warning to an informational,
@@ -1996,6 +2038,7 @@ pub fn check_workspace_isolation(workspace_root: &Path) -> Result<IsolationRepor
                     optional,
                     rule,
                     severity,
+                    detail,
                 });
             }
         }
@@ -5088,6 +5131,7 @@ lodestone-v1 = { path = "../v1" }
                 optional: false,
                 rule: IsolationRule::VersionDependsOnVersion,
                 severity: Severity::Violation,
+                detail: None,
             }]
         );
         assert!(report.has_violations());
@@ -5123,6 +5167,7 @@ lodestone-v1 = { path = "../protocol/v1" }
                 optional: false,
                 rule: IsolationRule::SharedDependsOnVersion,
                 severity: Severity::Violation,
+                detail: None,
             }]
         );
         assert!(report.has_violations());
@@ -5163,6 +5208,7 @@ live-v1 = ["dep:lodestone-v1"]
                 optional: true,
                 rule: IsolationRule::SharedDependsOnVersion,
                 severity: Severity::Warning,
+                detail: None,
             }]
         );
         assert!(!report.has_violations());
@@ -5199,6 +5245,7 @@ lodestone-v1 = { path = "../protocol/v1" }
                 optional: false,
                 rule: IsolationRule::SharedDependsOnVersion,
                 severity: Severity::Warning,
+                detail: None,
             }]
         );
         assert!(!report.has_violations());
@@ -5363,14 +5410,6 @@ reviewed = false
         assert!(error.contains("minecraft:map_chunk"), "{error}");
         assert!(error.contains("reviewed = true"), "{error}");
         Ok(())
-    }
-
-    #[test]
-    fn checked_in_shape_reviews_are_fully_reviewed() -> Result<()> {
-        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("xtask has a workspace parent");
-        check_shape_reviews(workspace_root)
     }
 
     #[test]
@@ -5573,11 +5612,56 @@ v1 = ["dep:lodestone-v1"]
                 optional: true,
                 rule: IsolationRule::RegistryAggregatesVersion,
                 severity: Severity::Info,
+                detail: None,
             }]
         );
         assert!(!report.has_violations());
         assert!(report.warning_summary().is_none());
         assert!(report.info_summary().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn registry_cannot_aggregate_unreviewed_shape_family() -> Result<()> {
+        let workspace = isolation_fixture(
+            "registry-unreviewed-shapes",
+            &[
+                ("crates/protocol/v2", "lodestone-v2", ""),
+                (
+                    "crates/lodestone-registry",
+                    "lodestone-registry",
+                    r#"
+[package.metadata.lodestone-isolation]
+role = "version-registry"
+
+[dependencies]
+lodestone-v2 = { path = "../protocol/v2", optional = true }
+"#,
+                ),
+            ],
+        )?;
+        std::fs::write(
+            workspace.join("crates/protocol/v2/SHAPE_REVIEW.toml"),
+            r#"source_family = "v1"
+target_family = "v2"
+
+[[packet]]
+state = "play"
+bound = "clientbound"
+name = "minecraft:map_chunk"
+change = "changed"
+reviewed = false
+"#,
+        )?;
+
+        let report = check_workspace_isolation(&workspace)?;
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(
+            report.findings[0].rule,
+            IsolationRule::RegistryAggregatesUnreviewedVersion
+        );
+        assert_eq!(report.findings[0].severity, Severity::Violation);
+        assert!(report.violation_summary().contains("minecraft:map_chunk"));
         Ok(())
     }
 
@@ -5615,6 +5699,7 @@ lodestone-v1 = { path = "../protocol/v1" }
                 optional: false,
                 rule: IsolationRule::SharedDependsOnVersion,
                 severity: Severity::Violation,
+                detail: None,
             }]
         );
         assert!(report.has_violations());

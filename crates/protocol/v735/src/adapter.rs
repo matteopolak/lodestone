@@ -12,7 +12,7 @@ use lodestone_world::{ChunkPos as WorldChunkPos, Heightmaps, LoadedChunk};
 
 use crate::entity_types;
 use crate::packet_ids::{handshaking, login, play};
-use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk};
+use crate::packets::chunk::{ChunkShape, MapChunk, UnloadChunk, UpdateLight};
 use crate::packets::common::{KeepAliveRequest, KeepAliveResponse};
 use crate::packets::entity::{
     EntityDestroy, EntityLook, EntityMoveLook, EntityTeleport, EntityVelocityPacket,
@@ -21,7 +21,7 @@ use crate::packets::entity::{
 use crate::packets::game::{
     BlockDig, BlockPlace, ClientboundChat, ClientboundPositionLook, EntityAction, JoinGame,
     KickDisconnect, ServerboundArmAnimation, ServerboundChat, ServerboundPositionLook,
-    TeleportConfirm, UseEntity, UseEntityAt, UseEntityInteract,
+    TeleportConfirm, UseEntity, UseEntityAt, UseEntityInteract, UseItem,
 };
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{EncryptionRequest, LoginDisconnect, LoginSuccess, SetCompression};
@@ -45,12 +45,12 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
-/// Version adapter implementing protocol 340 (Minecraft 1.12.2).
+/// Version adapter implementing protocol 754 (Minecraft 1.16.5).
 ///
-/// Holds the current dimension's [`ChunkShape`] because a `map_chunk` cannot
-/// tell from its own bytes whether sky light is present — that depends on the
-/// dimension announced at join. The shape is guarded by a [`Mutex`] purely to
-/// satisfy `Sync`; packets are processed serially so there is no contention.
+/// Holds a [`ChunkShape`] for the paletted chunk decoder. In 1.16 the shape no
+/// longer depends on the dimension (light left `map_chunk`), so it is constant;
+/// the field is kept guarded by a [`Mutex`] purely to satisfy `Sync` and to
+/// leave room for per-dimension configuration without an API change.
 #[derive(Debug, Clone)]
 pub struct V735Adapter {
     shape: Arc<Mutex<ChunkShape>>,
@@ -63,25 +63,11 @@ impl Default for V735Adapter {
 }
 
 impl V735Adapter {
-    /// Creates a new adapter, defaulting to the overworld chunk shape until a
-    /// join packet announces the real dimension.
+    /// Creates a new adapter with the 1.16.5 chunk shape.
     #[must_use]
     pub fn new() -> Self {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
-        }
-    }
-
-    /// Records whether the joined `dimension` carries sky light so subsequent
-    /// `map_chunk` packets decode the right number of light arrays. 1.12.2
-    /// dimension ids: `0` overworld (sky light), `-1` nether, `1` end.
-    fn set_dimension(&self, dimension: i32) {
-        if let Ok(mut shape) = self.shape.lock() {
-            *shape = if dimension == 0 {
-                ChunkShape::overworld()
-            } else {
-                ChunkShape::no_skylight()
-            };
         }
     }
 
@@ -166,23 +152,17 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
     }
 }
 
-/// Maps a 1.8 numeric dimension to a canonical namespaced dimension identifier.
+/// Parses a 1.16 namespaced world name (e.g. `minecraft:overworld`) into a
+/// canonical [`DimensionId`](lodestone_model::DimensionId).
 ///
-/// # Architectural note
+/// # 1.16 divergence
 ///
-/// 1.8's join packet carries the dimension as a signed byte, not the modern
-/// namespaced identifier the model expects. This mapping is the adapter's job:
-/// the model stays version-free and the numeric encoding stays in the version
-/// crate.
-fn dimension_id(value: i32) -> Result<lodestone_model::DimensionId, AdapterError> {
-    let name = match value {
-        -1 => "minecraft:the_nether",
-        0 => "minecraft:overworld",
-        1 => "minecraft:the_end",
-        other => {
-            return Err(AdapterError::Decode(format!("unknown dimension {other}")));
-        }
-    };
+/// Pre-1.16 join packets carried the dimension as a signed integer (`-1`
+/// nether, `0` overworld, `1` end); 1.16 replaced that with a namespaced
+/// **world name** string alongside an NBT dimension codec. The adapter maps the
+/// string straight through — the model already speaks namespaced identifiers —
+/// so no numeric table is involved.
+fn dimension_id(name: &str) -> Result<lodestone_model::DimensionId, AdapterError> {
     name.parse()
         .map_err(|_| AdapterError::Decode(format!("invalid dimension identifier {name}")))
 }
@@ -277,20 +257,18 @@ impl V735Adapter {
     ) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::LOGIN {
             let body: JoinGame = decode_body(payload)?;
-            // Record whether this dimension carries sky light before any chunk
-            // arrives, so single `map_chunk` packets decode the right geometry.
-            self.set_dimension(body.dimension);
             return Ok(vec![Directive::Emit(ClientEvent::Login {
                 entity_id: body.entity_id,
                 game_mode: game_mode(body.game_mode)?,
-                dimension: dimension_id(body.dimension)?,
+                dimension: dimension_id(&body.world_name)?,
             })]);
         }
         if packet_id == play::clientbound::MAP_CHUNK {
-            // Decode the paletted 1.12.2 column into version-free storage and
+            // Decode the paletted 1.16.5 column into version-free storage and
             // apply it to the world through the sink, emitting only a
-            // lightweight notification. 1.12.2 always sends a real column here
-            // (unloads use the dedicated unload_chunk packet), so this loads.
+            // lightweight notification. Light no longer travels here (1.14 split
+            // it into update_light), so the loaded column carries empty light
+            // until the matching update_light arrives.
             let shape = self.current_shape();
             let mut reader = Reader::new(payload);
             let data = MapChunk::decode(&mut reader, &shape)
@@ -308,9 +286,22 @@ impl V735Adapter {
             );
             return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })]);
         }
+        if packet_id == play::clientbound::UPDATE_LIGHT {
+            // 1.14+ delivers light separately from the chunk column. Decode the
+            // per-section nibble arrays into a version-free LightPatch and merge
+            // it onto the already-loaded column; a light update for an unloaded
+            // column is a harmless no-op in the world store.
+            let mut reader = Reader::new(payload);
+            let update = UpdateLight::decode(&mut reader)
+                .map_err(|err| AdapterError::Decode(err.to_string()))?;
+            reader
+                .ensure_empty()
+                .map_err(|err| AdapterError::Decode(err.to_string()))?;
+            world.merge_light(WorldChunkPos::new(update.x, update.z), update.patch);
+            return Ok(Vec::new());
+        }
         if packet_id == play::clientbound::UNLOAD_CHUNK {
-            // 1.12.2 has a dedicated forget packet (two ints), unlike 1.8's
-            // empty-bitmask trick.
+            // 1.16.5 has a dedicated forget packet (two ints).
             let body: UnloadChunk = decode_body(payload)?;
             let pos = ChunkPos::new(body.chunk_x, body.chunk_z);
             world.unload(WorldChunkPos::new(body.chunk_x, body.chunk_z));
@@ -378,7 +369,7 @@ impl V735Adapter {
         }
         if packet_id == play::clientbound::SPAWN_ENTITY {
             let body: SpawnObject = decode_body(payload)?;
-            let type_id = i32::from(body.kind);
+            let type_id = body.kind;
             let entity_type = entity_types::object_type_name(type_id)
                 .ok_or_else(|| {
                     AdapterError::Decode(format!("unknown object type id {type_id} in spawn"))
@@ -513,7 +504,7 @@ impl VersionAdapter for V735Adapter {
     }
 
     fn minecraft_versions(&self) -> &'static [&'static str] {
-        &["1.12.2"]
+        &["1.16.5"]
     }
 
     fn supports(&self, protocol: i32) -> bool {
@@ -674,56 +665,58 @@ impl VersionAdapter for V735Adapter {
                 Ok(Some((play::serverbound::BLOCK_DIG, encode_body(&body)?)))
             }
 
-            // Placing a block / using an item on a block. 1.12 sends a hand index
-            // and float cursor with no inline item (the server resolves the item
-            // from its own inventory view), so no item registry is needed.
+            // Placing a block / using an item on a block. 1.16 sends the hand
+            // first, then the packed position, a varint face, a float cursor and
+            // an `inside_block` flag; no inline item (the server resolves it) and
+            // no block-prediction `sequence` (added 1.19), both dropped
+            // deliberately.
             ClientAction::UseItemOn {
                 hand,
                 pos,
                 face,
                 cursor,
-                inside_block: _,
+                inside_block,
                 sequence: _,
             } => {
                 let body = BlockPlace {
+                    hand: hand_ordinal(*hand),
                     location: Position(*pos),
                     direction: face_ordinal(*face),
-                    hand: hand_ordinal(*hand),
                     cursor_x: cursor.x,
                     cursor_y: cursor.y,
                     cursor_z: cursor.z,
+                    inside_block: *inside_block,
                 };
                 Ok(Some((play::serverbound::BLOCK_PLACE, encode_body(&body)?)))
             }
-            // Using an item in the air: `block_place` with location (-1,-1,-1) and
-            // direction -1.
+            // Using an item in the air is the dedicated `use_item` packet in
+            // 1.14+ (the legacy (-1,-1,-1) `block_place` sentinel no longer
+            // works). The model's `rotation` and `sequence` have no 1.16
+            // equivalent and are dropped.
             ClientAction::UseItem {
                 hand,
                 rotation: _,
                 sequence: _,
             } => {
-                let body = BlockPlace {
-                    location: Position::new(-1, -1, -1),
-                    direction: -1,
+                let body = UseItem {
                     hand: hand_ordinal(*hand),
-                    cursor_x: 0.0,
-                    cursor_y: 0.0,
-                    cursor_z: 0.0,
                 };
-                Ok(Some((play::serverbound::BLOCK_PLACE, encode_body(&body)?)))
+                Ok(Some((play::serverbound::USE_ITEM, encode_body(&body)?)))
             }
 
             // Entity interaction. 1.9+ carries the hand for interact/interact-at
-            // (attack has no hand). Each mouse value is a distinct wire shape.
+            // (attack has no hand), and 1.16 appends a `sneaking` flag to every
+            // form. Each mouse value is a distinct wire shape.
             ClientAction::InteractEntity {
                 entity_id,
                 interaction,
-                sneaking: _,
+                sneaking,
             } => match interaction {
                 EntityInteraction::Attack => {
                     let body = UseEntity {
                         target: *entity_id,
                         mouse: 1,
+                        sneaking: *sneaking,
                     };
                     Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
                 }
@@ -732,6 +725,7 @@ impl VersionAdapter for V735Adapter {
                         target: *entity_id,
                         mouse: 0,
                         hand: hand_ordinal(*hand),
+                        sneaking: *sneaking,
                     };
                     Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
                 }
@@ -743,6 +737,7 @@ impl VersionAdapter for V735Adapter {
                         y: target.y as f32,
                         z: target.z as f32,
                         hand: hand_ordinal(*hand),
+                        sneaking: *sneaking,
                     };
                     Ok(Some((play::serverbound::USE_ENTITY, encode_body(&body)?)))
                 }
@@ -826,6 +821,56 @@ impl VersionAdapter for V735Adapter {
             )),
             ClientAction::SetPlayerInput(_) => Err(AdapterError::Unsupported(
                 "protocol 340 has no player-input packet".to_owned(),
+            )),
+
+            // Newly modelled actions not yet wired up for this adapter.
+            // Rejected loudly rather than silently dropped.
+            ClientAction::SetClientSettings(_) => Err(AdapterError::Unsupported(
+                "protocol 735 client settings encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SendBrand { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 brand payload encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 pong response encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::ResourcePackResponse { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 resource pack response encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::EndClientTick => Err(AdapterError::Unsupported(
+                "protocol 735 has no client_tick_end packet".to_owned(),
+            )),
+            ClientAction::ContainerButtonClick { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 container button click encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SetFlying { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 player abilities encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 rename item encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SelectTrade { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 select trade encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::PickItemFromBlock { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 pick item from block encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::PickItemFromEntity { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 pick item from entity encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SetBeaconEffects { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 set beacon encoding requires a mob-effect registry that is not yet \
+                 available"
+                    .to_owned(),
+            )),
+            ClientAction::EditBook { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 edit book encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SignUpdate { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 sign update encoding is not yet implemented".to_owned(),
+            )),
+            ClientAction::SetCommandBlock { .. } => Err(AdapterError::Unsupported(
+                "protocol 735 set command block encoding is not yet implemented".to_owned(),
             )),
 
             _ => Ok(None),

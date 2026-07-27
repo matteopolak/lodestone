@@ -17,8 +17,22 @@
 //!      item/slot decode shows up as a wrong or missing stack here.
 //!   3. **Serverbound half.** Send `ClientAction::DropSelectedItem` through
 //!      `ClientHandle::send_action` — a real `player_action` encode — and require
-//!      the server's *authoritative* post-drop content (again through the real
-//!      stream) to match the click machine's prediction of the same drop.
+//!      the server's *authoritative* post-drop count (read over RCON) to match the
+//!      click machine's prediction of the same drop.
+//!
+//! ## Two findings that shape the serverbound observation
+//!
+//! - **The server does not echo client-initiated inventory mutations.** It trusts
+//!   the client's own prediction and only sends *corrections*, so the drop produces
+//!   no clientbound `ContainerSlot`. The clientbound stream is therefore the wrong
+//!   oracle for our *own* action — the server's own NBT, read over RCON, is the
+//!   authority. (This is exactly why the hand-rolled tests force a resync with a
+//!   stale-state_id `container_click`, which we cannot use here — `container_click`
+//!   is `Unsupported` in v770.)
+//! - **The load gate.** Player actions are dropped until `hasClientLoaded()`; the
+//!   real driver never sends `player_loaded` and no `ClientAction` triggers it, so
+//!   the server auto-loads us only after ~60 ticks (~3s). Every drop before that is
+//!   a silent no-op, so we retry and stop on the first decrement.
 //!
 //! ## Why `DropSelectedItem` and not a container click
 //!

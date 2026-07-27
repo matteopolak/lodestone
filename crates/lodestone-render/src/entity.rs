@@ -258,7 +258,6 @@ pub struct EntitySpawn<'a> {
     pub scale: f32,
 }
 
-
 /// corners and takes their component-wise min/max. Correct for the entity flip
 /// and yaw rotation (an axis-aligned box stays conservative under rotation).
 fn transformed_aabb(m: &Mat4, local_min: Vec3, local_max: Vec3) -> (Vec3, Vec3) {

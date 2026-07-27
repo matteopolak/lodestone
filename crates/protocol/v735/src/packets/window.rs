@@ -1,13 +1,7 @@
-//! Inventory / window packets for protocol 340.
+//! Inventory / window packets for protocol 754 (Minecraft 1.16.5).
 //!
 //! These carry the [`Slot`](super::slot::Slot) item type and are all ordinary
-//! derived structs. [`OpenWindow`]'s conditional trailing `entity_id` (present
-//! only for a horse inventory) is expressed with `#[mc(when = ...)]`, the
-//! narrow prior-field tail attribute — no hand-written codec is required.
-//!
-//! The 1.8 and 1.12.2 window packets are structurally identical, so these
-//! types are duplicated verbatim in the v47 crate under the project's
-//! duplication-over-sharing rule.
+//! derived structs.
 
 use lodestone_macros::{Decode, Encode, Packet};
 
@@ -15,31 +9,26 @@ use super::slot::Slot;
 
 /// Clientbound `open_window` — asks the client to open a container window.
 ///
-/// The final `entity_id` field is present **only** when `inventory_type` is
-/// `"EntityHorse"`; for every other container it is absent from the wire. The
-/// `#[mc(when = "inventory_type == \"EntityHorse\"")]` attribute encodes
-/// that head-dependent tail: encode writes the field only when the predicate
-/// holds, and decode leaves it `0` otherwise. `inventory_type` is therefore the
-/// single source of truth for whether `entity_id` is meaningful.
+/// # 1.14+ shape
+///
+/// 1.14 replaced the pre-1.13 `(u8 id, string type, chat title, u8 slot count,
+/// [horse entity id])` shape with a flat `(varint window id, varint menu type,
+/// chat title)` triple. The window's slot count is implied by the menu type, and
+/// the horse-inventory special case (a trailing entity id) is gone — horse
+/// inventories use the generic menu registry — so this is now a plain derived
+/// struct with no conditional tail.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:open_window", state = Play, bound = Client)]
 pub struct OpenWindow {
     /// Window handle id.
-    pub window_id: u8,
-    /// Container type string, such as `minecraft:chest` or `EntityHorse`.
-    #[mc(max = 32767)]
-    pub inventory_type: String,
+    #[mc(varint)]
+    pub window_id: i32,
+    /// Menu type id from the `minecraft:menu` registry.
+    #[mc(varint)]
+    pub inventory_type: i32,
     /// Window title as a JSON chat component.
     #[mc(max = 32767)]
     pub window_title: String,
-    /// Number of slots in the window.
-    pub slot_count: u8,
-    /// Entity id of the horse — present on the wire only when `inventory_type`
-    /// is `"EntityHorse"`, and absent (`None`) for every other container. The
-    /// `when` attribute enforces the invariant: encoding `None` while the
-    /// predicate holds is a hard error rather than a silent default.
-    #[mc(when = "inventory_type == \"EntityHorse\"")]
-    pub entity_id: Option<i32>,
 }
 
 /// Clientbound `window_items` — the full contents of a window.

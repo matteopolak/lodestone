@@ -26,6 +26,12 @@
 //! * [`IntegratedServer`] — the reachable lifecycle wrapper a shell holds to
 //!   *start* singleplayer (in-memory) or open-to-LAN (TCP), with a clean
 //!   shutdown that never leaks the serving task.
+//! * [`MobSim`] / [`ChunkWorld`] — the server-side mob simulation. In vanilla
+//!   the *server* ticks mob AI and streams positions; the client interpolates
+//!   and runs none. So this crate is mob AI's home: [`ChunkWorld`] adapts the
+//!   version-free solid/air terrain into `lodestone-entity`'s `PathWorld` seam,
+//!   and [`MobSim`] ticks goal-driven `NavigatingMob`s over it. Streaming the
+//!   result to a client is a separate (encoder) seam.
 //!
 //! Wiring a real vanilla client to this server end-to-end requires the version
 //! crate to provide client-bound *encoders* (join game, registry data,
@@ -38,11 +44,13 @@
 
 mod chunk;
 mod integrated;
+mod mobs;
 mod protocol;
 mod server;
 mod spawn;
 
 pub use chunk::{ChunkColumn, ChunkSource, WorldgenChunkSource};
 pub use integrated::IntegratedServer;
+pub use mobs::{ChunkWorld, MobSim, SimMob};
 pub use protocol::{ServerBound, ServerDirective, ServerProtocol};
 pub use server::{ServeSummary, ServerError, serve_connection};

@@ -13,6 +13,12 @@ workspace = true
 lodestone-core = { path = "../lodestone-core" }
 lodestone-net = { path = "../lodestone-net" }
 lodestone-worldgen = { path = "../lodestone-worldgen" }
+# The mob simulation (`mobs`) ticks `lodestone-entity`'s goal AI + pathfinder
+# over the server's own terrain. `lodestone-entity` depends only on
+# `lodestone-model` + `uuid`, so this adds no version/protocol coupling and no
+# dependency cycle (entity never depends on server).
+lodestone-entity = { path = "../lodestone-entity" }
+lodestone-model = { path = "../lodestone-model" }
 thiserror = { workspace = true }
 
 # --- Native (non-wasm) target dependencies ---

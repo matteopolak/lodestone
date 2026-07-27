@@ -74,12 +74,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lodestone_client::{
-    ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, LoginProfile,
-    PlayerListEntry, ServerAddress, Vec3,
+    ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
+    LoginProfile, PlayerListEntry, ServerAddress, Vec3,
 };
 
 pub use lodestone_testsupport::unique_username;
 
+use crate::entities::EntitySnapshot;
 use crate::overlay::{BossBarView, Sidebar, boss_bars_from, sidebar_from};
 
 /// A handle to the live client, published by the net thread once the session is
@@ -222,6 +223,17 @@ impl NetClient {
     #[must_use]
     pub fn players(&self) -> Vec<PlayerListEntry> {
         self.handle.get().map_or_else(Vec::new, |h| h.players())
+    }
+
+    /// Every currently-tracked entity as a version-free [`EntitySnapshot`] for
+    /// interpolation and rendering. Empty before login. Reads the client-owned
+    /// entity table through the shared handle; the type key's `path()` and the
+    /// `baby` flag are lowered here so the render side never touches a wire type.
+    #[must_use]
+    pub fn entity_snapshots(&self) -> Vec<EntitySnapshot> {
+        self.handle.get().map_or_else(Vec::new, |h| {
+            h.entities().into_iter().map(entity_snapshot).collect()
+        })
     }
 
     /// The scoreboard sidebar to draw, folded from the live snapshot, or `None`
@@ -419,6 +431,26 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         _ => return Ok(()),
     };
     tx.send(update).map_err(|_| ())
+}
+
+/// Lower a client [`EntityView`] into a version-free [`EntitySnapshot`] for the
+/// renderer: the type key's `path()` selects the model, and the `baby` flag maps
+/// to a uniform render scale. Baby scale is a single 0.5 approximation for every
+/// ageable mob (vanilla varies it per type); good enough to read a baby as
+/// smaller, and noted as a refinement rather than a fake.
+fn entity_snapshot(view: EntityView) -> EntitySnapshot {
+    let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
+    EntitySnapshot {
+        id: view.entity_id,
+        type_path: view.entity_type.path().to_string(),
+        feet: glam::Vec3::new(
+            view.position.x as f32,
+            view.position.y as f32,
+            view.position.z as f32,
+        ),
+        yaw: view.rotation.yaw,
+        scale,
+    }
 }
 
 #[cfg(test)]
