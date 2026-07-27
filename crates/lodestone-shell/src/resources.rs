@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
-use lodestone_render::{BlockAtlas, blocks_json_registry};
+use lodestone_render::{BlockAtlas, GuiAtlas, blocks_json_registry};
 
 use crate::blocks::{DemoClassifier, ShellClassifier};
 
@@ -86,13 +86,71 @@ impl BlockResources {
         let report = root.join("generated/reports/blocks.json");
 
         let bytes = std::fs::read(&jar).map_err(|e| format!("read {}: {e}", jar.display()))?;
-        let zip = ZipSource::from_bytes(bytes).map_err(|e| format!("open {}: {e}", jar.display()))?;
+        let zip =
+            ZipSource::from_bytes(bytes).map_err(|e| format!("open {}: {e}", jar.display()))?;
         let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
         let registry =
             blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?;
         BlockAtlas::build(&manager, &registry)
             .map_err(|e| format!("build atlas from {}: {e}", root.display()))
     }
+}
+
+/// Load the vanilla GUI sprite atlas (`assets/<ns>/textures/gui/sprites/**`) from
+/// `client.jar`, for the HUD. Version-free and fail-open: returns `None` when no
+/// pack is found or the jar can't be opened/stitched, so the HUD keeps its
+/// procedural fallback rather than the whole run failing. Only the jar is needed
+/// (no `blocks.json`), so this succeeds even on a pack that can't build the block
+/// atlas.
+#[must_use]
+pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
+    let root = asset_root()?;
+    let jar = root.join("client.jar");
+    let bytes = match std::fs::read(&jar) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let zip = match ZipSource::from_bytes(bytes) {
+        Ok(z) => z,
+        Err(e) => {
+            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    match GuiAtlas::build(&manager) {
+        Ok(atlas) => {
+            tracing::info!(
+                target: "assets",
+                sprites = atlas.sprite_count(),
+                "loaded vanilla GUI sprite atlas for the HUD"
+            );
+            Some(Arc::new(atlas))
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "build GUI atlas from {}: {e}", root.display());
+            None
+        }
+    }
+}
+
+/// Gate helper: open the vanilla `client.jar` as a [`ResourceManager`],
+/// version-free, using the same discovery as the atlas loaders. Returns `None`
+/// when no pack is found so gates can fail *closed and loud* rather than
+/// silently skipping. Lets a GPU gate build a [`GuiAtlas`] and read the raw
+/// sprite PNGs from one manager, to compare rendered pixels against source art.
+#[cfg(test)]
+pub(crate) fn vanilla_manager() -> Option<ResourceManager> {
+    let root = asset_root()?;
+    let jar = root.join("client.jar");
+    let bytes = std::fs::read(&jar).ok()?;
+    let zip = ZipSource::from_bytes(bytes).ok()?;
+    Some(ResourceManager::new(vec![
+        Box::new(zip) as Box<dyn ResourceSource>
+    ]))
 }
 
 /// Locate a vanilla resource-pack root, version-free: honour `LODESTONE_ASSETS`

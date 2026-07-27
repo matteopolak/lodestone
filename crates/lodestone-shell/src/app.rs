@@ -436,7 +436,13 @@ impl ApplicationHandler for WindowApp {
             h,
             self.sim.vanilla_atlas(),
         );
-        let hud = HudRenderer::new(gpu.device(), format);
+        let mut hud = HudRenderer::new(gpu.device(), format);
+        // Attach the vanilla GUI sprite atlas so the survival vitals draw from
+        // real textures; on a jar-less run this is `None` and the HUD keeps its
+        // procedural fallback.
+        if let Some(gui) = crate::resources::load_gui_atlas() {
+            hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
+        }
         let effects = EffectsRenderer::new(gpu.device(), format);
         let container = ContainerRenderer::new(gpu.device(), format);
 

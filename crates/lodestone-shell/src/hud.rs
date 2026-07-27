@@ -6,15 +6,23 @@
 //! that shows a regression. The same [`DebugStats`] is also printed to stdout on
 //! a timer, so headless and windowed runs both produce evidence.
 //!
-//! Rendering is intentionally texture-free: glyphs and the crosshair are emitted
-//! as solid-colour quads in one dynamic vertex buffer (positions in NDC, RGBA
-//! per vertex) and drawn in a `Load` pass over the terrain with no depth. The
-//! vertex stream is a flat `Vec<f32>` so it needs no `bytemuck::Pod` derive
-//! (which the workspace's `deny(unsafe_code)` would reject).
+//! Rendering has two streams. Text, the crosshair, and overlay chrome are
+//! emitted as solid-colour quads in one dynamic vertex buffer (positions in NDC,
+//! RGBA per vertex). The survival vitals — hotbar, XP bar, hearts, hunger — draw
+//! from the vanilla GUI sprite atlas once [`HudRenderer::attach_gui`] supplies
+//! one, via a second textured vertex stream; without an atlas (jar-less or
+//! headless runs) they fall back to procedural quads on the colour stream. Both
+//! streams are flat `Vec<f32>`s so they need no `bytemuck::Pod` derive (which the
+//! workspace's `deny(unsafe_code)` would reject) and draw in a `Load` pass over
+//! the terrain with no depth.
 
 mod font;
 
 pub use font::glyph_rows;
+
+use std::sync::Arc;
+
+use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
 
 use crate::overlay::{BossBarView, Sidebar};
 
@@ -177,6 +185,11 @@ pub fn process_rss_bytes() -> usize {
 /// Bytes per HUD vertex: 2 position floats + 4 colour floats.
 const FLOATS_PER_VERTEX: usize = 6;
 
+/// Floats per textured-sprite vertex: position (x, y in NDC), atlas UV (u, v),
+/// and an RGBA tint. The GUI sprite stream is separate from the colour stream
+/// so the existing colour pipeline is untouched.
+const SPRITE_FLOATS_PER_VERTEX: usize = 8;
+
 /// Everything the HUD draws for one frame, bundled so the geometry builder and
 /// the GPU renderer take one argument that can grow without churning every call
 /// site. Borrows so building it per frame allocates nothing beyond the `chat`
@@ -253,6 +266,9 @@ impl<'a> HudFrame<'a> {
 pub struct HudGeometry {
     /// Flat `[x, y, r, g, b, a]` per vertex.
     pub verts: Vec<f32>,
+    /// Flat `[x, y, u, v, r, g, b, a]` per textured GUI-sprite vertex. Empty
+    /// unless a [`GuiAtlas`] was supplied to [`HudGeometry::build_with_gui`].
+    pub sprite_verts: Vec<f32>,
 }
 
 impl HudGeometry {
@@ -262,10 +278,31 @@ impl HudGeometry {
         self.verts.len() / FLOATS_PER_VERTEX
     }
 
-    /// Build the whole HUD for `width`×`height` pixels from a [`HudFrame`].
+    /// Number of textured GUI-sprite vertices.
+    #[must_use]
+    pub fn sprite_vertex_count(&self) -> usize {
+        self.sprite_verts.len() / SPRITE_FLOATS_PER_VERTEX
+    }
+
+    /// Build the whole HUD for `width`×`height` pixels from a [`HudFrame`],
+    /// drawing the survival vitals (hotbar, XP, hearts, hunger) as procedural
+    /// quads. This is the jar-less / headless path.
     #[must_use]
     pub fn build(frame: &HudFrame, width: u32, height: u32) -> Self {
-        let mut b = Builder::new(width.max(1) as f32, height.max(1) as f32);
+        Self::build_inner(frame, width, height, None)
+    }
+
+    /// Like [`build`](Self::build), but draws the survival vitals from the real
+    /// vanilla GUI atlas (hearts, hunger, XP bar, hotbar frame + selection)
+    /// instead of procedural quads. Everything else (debug text, chat, sidebar,
+    /// crosshair, …) is identical and still emitted to the colour stream.
+    #[must_use]
+    pub fn build_with_gui(frame: &HudFrame, width: u32, height: u32, gui: &GuiAtlas) -> Self {
+        Self::build_inner(frame, width, height, Some(gui))
+    }
+
+    fn build_inner(frame: &HudFrame, width: u32, height: u32, gui: Option<&GuiAtlas>) -> Self {
+        let mut b = Builder::new(width.max(1) as f32, height.max(1) as f32, gui);
 
         let scale = 2.0;
         let margin = 6.0;
@@ -343,107 +380,118 @@ impl HudGeometry {
         // hotbar draws whenever we're in active play; the pips only on a live
         // survival server that reports health/food.
         let cx = b.w * 0.5;
-        let pip = 8.0;
-        let gap = 2.0;
-        let row_w = 10.0 * (pip + gap);
+        // With the vanilla GUI atlas attached, the vitals cluster (hotbar, XP,
+        // hearts, hunger) draws from real sprites; without it — jar-less runs and
+        // the headless negative-control path — it falls back to the procedural
+        // quads below. Both branches return `bars_y`, the anchor the action bar
+        // sits above, so the rest of the HUD is oblivious to which drew.
+        let bars_y = if b.gui.is_some() {
+            sprite_vitals(&mut b, frame)
+        } else {
+            let pip = 8.0;
+            let gap = 2.0;
+            let row_w = 10.0 * (pip + gap);
 
-        // Hotbar: a 9-cell bar with the selected cell ringed in white. Item
-        // icons are deferred (no item atlas yet) so the cells are empty wells —
-        // the frame and selection are real, the contents explicitly aren't.
-        let hotbar_top = if let Some(sel) = frame.hotbar {
-            let sel = sel.min(8);
-            let cell = 22.0;
-            let hw = 9.0 * cell;
-            let hx = cx - hw * 0.5;
-            let hy = b.h - margin - cell;
-            b.rect_px(
-                hx - 2.0,
-                hy - 2.0,
-                hw + 4.0,
-                cell + 4.0,
-                [0.0, 0.0, 0.0, 0.55],
-            );
-            for i in 0..9 {
-                let sx = hx + i as f32 * cell;
+            // Hotbar: a 9-cell bar with the selected cell ringed in white. Item
+            // icons are deferred (no item atlas yet) so the cells are empty wells —
+            // the frame and selection are real, the contents explicitly aren't.
+            let hotbar_top = if let Some(sel) = frame.hotbar {
+                let sel = sel.min(8);
+                let cell = 22.0;
+                let hw = 9.0 * cell;
+                let hx = cx - hw * 0.5;
+                let hy = b.h - margin - cell;
                 b.rect_px(
-                    sx + 1.0,
-                    hy + 1.0,
-                    cell - 2.0,
-                    cell - 2.0,
-                    [0.28, 0.28, 0.30, 0.5],
+                    hx - 2.0,
+                    hy - 2.0,
+                    hw + 4.0,
+                    cell + 4.0,
+                    [0.0, 0.0, 0.0, 0.55],
                 );
-            }
-            // A 2px white ring around the selected cell (four edges).
-            let sx = hx + sel as f32 * cell;
-            let bw = 2.0;
-            let col = [0.95, 0.97, 1.0, 0.95];
-            b.rect_px(sx - 1.0, hy - 1.0, cell + 2.0, bw, col);
-            b.rect_px(sx - 1.0, hy + cell + 1.0 - bw, cell + 2.0, bw, col);
-            b.rect_px(sx - 1.0, hy - 1.0, bw, cell + 2.0, col);
-            b.rect_px(sx + cell + 1.0 - bw, hy - 1.0, bw, cell + 2.0, col);
-            hy
-        } else {
-            b.h - margin
-        };
-
-        // XP bar: a full-hotbar-width green progress bar just above the hotbar,
-        // with the level number centred above it (vanilla green). Drawn only
-        // once the server has sent experience (`frame.xp`); off a live server
-        // this is `None` and nothing draws, keeping the gauge honest.
-        let vitals_base = if let Some((level, progress)) = frame.xp {
-            let bar_w = 9.0 * 22.0;
-            let bx = cx - bar_w * 0.5;
-            let bar_h = 4.0;
-            let by = hotbar_top - bar_h - 5.0;
-            b.rect_px(bx, by, bar_w, bar_h, [0.0, 0.0, 0.0, 0.7]);
-            let fill = bar_w * progress.clamp(0.0, 1.0);
-            if fill > 0.0 {
-                b.rect_px(bx, by, fill, bar_h, [0.47, 0.82, 0.16, 1.0]);
-            }
-            let level_gap = if level > 0 {
-                let s = level.to_string();
-                let tw = text_w(&s, scale);
-                b.text(
-                    &s,
-                    cx - tw * 0.5,
-                    by - line_h,
-                    scale,
-                    [0.44, 0.92, 0.20, 1.0],
-                );
-                line_h
+                for i in 0..9 {
+                    let sx = hx + i as f32 * cell;
+                    b.rect_px(
+                        sx + 1.0,
+                        hy + 1.0,
+                        cell - 2.0,
+                        cell - 2.0,
+                        [0.28, 0.28, 0.30, 0.5],
+                    );
+                }
+                // A 2px white ring around the selected cell (four edges).
+                let sx = hx + sel as f32 * cell;
+                let bw = 2.0;
+                let col = [0.95, 0.97, 1.0, 0.95];
+                b.rect_px(sx - 1.0, hy - 1.0, cell + 2.0, bw, col);
+                b.rect_px(sx - 1.0, hy + cell + 1.0 - bw, cell + 2.0, bw, col);
+                b.rect_px(sx - 1.0, hy - 1.0, bw, cell + 2.0, col);
+                b.rect_px(sx + cell + 1.0 - bw, hy - 1.0, bw, cell + 2.0, col);
+                hy
             } else {
-                0.0
+                b.h - margin
             };
-            by - level_gap
-        } else {
-            hotbar_top
-        };
 
-        // Health / food pip rows, sitting just above the hotbar (or the XP bar
-        // when one is drawn). Each row is 10 pips of 2 units; a pip lights the
-        // moment any of its two units is present (a deliberate simplification —
-        // no half-pip art yet).
-        let bars_y = vitals_base - pip - 4.0;
-        if let Some(hp) = frame.health {
-            b.pips(
-                hp,
-                cx - row_w - 8.0,
-                bars_y,
-                pip,
-                gap,
-                [0.86, 0.15, 0.16, 1.0],
-            );
-        }
-        if let Some(food) = frame.food {
-            b.pips(
-                food as f32,
-                cx + 8.0,
-                bars_y,
-                pip,
-                gap,
-                [0.78, 0.60, 0.20, 1.0],
-            );
-        }
+            // XP bar: a full-hotbar-width green progress bar just above the hotbar,
+            // with the level number centred above it (vanilla green). Drawn only
+            // once the server has sent experience (`frame.xp`); off a live server
+            // this is `None` and nothing draws, keeping the gauge honest.
+            let vitals_base = if let Some((level, progress)) = frame.xp {
+                let bar_w = 9.0 * 22.0;
+                let bx = cx - bar_w * 0.5;
+                let bar_h = 4.0;
+                let by = hotbar_top - bar_h - 5.0;
+                b.rect_px(bx, by, bar_w, bar_h, [0.0, 0.0, 0.0, 0.7]);
+                let fill = bar_w * progress.clamp(0.0, 1.0);
+                if fill > 0.0 {
+                    b.rect_px(bx, by, fill, bar_h, [0.47, 0.82, 0.16, 1.0]);
+                }
+                let level_gap = if level > 0 {
+                    let s = level.to_string();
+                    let tw = text_w(&s, scale);
+                    b.text(
+                        &s,
+                        cx - tw * 0.5,
+                        by - line_h,
+                        scale,
+                        [0.44, 0.92, 0.20, 1.0],
+                    );
+                    line_h
+                } else {
+                    0.0
+                };
+                by - level_gap
+            } else {
+                hotbar_top
+            };
+
+            // Health / food pip rows, sitting just above the hotbar (or the XP bar
+            // when one is drawn). Each row is 10 pips of 2 units; a pip lights the
+            // moment any of its two units is present (a deliberate simplification —
+            // no half-pip art yet).
+            let bars_y = vitals_base - pip - 4.0;
+            if let Some(hp) = frame.health {
+                b.pips(
+                    hp,
+                    cx - row_w - 8.0,
+                    bars_y,
+                    pip,
+                    gap,
+                    [0.86, 0.15, 0.16, 1.0],
+                );
+            }
+            if let Some(food) = frame.food {
+                b.pips(
+                    food as f32,
+                    cx + 8.0,
+                    bars_y,
+                    pip,
+                    gap,
+                    [0.78, 0.60, 0.20, 1.0],
+                );
+            }
+
+            bars_y
+        };
 
         // Action bar: a single centred line just above the vitals/XP cluster,
         // fading with the server-driven alpha. Legacy `§` colour codes render.
@@ -550,8 +598,118 @@ impl HudGeometry {
             }
         }
 
-        Self { verts: b.verts }
+        Self {
+            verts: b.verts,
+            sprite_verts: b.sprite_verts,
+        }
     }
+}
+
+/// Draw the survival vitals cluster — hotbar frame, selection highlight, XP bar
+/// (background + progress), hearts, and hunger — from the vanilla GUI atlas.
+/// Returns `bars_y`, the top of the hearts/hunger row, which the action bar sits
+/// above. Layout mirrors the procedural fallback closely so toggling the atlas
+/// on or off does not visibly jump the HUD. A no-op-safe: [`Builder::sprite`]
+/// draws nothing for a missing sprite, so a partial atlas degrades gracefully.
+fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
+    // Vanilla "GUI Scale 2": native sprite pixels are doubled on screen. At an
+    // integer scale the atlas sampler's Nearest magnification replicates texels
+    // exactly, so on-screen pixels equal jar pixels — which the GPU gate checks.
+    const S: f32 = 2.0;
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let cx = b.w * 0.5;
+    let margin = 6.0;
+
+    // Hotbar (182x22 native), centred at the bottom, with the 24x23 selection
+    // sprite over the chosen slot.
+    let hw = 182.0 * S;
+    let hh = 22.0 * S;
+    let hx = cx - hw * 0.5;
+    let hy = b.h - hh - margin;
+    let mut cluster_top = b.h - margin;
+    if let Some(sel) = frame.hotbar {
+        b.sprite("hud/hotbar", hx, hy, hw, hh, white);
+        // Vanilla draws the selection at native offset (slot*20 - 1, -1) from the
+        // hotbar origin; the sprite is 24x23 so it overhangs the 20px slot pitch.
+        let sel = sel.min(8) as f32;
+        let sw = 24.0 * S;
+        let sh = 23.0 * S;
+        let sx = hx + (sel * 20.0 - 1.0) * S;
+        let sy = hy - S;
+        b.sprite("hud/hotbar_selection", sx, sy, sw, sh, white);
+        cluster_top = hy;
+    }
+
+    // XP bar (182x5), just above the hotbar: full background, then the progress
+    // sprite cropped left-to-right to its filled fraction.
+    let bar_w = 182.0 * S;
+    let bar_h = 5.0 * S;
+    if let Some((level, progress)) = frame.xp {
+        let by = hy - bar_h - 4.0;
+        b.sprite("hud/experience_bar_background", hx, by, bar_w, bar_h, white);
+        let p = progress.clamp(0.0, 1.0);
+        if p > 0.0 {
+            // Crop by shrinking both the destination width and the sampled UV
+            // span, so the bar reveals its pattern instead of squashing it.
+            for mut q in b.gui_geometry("hud/experience_bar_progress", hx, by, bar_w, bar_h) {
+                let span = q.uv_max[0] - q.uv_min[0];
+                q.dst[2] *= p;
+                q.uv_max[0] = q.uv_min[0] + span * p;
+                b.push_sprite_quad(q, white);
+            }
+        }
+        // The level number stays coloured text (vanilla green), centred above.
+        if level > 0 {
+            let scale = 2.0;
+            let line_h = (font::GLYPH_H as f32 + 2.0) * scale;
+            let s = level.to_string();
+            let tw = text_w(&s, scale);
+            b.text(
+                &s,
+                cx - tw * 0.5,
+                by - line_h,
+                scale,
+                [0.44, 0.92, 0.20, 1.0],
+            );
+        }
+        cluster_top = by;
+    }
+
+    // Hearts (health) left, hunger right, one row above the cluster. Each icon
+    // is 9x9 native, stepped 8px (vanilla spacing); a container/empty backing is
+    // drawn first, then a full or half overlay per two points.
+    let icon = 9.0 * S;
+    let step = 8.0 * S;
+    let row_y = cluster_top - icon - 4.0;
+    if let Some(hp) = frame.health {
+        let hp = hp.max(0.0);
+        for i in 0..10 {
+            let x = hx + i as f32 * step;
+            b.sprite("hud/heart/container", x, row_y, icon, icon, white);
+            let units = hp - i as f32 * 2.0;
+            if units >= 2.0 {
+                b.sprite("hud/heart/full", x, row_y, icon, icon, white);
+            } else if units >= 1.0 {
+                b.sprite("hud/heart/half", x, row_y, icon, icon, white);
+            }
+        }
+    }
+    if let Some(food) = frame.food {
+        let food = food.max(0) as f32;
+        for i in 0..10 {
+            // Hunger fills right-to-left in vanilla.
+            let x = hx + hw - icon - i as f32 * step;
+            b.sprite("hud/food_empty", x, row_y, icon, icon, white);
+            let units = food - i as f32 * 2.0;
+            if units >= 2.0 {
+                b.sprite("hud/food_full", x, row_y, icon, icon, white);
+            } else if units >= 1.0 {
+                b.sprite("hud/food_half", x, row_y, icon, icon, white);
+            }
+        }
+    }
+
+    row_y
 }
 
 /// Pixel width of `s` in the fixed-advance HUD font at `scale` (matches
@@ -607,19 +765,63 @@ fn legacy_rgb(code: char) -> Option<[f32; 3]> {
     ])
 }
 
-struct Builder {
+struct Builder<'a> {
     w: f32,
     h: f32,
     verts: Vec<f32>,
+    sprite_verts: Vec<f32>,
+    gui: Option<&'a GuiAtlas>,
 }
 
-impl Builder {
-    fn new(w: f32, h: f32) -> Self {
+impl<'a> Builder<'a> {
+    fn new(w: f32, h: f32, gui: Option<&'a GuiAtlas>) -> Self {
         Self {
             w,
             h,
             verts: Vec::new(),
+            sprite_verts: Vec::new(),
+            gui,
         }
+    }
+
+    /// Emit a GUI sprite scaled into the pixel rect `(x, y, w, h)`, tinted by
+    /// `c`. A no-op when no atlas is attached or the id is unknown, so callers
+    /// need not branch.
+    fn sprite(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
+        for q in self.gui_geometry(id, x, y, w, h) {
+            self.push_sprite_quad(q, c);
+        }
+    }
+
+    /// The raw textured quads for a sprite, for callers that post-process them
+    /// (for example cropping the XP progress bar to its filled fraction). Empty
+    /// when no atlas is attached or the id is unknown.
+    fn gui_geometry(&self, id: &str, x: f32, y: f32, w: f32, h: f32) -> Vec<GuiSpriteQuad> {
+        match self.gui {
+            Some(gui) => gui.geometry(id, x, y, w, h),
+            None => Vec::new(),
+        }
+    }
+
+    /// Push one textured quad (two triangles) from an absolute-pixel destination
+    /// rect and its atlas UVs, tinted by `c`.
+    fn push_sprite_quad(&mut self, q: GuiSpriteQuad, c: [f32; 4]) {
+        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
+        let [dx, dy, dw, dh] = q.dst;
+        let (x0, y0) = to_ndc(dx, dy);
+        let (x1, y1) = to_ndc(dx + dw, dy + dh);
+        let [u0, v0] = q.uv_min;
+        let [u1, v1] = q.uv_max;
+        let mut v = |vx: f32, vy: f32, tu: f32, tv: f32| {
+            self.sprite_verts
+                .extend_from_slice(&[vx, vy, tu, tv, c[0], c[1], c[2], c[3]]);
+        };
+        v(x0, y0, u0, v0);
+        v(x1, y0, u1, v0);
+        v(x1, y1, u1, v1);
+        v(x0, y0, u0, v0);
+        v(x1, y1, u1, v1);
+        v(x0, y1, u0, v1);
     }
 
     /// Emit a pixel-space rectangle as two triangles in NDC.
@@ -726,6 +928,22 @@ pub struct HudRenderer {
     pipeline: wgpu::RenderPipeline,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
+    gui: Option<GuiHud>,
+}
+
+/// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
+/// uploaded atlas texture, its textured pipeline + bind group, and a dynamic
+/// vertex buffer. Present only once [`HudRenderer::attach_gui`] has run; absent
+/// on jar-less / headless runs, where the HUD falls back to procedural quads.
+#[derive(Debug)]
+struct GuiHud {
+    atlas: Arc<GuiAtlas>,
+    #[allow(dead_code)]
+    gpu: GpuAtlas,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    capacity_floats: usize,
 }
 
 impl HudRenderer {
@@ -797,7 +1015,130 @@ impl HudRenderer {
             pipeline,
             buffer,
             capacity_floats,
+            gui: None,
         }
+    }
+
+    /// Attach the vanilla GUI sprite atlas so the survival vitals (hearts,
+    /// hunger, XP bar, hotbar frame + selection) render from real textures.
+    /// Uploads the atlas, builds the textured pipeline, and binds it. Without
+    /// this call the HUD keeps its procedural fallback — the jar-less runtime
+    /// behaviour and the headless negative control the GPU gate exercises.
+    pub fn attach_gui(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        atlas: Arc<GuiAtlas>,
+    ) {
+        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hud-sprite-shader"),
+            source: wgpu::ShaderSource::Wgsl(HUD_SPRITE_WGSL.into()),
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hud-sprite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hud-sprite-layout"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hud-sprite-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                    ],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-sprite-bg"),
+            layout: &bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&gpu.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                },
+            ],
+        });
+        let capacity_floats = 4096;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud-sprite-verts"),
+            size: (capacity_floats * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.gui = Some(GuiHud {
+            atlas,
+            gpu,
+            pipeline,
+            bind_group,
+            buffer,
+            capacity_floats,
+        });
     }
 
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
@@ -810,22 +1151,48 @@ impl HudRenderer {
         width: u32,
         height: u32,
     ) {
-        let geo = HudGeometry::build(frame, width, height);
-        if geo.verts.is_empty() {
+        // With the GUI atlas attached, the vitals come back as textured sprite
+        // verts; otherwise the whole HUD is the procedural colour stream.
+        let gui_atlas = self.gui.as_ref().map(|g| Arc::clone(&g.atlas));
+        let geo = match &gui_atlas {
+            Some(atlas) => HudGeometry::build_with_gui(frame, width, height, atlas),
+            None => HudGeometry::build(frame, width, height),
+        };
+        if geo.verts.is_empty() && geo.sprite_verts.is_empty() {
             return;
         }
-        if geo.verts.len() > self.capacity_floats {
-            self.capacity_floats = geo.verts.len().next_power_of_two();
-            self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("hud-verts"),
-                size: (self.capacity_floats * 4) as wgpu::BufferAddress,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.verts));
 
-        let vertex_count = geo.vertex_count() as u32;
+        // Grow + upload the colour stream.
+        if !geo.verts.is_empty() {
+            if geo.verts.len() > self.capacity_floats {
+                self.capacity_floats = geo.verts.len().next_power_of_two();
+                self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("hud-verts"),
+                    size: (self.capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.verts));
+        }
+
+        // Grow + upload the sprite stream (only when an atlas is attached).
+        if !geo.sprite_verts.is_empty()
+            && let Some(g) = self.gui.as_mut()
+        {
+            if geo.sprite_verts.len() > g.capacity_floats {
+                g.capacity_floats = geo.sprite_verts.len().next_power_of_two();
+                g.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("hud-sprite-verts"),
+                    size: (g.capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&g.buffer, 0, bytemuck::cast_slice(&geo.sprite_verts));
+        }
+        let colour_count = geo.vertex_count() as u32;
+        let sprite_count = geo.sprite_vertex_count() as u32;
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("hud") });
         {
@@ -845,9 +1212,21 @@ impl HudRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.buffer.slice(..));
-            pass.draw(0..vertex_count, 0..1);
+            // Sprites first, then the colour stream (text) on top, so future
+            // overlays like item counts land above the hotbar art.
+            if let Some(g) = &self.gui
+                && sprite_count > 0
+            {
+                pass.set_pipeline(&g.pipeline);
+                pass.set_bind_group(0, &g.bind_group, &[]);
+                pass.set_vertex_buffer(0, g.buffer.slice(..));
+                pass.draw(0..sprite_count, 0..1);
+            }
+            if colour_count > 0 {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, self.buffer.slice(..));
+                pass.draw(0..colour_count, 0..1);
+            }
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -870,6 +1249,35 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
+}
+";
+
+const HUD_SPRITE_WGSL: &str = r"
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) tint: vec4<f32>,
+};
+
+@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(1) var atlas_samp: sampler;
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) tint: vec4<f32>,
+) -> VsOut {
+    var out: VsOut;
+    out.clip = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    out.tint = tint;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(atlas_tex, atlas_samp, in.uv) * in.tint;
 }
 ";
 
@@ -1574,8 +1982,7 @@ mod tests {
         let (empty_title, empty_act) = render(None, None);
         let (shown_title, title_leak_act) =
             render(Some(("TITLE".into(), Some("subtitle".into()), 1.0)), None);
-        let (act_leak_title, shown_act) =
-            render(None, Some(("Action bar!".into(), 1.0)));
+        let (act_leak_title, shown_act) = render(None, Some(("Action bar!".into(), 1.0)));
 
         eprintln!("=== title/action-bar readback (headless) ===");
         eprintln!("empty:  title_band={empty_title} act_band={empty_act}");
@@ -1607,6 +2014,148 @@ mod tests {
         assert_eq!(
             act_leak_title, 0,
             "the action bar must not bleed into the title rect"
+        );
+    }
+
+    /// **The closing gate for the HUD-textures island**: proves the survival
+    /// vitals draw from the *actual vanilla heart sprite in `client.jar`*, not
+    /// the procedural fallback, by comparing rendered pixels texel-for-texel
+    /// against the jar art — then EXECUTES the negative control (no atlas
+    /// attached) and confirms the same assertion *fails*. A gate never watched
+    /// fail proves nothing; "it draws" is not a gate.
+    ///
+    /// sRGB note: the atlas uploads as `Rgba8UnormSrgb` and we render into an
+    /// `Rgba8UnormSrgb` target, so the sample→tint→store roundtrip re-encodes
+    /// back to ~the source bytes. We compare only *opaque* source texels — the
+    /// heart's transparent corners show the backdrop and carry no identity — and
+    /// at an integer 2× scale each texel maps to a clean 2×2 Nearest block.
+    #[test]
+    #[ignore = "requires a GPU adapter and the vanilla client.jar"]
+    fn hud_vitals_draw_the_real_heart_sprite() {
+        use lodestone_assets::Image;
+        use lodestone_render::{HeadlessTarget, RenderTarget};
+
+        let manager = crate::resources::vanilla_manager().expect(
+            "GPU gate opted in via --ignored but no vanilla client.jar was found; set \
+             LODESTONE_ASSETS to a pack root containing client.jar, or populate \
+             .cache/mc/<ver>/client.jar — do NOT skip, a silent pass here asserts nothing",
+        );
+        let atlas =
+            Arc::new(GuiAtlas::build(&manager).expect("build the GUI atlas from client.jar"));
+
+        // The source art we must reproduce on screen.
+        let heart_png = manager
+            .read("assets/minecraft/textures/gui/sprites/hud/heart/full.png")
+            .expect("client.jar must carry hud/heart/full.png");
+        let heart = Image::decode_png(&heart_png).expect("decode hud/heart/full.png");
+        assert_eq!(
+            (heart.width, heart.height),
+            (9, 9),
+            "the heart sprite is 9x9 native"
+        );
+
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU, don't 'skip' — a silent pass here asserts nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        // sRGB target so the sampler's linear decode is re-encoded on store,
+        // letting opaque texels land near the source PNG bytes.
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (w, h) = (480u32, 320u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let stats = DebugStats::default();
+
+        // A backdrop that is neither red (heart) nor grey, so an opaque heart
+        // texel can never be mistaken for the background.
+        const BG: [u8; 3] = [24, 96, 176];
+
+        // Only health on: no hotbar, XP or hunger, so the hearts sit at a
+        // location we can compute exactly. `sprite_vitals` uses S=2; with the
+        // cluster anchored at the bottom, the first heart is at (cx-182, h-28)
+        // and spans 18×18 px.
+        let hud_frame = HudFrame {
+            show_debug: false,
+            crosshair: false,
+            health: Some(20.0),
+            food: None,
+            xp: None,
+            hotbar: None,
+            ..HudFrame::new(&stats)
+        };
+        let s = 2u32;
+        let cx = w / 2;
+        let x0 = cx - 182;
+        let y0 = h - 28;
+
+        // Render one frame with `hud`, read it back, and score how many *opaque*
+        // heart texels match the jar sprite within tolerance after the 2× Nearest
+        // downsample.
+        let mut score = |hud: &mut HudRenderer, tag: &str| -> (usize, usize) {
+            let frame = target.acquire().expect("headless acquire");
+            clear_view(device, queue, frame.view(), BG);
+            hud.render(device, queue, frame.view(), &hud_frame, w, h);
+            let pixels = target.read_texels(device, queue);
+            const TOL: i32 = 24;
+            let (mut opaque, mut matched) = (0usize, 0usize);
+            for ty in 0..9u32 {
+                for tx in 0..9u32 {
+                    let si = ((ty * 9 + tx) * 4) as usize;
+                    if heart.rgba[si + 3] < 250 {
+                        continue; // transparent corner — no identity
+                    }
+                    opaque += 1;
+                    let px = x0 + tx * s + s / 2;
+                    let py = y0 + ty * s + s / 2;
+                    let di = ((py * w + px) * 4) as usize;
+                    let dr = i32::from(pixels[di]) - i32::from(heart.rgba[si]);
+                    let dg = i32::from(pixels[di + 1]) - i32::from(heart.rgba[si + 1]);
+                    let db = i32::from(pixels[di + 2]) - i32::from(heart.rgba[si + 2]);
+                    if dr.abs() <= TOL && dg.abs() <= TOL && db.abs() <= TOL {
+                        matched += 1;
+                    }
+                }
+            }
+            eprintln!("{tag}: matched {matched}/{opaque} opaque heart texels");
+            (matched, opaque)
+        };
+
+        // Positive: atlas attached → real heart sprite → high match.
+        let mut lit = HudRenderer::new(device, format);
+        lit.attach_gui(device, queue, format, Arc::clone(&atlas));
+        let (pos_matched, opaque) = score(&mut lit, "vanilla-atlas");
+        assert!(
+            opaque > 20,
+            "the heart sprite must have a solid opaque body, got {opaque}"
+        );
+
+        // Negative control, EXECUTED: no atlas → procedural fallback → the same
+        // region does NOT reproduce the jar heart, so the match collapses.
+        let mut dark = HudRenderer::new(device, format);
+        let (neg_matched, _) = score(&mut dark, "procedural-fallback (negative control)");
+
+        let pos_frac = pos_matched as f32 / opaque as f32;
+        let neg_frac = neg_matched as f32 / opaque as f32;
+        eprintln!("=== heart-sprite gate: vanilla={pos_frac:.2} fallback={neg_frac:.2} ===");
+
+        // Load-bearing: vanilla pixels match the jar; the fallback fails the very
+        // same check; and the delta is wide enough that no coincidence passes
+        // both.
+        assert!(
+            pos_frac > 0.80,
+            "with the vanilla atlas the rendered hearts must reproduce hud/heart/full.png, \
+             got {pos_matched}/{opaque}"
+        );
+        assert!(
+            neg_frac < 0.40,
+            "negative control failed to fail: the procedural fallback reproduced the jar \
+             heart sprite ({neg_matched}/{opaque}) — the gate would be vacuous"
+        );
+        assert!(
+            pos_frac - neg_frac > 0.40,
+            "vanilla vs fallback delta too small to prove the atlas is what reaches pixels: \
+             vanilla={pos_frac:.2} fallback={neg_frac:.2}"
         );
     }
 }
