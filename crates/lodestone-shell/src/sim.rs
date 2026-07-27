@@ -92,6 +92,12 @@ pub struct Sim {
     /// next to `live_cols` so this defect class is a one-line diagnosis instead
     /// of a play-test archaeology session. Should stay `0` in a healthy session.
     mesh_drops: u64,
+    /// Count of server `TeleportPlayer` corrections adopted since start. At rest
+    /// on settled ground this stays flat; a burst *during* a jump is the
+    /// signature of the server rejecting the ascent and snapping the camera down
+    /// (the "jumping glitches down" defect). Read by the live jump gate to
+    /// distinguish a clean vanilla arc from a server-corrected one.
+    pub teleport_count: u64,
     /// Diagnostic switch (normal play: always `true`): when `false`, the live
     /// path collides against the offline demo world instead of the server
     /// terrain. This exists to reproduce the pre-collision "fall through absent
@@ -275,6 +281,7 @@ impl Sim {
             vanilla_atlas: resources.vanilla_atlas,
             water_ids,
             mesh_drops: 0,
+            teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
             phase: SessionPhase::LocalOnly,
@@ -1053,6 +1060,7 @@ impl Sim {
                     };
                     self.player.velocity = Vec3d::ZERO;
                     self.prev_position = self.player.position;
+                    self.teleport_count += 1;
                 }
                 NetUpdate::Chat { text, player } => {
                     tracing::info!(target: "chat", "{}", text.to_legacy_string());
