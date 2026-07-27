@@ -487,6 +487,7 @@ mod tests {
             pos: Vec3::new(1.0, 2.0, 3.0),
             rotation: Rotation::new(45.0, -10.0),
             on_ground: true,
+            horizontal_collision: false,
         };
         let b = ClientAction::SwingArm {
             hand: lodestone_client::Hand::Main,

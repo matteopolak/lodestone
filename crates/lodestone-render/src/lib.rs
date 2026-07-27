@@ -78,8 +78,8 @@ pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
 pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simple};
 pub use mesher::{
-    BuiltSection, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of, dirty_jobs,
-    neighbour_columns, neighbourhood_coords,
+    BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
+    dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
 pub use model_pipeline::{GpuModelMesh, ModelPipeline, model_camera_buffer};
 pub use models::{
@@ -105,4 +105,6 @@ pub use vertex::{BYTES_PER_VERTEX, PackedVertex, VertexFields};
 pub use visibility::{
     SectionCoord, SectionVisibility, VisibilityGraph, compute_visibility, walk_visible,
 };
-pub use world::{BlockClassifier, ChunkSectionView, SectionLight, UniformLight};
+pub use world::{
+    BlockClassifier, ChunkSectionView, SectionLight, SkyDefault, UniformLight, WorldSectionLight,
+};

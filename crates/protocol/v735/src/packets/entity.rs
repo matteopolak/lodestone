@@ -1,4 +1,4 @@
-//! Entity packets for protocol 340 that carry [`EntityMetadata`].
+//! Entity packets for protocol 754 that carry [`EntityMetadata`].
 //!
 //! Both the mob-spawn packet and the standalone metadata packet end with a
 //! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
@@ -68,7 +68,7 @@ pub struct EntityMetadataPacket {
 
 /// Clientbound `rel_entity_move` — a small relative movement (no rotation).
 ///
-/// # 1.12.2 vs 1.8 divergence
+/// # 1.16.5 vs 1.8 divergence
 ///
 /// 1.9+ encodes each delta as an `i16` in units of `1/4096` of a block (1.8
 /// used a signed byte in `1/32` units), which is why this struct cannot be
@@ -127,7 +127,7 @@ pub struct EntityMoveLook {
 
 /// Clientbound `entity_teleport` — an absolute position + rotation update.
 ///
-/// # 1.12.2 vs 1.8 divergence
+/// # 1.16.5 vs 1.8 divergence
 ///
 /// 1.9+ sends the position as `f64` (1.8 used fixed-point `i32`, block × 32).
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]

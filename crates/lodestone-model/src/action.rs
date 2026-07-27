@@ -29,6 +29,16 @@ pub enum ClientAction {
         offset: i32,
     },
     /// Send player movement.
+    ///
+    /// Carries the same two boolean status bits vanilla's
+    /// `ServerboundMovePlayerPacket` family packs into its flags byte:
+    /// `on_ground` and `horizontal_collision`. Both are simulation outputs —
+    /// the caller's physics step decides them — never something a version
+    /// adapter should derive on its own. A version adapter that sends
+    /// movement at vanilla's own cadence chooses *which* concrete packet
+    /// (position-only, rotation-only, status-only, or both) to emit from the
+    /// deltas between successive `Move` actions; it does not change what this
+    /// variant carries.
     Move {
         /// Player position.
         pos: Vec3,
@@ -36,6 +46,8 @@ pub enum ClientAction {
         rotation: Rotation,
         /// Whether the player is on the ground.
         on_ground: bool,
+        /// Whether the player collided horizontally this tick.
+        horizontal_collision: bool,
     },
     /// Respond to a keep-alive challenge.
     KeepAliveResponse {

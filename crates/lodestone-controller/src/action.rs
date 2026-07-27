@@ -22,6 +22,7 @@ pub fn move_action(player: &PlayerState) -> ClientAction {
         pos: Vec3::new(player.position.x, player.position.y, player.position.z),
         rotation: Rotation::new(player.yaw, player.pitch),
         on_ground: player.on_ground,
+        horizontal_collision: player.horizontal_collision,
     }
 }
 
@@ -35,12 +36,14 @@ mod tests {
         let mut player = PlayerState::at(Vec3d::new(1.5, 64.0, -2.5), 90.0);
         player.pitch = -10.0;
         player.on_ground = true;
+        player.horizontal_collision = true;
         assert_eq!(
             move_action(&player),
             ClientAction::Move {
                 pos: Vec3::new(1.5, 64.0, -2.5),
                 rotation: Rotation::new(90.0, -10.0),
                 on_ground: true,
+                horizontal_collision: true,
             }
         );
     }

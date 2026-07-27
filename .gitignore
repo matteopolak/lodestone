@@ -28,3 +28,6 @@
 
 # OS
 .DS_Store
+
+# stray per-run logs from live gates
+**/.session_*.log

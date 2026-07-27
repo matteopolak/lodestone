@@ -306,6 +306,9 @@ impl<T: Transport> Driver<T> {
             pos,
             rotation,
             on_ground,
+            // The read-model's local prediction tracks pose only; it has no
+            // use for horizontal-collision (never rendered or queried today).
+            horizontal_collision: _,
         } = &action
         {
             self.read_model

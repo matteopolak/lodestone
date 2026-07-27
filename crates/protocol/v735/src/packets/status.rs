@@ -1,7 +1,7 @@
-//! Status-state packets for protocol 340.
+//! Status-state packets for protocol 754.
 //!
 //! Status is the server-list-ping flow. It is not needed to join and stay
-//! connected, but 1.12.2's status packets are trivially derive-expressible and are
+//! connected, but 1.16.5's status packets are trivially derive-expressible and are
 //! included so the crate can answer a server ping and to exercise the derive
 //! macro across another state.
 

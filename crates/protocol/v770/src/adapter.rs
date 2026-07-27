@@ -37,10 +37,11 @@ use crate::packets::entity::{read_lp_vec3, unpack_degrees};
 use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
     AcceptTeleportation, Attack, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
-    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChatCommand, ChatMessage, ChunkBatchFinished,
+    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChatAck, ChatCommand, ChatMessage, ChunkBatchFinished,
     ChunkBatchReceived, ClientCommand, ClientTickEnd, ConfigurationAcknowledged,
     ContainerButtonClick, ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent,
-    LevelParticles, MOVE_FLAG_ON_GROUND, MovePlayerPosRot, PickItemFromBlock, PickItemFromEntity,
+    LevelParticles, MOVE_FLAG_HORIZONTAL_COLLISION, MOVE_FLAG_ON_GROUND, MovePlayerPosRot,
+    PickItemFromBlock, PickItemFromEntity,
     PlayerAbilities, PlayerAction, PlayerCommand as PlayerCommandPacket,
     PlayerInput as PlayerInputPacket, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING,
     SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock,
@@ -83,6 +84,7 @@ const NEXT_STATE_LOGIN: i32 = 2;
 pub struct V770Adapter {
     shape: Arc<Mutex<ChunkShape>>,
     batch: Arc<Mutex<ChunkBatchState>>,
+    movement: Arc<Mutex<MovementSendState>>,
 }
 
 /// Per-connection chunk-batch flow-control state: the running rate estimator and
@@ -92,6 +94,43 @@ pub struct V770Adapter {
 struct ChunkBatchState {
     calculator: ChunkBatchSizeCalculator,
     batch_start: Instant,
+}
+
+/// Per-connection movement-send tracking, mirroring the fields vanilla's
+/// `LocalPlayer` uses to decide which `move_player_*` packet (if any) a tick
+/// sends: `xLast`/`yLast`/`zLast`/`yRotLast`/`xRotLast`,
+/// `lastOnGround`/`lastHorizontalCollision`, and `positionReminder`.
+///
+/// These track the last **sent** pose, not the last pose the client held —
+/// position and rotation only advance when that axis actually sends (the
+/// same hysteresis vanilla uses to avoid re-sending on float jitter), while
+/// on-ground/horizontal-collision advance every tick regardless of whether
+/// anything was sent. Zero-initialized to match Java's field defaults, so a
+/// fresh connection's first `Move` reads as maximally "dirty" against the
+/// all-zero baseline — exactly like a freshly constructed `LocalPlayer`.
+#[derive(Debug, Clone, Copy)]
+struct MovementSendState {
+    last_pos: Vec3,
+    last_yaw: f32,
+    last_pitch: f32,
+    last_on_ground: bool,
+    last_horizontal_collision: bool,
+    /// Ticks since the last full position update; forces one every 20 ticks
+    /// even with zero movement, matching `positionReminder >= 20`.
+    position_reminder: u32,
+}
+
+impl Default for MovementSendState {
+    fn default() -> Self {
+        Self {
+            last_pos: Vec3::new(0.0, 0.0, 0.0),
+            last_yaw: 0.0,
+            last_pitch: 0.0,
+            last_on_ground: false,
+            last_horizontal_collision: false,
+            position_reminder: 0,
+        }
+    }
 }
 
 impl V770Adapter {
@@ -104,6 +143,7 @@ impl V770Adapter {
                 calculator: ChunkBatchSizeCalculator::new(),
                 batch_start: Instant::now(),
             })),
+            movement: Arc::new(Mutex::new(MovementSendState::default())),
         }
     }
 
@@ -1010,13 +1050,23 @@ fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     ])
 }
 
-/// Decodes `add_entity` into a canonical spawn event.
+/// Decodes `add_entity` into a canonical spawn event, plus an initial
+/// head-rotation event.
 ///
 /// Wire layout (`ClientboundAddEntityPacket`): VarInt entity id, UUID, VarInt
 /// entity-type registry id, position `f64`×3, low-precision velocity, three
 /// signed-byte angles (pitch, yaw, head yaw), and a VarInt data field. The type
 /// id is resolved to its canonical identifier through the version-specific
 /// [`entity_type_name`] table.
+///
+/// Head yaw is carried separately from body yaw on the wire (they diverge
+/// constantly once a mob starts looking around) and vanilla sends it
+/// unconditionally at spawn, so it is surfaced through the same
+/// [`ClientEvent::EntityHeadRotation`] outlet [`ROTATE_HEAD`](play::clientbound::ROTATE_HEAD)
+/// uses for later updates, rather than widening [`ClientEvent::EntitySpawned`]
+/// itself — that struct is shared across every protocol version's adapter, and
+/// adding a field to it would force edits into v47/v340/v735 outside this
+/// crate's scope.
 fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let entity_id = reader.var_i32().map_err(dec_err)?;
@@ -1028,7 +1078,7 @@ fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let (vx, vy, vz) = read_lp_vec3(&mut reader).map_err(dec_err)?;
     let pitch = reader.i8().map_err(dec_err)?;
     let yaw = reader.i8().map_err(dec_err)?;
-    let _head_yaw = reader.i8().map_err(dec_err)?;
+    let head_yaw = reader.i8().map_err(dec_err)?;
     let _data = reader.var_i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
@@ -1041,14 +1091,20 @@ fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         ))
     })?;
 
-    Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
-        entity_id,
-        uuid: Some(uuid),
-        entity_type,
-        pos: Vec3::new(x, y, z),
-        rotation: Rotation::new(unpack_degrees(yaw), unpack_degrees(pitch)),
-        velocity: Some(Vec3::new(vx, vy, vz)),
-    })])
+    Ok(vec![
+        Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id,
+            uuid: Some(uuid),
+            entity_type,
+            pos: Vec3::new(x, y, z),
+            rotation: Rotation::new(unpack_degrees(yaw), unpack_degrees(pitch)),
+            velocity: Some(Vec3::new(vx, vy, vz)),
+        }),
+        Directive::Emit(ClientEvent::EntityHeadRotation {
+            entity_id,
+            head_yaw: unpack_degrees(head_yaw),
+        }),
+    ])
 }
 
 /// Decodes `remove_entities` (a VarInt-length list of VarInt ids) into a removal
@@ -2328,6 +2384,10 @@ impl VersionAdapter for V770Adapter {
                 };
                 Ok(Some((play::serverbound::CHAT_COMMAND, encode_body(&body)?)))
             }
+            ClientAction::ChatAck { offset } if state == ConnectionState::Play => {
+                let body = ChatAck { offset: *offset };
+                Ok(Some((play::serverbound::CHAT_ACK, encode_body(&body)?)))
+            }
             ClientAction::SendChat { text } if state == ConnectionState::Play => Ok(Some((
                 play::serverbound::CHAT,
                 encode_body(&ChatMessage::unsigned(text.clone()))?,
@@ -2344,12 +2404,19 @@ impl VersionAdapter for V770Adapter {
                 pos,
                 rotation,
                 on_ground,
+                horizontal_collision,
             } if state == ConnectionState::Play => {
                 // Both position and rotation are always supplied, so this maps
-                // to `move_player_pos_rot`. The model carries no
-                // horizontal-collision signal, so only the on-ground bit is set
-                // (a controller with collision info would extend this).
-                let flags = if *on_ground { MOVE_FLAG_ON_GROUND } else { 0 };
+                // to `move_player_pos_rot`. The on-ground and horizontal-collision
+                // simulation outputs are packed into the flags byte exactly as
+                // vanilla's `packFlags` does.
+                let mut flags = 0;
+                if *on_ground {
+                    flags |= MOVE_FLAG_ON_GROUND;
+                }
+                if *horizontal_collision {
+                    flags |= MOVE_FLAG_HORIZONTAL_COLLISION;
+                }
                 let body = MovePlayerPosRot {
                     x: pos.x,
                     y: pos.y,

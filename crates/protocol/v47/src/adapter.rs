@@ -663,6 +663,10 @@ impl VersionAdapter for V47Adapter {
                 pos,
                 rotation,
                 on_ground,
+                // 1.8's `PositionLook` packet has no horizontal-collision
+                // bit at all — only `onGround` — so there is nothing to
+                // forward it into.
+                horizontal_collision: _,
             } => {
                 let body = ServerboundPositionLook {
                     x: pos.x,

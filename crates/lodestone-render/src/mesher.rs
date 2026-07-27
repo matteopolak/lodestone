@@ -16,34 +16,36 @@
 //! this module holds valid and unchanged — which is what makes off-thread
 //! meshing sound.
 //!
-//! ## Light (world seam — accessors landed, per-section wiring pending)
+//! ## Light (world seam — mesher wired per-section; driver fetch pending)
 //!
-//! The version-free light source is now published by `lodestone-world`:
+//! The version-free light source is published by `lodestone-world`:
 //! `World::section_light(pos, light_section_index) -> Option<SectionLight>`, and
 //! `SectionLight::sky_at(x,y,z) -> u8` / `block_at(x,y,z) -> u8` return resolved
 //! levels with the nibble unpacking kept on the storage side (single unpack
 //! path — this module's cross-seam corner averaging cannot drift a nibble
-//! against storage). Those accessors match this crate's [`SectionLight`] trait
-//! one-for-one, so the adapter is a rename-forward.
+//! against storage). [`crate::world::WorldSectionLight`] rename-forwards those
+//! accessors onto this crate's [`SectionLight`] trait, applying the dimension's
+//! [`SkyDefault`](crate::world::SkyDefault) to absent sky and nothing else.
+//! `lodestone-world`'s real sky+block propagation (`compute_column_light`) has
+//! landed too, so those values are now real rather than uniform — through the
+//! same accessors, no interface change.
 //!
-//! Until the path below is wired, this module still meshes with the declared
-//! pre-light bridge ([`UniformLight::pre_light_bridge`], full sky / no block) so
-//! no exposed face renders black in the interim (§7). **Two things gate the live
-//! swap, and neither is a one-line call-site change:**
+//! **The mesher itself is now per-section.** [`SectionSnapshot::build_mesh`]
+//! takes a [`LightGrid`] — one [`SectionLight`] source *per neighbourhood slot* —
+//! so each section is lit by its own light and the smooth-lighting corner blend
+//! reads neighbours' real light across seams (the anti-vacuity test
+//! `build_mesh_lights_each_section_from_its_own_source` proves a dim centre among
+//! bright neighbours reaches the vertices — something the old single shared light
+//! structurally could not express). What remains is purely the **driver fetch**:
 //!
-//! 1. **A per-section refactor here.** [`SectionSnapshot::build_mesh`] today
-//!    takes *one* shared `light: &L` and applies it to all 27 neighbourhood
-//!    sections — correct for a uniform bridge, wrong for real light, since each
-//!    section carries its own [`SectionLight`] and the smooth-lighting corner
-//!    blend reads *neighbours'* light across seams. Real light therefore requires
-//!    the snapshot to carry per-section light and `build_mesh` to sample the
-//!    owning section's light per cell, not one global source.
-//! 2. **A lock-free `handle` accessor** (pending in `lodestone-client`): the
-//!    mesher runs off-thread on `Arc` snapshots, so it needs
-//!    `handle.section_light(pos, i)` mirroring `section_at`, not `World` access
-//!    under a lock. (`lodestone-world`'s real sky/block propagation is also still
-//!    landing; the accessors already work, the values are just uniform until it
-//!    does — no interface change when they become real.)
+//! * `build_batch` still fills the grid with one
+//!   [`UniformLight::pre_light_bridge`] (full sky / no block) so no exposed face
+//!   renders black in the interim (§7), because the mesher runs off-thread on
+//!   `Arc` snapshots and there is **no lock-free `handle.section_light`** yet
+//!   (pending in `lodestone-client`, mirroring `section_at`). When that lands,
+//!   the driver attaches each present section's `WorldSectionLight` to the job's
+//!   grid and the bridge is dropped; the canary test
+//!   `pre_light_bridge_is_the_declared_full_bright_source` guards that swap.
 //!
 //! The seam contract (agreed with the light-engine owner, since this module is
 //! the consumer that samples across section seams):
@@ -487,14 +489,22 @@ mod tests {
         let per = snap.build_mesh(&SimpleClassifier, &per_section, true);
         let flat = snap.build_mesh(&SimpleClassifier, &uniform, true);
 
-        assert_eq!(
-            per.quad_count(),
-            flat.quad_count(),
-            "identical geometry — only the lighting differs"
-        );
+        // The per-section mesh differs from the uniform bridge because the
+        // centre's dim sky reaches the vertices. It even *fragments* the greedy
+        // merge at the section seam — greedy keys on per-corner light, so where
+        // the dim centre's top face borders bright neighbours the plane can no
+        // longer merge to one quad — which is further proof the per-section light
+        // is really flowing into meshing, not being ignored.
         assert_ne!(
-            per.vertices, flat.vertices,
-            "per-section light must change the vertex lighting the bridge cannot"
+            per, flat,
+            "per-section light must change the mesh the uniform bridge cannot"
+        );
+        assert!(
+            per.quad_count() > flat.quad_count(),
+            "the dim centre breaks the greedy seam merge (light is part of the key): \
+             per-section {} vs uniform {}",
+            per.quad_count(),
+            flat.quad_count()
         );
     }
 

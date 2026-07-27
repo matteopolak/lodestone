@@ -591,6 +591,10 @@ impl VersionAdapter for V340Adapter {
                 pos,
                 rotation,
                 on_ground,
+                // This protocol's `PositionLook` packet has no
+                // horizontal-collision bit — only `onGround` — so there is
+                // nothing to forward it into.
+                horizontal_collision: _,
             } => {
                 let body = ServerboundPositionLook {
                     x: pos.x,

@@ -50,12 +50,18 @@ fn every_model_bakes_nonempty() {
 }
 
 /// Every baked UV must lie within the model's declared sheet (`[0, 1]`). A UV
-/// outside means the texel offset or sheet size is wrong.
+/// outside means the texel offset or sheet size is wrong. Degenerate (zero-area)
+/// faces are skipped: vanilla flat planes (e.g. strider bristles, hoglin mane)
+/// are boxes with a zero dimension whose collapsed side faces are laid out
+/// off-sheet by vanilla itself and never sampled.
 #[test]
 fn every_uv_is_within_the_sheet() {
     for e in &entity_models() {
         let model = (e.build)();
         for q in bake_entity(&model) {
+            if quad_is_degenerate(&q.positions) {
+                continue;
+            }
             for uv in q.uvs {
                 assert!(
                     (-1e-6..=1.0 + 1e-6).contains(&uv[0]) && (-1e-6..=1.0 + 1e-6).contains(&uv[1]),
@@ -67,6 +73,19 @@ fn every_uv_is_within_the_sheet() {
             }
         }
     }
+}
+
+/// A quad is degenerate (zero area) when two of its edges collapse — true for the
+/// side faces of a flat, zero-thickness box.
+fn quad_is_degenerate(p: &[[f32; 3]; 4]) -> bool {
+    let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+    let e2 = [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]];
+    let cross = [
+        e1[1] * e2[2] - e1[2] * e2[1],
+        e1[2] * e2[0] - e1[0] * e2[2],
+        e1[0] * e2[1] - e1[1] * e2[0],
+    ];
+    (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]) < 1e-9
 }
 
 /// Baking is deterministic: identical input yields byte-identical output, with
@@ -83,6 +102,41 @@ fn baking_is_deterministic() {
         }
     }
 }
+
+/// The size-variant mobs must actually carry vanilla's baked-in
+/// `MeshTransformer.scaling`, not just reuse the base mesh. Cave spider is
+/// spider baked at 0.7; every baked vertex must equal `0.7 * spider_vertex +
+/// (0, y_offset/16, 0)` where `y_offset = 24.016 * (1 - 0.7)`. If the scale were
+/// forgotten the two would be identical and this fails (0.7 != 1).
+#[test]
+fn size_variants_carry_the_vanilla_mesh_scale() {
+    use lodestone_assets::entity_models::{cave_spider_model, spider_model};
+
+    let factor = 0.7f32;
+    let ty = 24.016 * (1.0 - factor) / 16.0;
+    let base = bake_entity(&spider_model());
+    let scaled = bake_entity(&cave_spider_model());
+    assert_eq!(base.len(), scaled.len(), "cave_spider changed box count");
+    // Prove non-vacuity: the scaled model is genuinely different from the base.
+    assert_ne!(
+        base[0].positions[0], scaled[0].positions[0],
+        "cave_spider is identical to spider — scale not applied"
+    );
+    for (b, s) in base.iter().zip(&scaled) {
+        for k in 0..4 {
+            let bp = b.positions[k];
+            let sp = s.positions[k];
+            let want = [factor * bp[0], factor * bp[1] + ty, factor * bp[2]];
+            for axis in 0..3 {
+                assert!(
+                    (sp[axis] - want[axis]).abs() < 1e-4,
+                    "cave_spider vertex {sp:?} != scaled spider {want:?}"
+                );
+            }
+        }
+    }
+}
+
 
 /// Exact per-box counts, transcribed from the vanilla meshes: each solid box
 /// emits six faces, so a dropped or duplicated box shows up here.
@@ -110,6 +164,14 @@ fn quad_counts_match_vanilla_box_counts() {
         ("vex", 7),          // head, 2-box body, 2 arms, 2 wings
         ("silverfish", 10),  // 7 segments + 3 raised plates
         ("endermite", 4),    // 4 segments
+        ("piglin", 15),      // player mesh: head(4)+2 ears, body, 2 arms+2 sleeves, 2 legs+2 pants
+        ("ghast", 10),       // body + 9 tentacles
+        ("cave_spider", 11), // spider mesh, scaled 0.7
+        ("husk", 7),         // zombie mesh, scaled 1.0625
+        ("wither_skeleton", 7), // skeleton mesh, scaled 1.2
+        ("hoglin", 11),      // body+mane, head+2 ears+2 horns, 4 legs
+        ("strider", 9),      // 2 legs, body + 6 bristles
+        ("guardian", 22),    // head(5) + 12 spikes + eye + tail(3)
     ];
     let models = entity_models();
     for (name, boxes) in expected {

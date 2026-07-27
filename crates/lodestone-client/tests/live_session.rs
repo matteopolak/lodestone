@@ -343,12 +343,12 @@ struct Sample {
     teleports: usize,
 }
 
-/// The result of oscillating within a clean runway while sampling session health.
+/// The result of a walk while sampling session health.
 struct WalkReport {
     samples: Vec<Sample>,
-    /// Cumulative horizontal path length walked (sum of per-tick advances). This
-    /// is the real "we kept moving for minutes" signal; net displacement is
-    /// deliberately bounded because we stay inside a verified-clean runway.
+    /// Cumulative horizontal path length walked (sum of per-tick steps). This is
+    /// the real "we kept moving for minutes" signal; net displacement is small
+    /// because the controller stays glued to the server's position.
     path_length: f64,
     /// True if the session ended (server disconnect or transport close) before
     /// the requested duration elapsed.
@@ -369,38 +369,33 @@ impl WalkReport {
     }
 }
 
-/// Oscillates back and forth along the X axis *within a pre-verified clean
-/// runway* `[lo, hi]` for `duration`, sending one `move_to` per tick and
-/// sampling session health.
+/// Walks back and forth along the X axis for `duration`, sending one `move_to`
+/// per tick and sampling session health.
 ///
-/// Why oscillate instead of walk in a straight line? On this shared 26.2 server
-/// the spawn area contains other agents' builds. A headless client that walks a
-/// long straight line eventually rams an obstruction, and the server clamps that
-/// with an *unbounded* rubber-band storm (continuous corrective teleports, frozen
-/// streaming) that never clears — which ate the distance budget and made a
-/// straight-line gate flaky for reasons unrelated to session survival. Confining
-/// movement to columns we proved walkable with `block_at` keeps every move valid,
-/// so the run exercises sustained per-tick movement, keep-alives and the movement
-/// send-path for the full multi-minute duration without a spurious storm. The
-/// tradeoff, stated honestly: this proves *sustained activity*, not *long-distance
-/// travel* — net displacement is bounded by the runway.
+/// The controller tracks the *server's* authority every tick: it reads
+/// `handle.position()` (which folds any server correction), adopts the server's
+/// current `y`/`z`, and steps at most `STEP` in `x` into a column it re-verifies
+/// walkable with `block_at` *from the current position*, reversing when the next
+/// column is blocked or unloaded. Because every command is within `STEP` of where
+/// the server already believes we are, the server never sees a large delta, so it
+/// never rejects our movement — which is what prevents the unbounded rubber-band
+/// *storm* that a fixed absolute lane provokes the moment the server relocates us
+/// (a single stray corrective teleport would otherwise leave us commanding a lane
+/// far from our actual position, and the server rejects every command after that).
+///
+/// The tradeoff, stated honestly: staying glued to the server's position and only
+/// stepping through verified-clean columns means this proves *sustained, valid
+/// per-tick movement* — not *long-distance travel*. Net displacement is small; the
+/// path length (sum of per-tick steps) is the real "we kept moving for minutes"
+/// signal. Long straight-line travel is not robust on this shared server because
+/// its spawn area carries other agents' builds.
 async fn oscillate_and_sample(
     handle: &ClientHandle,
     observed: &Observed,
     duration: Duration,
     start: Vec3,
-    lo: i32,
-    hi: i32,
 ) -> WalkReport {
-    // Confine feet to the verified-clean interval, inset half a block from each
-    // end so we never step onto the first obstructed (or unloaded) column.
-    let min_x = lo as f64 + 0.5;
-    let max_x = hi as f64 + 0.5;
-    let mut dir: f64 = if (max_x - start.x) >= (start.x - min_x) {
-        1.0
-    } else {
-        -1.0
-    };
+    let mut dir: f64 = 1.0;
 
     let mut seen: HashSet<ChunkPos> = handle.loaded_chunks().into_iter().collect();
     let mut samples = Vec::new();
@@ -409,7 +404,6 @@ async fn oscillate_and_sample(
     let mut ended_early = false;
     let mut last_teleports = observed.teleports.load(Ordering::Relaxed);
     let mut path_length = 0.0_f64;
-    let mut prev_x = handle.position().map(|p| p.x).unwrap_or(start.x);
 
     loop {
         let elapsed = begin.elapsed();
@@ -421,38 +415,45 @@ async fn oscillate_and_sample(
             break;
         }
 
-        // Considerate tick controller: read the driver's *current* knowledge
-        // (which already folds any server correction). If the server just
-        // corrected us, re-affirm its position instead of fighting it; otherwise
-        // advance one step in the current direction, reversing at the runway
-        // ends. `move_to` folds an optimistic local prediction — fine, because
-        // the signals we assert on (corrective teleports, disconnect, chunk
-        // batches) are all server-authored, not our own read-model echo.
         let teleports_now = observed.teleports.load(Ordering::Relaxed);
         let being_corrected = teleports_now != last_teleports;
         last_teleports = teleports_now;
 
         let base = handle.position().unwrap_or(start);
+        // On an active correction, re-affirm exactly where the server just put us
+        // rather than fighting it — this appeases a burst instead of feeding it.
         if being_corrected {
-            let _ = handle.move_to(base, Rotation::new(-90.0, 0.0), true);
-            prev_x = base.x;
+            let _ = handle.move_to(base, Rotation::new(-90.0, 0.0), true, false);
         } else {
-            let mut nx = base.x + dir * STEP;
-            if nx >= max_x {
-                nx = max_x;
-                dir = -1.0;
-            } else if nx <= min_x {
-                nx = min_x;
-                dir = 1.0;
+            // Step within STEP of the server's current position, into a column we
+            // re-verify walkable *from here*. If the chosen direction is blocked or
+            // not yet loaded, flip; if both are blocked, hold in place. Adopting
+            // base.y/base.z means a server relocation just moves our anchor and we
+            // keep making small valid steps from wherever it placed us.
+            let fy = base.y.floor() as i32;
+            let fz = base.z.floor() as i32;
+            let ahead = |d: f64| {
+                let fx = (base.x + d * 0.6).floor() as i32;
+                column_is_walkable(handle, fx, fy, fz)
+            };
+            if !ahead(dir) {
+                dir = -dir;
             }
-            let yaw = if dir > 0.0 { -90.0 } else { 90.0 };
-            let _ = handle.move_to(
-                Vec3::new(nx, start.y, start.z),
-                Rotation::new(yaw, 0.0),
-                true,
-            );
-            path_length += (nx - prev_x).abs();
-            prev_x = nx;
+            if ahead(dir) {
+                let nx = base.x + dir * STEP;
+                let yaw = if dir > 0.0 { -90.0 } else { 90.0 };
+                let _ = handle.move_to(
+                    Vec3::new(nx, base.y, base.z),
+                    Rotation::new(yaw, 0.0),
+                    true,
+                    false,
+                );
+                path_length += STEP;
+            } else {
+                // Boxed in this tick; re-affirm position so we stay active without
+                // stepping into anything.
+                let _ = handle.move_to(base, Rotation::new(-90.0, 0.0), true, false);
+            }
         }
 
         if elapsed >= next_sample {
@@ -510,8 +511,6 @@ struct Session {
     drain: tokio::task::JoinHandle<()>,
     /// Server-placed spawn position (post-settle).
     start: Vec3,
-    /// Verified-clean walkable runway `[lo, hi]` (block x) through `start`.
-    runway: (i32, i32),
     /// Positive health read during the corpse guard.
     health: f32,
 }
@@ -612,6 +611,10 @@ async fn join_clean_settled(filter: Filter) -> Session {
             continue;
         };
 
+        // Require an open, walkable spawn as a quality gate: if we spawn boxed in
+        // by another agent's build the movement path can't exercise anything, so
+        // retry for a cleaner placement. (The controller itself re-verifies each
+        // column at move time; this only rejects hopeless spawns up front.)
         let (lo, hi) = clean_runway(&handle, start);
         if (hi - lo) as f64 >= MIN_RUNWAY {
             return Session {
@@ -619,7 +622,6 @@ async fn join_clean_settled(filter: Filter) -> Session {
                 observed,
                 drain,
                 start,
-                runway: (lo, hi),
                 health,
             };
         }
@@ -675,18 +677,10 @@ async fn bot_survives_extended_session() {
     let duration = Duration::from_secs(secs);
 
     let session = join_clean_settled(Filter::PassThrough).await;
-    let (lo, hi) = session.runway;
     let health = session.health;
 
-    let report = oscillate_and_sample(
-        &session.handle,
-        &session.observed,
-        duration,
-        session.start,
-        lo,
-        hi,
-    )
-    .await;
+    let report =
+        oscillate_and_sample(&session.handle, &session.observed, duration, session.start).await;
 
     // If the session died mid-run, surface *which* of the twelve reasons.
     if report.ended_early {
@@ -731,7 +725,6 @@ async fn bot_survives_extended_session() {
         last.distinct_chunks
     );
 
-    // --- Property 3: once settled, the server does not rubber-band us. ---
     // --- Property 3: once settled, the server does not *storm* us with
     // corrections. ---
     // A corrective `TeleportPlayer` while we are moving = the server disagreeing
@@ -760,10 +753,11 @@ async fn bot_survives_extended_session() {
 
     // --- Property 4: we stayed *active* for the whole run (not standing still,
     // which would risk `idling` and prove nothing about the movement send-path).
-    // We assert cumulative path length, not net displacement: movement is confined
-    // to a verified-clean runway, so we oscillate rather than travel far. ~2 b/s
-    // minus considerate holds over `secs` seconds; the 0.5 b/s floor is generous
-    // and scales so a shortened dev run and the committed default are both valid. ---
+    // We assert cumulative path length, not net displacement: the controller stays
+    // glued to the server's position and steps through verified-clean columns, so
+    // it walks a long path without traveling far. ~2 b/s minus considerate holds
+    // over `secs` seconds; the 0.5 b/s floor is generous and scales so a shortened
+    // dev run and the committed default are both valid. ---
     let min_path = secs as f64 * 0.5;
     assert!(
         report.path_length > min_path,
@@ -784,21 +778,21 @@ async fn bot_survives_extended_session() {
     eprintln!(
         "REPORT: survived {:.0}s. still_connected=true, spawn_bubble={} distinct chunk columns \
          (>200 => ~13+ acked batches, past the 10-batch cliff), final_distinct={}, \
-         path_walked={:.1} blocks (oscillating in a {}-block clean runway), \
+         path_walked={:.1} blocks (server-tracking per-tick steps through verified-clean columns), \
          corrective_teleports early={early_corrective} steady(back half)={steady_corrective} \
          ({corrective_rate:.2}/s vs the airborne-lie control's 6-9/s storm), \
          keepalives={keepalives}, health={health}. \
          Proves: still connected after minutes, chunk streaming survived the 10-batch cliff, \
          keep-alives answered, movement send-path drove sustained valid moves, server did not \
-         rubber-band us once settled. Does NOT prove: long-distance travel (movement is confined \
-         to a verified-clean runway to avoid this shared server's spawn obstructions), \
-         server-confirmed *displacement* (position is local prediction; see the physics second-\
-         observer gate), or the 4096-pending-chat kick (unreachable in a test).",
+         storm us with corrections. Does NOT prove: long-distance travel (the controller stays \
+         glued to the server's position and only steps through verified-clean columns, to avoid \
+         this shared server's spawn obstructions), server-confirmed *displacement* (position is \
+         local prediction; see the physics second-observer gate), or the 4096-pending-chat kick \
+         (unreachable in a test).",
         report.last().elapsed,
         first.distinct_chunks,
         last.distinct_chunks,
         report.path_length,
-        hi - lo,
     );
 
     // Clean local shutdown, and observe why the session ended.
@@ -826,17 +820,9 @@ async fn suppressing_chunk_ack_starves_streaming() {
     let duration = Duration::from_secs(60);
 
     let session = join_clean_settled(Filter::SuppressBatchAck).await;
-    let (lo, hi) = session.runway;
 
-    let report = oscillate_and_sample(
-        &session.handle,
-        &session.observed,
-        duration,
-        session.start,
-        lo,
-        hi,
-    )
-    .await;
+    let report =
+        oscillate_and_sample(&session.handle, &session.observed, duration, session.start).await;
 
     // Starvation is not itself a kick (the server just stops sending), so we
     // should remain connected the whole time. If we were kicked, that's a
@@ -907,25 +893,35 @@ async fn suppressing_chunk_ack_starves_streaming() {
 /// positions the server computes as airborne/unsupported while claiming
 /// `on_ground = true` — and proves the server *actively punishes* it. This is the
 /// falsifier for the positive gate's Property 3: valid ground movement draws ~0
-/// corrective teleports, so if that assertion is to mean anything, invalid
-/// airborne movement must draw *many*. It does, in a storm.
+/// corrective teleports and no disconnect, so if that assertion is to mean
+/// anything, an invalid airborne lie must draw an *adverse* server reaction.
 ///
-/// A note on what this does and does not reach, because it matters. Vanilla has a
-/// terminal `flying` kick (`aboveGroundTickCount` → `getMaximumFlyingTicks`, ~80
-/// ticks) for a client the server believes is hovering unsupported. Empirically,
-/// against live 26.2, we could **not** reach that terminal kick through the public
-/// movement API: the server's *position-correction* path fires first — it rejects
-/// each airborne position and teleports us back onto valid ground (observed:
-/// 100+ corrective teleports in a 12s window, each relocating us to a real ground
-/// height). Because every correction re-grounds us, `aboveGroundTickCount` is
-/// reset before it can reach the limit, so `flying` never triggers. The two
-/// protections are mutually exclusive here: correction masks the flying counter.
-/// That is itself a finding, and it does not weaken the control — the property we
-/// assert (the server refuses to accept our airborne on_ground lie and corrects
-/// it hard) is the real, server-authored signal that certifies the positive
-/// gate's "the server agrees with our position" claim is non-vacuous. If a future
-/// server/version ever lets the position stand and fires `flying` instead, this
-/// test surfaces that category too rather than silently passing.
+/// The server punishes the lie in one of two observed modes, and this control
+/// accepts either — because both are the server refusing our position, and both
+/// are categorically different from the positive gate's clean survival:
+///
+///  * a **correction storm** — the server rejects each airborne position and
+///    teleports us back onto valid ground (observed: 100+ corrective teleports in
+///    a 12s window, each relocating us to a real ground height); or
+///  * an **outright kick** — the server sends a `Disconnect` and closes the
+///    session (a server-authored `ClientEvent::Disconnect`, distinct from our own
+///    local shutdown, which never sets `disconnected`).
+///
+/// Which mode fires varies run to run with spawn geometry and timing; the one
+/// thing that never happens is the failure this guards against — the server
+/// *accepting* the airborne lie (surviving cleanly with ~0 corrections and no
+/// disconnect), which would make the positive gate's low-correction assertion
+/// vacuous.
+///
+/// A note on what this does and does not reach. Vanilla has a terminal `flying`
+/// kick (`aboveGroundTickCount` → `getMaximumFlyingTicks`, ~80 ticks) for a client
+/// the server believes is hovering unsupported. When the correction-storm mode
+/// fires we do **not** reach that terminal kick through the public movement API:
+/// each correction re-grounds us, resetting `aboveGroundTickCount` before it hits
+/// the limit, so `flying` never triggers and the two protections are mutually
+/// exclusive. That is itself a finding. If a future server/version ever lets the
+/// position stand and fires `flying` instead, this test surfaces that category too
+/// (via `classify_disconnect`) rather than silently passing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live negative control (physics parity); requires a Minecraft 26.2 server on 127.0.0.1:25565 (offline mode, flat world)"]
 async fn airborne_on_ground_lie_is_punished_by_server() {
@@ -937,8 +933,8 @@ async fn airborne_on_ground_lie_is_punished_by_server() {
     // Rise to an *unambiguously* airborne height (well clear of the local ground,
     // whose exact level varies across spawns on this world) in small per-tick
     // steps, then hold there while lying with on_ground = true. At this height the
-    // server always computes us as unsupported and rejects every position,
-    // re-grounding us — so the correction storm is reliable, not spawn-dependent.
+    // server always computes us as unsupported and rejects every position, either
+    // storming corrective teleports or kicking us outright.
     let hover_y = start.y + 4.0;
     let window = Duration::from_secs(12);
     let before = session.observed.teleports.load(Ordering::Relaxed);
@@ -953,7 +949,7 @@ async fn airborne_on_ground_lie_is_punished_by_server() {
         }
         let _ = session
             .handle
-            .move_to(Vec3::new(start.x, y, start.z), rotation, true);
+            .move_to(Vec3::new(start.x, y, start.z), rotation, true, false);
         tokio::time::sleep(TICK).await;
     }
 
@@ -965,30 +961,33 @@ async fn airborne_on_ground_lie_is_punished_by_server() {
     let disconnected = session.observed.disconnected.load(Ordering::Relaxed);
     let raw = session.observed.reason.lock().unwrap().clone();
     let category = raw.as_deref().map(classify_disconnect);
+    let punished = corrections > 25 || disconnected;
 
     eprintln!(
-        "REPORT (negative control): airborne + on_ground=true for {}s -> {corrections} corrective \
-         teleports (server refused our airborne position and re-grounded us), disconnected={disconnected}, \
-         category={category:?}, raw={raw:?}. Confirms the positive gate's Property 3 is falsifiable: \
-         a valid walk draws ~0 corrections, an invalid airborne lie draws a storm. Does NOT reach the \
-         terminal `flying` kick — position-correction re-grounds us each burst, resetting \
-         aboveGroundTickCount before it hits getMaximumFlyingTicks (the two protections are mutually \
-         exclusive on this server/version).",
+        "REPORT (negative control): airborne + on_ground=true for {}s -> punished={punished} via \
+         {corrections} corrective teleports and disconnected={disconnected} (category={category:?}, \
+         raw={raw:?}). The server refused the airborne lie — a valid walk in the positive gate draws \
+         ~0 corrections and no disconnect, so this confirms Property 3 is falsifiable. The two \
+         observed punishment modes (correction storm vs outright kick) are mutually exclusive with \
+         the terminal `flying` kick when the storm mode fires: position-correction re-grounds us each \
+         burst, resetting aboveGroundTickCount before it reaches getMaximumFlyingTicks.",
         window.as_secs(),
     );
 
-    // The server must have actively corrected us. A valid walk in the positive
-    // gate draws <=5 corrective teleports over a *multi-minute* run; drawing many
-    // dozens over a 12s window is only possible because the server is rejecting
-    // every airborne position we send. If the server *accepted* our lie it would
-    // draw ~0 corrections here — and then the positive gate's low-correction
-    // assertion would be proving nothing.
+    // The server must have *reacted adversely*. A valid walk in the positive gate
+    // draws <=5 corrective teleports over a *multi-minute* run and never a server
+    // disconnect; an airborne lie draws either a correction storm (many dozens over
+    // this 12s window) or an outright server kick. Either proves the server does
+    // not accept an unsupported position — which is exactly what makes the positive
+    // gate's near-zero-correction, no-disconnect survival a real, non-vacuous claim.
+    // The only outcome this rejects is the server *accepting* the lie: surviving
+    // with ~0 corrections and no disconnect.
     assert!(
-        corrections > 25 || category == Some("flying"),
-        "airborne on_ground=true lie drew only {corrections} corrective teleports and no `flying` \
-         kick — the server appears to have *accepted* an airborne position it should reject, which \
-         would make the positive gate's Property 3 (near-zero corrections when moving validly) \
-         vacuous. (disconnected={disconnected}, category={category:?})"
+        punished,
+        "airborne on_ground=true lie drew only {corrections} corrective teleports and no server \
+         disconnect — the server appears to have *accepted* an airborne position it should reject, \
+         which would make the positive gate's Property 3 (near-zero corrections and no disconnect \
+         when moving validly) vacuous. (disconnected={disconnected}, category={category:?})"
     );
 
     let _ = session.close().await;

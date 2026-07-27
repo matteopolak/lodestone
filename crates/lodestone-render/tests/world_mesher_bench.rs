@@ -193,7 +193,7 @@ fn rd16_frame_cull_budget() {
     // Build the scene through the real lifecycle, but on the CPU: synthesise the
     // draw regions the arena would produce so the cull budget is measurable
     // without a GPU. (The GPU residency path is covered by the #[ignore] test.)
-    use lodestone_render::{ChunkSectionView, UniformLight};
+    use lodestone_render::{ChunkSectionView, LightGrid, UniformLight};
     use lodestone_render::{DrawRegion, WorldScene, compute_visibility};
 
     const RD: i32 = 16;
@@ -202,6 +202,10 @@ fn rd16_frame_cull_budget() {
 
     let mut scene = WorldScene::new();
     let light = UniformLight::default();
+    // One shared light for every neighbourhood slot — the benchmark meshes with
+    // the uniform bridge, matching the live pre-light path.
+    let lights: LightGrid<'_, UniformLight> =
+        core::array::from_fn(|_| core::array::from_fn(|_| core::array::from_fn(|_| Some(&light))));
     let mut drawable_quads = 0u64;
     for (instance, (&coord, sec)) in world.0.iter().enumerate() {
         let instance = instance as u32;
@@ -213,7 +217,7 @@ fn rd16_frame_cull_budget() {
             .find(|j| j.coord == coord)
             .map(|j| {
                 j.snapshot
-                    .build_mesh(&TerrainClassifier, &light, true)
+                    .build_mesh(&TerrainClassifier, &lights, true)
                     .quad_count()
             })
             .unwrap_or(0) as u32;

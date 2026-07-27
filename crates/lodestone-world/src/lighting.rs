@@ -363,13 +363,25 @@ impl LightDiff {
 ///
 /// The margin exists because this engine does not pull light in from neighbouring
 /// chunks (see the module seam note), so border cells can legitimately disagree
-/// with a server that lit them with neighbours loaded. A margin of `0` compares
-/// everything; a margin of `15` compares only cells no propagation could reach
-/// from another chunk. Light sections the `server` source left
-/// [`Missing`](LightData::Missing) are skipped — an elided section is not an
-/// assertion of zero, so there is nothing to check there.
+/// with a server that lit them with neighbours loaded.
+///
+/// A column is [`EDGE`] (16) wide, so no interior cell is more than 7 blocks from
+/// a border: **the margin must be less than `EDGE / 2` (8)**, or both axis loops
+/// collapse to empty and the diff compares zero cells — a vacuous pass that looks
+/// exactly like agreement. A `debug_assert` enforces this. A margin of `0`
+/// compares everything and is *exact* for uniform terrain, where every column is
+/// identical so no neighbour chunk could have contributed anything to exclude;
+/// use a small non-zero margin only when a horizontal light gradient makes the
+/// outermost columns depend on unseen neighbours. Light sections the `server`
+/// source left [`Missing`](LightData::Missing) are skipped — an elided section is
+/// not an assertion of zero, so there is nothing to check there.
 #[must_use]
 pub fn diff_column_light(ours: &ColumnLight, server: &ColumnLight, interior_margin: usize) -> LightDiff {
+    debug_assert!(
+        interior_margin < EDGE / 2,
+        "interior_margin {interior_margin} >= EDGE/2 ({}) compares zero cells — a vacuous pass",
+        EDGE / 2
+    );
     let mut diff = LightDiff::default();
     let sections = ours.light_section_count().min(server.light_section_count());
     let lo = interior_margin;
@@ -614,6 +626,16 @@ mod tests {
         let d = diff_column_light(&ours, &server, 0);
         assert_eq!(d.sky_disagreements, 1, "exactly the one differing cell");
         assert_eq!(d.block_disagreements, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "vacuous pass")]
+    fn diff_rejects_a_margin_that_would_compare_zero_cells() {
+        // A margin >= EDGE/2 collapses both axis loops to empty; the guard must
+        // catch it rather than returning a zero-cell "agreement".
+        let a = ColumnLight::new(1);
+        let b = ColumnLight::new(1);
+        let _ = diff_column_light(&a, &b, EDGE / 2);
     }
 
     #[test]

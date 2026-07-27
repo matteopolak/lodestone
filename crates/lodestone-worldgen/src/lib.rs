@@ -28,6 +28,7 @@
 pub mod aquifer;
 pub mod carver;
 pub mod density;
+pub mod feature;
 pub mod hash;
 pub mod math;
 pub mod noise;

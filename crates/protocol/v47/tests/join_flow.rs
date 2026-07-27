@@ -650,6 +650,7 @@ fn encode_move_uses_position_look() {
         pos: Vec3::new(1.0, 2.0, 3.0),
         rotation: Rotation::new(45.0, -20.0),
         on_ground: true,
+        horizontal_collision: false,
     };
     let (id, body) = adapter
         .encode_action(ConnectionState::Play, &action)
