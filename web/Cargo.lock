@@ -1058,6 +1058,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-entity"
+version = "0.1.0"
+dependencies = [
+ "lodestone-model",
+ "uuid",
+]
+
+[[package]]
 name = "lodestone-macros"
 version = "0.1.0"
 dependencies = [
@@ -1126,6 +1134,8 @@ name = "lodestone-server"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
+ "lodestone-entity",
+ "lodestone-model",
  "lodestone-net",
  "lodestone-worldgen",
  "thiserror",

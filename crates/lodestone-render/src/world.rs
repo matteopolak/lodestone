@@ -15,7 +15,7 @@
 //! no coordinate translation, and cross-section access stays the mesher's job
 //! via [`SectionNeighborhood`](crate::section::SectionNeighborhood).
 
-use lodestone_world::ChunkSection;
+use lodestone_world::{ChunkSection, LightData, SectionLight as WorldLight};
 
 use crate::section::{Cell, SectionView};
 
@@ -111,6 +111,78 @@ impl SectionLight for UniformLight {
     }
     fn sky_light(&self, _x: usize, _y: usize, _z: usize) -> u8 {
         self.sky_light
+    }
+}
+
+/// How to resolve *absent* (`Missing`) sky light for a section — the one light
+/// value `lodestone-world` deliberately cannot decide, because it depends on the
+/// dimension (there is no sky light in the nether/end) and on whether the
+/// section sits above the heightmap. The renderer's caller, which tracks the
+/// dimension, chooses this policy; the mesher never coerces a default itself.
+///
+/// It applies **only** to `Missing` sky data. A section that *stores* a sky
+/// value — including an all-air nether section stored as `0` — is real data and
+/// is returned unchanged, so this can never manufacture the too-bright-nether
+/// bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkyDefault {
+    /// Absent sky light is full daylight (`15`): an overworld section above the
+    /// heightmap that carried no light data of its own.
+    Full,
+    /// Absent sky light is `0`: the nether/end (no sky light at all), or a
+    /// section below the heightmap. The nether-safe choice — absent nether sky
+    /// must stay `0`, never default *up* to 15.
+    None,
+}
+
+/// Adapts a [`lodestone_world::SectionLight`] snapshot into this crate's per-cell
+/// [`SectionLight`] trait.
+///
+/// This is the render-side end of the light seam agreed with the light-engine
+/// owner (see the [`mesher`](crate::mesher) light-seam contract). It forwards
+/// resolved `u8` levels **verbatim** via the world snapshot's `sky_at`/`block_at`
+/// — the nibble unpacking stays on the storage side, so the mesher's smooth-
+/// lighting corner blend can never drift a nibble against storage — and it
+/// applies the dimension-aware [`SkyDefault`] **only** to genuinely absent
+/// (`Missing`) sky data. Block light is never defaulted up: absent block light
+/// resolves to `0`, which is correct everywhere.
+///
+/// One adapter wraps one section; a mesher builds `section_count`-plus-neighbour
+/// adapters and assembles them into the per-section light grid consumed by
+/// [`SectionSnapshot::build_mesh`](crate::mesher::SectionSnapshot::build_mesh).
+#[derive(Debug)]
+pub struct WorldSectionLight<'a> {
+    snapshot: &'a WorldLight,
+    sky_default: SkyDefault,
+}
+
+impl<'a> WorldSectionLight<'a> {
+    /// Wraps a `lodestone-world` light snapshot with the dimension's policy for
+    /// absent sky light.
+    #[must_use]
+    pub fn new(snapshot: &'a WorldLight, sky_default: SkyDefault) -> Self {
+        Self {
+            snapshot,
+            sky_default,
+        }
+    }
+}
+
+impl SectionLight for WorldSectionLight<'_> {
+    fn block_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        self.snapshot.block_at(x, y, z)
+    }
+
+    fn sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        match self.snapshot.sky {
+            // Absent data — the dimension policy decides, never the storage.
+            LightData::Missing => match self.sky_default {
+                SkyDefault::Full => 15,
+                SkyDefault::None => 0,
+            },
+            // Stored data (including a nether section's Uniform(0)) is verbatim.
+            _ => self.snapshot.sky_at(x, y, z),
+        }
     }
 }
 
@@ -257,5 +329,55 @@ mod tests {
         let c = view.cell(0, 0, 0);
         assert_eq!(c.block_light, 7);
         assert_eq!(c.sky_light, 12);
+    }
+
+    #[test]
+    fn world_section_light_forwards_levels_and_applies_explicit_sky_default() {
+        // Resolved levels forward verbatim — the nibble unpacking stays on the
+        // world side, so this adapter can never disagree with storage.
+        let lit = WorldLight {
+            sky: LightData::Uniform(12),
+            block: LightData::Uniform(7),
+        };
+        let a = WorldSectionLight::new(&lit, SkyDefault::Full);
+        assert_eq!(a.sky_light(1, 2, 3), 12);
+        assert_eq!(a.block_light(1, 2, 3), 7);
+
+        // Absent block light resolves to 0 everywhere and is never defaulted up.
+        let missing_block = WorldLight {
+            sky: LightData::Uniform(15),
+            block: LightData::Missing,
+        };
+        assert_eq!(
+            WorldSectionLight::new(&missing_block, SkyDefault::Full).block_light(0, 0, 0),
+            0
+        );
+
+        // The dimension policy applies to *absent* (Missing) sky and nothing
+        // else: overworld-above-heightmap -> 15, nether/end -> 0.
+        let missing_sky = WorldLight {
+            sky: LightData::Missing,
+            block: LightData::Uniform(0),
+        };
+        assert_eq!(
+            WorldSectionLight::new(&missing_sky, SkyDefault::Full).sky_light(5, 5, 5),
+            15
+        );
+        assert_eq!(
+            WorldSectionLight::new(&missing_sky, SkyDefault::None).sky_light(5, 5, 5),
+            0
+        );
+
+        // A section that *stores* sky 0 (an all-air nether section) is real data,
+        // not absence, so it reads 0 even under the Full policy — never defaulted
+        // up to 15. This is the nether-safety invariant.
+        let stored_dark_sky = WorldLight {
+            sky: LightData::Uniform(0),
+            block: LightData::Uniform(0),
+        };
+        assert_eq!(
+            WorldSectionLight::new(&stored_dark_sky, SkyDefault::Full).sky_light(8, 8, 8),
+            0
+        );
     }
 }

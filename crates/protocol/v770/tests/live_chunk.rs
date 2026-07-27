@@ -36,6 +36,7 @@
 //! `impl-client`'s half of the seam.
 #![cfg(feature = "live-chunk")]
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use lodestone_model::{
@@ -43,8 +44,12 @@ use lodestone_model::{
 };
 use lodestone_net::Connection;
 use lodestone_v770::V770Adapter;
+use lodestone_v770::block_states;
 use lodestone_v770::packet_ids::play;
-use lodestone_world::{ChunkColumn, ChunkPos as WorldChunkPos, PalettedContainer, World};
+use lodestone_world::{
+    ChunkColumn, ChunkPos as WorldChunkPos, LightProperties, PalettedContainer, World,
+    compute_column_light, diff_column_light,
+};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
@@ -341,4 +346,294 @@ async fn decodes_real_chunks_from_live_server() {
         "measured world heap       : {total_bytes} bytes total (blocks+biomes+light+heightmaps), {per_chunk:.0} B/chunk avg"
     );
     eprintln!("======================================================\n");
+}
+
+// ============================================================================
+// Live light oracle: impl-world's version-free light engine judged against the
+// real server.
+//
+// `compute_column_light` / `diff_column_light` (in lodestone-world) are the
+// engine and its cell-by-cell comparator. The engine needs two inputs, and this
+// crate is the only place that holds both:
+//
+//   * a protocol-776 `LightProperties` — block-state id → (opacity, emission).
+//     Only a version crate can supply this: the id numbering is 776-specific.
+//   * a real server's decoded `ColumnLight`. Every `level_chunk_with_light`
+//     carries the column's light and the adapter stores it on `LoadedChunk.light`.
+//
+// So the oracle is hosted here rather than in lodestone-world, which has neither.
+// ============================================================================
+
+/// A protocol-776 [`LightProperties`], indexed by block-state id.
+///
+/// The opacity/emission of a block are not in Mojang's data-generator report
+/// (they are code constants), so they come from the committable community
+/// dataset (`vendor/minecraft-data`), whose `filterLight`/`emitLight` are exactly
+/// vanilla's light-dampening and emission. We deliberately do **not** trust
+/// minecraft-data's own state-id numbering (it may drift from 776): instead we
+/// key its values by block *name* and resolve each 776 state id → name through
+/// this crate's authoritative generated table ([`block_states::block_name`]).
+struct V770LightProps {
+    /// `(opacity, emission)` per block-state id, `0..block_states::STATE_COUNT`.
+    by_state: Vec<(u8, u8)>,
+}
+
+impl V770LightProps {
+    /// Builds the table from vendored minecraft-data, keyed by block name.
+    fn load() -> Self {
+        // 1.21.11 is the newest vendored dataset; its block *names* cover the flat
+        // world's blocks (air/bedrock/dirt/grass_block). Blocks that exist in 26.2
+        // but not here default to opaque and are counted below — they cannot occur
+        // in the featureless flat column the gate actually judges.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../vendor/minecraft-data/data/pc/1.21.11/blocks.json"
+        );
+        let text = std::fs::read_to_string(path)
+            .expect("read vendored minecraft-data blocks.json (committable light source)");
+        let blocks: serde_json::Value =
+            serde_json::from_str(&text).expect("parse minecraft-data blocks.json");
+
+        let mut by_name: HashMap<String, (u8, u8)> = HashMap::new();
+        for block in blocks.as_array().expect("blocks.json is a JSON array") {
+            let name = block["name"].as_str().expect("block has a name").to_string();
+            let opacity = block["filterLight"].as_u64().unwrap_or(0) as u8;
+            let emission = block["emitLight"].as_u64().unwrap_or(0) as u8;
+            by_name.insert(name, (opacity, emission));
+        }
+
+        let mut by_state = vec![(0u8, 0u8); block_states::STATE_COUNT as usize];
+        let mut unmapped = 0usize;
+        for id in 0..block_states::STATE_COUNT {
+            let full = block_states::block_name(id).expect("state id in range");
+            let short = full.strip_prefix("minecraft:").unwrap_or(full);
+            match by_name.get(short) {
+                Some(&pair) => by_state[id as usize] = pair,
+                None => {
+                    // Default opaque, non-emitting: conservative for an unknown
+                    // solid, and irrelevant to the featureless column judged.
+                    by_state[id as usize] = (15, 0);
+                    unmapped += 1;
+                }
+            }
+        }
+        eprintln!(
+            "light props: {} of {} block-state ids mapped from minecraft-data 1.21.11 \
+             ({unmapped} unmapped, defaulted opaque)",
+            block_states::STATE_COUNT as usize - unmapped,
+            block_states::STATE_COUNT
+        );
+        Self { by_state }
+    }
+}
+
+impl LightProperties for V770LightProps {
+    fn opacity(&self, state: u32) -> u8 {
+        self.by_state.get(state as usize).map_or(0, |&(o, _)| o)
+    }
+
+    fn emission(&self, state: u32) -> u8 {
+        self.by_state.get(state as usize).map_or(0, |&(_, e)| e)
+    }
+}
+
+/// A deliberately wrong [`LightProperties`] where every block is transparent and
+/// unlit. Used as the gate's built-in negative control: with nothing blocking
+/// sky light it floods below the surface, so the oracle *must* report
+/// disagreements against the real server — proving the comparison actually
+/// checks values rather than trivially returning zero.
+struct AllTransparentProps;
+
+impl LightProperties for AllTransparentProps {
+    fn opacity(&self, _state: u32) -> u8 {
+        0
+    }
+
+    fn emission(&self, _state: u32) -> u8 {
+        0
+    }
+}
+
+/// Whether `column` is air at every cell from `min_y + 4` upward — i.e. only the
+/// flat world's 4-block bedrock/dirt/dirt/grass floor is present and nothing
+/// above it casts a shadow.
+///
+/// Such a column has a purely vertical sky-light profile identical to every
+/// other flat column, so its interior light does not depend on the (unseen)
+/// neighbouring chunks. That is what lets the oracle compare with
+/// `interior_margin = 0` — every cell, including chunk borders — without seam
+/// false positives. The seed-`lodestone` flat world also contains a village, so
+/// this rejects any column carrying structure.
+fn column_is_featureless_above(column: &ChunkColumn) -> bool {
+    let min_y = column.min_y();
+    let top = min_y + (column.section_count() as i32) * 16;
+    for y in (min_y + 4)..top {
+        for x in 0..16usize {
+            for z in 0..16usize {
+                if column.get_block(x, y, z) != 0 {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+#[tokio::test]
+#[ignore = "requires a live Minecraft server on 127.0.0.1:25565"]
+async fn computed_light_matches_server_oracle_on_flat_world() {
+    let server = ServerAddress {
+        host: "127.0.0.1".into(),
+        port: 25565,
+    };
+    let profile = LoginProfile {
+        username: unique_username(),
+        uuid: Uuid::new_v4(),
+    };
+    let adapter = V770Adapter::new();
+    let mut world = World::new();
+
+    // FAIL, never skip, when the server is unreachable (§12.52): a skipped gate
+    // reads as a pass, and this one exists to catch a light-engine regression.
+    let mut conn = Connection::connect("127.0.0.1:25565")
+        .await
+        .expect("connect to live server (gate fails, never skips, if unreachable)");
+    let mut state = ConnectionState::Handshaking;
+    for directive in adapter.begin_login(&profile, &server).expect("begin login") {
+        apply(&mut conn, &mut state, directive).await;
+    }
+
+    // Collect chunks. Light rides along in level_chunk_with_light and the adapter
+    // stores it on LoadedChunk.light; we ACK batches via `apply` exactly as the
+    // main test does, so delivery does not stall.
+    let mut chunks = 0usize;
+    let overall = Duration::from_secs(60);
+    let read_timeout = Duration::from_secs(5);
+    let collect_window = Duration::from_secs(8);
+    let target = 225usize;
+    let mut first_chunk_at: Option<Instant> = None;
+
+    let _ = tokio::time::timeout(overall, async {
+        loop {
+            if let Some(t) = first_chunk_at
+                && (chunks >= target || t.elapsed() >= collect_window)
+            {
+                break;
+            }
+            let read = tokio::time::timeout(read_timeout, conn.read_packet()).await;
+            let packet = match read {
+                Err(_) => break,
+                Ok(Ok(Some(packet))) => packet,
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) => panic!("read error: {err}"),
+            };
+            let (packet_id, payload) = packet;
+            let is_chunk = state == ConnectionState::Play
+                && packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT;
+            let result = adapter.handle_packet(&mut world, state, packet_id, &payload);
+            let directives = if is_chunk {
+                result.expect("real chunk decodes through the public seam")
+            } else {
+                result.unwrap_or_default()
+            };
+            for directive in directives {
+                match directive {
+                    Directive::Emit(ClientEvent::ChunkLoaded { .. }) => {
+                        chunks += 1;
+                        first_chunk_at.get_or_insert_with(Instant::now);
+                    }
+                    Directive::Emit(_) => {}
+                    other => apply(&mut conn, &mut state, other).await,
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        chunks >= 100,
+        "expected the flat world to stream chunks (got {chunks}); without chunks \
+         there is no server light to judge against"
+    );
+
+    let props = V770LightProps::load();
+
+    // Find the first column that is featureless above the surface, then judge our
+    // computed light against the server's for that column, cell by cell.
+    let mut judged = 0usize;
+    let mut report: Option<(i32, i32, usize)> = None;
+    for (pos, loaded) in world.iter() {
+        if !column_is_featureless_above(&loaded.column) {
+            continue;
+        }
+        let ours = compute_column_light(&loaded.column, &props);
+        // interior_margin = 0: compare every cell. The flat overworld has no
+        // horizontal light gradient, so even border cells are exact — there is no
+        // neighbour-chunk contribution to exclude. (impl-world suggested 15, but
+        // for a 16-wide column that collapses the compared range to empty
+        // [lo=15, hi=1] and would compare zero cells, the vacuous pass this
+        // project bans — reported back to impl-world.)
+        let d = diff_column_light(&ours, &loaded.light, 0);
+        println!(
+            "light oracle @ chunk ({}, {}): {} of {} cells differ (sky {}, block {})",
+            pos.x,
+            pos.z,
+            d.disagreements(),
+            d.cells_compared,
+            d.sky_disagreements,
+            d.block_disagreements
+        );
+        assert!(
+            d.cells_compared > 0,
+            "oracle compared zero cells at ({}, {}) — did the server elide all \
+             light sections?",
+            pos.x,
+            pos.z
+        );
+        assert_eq!(
+            d.disagreements(),
+            0,
+            "computed light disagrees with the live server at chunk ({}, {}): \
+             sky {}, block {} of {} cells",
+            pos.x,
+            pos.z,
+            d.sky_disagreements,
+            d.block_disagreements,
+            d.cells_compared
+        );
+
+        // Built-in negative control: an all-transparent world lets sky light
+        // flood below the surface, so the same comparison MUST now disagree.
+        // Without this, "0 of N differ" could mean the diff never actually
+        // checks anything (the vacuity this project keeps finding).
+        let broken = compute_column_light(&loaded.column, &AllTransparentProps);
+        let nd = diff_column_light(&broken, &loaded.light, 0);
+        println!(
+            "negative control @ chunk ({}, {}): {} of {} cells differ (transparent world)",
+            pos.x,
+            pos.z,
+            nd.disagreements(),
+            nd.cells_compared
+        );
+        assert!(
+            nd.disagreements() > 0,
+            "negative control: a transparent world must disagree with the server's \
+             light, but the oracle reported full agreement — the comparison is not \
+             actually checking cell values"
+        );
+
+        judged += 1;
+        report = Some((pos.x, pos.z, d.cells_compared));
+        break;
+    }
+
+    let (cx, cz, cells) =
+        report.expect("found no featureless flat column to judge light against");
+    assert!(judged > 0);
+    eprintln!("\n=== LIVE LIGHT ORACLE (compute_column_light vs server) ===");
+    eprintln!("judged chunk              : ({cx}, {cz})");
+    eprintln!("cells compared            : {cells} (0 disagreements)");
+    eprintln!("props source              : vendor/minecraft-data 1.21.11 blocks.json");
+    eprintln!("interior_margin           : 0 (flat overworld: no horizontal gradient)");
+    eprintln!("==========================================================\n");
 }

@@ -1,11 +1,12 @@
-//! Hermetic tests for the protocol 340 serverbound interaction encode arms.
+//! Hermetic tests for the protocol 754 serverbound interaction encode arms.
 //!
-//! Mirrors the v47 suite but asserts the 1.12-specific divergences: the off-hand
+//! Mirrors the v47 suite but asserts the 1.16-specific divergences: the off-hand
 //! exists (so `SwapItemWithOffhand` maps to `block_dig` status 6 and
 //! interact/interact-at carry a hand), `block_place` uses a varint hand and float
-//! cursor with no inline item, and the full `entity_action` id set is available
-//! (stop-riding-jump, open-inventory=7, elytra). The actions that genuinely
-//! cannot be expressed still fail loudly.
+//! cursor with no inline item, using an item in the air is the dedicated
+//! `use_item` packet (not the legacy `block_place` sentinel), and the full
+//! `entity_action` id set is available. The actions that genuinely cannot be
+//! expressed still fail loudly.
 
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{
@@ -16,14 +17,14 @@ use lodestone_model::{
 use lodestone_v735::V735Adapter;
 use lodestone_v735::packet_ids::play;
 use lodestone_v735::packets::game::{
-    BlockDig, BlockPlace, EntityAction, UseEntity, UseEntityAt, UseEntityInteract,
+    BlockDig, BlockPlace, EntityAction, UseEntity, UseEntityAt, UseEntityInteract, UseItem,
 };
 use lodestone_v735::packets::slot::Slot;
 use lodestone_v735::packets::window::{
     ServerboundCloseWindow, ServerboundHeldItemSlot, SetCreativeSlot,
 };
 
-const CTX: Ctx = Ctx { version: 340 };
+const CTX: Ctx = Ctx { version: 754 };
 
 fn decode<T: Decode>(bytes: &[u8]) -> T {
     let mut reader = Reader::new(bytes);
@@ -106,14 +107,14 @@ fn use_item_on_block_sends_hand_and_float_cursor_no_item() {
     let place: BlockPlace = decode(&body);
     assert_eq!(BlockPos::from(place.location), BlockPos::new(10, 70, -4));
     assert_eq!(place.direction, 5, "East ordinal");
-    assert_eq!(place.hand, 1, "off-hand carried on 1.12");
+    assert_eq!(place.hand, 1, "off-hand carried on 1.16");
     assert!((place.cursor_x - 0.5).abs() < 1e-6);
     assert!((place.cursor_y - 1.0).abs() < 1e-6);
     assert!((place.cursor_z - 0.25).abs() < 1e-6);
 }
 
 #[test]
-fn use_item_in_air_uses_sentinel_placement() {
+fn use_item_in_air_sends_dedicated_use_item() {
     let (id, body) = encode(&ClientAction::UseItem {
         hand: Hand::Main,
         rotation: Rotation {
@@ -122,15 +123,13 @@ fn use_item_in_air_uses_sentinel_placement() {
         },
         sequence: 0,
     });
-    assert_eq!(id, play::serverbound::BLOCK_PLACE);
-    let place: BlockPlace = decode(&body);
-    assert_eq!(BlockPos::from(place.location), BlockPos::new(-1, -1, -1));
-    assert_eq!(place.direction, -1);
-    assert_eq!(place.hand, 0);
+    assert_eq!(id, play::serverbound::USE_ITEM);
+    let use_item: UseItem = decode(&body);
+    assert_eq!(use_item.hand, 0, "main-hand ordinal");
 }
 
 #[test]
-fn interact_entity_carries_hand_on_1_12() {
+fn interact_entity_carries_hand_on_1_16() {
     let (id, body) = encode(&ClientAction::InteractEntity {
         entity_id: 42,
         interaction: EntityInteraction::Attack,
@@ -148,7 +147,7 @@ fn interact_entity_carries_hand_on_1_12() {
     });
     let interact: UseEntityInteract = decode(&body);
     assert_eq!(interact.mouse, 0);
-    assert_eq!(interact.hand, 1, "interact carries the hand on 1.12");
+    assert_eq!(interact.hand, 1, "interact carries the hand on 1.16");
 
     let (_, body) = encode(&ClientAction::InteractEntity {
         entity_id: 42,
@@ -169,7 +168,7 @@ fn interact_entity_carries_hand_on_1_12() {
 }
 
 #[test]
-fn player_commands_use_full_1_12_action_set() {
+fn player_commands_use_full_1_16_action_set() {
     for (command, action_id) in [
         (PlayerCommand::StopSleeping, 2),
         (PlayerCommand::StartSprinting, 3),
@@ -231,7 +230,7 @@ fn clearing_creative_slot_sends_empty_but_setting_needs_registry() {
 }
 
 #[test]
-fn actions_absent_from_1_12_fail_loudly() {
+fn actions_absent_from_1_16_fail_loudly() {
     let cases: [ClientAction; 3] = [
         ClientAction::Stab,
         ClientAction::SetPlayerInput(PlayerInput::EMPTY),

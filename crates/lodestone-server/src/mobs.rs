@@ -177,6 +177,7 @@ impl PathWorld for ChunkWorld {
 /// Configure it after spawning with [`add_goal`](SimMob::add_goal) and
 /// [`set_attack_target`](SimMob::set_attack_target); observe it with
 /// [`position`](SimMob::position) / [`path_searches`](SimMob::path_searches).
+#[derive(Debug)]
 pub struct SimMob<'w> {
     id: i32,
     mob: NavigatingMob<'w>,
@@ -227,6 +228,7 @@ impl<'w> SimMob<'w> {
 /// The [`ChunkWorld`] is borrowed (the mobs path over it), so the caller holds
 /// the world and hands it here. Drive the sim with [`tick`](MobSim::tick) once
 /// per game tick, or [`tick_for`](MobSim::tick_for) to run many.
+#[derive(Debug)]
 pub struct MobSim<'w> {
     world: &'w ChunkWorld,
     mobs: Vec<SimMob<'w>>,

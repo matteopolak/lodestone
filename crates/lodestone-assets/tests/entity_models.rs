@@ -98,6 +98,12 @@ fn quad_counts_match_vanilla_box_counts() {
         ("sheep", 6),        // head, body, 4 legs
         ("chicken", 8),      // head, beak, red_thing, body, 2 legs, 2 wings
         ("player_wide", 12), // head+hat, body+jacket, arms+sleeves, legs+pants
+        ("slime", 1),        // outer shell cube
+        ("magma_cube", 9),   // 8 stacked segments + inside cube
+        ("blaze", 13),       // head + 12 rods
+        ("squid", 9),        // body + 8 tentacles
+        ("bat", 9),          // body, head, 2 ears, 2 wings, 2 tips, feet
+        ("enderman", 7),     // head, hat, body, 2 arms, 2 legs
     ];
     let models = entity_models();
     for (name, boxes) in expected {

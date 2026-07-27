@@ -422,6 +422,268 @@ pub fn chicken_model() -> EntityModelDef {
     }
 }
 
+/// `SlimeModel.createOuterBodyLayer`: the translucent outer shell, a single
+/// 8×8×8 cube at `(-4,16,-4)` texOffs `(0,0)`, sheet 64×32. The inner core with
+/// eyes/mouth is a second render layer (translucent-over-opaque) and is left to
+/// the render pipeline; the outer cube is the recognisable silhouette.
+pub fn slime_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child(
+            "cube",
+            PartDef::new(PartPose::ZERO).with_cube(cube(
+                [-4.0, 16.0, -4.0],
+                [8.0, 8.0, 8.0],
+                [0.0, 0.0],
+            )),
+        ),
+    }
+}
+
+/// `MagmaCubeModel.createBodyLayer`: eight stacked 8×1×8 segments (`y = 16+i`)
+/// whose texel offset steps per the vanilla `u,v` schedule, plus a 4×4×4 inside
+/// cube. Sheet 64×64. The loop is mirrored structurally, not unrolled.
+pub fn magma_cube_model() -> EntityModelDef {
+    let mut root = PartDef::new(PartPose::ZERO);
+    for i in 0..8i32 {
+        let (mut u, mut v) = (0i32, 0i32);
+        if i > 0 && i < 4 {
+            v += 9 * i;
+        } else if i > 3 {
+            u = 32;
+            v += 9 * i - 36;
+        }
+        root = root.with_child(
+            &format!("cube{i}"),
+            PartDef::new(PartPose::ZERO).with_cube(cube(
+                [-4.0, (16 + i) as f32, -4.0],
+                [8.0, 1.0, 8.0],
+                [u as f32, v as f32],
+            )),
+        );
+    }
+    root = root.with_child(
+        "inside_cube",
+        PartDef::new(PartPose::ZERO).with_cube(cube([-2.0, 18.0, -2.0], [4.0, 4.0, 4.0], [24.0, 40.0])),
+    );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `BlazeModel.createBodyLayer`: a head plus twelve rods placed on three rings
+/// (radii 9/7/5, offset angles `0`/`π/4`/`0.47123894`), sheet 64×32. Positions
+/// come from the exact vanilla trig loop; `Mth.cos`/`sin` are approximated by
+/// `f32` trig (sub-pixel identical for placement).
+pub fn blaze_model() -> EntityModelDef {
+    let mut root = PartDef::new(PartPose::ZERO).with_child(
+        "head",
+        PartDef::new(PartPose::ZERO).with_cube(cube([-4.0, -4.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0])),
+    );
+    let rod = |x: f32, y: f32, z: f32| {
+        PartDef::new(PartPose::offset(x, y, z))
+            .with_cube(cube([0.0, 0.0, 0.0], [2.0, 8.0, 2.0], [0.0, 16.0]))
+    };
+    let mut idx = 0usize;
+    // Ring 0: i in 0..4, y = -2 + cos(i*2*0.25); Ring 1: i in 4..8, y = 2 + cos(i*2*0.25);
+    // Ring 2: i in 8..12, y = 11 + cos(i*1.5*0.5). The cos-arg uses vanilla's
+    // absolute `i`, so the three loops keep distinct `i` ranges.
+    {
+        let mut angle = 0.0f32;
+        for i in 0..4 {
+            let x = angle.cos() * 9.0;
+            let y = -2.0 + ((i as f32) * 2.0 * 0.25).cos();
+            let z = angle.sin() * 9.0;
+            root.children.push((format!("part{idx}"), rod(x, y, z)));
+            idx += 1;
+            angle += PI / 2.0;
+        }
+        angle = PI / 4.0;
+        for i in 4..8 {
+            let x = angle.cos() * 7.0;
+            let y = 2.0 + ((i as f32) * 2.0 * 0.25).cos();
+            let z = angle.sin() * 7.0;
+            root.children.push((format!("part{idx}"), rod(x, y, z)));
+            idx += 1;
+            angle += PI / 2.0;
+        }
+        angle = 0.47123894;
+        for i in 8..12 {
+            let x = angle.cos() * 5.0;
+            let y = 11.0 + ((i as f32) * 1.5 * 0.5).cos();
+            let z = angle.sin() * 5.0;
+            root.children.push((format!("part{idx}"), rod(x, y, z)));
+            idx += 1;
+            angle += PI / 2.0;
+        }
+    }
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `SquidModel.createBodyLayer`: a 12×16×12 body plus eight 2×18×2 tentacles
+/// evenly placed on a radius-5 ring, each yaw-rotated to face outward. Sheet
+/// 64×32. Positions/rotations come from the exact vanilla loop.
+pub fn squid_model() -> EntityModelDef {
+    let mut root = PartDef::new(PartPose::ZERO).with_child(
+        "body",
+        PartDef::new(PartPose::offset(0.0, 8.0, 0.0)).with_cube(cube(
+            [-6.0, -8.0, -6.0],
+            [12.0, 16.0, 12.0],
+            [0.0, 0.0],
+        )),
+    );
+    for i in 0..8i32 {
+        let a = (i as f32) * std::f32::consts::TAU / 8.0;
+        let x = a.cos() * 5.0;
+        let z = a.sin() * 5.0;
+        let y_rot = (i as f32) * -std::f32::consts::TAU / 8.0 + PI / 2.0;
+        root.children.push((
+            format!("tentacle{i}"),
+            PartDef::new(PartPose::offset_and_rotation(x, 15.0, z, 0.0, y_rot, 0.0)).with_cube(cube(
+                [-1.0, 0.0, -1.0],
+                [2.0, 18.0, 2.0],
+                [48.0, 0.0],
+            )),
+        ));
+    }
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `BatModel.createBodyLayer`: body, head with two flat ears, folded wings
+/// (each a wing + wing-tip child on the body) and flat feet. Sheet **32×32** —
+/// the only small-sheet entry in the batch, which the real-PNG coverage test
+/// pins. Zero-thickness parts are intentional (vanilla flat quads).
+pub fn bat_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::offset(0.0, 17.0, 0.0))
+        .with_cube(cube([-1.5, 0.0, -1.0], [3.0, 5.0, 2.0], [0.0, 0.0]))
+        .with_child(
+            "right_wing",
+            PartDef::new(PartPose::offset(-1.5, 0.0, 0.0))
+                .with_cube(cube([-2.0, -2.0, 0.0], [2.0, 7.0, 0.0], [12.0, 0.0]))
+                .with_child(
+                    "right_wing_tip",
+                    PartDef::new(PartPose::offset(-2.0, 0.0, 0.0)).with_cube(cube(
+                        [-6.0, -2.0, 0.0],
+                        [6.0, 8.0, 0.0],
+                        [16.0, 0.0],
+                    )),
+                ),
+        )
+        .with_child(
+            "left_wing",
+            PartDef::new(PartPose::offset(1.5, 0.0, 0.0))
+                .with_cube(cube([0.0, -2.0, 0.0], [2.0, 7.0, 0.0], [12.0, 7.0]))
+                .with_child(
+                    "left_wing_tip",
+                    PartDef::new(PartPose::offset(2.0, 0.0, 0.0)).with_cube(cube(
+                        [0.0, -2.0, 0.0],
+                        [6.0, 8.0, 0.0],
+                        [16.0, 8.0],
+                    )),
+                ),
+        )
+        .with_child(
+            "feet",
+            PartDef::new(PartPose::offset(0.0, 5.0, 0.0)).with_cube(cube(
+                [-1.5, 0.0, 0.0],
+                [3.0, 2.0, 0.0],
+                [16.0, 16.0],
+            )),
+        );
+    let head = PartDef::new(PartPose::offset(0.0, 17.0, 0.0))
+        .with_cube(cube([-2.0, -3.0, -1.0], [4.0, 3.0, 2.0], [0.0, 7.0]))
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset(-1.5, -2.0, 0.0)).with_cube(cube(
+                [-2.5, -4.0, 0.0],
+                [3.0, 5.0, 0.0],
+                [1.0, 15.0],
+            )),
+        )
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset(1.1, -3.0, 0.0)).with_cube(cube(
+                [-0.1, -3.0, 0.0],
+                [3.0, 5.0, 0.0],
+                [8.0, 15.0],
+            )),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO)
+            .with_child("body", body)
+            .with_child("head", head),
+    }
+}
+
+/// `EndermanModel.createBodyLayer`: starts from the humanoid mesh but replaces
+/// every part, so it is authored directly — small head with a `-0.5` hat, a
+/// slim body, and the characteristic 2×30×2 arms and legs. Sheet 64×32.
+pub fn enderman_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -13.0, 0.0))
+        .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]))
+        .with_child(
+            "hat",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 16.0]).grown(-0.5)),
+        );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, -14.0, 0.0)).with_cube(cube(
+                [-4.0, 0.0, -2.0],
+                [8.0, 12.0, 4.0],
+                [32.0, 16.0],
+            )),
+        )
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-5.0, -12.0, 0.0)).with_cube(cube(
+                [-1.0, -2.0, -1.0],
+                [2.0, 30.0, 2.0],
+                [56.0, 0.0],
+            )),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(5.0, -12.0, 0.0)).with_cube(
+                cube([-1.0, -2.0, -1.0], [2.0, 30.0, 2.0], [56.0, 0.0]).mirrored(),
+            ),
+        )
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-2.0, -5.0, 0.0)).with_cube(cube(
+                [-1.0, 0.0, -1.0],
+                [2.0, 30.0, 2.0],
+                [56.0, 0.0],
+            )),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(2.0, -5.0, 0.0)).with_cube(
+                cube([-1.0, 0.0, -1.0], [2.0, 30.0, 2.0], [56.0, 0.0]).mirrored(),
+            ),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
 fn player_wide() -> EntityModelDef {
     player_model(false)
 }
@@ -483,6 +745,59 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             name: "chicken",
             texture: "entity/chicken/chicken_temperate",
             build: chicken_model,
+        },
+        // Tier 2: common overworld/hostile expansion. Texture-only variants reuse
+        // an existing builder because vanilla renders them with the same model
+        // class (only the placement scale, applied by the renderer, differs).
+        EntityModelEntry {
+            name: "husk",
+            texture: "entity/zombie/husk",
+            build: zombie_model,
+        },
+        EntityModelEntry {
+            name: "stray",
+            texture: "entity/skeleton/stray",
+            build: skeleton_model,
+        },
+        EntityModelEntry {
+            name: "wither_skeleton",
+            texture: "entity/skeleton/wither_skeleton",
+            build: skeleton_model,
+        },
+        EntityModelEntry {
+            name: "cave_spider",
+            texture: "entity/spider/cave_spider",
+            build: spider_model,
+        },
+        EntityModelEntry {
+            name: "slime",
+            texture: "entity/slime/slime",
+            build: slime_model,
+        },
+        EntityModelEntry {
+            name: "magma_cube",
+            texture: "entity/slime/magmacube",
+            build: magma_cube_model,
+        },
+        EntityModelEntry {
+            name: "blaze",
+            texture: "entity/blaze/blaze",
+            build: blaze_model,
+        },
+        EntityModelEntry {
+            name: "squid",
+            texture: "entity/squid/squid",
+            build: squid_model,
+        },
+        EntityModelEntry {
+            name: "bat",
+            texture: "entity/bat/bat",
+            build: bat_model,
+        },
+        EntityModelEntry {
+            name: "enderman",
+            texture: "entity/enderman/enderman",
+            build: enderman_model,
         },
     ]
 }

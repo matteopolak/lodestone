@@ -31,7 +31,7 @@ fn set_action_bar_text_emits_game_info_chat() {
         )
         .expect("handle set_action_bar_text");
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Chat { text, kind })] => {
+        [Directive::Emit(ClientEvent::Chat { text, kind, .. })] => {
             assert_eq!(text.to_plain_string(), "Go!");
             assert_eq!(*kind, ChatKind::GameInfo);
         }

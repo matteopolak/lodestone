@@ -323,6 +323,7 @@ async fn chunk_applied_through_sink_and_only_notice_is_forwarded() {
                 Directive::Emit(ClientEvent::Chat {
                     text: Text::literal("after"),
                     kind: ChatKind::System,
+                    ack: None,
                 }),
             ],
         );

@@ -1,11 +1,11 @@
-//! Hermetic tests for protocol 340 entity-metadata, slot and window packets.
+//! Hermetic tests for protocol 754 entity-metadata, slot and window packets.
 //!
 //! Every packet round-trips (decode∘encode is identity *and* re-encode
 //! reproduces the exact bytes), malformed/truncated input yields a clean
-//! `Err` rather than a panic, and the modern metadata framing (`0xFF`
+//! `Err` rather than a panic, and the 1.16 metadata framing (`0xFF`
 //! terminator, per-entry `type: varint`) is pinned with byte-level goldens.
-//! Unlike 1.8's 3-bit type field, 1.12's varint type can name a nonexistent
-//! serializer, so there is an explicit invalid-type-id test here.
+//! The varint type can name a nonexistent serializer, so there is an explicit
+//! invalid-type-id test here.
 
 use lodestone_core::{Ctx, Decode, Encode, Error, Packet, Reader, Writer};
 use lodestone_v735::packet_ids::{BOUND_CLIENTBOUND, BOUND_SERVERBOUND, STATE_PLAY, id_for, play};
@@ -19,7 +19,7 @@ use lodestone_v735::packets::window::{
 };
 use uuid::Uuid;
 
-const CTX: Ctx = Ctx { version: 340 };
+const CTX: Ctx = Ctx { version: 754 };
 
 fn encode<T: Encode>(value: &T) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -54,7 +54,7 @@ fn tiny_nbt() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Slot (identical wire format to 1.8)
+// Slot (1.13.1 format: present bool, varint id, count, nbt — no damage)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -63,27 +63,26 @@ fn slot_variants_round_trip() {
     round_trip(&Slot::Item {
         id: 1,
         count: 64,
-        damage: 0,
         nbt: None,
     });
     round_trip(&Slot::Item {
         id: 267,
         count: 1,
-        damage: 5,
         nbt: Some(tiny_nbt()),
     });
 }
 
 #[test]
 fn slot_truncated_is_clean_error() {
+    // present == true, then the varint id is truncated → clean EOF.
     assert!(matches!(
-        try_decode::<Slot>(&[0x00, 0x01]),
+        try_decode::<Slot>(&[0x01]),
         Err(Error::UnexpectedEof)
     ));
 }
 
 // ---------------------------------------------------------------------------
-// Entity metadata (1.12: key:u8, type:varint, 0xFF terminator)
+// Entity metadata (1.16: key:u8, type:varint, 0xFF terminator)
 // ---------------------------------------------------------------------------
 
 fn sample_metadata() -> EntityMetadata {
@@ -113,7 +112,6 @@ fn sample_metadata() -> EntityMetadata {
             value: MetadataValue::Slot(Slot::Item {
                 id: 276,
                 count: 1,
-                damage: 0,
                 nbt: None,
             }),
         },
@@ -187,8 +185,8 @@ fn metadata_entry_layout_is_key_then_type() {
         value: MetadataValue::Bool(true),
     }]);
     let bytes = encode(&meta);
-    // key (5), type (6 = bool), value (0x01), terminator (0xFF).
-    assert_eq!(bytes, vec![0x05, 0x06, 0x01, 0xFF]);
+    // key (5), type (7 = bool in 1.16), value (0x01), terminator (0xFF).
+    assert_eq!(bytes, vec![0x05, 0x07, 0x01, 0xFF]);
 }
 
 #[test]
@@ -233,7 +231,6 @@ fn spawn_entity_living_round_trips() {
         velocity_x: 1,
         velocity_y: 0,
         velocity_z: -2,
-        metadata: sample_metadata(),
     });
 }
 
@@ -246,50 +243,31 @@ fn entity_metadata_packet_round_trips() {
 }
 
 // ---------------------------------------------------------------------------
-// Window packets (structurally identical to 1.8)
+// Window packets (1.14+ open_window: varint id/type, chat title)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn open_window_chest_has_no_entity_id() {
+fn open_window_is_a_flat_varint_triple() {
     let chest = OpenWindow {
         window_id: 1,
-        inventory_type: "minecraft:chest".into(),
+        inventory_type: 2,
         window_title: "{\"text\":\"Chest\"}".into(),
-        slot_count: 27,
-        entity_id: None,
     };
     round_trip(&chest);
-    let back: OpenWindow = decode(&encode(&chest));
-    assert_eq!(back.entity_id, None);
+    // window_id (1), menu type (2), then the length-prefixed title.
+    let bytes = encode(&chest);
+    assert_eq!(&bytes[..2], &[0x01, 0x02]);
 }
 
 #[test]
-fn open_window_horse_carries_entity_id() {
-    round_trip(&OpenWindow {
-        window_id: 2,
-        inventory_type: "EntityHorse".into(),
-        window_title: "{\"text\":\"Horse\"}".into(),
-        slot_count: 2,
-        entity_id: Some(1337),
-    });
-}
-
-#[test]
-fn open_window_horse_without_entity_id_is_an_encode_error() {
-    // The `when` invariant: a horse window with no entity id cannot be
-    // faithfully encoded, so it fails loudly rather than writing a bogus 0.
-    let invalid = OpenWindow {
-        window_id: 2,
-        inventory_type: "EntityHorse".into(),
-        window_title: "{\"text\":\"Horse\"}".into(),
-        slot_count: 2,
-        entity_id: None,
-    };
-    let mut writer = Writer::default();
-    assert!(
-        invalid.encode(&mut writer, CTX).is_err(),
-        "EntityHorse with entity_id None must be an encode error"
-    );
+fn open_window_round_trips_various_menu_types() {
+    for (window_id, menu) in [(2, 20), (127, 0), (5, 11)] {
+        round_trip(&OpenWindow {
+            window_id,
+            inventory_type: menu,
+            window_title: "{\"text\":\"W\"}".into(),
+        });
+    }
 }
 
 #[test]
@@ -301,7 +279,6 @@ fn window_items_round_trips_with_i16_count() {
             Slot::Item {
                 id: 1,
                 count: 32,
-                damage: 0,
                 nbt: None,
             },
         ],
@@ -319,7 +296,6 @@ fn simple_window_packets_round_trip() {
         item: Slot::Item {
             id: 5,
             count: 1,
-            damage: 0,
             nbt: None,
         },
     });
@@ -340,7 +316,6 @@ fn simple_window_packets_round_trip() {
         item: Slot::Item {
             id: 264,
             count: 64,
-            damage: 0,
             nbt: None,
         },
     });

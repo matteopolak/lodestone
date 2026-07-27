@@ -130,6 +130,51 @@ fn text_flattens_nested_extra_children() {
 }
 
 #[test]
+fn chat_events_carry_acknowledgement_inputs_for_signed_messages() {
+    let shown = ClientEvent::Chat {
+        text: Text::literal("hello"),
+        kind: ChatKind::Chat,
+        ack: Some(ChatAckInfo {
+            signature: vec![1, 2, 3, 4],
+            global_index: 12,
+            was_shown: true,
+        }),
+    };
+    let filtered = ClientEvent::Chat {
+        text: Text::literal("filtered"),
+        kind: ChatKind::Chat,
+        ack: Some(ChatAckInfo {
+            signature: vec![5, 6, 7, 8],
+            global_index: 13,
+            was_shown: false,
+        }),
+    };
+
+    assert!(matches!(
+        shown,
+        ClientEvent::Chat {
+            ack: Some(ChatAckInfo {
+                signature,
+                global_index: 12,
+                was_shown: true,
+            }),
+            ..
+        } if signature == vec![1, 2, 3, 4]
+    ));
+    assert!(matches!(
+        filtered,
+        ClientEvent::Chat {
+            ack: Some(ChatAckInfo {
+                signature,
+                global_index: 13,
+                was_shown: false,
+            }),
+            ..
+        } if signature == vec![5, 6, 7, 8]
+    ));
+}
+
+#[test]
 fn legacy_text_parser_tracks_color_and_format_segments() {
     let text = Text::from_legacy("Plain §cRed §lBold§r Normal");
 
@@ -993,6 +1038,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         },
         ClientAction::DropSelectedItem,
         ClientAction::DropSelectedItemStack,
+        ClientAction::ChatAck { offset: 65 },
         ClientAction::SwapItemWithOffhand,
         ClientAction::ReleaseUseItem,
         ClientAction::Stab,
@@ -1059,7 +1105,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         },
     ];
 
-    assert_eq!(actions.len(), 17);
+    assert_eq!(actions.len(), 18);
     assert!(matches!(
         &actions[0],
         ClientAction::BlockAction {
@@ -1070,7 +1116,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         }
     ));
     assert!(matches!(
-        &actions[6],
+        &actions[7],
         ClientAction::UseItemOn {
             sequence: 42,
             cursor,
@@ -1078,7 +1124,7 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         } if *cursor == Vec3f::new(0.5, 1.0, 0.25)
     ));
     assert!(matches!(
-        &actions[10],
+        &actions[11],
         ClientAction::ContainerClick {
             click_type: ContainerClickType::Pickup,
             changed_slots,
@@ -1091,12 +1137,16 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
         ClientActionKind::BlockAction
     );
     assert_eq!(
-        ClientActionKind::from(&actions[10]),
+        ClientActionKind::from(&actions[11]),
         ClientActionKind::ContainerClick
     );
     assert_eq!(
-        ClientActionKind::from(&actions[14]),
+        ClientActionKind::from(&actions[15]),
         ClientActionKind::SetPlayerInput
+    );
+    assert_eq!(
+        ClientActionKind::from(&actions[3]),
+        ClientActionKind::ChatAck
     );
     assert_eq!(PlayerInput::default(), PlayerInput::EMPTY);
 }

@@ -10,12 +10,12 @@ use lodestone_model::{
     AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor,
     BossOverlay, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent, ClientSettings,
     CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType, ContainerSlotChange,
-    Difficulty, Directive, DisplayedSkinParts, DisplaySlot, EntityInteraction, EntityMovement,
-    EquipmentSlot, EntityEquipment, GameMode, Hand, ItemStack, LoginProfile, MainHand,
-    NumberFormat, ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand, PlayerInput,
-    PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress,
-    SoundCategory, TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3,
-    Vec3f, VersionAdapter, Visibility, WorldSink,
+    Difficulty, Directive, DisplaySlot, DisplayedSkinParts, EntityEquipment, EntityInteraction,
+    EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile, MainHand, NumberFormat,
+    ObjectiveMode, ObjectiveRenderType, ParticleStatus, PlayerCommand, PlayerInput,
+    PlayerListEntry, ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, SoundCategory,
+    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
+    VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
@@ -27,22 +27,24 @@ use crate::menus::menu_name;
 use crate::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
-use crate::packets::common::{BrandPayload, ClientInformation, KeepAlive, Pong, ResourcePackResponse};
+use crate::packets::common::{
+    BrandPayload, ClientInformation, KeepAlive, Pong, ResourcePackResponse,
+};
 use crate::packets::configuration::{
     AcceptCodeOfConduct, FinishConfiguration, ServerboundKnownPacks,
 };
 use crate::packets::entity::{read_lp_vec3, unpack_degrees};
 use crate::packets::game::{
     ABILITY_FLAG_CAN_FLY, ABILITY_FLAG_FLYING, ABILITY_FLAG_INSTABUILD, ABILITY_FLAG_INVULNERABLE,
-    AcceptTeleportation, Attack, ChatCommand, ChatMessage, ChunkBatchFinished, ChunkBatchReceived,
-    ClientCommand, ClientTickEnd, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
-    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ConfigurationAcknowledged, ContainerButtonClick,
-    ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent, LevelParticles,
-    MOVE_FLAG_ON_GROUND, MovePlayerPosRot, PickItemFromBlock, PickItemFromEntity, PlayerAbilities,
-    PlayerAction, PlayerCommand as PlayerCommandPacket, PlayerInput as PlayerInputPacket,
-    RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING, SelectTrade, ServerboundPlayerAbilities,
-    SetCarriedItem, SetCommandBlock, SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing,
-    UseItem, UseItemOn,
+    AcceptTeleportation, Attack, COMMAND_BLOCK_FLAG_AUTOMATIC, COMMAND_BLOCK_FLAG_CONDITIONAL,
+    COMMAND_BLOCK_FLAG_TRACK_OUTPUT, ChatCommand, ChatMessage, ChunkBatchFinished,
+    ChunkBatchReceived, ClientCommand, ClientTickEnd, ConfigurationAcknowledged,
+    ContainerButtonClick, ContainerClose, EditBook, GameEvent, GameLogin, LevelEvent,
+    LevelParticles, MOVE_FLAG_ON_GROUND, MovePlayerPosRot, PickItemFromBlock, PickItemFromEntity,
+    PlayerAbilities, PlayerAction, PlayerCommand as PlayerCommandPacket,
+    PlayerInput as PlayerInputPacket, RenameItem, Respawn, SERVERBOUND_ABILITY_FLAG_FLYING,
+    SelectTrade, ServerboundPlayerAbilities, SetCarriedItem, SetCommandBlock,
+    SetDefaultSpawnPosition, SetHealth, SignUpdate, Swing, UseItem, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{
@@ -119,7 +121,9 @@ impl V770Adapter {
         match self.batch.lock() {
             Ok(mut state) => {
                 let duration_nanos = state.batch_start.elapsed().as_nanos() as f64;
-                state.calculator.on_batch_finished(batch_size, duration_nanos);
+                state
+                    .calculator
+                    .on_batch_finished(batch_size, duration_nanos);
                 state.calculator.desired_chunks_per_tick()
             }
             Err(_) => ChunkBatchSizeCalculator::new().desired_chunks_per_tick(),
@@ -335,8 +339,9 @@ fn encode_container_click(
     })?;
     w.i8(button_i8);
     w.var_i32(container_input_ordinal(click_type));
-    let count = i32::try_from(changed_slots.len())
-        .map_err(|_| AdapterError::Encode("too many changed slots in container click".to_owned()))?;
+    let count = i32::try_from(changed_slots.len()).map_err(|_| {
+        AdapterError::Encode("too many changed slots in container click".to_owned())
+    })?;
     w.var_i32(count);
     for change in changed_slots {
         let change_slot = i16::try_from(change.slot).map_err(|_| {
@@ -464,8 +469,9 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result
     match item {
         None => w.var_i32(0),
         Some(stack) => {
-            let count = i32::try_from(stack.count)
-                .map_err(|_| AdapterError::Encode(format!("item count {} overflows i32", stack.count)))?;
+            let count = i32::try_from(stack.count).map_err(|_| {
+                AdapterError::Encode(format!("item count {} overflows i32", stack.count))
+            })?;
             w.var_i32(count);
             w.var_i32(item_registry_id(stack)?);
             w.var_i32(0); // added components
@@ -490,8 +496,9 @@ fn write_hashed_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), Ad
         Some(stack) => {
             w.bool(true);
             w.var_i32(item_registry_id(stack)?);
-            let count = i32::try_from(stack.count)
-                .map_err(|_| AdapterError::Encode(format!("item count {} overflows i32", stack.count)))?;
+            let count = i32::try_from(stack.count).map_err(|_| {
+                AdapterError::Encode(format!("item count {} overflows i32", stack.count))
+            })?;
             w.var_i32(count);
             w.var_i32(0); // added components
             w.var_i32(0); // removed components
@@ -505,7 +512,10 @@ fn write_hashed_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), Ad
 /// flag, then, only if present, the effect's `minecraft:mob_effect` registry
 /// id as a direct VarInt (`holderRegistry`, unlike the sound-holder codec, has
 /// no inline-definition escape id).
-fn write_optional_mob_effect(w: &mut Writer, effect: Option<&ResourceKey>) -> Result<(), AdapterError> {
+fn write_optional_mob_effect(
+    w: &mut Writer,
+    effect: Option<&ResourceKey>,
+) -> Result<(), AdapterError> {
     match effect {
         None => w.bool(false),
         Some(key) => {
@@ -669,7 +679,6 @@ fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         source_pos,
     })])
 }
-
 
 /// Builds a [`Directive::Send`] from a packet id and an encodable body.
 fn send<T: Encode>(packet_id: i32, packet: &T) -> Result<Directive, AdapterError> {
@@ -1368,6 +1377,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::literal(text),
                 kind,
+                ack: None,
             })]);
         }
         if packet_id == play::clientbound::SET_ACTION_BAR_TEXT {
@@ -1383,6 +1393,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Chat {
                 text: Text::literal(text),
                 kind: ChatKind::GameInfo,
+                ack: None,
             })]);
         }
         if packet_id == play::clientbound::SET_TITLE_TEXT {
@@ -1890,18 +1901,17 @@ impl V770Adapter {
             let x = reader.var_i32().map_err(dec_err)?;
             let z = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkCacheCenterChanged {
-                x,
-                z,
-            })]);
+            return Ok(vec![Directive::Emit(
+                ClientEvent::ChunkCacheCenterChanged { x, z },
+            )]);
         }
         if packet_id == play::clientbound::SET_CHUNK_CACHE_RADIUS {
             let mut reader = Reader::new(payload);
             let radius = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkCacheRadiusChanged {
-                radius,
-            })]);
+            return Ok(vec![Directive::Emit(
+                ClientEvent::ChunkCacheRadiusChanged { radius },
+            )]);
         }
         if packet_id == play::clientbound::SET_SIMULATION_DISTANCE {
             let mut reader = Reader::new(payload);
@@ -1980,10 +1990,12 @@ impl V770Adapter {
                 passenger_ids.push(reader.var_i32().map_err(dec_err)?);
             }
             reader.ensure_empty().map_err(dec_err)?;
-            return Ok(vec![Directive::Emit(ClientEvent::EntityPassengersChanged {
-                vehicle_id,
-                passenger_ids,
-            })]);
+            return Ok(vec![Directive::Emit(
+                ClientEvent::EntityPassengersChanged {
+                    vehicle_id,
+                    passenger_ids,
+                },
+            )]);
         }
         if packet_id == play::clientbound::SET_ENTITY_LINK {
             // Two raw `int`s (source, dest); dest `0` means "no holder", matching
@@ -2055,8 +2067,9 @@ impl V770Adapter {
             let duration_ticks = reader.var_i32().map_err(dec_err)?;
             let flags = reader.u8().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            let name = mob_effect_name(effect_id)
-                .ok_or_else(|| AdapterError::Decode(format!("unknown mob effect id {effect_id}")))?;
+            let name = mob_effect_name(effect_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown mob effect id {effect_id}"))
+            })?;
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
                 entity_id,
                 effect: parse_key(name, "mob effect")?,
@@ -2073,8 +2086,9 @@ impl V770Adapter {
             let entity_id = reader.var_i32().map_err(dec_err)?;
             let effect_id = reader.var_i32().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            let name = mob_effect_name(effect_id)
-                .ok_or_else(|| AdapterError::Decode(format!("unknown mob effect id {effect_id}")))?;
+            let name = mob_effect_name(effect_id).ok_or_else(|| {
+                AdapterError::Decode(format!("unknown mob effect id {effect_id}"))
+            })?;
             return Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
                 entity_id,
                 effect: parse_key(name, "mob effect")?,
@@ -2553,7 +2567,10 @@ impl VersionAdapter for V770Adapter {
                 )))
             }
             ClientAction::SetClientSettings(settings)
-                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
             {
                 let ClientSettings {
                     locale,
@@ -2589,13 +2606,18 @@ impl VersionAdapter for V770Adapter {
                     },
                 };
                 let packet_id = match state {
-                    ConnectionState::Configuration => configuration::serverbound::CLIENT_INFORMATION,
+                    ConnectionState::Configuration => {
+                        configuration::serverbound::CLIENT_INFORMATION
+                    }
                     _ => play::serverbound::CLIENT_INFORMATION,
                 };
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
             ClientAction::SendBrand { brand }
-                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
             {
                 let body = BrandPayload {
                     channel: "minecraft:brand".to_owned(),
@@ -2608,7 +2630,10 @@ impl VersionAdapter for V770Adapter {
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
             ClientAction::PongResponse { id }
-                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
             {
                 let body = Pong { id: *id };
                 let packet_id = match state {
@@ -2618,7 +2643,10 @@ impl VersionAdapter for V770Adapter {
                 Ok(Some((packet_id, encode_body(&body)?)))
             }
             ClientAction::ResourcePackResponse { id, response }
-                if matches!(state, ConnectionState::Configuration | ConnectionState::Play) =>
+                if matches!(
+                    state,
+                    ConnectionState::Configuration | ConnectionState::Play
+                ) =>
             {
                 let body = ResourcePackResponse {
                     id: *id,
@@ -2665,12 +2693,11 @@ impl VersionAdapter for V770Adapter {
             }
             ClientAction::SelectTrade { index } if state == ConnectionState::Play => {
                 let body = SelectTrade { index: *index };
-                Ok(Some((
-                    play::serverbound::SELECT_TRADE,
-                    encode_body(&body)?,
-                )))
+                Ok(Some((play::serverbound::SELECT_TRADE, encode_body(&body)?)))
             }
-            ClientAction::PickItemFromBlock { pos, include_data } if state == ConnectionState::Play => {
+            ClientAction::PickItemFromBlock { pos, include_data }
+                if state == ConnectionState::Play =>
+            {
                 let body = PickItemFromBlock {
                     pos: pack_block_pos(*pos),
                     include_data: *include_data,
@@ -2693,15 +2720,13 @@ impl VersionAdapter for V770Adapter {
                     encode_body(&body)?,
                 )))
             }
-            ClientAction::SetBeaconEffects { primary, secondary } if state == ConnectionState::Play => {
+            ClientAction::SetBeaconEffects { primary, secondary }
+                if state == ConnectionState::Play =>
+            {
                 let payload = encode_set_beacon(primary.as_ref(), secondary.as_ref())?;
                 Ok(Some((play::serverbound::SET_BEACON, payload)))
             }
-            ClientAction::EditBook {
-                slot,
-                pages,
-                title,
-            } if state == ConnectionState::Play => {
+            ClientAction::EditBook { slot, pages, title } if state == ConnectionState::Play => {
                 let body = EditBook {
                     slot: *slot,
                     pages: pages.clone(),

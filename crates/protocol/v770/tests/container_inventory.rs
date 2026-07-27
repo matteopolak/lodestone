@@ -6,6 +6,10 @@
 //! `removed VarInt`). `container id` and `state id` are VarInts; slot/property/
 //! value are big-endian shorts. Every payload is exercised through the public
 //! adapter, and every decode asserts zero trailing bytes.
+//!
+//! Also covers `set_held_slot`, `set_experience`, `set_cursor_item`,
+//! `set_player_inventory`, and `cooldown`, which share the same item-stack and
+//! VarInt building blocks.
 
 use lodestone_model::{
     ClientEvent, ConnectionState, Directive, ItemStack, ResourceKey, VersionAdapter,
@@ -157,4 +161,170 @@ fn container_set_slot_rejects_trailing_bytes() {
         result.is_err(),
         "a trailing byte must fail decode, got {result:?}"
     );
+}
+
+// ---- set_held_slot ---------------------------------------------------------
+
+#[test]
+fn set_held_slot_emits_slot() {
+    let directives = handle(play::clientbound::SET_HELD_SLOT, &[0x04]);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::HeldSlotChanged { slot: 4 })]
+    );
+}
+
+#[test]
+fn set_held_slot_rejects_trailing_bytes() {
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_HELD_SLOT,
+        &[0x04, 0xFF],
+    );
+    assert!(result.is_err(), "a misaligned set_held_slot must be rejected");
+}
+
+// ---- set_experience ---------------------------------------------------------
+
+#[test]
+fn set_experience_decodes_progress_level_total_wire_order() {
+    // Wire order is progress (f32), level (varint), total (varint) — not the
+    // constructor's declared field order.
+    let mut payload = 0.5f32.to_be_bytes().to_vec();
+    payload.push(0x1E); // level 30
+    payload.push(0x64); // total 100
+    let directives = handle(play::clientbound::SET_EXPERIENCE, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::ExperienceChanged {
+            progress: 0.5,
+            level: 30,
+            total: 100,
+        })]
+    );
+}
+
+#[test]
+fn set_experience_rejects_trailing_bytes() {
+    let mut payload = 0.0f32.to_be_bytes().to_vec();
+    payload.push(0x00);
+    payload.push(0x00);
+    payload.push(0xFF);
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_EXPERIENCE,
+        &payload,
+    );
+    assert!(result.is_err(), "a misaligned set_experience must be rejected");
+}
+
+// ---- set_cursor_item ---------------------------------------------------------
+
+#[test]
+fn set_cursor_item_decodes_a_plain_stack() {
+    let directives = handle(play::clientbound::SET_CURSOR_ITEM, &STONE_64);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::CursorItemChanged {
+            item: Some(ItemStack {
+                item: key("minecraft:stone"),
+                count: 64,
+            }),
+        })]
+    );
+}
+
+#[test]
+fn set_cursor_item_decodes_the_empty_stack() {
+    let directives = handle(play::clientbound::SET_CURSOR_ITEM, &EMPTY_STACK);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::CursorItemChanged { item: None })]
+    );
+}
+
+#[test]
+fn set_cursor_item_rejects_trailing_bytes() {
+    let mut payload = STONE_64.to_vec();
+    payload.push(0xFF);
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_CURSOR_ITEM,
+        &payload,
+    );
+    assert!(result.is_err(), "a misaligned set_cursor_item must be rejected");
+}
+
+// ---- set_player_inventory ---------------------------------------------------
+
+#[test]
+fn set_player_inventory_decodes_slot_and_stack() {
+    let mut payload = vec![0x08]; // slot 8
+    payload.extend_from_slice(&STONE_64);
+    let directives = handle(play::clientbound::SET_PLAYER_INVENTORY, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::InventorySlotChanged {
+            slot: 8,
+            item: Some(ItemStack {
+                item: key("minecraft:stone"),
+                count: 64,
+            }),
+        })]
+    );
+}
+
+#[test]
+fn set_player_inventory_rejects_trailing_bytes() {
+    let mut payload = vec![0x08];
+    payload.extend_from_slice(&STONE_64);
+    payload.push(0xFF);
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_PLAYER_INVENTORY,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned set_player_inventory must be rejected"
+    );
+}
+
+// ---- cooldown ---------------------------------------------------------------
+
+#[test]
+fn cooldown_decodes_combined_namespace_path_string() {
+    let group = "minecraft:ender_pearl";
+    let mut payload = vec![group.len() as u8];
+    payload.extend_from_slice(group.as_bytes());
+    payload.push(0xA0); // duration_ticks varint low byte (continuation)
+    payload.push(0x01); // duration_ticks varint high byte -> 160
+    let directives = handle(play::clientbound::COOLDOWN, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::ItemCooldown {
+            group: key("minecraft:ender_pearl"),
+            duration_ticks: 160,
+        })]
+    );
+}
+
+#[test]
+fn cooldown_rejects_trailing_bytes() {
+    let group = "minecraft:ender_pearl";
+    let mut payload = vec![group.len() as u8];
+    payload.extend_from_slice(group.as_bytes());
+    payload.push(0x00);
+    payload.push(0xFF);
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::COOLDOWN,
+        &payload,
+    );
+    assert!(result.is_err(), "a misaligned cooldown must be rejected");
 }

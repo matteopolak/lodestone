@@ -1,10 +1,11 @@
-//! Hermetic tests for the protocol 340 (Minecraft 1.12.2) join flow.
+//! Hermetic tests for the protocol 754 (Minecraft 1.16.5) join flow.
 //!
-//! Serverbound expectations are hand-built from the 1.12.2 wire specification and
+//! Serverbound expectations are hand-built from the 1.16.5 wire specification and
 //! clientbound bodies are constructed byte-for-byte here, so a symmetric
-//! encode/decode bug cannot pass silently. The string-UUID login success and
-//! the packed pre-1.14 position have dedicated byte-level golden tests because a
-//! subtly wrong layout is invisible to a round-trip.
+//! encode/decode bug cannot pass silently. The binary UUID login success and
+//! the packed 1.14+ position (x:26, z:26, y:12 in the low bits) have dedicated
+//! byte-level golden tests because a subtly wrong layout is invisible to a
+//! round-trip.
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_model::{
@@ -27,9 +28,38 @@ use lodestone_v735::packets::login::{
 use lodestone_v735::packets::position::{Position, pack_position, unpack_position};
 use lodestone_v735::packets::status::{StatusPing, StatusPong, StatusRequest, StatusResponse};
 use lodestone_world::World;
+use uuid::Uuid;
 
-const CTX: Ctx = Ctx { version: 340 };
+const CTX: Ctx = Ctx { version: 754 };
 const PROFILE_UUID: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+
+/// The 16 raw bytes of [`PROFILE_UUID`], big-endian, as 1.16 sends it.
+const PROFILE_UUID_BYTES: [u8; 16] = [
+    0x06, 0x9a, 0x79, 0xf4, 0x44, 0xe9, 0x47, 0x26, 0xa5, 0xbe, 0xfc, 0xa9, 0x0e, 0x38, 0xaa, 0xf5,
+];
+
+fn profile_uuid() -> Uuid {
+    PROFILE_UUID.parse().expect("valid uuid")
+}
+
+/// A minimal `JoinGame` fixture for the requested world, with empty world list.
+fn join_game(entity_id: i32, game_mode: u8, world: &str) -> JoinGame {
+    JoinGame {
+        entity_id,
+        is_hardcore: false,
+        game_mode,
+        previous_game_mode: 255,
+        world_names: vec![world.to_owned()],
+        world_name: world.to_owned(),
+        hashed_seed: 0,
+        max_players: 20,
+        view_distance: 10,
+        reduced_debug_info: false,
+        enable_respawn_screen: true,
+        is_debug: false,
+        is_flat: false,
+    }
+}
 
 fn encode<T: Encode>(value: &T) -> Vec<u8> {
     let mut writer = Writer::default();
@@ -65,12 +95,13 @@ where
 #[test]
 fn set_protocol_encodes_exact_bytes() {
     let packet = SetProtocol {
-        protocol_version: 340,
+        protocol_version: 754,
         server_host: "localhost".to_owned(),
         server_port: 25565,
         next_state: 2,
     };
-    let mut expected = vec![0xd4, 0x02, 0x09];
+    // 754 as a VarInt is f2 05; host length 9; port 25565 = 0x63dd; next 2.
+    let mut expected = vec![0xf2, 0x05, 0x09];
     expected.extend_from_slice(b"localhost");
     expected.extend_from_slice(&[0x63, 0xdd, 0x02]);
     assert_eq!(encode(&packet), expected);
@@ -87,38 +118,38 @@ fn login_start_encodes_only_username() {
 }
 
 // ---------------------------------------------------------------------------
-// Golden: string UUID login success (1.8 differs from modern binary UUID)
+// Golden: binary UUID login success (1.16 sends 128 bits, not a string)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn login_success_uuid_is_a_string_not_128_bits() {
+fn login_success_uuid_is_128_bits_not_a_string() {
     let packet = LoginSuccess {
-        uuid: PROFILE_UUID.to_owned(),
+        uuid: profile_uuid(),
         username: "Tester".to_owned(),
     };
     let mut expected = Vec::new();
-    // 36-char dashed UUID string, length-prefixed.
-    expected.push(0x24);
-    expected.extend_from_slice(PROFILE_UUID.as_bytes());
+    // 16 raw UUID bytes, no length prefix.
+    expected.extend_from_slice(&PROFILE_UUID_BYTES);
     // 6-char username, length-prefixed.
     expected.push(0x06);
     expected.extend_from_slice(b"Tester");
     assert_eq!(encode(&packet), expected);
-    assert_eq!(expected.len(), 1 + 36 + 1 + 6);
+    assert_eq!(expected.len(), 16 + 1 + 6);
     round_trip(&packet);
 }
 
 // ---------------------------------------------------------------------------
-// Golden: 1.8 packed position (x:26, y:12 in the MIDDLE, z:26)
+// Golden: 1.14+ packed position (x:26, z:26, y:12 in the LOW bits)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn position_packing_matches_1_8_bit_layout() {
-    // Each axis isolated locks the field order: y lives in the middle bits.
-    assert_eq!(pack_position(BlockPos::new(0, 0, 1)), 0x0000_0000_0000_0001);
-    assert_eq!(pack_position(BlockPos::new(0, 1, 0)), 0x0000_0000_0400_0000);
+fn position_packing_matches_1_14_bit_layout() {
+    // Each axis isolated locks the field order: y lives in the low 12 bits,
+    // z in the next 26, x in the top 26.
+    assert_eq!(pack_position(BlockPos::new(0, 1, 0)), 0x0000_0000_0000_0001);
+    assert_eq!(pack_position(BlockPos::new(0, 0, 1)), 0x0000_0000_0000_1000);
     assert_eq!(pack_position(BlockPos::new(1, 0, 0)), 0x0000_0040_0000_0000);
-    assert_eq!(pack_position(BlockPos::new(1, 2, 3)), 0x0000_0040_0800_0003);
+    assert_eq!(pack_position(BlockPos::new(1, 2, 3)), 0x0000_0040_0000_3002);
 }
 
 #[test]
@@ -126,8 +157,8 @@ fn spawn_position_encodes_exact_bytes() {
     let packet = SpawnPosition {
         location: Position::new(1, 2, 3),
     };
-    // 0x0000004008000003, big-endian.
-    let expected = [0x00, 0x00, 0x00, 0x40, 0x08, 0x00, 0x00, 0x03];
+    // 0x0000004000003002, big-endian.
+    let expected = [0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x30, 0x02];
     assert_eq!(encode(&packet), expected);
 }
 
@@ -155,7 +186,7 @@ fn position_round_trips_including_negatives() {
 #[test]
 fn all_packets_round_trip() {
     round_trip(&SetProtocol {
-        protocol_version: 340,
+        protocol_version: 754,
         server_host: "example.com".to_owned(),
         server_port: 25565,
         next_state: 2,
@@ -182,24 +213,17 @@ fn all_packets_round_trip() {
         verify_token: vec![6, 5, 4],
     });
     round_trip(&LoginSuccess {
-        uuid: PROFILE_UUID.to_owned(),
+        uuid: profile_uuid(),
         username: "Tester".to_owned(),
     });
     round_trip(&SetCompression { threshold: 256 });
     round_trip(&KeepAliveRequest { id: 42 });
     round_trip(&KeepAliveResponse { id: 42 });
-    round_trip(&JoinGame {
-        entity_id: 1,
-        game_mode: 0,
-        dimension: 0,
-        difficulty: 2,
-        max_players: 20,
-        level_type: "default".to_owned(),
-        reduced_debug_info: false,
-    });
+    round_trip(&join_game(1, 0, "minecraft:overworld"));
     round_trip(&ClientboundChat {
         message: "{\"text\":\"hello\"}".to_owned(),
         position: 0,
+        sender: profile_uuid(),
     });
     round_trip(&ServerboundChat {
         message: "hello world".to_owned(),
@@ -222,10 +246,12 @@ fn all_packets_round_trip() {
         food_saturation: 5.0,
     });
     round_trip(&Respawn {
-        dimension: -1,
-        difficulty: 2,
+        world_name: "minecraft:the_nether".to_owned(),
         game_mode: 0,
-        level_type: "flat".to_owned(),
+        previous_game_mode: 255,
+        is_debug: false,
+        is_flat: true,
+        copy_metadata: false,
     });
     round_trip(&KickDisconnect {
         reason: "{\"text\":\"kicked\"}".to_owned(),
@@ -318,13 +344,13 @@ fn server() -> ServerAddress {
 }
 
 #[test]
-fn supports_only_protocol_340() {
+fn supports_only_protocol_754() {
     let adapter = V735Adapter::new();
-    assert!(adapter.supports(340));
+    assert!(adapter.supports(754));
     assert!(!adapter.supports(776));
     assert!(!adapter.supports(47));
-    assert_eq!(adapter.protocol_version(), 340);
-    assert_eq!(adapter.minecraft_versions(), &["1.12.2"]);
+    assert_eq!(adapter.protocol_version(), 754);
+    assert_eq!(adapter.minecraft_versions(), &["1.16.5"]);
 }
 
 #[test]
@@ -337,7 +363,7 @@ fn begin_login_sends_handshake_then_login_start() {
         Directive::Send { packet_id, payload } => {
             assert_eq!(*packet_id, handshaking::serverbound::SET_PROTOCOL);
             let handshake: SetProtocol = decode(payload);
-            assert_eq!(handshake.protocol_version, 340);
+            assert_eq!(handshake.protocol_version, 754);
             assert_eq!(handshake.next_state, 2);
             assert_eq!(handshake.server_host, "localhost");
         }
@@ -377,7 +403,7 @@ fn login_compression_sets_compression() {
 fn login_success_transitions_straight_to_play_with_no_ack() {
     let adapter = V735Adapter::new();
     let payload = encode(&LoginSuccess {
-        uuid: PROFILE_UUID.to_owned(),
+        uuid: profile_uuid(),
         username: "Tester".to_owned(),
     });
     let directives = adapter
@@ -436,15 +462,10 @@ fn login_disconnect_surfaces_json_reason() {
 #[test]
 fn play_join_game_emits_login_event() {
     let adapter = V735Adapter::new();
-    let payload = encode(&JoinGame {
-        entity_id: 7,
-        game_mode: 0x9, // hardcore | creative
-        dimension: -1,
-        difficulty: 2,
-        max_players: 20,
-        level_type: "default".to_owned(),
-        reduced_debug_info: false,
-    });
+    // 1.16 carries game mode and the world name separately (no packed hardcore
+    // bit, no numeric dimension); the adapter maps the world name straight to a
+    // namespaced dimension id.
+    let payload = encode(&join_game(7, 1, "minecraft:the_nether"));
     let directives = adapter
         .handle_packet(
             &mut World::new(),
@@ -462,7 +483,6 @@ fn play_join_game_emits_login_event() {
             }),
         ] => {
             assert_eq!(*entity_id, 7);
-            // The 0x8 hardcore bit is masked off; the low bits select the mode.
             assert_eq!(*game_mode, GameMode::Creative);
             assert_eq!(dimension.to_string(), "minecraft:the_nether");
         }
@@ -503,6 +523,7 @@ fn play_chat_emits_extracted_text() {
     let payload = encode(&ClientboundChat {
         message: "{\"text\":\"hi \",\"extra\":[{\"text\":\"there\"}]}".to_owned(),
         position: 1,
+        sender: profile_uuid(),
     });
     let directives = adapter
         .handle_packet(
@@ -513,7 +534,7 @@ fn play_chat_emits_extracted_text() {
         )
         .expect("handle");
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Chat { text, kind })] => {
+        [Directive::Emit(ClientEvent::Chat { text, kind, .. })] => {
             assert_eq!(text.to_plain_string(), "hi there");
             assert_eq!(*kind, ChatKind::System);
         }
@@ -591,7 +612,7 @@ fn play_kick_disconnect_surfaces_reason() {
 
 #[test]
 fn play_set_compression_sets_compression() {
-    // Protocol 340 (1.12.2) has no play-state set_compression packet; compression
+    // Protocol 754 (1.16.5) has no play-state set_compression packet; compression
     // is negotiated only during login. This behaviour is exercised by the login
     // set_compression test below.
 }
@@ -650,7 +671,7 @@ fn encode_move_uses_position_look() {
 #[test]
 fn encode_swing_arm_selects_hand() {
     let adapter = V735Adapter::new();
-    // 1.12 arm_animation carries the hand as a VarInt (0 = main, 1 = off).
+    // 1.16 arm_animation carries the hand as a VarInt (0 = main, 1 = off).
     let (id, body) = adapter
         .encode_action(
             ConnectionState::Play,
