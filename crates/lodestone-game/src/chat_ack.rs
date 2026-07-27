@@ -47,7 +47,9 @@ pub struct MessageSignature {
 impl MessageSignature {
     /// Wrap raw signature bytes.
     pub fn new(bytes: impl Into<Vec<u8>>) -> Self {
-        Self { bytes: bytes.into() }
+        Self {
+            bytes: bytes.into(),
+        }
     }
 
     /// The raw signature bytes.
@@ -328,7 +330,8 @@ impl MessageSignatureCache {
     /// entries already present are not duplicated, and survivors are pushed back
     /// in order.
     pub fn push(&mut self, last_seen: &[MessageSignature], signature: Option<&MessageSignature>) {
-        let mut queue: std::collections::VecDeque<MessageSignature> = last_seen.iter().cloned().collect();
+        let mut queue: std::collections::VecDeque<MessageSignature> =
+            last_seen.iter().cloned().collect();
         if let Some(sig) = signature {
             queue.push_back(sig.clone());
         }
@@ -336,7 +339,8 @@ impl MessageSignatureCache {
             return;
         }
 
-        let new_entries: std::collections::HashSet<MessageSignature> = queue.iter().cloned().collect();
+        let new_entries: std::collections::HashSet<MessageSignature> =
+            queue.iter().cloned().collect();
         let capacity = self.entries.len();
         let mut i = 0;
         while !queue.is_empty() && i < capacity {

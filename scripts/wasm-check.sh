@@ -47,6 +47,11 @@
 # USAGE
 #   scripts/wasm-check.sh
 #
+# PREREQUISITES (the script verifies both and FAILS with the install command if
+# either is missing — a check that cannot run must fail, not pass quietly):
+#   * rustup target: wasm32-unknown-unknown
+#   * trunk (0.21.x) — the browser app is built through it as the final step.
+#
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -55,7 +60,23 @@ TARGET="wasm32-unknown-unknown"
 
 if ! rustup target list --installed 2>/dev/null | grep -q "$TARGET"; then
   echo "error: rust target '$TARGET' is not installed."
+  echo "       this check CANNOT RUN without it — failing rather than passing quietly."
   echo "       run: rustup target add $TARGET"
+  exit 2
+fi
+
+# trunk is required: it is how the browser app is built and served, and the final
+# step below builds the app THROUGH it (cargo -> wasm -> wasm-bindgen bundle), so
+# a wasm-bindgen-level break is caught, not just a rustc one. A check that cannot
+# run must FAIL, not skip — so a missing trunk is exit 2 with the install command,
+# never a quiet green.
+if ! command -v trunk >/dev/null 2>&1; then
+  echo "error: 'trunk' is not installed (required to build/serve the browser app)."
+  echo "       this check CANNOT RUN without it — failing rather than passing quietly."
+  echo "       run: cargo install trunk --version 0.21.14"
+  echo "       or (prebuilt, faster): curl -sSL \\"
+  echo "         https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-\$(uname -m)-apple-darwin.tar.gz \\"
+  echo "         | tar xz -C ~/.cargo/bin trunk"
   exit 2
 fi
 
@@ -101,11 +122,21 @@ for entry in "${CRATES[@]}"; do
   [[ "$entry" == *"|"* ]] && extra="${entry#*|}"
   printf '  %-34s ' "$pkg ${extra}"
   # shellcheck disable=SC2086
-  if cargo build -p "$pkg" --target "$TARGET" $extra >/dev/null 2>&1; then
+  if out="$(cargo build -p "$pkg" --target "$TARGET" $extra 2>&1)"; then
     echo "PASS"
   else
     echo "FAIL"
     fails+=("$pkg $extra")
+    # Name the offender and the fix, inline. The captured cargo error usually
+    # names the actual native-only crate (e.g. `could not compile \`cpal\``),
+    # which is the single most useful line for whoever just broke the build.
+    printf '%s\n' "$out" \
+      | grep -E "^error|could not compile|is not supported|cannot find (function|type|crate)|unresolved import|native" \
+      | head -6 | sed 's/^/      │ /'
+    echo "      └─ likely cause: a dependency pulled '$pkg' onto native-only code"
+    echo "         (threads / std::fs / OS sockets / OS audio like cpal). Fix: gate that"
+    echo "         dep or call behind cfg(not(target_arch = \"wasm32\")) or an off-by-default"
+    echo "         feature. Reproduce: cargo build -p $pkg --target $TARGET $extra"
   fi
 done
 
@@ -171,14 +202,24 @@ for rule in "${CONFINEMENT_RULES[@]}"; do
 done
 
 # The browser app is its own workspace (outside the crates/ glob), so it is built
-# from its own directory. It is the end-to-end integration of the subset above.
+# from its own directory. This is the end-to-end integration of the subset above,
+# and it is built THROUGH trunk on purpose: trunk runs cargo for wasm32 and then
+# wasm-bindgen, so this step catches a wasm-bindgen-level break (a signature rustc
+# accepts but wasm-bindgen rejects), not only a rustc one. Cheap because the crate
+# graph above is already warm in the shared target dir.
 if [[ -f "$ROOT/web/Cargo.toml" ]]; then
-  printf '  %-34s ' "lodestone-web (browser app)"
-  if (cd "$ROOT/web" && cargo build --target "$TARGET" >/dev/null 2>&1); then
+  printf '  %-34s ' "lodestone-web (trunk build)"
+  if out="$(cd "$ROOT/web" && trunk build 2>&1)"; then
     echo "PASS"
   else
     echo "FAIL"
-    fails+=("lodestone-web")
+    fails+=("lodestone-web (trunk build)")
+    printf '%s\n' "$out" \
+      | grep -E "^error|could not compile|is not supported|unresolved import|wasm-bindgen|error from" \
+      | head -8 | sed 's/^/      │ /'
+    echo "      └─ the browser app failed to build. If the per-crate rows above are all"
+    echo "         PASS, this is a wasm-bindgen/trunk-level break in web/ itself."
+    echo "         Reproduce: (cd web && trunk build)"
   fi
 fi
 

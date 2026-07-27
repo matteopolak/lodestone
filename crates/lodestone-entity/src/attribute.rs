@@ -25,6 +25,7 @@
 
 use lodestone_model::Identifier;
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// How an [`AttributeModifier`] combines with the running value.
 ///
@@ -296,6 +297,16 @@ impl AttributeMap {
     pub fn is_empty(&self) -> bool {
         self.instances.is_empty()
     }
+
+    /// Iterates the attribute keys currently tracked, in unspecified order.
+    pub fn keys(&self) -> impl Iterator<Item = &Identifier> {
+        self.instances.keys()
+    }
+
+    /// Iterates `(key, instance)` pairs currently tracked, in unspecified order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Identifier, &AttributeInstance)> {
+        self.instances.iter()
+    }
 }
 
 /// Looks up the vanilla default definition for a namespaced attribute id.
@@ -403,10 +414,179 @@ pub fn known_attribute_paths() -> &'static [&'static str] {
     ]
 }
 
+/// The base-class attribute template a concrete entity type is built on,
+/// mirroring vanilla's `createLivingAttributes` → `createMobAttributes` →
+/// `createMonsterAttributes` / `createAnimalAttributes` chain.
+///
+/// Both variants extend `Mob.createMobAttributes()` (living + `follow_range`
+/// 16), which is the shared prefix in [`template_bases`]; they differ only in
+/// the one attribute their subclass adds. (A bare-`Mob` type such as a bat or
+/// squid would need a third variant; none of the currently-rendered mobs are
+/// bare mobs.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseTemplate {
+    /// `Monster.createMonsterAttributes()`: mob + `attack_damage`.
+    Monster,
+    /// `Animal.createAnimalAttributes()`: mob + `tempt_range` 10.
+    Animal,
+}
+
+/// The attribute set contributed by `LivingEntity.createLivingAttributes()`,
+/// every entry seeded at its `RangedAttribute` default. Ordered as vanilla adds
+/// them so a built map iterates deterministically.
+const LIVING_PATHS: &[&str] = &[
+    "max_health",
+    "knockback_resistance",
+    "movement_speed",
+    "armor",
+    "armor_toughness",
+    "max_absorption",
+    "step_height",
+    "scale",
+    "gravity",
+    "safe_fall_distance",
+    "fall_damage_multiplier",
+    "jump_strength",
+    "entity_interaction_range",
+    "oxygen_bonus",
+    "burning_time",
+    "explosion_knockback_resistance",
+    "water_movement_efficiency",
+    "movement_efficiency",
+    "attack_knockback",
+    "camera_distance",
+    "waypoint_transmit_range",
+    "bounciness",
+    "air_drag_modifier",
+    "friction_modifier",
+    "name_tag_distance",
+    "below_name_distance",
+];
+
+/// A concrete entity type's base-value overrides: the explicit `.add(ATTR, v)`
+/// calls in its `createAttributes()`, layered on top of its [`BaseTemplate`].
+struct TypeSpec {
+    template: BaseTemplate,
+    /// `(attribute path, base value)` overrides. An entry whose path is not in
+    /// the template's set *adds* that attribute (e.g. a zombie's
+    /// `spawn_reinforcements`); an entry that is present *replaces* the base.
+    overrides: &'static [(&'static str, f64)],
+}
+
+/// Resolves a modern entity type key to its vanilla base-attribute spec.
+///
+/// This is version-free semantic content read from 26.2's per-mob
+/// `createAttributes()` builders: it is the *set* of attributes a type has plus
+/// its base-value overrides, independent of any wire index. A version whose
+/// registry differs would supply its own; this covers the mobs the client
+/// currently renders plus their close variants.
+fn type_spec(path: &str) -> Option<TypeSpec> {
+    // Zombie family shares `Zombie.createAttributes()`.
+    const ZOMBIE: &[(&str, f64)] = &[
+        ("follow_range", 35.0),
+        ("movement_speed", 0.23),
+        ("attack_damage", 3.0),
+        ("armor", 2.0),
+        ("spawn_reinforcements", 0.0),
+    ];
+    let spec = match path {
+        "zombie" | "husk" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: ZOMBIE,
+        },
+        "skeleton" | "stray" | "wither_skeleton" | "bogged" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("movement_speed", 0.25)],
+        },
+        "creeper" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("movement_speed", 0.25)],
+        },
+        "spider" => TypeSpec {
+            template: BaseTemplate::Monster,
+            overrides: &[("max_health", 16.0), ("movement_speed", 0.3)],
+        },
+        "pig" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 10.0), ("movement_speed", 0.25)],
+        },
+        "cow" | "mooshroom" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 10.0), ("movement_speed", 0.2)],
+        },
+        "sheep" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 8.0), ("movement_speed", 0.23)],
+        },
+        "chicken" => TypeSpec {
+            template: BaseTemplate::Animal,
+            overrides: &[("max_health", 4.0), ("movement_speed", 0.25)],
+        },
+        _ => return None,
+    };
+    Some(spec)
+}
+
+/// The ordered `(path, base value)` pairs a [`BaseTemplate`] contributes before
+/// a type's own overrides, mirroring the `createMobAttributes` chain.
+fn template_bases(template: BaseTemplate) -> Vec<(&'static str, f64)> {
+    let mut bases: Vec<(&'static str, f64)> =
+        LIVING_PATHS.iter().map(|p| (*p, default_path(p))).collect();
+    // Every mob overrides the generic follow_range default (32) with 16.
+    bases.push(("follow_range", 16.0));
+    match template {
+        BaseTemplate::Monster => bases.push(("attack_damage", default_path("attack_damage"))),
+        BaseTemplate::Animal => bases.push(("tempt_range", default_path("tempt_range"))),
+    }
+    bases
+}
+
+/// The `RangedAttribute` default for a bare path, or `0.0` if unknown (unknown
+/// paths never appear in the hand-verified templates above).
+fn default_path(path: &str) -> f64 {
+    // `Identifier::from_str` on a bare path yields the `minecraft` namespace.
+    Identifier::from_str(&format!("minecraft:{path}"))
+        .ok()
+        .and_then(|id| default_def(&id))
+        .map(|d| d.default)
+        .unwrap_or(0.0)
+}
+
+/// Builds the fully-seeded [`AttributeMap`] for a modern entity type, matching
+/// what vanilla's `DefaultAttributes.getSupplier(type)` produces: the type's
+/// attribute set, each seeded with its per-type base value (or the generic
+/// `RangedAttribute` default where the type does not override it).
+///
+/// Returns `None` for a type this crate has no template for. The map holds only
+/// base values — no modifiers — so `map.value(key)` equals the base until a
+/// live `update_attributes` or an equipment/effect modifier is folded in.
+///
+/// This is the input the physics movement seam consumes: `movement_speed` here
+/// is the real per-type base (a zombie's `0.23`, a spider's `0.3`), not a
+/// hand-picked constant.
+#[must_use]
+pub fn default_attributes(entity_type: &Identifier) -> Option<AttributeMap> {
+    if entity_type.namespace() != "minecraft" {
+        return None;
+    }
+    let spec = type_spec(entity_type.path())?;
+    let mut map = AttributeMap::new();
+    // Seed the template set, then apply the type's overrides in order. Using
+    // `get_or_default` keeps each instance's clamp range from the registry.
+    for (path, base) in template_bases(spec.template)
+        .into_iter()
+        .chain(spec.overrides.iter().copied())
+    {
+        if let Ok(key) = Identifier::from_str(&format!("minecraft:{path}")) {
+            map.get_or_default(&key).set_base_value(base);
+        }
+    }
+    Some(map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
 
     fn id(s: &str) -> Identifier {
         Identifier::from_str(s).unwrap()
@@ -494,5 +674,77 @@ mod tests {
             assert_eq!(Operation::from_id(op.id()), Some(op));
         }
         assert_eq!(Operation::from_id(3), None);
+    }
+
+    #[test]
+    fn zombie_base_attributes_match_vanilla() {
+        let map = default_attributes(&id("minecraft:zombie")).expect("zombie has a spec");
+        // Explicit per-mob overrides.
+        assert_eq!(map.value(&id("minecraft:movement_speed")), Some(0.23));
+        assert_eq!(map.value(&id("minecraft:follow_range")), Some(35.0));
+        assert_eq!(map.value(&id("minecraft:attack_damage")), Some(3.0));
+        assert_eq!(map.value(&id("minecraft:armor")), Some(2.0));
+        // Inherited living defaults the zombie does NOT override.
+        assert_eq!(map.value(&id("minecraft:max_health")), Some(20.0));
+        assert_eq!(map.value(&id("minecraft:step_height")), Some(0.6));
+        assert_eq!(map.value(&id("minecraft:knockback_resistance")), Some(0.0));
+    }
+
+    #[test]
+    fn pig_is_an_animal_without_attack_damage() {
+        let map = default_attributes(&id("minecraft:pig")).expect("pig has a spec");
+        assert_eq!(map.value(&id("minecraft:movement_speed")), Some(0.25));
+        assert_eq!(map.value(&id("minecraft:max_health")), Some(10.0));
+        // Animals get the mob follow_range (16), not the generic 32 default.
+        assert_eq!(map.value(&id("minecraft:follow_range")), Some(16.0));
+        assert_eq!(map.value(&id("minecraft:tempt_range")), Some(10.0));
+        // Only monsters have attack_damage in their set.
+        assert!(map.get(&id("minecraft:attack_damage")).is_none());
+    }
+
+    #[test]
+    fn spider_and_animal_speed_overrides() {
+        let spider = default_attributes(&id("minecraft:spider")).unwrap();
+        assert_eq!(spider.value(&id("minecraft:max_health")), Some(16.0));
+        assert_eq!(spider.value(&id("minecraft:movement_speed")), Some(0.3));
+
+        for (ty, speed, hp) in [
+            ("minecraft:cow", 0.2, 10.0),
+            ("minecraft:sheep", 0.23, 8.0),
+            ("minecraft:chicken", 0.25, 4.0),
+            ("minecraft:creeper", 0.25, 20.0),
+            ("minecraft:skeleton", 0.25, 20.0),
+        ] {
+            let map = default_attributes(&id(ty)).unwrap();
+            assert_eq!(
+                map.value(&id("minecraft:movement_speed")),
+                Some(speed),
+                "{ty} speed"
+            );
+            assert_eq!(map.value(&id("minecraft:max_health")), Some(hp), "{ty} hp");
+        }
+    }
+
+    #[test]
+    fn a_folded_sprint_modifier_uses_the_real_base() {
+        // The physics seam consumes movement_speed; folding a sprint modifier
+        // onto the real zombie base 0.23 gives 0.23 * 1.3 = 0.299, not the
+        // generic-default 0.7 * 1.3.
+        let mut map = default_attributes(&id("minecraft:zombie")).unwrap();
+        map.get_mut(&id("minecraft:movement_speed"))
+            .unwrap()
+            .add_or_update(Modifier::new(
+                id("minecraft:sprinting"),
+                0.3,
+                Operation::AddMultipliedTotal,
+            ));
+        let v = map.value(&id("minecraft:movement_speed")).unwrap();
+        assert!((v - 0.299).abs() < 1e-9, "got {v}");
+    }
+
+    #[test]
+    fn unknown_type_has_no_supplier() {
+        assert!(default_attributes(&id("minecraft:item")).is_none());
+        assert!(default_attributes(&id("modded:thing")).is_none());
     }
 }

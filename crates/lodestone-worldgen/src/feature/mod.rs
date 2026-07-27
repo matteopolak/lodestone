@@ -732,13 +732,7 @@ fn is_adjacent_to_air(input: &OreInput<'_>, working: &CenterGrid, x: i32, y: i32
     })
 }
 
-fn block_at<'a>(
-    input: &OreInput<'_>,
-    working: &'a CenterGrid,
-    x: i32,
-    y: i32,
-    z: i32,
-) -> &'a str {
+fn block_at<'a>(input: &OreInput<'_>, working: &'a CenterGrid, x: i32, y: i32, z: i32) -> &'a str {
     if is_outside_build_height(y, input.min_y, input.height) {
         return "minecraft:air";
     }

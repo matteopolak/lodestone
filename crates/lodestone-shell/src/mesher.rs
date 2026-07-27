@@ -329,11 +329,21 @@ mod tests {
     #[test]
     fn empty_sky_section_is_skipped() {
         let world = crate::worldgen::generate(0);
-        // The top section (index 4, y 64..80) is well above the surface: air.
+        // Pick the first section that starts strictly above the generated
+        // surface at the origin, so it is guaranteed sky. Deriving the index
+        // from `surface_height` keeps this honest as the terrain generator
+        // changes underneath us (real vanilla terrain lifted the origin surface
+        // to ~y71, which used to be hard-coded sky).
+        let surface = crate::worldgen::surface_height(0, 0);
+        let si = ((surface - crate::worldgen::MIN_Y) / 16 + 1) as usize;
+        assert!(
+            si < crate::worldgen::SECTION_COUNT,
+            "surface {surface} leaves no sky section in the window"
+        );
         let key = SectionKey {
             cx: 0,
             cz: 0,
-            si: 4,
+            si,
             min_y: crate::worldgen::MIN_Y,
         };
         assert!(

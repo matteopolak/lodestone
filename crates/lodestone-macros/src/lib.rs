@@ -21,14 +21,18 @@
 //! field. When absent on decode the field is filled with `Default::default()`.
 //! For `Option<T>` fields, the condition controls the wire presence directly:
 //! present decodes `Some(T)` without an extra bool, absent decodes `None`.
+//!
+//! `#[mc(nbt)]` on `Vec<u8>` fields captures one raw named-NBT value. Decode
+//! validates the tag with `read_named_nbt` and stores the exact consumed bytes;
+//! encode validates and replays those bytes.
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::{
     Attribute, BinOp, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, ExprPath, Field,
-    Fields, GenericArgument, Generics, Ident, Lit, LitInt, LitStr, Path, Type, TypeArray,
-    TypePath, parse_macro_input, parse_quote,
+    Fields, GenericArgument, Generics, Ident, Lit, LitInt, LitStr, Path, Type, TypeArray, TypePath,
+    parse_macro_input, parse_quote,
 };
 
 #[proc_macro_derive(Encode, attributes(mc))]
@@ -113,6 +117,7 @@ struct FieldAttr {
     since: Option<i32>,
     until: Option<i32>,
     bits: Option<BitsAttr>,
+    nbt: bool,
     remaining: bool,
     skip: bool,
 }
@@ -199,6 +204,7 @@ impl Default for FieldAttr {
             since: None,
             until: None,
             bits: None,
+            nbt: false,
             remaining: false,
             skip: false,
         }
@@ -406,19 +412,19 @@ fn decode_struct_body(
             let mut decoded = Vec::new();
             let mut initializers = Vec::new();
             for (index, field) in fields.named.iter().enumerate() {
-                    let name = field.ident.as_ref().expect("named field has ident");
-                    let binding = format_ident!("__mc_field_{index}");
-                    let attrs = parse_field_attrs(&field.attrs)?;
-                    let value = decode_field(
-                        crate_path,
-                        field,
-                        &attrs,
-                        has_decode_context,
-                        &prior_bindings,
-                    )?;
-                    decoded.push(quote! { let #binding = #value; });
-                    initializers.push(quote! { #name: #binding });
-                    prior_bindings.push((name.clone(), binding));
+                let name = field.ident.as_ref().expect("named field has ident");
+                let binding = format_ident!("__mc_field_{index}");
+                let attrs = parse_field_attrs(&field.attrs)?;
+                let value = decode_field(
+                    crate_path,
+                    field,
+                    &attrs,
+                    has_decode_context,
+                    &prior_bindings,
+                )?;
+                decoded.push(quote! { let #binding = #value; });
+                initializers.push(quote! { #name: #binding });
+                prior_bindings.push((name.clone(), binding));
             }
             Ok(quote! {
                 #(#decoded)*
@@ -710,6 +716,16 @@ fn encode_value(
         return encode_fixed_bytes(crate_path, ty, attrs, value, mode);
     }
 
+    if attrs.nbt {
+        validate_vec_u8(ty, "#[mc(nbt)] is only valid on Vec<u8> fields")?;
+        return Ok(quote! {{
+            let mut __mc_nbt_reader = #crate_path::Reader::new(#value.as_slice());
+            #crate_path::read_named_nbt(&mut __mc_nbt_reader)?;
+            __mc_nbt_reader.ensure_empty()?;
+            w.bytes(#value.as_slice());
+        }});
+    }
+
     if attrs.remaining {
         validate_vec_u8(ty, "#[mc(remaining)] is only valid on Vec<u8> fields")?;
         return Ok(quote! { w.bytes(#value.as_slice()); });
@@ -759,6 +775,17 @@ fn decode_value(crate_path: &Path, ty: &Type, attrs: &FieldAttr) -> syn::Result<
 
     if attrs.fixed.is_some() {
         return decode_fixed_bytes(ty, attrs);
+    }
+
+    if attrs.nbt {
+        validate_vec_u8(ty, "#[mc(nbt)] is only valid on Vec<u8> fields")?;
+        return Ok(quote! {{
+            let __mc_nbt_before = r.remaining_bytes();
+            let __mc_nbt_before_len = __mc_nbt_before.len();
+            #crate_path::read_named_nbt(r)?;
+            let __mc_nbt_len = __mc_nbt_before_len - r.remaining();
+            __mc_nbt_before[..1].to_vec()
+        }});
     }
 
     if attrs.remaining {
@@ -1599,6 +1626,9 @@ fn parse_field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             } else if meta.path.is_ident("until") {
                 out.until = Some(parse_lit_i32(meta.value()?.parse()?)?);
                 Ok(())
+            } else if meta.path.is_ident("nbt") {
+                out.nbt = true;
+                Ok(())
             } else if meta.path.is_ident("remaining") {
                 out.remaining = true;
                 Ok(())
@@ -1621,6 +1651,21 @@ fn parse_field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             Span::call_site(),
             "#[mc(present_if = ...)] cannot be combined with #[mc(skip)]",
         ));
+    }
+    if out.nbt {
+        if out.fixed.is_some()
+            || out.remaining
+            || out.len_explicit
+            || out.max.is_some()
+            || out.var_encoding != VarEncoding::Fixed
+            || out.decode_with.is_some()
+            || out.bits.is_some()
+        {
+            return Err(syn::Error::new(
+                Span::call_site(),
+                "#[mc(nbt)] cannot be combined with other wire-format field attributes",
+            ));
+        }
     }
     if out.fixed.is_some() {
         if out.remaining {
@@ -1668,6 +1713,7 @@ fn parse_field_attrs(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             || out.var_encoding != VarEncoding::Fixed
             || out.decode_with.is_some()
             || out.present_if.is_some()
+            || out.nbt
             || out.skip
             || out.since.is_some()
             || out.until.is_some()
@@ -1767,8 +1813,9 @@ fn parse_lit_i32(lit: LitInt) -> syn::Result<i32> {
 }
 
 fn parse_present_if(lit: &LitStr) -> syn::Result<PresentIf> {
-    let expr: Expr = syn::parse_str(&lit.value())
-        .map_err(|err| syn::Error::new(lit.span(), format!("invalid present_if predicate: {err}")))?;
+    let expr: Expr = syn::parse_str(&lit.value()).map_err(|err| {
+        syn::Error::new(lit.span(), format!("invalid present_if predicate: {err}"))
+    })?;
     let Expr::Binary(binary) = expr else {
         return Err(syn::Error::new(
             lit.span(),
@@ -1800,7 +1847,10 @@ fn parse_present_if(lit: &LitStr) -> syn::Result<PresentIf> {
 }
 
 fn present_if_field(expr: &Expr, span: Span) -> syn::Result<Ident> {
-    let Expr::Path(ExprPath { qself: None, path, .. }) = expr else {
+    let Expr::Path(ExprPath {
+        qself: None, path, ..
+    }) = expr
+    else {
         return Err(syn::Error::new(
             span,
             "#[mc(present_if = ...)] left-hand side must be a prior field name",
@@ -1907,6 +1957,9 @@ fn validate_field_attr_usage(field: &Field, attrs: &FieldAttr) -> syn::Result<()
             &field.ty,
             "#[mc(remaining)] is only valid on Vec<u8> fields",
         )?;
+    }
+    if attrs.nbt {
+        validate_vec_u8(&field.ty, "#[mc(nbt)] is only valid on Vec<u8> fields")?;
     }
     if attrs.max.is_some() && !is_string(&field.ty) && vec_element(&field.ty).is_none() {
         return Err(syn::Error::new_spanned(

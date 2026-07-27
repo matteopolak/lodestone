@@ -222,12 +222,50 @@ pub fn read_named_nbt(r: &mut Reader<'_>) -> Result<(String, Nbt)> {
     Ok((name, value))
 }
 
+/// Writes network-form NBT: root tag id followed immediately by its payload.
+pub fn write_network_nbt(w: &mut Writer, value: &Nbt) -> Result<()> {
+    let tag = value.tag();
+    w.u8(tag.id());
+    write_nbt_payload(w, value, 0)
+}
+
+/// Writes named-form NBT: root tag id, root name, then payload.
+pub fn write_named_nbt(w: &mut Writer, name: &str, value: &Nbt) -> Result<()> {
+    let tag = value.tag();
+    w.u8(tag.id());
+    if tag != NbtTag::End {
+        write_modified_utf8_string(w, name)?;
+        write_nbt_payload(w, value, 0)?;
+    }
+    Ok(())
+}
+
 /// Extracts plain text from a decoded Minecraft text-component NBT value.
 #[must_use]
 pub fn plain_text_from_nbt_component(component: &Nbt) -> String {
     let mut out = String::new();
     append_nbt_component_text(component, &mut out);
     out
+}
+
+impl Nbt {
+    fn tag(&self) -> NbtTag {
+        match self {
+            Self::End => NbtTag::End,
+            Self::Byte(_) => NbtTag::Byte,
+            Self::Short(_) => NbtTag::Short,
+            Self::Int(_) => NbtTag::Int,
+            Self::Long(_) => NbtTag::Long,
+            Self::Float(_) => NbtTag::Float,
+            Self::Double(_) => NbtTag::Double,
+            Self::ByteArray(_) => NbtTag::ByteArray,
+            Self::String(_) => NbtTag::String,
+            Self::List { .. } => NbtTag::List,
+            Self::Compound(_) => NbtTag::Compound,
+            Self::IntArray(_) => NbtTag::IntArray,
+            Self::LongArray(_) => NbtTag::LongArray,
+        }
+    }
 }
 
 fn read_nbt_payload(r: &mut Reader<'_>, tag: NbtTag, depth: usize) -> Result<Nbt> {
@@ -323,6 +361,104 @@ fn read_nbt_compound(r: &mut Reader<'_>, depth: usize) -> Result<Nbt> {
     Ok(Nbt::Compound(fields))
 }
 
+fn write_nbt_payload(w: &mut Writer, value: &Nbt, depth: usize) -> Result<()> {
+    if depth > NBT_MAX_DEPTH {
+        return Err(Error::NbtDepthExceeded {
+            limit: NBT_MAX_DEPTH,
+        });
+    }
+
+    match value {
+        Nbt::End => {}
+        Nbt::Byte(value) => w.i8(*value),
+        Nbt::Short(value) => w.i16(*value),
+        Nbt::Int(value) => w.i32(*value),
+        Nbt::Long(value) => w.i64(*value),
+        Nbt::Float(value) => w.f32(*value),
+        Nbt::Double(value) => w.f64(*value),
+        Nbt::ByteArray(values) => {
+            write_nbt_len(w, values.len())?;
+            for value in values {
+                w.u8(*value as u8);
+            }
+        }
+        Nbt::String(value) => write_modified_utf8_string(w, value)?,
+        Nbt::List {
+            element_type,
+            elements,
+        } => write_nbt_list(w, *element_type, elements, depth)?,
+        Nbt::Compound(fields) => {
+            for (name, value) in fields {
+                let tag = value.tag();
+                if tag == NbtTag::End {
+                    return Err(Error::InvalidEnumVariant {
+                        name: "nbt tag",
+                        value: i32::from(NbtTag::End.id()),
+                    });
+                }
+                w.u8(tag.id());
+                write_modified_utf8_string(w, name)?;
+                write_nbt_payload(w, value, depth + 1)?;
+            }
+            w.u8(NbtTag::End.id());
+        }
+        Nbt::IntArray(values) => {
+            write_nbt_len(w, values.len())?;
+            for value in values {
+                w.i32(*value);
+            }
+        }
+        Nbt::LongArray(values) => {
+            write_nbt_len(w, values.len())?;
+            for value in values {
+                w.i64(*value);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_nbt_list(
+    w: &mut Writer,
+    element_type: NbtTag,
+    elements: &[Nbt],
+    depth: usize,
+) -> Result<()> {
+    if element_type == NbtTag::End && !elements.is_empty() {
+        return Err(Error::InvalidEnumVariant {
+            name: "nbt list element type",
+            value: i32::from(NbtTag::End.id()),
+        });
+    }
+
+    for element in elements {
+        let actual = element.tag();
+        if actual != element_type {
+            return Err(Error::InvalidEnumVariant {
+                name: "nbt list element type",
+                value: i32::from(actual.id()),
+            });
+        }
+    }
+
+    w.u8(element_type.id());
+    write_nbt_len(w, elements.len())?;
+    for element in elements {
+        write_nbt_payload(w, element, depth + 1)?;
+    }
+    Ok(())
+}
+
+fn write_nbt_len(w: &mut Writer, len: usize) -> Result<()> {
+    let len = i32::try_from(len).map_err(|_| Error::LimitExceeded {
+        limit: i32::MAX as usize,
+        actual: len,
+    })?;
+    w.i32(len);
+    Ok(())
+}
+
 fn read_nbt_length(r: &mut Reader<'_>) -> Result<usize> {
     let len = r.i32()?;
     if len < 0 {
@@ -361,6 +497,33 @@ fn ensure_nbt_length_fits_remaining(
 fn read_modified_utf8_string(r: &mut Reader<'_>) -> Result<String> {
     let len = usize::from(r.u16()?);
     decode_modified_utf8(r.bytes(len)?)
+}
+
+fn write_modified_utf8_string(w: &mut Writer, value: &str) -> Result<()> {
+    let mut encoded = Vec::with_capacity(value.len());
+    for unit in value.encode_utf16() {
+        match unit {
+            0 => encoded.extend_from_slice(&[0xc0, 0x80]),
+            0x0001..=0x007f => encoded.push(unit as u8),
+            0x0080..=0x07ff => {
+                encoded.push((0xc0 | ((unit >> 6) & 0x1f)) as u8);
+                encoded.push((0x80 | (unit & 0x3f)) as u8);
+            }
+            _ => {
+                encoded.push((0xe0 | ((unit >> 12) & 0x0f)) as u8);
+                encoded.push((0x80 | ((unit >> 6) & 0x3f)) as u8);
+                encoded.push((0x80 | (unit & 0x3f)) as u8);
+            }
+        }
+    }
+
+    let len = u16::try_from(encoded.len()).map_err(|_| Error::LimitExceeded {
+        limit: u16::MAX as usize,
+        actual: encoded.len(),
+    })?;
+    w.u16(len);
+    w.bytes(&encoded);
+    Ok(())
 }
 
 fn decode_modified_utf8(bytes: &[u8]) -> Result<String> {
@@ -1332,6 +1495,19 @@ mod tests {
         out
     }
 
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        let compact: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+        assert_eq!(compact.len() % 2, 0);
+        compact
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let text = core::str::from_utf8(pair).expect("hex is ascii");
+                u8::from_str_radix(text, 16).expect("valid hex byte")
+            })
+            .collect()
+    }
+
     #[test]
     fn nbt_network_and_named_roots_decode_to_same_value() {
         let mut network = vec![10];
@@ -1455,6 +1631,121 @@ mod tests {
             read_network_nbt(&mut Reader::new(&emoji_string)).expect("emoji string decodes"),
             Nbt::String("😀".to_owned()),
         );
+    }
+
+    #[test]
+    fn nbt_writer_emits_exact_network_bytes_for_live_dimension_type_payload() {
+        // Captured from the 26.2 server on 127.0.0.1:25565 during Configuration:
+        // the `minecraft:dimension_type` registry's `minecraft:overworld` entry.
+        let live_dimension_type = hex_bytes(
+            "\
+            0a08000d64656661756c745f636c6f636b00136d696e6563726166743a6f766572776f726c64\
+            0100166861735f656e6465725f647261676f6e5f66696768740005000d616d6269656e745f\
+            6c696768740000000003001f6d6f6e737465725f737061776e5f626c6f636b5f6c69676874\
+            5f6c696d69740000000008000a696e66696e696275726e001f236d696e6563726166743a69\
+            6e66696e696275726e5f6f766572776f726c6401000c6861735f736b796c69676874010800\
+            0974696d656c696e65730017236d696e6563726166743a696e5f6f766572776f726c640600\
+            10636f6f7264696e6174655f7363616c653ff000000000000003000e6c6f676963616c5f68\
+            6569676874000001800a000a617474726962757465730a00206d696e6563726166743a6175\
+            64696f2f6261636b67726f756e645f6d757369630a000764656661756c740300096d61785f\
+            64656c617900005dc0080005736f756e6400146d696e6563726166743a6d757369632e6761\
+            6d650300096d696e5f64656c617900002ee0000a000863726561746976650300096d61785f\
+            64656c617900005dc0080005736f756e6400186d696e6563726166743a6d757369632e6372\
+            6561746976650300096d696e5f64656c617900002ee0000008001a6d696e6563726166743a\
+            76697375616c2f666f675f636f6c6f7200072363306438666605001d6d696e656372616674\
+            3a76697375616c2f636c6f75645f6865696768744340547b0800246d696e6563726166743a\
+            76697375616c2f616d6269656e745f6c696768745f636f6c6f720007233061306130610800\
+            1a6d696e6563726166743a76697375616c2f736b795f636f6c6f720007233738613766660a\
+            001e6d696e6563726166743a617564696f2f616d6269656e745f736f756e64730a00046d6f\
+            6f6403000a7469636b5f64656c6179000017700600066f6666736574400000000000000008\
+            0005736f756e6400166d696e6563726166743a616d6269656e742e63617665030013626c6f\
+            636b5f7365617263685f657874656e7400000008000008001c6d696e6563726166743a7669\
+            7375616c2f636c6f75645f636f6c6f720009236363666666666666000300056d696e5f79ff\
+            ffffc00a00196d6f6e737465725f737061776e5f6c696768745f6c6576656c03000d6d69\
+            6e5f696e636c75736976650000000003000d6d61785f696e636c7573697665000000070800\
+            047479706500116d696e6563726166743a756e69666f726d0001000b6861735f6365696c69\
+            6e67000300066865696768740000018000",
+        );
+        let mut reader = Reader::new(&live_dimension_type);
+        let value = read_network_nbt(&mut reader).expect("live registry NBT decodes");
+        reader
+            .ensure_empty()
+            .expect("live registry NBT fully consumed");
+
+        let mut writer = Writer::default();
+        write_network_nbt(&mut writer, &value).expect("live registry NBT encodes");
+        assert_eq!(writer.as_slice(), live_dimension_type.as_slice());
+    }
+
+    #[test]
+    fn nbt_writer_distinguishes_named_and_network_roots() {
+        let value = Nbt::Compound(vec![("text".to_owned(), Nbt::String("hi".to_owned()))]);
+
+        let mut network = Writer::default();
+        write_network_nbt(&mut network, &value).expect("network NBT encodes");
+        assert_eq!(
+            network.as_slice(),
+            &[10, 8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'h', b'i', 0]
+        );
+
+        let mut named = Writer::default();
+        write_named_nbt(&mut named, "root", &value).expect("named NBT encodes");
+        assert_eq!(
+            named.as_slice(),
+            &[
+                10, 0, 4, b'r', b'o', b'o', b't', 8, 0, 4, b't', b'e', b'x', b't', 0, 2, b'h',
+                b'i', 0,
+            ],
+        );
+    }
+
+    #[test]
+    fn nbt_writer_preserves_empty_list_element_type_and_modified_utf8() {
+        let value = Nbt::List {
+            element_type: NbtTag::String,
+            elements: vec![],
+        };
+        let mut writer = Writer::default();
+        write_network_nbt(&mut writer, &value).expect("empty list encodes");
+        assert_eq!(writer.as_slice(), &[9, 8, 0, 0, 0, 0]);
+
+        let value = Nbt::String("a\0😀".to_owned());
+        writer.clear();
+        write_network_nbt(&mut writer, &value).expect("modified UTF-8 string encodes");
+        assert_eq!(
+            writer.as_slice(),
+            &[
+                8, 0, 9, b'a', 0xc0, 0x80, 0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80
+            ],
+        );
+    }
+
+    #[test]
+    fn nbt_writer_rejects_mismatched_or_non_empty_end_lists() {
+        let mut writer = Writer::default();
+        let mismatched = Nbt::List {
+            element_type: NbtTag::Int,
+            elements: vec![Nbt::String("wrong".to_owned())],
+        };
+        assert!(matches!(
+            write_network_nbt(&mut writer, &mismatched),
+            Err(Error::InvalidEnumVariant {
+                name: "nbt list element type",
+                value: 8
+            })
+        ));
+
+        let non_empty_end = Nbt::List {
+            element_type: NbtTag::End,
+            elements: vec![Nbt::End],
+        };
+        assert!(matches!(
+            write_network_nbt(&mut writer, &non_empty_end),
+            Err(Error::InvalidEnumVariant {
+                name: "nbt list element type",
+                value: 0
+            })
+        ));
     }
 
     #[test]

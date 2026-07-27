@@ -147,6 +147,24 @@ impl ChunkSection {
         self.biomes.get(self.biomes.kind().index(x, y, z))
     }
 
+    /// Returns the biome at local block `(x, y, z)`, each in `0..16`.
+    ///
+    /// One biome cell spans a 4×4×4 block region, so this maps block coordinates
+    /// to their owning cell via `>> 2`. It exists so the block→cell mapping lives
+    /// in exactly one place: a mesher tinting per block and this storage cannot
+    /// disagree on the convention the way two independent `>> 2`s could.
+    ///
+    /// # Panics
+    /// Panics if any coordinate is out of range (`>= 16`).
+    #[must_use]
+    pub fn biome_at_block(&self, x: usize, y: usize, z: usize) -> u32 {
+        assert!(
+            x < Self::EDGE && y < Self::EDGE && z < Self::EDGE,
+            "block coordinate out of range"
+        );
+        self.get_biome(x >> 2, y >> 2, z >> 2)
+    }
+
     /// Sets the biome at local biome cell `(x, y, z)`, each in `0..4`.
     ///
     /// # Panics
@@ -217,6 +235,34 @@ mod tests {
         assert!(
             !s.is_empty(0),
             "a non-default biome keeps the section non-empty"
+        );
+    }
+
+    #[test]
+    fn biome_at_block_maps_block_coords_to_the_owning_cell() {
+        let mut s = section();
+        // One biome cell covers a 4×4×4 block region. Cell (1, 0, 2) owns blocks
+        // x in 4..8, y in 0..4, z in 8..12.
+        s.set_biome(1, 0, 2, 7);
+        for bx in 4..8 {
+            for bz in 8..12 {
+                assert_eq!(
+                    s.biome_at_block(bx, 3, bz),
+                    7,
+                    "block ({bx},3,{bz}) resolves to biome cell (1,0,2)"
+                );
+            }
+        }
+        // A block just outside that region resolves to a different cell (default 0).
+        assert_eq!(
+            s.biome_at_block(8, 3, 8),
+            0,
+            "x=8 is cell (2,_,_), not (1,_,_)"
+        );
+        assert_eq!(
+            s.biome_at_block(4, 4, 8),
+            0,
+            "y=4 is cell (_,1,_), not (_,0,_)"
         );
     }
 

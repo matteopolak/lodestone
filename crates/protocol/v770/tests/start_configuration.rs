@@ -26,7 +26,10 @@ fn start_configuration_acks_and_switches_to_configuration() {
         .expect("start_configuration handled");
 
     match directives.as_slice() {
-        [Directive::Send { packet_id, payload }, Directive::SetState(next)] => {
+        [
+            Directive::Send { packet_id, payload },
+            Directive::SetState(next),
+        ] => {
             assert_eq!(
                 *packet_id,
                 play::serverbound::CONFIGURATION_ACKNOWLEDGED,

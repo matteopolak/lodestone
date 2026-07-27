@@ -1,6 +1,5 @@
 //! Play-state packets for protocol 754 (Minecraft 1.16.5).
 
-use lodestone_core::{Ctx, Reader, Result, Writer, read_named_nbt};
 use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
@@ -23,12 +22,9 @@ use crate::packets::position::Position;
 ///   (`is_hardcore`), unlike pre-1.16 where the `0x8` bit of the mode byte
 ///   flagged it.
 ///
-/// Because the wire carries NBT (which the derive macro cannot express) and a
-/// `worldNames` string array, this is a hand-written [`lodestone_core::Decode`]
-/// (and a matching [`lodestone_core::Encode`] used only by hermetic tests, which
-/// writes each NBT blob as a lone `TAG_End` — a valid empty named tag that the
-/// decoder consumes symmetrically).
-#[derive(Debug, Clone, PartialEq, Eq, Packet)]
+/// The inline NBT blobs are captured as raw named-NBT byte spans; the client
+/// currently only needs to carry/validate them, not interpret their contents.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct JoinGame {
     /// Local player entity id.
@@ -41,13 +37,21 @@ pub struct JoinGame {
     pub previous_game_mode: u8,
     /// Names of every world on the server (namespaced identifiers).
     pub world_names: Vec<String>,
+    /// Raw named-NBT dimension codec registry.
+    #[mc(nbt)]
+    pub dimension_codec: Vec<u8>,
+    /// Raw named-NBT current dimension type.
+    #[mc(nbt)]
+    pub dimension: Vec<u8>,
     /// Namespaced identifier of the world the player is joining.
     pub world_name: String,
     /// Hashed world seed (for client-side biome noise).
     pub hashed_seed: i64,
     /// Legacy max-players hint.
+    #[mc(varint)]
     pub max_players: i32,
     /// Server view distance in chunks.
+    #[mc(varint)]
     pub view_distance: i32,
     /// Whether reduced debug info is in effect.
     pub reduced_debug_info: bool,
@@ -57,72 +61,6 @@ pub struct JoinGame {
     pub is_debug: bool,
     /// Whether this is a superflat world.
     pub is_flat: bool,
-}
-
-impl lodestone_core::Decode for JoinGame {
-    fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
-        let entity_id = r.i32()?;
-        let is_hardcore = r.bool()?;
-        let game_mode = r.u8()?;
-        let previous_game_mode = r.u8()?;
-        let count = r.var_i32()?;
-        if count < 0 {
-            return Err(lodestone_core::Error::NegativeLength(count));
-        }
-        let mut world_names = Vec::with_capacity(count.min(1024) as usize);
-        for _ in 0..count {
-            world_names.push(r.string(32767)?);
-        }
-        read_named_nbt(r)?; // dimension_codec registry — consumed, not retained
-        read_named_nbt(r)?; // current dimension type — consumed, not retained
-        let world_name = r.string(32767)?;
-        let hashed_seed = r.i64()?;
-        let max_players = r.var_i32()?;
-        let view_distance = r.var_i32()?;
-        let reduced_debug_info = r.bool()?;
-        let enable_respawn_screen = r.bool()?;
-        let is_debug = r.bool()?;
-        let is_flat = r.bool()?;
-        Ok(Self {
-            entity_id,
-            is_hardcore,
-            game_mode,
-            previous_game_mode,
-            world_names,
-            world_name,
-            hashed_seed,
-            max_players,
-            view_distance,
-            reduced_debug_info,
-            enable_respawn_screen,
-            is_debug,
-            is_flat,
-        })
-    }
-}
-
-impl lodestone_core::Encode for JoinGame {
-    fn encode(&self, w: &mut Writer, _ctx: Ctx) -> Result<()> {
-        w.i32(self.entity_id);
-        w.bool(self.is_hardcore);
-        w.u8(self.game_mode);
-        w.u8(self.previous_game_mode);
-        w.var_i32(self.world_names.len() as i32);
-        for name in &self.world_names {
-            w.string(name);
-        }
-        w.u8(0); // dimension_codec: empty named NBT (TAG_End)
-        w.u8(0); // dimension: empty named NBT (TAG_End)
-        w.string(&self.world_name);
-        w.i64(self.hashed_seed);
-        w.var_i32(self.max_players);
-        w.var_i32(self.view_distance);
-        w.bool(self.reduced_debug_info);
-        w.bool(self.enable_respawn_screen);
-        w.bool(self.is_debug);
-        w.bool(self.is_flat);
-        Ok(())
-    }
 }
 
 /// Clientbound `chat` packet.
@@ -239,18 +177,22 @@ pub struct UpdateHealth {
 /// Clientbound `respawn` packet for 1.16.5.
 ///
 /// Like [`JoinGame`], 1.16 replaced the numeric dimension with a namespaced
-/// `world_name` string plus an inline **NBT** dimension type, so this is a
-/// hand-written codec that consumes the NBT blob. It is not on the join-and-stay
-/// critical path (respawn fires only on death / dimension change), but the shape
-/// is migrated for correctness.
+/// `world_name` string plus an inline raw named-NBT dimension type. It is not on
+/// the join-and-stay critical path (respawn fires only on death / dimension
+/// change), but the shape is derived for correctness.
 ///
 /// Wire layout: nbt dimension, string world name, i64 hashed seed, u8 game mode,
 /// u8 previous game mode, bool is-debug, bool is-flat, bool copy-metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Packet)]
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:respawn", state = Play, bound = Client)]
 pub struct Respawn {
+    /// Raw named-NBT dimension type.
+    #[mc(nbt)]
+    pub dimension: Vec<u8>,
     /// Namespaced identifier of the world respawned into.
     pub world_name: String,
+    /// Hashed world seed (retained so raw packet bytes can be replayed exactly).
+    pub hashed_seed: i64,
     /// Game mode after respawn.
     pub game_mode: u8,
     /// Previous game mode.
@@ -261,41 +203,6 @@ pub struct Respawn {
     pub is_flat: bool,
     /// Whether to keep entity metadata / attributes across the respawn.
     pub copy_metadata: bool,
-}
-
-impl lodestone_core::Decode for Respawn {
-    fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
-        read_named_nbt(r)?; // dimension type — consumed, not retained
-        let world_name = r.string(32767)?;
-        let _hashed_seed = r.i64()?;
-        let game_mode = r.u8()?;
-        let previous_game_mode = r.u8()?;
-        let is_debug = r.bool()?;
-        let is_flat = r.bool()?;
-        let copy_metadata = r.bool()?;
-        Ok(Self {
-            world_name,
-            game_mode,
-            previous_game_mode,
-            is_debug,
-            is_flat,
-            copy_metadata,
-        })
-    }
-}
-
-impl lodestone_core::Encode for Respawn {
-    fn encode(&self, w: &mut Writer, _ctx: Ctx) -> Result<()> {
-        w.u8(0); // dimension: empty named NBT (TAG_End)
-        w.string(&self.world_name);
-        w.i64(0); // hashed seed (not retained)
-        w.u8(self.game_mode);
-        w.u8(self.previous_game_mode);
-        w.bool(self.is_debug);
-        w.bool(self.is_flat);
-        w.bool(self.copy_metadata);
-        Ok(())
-    }
 }
 
 /// Clientbound `kick_disconnect` packet sent during play.

@@ -331,7 +331,9 @@ fn container_click_unknown_item_fails_loudly() {
                 click_type: lodestone_model::ContainerClickType::Pickup,
                 changed_slots: Vec::new(),
                 carried_item: Some(lodestone_model::ItemStack {
-                    item: "minecraft:does_not_exist".parse().expect("valid identifier"),
+                    item: "minecraft:does_not_exist"
+                        .parse()
+                        .expect("valid identifier"),
                     count: 1,
                 }),
             },

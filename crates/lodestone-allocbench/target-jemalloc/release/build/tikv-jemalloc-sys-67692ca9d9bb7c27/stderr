@@ -1,0 +1,24 @@
+src/thread_event_registry.c:27:5: warning: suggest braces around initialization of subobject [-Wmissing-braces]
+   27 |     NULL,
+      |     ^~~~
+      |     {   }
+/opt/homebrew/Cellar/llvm/22.1.1/lib/clang/22/include/__stddef_null.h:26:14: note: expanded from macro 'NULL'
+   26 | #define NULL ((void*)0)
+      |              ^~~~~~~~~~
+1 warning generated.
+src/thread_event_registry.c:27:5: warning: suggest braces around initialization of subobject [-Wmissing-braces]
+   27 |     NULL,
+      |     ^~~~
+      |     {   }
+/opt/homebrew/Cellar/llvm/22.1.1/lib/clang/22/include/__stddef_null.h:26:14: note: expanded from macro 'NULL'
+   26 | #define NULL ((void*)0)
+      |              ^~~~~~~~~~
+1 warning generated.
+src/thread_event_registry.c:27:5: warning: suggest braces around initialization of subobject [-Wmissing-braces]
+   27 |     NULL,
+      |     ^~~~
+      |     {   }
+/opt/homebrew/Cellar/llvm/22.1.1/lib/clang/22/include/__stddef_null.h:26:14: note: expanded from macro 'NULL'
+   26 | #define NULL ((void*)0)
+      |              ^~~~~~~~~~
+1 warning generated.

@@ -1613,6 +1613,7 @@ dependencies = [
 name = "lodestone-allocbench"
 version = "0.1.0"
 dependencies = [
+ "lodestone-world",
  "mimalloc",
  "snmalloc-rs",
  "tikv-jemallocator",
@@ -1943,6 +1944,7 @@ dependencies = [
  "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
+ "lodestone-worldgen",
  "serde_json",
  "tokio",
  "uuid",

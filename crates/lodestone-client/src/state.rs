@@ -354,6 +354,30 @@ impl SharedState {
             .collect()
     }
 
+    /// Returns a `(block section, light section)` snapshot pair per requested
+    /// `(chunk, block_section_index, light_section_index)`, in order, under a
+    /// single world read lock — so a mesher's geometry and light for a
+    /// neighbourhood come from one lock epoch rather than two. The two indices
+    /// are distinct spaces (block-section for the `Arc`, light-section for the
+    /// light) and are passed straight through with no translation.
+    #[must_use]
+    pub(crate) fn sections_and_light_at(
+        &self,
+        requests: &[(ChunkPos, usize, usize)],
+    ) -> Vec<(Option<Arc<ChunkSection>>, Option<SectionLight>)> {
+        let world = self.world.read().unwrap_or_else(|e| e.into_inner());
+        requests
+            .iter()
+            .map(|(pos, block_index, light_index)| {
+                let wp = to_world_pos(*pos);
+                (
+                    world.section(wp, *block_index),
+                    world.section_light(wp, *light_index),
+                )
+            })
+            .collect()
+    }
+
     /// Whether the chunk at `pos` is currently loaded.
     #[must_use]
     pub(crate) fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {

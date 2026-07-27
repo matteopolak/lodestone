@@ -251,9 +251,9 @@ struct TimingProps;
 impl LightProperties for TimingProps {
     fn opacity(&self, state: u32) -> u8 {
         match state {
-            0 => 0,       // air
-            7 => 0,       // a transparent non-air (glass-like)
-            _ => 15,      // everything else opaque
+            0 => 0,  // air
+            7 => 0,  // a transparent non-air (glass-like)
+            _ => 15, // everything else opaque
         }
     }
     fn emission(&self, state: u32) -> u8 {

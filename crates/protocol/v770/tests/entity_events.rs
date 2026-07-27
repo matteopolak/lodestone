@@ -7,7 +7,9 @@
 //! (behavioural reference only), so a symmetric encode/decode bug cannot pass
 //! silently.
 
-use lodestone_model::{AnimationAction, ClientEvent, ConnectionState, Directive, Vec3, VersionAdapter};
+use lodestone_model::{
+    AnimationAction, ClientEvent, ConnectionState, Directive, Vec3, VersionAdapter,
+};
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
 use lodestone_world::World;
@@ -19,8 +21,12 @@ fn handle(adapter: &V770Adapter, packet_id: i32, payload: &[u8]) -> Vec<Directiv
 }
 
 fn expect_err(adapter: &V770Adapter, packet_id: i32, payload: &[u8]) {
-    let result = adapter.handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload);
-    assert!(result.is_err(), "expected packet {packet_id} to be rejected");
+    let result =
+        adapter.handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload);
+    assert!(
+        result.is_err(),
+        "expected packet {packet_id} to be rejected"
+    );
 }
 
 /// Independent VarInt encoder (not the codec under test).

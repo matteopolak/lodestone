@@ -434,7 +434,7 @@ pub struct GameEvent {
 ///
 /// Wire layout: a [`GlobalPos`] (identifier dimension then a packed 64-bit block
 /// position) followed by big-endian `f32` yaw and pitch.
-#[derive(Debug, Clone, PartialEq, Decode)]
+#[derive(Debug, Clone, PartialEq, Encode, Decode)]
 pub struct SetDefaultSpawnPosition {
     /// Dimension-qualified spawn block position.
     pub location: GlobalPos,

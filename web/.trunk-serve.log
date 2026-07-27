@@ -1,0 +1,17 @@
+2026-07-27T16:04:46.223922Z  INFO 🚀 Starting trunk 0.21.14
+2026-07-27T16:04:47.150427Z  INFO 📦 starting build
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+2026-07-27T16:04:48.716738Z  INFO applying new distribution
+2026-07-27T16:04:48.719692Z  INFO ✅ success
+2026-07-27T16:04:48.721166Z  INFO 📡 serving static assets at -> /
+2026-07-27T16:04:48.721218Z  INFO 📡 server listening at:
+2026-07-27T16:04:48.721370Z  INFO     🏠 http://127.0.0.1:8080/
+2026-07-27T16:04:48.723288Z  INFO     🏠 http://localhost.:8080/
+2026-07-27T16:11:29.865580Z  INFO 📦 starting build
+   Compiling lodestone-physics v0.1.0 (/Users/matthew/projects/lodestone/crates/lodestone-physics)
+   Compiling lodestone-v770 v0.1.0 (/Users/matthew/projects/lodestone/crates/protocol/v770)
+   Compiling lodestone-controller v0.1.0 (/Users/matthew/projects/lodestone/crates/lodestone-controller)
+   Compiling lodestone-web v0.1.0 (/Users/matthew/projects/lodestone/web)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.08s
+2026-07-27T16:11:34.088690Z  INFO applying new distribution
+2026-07-27T16:11:34.095104Z  INFO ✅ success

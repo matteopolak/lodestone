@@ -278,13 +278,17 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
         .cmd(&format!("scoreboard players reset {holder} {objective}"))
         .await;
     println!("  RCON `scoreboard players reset {holder} {objective}` -> {reset_resp:?}");
-    let score_cleared = poll_until(Duration::from_secs(15), Duration::from_millis(150), || async {
-        // Objective still present, but this holder's score must vanish.
-        match handle.scoreboard().score(&objective, &holder) {
-            None => Some(()),
-            Some(_) => None,
-        }
-    })
+    let score_cleared = poll_until(
+        Duration::from_secs(15),
+        Duration::from_millis(150),
+        || async {
+            // Objective still present, but this holder's score must vanish.
+            match handle.scoreboard().score(&objective, &holder) {
+                None => Some(()),
+                Some(_) => None,
+            }
+        },
+    )
     .await;
     assert!(
         score_cleared.is_some(),
@@ -298,12 +302,16 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
         .cmd(&format!("scoreboard objectives remove {objective}"))
         .await;
     println!("  RCON `scoreboard objectives remove {objective}` -> {remove_resp:?}");
-    let objective_removed = poll_until(Duration::from_secs(15), Duration::from_millis(150), || async {
-        match handle.scoreboard().objective(&objective) {
-            None => Some(()),
-            Some(_) => None,
-        }
-    })
+    let objective_removed = poll_until(
+        Duration::from_secs(15),
+        Duration::from_millis(150),
+        || async {
+            match handle.scoreboard().objective(&objective) {
+                None => Some(()),
+                Some(_) => None,
+            }
+        },
+    )
     .await;
     assert!(
         objective_removed.is_some(),

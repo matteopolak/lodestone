@@ -41,6 +41,7 @@ pub use entity::{EntityDimensions, EntityMotion, MoveContext, move_entity};
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
-    MovementInput, PlayerState, StatusEffects, tick, tick_air, tick_elytra, tick_lava, tick_water,
+    MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air, tick_elytra,
+    tick_lava, tick_water,
 };
 pub use profile::{FluidModel, InputModel, PhysicsProfile};

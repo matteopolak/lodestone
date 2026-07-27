@@ -123,7 +123,10 @@ fn add_entity_rejects_unknown_entity_type() {
         play::clientbound::ADD_ENTITY,
         &payload,
     );
-    assert!(result.is_err(), "an unknown entity-type id must be rejected");
+    assert!(
+        result.is_err(),
+        "an unknown entity-type id must be rejected"
+    );
 }
 
 #[test]

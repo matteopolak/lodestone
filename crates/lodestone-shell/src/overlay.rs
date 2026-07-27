@@ -13,7 +13,7 @@
 //! [`ScoreEntry`] slice the client hands out; [`sidebar_from`] is a thin adapter
 //! that pulls that slice from a live snapshot.
 
-use lodestone_client::{BossBar, BossColor, DisplaySlot, Scoreboard, ScoreEntry, Text};
+use lodestone_client::{BossBar, BossColor, DisplaySlot, ScoreEntry, Scoreboard, Text};
 
 /// Vanilla renders at most 15 sidebar entries below the title.
 const MAX_SIDEBAR_LINES: usize = 15;
@@ -73,7 +73,10 @@ pub fn sidebar_from(sb: &Scoreboard) -> Option<Sidebar> {
         .objective(objective)
         .and_then(|o| o.display_name.as_ref().map(Text::to_plain_string))
         .unwrap_or_else(|| objective.to_string());
-    Some(sidebar_view(&title, &sb.scores_in_slot(DisplaySlot::Sidebar)))
+    Some(sidebar_view(
+        &title,
+        &sb.scores_in_slot(DisplaySlot::Sidebar),
+    ))
 }
 
 /// A ready-to-draw boss bar: a plain title, a clamped progress fraction, and an

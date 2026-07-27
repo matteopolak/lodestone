@@ -247,6 +247,29 @@ pub enum EntityVariant {
     /// The climate family a mob spawned into. 26.2 gave pigs, cows, chickens and
     /// several others per-temperature skins instead of one universal sheet.
     Temperature(Temperature),
+    /// A horse's colour coat (`Horse.Variant` / `HorseRenderer.getTextureLocation`).
+    /// This is deliberately *only* the base-colour layer: vanilla's markings
+    /// overlay (`Markings`, drawn by `HorseMarkingLayer` as an independent
+    /// second translucent pass over the same model) is a second, unrelated
+    /// selection axis, not a sub-case of colour — see `horse_markings_texture`
+    /// in `entity_models.rs`, which is intentionally *not* routed through
+    /// `EntityTexture`/`ByVariant` because that shape only carries one path.
+    HorseColor(HorseColor),
+    /// A llama or trader llama's wool colour (`Llama.Variant`).
+    Llama(LlamaColor),
+    /// A cat's breed (`CatVariant`/`CatVariants.java`).
+    Cat(CatCoat),
+    /// A wolf's breed and tame/angry state, combined: vanilla's own
+    /// `Wolf.getTexture()` resolves both together to one texture path, so
+    /// they are one axis here rather than two independent ones.
+    Wolf {
+        /// The breed (`WolfVariant`/`WolfVariants.java`).
+        coat: WolfCoat,
+        /// Wild, tame, or (tamed-and-)angry — each breed ships one file per state.
+        state: WolfState,
+    },
+    /// A parrot's plumage colour (`Parrot.Variant`).
+    Parrot(ParrotColor),
 }
 
 /// The three climate families 26.2 ships variant skins for.
@@ -258,6 +281,135 @@ pub enum Temperature {
     Cold,
     /// Warm biomes (`*_warm`).
     Warm,
+}
+
+/// A horse's base coat colour (`Horse.Variant`, `HorseRenderer.java`). Ordered
+/// as vanilla's own `id` field, not alphabetically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HorseColor {
+    /// `entity/horse/horse_white`.
+    White,
+    /// `entity/horse/horse_creamy`.
+    Creamy,
+    /// `entity/horse/horse_chestnut`.
+    Chestnut,
+    /// `entity/horse/horse_brown`.
+    Brown,
+    /// `entity/horse/horse_black`.
+    Black,
+    /// `entity/horse/horse_gray`.
+    Gray,
+    /// `entity/horse/horse_darkbrown`.
+    DarkBrown,
+}
+
+/// A horse's independent markings overlay (`Markings.java`). Not part of
+/// [`EntityVariant`] — see the note on [`EntityVariant::HorseColor`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HorseMarkings {
+    /// No overlay pass at all (vanilla maps this to an invisible texture).
+    None,
+    /// `entity/horse/horse_markings_white`.
+    White,
+    /// `entity/horse/horse_markings_whitefield`.
+    WhiteField,
+    /// `entity/horse/horse_markings_whitedots`.
+    WhiteDots,
+    /// `entity/horse/horse_markings_blackdots`.
+    BlackDots,
+}
+
+/// A llama/trader llama's wool colour (`Llama.Variant`, `LlamaRenderer.java`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LlamaColor {
+    /// `entity/llama/llama_creamy`, vanilla's `DEFAULT`.
+    Creamy,
+    /// `entity/llama/llama_white`.
+    White,
+    /// `entity/llama/llama_brown`.
+    Brown,
+    /// `entity/llama/llama_gray`.
+    Gray,
+}
+
+/// A cat's breed (`CatVariants.java`). Ordered as vanilla registers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CatCoat {
+    /// `entity/cat/cat_tabby`, vanilla's default breed.
+    Tabby,
+    /// `entity/cat/cat_black`.
+    Black,
+    /// `entity/cat/cat_red`.
+    Red,
+    /// `entity/cat/cat_siamese`.
+    Siamese,
+    /// `entity/cat/cat_british_shorthair`.
+    BritishShorthair,
+    /// `entity/cat/cat_calico`.
+    Calico,
+    /// `entity/cat/cat_persian`.
+    Persian,
+    /// `entity/cat/cat_ragdoll`.
+    Ragdoll,
+    /// `entity/cat/cat_white`.
+    White,
+    /// `entity/cat/cat_jellie`.
+    Jellie,
+    /// `entity/cat/cat_all_black`.
+    AllBlack,
+}
+
+/// A wolf's breed (`WolfVariants.java`). Ordered as vanilla registers them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WolfCoat {
+    /// `entity/wolf/wolf`, vanilla's default breed (`WolfVariants.DEFAULT`).
+    Pale,
+    /// `entity/wolf/wolf_spotted`.
+    Spotted,
+    /// `entity/wolf/wolf_snowy`.
+    Snowy,
+    /// `entity/wolf/wolf_black`.
+    Black,
+    /// `entity/wolf/wolf_ashen`.
+    Ashen,
+    /// `entity/wolf/wolf_rusty`.
+    Rusty,
+    /// `entity/wolf/wolf_woods`.
+    Woods,
+    /// `entity/wolf/wolf_chestnut`.
+    Chestnut,
+    /// `entity/wolf/wolf_striped`.
+    Striped,
+}
+
+/// A wolf's wild/tame/angry state (`Wolf.getTexture()`); each breed ships one
+/// texture file per state (`<breed>`, `<breed>_tame`, `<breed>_angry`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WolfState {
+    /// Undomesticated (no suffix on the breed's texture file).
+    Wild,
+    /// Tamed by a player (`_tame` suffix).
+    Tame,
+    /// Tamed but currently hostile (`_angry` suffix).
+    Angry,
+}
+
+/// A parrot's plumage colour (`Parrot.Variant`). Note vanilla's own filename
+/// for `GRAY` is spelled `parrot_grey.png` — transcribed verbatim, not
+/// "corrected" to the American spelling used by the enum case name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ParrotColor {
+    /// `entity/parrot/parrot_red_blue`, vanilla's default.
+    RedBlue,
+    /// `entity/parrot/parrot_blue`.
+    Blue,
+    /// `entity/parrot/parrot_green`.
+    Green,
+    /// `entity/parrot/parrot_yellow_blue`.
+    YellowBlue,
+    /// `entity/parrot/parrot_grey` — note the vanilla file uses British
+    /// spelling despite the enum case matching `Parrot.Variant.GRAY`.
+    Gray,
 }
 
 /// How an entry resolves its texture: a single fixed sheet, or a selector over

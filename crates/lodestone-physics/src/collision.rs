@@ -9,8 +9,8 @@
 //! epsilon placement rather than the classic pre-1.13 form, because the epsilon
 //! decides borderline contacts that the server's anti-cheat also sees.
 
-use crate::geometry::{Aabb, Axis, Vec3d};
 use crate::fluid::{FluidCell, HorizontalDir};
+use crate::geometry::{Aabb, Axis, Vec3d};
 
 /// Vanilla's collision epsilon (`1.0E-7`), used throughout `VoxelShape.collideX`.
 const EPSILON: f64 = 1.0E-7;

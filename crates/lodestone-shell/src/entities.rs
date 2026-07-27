@@ -262,7 +262,10 @@ mod tests {
         // A full tick after the snapshot it reaches the target.
         interp.update(&[snap(1, target, 0.0)], TICK);
         let xf = interp.draws()[0].feet.x;
-        assert!((xf - 4.0).abs() < 1.0e-3, "after a tick it arrives, was x={xf}");
+        assert!(
+            (xf - 4.0).abs() < 1.0e-3,
+            "after a tick it arrives, was x={xf}"
+        );
     }
 
     #[test]

@@ -1122,6 +1122,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "lodestone-assets",
+ "lodestone-model",
  "lodestone-world",
  "pollster",
  "rayon",
@@ -1138,8 +1139,10 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-worldgen",
+ "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
  "wasm-bindgen-futures",
 ]
 
@@ -1150,6 +1153,7 @@ dependencies = [
  "lodestone-core",
  "lodestone-macros",
  "lodestone-model",
+ "lodestone-server",
  "lodestone-world",
  "uuid",
 ]

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsnmallocshim-checks-rust.a "CMakeFiles/snmallocshim-checks-rust.dir/src/snmalloc/override/rust.cc.o"
+/opt/homebrew/opt/llvm/bin/llvm-ranlib libsnmallocshim-checks-rust.a

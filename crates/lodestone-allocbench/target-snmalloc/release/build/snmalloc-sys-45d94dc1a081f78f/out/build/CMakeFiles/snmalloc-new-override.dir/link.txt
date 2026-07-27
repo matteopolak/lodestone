@@ -1,0 +1,2 @@
+/usr/bin/ar qc libsnmalloc-new-override.a "CMakeFiles/snmalloc-new-override.dir/src/snmalloc/override/new.cc.o"
+/opt/homebrew/opt/llvm/bin/llvm-ranlib libsnmalloc-new-override.a

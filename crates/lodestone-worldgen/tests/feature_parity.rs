@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lodestone_worldgen::feature::{
-    apply_ore_step, decoration_seed, parse_ore_config, parse_placements, OreInput, PlacedOre,
+    OreInput, PlacedOre, apply_ore_step, decoration_seed, parse_ore_config, parse_placements,
 };
 use lodestone_worldgen::rng::{WorldgenRandom, XoroshiroRandomSource};
 use serde_json::Value;
@@ -106,8 +106,10 @@ fn parse_fixture(text: &str) -> Fixture {
             f.ore.insert(parse_xyz(coords), rest.to_string());
         } else if let Some(coords) = tag.strip_prefix("ofh.") {
             let (x, z) = coords.split_once(',').unwrap();
-            f.ocean_floor_wg
-                .insert((x.parse().unwrap(), z.parse().unwrap()), rest.parse().unwrap());
+            f.ocean_floor_wg.insert(
+                (x.parse().unwrap(), z.parse().unwrap()),
+                rest.parse().unwrap(),
+            );
         } else if let Some(order) = tag.strip_prefix("oredef.") {
             // rest = "<placedId> <indexInStep>"
             let (pid, idx) = rest.split_once(' ').expect("oredef fields");
@@ -139,8 +141,8 @@ fn parse_fixture(text: &str) -> Fixture {
 // ---------------------------------------------------------------------------
 
 fn read_json(path: &Path) -> Value {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
 }
 
@@ -161,8 +163,7 @@ fn build_plains_ores() -> Vec<PlacedOre> {
         let placed_id = entry.as_str().expect("placed feature id");
         let placed = read_json(&root.join(format!("placed_feature/{}.json", strip(placed_id))));
         let cf_id = placed["feature"].as_str().expect("configured feature id");
-        let configured =
-            read_json(&root.join(format!("configured_feature/{}.json", strip(cf_id))));
+        let configured = read_json(&root.join(format!("configured_feature/{}.json", strip(cf_id))));
         if configured["type"].as_str() == Some("minecraft:ore") {
             ores.push(PlacedOre {
                 index: i,
@@ -227,12 +228,13 @@ struct RunResult {
     decoration_seed: i64,
 }
 
-fn run_fixture(f: &Fixture, ores: &[PlacedOre], tag_map: &HashMap<String, HashSet<String>>) -> RunResult {
-    let in_tag = |base: &str, tag: &str| -> bool {
-        tag_map
-            .get(tag)
-            .is_some_and(|set| set.contains(base))
-    };
+fn run_fixture(
+    f: &Fixture,
+    ores: &[PlacedOre],
+    tag_map: &HashMap<String, HashSet<String>>,
+) -> RunResult {
+    let in_tag =
+        |base: &str, tag: &str| -> bool { tag_map.get(tag).is_some_and(|set| set.contains(base)) };
     let input = OreInput {
         chunk_x: f.chunk_x,
         chunk_z: f.chunk_z,
@@ -314,9 +316,9 @@ fn assert_exact(name: &str, f: &Fixture, res: &RunResult, ores: &[PlacedOre]) {
                 actual, expected,
                 "{name}: block mismatch at ({x},{y},{z}) — Rust {actual}, JVM {expected}"
             ),
-            None => panic!(
-                "{name}: Rust placed no ore at ({x},{y},{z}) where JVM placed {expected}"
-            ),
+            None => {
+                panic!("{name}: Rust placed no ore at ({x},{y},{z}) where JVM placed {expected}")
+            }
         }
         checked += 1;
     }
@@ -403,9 +405,15 @@ fn ore_counts_match_jvm_and_are_in_bands() {
         }
 
         let iron = f.counts.get("minecraft:iron_ore").copied().unwrap_or(0)
-            + f.counts.get("minecraft:deepslate_iron_ore").copied().unwrap_or(0);
+            + f.counts
+                .get("minecraft:deepslate_iron_ore")
+                .copied()
+                .unwrap_or(0);
         let coal = f.counts.get("minecraft:coal_ore").copied().unwrap_or(0)
-            + f.counts.get("minecraft:deepslate_coal_ore").copied().unwrap_or(0);
+            + f.counts
+                .get("minecraft:deepslate_coal_ore")
+                .copied()
+                .unwrap_or(0);
         let diamond = f.counts.get("minecraft:diamond_ore").copied().unwrap_or(0)
             + f.counts
                 .get("minecraft:deepslate_diamond_ore")

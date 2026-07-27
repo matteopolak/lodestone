@@ -843,6 +843,7 @@ pub enum CliCommand {
     CheckConnected {
         allowlist: PathBuf,
     },
+    Connectedness,
     CheckDeletable {
         version: String,
     },
@@ -860,7 +861,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report play packet reachability per protocol family\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses each family's own generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -883,6 +884,7 @@ where
         "gen-registries" => parse_gen_registries_args(&args[1..]),
         "check-isolation" => Ok(CliCommand::CheckIsolation),
         "check-connected" => parse_check_connected_args(&args[1..]),
+        "connectedness" => Ok(CliCommand::Connectedness),
         "check-deletable" => parse_check_deletable_args(&args[1..]),
         "codegen-ratio" => Ok(CliCommand::CodegenRatio),
         "new-version" => parse_new_version_args(&args[1..]),
@@ -992,6 +994,19 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
                 bail!("{}", report.violation_summary());
             }
             println!("{}", report.success_summary());
+            Ok(())
+        }
+        CliCommand::Connectedness => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            let report = connectedness_report(&workspace_root)?;
+            println!("{}", report.render());
+            if report.has_unclassified() {
+                bail!(
+                    "connectedness classification has {} unclassified clientbound arm(s)",
+                    report.unclassified_count()
+                );
+            }
             Ok(())
         }
         CliCommand::CheckDeletable { version } => {
@@ -2510,6 +2525,637 @@ fn parse_key_value_string(line: &str) -> Result<(&str, String)> {
         bail!("expected string value for {key:?}");
     };
     Ok((key, value.to_owned()))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectednessReport {
+    pub families: Vec<ConnectednessFamily>,
+}
+
+impl ConnectednessReport {
+    #[must_use]
+    pub fn has_unclassified(&self) -> bool {
+        self.unclassified_count() > 0
+    }
+
+    #[must_use]
+    pub fn unclassified_count(&self) -> usize {
+        self.families
+            .iter()
+            .map(|family| family.unclassified.len())
+            .sum()
+    }
+
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::from(
+            "protocol connectedness (denominators from each family play::{clientbound,serverbound} packet_ids.rs):",
+        );
+        for family in &self.families {
+            let _ = write!(
+                out,
+                "\n{}  clientbound reaches {}/{}; decoded-but-stranded {}",
+                family.family,
+                family.play_clientbound_reaches_consumer,
+                family.play_clientbound_total,
+                family.play_clientbound_stranded_names.len()
+            );
+            if !family.play_clientbound_stranded_names.is_empty() {
+                let _ = write!(
+                    out,
+                    " [{}]",
+                    family.play_clientbound_stranded_names.join(", ")
+                );
+            }
+            let _ = write!(
+                out,
+                "; serverbound encoded {}/{}; examined {} arm(s)",
+                family.play_serverbound_encoded,
+                family.play_serverbound_total,
+                family.examined_clientbound_arms
+            );
+            if !family.unclassified.is_empty() {
+                let _ = write!(out, "\n  UNCLASSIFIED:");
+                for arm in &family.unclassified {
+                    let _ = write!(
+                        out,
+                        "\n    - {} at {}:{} ({})",
+                        arm.packet, arm.file, arm.line, arm.reason
+                    );
+                }
+            }
+            if !family.depth_limited.is_empty() {
+                let _ = write!(
+                    out,
+                    "\n  depth-limited at cap {}:",
+                    family.delegation_depth_cap
+                );
+                for arm in &family.depth_limited {
+                    let _ = write!(out, "\n    - {} at {}:{}", arm.packet, arm.file, arm.line);
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectednessFamily {
+    pub family: String,
+    pub play_clientbound_total: usize,
+    pub play_clientbound_reaches_consumer: usize,
+    pub play_clientbound_stranded_names: Vec<String>,
+    pub play_serverbound_total: usize,
+    pub play_serverbound_encoded: usize,
+    pub examined_clientbound_arms: usize,
+    pub unclassified: Vec<ConnectednessUnknown>,
+    pub depth_limited: Vec<ConnectednessUnknown>,
+    pub delegation_depth_cap: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConnectednessUnknown {
+    pub packet: String,
+    pub file: String,
+    pub line: usize,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlayPacketIdSummary {
+    clientbound: Vec<PlayPacketEntry>,
+    serverbound: Vec<PlayPacketEntry>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlayPacketEntry {
+    const_name: String,
+    resource_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClientboundArm {
+    packet: String,
+    line: usize,
+    verdict: ClientboundVerdict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ClientboundVerdict {
+    ReachesConsumer {
+        outlet: ConsumerOutlet,
+        via: Option<String>,
+    },
+    DecodedButStranded,
+    Unclassified {
+        reason: String,
+        depth_limited: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ConsumerOutlet {
+    ClientEvent,
+    Directive,
+    WorldSink,
+}
+
+pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport> {
+    let protocol_root = workspace_root.join("crates/protocol");
+    let mut families = Vec::new();
+    if !protocol_root.exists() {
+        return Ok(ConnectednessReport { families });
+    }
+
+    for entry in std::fs::read_dir(&protocol_root)
+        .with_context(|| format!("read protocol family directory {}", protocol_root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let family = entry.file_name().to_string_lossy().into_owned();
+        if !is_protocol_family_name(&family) {
+            continue;
+        }
+        let family_dir = entry.path();
+        let packet_ids_path = family_dir.join("src/generated/packet_ids.rs");
+        let adapter_path = family_dir.join("src/adapter.rs");
+        if !packet_ids_path.exists() || !adapter_path.exists() {
+            continue;
+        }
+        let packet_ids_source = std::fs::read_to_string(&packet_ids_path)
+            .with_context(|| format!("read {}", packet_ids_path.display()))?;
+        let adapter_source = std::fs::read_to_string(&adapter_path)
+            .with_context(|| format!("read {}", adapter_path.display()))?;
+        let play_ids = parse_play_packet_id_summary(&packet_ids_source)
+            .with_context(|| format!("parse {}", packet_ids_path.display()))?;
+        let depth_cap = 4;
+        let arms = classify_clientbound_dispatch(&adapter_source, depth_cap)
+            .with_context(|| format!("classify {}", adapter_path.display()))?;
+        let serverbound_encoded =
+            encoded_serverbound_packets(&adapter_source, &play_ids.serverbound);
+        let rel_adapter = adapter_path
+            .strip_prefix(workspace_root)
+            .unwrap_or(&adapter_path)
+            .display()
+            .to_string();
+
+        let mut stranded = Vec::new();
+        let mut unclassified = Vec::new();
+        let mut depth_limited = Vec::new();
+        let mut reaches = 0;
+        for arm in arms.values() {
+            match &arm.verdict {
+                ClientboundVerdict::ReachesConsumer { .. } => reaches += 1,
+                ClientboundVerdict::DecodedButStranded => stranded.push(arm.packet.clone()),
+                ClientboundVerdict::Unclassified {
+                    reason,
+                    depth_limited: limited,
+                } => {
+                    let unknown = ConnectednessUnknown {
+                        packet: arm.packet.clone(),
+                        file: rel_adapter.clone(),
+                        line: arm.line,
+                        reason: reason.clone(),
+                    };
+                    if *limited {
+                        depth_limited.push(unknown);
+                    } else {
+                        unclassified.push(unknown);
+                    }
+                }
+            }
+        }
+        stranded.sort();
+        unclassified.sort_by(|a, b| a.packet.cmp(&b.packet));
+        depth_limited.sort_by(|a, b| a.packet.cmp(&b.packet));
+
+        families.push(ConnectednessFamily {
+            family,
+            play_clientbound_total: play_ids.clientbound.len(),
+            play_clientbound_reaches_consumer: reaches,
+            play_clientbound_stranded_names: stranded,
+            play_serverbound_total: play_ids.serverbound.len(),
+            play_serverbound_encoded: serverbound_encoded.len(),
+            examined_clientbound_arms: arms.len(),
+            unclassified,
+            depth_limited,
+            delegation_depth_cap: depth_cap,
+        });
+    }
+    families.sort_by(|a, b| {
+        protocol_family_sort_key(&a.family).cmp(&protocol_family_sort_key(&b.family))
+    });
+    Ok(ConnectednessReport { families })
+}
+
+fn is_protocol_family_name(name: &str) -> bool {
+    name.strip_prefix('v')
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn protocol_family_sort_key(name: &str) -> u32 {
+    name.strip_prefix('v')
+        .and_then(|suffix| suffix.parse::<u32>().ok())
+        .unwrap_or(u32::MAX)
+}
+
+fn parse_play_packet_id_summary(source: &str) -> Result<PlayPacketIdSummary> {
+    let play = extract_named_block(source, "pub mod play")
+        .or_else(|| extract_named_block(source, "mod play"))
+        .ok_or_else(|| anyhow!("packet_ids.rs is missing pub mod play"))?;
+    let clientbound = extract_named_block(play, "pub mod clientbound")
+        .or_else(|| extract_named_block(play, "mod clientbound"))
+        .ok_or_else(|| anyhow!("packet_ids.rs play module is missing clientbound"))?;
+    let serverbound = extract_named_block(play, "pub mod serverbound")
+        .or_else(|| extract_named_block(play, "mod serverbound"))
+        .ok_or_else(|| anyhow!("packet_ids.rs play module is missing serverbound"))?;
+
+    Ok(PlayPacketIdSummary {
+        clientbound: parse_packet_entries(clientbound, "play::clientbound")?,
+        serverbound: parse_packet_entries(serverbound, "play::serverbound")?,
+    })
+}
+
+fn parse_packet_entries(module_body: &str, label: &str) -> Result<Vec<PlayPacketEntry>> {
+    if !module_body.contains("ENTRIES") {
+        bail!("{label} is missing ENTRIES");
+    }
+    let mut entries = Vec::new();
+    for line in module_body.lines() {
+        let trimmed = line.trim();
+        let Some(after_const) = trimmed.strip_prefix("pub const ") else {
+            continue;
+        };
+        let const_name = after_const
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        if const_name.is_empty() {
+            bail!("malformed {label} constant line {trimmed:?}");
+        }
+        let resource_name = format!("minecraft:{}", const_name.to_ascii_lowercase());
+        entries.push(PlayPacketEntry {
+            const_name,
+            resource_name,
+        });
+    }
+    if entries.is_empty() {
+        bail!("{label} did not contain packet constants");
+    }
+    let mut seen = BTreeSet::new();
+    for entry in &entries {
+        if !seen.insert(entry.const_name.as_str()) {
+            bail!("{label} contains duplicate packet {}", entry.const_name);
+        }
+    }
+    Ok(entries)
+}
+
+fn classify_clientbound_dispatch(
+    adapter_source: &str,
+    depth_cap: usize,
+) -> Result<BTreeMap<String, ClientboundArm>> {
+    let functions = extract_functions(adapter_source)?;
+    let prefix = "if packet_id == play::clientbound::";
+    let mut search_from = 0;
+    let mut arms = BTreeMap::new();
+    while let Some(relative) = adapter_source[search_from..].find(prefix) {
+        let start = search_from + relative;
+        let packet_start = start + prefix.len();
+        let packet_end = adapter_source[packet_start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|offset| packet_start + offset)
+            .ok_or_else(|| anyhow!("unterminated clientbound packet id at byte {packet_start}"))?;
+        let packet = adapter_source[packet_start..packet_end].to_owned();
+        let open = adapter_source[packet_end..]
+            .find('{')
+            .map(|offset| packet_end + offset)
+            .ok_or_else(|| anyhow!("packet arm {packet} has no body"))?;
+        let close = matching_brace(adapter_source, open)
+            .ok_or_else(|| anyhow!("packet arm {packet} has an unclosed body"))?;
+        let body = &adapter_source[open + 1..close];
+        let line = line_number(adapter_source, start);
+        let verdict = classify_body(body, &functions, depth_cap, None);
+        if arms
+            .insert(
+                packet.clone(),
+                ClientboundArm {
+                    packet,
+                    line,
+                    verdict,
+                },
+            )
+            .is_some()
+        {
+            bail!("duplicate play clientbound dispatch arm");
+        }
+        search_from = close + 1;
+    }
+    Ok(arms)
+}
+
+#[derive(Clone, Debug)]
+struct FunctionBody<'a> {
+    body: &'a str,
+}
+
+fn extract_functions(source: &str) -> Result<BTreeMap<String, FunctionBody<'_>>> {
+    let mut functions = BTreeMap::new();
+    let mut search_from = 0;
+    while let Some(relative) = source[search_from..].find("fn ") {
+        let fn_pos = search_from + relative;
+        if fn_pos > 0 {
+            let prev = source.as_bytes()[fn_pos - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = fn_pos + 3;
+                continue;
+            }
+        }
+        let name_start = fn_pos + 3;
+        let name_end = source[name_start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map(|offset| name_start + offset)
+            .ok_or_else(|| anyhow!("unterminated function name at byte {name_start}"))?;
+        let name = &source[name_start..name_end];
+        let Some(open) = source[name_end..].find('{').map(|offset| name_end + offset) else {
+            search_from = name_end;
+            continue;
+        };
+        let close = matching_brace(source, open)
+            .ok_or_else(|| anyhow!("function {name} has an unclosed body"))?;
+        functions.insert(
+            name.to_owned(),
+            FunctionBody {
+                body: &source[open + 1..close],
+            },
+        );
+        search_from = close + 1;
+    }
+    Ok(functions)
+}
+
+fn classify_body(
+    body: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+    remaining_depth: usize,
+    via: Option<String>,
+) -> ClientboundVerdict {
+    if body.contains("ClientEvent::") {
+        return ClientboundVerdict::ReachesConsumer {
+            outlet: ConsumerOutlet::ClientEvent,
+            via,
+        };
+    }
+    if body.contains("Directive::") || body.contains("send(") {
+        return ClientboundVerdict::ReachesConsumer {
+            outlet: ConsumerOutlet::Directive,
+            via,
+        };
+    }
+    if body.contains("world.")
+        || body.contains("sink.")
+        || body.contains(".set_block(")
+        || body.contains(".merge(")
+    {
+        return ClientboundVerdict::ReachesConsumer {
+            outlet: ConsumerOutlet::WorldSink,
+            via,
+        };
+    }
+
+    let delegates = delegate_function_calls(body, functions);
+    if !delegates.is_empty() {
+        if remaining_depth == 0 {
+            return ClientboundVerdict::Unclassified {
+                reason: format!(
+                    "delegation depth cap reached while following {}",
+                    delegates.join(", ")
+                ),
+                depth_limited: true,
+            };
+        }
+        let mut saw_unclassified = None;
+        for delegate in delegates {
+            let Some(function) = functions.get(&delegate) else {
+                continue;
+            };
+            match classify_body(
+                function.body,
+                functions,
+                remaining_depth - 1,
+                Some(delegate.clone()),
+            ) {
+                ClientboundVerdict::ReachesConsumer { outlet, .. } => {
+                    return ClientboundVerdict::ReachesConsumer {
+                        outlet,
+                        via: Some(delegate),
+                    };
+                }
+                ClientboundVerdict::DecodedButStranded => {}
+                ClientboundVerdict::Unclassified {
+                    reason,
+                    depth_limited,
+                } => {
+                    saw_unclassified = Some((reason, depth_limited));
+                }
+            }
+        }
+        if let Some((reason, depth_limited)) = saw_unclassified {
+            return ClientboundVerdict::Unclassified {
+                reason,
+                depth_limited,
+            };
+        }
+    }
+
+    if is_decoded_but_stranded(body) {
+        return ClientboundVerdict::DecodedButStranded;
+    }
+
+    ClientboundVerdict::Unclassified {
+        reason: "no recognized consumer outlet, explicit empty return, or classifiable delegate"
+            .to_owned(),
+        depth_limited: false,
+    }
+}
+
+fn delegate_function_calls(
+    body: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+) -> Vec<String> {
+    let mut delegates = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = body[start..].find('(') {
+        let open = start + pos;
+        let name_end = open;
+        let name_start = body[..name_end]
+            .rfind(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map_or(0, |idx| idx + 1);
+        let name = body[name_start..name_end].trim();
+        if functions.contains_key(name)
+            && !matches!(
+                name,
+                "send"
+                    | "decode_body"
+                    | "decode_and_validate"
+                    | "encode_body"
+                    | "Ok"
+                    | "Err"
+                    | "Some"
+                    | "Vec"
+                    | "Reader"
+            )
+            && !delegates.iter().any(|existing| existing == name)
+        {
+            delegates.push(name.to_owned());
+        }
+        start = open + 1;
+    }
+    delegates
+}
+
+fn is_decoded_but_stranded(body: &str) -> bool {
+    let returns_empty = body.contains("Ok(Vec::new())")
+        || body.contains("Ok(vec![])")
+        || body.contains("Ok(vec![])")
+        || body.contains("return Vec::new()")
+        || body.contains("Vec::new()")
+        || body.contains("vec![]");
+    let validates_or_decodes = body.contains("decode_body")
+        || body.contains("decode_and_validate")
+        || body.contains("Reader::new")
+        || body.contains("ensure_empty")
+        || body.contains("reader.");
+    returns_empty && validates_or_decodes
+}
+
+fn encoded_serverbound_packets(
+    adapter_source: &str,
+    serverbound: &[PlayPacketEntry],
+) -> BTreeSet<String> {
+    let valid = serverbound
+        .iter()
+        .map(|entry| entry.const_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let prefix = "play::serverbound::";
+    let mut encoded = BTreeSet::new();
+    let mut search_from = 0;
+    while let Some(relative) = adapter_source[search_from..].find(prefix) {
+        let start = search_from + relative + prefix.len();
+        let end = adapter_source[start..]
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .map_or(adapter_source.len(), |offset| start + offset);
+        let const_name = &adapter_source[start..end];
+        if valid.contains(const_name) {
+            encoded.insert(const_name.to_owned());
+        }
+        search_from = end;
+    }
+    encoded
+}
+
+fn extract_named_block<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
+    let start = source.find(marker)?;
+    let open = source[start..].find('{')? + start;
+    let close = matching_brace(source, open)?;
+    Some(&source[open + 1..close])
+}
+
+fn matching_brace(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(open) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut i = open;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        if in_line_comment {
+            if b == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_block_comment {
+            if b == b'*' && next == Some(b'/') {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_char {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'\'' {
+                in_char = false;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && next == Some(b'/') {
+            in_line_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'/' && next == Some(b'*') {
+            in_block_comment = true;
+            i += 2;
+            continue;
+        }
+        if b == b'"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' {
+            in_char = true;
+            i += 1;
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+        } else if b == b'}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn line_number(source: &str, byte_offset: usize) -> usize {
+    source[..byte_offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
 }
 
 /// One dependency edge that points at the version family being deleted.
@@ -5081,6 +5727,146 @@ mod tests {
     }
 
     #[test]
+    fn cli_parses_connectedness_command() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["connectedness"])?,
+            CliCommand::Connectedness
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn packet_id_play_counts_use_nested_play_modules() -> Result<()> {
+        let source = r#"
+pub mod login {
+    pub mod clientbound {
+        pub const LOGIN: i32 = 0;
+        pub static ENTRIES: &[(&str, i32)] = &[("minecraft:login", LOGIN)];
+    }
+}
+pub mod play {
+    pub mod clientbound {
+        pub const CHAT: i32 = 0;
+        pub const BLOCK_UPDATE: i32 = 1;
+        pub static ENTRIES: &[(&str, i32)] = &[
+            ("minecraft:chat", CHAT),
+            ("minecraft:block_update", BLOCK_UPDATE),
+        ];
+    }
+    pub mod serverbound {
+        pub const CHAT: i32 = 0;
+        pub static ENTRIES: &[(&str, i32)] = &[("minecraft:chat", CHAT)];
+    }
+}
+"#;
+
+        let ids = parse_play_packet_id_summary(source)?;
+        assert_eq!(ids.clientbound.len(), 2);
+        assert_eq!(ids.serverbound.len(), 1);
+        assert!(
+            ids.clientbound
+                .iter()
+                .any(|packet| packet.const_name == "CHAT")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connectedness_classifier_ground_truths_direct_delegated_world_and_stranded() -> Result<()> {
+        let adapter = r#"
+fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    Ok(vec![Directive::Emit(ClientEvent::EntitySpawned { id: 1 })])
+}
+
+fn handle_play(
+    &self,
+    world: &mut dyn WorldSink,
+    packet_id: i32,
+    payload: &[u8],
+) -> Result<Vec<Directive>, AdapterError> {
+    if packet_id == play::clientbound::SYSTEM_CHAT {
+        return Ok(vec![Directive::Emit(ClientEvent::Chat { text })]);
+    }
+    if packet_id == play::clientbound::ADD_ENTITY {
+        return handle_add_entity(payload);
+    }
+    if packet_id == play::clientbound::BLOCK_UPDATE {
+        world.set_block(pos, state);
+        return Ok(Vec::new());
+    }
+    if packet_id == play::clientbound::SET_OBJECTIVE {
+        decode_and_validate::<SetObjective>(payload)?;
+        return Ok(Vec::new());
+    }
+    if packet_id == play::clientbound::MYSTERY {
+        return parse_mystery(payload);
+    }
+    Ok(Vec::new())
+}
+"#;
+
+        let arms = classify_clientbound_dispatch(adapter, 4)?;
+        assert_eq!(
+            arms.get("SYSTEM_CHAT").map(|arm| &arm.verdict),
+            Some(&ClientboundVerdict::ReachesConsumer {
+                outlet: ConsumerOutlet::ClientEvent,
+                via: None,
+            })
+        );
+        assert_eq!(
+            arms.get("ADD_ENTITY").map(|arm| &arm.verdict),
+            Some(&ClientboundVerdict::ReachesConsumer {
+                outlet: ConsumerOutlet::ClientEvent,
+                via: Some("handle_add_entity".to_owned()),
+            })
+        );
+        assert_eq!(
+            arms.get("BLOCK_UPDATE").map(|arm| &arm.verdict),
+            Some(&ClientboundVerdict::ReachesConsumer {
+                outlet: ConsumerOutlet::WorldSink,
+                via: None,
+            })
+        );
+        assert_eq!(
+            arms.get("SET_OBJECTIVE").map(|arm| &arm.verdict),
+            Some(&ClientboundVerdict::DecodedButStranded)
+        );
+        assert!(matches!(
+            arms.get("MYSTERY").map(|arm| &arm.verdict),
+            Some(ClientboundVerdict::Unclassified { .. })
+        ));
+        assert!(
+            arms.len() >= 5,
+            "anti-vacuity: classifier saw {}",
+            arms.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn connectedness_report_uses_external_denominators_and_serverbound_encodes() -> Result<()> {
+        let workspace = connectedness_fixture_workspace()?;
+
+        let report = connectedness_report(&workspace)?;
+        let family = report
+            .families
+            .iter()
+            .find(|family| family.family == "v9")
+            .expect("fixture family exists");
+        assert_eq!(family.play_clientbound_total, 5);
+        assert_eq!(family.play_clientbound_reaches_consumer, 3);
+        assert_eq!(
+            family.play_clientbound_stranded_names,
+            vec!["SET_OBJECTIVE".to_owned()]
+        );
+        assert_eq!(family.play_serverbound_total, 2);
+        assert_eq!(family.play_serverbound_encoded, 1);
+        assert_eq!(family.examined_clientbound_arms, 5);
+        assert_eq!(family.unclassified.len(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn conformance_skip_cargo_checks_packet_ids_and_skips_absent_registry_report() -> Result<()> {
         let workspace = isolation_fixture(
             "conformance",
@@ -6950,6 +7736,81 @@ live-v1 = ["lodestone-registry/v1"]
             std::fs::create_dir_all(allowlist_path.parent().expect("allowlist path has parent"))?;
             std::fs::write(allowlist_path, allowlist)?;
         }
+        Ok(workspace)
+    }
+
+    fn connectedness_fixture_workspace() -> Result<TestWorkspace> {
+        let workspace = fresh_test_workspace("connectedness")?;
+        let root = workspace.deref();
+        let family = root.join("crates/protocol/v9");
+        std::fs::create_dir_all(family.join("src/generated"))?;
+        std::fs::write(
+            family.join("src/generated/packet_ids.rs"),
+            r#"
+pub mod play {
+    pub mod clientbound {
+        pub const SYSTEM_CHAT: i32 = 0;
+        pub const ADD_ENTITY: i32 = 1;
+        pub const BLOCK_UPDATE: i32 = 2;
+        pub const SET_OBJECTIVE: i32 = 3;
+        pub const MYSTERY: i32 = 4;
+        pub static ENTRIES: &[(&str, i32)] = &[
+            ("minecraft:system_chat", SYSTEM_CHAT),
+            ("minecraft:add_entity", ADD_ENTITY),
+            ("minecraft:block_update", BLOCK_UPDATE),
+            ("minecraft:set_objective", SET_OBJECTIVE),
+            ("minecraft:mystery", MYSTERY),
+        ];
+    }
+    pub mod serverbound {
+        pub const CHAT: i32 = 0;
+        pub const MOVE: i32 = 1;
+        pub static ENTRIES: &[(&str, i32)] = &[
+            ("minecraft:chat", CHAT),
+            ("minecraft:move", MOVE),
+        ];
+    }
+}
+"#,
+        )?;
+        std::fs::write(
+            family.join("src/adapter.rs"),
+            r#"
+fn handle_add_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    Ok(vec![Directive::Emit(ClientEvent::EntitySpawned { id: 1 })])
+}
+
+fn encode_action(action: ClientAction) -> Result<Option<(i32, Vec<u8>)>, AdapterError> {
+    Ok(Some((play::serverbound::CHAT, Vec::new())))
+}
+
+fn handle_play(
+    &self,
+    world: &mut dyn WorldSink,
+    packet_id: i32,
+    payload: &[u8],
+) -> Result<Vec<Directive>, AdapterError> {
+    if packet_id == play::clientbound::SYSTEM_CHAT {
+        return Ok(vec![Directive::Emit(ClientEvent::Chat { text })]);
+    }
+    if packet_id == play::clientbound::ADD_ENTITY {
+        return handle_add_entity(payload);
+    }
+    if packet_id == play::clientbound::BLOCK_UPDATE {
+        world.set_block(pos, state);
+        return Ok(Vec::new());
+    }
+    if packet_id == play::clientbound::SET_OBJECTIVE {
+        decode_and_validate::<SetObjective>(payload)?;
+        return Ok(Vec::new());
+    }
+    if packet_id == play::clientbound::MYSTERY {
+        return parse_mystery(payload);
+    }
+    Ok(Vec::new())
+}
+"#,
+        )?;
         Ok(workspace)
     }
 

@@ -114,9 +114,18 @@ fn a_pending_multiplier_scales_this_tick_displacement_component_wise() {
     let dx = s.position.x - before.x;
     let dy = s.position.y - before.y;
     let dz = s.position.z - before.z;
-    assert!((dx - 0.5 * 0.25).abs() < 1e-12, "x scaled by 0.25, got {dx}");
-    assert!((dy - (-0.5 * 0.05)).abs() < 1e-12, "y scaled by 0.05, got {dy}");
-    assert!((dz - 0.3 * 0.25).abs() < 1e-12, "z scaled by 0.25, got {dz}");
+    assert!(
+        (dx - 0.5 * 0.25).abs() < 1e-12,
+        "x scaled by 0.25, got {dx}"
+    );
+    assert!(
+        (dy - (-0.5 * 0.05)).abs() < 1e-12,
+        "y scaled by 0.05, got {dy}"
+    );
+    assert!(
+        (dz - 0.3 * 0.25).abs() < 1e-12,
+        "z scaled by 0.25, got {dz}"
+    );
 }
 
 #[test]

@@ -253,7 +253,10 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     let coverage = mob_px as f64 / f64::from(w * h);
 
     eprintln!("=== shell live entity render ===");
-    eprintln!("pig feet (server) = ({:.2}, {:.2}, {:.2})", pig.feet.x, pig.feet.y, pig.feet.z);
+    eprintln!(
+        "pig feet (server) = ({:.2}, {:.2}, {:.2})",
+        pig.feet.x, pig.feet.y, pig.feet.z
+    );
     eprintln!("summon point      = ({px:.2}, {py:.2}, {pz:.2})");
     eprintln!("entities drawn    = {}", stats.entities_drawn);
     eprintln!("mob coverage      = {:.2}%", coverage * 100.0);

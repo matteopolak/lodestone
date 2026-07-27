@@ -249,7 +249,8 @@ impl LightPatch {
 
 /// Tests bit `i` of a wire bitset stored as an LSB-first `long[]`.
 fn mask_bit(mask: &[u64], i: usize) -> bool {
-    mask.get(i >> 6).is_some_and(|word| (word >> (i & 63)) & 1 == 1)
+    mask.get(i >> 6)
+        .is_some_and(|word| (word >> (i & 63)) & 1 == 1)
 }
 
 /// Returns one past the highest set bit of an LSB-first `long[]` bitset, i.e. the
@@ -1512,7 +1513,11 @@ mod tests {
             &LightData::Uniform(15),
             "a section named by neither mask keeps its prior light"
         );
-        assert_eq!(light.sky(3), &LightData::Values(arr), "the named section updates");
+        assert_eq!(
+            light.sky(3),
+            &LightData::Values(arr),
+            "the named section updates"
+        );
     }
 
     #[test]

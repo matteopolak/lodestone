@@ -121,6 +121,14 @@ struct FixedUuidSizedPacket {
 }
 
 #[derive(Debug, PartialEq, Encode, Decode)]
+struct NamedNbtPacket {
+    prefix: u8,
+    #[mc(nbt)]
+    dimension_codec: Vec<u8>,
+    suffix: u8,
+}
+
+#[derive(Debug, PartialEq, Encode, Decode)]
 #[repr(u8)]
 #[mc(repr = "u8")]
 enum ExampleEnum {
@@ -452,8 +460,8 @@ fn when_decodes_conditional_option_without_option_presence_byte() {
     assert_eq!(
         bytes,
         vec![
-            1, 15, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'c', b'h',
-            b'e', b's', b't', 27
+            1, 15, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'c', b'h', b'e',
+            b's', b't', 27
         ]
     );
     assert_eq!(
@@ -476,8 +484,8 @@ fn when_decodes_conditional_option_without_option_presence_byte() {
     assert_eq!(
         bytes,
         vec![
-            2, 11, b'E', b'n', b't', b'i', b't', b'y', b'H', b'o', b'r', b's', b'e', 2, 0, 0,
-            0x30, 0x39
+            2, 11, b'E', b'n', b't', b'i', b't', b'y', b'H', b'o', b'r', b's', b'e', 2, 0, 0, 0x30,
+            0x39
         ]
     );
     assert_eq!(
@@ -689,6 +697,59 @@ fn fixed_on_sixteen_byte_array_writes_raw_bytes_instead_of_uuid() {
         decode_from_slice::<FixedUuidSizedPacket>(&bytes, 776).unwrap(),
         value
     );
+}
+
+#[test]
+fn nbt_captures_exact_named_nbt_span_from_external_bytes() {
+    // Hand-authored named NBT, not produced by lodestone_core's writer:
+    // TAG_Compound("root") { TAG_String("name") = "overworld"; TAG_End }
+    let named_nbt = vec![
+        0x0a, 0x00, 0x04, b'r', b'o', b'o', b't', 0x08, 0x00, 0x04, b'n', b'a', b'm', b'e', 0x00,
+        0x09, b'o', b'v', b'e', b'r', b'w', b'o', b'r', b'l', b'd', 0x00,
+    ];
+    let mut bytes = vec![7];
+    bytes.extend_from_slice(&named_nbt);
+    bytes.push(9);
+
+    let decoded = decode_from_slice::<NamedNbtPacket>(&bytes, 776).unwrap();
+    assert_eq!(
+        decoded,
+        NamedNbtPacket {
+            prefix: 7,
+            dimension_codec: named_nbt,
+            suffix: 9,
+        }
+    );
+    assert_eq!(encode_to_vec(&decoded, 776).unwrap(), bytes);
+}
+
+#[test]
+fn nbt_rejects_truncated_named_nbt_before_reading_following_fields() {
+    let truncated = [
+        7, 0x0a, 0x00, 0x04, b'r', b'o', b'o', // missing final name byte + payload
+    ];
+
+    assert_eq!(
+        decode_from_slice::<NamedNbtPacket>(&truncated, 776),
+        Err(Error::UnexpectedEof)
+    );
+}
+
+#[test]
+fn nbt_encode_rejects_invalid_raw_named_nbt() {
+    let packet = NamedNbtPacket {
+        prefix: 7,
+        dimension_codec: vec![0x63],
+        suffix: 9,
+    };
+
+    assert!(matches!(
+        encode_to_vec(&packet, 776),
+        Err(Error::InvalidEnumVariant {
+            name: "nbt tag",
+            value: 0x63
+        })
+    ));
 }
 
 #[test]

@@ -129,7 +129,10 @@ fn send_brand_is_byte_exact() {
 fn pong_response_is_big_endian_i32() {
     let adapter = V770Adapter::new();
     let encoded = adapter
-        .encode_action(ConnectionState::Play, &ClientAction::PongResponse { id: 42 })
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::PongResponse { id: 42 },
+        )
         .expect("encode pong");
     assert_eq!(
         encoded,

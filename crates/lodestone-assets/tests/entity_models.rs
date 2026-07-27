@@ -145,46 +145,47 @@ fn size_variants_carry_the_vanilla_mesh_scale() {
     }
 }
 
-
 /// Exact per-box counts, transcribed from the vanilla meshes: each solid box
 /// emits six faces, so a dropped or duplicated box shows up here.
 #[test]
 fn quad_counts_match_vanilla_box_counts() {
     let expected: &[(&str, usize)] = &[
-        ("creeper", 6),      // head, body, 4 legs
-        ("zombie", 7),       // head, hat, body, 2 arms, 2 legs
-        ("skeleton", 7),     // head, hat, body, 2 arms, 2 legs (thin)
-        ("spider", 11),      // head, body0, body1, 8 legs
-        ("pig", 7),          // head+snout(2), body, 4 legs
-        ("cow", 10),         // head+snout+2 horns(4), body+udder(2), 4 legs
-        ("sheep", 6),        // head, body, 4 legs
-        ("chicken", 8),      // head, beak, red_thing, body, 2 legs, 2 wings
-        ("player_wide", 12), // head+hat, body+jacket, arms+sleeves, legs+pants
-        ("slime", 1),        // outer shell cube
-        ("magma_cube", 9),   // 8 stacked segments + inside cube
-        ("blaze", 13),       // head + 12 rods
-        ("squid", 9),        // body + 8 tentacles
-        ("bat", 9),          // body, head, 2 ears, 2 wings, 2 tips, feet
-        ("enderman", 7),     // head, hat, body, 2 arms, 2 legs
-        ("drowned", 7),      // zombie mesh, retextured left limbs
-        ("iron_golem", 8),   // head+nose, body+belt, 2 arms, 2 legs
-        ("snow_golem", 5),   // head, 2 arms, 2 stacked snow spheres
-        ("vex", 7),          // head, 2-box body, 2 arms, 2 wings
-        ("silverfish", 10),  // 7 segments + 3 raised plates
-        ("endermite", 4),    // 4 segments
-        ("piglin", 15),      // player mesh: head(4)+2 ears, body, 2 arms+2 sleeves, 2 legs+2 pants
-        ("ghast", 10),       // body + 9 tentacles
+        ("creeper", 6),          // head, body, 4 legs
+        ("zombie", 7),           // head, hat, body, 2 arms, 2 legs
+        ("skeleton", 7),         // head, hat, body, 2 arms, 2 legs (thin)
+        ("spider", 11),          // head, body0, body1, 8 legs
+        ("pig", 7),              // head+snout(2), body, 4 legs
+        ("cow", 10),             // head+snout+2 horns(4), body+udder(2), 4 legs
+        ("sheep", 6),            // head, body, 4 legs
+        ("chicken", 8),          // head, beak, red_thing, body, 2 legs, 2 wings
+        ("player_wide", 12),     // head+hat, body+jacket, arms+sleeves, legs+pants
+        ("slime", 1),            // outer shell cube
+        ("magma_cube", 9),       // 8 stacked segments + inside cube
+        ("blaze", 13),           // head + 12 rods
+        ("squid", 9),            // body + 8 tentacles
+        ("bat", 9),              // body, head, 2 ears, 2 wings, 2 tips, feet
+        ("enderman", 7),         // head, hat, body, 2 arms, 2 legs
+        ("drowned", 7),          // zombie mesh, retextured left limbs
+        ("iron_golem", 8),       // head+nose, body+belt, 2 arms, 2 legs
+        ("snow_golem", 5),       // head, 2 arms, 2 stacked snow spheres
+        ("vex", 7),              // head, 2-box body, 2 arms, 2 wings
+        ("silverfish", 10),      // 7 segments + 3 raised plates
+        ("endermite", 4),        // 4 segments
+        ("piglin", 15), // player mesh: head(4)+2 ears, body, 2 arms+2 sleeves, 2 legs+2 pants
+        ("ghast", 10),  // body + 9 tentacles
         ("cave_spider", 11), // spider mesh, scaled 0.7
-        ("husk", 7),         // zombie mesh, scaled 1.0625
+        ("husk", 7),    // zombie mesh, scaled 1.0625
         ("wither_skeleton", 7), // skeleton mesh, scaled 1.2
-        ("hoglin", 11),      // body+mane, head+2 ears+2 horns, 4 legs
-        ("strider", 9),      // 2 legs, body + 6 bristles
-        ("guardian", 22),    // head(5) + 12 spikes + eye + tail(3)
-        ("phantom", 8),      // body, tail(2), 2 wings(2 boxes each), head
-        ("warden", 10),      // body, 2 ribcages, head, 2 tendrils, 2 arms, 2 legs
-        ("wither", 9),       // shoulders, ribcage(4), tail, 3 heads
+        ("hoglin", 11), // body+mane, head+2 ears+2 horns, 4 legs
+        ("strider", 9), // 2 legs, body + 6 bristles
+        ("guardian", 22), // head(5) + 12 spikes + eye + tail(3)
+        ("phantom", 8), // body, tail(2), 2 wings(2 boxes each), head
+        ("warden", 10), // body, 2 ribcages, head, 2 tendrils, 2 arms, 2 legs
+        ("wither", 9),  // shoulders, ribcage(4), tail, 3 heads
         ("ender_dragon", 65), // head(6)+jaw, 5 neck*2, 12 tail*2, body(4), 2 wings*2*2, 4 legs*3
-        ("witch", 15),       // head, hat(+brim+3 stack), nose+mole, body, jacket, arms(3), 2 legs
+        ("witch", 15),  // head, hat(+brim+3 stack), nose+mole, body, jacket, arms(3), 2 legs
+        ("villager", 11), // head, hat, hat_rim, nose, body, jacket, arms(3), 2 legs
+        ("zombie_villager", 10), // head(+nose), hat, hat_rim, body(2), 2 arms, 2 legs
         // --- animal/npc/object half (owned by this agent) ---
         ("armor_stand", 10), // baseplate, 2 shoulder sticks + torso stick, body, 2 arms, head, right_leg, left_leg (no hat)
         ("boat", 9),         // bottom, back, front, right, left, 2 paddles(2 boxes each)
@@ -200,16 +201,27 @@ fn quad_counts_match_vanilla_box_counts() {
         ("bee", 9),          // body, stinger, 2 antennae, 2 wings, 3 legs (front/middle/back)
         ("turtle", 8),       // head, body(2 boxes: shell+belly), egg_belly, 4 legs
         ("camel", 12),       // head(3: muzzle/skull/snout)+2 ears, body+hump+tail, 4 legs
-        ("cod", 7),          // body, tail, nose, 2 side fins, top_fin, tail_fin... transcribed below
-        ("salmon", 8),       // body, tail, nose, 2 fins, top_fin, tail_fin, back_fin
-        ("pufferfish", 13),  // Big variant: body + 12 spikes
-        ("tropical_fish", 6),// Large variant: body, tail, 4 fins (right/left/top/bottom)
-        ("dolphin", 8),      // body, back_fin, left_fin, right_fin, tail+tail_fin, head+nose
-        ("axolotl", 11),     // body, tail, head, 3 gills, 4 legs
-        ("frog", 16),        // body(2), head(2), eyes(2), croaking_body, tongue, 2 arms+hands(4), 2 legs+feet(4)
-        ("tadpole", 2),      // body, tail
-        ("sniffer", 15),     // body(3), 6 legs, head(2), 2 ears, nose, lower_beak
-        ("armadillo", 11),   // body(2), tail, head_cube, 2 ear cubes, 4 legs, rolled-up cube
+        ("cod", 7), // body, tail, nose, 2 side fins, top_fin, tail_fin... transcribed below
+        ("salmon", 8), // body, tail, nose, 2 fins, top_fin, tail_fin, back_fin
+        ("pufferfish", 13), // Big variant: body + 12 spikes
+        ("tropical_fish", 6), // Large variant: body, tail, 4 fins (right/left/top/bottom)
+        ("dolphin", 8), // body, back_fin, left_fin, right_fin, tail+tail_fin, head+nose
+        ("axolotl", 11), // body, tail, head, 3 gills, 4 legs
+        ("frog", 16), // body(2), head(2), eyes(2), croaking_body, tongue, 2 arms+hands(4), 2 legs+feet(4)
+        ("tadpole", 2), // body, tail
+        ("sniffer", 15), // body(3), 6 legs, head(2), 2 ears, nose, lower_beak
+        ("armadillo", 11), // body(2), tail, head_cube, 2 ear cubes, 4 legs, rolled-up cube
+        ("horse", 12),     // equine base: body, tail, head_parts, head, 2 ears, mane, upper_mouth, 4 legs
+        ("skeleton_horse", 12), // equine base, unscaled
+        ("zombie_horse", 12),   // equine base, unscaled
+        ("donkey", 14),    // equine base(12) with 2 chest boxes added, scaled 0.87
+        ("mule", 14),      // equine base(12) with 2 chest boxes added, scaled 0.92
+        ("llama", 11),     // head(4: main/neck/2 ears), body, right_chest, left_chest, 4 legs
+        ("trader_llama", 11), // same mesh as llama
+        ("cat", 11),       // feline base: head(4: main/nose/2 ears), body, tail1, tail2, 4 legs
+        ("ocelot", 11),    // feline base, unscaled
+        ("wolf", 11), // real_head(4), body, upper_body, 4 legs, real_tail (head/tail parts are empty pivots)
+        ("parrot", 11), // body, tail, 2 wings, head tree(5: head/head2/beak1/beak2/feather), 2 legs
     ];
     let models = entity_models();
     for (name, boxes) in expected {
@@ -296,13 +308,19 @@ fn composition_order_matches_vanilla_zyx_hand_derived() {
     //   Rx(90)*(0,0,1)=(0,-1,0); Ry(90)*(0,-1,0)=(0,-1,0); +pivot=(1,-1,0).
     //   A swapped Rx*Ry*Rz order would give (2,0,0) instead.
     let a = transform_probe([0.0, 0.0, 16.0], [16.0, 0.0, 0.0], [h, h, 0.0]);
-    assert!(close(a, [1.0, -1.0, 0.0]), "case A got {a:?}, want [1,-1,0]");
+    assert!(
+        close(a, [1.0, -1.0, 0.0]),
+        "case A got {a:?}, want [1,-1,0]"
+    );
 
     // Case B: the spider-leg shape, yRot & zRot both nonzero, xRot=0.
     //   local (16,0,0)->(1,0,0)wu, no pivot; Ry(90)*(1,0,0)=(0,0,-1);
     //   Rz(90)*(0,0,-1)=(0,0,-1). A swapped order would give (0,1,0).
     let b = transform_probe([16.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, h, h]);
-    assert!(close(b, [0.0, 0.0, -1.0]), "case B got {b:?}, want [0,0,-1]");
+    assert!(
+        close(b, [0.0, 0.0, -1.0]),
+        "case B got {b:?}, want [0,0,-1]"
+    );
 }
 
 /// The texture-variant seam must be non-vacuous: a `ByVariant` entry has to
@@ -320,13 +338,26 @@ fn variant_textures_resolve_distinctly() {
         .find(|e| e.name == "pig")
         .expect("pig model registered");
 
-    assert!(pig.texture.is_variant(), "pig must be variant-driven in 26.2");
+    assert!(
+        pig.texture.is_variant(),
+        "pig must be variant-driven in 26.2"
+    );
 
-    let temperate = pig.texture.resolve(EntityVariant::Temperature(Temperature::Temperate));
-    let cold = pig.texture.resolve(EntityVariant::Temperature(Temperature::Cold));
-    let warm = pig.texture.resolve(EntityVariant::Temperature(Temperature::Warm));
+    let temperate = pig
+        .texture
+        .resolve(EntityVariant::Temperature(Temperature::Temperate));
+    let cold = pig
+        .texture
+        .resolve(EntityVariant::Temperature(Temperature::Cold));
+    let warm = pig
+        .texture
+        .resolve(EntityVariant::Temperature(Temperature::Warm));
 
-    assert_eq!(temperate, pig.texture.default_path(), "default is the temperate sheet");
+    assert_eq!(
+        temperate,
+        pig.texture.default_path(),
+        "default is the temperate sheet"
+    );
     assert_ne!(temperate, cold, "cold variant must differ from temperate");
     assert_ne!(temperate, warm, "warm variant must differ from temperate");
     assert_ne!(cold, warm, "cold and warm variants must differ");
@@ -341,15 +372,125 @@ fn variant_textures_resolve_distinctly() {
         "Fixed must ignore the variant"
     );
 
-    // Every registered ByVariant entry must resolve all three temperatures to
-    // distinct, non-empty paths — proves no selector is a constant fn.
+    // Every registered ByVariant entry must resolve its own variant axis to
+    // distinct, non-empty paths — proves no selector is a constant fn. Each
+    // entry's axis is looked up by name rather than assumed to be Temperature,
+    // since 26.2 grew independent axes for horse colour, llama, cat, wolf and
+    // parrot alongside the original pig/cow/chicken temperature axis.
+    use lodestone_assets::entity::{CatCoat, HorseColor, LlamaColor, ParrotColor, WolfCoat, WolfState};
+
     for e in &models {
         if e.texture.is_variant() {
-            let t = e.texture.resolve(EntityVariant::Temperature(Temperature::Temperate));
-            let c = e.texture.resolve(EntityVariant::Temperature(Temperature::Cold));
-            let w = e.texture.resolve(EntityVariant::Temperature(Temperature::Warm));
-            assert!(!t.is_empty() && !c.is_empty() && !w.is_empty(), "{}: empty path", e.name);
-            assert!(t != c && t != w && c != w, "{}: variant selector is constant", e.name);
+            let probes: Vec<EntityVariant> = match e.name {
+                "pig" | "cow" | "chicken" => vec![
+                    EntityVariant::Temperature(Temperature::Temperate),
+                    EntityVariant::Temperature(Temperature::Cold),
+                    EntityVariant::Temperature(Temperature::Warm),
+                ],
+                "horse" => vec![
+                    EntityVariant::HorseColor(HorseColor::White),
+                    EntityVariant::HorseColor(HorseColor::Creamy),
+                    EntityVariant::HorseColor(HorseColor::Chestnut),
+                    EntityVariant::HorseColor(HorseColor::Brown),
+                    EntityVariant::HorseColor(HorseColor::Black),
+                    EntityVariant::HorseColor(HorseColor::Gray),
+                    EntityVariant::HorseColor(HorseColor::DarkBrown),
+                ],
+                "llama" | "trader_llama" => vec![
+                    EntityVariant::Llama(LlamaColor::Creamy),
+                    EntityVariant::Llama(LlamaColor::White),
+                    EntityVariant::Llama(LlamaColor::Brown),
+                    EntityVariant::Llama(LlamaColor::Gray),
+                ],
+                "cat" => vec![
+                    EntityVariant::Cat(CatCoat::Tabby),
+                    EntityVariant::Cat(CatCoat::Black),
+                    EntityVariant::Cat(CatCoat::Red),
+                    EntityVariant::Cat(CatCoat::Siamese),
+                    EntityVariant::Cat(CatCoat::BritishShorthair),
+                    EntityVariant::Cat(CatCoat::Calico),
+                    EntityVariant::Cat(CatCoat::Persian),
+                    EntityVariant::Cat(CatCoat::Ragdoll),
+                    EntityVariant::Cat(CatCoat::White),
+                    EntityVariant::Cat(CatCoat::Jellie),
+                    EntityVariant::Cat(CatCoat::AllBlack),
+                ],
+                "wolf" => vec![
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Pale,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Pale,
+                        state: WolfState::Tame,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Pale,
+                        state: WolfState::Angry,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Spotted,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Snowy,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Black,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Ashen,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Rusty,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Woods,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Chestnut,
+                        state: WolfState::Wild,
+                    },
+                    EntityVariant::Wolf {
+                        coat: WolfCoat::Striped,
+                        state: WolfState::Wild,
+                    },
+                ],
+                "parrot" => vec![
+                    EntityVariant::Parrot(ParrotColor::RedBlue),
+                    EntityVariant::Parrot(ParrotColor::Blue),
+                    EntityVariant::Parrot(ParrotColor::Green),
+                    EntityVariant::Parrot(ParrotColor::YellowBlue),
+                    EntityVariant::Parrot(ParrotColor::Gray),
+                ],
+                other => panic!(
+                    "{other}: ByVariant entry has no probe set in this test — add one \
+                     covering its variant axis rather than letting it fall through to \
+                     the Temperature default"
+                ),
+            };
+            let resolved: Vec<&str> = probes.iter().map(|v| e.texture.resolve(*v)).collect();
+            assert!(
+                resolved.iter().all(|p| !p.is_empty()),
+                "{}: empty path",
+                e.name
+            );
+            let mut sorted = resolved.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                resolved.len(),
+                "{}: variant selector is constant (or maps two distinct variants to the \
+                 same path) — got {:?}",
+                e.name,
+                resolved
+            );
         }
     }
 }

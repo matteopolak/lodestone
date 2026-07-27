@@ -35,7 +35,11 @@ impl SpawnCandidateSource for AlwaysSpawns {
         // cap accounting, which is what this source feeds.
         self.next_x += 1.0;
         Some(SpawnCandidate {
-            pos: Vec3::new(self.next_x + f64::from(cx) * 16.0, 0.0, f64::from(cz) * 16.0),
+            pos: Vec3::new(
+                self.next_x + f64::from(cx) * 16.0,
+                0.0,
+                f64::from(cz) * 16.0,
+            ),
             shape: MobShape::land(0.6, 1.95),
             step_per_tick: 0.15,
             visited_budget: 400,
@@ -110,15 +114,39 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
     let player = Vec3::new(0.0, 0.0, 0.0);
 
     // Three monsters at three bands relative to the player.
-    let immune = sim.spawn(Vec3::new(20.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 400).id(); // dist 20 (<32)
-    let middle = sim.spawn(Vec3::new(40.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 400).id(); // dist 40
-    let far = sim.spawn(Vec3::new(130.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 400).id(); // dist 130 (>128)
+    let immune = sim
+        .spawn(
+            Vec3::new(20.0, 0.0, 0.0),
+            MobShape::land(0.6, 1.95),
+            0.0,
+            400,
+        )
+        .id(); // dist 20 (<32)
+    let middle = sim
+        .spawn(
+            Vec3::new(40.0, 0.0, 0.0),
+            MobShape::land(0.6, 1.95),
+            0.0,
+            400,
+        )
+        .id(); // dist 40
+    let far = sim
+        .spawn(
+            Vec3::new(130.0, 0.0, 0.0),
+            MobShape::land(0.6, 1.95),
+            0.0,
+            400,
+        )
+        .id(); // dist 130 (>128)
 
     let mut rng = SpawnRng::new(0xDEAD_BEEF);
 
     // One pass: the far mob is instantly despawned; the other two survive.
     let discarded = sim.despawn_pass(Some(player), &mut rng);
-    assert_eq!(discarded, 1, "only the >128-block mob should instant-despawn");
+    assert_eq!(
+        discarded, 1,
+        "only the >128-block mob should instant-despawn"
+    );
     assert!(sim.get(far).is_none(), "far mob gone");
     assert!(sim.get(immune).is_some() && sim.get(middle).is_some());
 
@@ -162,10 +190,19 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
 fn no_player_means_no_despawn() {
     let world = ChunkWorld::new(-64, 128);
     let mut sim = MobSim::new(&world);
-    sim.spawn(Vec3::new(500.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 400);
+    sim.spawn(
+        Vec3::new(500.0, 0.0, 0.0),
+        MobShape::land(0.6, 1.95),
+        0.0,
+        400,
+    );
     let mut rng = SpawnRng::new(1);
     sim.tick_for(1000);
     let discarded = sim.despawn_pass(None, &mut rng);
     assert_eq!(discarded, 0);
-    assert_eq!(sim.len(), 1, "no player → nothing despawns even at 500 blocks");
+    assert_eq!(
+        sim.len(),
+        1,
+        "no player → nothing despawns even at 500 blocks"
+    );
 }

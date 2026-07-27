@@ -499,14 +499,12 @@ fn block_destruction_rejects_trailing_bytes() {
 #[test]
 fn block_changed_ack_emits_sequence() {
     let adapter = V770Adapter::new();
-    let directives = handle(
-        &adapter,
-        play::clientbound::BLOCK_CHANGED_ACK,
-        &var_i32(99),
-    );
+    let directives = handle(&adapter, play::clientbound::BLOCK_CHANGED_ACK, &var_i32(99));
     assert_eq!(
         directives,
-        vec![Directive::Emit(ClientEvent::BlockChangedAck { sequence: 99 })]
+        vec![Directive::Emit(ClientEvent::BlockChangedAck {
+            sequence: 99
+        })]
     );
 }
 
@@ -534,7 +532,11 @@ fn set_chunk_cache_center_emits_coordinates() {
     let adapter = V770Adapter::new();
     let mut payload = var_i32(12);
     payload.extend_from_slice(&var_i32(-7));
-    let directives = handle(&adapter, play::clientbound::SET_CHUNK_CACHE_CENTER, &payload);
+    let directives = handle(
+        &adapter,
+        play::clientbound::SET_CHUNK_CACHE_CENTER,
+        &payload,
+    );
     assert_eq!(
         directives,
         vec![Directive::Emit(ClientEvent::ChunkCacheCenterChanged {
@@ -676,4 +678,3 @@ fn change_difficulty_rejects_trailing_bytes() {
         "a misaligned change_difficulty must be rejected"
     );
 }
-

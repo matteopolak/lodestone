@@ -12,8 +12,11 @@ const SIN_SCALE: f64 = 10_430.378_350_470_453;
 /// `Mth.SIN` — the 65536-entry float sine lookup table, built exactly as
 /// vanilla: `SIN[i] = (float)Math.sin(i / SIN_SCALE)`. Verified bit-for-bit
 /// against the JVM's own table (`mth_parity`).
-static SIN: LazyLock<Vec<f32>> =
-    LazyLock::new(|| (0..65536).map(|i| ((f64::from(i) / SIN_SCALE).sin()) as f32).collect());
+static SIN: LazyLock<Vec<f32>> = LazyLock::new(|| {
+    (0..65536)
+        .map(|i| ((f64::from(i) / SIN_SCALE).sin()) as f32)
+        .collect()
+});
 
 /// `Mth.sin(double)` — table lookup, `SIN[(int)((long)(d * SIN_SCALE) & 65535)]`.
 #[must_use]
@@ -41,7 +44,11 @@ pub fn random_between<R: RandomSource>(random: &mut R, min: f32, max_exclusive: 
 
 /// `Mth.randomBetweenInclusive(random, min, maxInclusive)`.
 #[must_use]
-pub fn random_between_inclusive<R: RandomSource>(random: &mut R, min: i32, max_inclusive: i32) -> i32 {
+pub fn random_between_inclusive<R: RandomSource>(
+    random: &mut R,
+    min: i32,
+    max_inclusive: i32,
+) -> i32 {
     random.next_int_bounded(max_inclusive - min + 1) + min
 }
 

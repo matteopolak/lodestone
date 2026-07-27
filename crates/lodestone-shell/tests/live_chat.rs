@@ -130,9 +130,7 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     // Claim 1 (shell-owned, must hold): the server's message crosses the whole
     // net → shell chat seam and lands in the display log. This is the core
     // deliverable and is proven the moment we get here with the token present.
-    println!(
-        "OK  server chat reached the display log through the shell: {line:?}"
-    );
+    println!("OK  server chat reached the display log through the shell: {line:?}");
 
     // Claim 2 (depends on the v770 chat decode): the server-authored colour must
     // survive the wire. `tellraw ... color:red` becomes the legacy `§c` code via

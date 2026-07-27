@@ -182,7 +182,10 @@ fn set_held_slot_rejects_trailing_bytes() {
         play::clientbound::SET_HELD_SLOT,
         &[0x04, 0xFF],
     );
-    assert!(result.is_err(), "a misaligned set_held_slot must be rejected");
+    assert!(
+        result.is_err(),
+        "a misaligned set_held_slot must be rejected"
+    );
 }
 
 // ---- set_experience ---------------------------------------------------------
@@ -217,7 +220,10 @@ fn set_experience_rejects_trailing_bytes() {
         play::clientbound::SET_EXPERIENCE,
         &payload,
     );
-    assert!(result.is_err(), "a misaligned set_experience must be rejected");
+    assert!(
+        result.is_err(),
+        "a misaligned set_experience must be rejected"
+    );
 }
 
 // ---- set_cursor_item ---------------------------------------------------------
@@ -241,7 +247,9 @@ fn set_cursor_item_decodes_the_empty_stack() {
     let directives = handle(play::clientbound::SET_CURSOR_ITEM, &EMPTY_STACK);
     assert_eq!(
         directives,
-        vec![Directive::Emit(ClientEvent::CursorItemChanged { item: None })]
+        vec![Directive::Emit(ClientEvent::CursorItemChanged {
+            item: None
+        })]
     );
 }
 
@@ -255,7 +263,10 @@ fn set_cursor_item_rejects_trailing_bytes() {
         play::clientbound::SET_CURSOR_ITEM,
         &payload,
     );
-    assert!(result.is_err(), "a misaligned set_cursor_item must be rejected");
+    assert!(
+        result.is_err(),
+        "a misaligned set_cursor_item must be rejected"
+    );
 }
 
 // ---- set_player_inventory ---------------------------------------------------

@@ -17,12 +17,12 @@ use crate::blocks::id;
 use crate::camera_rig::build_camera;
 use crate::chat::{ChatLog, compose_chat_action};
 use crate::collision::WorldCollision;
-use crate::overlay::{BossBarView, Sidebar};
 use crate::config::Config;
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section};
 use crate::net::{NetClient, NetUpdate};
+use crate::overlay::{BossBarView, Sidebar};
 use crate::raycast::{REACH, RayHit, raycast};
 use crate::worldgen;
 
@@ -257,7 +257,9 @@ impl Sim {
     /// The active boss bars to draw, in render order. Empty off a live server.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<BossBarView> {
-        self.net.as_ref().map_or_else(Vec::new, NetClient::boss_bars)
+        self.net
+            .as_ref()
+            .map_or_else(Vec::new, NetClient::boss_bars)
     }
 
     /// Compose a typed chat line onto the outbound [`ClientAction`] seam and hand
@@ -1000,7 +1002,10 @@ mod tests {
         feed.send(NetUpdate::Chat("aged line".into())).unwrap();
         sim.poll_net();
         // Freshly received: age is ~0.
-        assert!(sim.recent_chat(1)[0].1 < 0.001, "a just-received line is young");
+        assert!(
+            sim.recent_chat(1)[0].1 < 0.001,
+            "a just-received line is young"
+        );
 
         // Advancing the sim clock ages the line by real elapsed time.
         sim.step(2.5);
@@ -1058,12 +1063,19 @@ mod tests {
         assert_eq!(sim.selected_slot(), 4);
         sim.select_slot(8);
         sim.cycle_slot(1);
-        assert_eq!(sim.selected_slot(), 0, "scroll past the last slot wraps to 0");
+        assert_eq!(
+            sim.selected_slot(),
+            0,
+            "scroll past the last slot wraps to 0"
+        );
         sim.cycle_slot(-1);
-        assert_eq!(sim.selected_slot(), 8, "scroll before the first slot wraps to 8");
+        assert_eq!(
+            sim.selected_slot(),
+            8,
+            "scroll before the first slot wraps to 8"
+        );
 
-        let sent: Vec<ClientAction> =
-            std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
         // Every *change* echoes SetCarriedItem; the no-op select_slot(0) and the
         // rejected select_slot(9) send nothing, so the wire shows only the moves.
         assert_eq!(
@@ -1110,12 +1122,30 @@ mod tests {
 
     #[test]
     fn sprint_moves_faster_than_walk_via_attribute_seam() {
-        // Walk forward for a second on flat ground, then sprint the same time
-        // from the same spot; sprinting must cover more ground. This drives the
-        // physics `with_movement_speed` seam from a real caller.
+        // Walk forward for a second, then sprint the same time from the same
+        // spot; sprinting must cover more ground. This drives the physics
+        // `with_movement_speed` seam from a real caller.
+        //
+        // The local world is now real vanilla terrain (`lodestone-worldgen`),
+        // so spawn sits on a slope and walking north walls the player out after
+        // ~0.2 blocks — a wall, not the speed seam, would otherwise decide the
+        // result. Flatten a private corridor along the walking line so what we
+        // measure is physics speed and nothing else.
         fn distance(sprint: bool) -> f64 {
             let mut sim = Sim::new(test_config());
-            // Settle on the ground first.
+            // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180).
+            // Lay a solid floor and clear head-room along -Z so the walk is
+            // unobstructed regardless of the generated surface.
+            let feet_y = sim.player.position.y.floor() as i32;
+            for dz in -25..=1 {
+                for dx in -1..=1 {
+                    sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                    sim.set_block_world([dx, feet_y, dz], id::AIR);
+                    sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                    sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+                }
+            }
+            // Settle on the fresh floor first.
             for _ in 0..20 {
                 sim.step(1.0 / 20.0);
             }

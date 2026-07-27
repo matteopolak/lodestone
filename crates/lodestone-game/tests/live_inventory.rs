@@ -164,7 +164,10 @@ fn intent_to_action(window_id: i32, intent: &ClickIntent) -> ClientAction {
 }
 
 fn count_at(w: &Window0, menu_index: usize) -> Option<u32> {
-    w.slots.get(menu_index).and_then(|s| s.as_ref()).map(|s| s.count)
+    w.slots
+        .get(menu_index)
+        .and_then(|s| s.as_ref())
+        .map(|s| s.count)
 }
 
 fn name_at(w: &Window0, menu_index: usize) -> Option<String> {
@@ -266,12 +269,16 @@ async fn inventory_mutation_round_trips_through_client() {
     });
 
     // Reach Play: the server must know our player before RCON commands target it.
-    let ready = poll_until(Duration::from_secs(30), Duration::from_millis(100), || async {
-        handle
-            .players()
-            .into_iter()
-            .find(|p| p.name.as_deref() == Some(user.as_str()))
-    })
+    let ready = poll_until(
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+        || async {
+            handle
+                .players()
+                .into_iter()
+                .find(|p| p.name.as_deref() == Some(user.as_str()))
+        },
+    )
     .await;
     assert!(
         ready.is_some(),
@@ -282,7 +289,9 @@ async fn inventory_mutation_round_trips_through_client() {
 
     let mut rcon = Rcon::connect((HOST, RCON_PORT), RCON_PASSWORD)
         .await
-        .expect("connect RCON on 127.0.0.1:25571 (password 'lodestone') — is lodestone-creative up?");
+        .expect(
+            "connect RCON on 127.0.0.1:25571 (password 'lodestone') — is lodestone-creative up?",
+        );
 
     let mut checked = 0usize;
 
@@ -296,16 +305,20 @@ async fn inventory_mutation_round_trips_through_client() {
 
     // Poll, never assert immediately: the seed is tick-published and arrives as a
     // separate packet through the real adapter.
-    let seeded = poll_until(Duration::from_secs(20), Duration::from_millis(150), || async {
-        let w = win.lock().unwrap();
-        if !w.saw_content {
-            return None;
-        }
-        match (name_at(&w, MAINHAND_MENU), count_at(&w, MAINHAND_MENU)) {
-            (Some(name), Some(5)) if name == "minecraft:diamond" => Some(()),
-            _ => None,
-        }
-    })
+    let seeded = poll_until(
+        Duration::from_secs(20),
+        Duration::from_millis(150),
+        || async {
+            let w = win.lock().unwrap();
+            if !w.saw_content {
+                return None;
+            }
+            match (name_at(&w, MAINHAND_MENU), count_at(&w, MAINHAND_MENU)) {
+                (Some(name), Some(5)) if name == "minecraft:diamond" => Some(()),
+                _ => None,
+            }
+        },
+    )
     .await;
     assert!(
         seeded.is_some(),
@@ -314,7 +327,9 @@ async fn inventory_mutation_round_trips_through_client() {
         handle.is_alive(),
         win.lock().unwrap().saw_content
     );
-    println!("clientbound half: diamond x5 reached our Menu at slot {MAINHAND_MENU} via the real client");
+    println!(
+        "clientbound half: diamond x5 reached our Menu at slot {MAINHAND_MENU} via the real client"
+    );
 
     // Clientbound assertions.
     {
@@ -325,7 +340,11 @@ async fn inventory_mutation_round_trips_through_client() {
             "held item name via real ContainerContent"
         );
         checked += 1;
-        assert_eq!(count_at(&w, MAINHAND_MENU), Some(5), "held count via real stream");
+        assert_eq!(
+            count_at(&w, MAINHAND_MENU),
+            Some(5),
+            "held count via real stream"
+        );
         checked += 1;
         // Negative control: a slot we never seeded must be empty — proves the
         // tracker discriminates rather than echoing a stack into every slot.
@@ -446,7 +465,9 @@ async fn inventory_mutation_round_trips_through_client() {
         "an inventory slot we never seeded must be empty server-side after the drop"
     );
     checked += 1;
-    println!("serverbound half: server authoritative held count = {server_count:?}, matches prediction");
+    println!(
+        "serverbound half: server authoritative held count = {server_count:?}, matches prediction"
+    );
 
     const EXPECTED_CHECKS: usize = 7;
     assert!(
@@ -457,7 +478,9 @@ async fn inventory_mutation_round_trips_through_client() {
 
     // Best-effort cleanup (shared --rm server): clear the seeded slot.
     let _ = rcon
-        .cmd(&format!("item replace entity {user} container.0 with minecraft:air"))
+        .cmd(&format!(
+            "item replace entity {user} container.0 with minecraft:air"
+        ))
         .await;
 
     println!(
@@ -554,12 +577,16 @@ async fn container_click_pickup_round_trips_through_client() {
         }
     });
 
-    let ready = poll_until(Duration::from_secs(30), Duration::from_millis(100), || async {
-        handle
-            .players()
-            .into_iter()
-            .find(|p| p.name.as_deref() == Some(user.as_str()))
-    })
+    let ready = poll_until(
+        Duration::from_secs(30),
+        Duration::from_millis(100),
+        || async {
+            handle
+                .players()
+                .into_iter()
+                .find(|p| p.name.as_deref() == Some(user.as_str()))
+        },
+    )
     .await;
     assert!(
         ready.is_some(),
@@ -582,16 +609,20 @@ async fn container_click_pickup_round_trips_through_client() {
         .await;
     println!("  RCON seed container.0 -> {seed:?}");
 
-    let seeded = poll_until(Duration::from_secs(20), Duration::from_millis(150), || async {
-        let w = win.lock().unwrap();
-        if !w.saw_content {
-            return None;
-        }
-        match (name_at(&w, MAINHAND_MENU), count_at(&w, MAINHAND_MENU)) {
-            (Some(name), Some(5)) if name == "minecraft:diamond" => Some(()),
-            _ => None,
-        }
-    })
+    let seeded = poll_until(
+        Duration::from_secs(20),
+        Duration::from_millis(150),
+        || async {
+            let w = win.lock().unwrap();
+            if !w.saw_content {
+                return None;
+            }
+            match (name_at(&w, MAINHAND_MENU), count_at(&w, MAINHAND_MENU)) {
+                (Some(name), Some(5)) if name == "minecraft:diamond" => Some(()),
+                _ => None,
+            }
+        },
+    )
     .await;
     assert!(
         seeded.is_some(),
@@ -615,8 +646,11 @@ async fn container_click_pickup_round_trips_through_client() {
         let w = win.lock().unwrap();
         // Seed the client menu from the real server content + its state_id, so the
         // packet carries a state_id the server recognises (matching → no rollback).
-        let items: Vec<Option<GameItem>> =
-            w.slots.iter().map(|s| s.as_ref().map(model_to_game)).collect();
+        let items: Vec<Option<GameItem>> = w
+            .slots
+            .iter()
+            .map(|s| s.as_ref().map(model_to_game))
+            .collect();
         let mut menu = ClientMenu::new(Menu::player());
         menu.reconcile(ServerUpdate::SetContent {
             state_id: w.state_id.max(0) as u32,
@@ -645,7 +679,10 @@ async fn container_click_pickup_round_trips_through_client() {
         "click machine must predict the cursor holding the whole diamond x5 after pickup"
     );
     checked += 1;
-    assert_eq!(intent.slot, MAINHAND_MENU as i32, "intent targets the clicked slot");
+    assert_eq!(
+        intent.slot, MAINHAND_MENU as i32,
+        "intent targets the clicked slot"
+    );
     checked += 1;
 
     let action = intent_to_action(0, &intent);
@@ -668,13 +705,16 @@ async fn container_click_pickup_round_trips_through_client() {
             break;
         }
     }
-    println!("serverbound: ContainerClick(Pickup, slot {MAINHAND_MENU}) sent via ClientHandle::send_action");
+    println!(
+        "serverbound: ContainerClick(Pickup, slot {MAINHAND_MENU}) sent via ClientHandle::send_action"
+    );
 
     // The authoritative result: a pickup moves the stack to the cursor, so the
     // slot is empty server-side. A stubbed/no-op encoder would leave it at 5 and
     // this fails loudly rather than passing vacuously.
     assert_eq!(
-        after, None,
+        after,
+        None,
         "after a left-click pickup the server must report slot 0 empty (stack moved to cursor); \
          got {after:?} (alive={})",
         handle.is_alive()
@@ -698,7 +738,9 @@ async fn container_click_pickup_round_trips_through_client() {
 
     // Best-effort cleanup (shared --rm server).
     let _ = rcon
-        .cmd(&format!("item replace entity {user} container.0 with minecraft:air"))
+        .cmd(&format!(
+            "item replace entity {user} container.0 with minecraft:air"
+        ))
         .await;
 
     println!(

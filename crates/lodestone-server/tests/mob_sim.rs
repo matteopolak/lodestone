@@ -42,8 +42,14 @@ fn goal_driven_mob_walks_to_its_target_over_real_worldgen_terrain() {
     // Ground truth first: the snapshot really is a floor at y=0 (solid below,
     // air above). If this is wrong the mob would fall or fly and the movement
     // assertion below would be meaningless.
-    assert!(world.is_solid(4, -1, 4), "expected solid floor block at y=-1");
-    assert!(!world.is_solid(4, 0, 4), "expected air at y=0 (floor surface)");
+    assert!(
+        world.is_solid(4, -1, 4),
+        "expected solid floor block at y=-1"
+    );
+    assert!(
+        !world.is_solid(4, 0, 4),
+        "expected air at y=0 (floor surface)"
+    );
 
     let mut sim = MobSim::new(&world);
     let start = Vec3::new(0.5, 0.0, 0.5);
@@ -105,8 +111,14 @@ fn mob_detours_a_two_tall_wall_and_holds_the_recompute_throttle() {
     // end at x=5 (so a detour genuinely exists and the wall genuinely blocks the
     // straight line). Without this the "detour" assertion could pass vacuously on
     // a world with no wall at all.
-    assert!(world.is_solid(0, 0, 3) && world.is_solid(0, 1, 3), "wall not two-tall");
-    assert!(!world.is_solid(5, 0, 3) && !world.is_solid(5, 1, 3), "no gap past wall end");
+    assert!(
+        world.is_solid(0, 0, 3) && world.is_solid(0, 1, 3),
+        "wall not two-tall"
+    );
+    assert!(
+        !world.is_solid(5, 0, 3) && !world.is_solid(5, 1, 3),
+        "no gap past wall end"
+    );
 
     let mut sim = MobSim::new(&world);
     let start = Vec3::new(0.5, 0.0, 0.5);

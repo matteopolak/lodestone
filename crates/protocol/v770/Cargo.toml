@@ -30,6 +30,11 @@ tokio = { workspace = true }
 # in-memory transport, proving the join sequence end-to-end without a socket.
 lodestone-client = { workspace = true }
 # Direct path dep (not a workspace alias) so the addition stays inside this
+# crate's manifest — feeds the density-router `Density` the server integration
+# test needs to build a `WorldgenChunkSource`, mirroring the same fixture-driven
+# setup `lodestone-server`'s own tests use. Test-only.
+lodestone-worldgen = { path = "../../lodestone-worldgen" }
+# Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — the live physics gate drives the version-free
 # `lodestone-physics` engine to walk a player and asserts the real server never
 # corrects us. Test-only; production code never depends on physics.

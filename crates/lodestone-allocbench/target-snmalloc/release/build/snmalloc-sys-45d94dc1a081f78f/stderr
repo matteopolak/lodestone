@@ -1,0 +1,2974 @@
+running: cd "/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build" && CMAKE_PREFIX_PATH="" LC_ALL="C" "cmake" "-Wdev" "--debug-output" "/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream" "-B" "/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build" "-DCMAKE_OSX_ARCHITECTURES=arm64" "-DSNMALLOC_RUST_SUPPORT=ON" "-DCMAKE_SH=CMAKE_SH-NOTFOUND" "-DSNMALLOC_QEMU_WORKAROUND=OFF" "-DSNMALLOC_ENABLE_DYNAMIC_LOADING=OFF" "-DUSE_SNMALLOC_STATS=OFF" "-DSNMALLOC_RUST_LIBC_API=OFF" "-DSNMALLOC_USE_CXX17=OFF" "-DSNMALLOC_CHECK_LOADS=OFF" "-DSNMALLOC_PAGEID=OFF" "-DSNMALLOC_ENABLE_WAIT_ON_ADDRESS=ON" "-DCMAKE_INSTALL_PREFIX=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out" "-DCMAKE_C_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang" "-DCMAKE_CXX_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++" "-DCMAKE_ASM_FLAGS= -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w" "-DCMAKE_ASM_COMPILER=/opt/homebrew/opt/llvm/bin/clang" "-DCMAKE_BUILD_TYPE=Release" "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
+CMake Warning at CMakeLists.txt:274 (message):
+  Could not find clang-format version 15, falling back to
+  /opt/homebrew/opt/llvm/bin/clang-format
+Call Stack (most recent call first):
+  CMakeLists.txt:729 (clangformat_targets)
+
+
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:641 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:646 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:649 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:649 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:652 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:652 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:653 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:653 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:659 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:659 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:667 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:573 (add_library):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:668 (compile)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0156 is not set: De-duplicate libraries on link lines based on
+  linker capabilities.  Run "cmake --help-policy CMP0156" for policy details.
+  Use the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, legacy libraries de-duplication strategy will
+  be applied.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_LINK_FLAGS' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning (dev) at CMakeLists.txt:491 (add_executable):
+  Policy CMP0181 is not set: Link command-line fragment variables are parsed
+  and re-quoted.  Run "cmake --help-policy CMP0181" for policy details.  Use
+  the cmake_policy command to set the policy and suppress this warning.
+
+  Since the policy is not set, the contents of variable
+  'CMAKE_CXX_CREATE_CONSOLE_EXE' will be used as is.
+Call Stack (most recent call first):
+  CMakeLists.txt:683 (make_tests)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+CMake Warning:
+  Manually-specified variables were not used by the project:
+
+    CMAKE_ASM_COMPILER
+    CMAKE_ASM_FLAGS
+    CMAKE_C_COMPILER
+    CMAKE_C_FLAGS
+    CMAKE_SH
+    USE_SNMALLOC_STATS
+
+
+running: cd "/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build" && LC_ALL="C" "cmake" "--build" "/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build" "--target" "snmallocshim-rust" "--config" "Release" "--parallel" "10"

@@ -115,7 +115,10 @@ impl DebugStats {
                 "CHUNKS {} SECTIONS {} QUADS {}",
                 self.chunk_count, self.section_count, self.quads
             ),
-            format!("LIVE COLS {} ENTITIES {}", self.live_columns, self.entities_drawn),
+            format!(
+                "LIVE COLS {} ENTITIES {}",
+                self.live_columns, self.entities_drawn
+            ),
             format!(
                 "MESH VRAM {} KB WORLD {} KB RSS {} MB",
                 self.vram_bytes / 1024,
@@ -289,7 +292,11 @@ impl HudGeometry {
         for (i, (line, age)) in frame.chat.iter().rev().take(max_lines).enumerate() {
             // While open, every line is fully lit; while closed, lines fade over
             // their last two seconds of a ten-second life and then disappear.
-            let alpha = if chat_open { 1.0 } else { chat_line_alpha(*age) };
+            let alpha = if chat_open {
+                1.0
+            } else {
+                chat_line_alpha(*age)
+            };
             if alpha <= 0.0 {
                 // Older-than-visible lines end the stack: everything above is
                 // older still, so there is nothing more to draw.
@@ -299,7 +306,13 @@ impl HudGeometry {
             if y < margin {
                 break;
             }
-            b.rect_px(0.0, y - 1.0, b.w * 0.6, line_h, [0.0, 0.0, 0.0, 0.4 * alpha]);
+            b.rect_px(
+                0.0,
+                y - 1.0,
+                b.w * 0.6,
+                line_h,
+                [0.0, 0.0, 0.0, 0.4 * alpha],
+            );
             b.text_legacy(line, margin, y, scale, [0.92, 0.94, 1.0], alpha);
         }
 
@@ -330,10 +343,22 @@ impl HudGeometry {
             let hw = 9.0 * cell;
             let hx = cx - hw * 0.5;
             let hy = b.h - margin - cell;
-            b.rect_px(hx - 2.0, hy - 2.0, hw + 4.0, cell + 4.0, [0.0, 0.0, 0.0, 0.55]);
+            b.rect_px(
+                hx - 2.0,
+                hy - 2.0,
+                hw + 4.0,
+                cell + 4.0,
+                [0.0, 0.0, 0.0, 0.55],
+            );
             for i in 0..9 {
                 let sx = hx + i as f32 * cell;
-                b.rect_px(sx + 1.0, hy + 1.0, cell - 2.0, cell - 2.0, [0.28, 0.28, 0.30, 0.5]);
+                b.rect_px(
+                    sx + 1.0,
+                    hy + 1.0,
+                    cell - 2.0,
+                    cell - 2.0,
+                    [0.28, 0.28, 0.30, 0.5],
+                );
             }
             // A 2px white ring around the selected cell (four edges).
             let sx = hx + sel as f32 * cell;
@@ -383,7 +408,13 @@ impl HudGeometry {
             for (i, bb) in frame.boss_bars.iter().enumerate() {
                 let top = margin + i as f32 * (line_h + bar_h + 6.0);
                 let tw = text_w(&bb.title, scale);
-                b.text(&bb.title, (b.w - tw) * 0.5, top, scale, [1.0, 1.0, 1.0, 1.0]);
+                b.text(
+                    &bb.title,
+                    (b.w - tw) * 0.5,
+                    top,
+                    scale,
+                    [1.0, 1.0, 1.0, 1.0],
+                );
                 let bar_y = top + line_h;
                 b.rect_px(bx, bar_y, bar_w, bar_h, [0.08, 0.08, 0.10, 0.75]);
                 let fill = bar_w * bb.progress.clamp(0.0, 1.0);
@@ -910,7 +941,10 @@ mod tests {
         )
         .vertex_count();
         assert!(fresh_n > 0, "a fresh chat line must be visible");
-        assert_eq!(stale_n, 0, "a line past its lifetime must vanish when closed");
+        assert_eq!(
+            stale_n, 0,
+            "a line past its lifetime must vanish when closed"
+        );
 
         // Opening the box (a chat_input present) resurrects the stale line.
         let opened = HudGeometry::build(
@@ -925,7 +959,10 @@ mod tests {
             480,
         )
         .vertex_count();
-        assert!(opened > 0, "an open chat box shows history regardless of age");
+        assert!(
+            opened > 0,
+            "an open chat box shows history regardless of age"
+        );
     }
 
     #[test]

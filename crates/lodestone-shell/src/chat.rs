@@ -189,7 +189,10 @@ mod tests {
         let mut log = ChatLog::new();
         log.push("only", 0.0);
         assert_eq!(
-            log.recent(10).into_iter().map(|(l, _)| l).collect::<Vec<_>>(),
+            log.recent(10)
+                .into_iter()
+                .map(|(l, _)| l)
+                .collect::<Vec<_>>(),
             vec!["only"]
         );
         assert!(ChatLog::new().recent(5).is_empty());

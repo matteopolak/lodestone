@@ -101,7 +101,11 @@ fn mth_random_helpers_match_jvm() {
         for i in 0..8 {
             let want = f32_bits(&m[&format!("rb[{seed}].{i}")]);
             let got = math::random_between(&mut r, 0.75, 1.4);
-            assert_eq!(got.to_bits(), want.to_bits(), "randomBetween seed {seed} #{i}");
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "randomBetween seed {seed} #{i}"
+            );
             checked += 1;
         }
         for i in 0..8 {
@@ -117,5 +121,8 @@ fn mth_random_helpers_match_jvm() {
             checked += 1;
         }
     }
-    assert!(checked >= 80, "must have checked all helper draws, got {checked}");
+    assert!(
+        checked >= 80,
+        "must have checked all helper draws, got {checked}"
+    );
 }

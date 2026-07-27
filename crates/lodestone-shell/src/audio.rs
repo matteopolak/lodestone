@@ -107,8 +107,8 @@ impl ShellAudio {
 
     fn load_from_root(root: &Path) -> Result<Self, String> {
         let index_path = find_asset_index(root)?;
-        let index_bytes =
-            std::fs::read(&index_path).map_err(|e| format!("reading {}: {e}", index_path.display()))?;
+        let index_bytes = std::fs::read(&index_path)
+            .map_err(|e| format!("reading {}: {e}", index_path.display()))?;
         let index = parse_asset_index(&index_bytes)?;
         let source = AssetObjectSource {
             root: root.to_path_buf(),
@@ -119,8 +119,8 @@ impl ShellAudio {
         let sounds_json = source
             .object_bytes("minecraft/sounds.json")
             .ok_or("no minecraft/sounds.json in the asset store")?;
-        let registry = SoundRegistry::parse(&sounds_json)
-            .map_err(|e| format!("parsing sounds.json: {e}"))?;
+        let registry =
+            SoundRegistry::parse(&sounds_json).map_err(|e| format!("parsing sounds.json: {e}"))?;
 
         let engine = AudioEngine::new(registry, Box::new(source))
             .map_err(|e| format!("opening audio device: {e}"))?;
@@ -189,7 +189,8 @@ impl ShellAudio {
 /// zero or several exist (deterministic selection, never directory order).
 fn find_asset_index(root: &Path) -> Result<PathBuf, String> {
     let mut matches: Vec<PathBuf> = Vec::new();
-    let entries = std::fs::read_dir(root).map_err(|e| format!("reading dir {}: {e}", root.display()))?;
+    let entries =
+        std::fs::read_dir(root).map_err(|e| format!("reading dir {}: {e}", root.display()))?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -334,7 +335,10 @@ mod tests {
 
     #[test]
     fn object_relpath_is_sha1_sharded() {
-        let p = object_relpath(Path::new("/root"), "0011223344556677889900112233445566778899");
+        let p = object_relpath(
+            Path::new("/root"),
+            "0011223344556677889900112233445566778899",
+        );
         assert_eq!(
             p,
             Path::new("/root/objects/00/0011223344556677889900112233445566778899")

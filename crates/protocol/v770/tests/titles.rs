@@ -18,8 +18,12 @@ fn handle(adapter: &V770Adapter, packet_id: i32, payload: &[u8]) -> Vec<Directiv
 }
 
 fn expect_err(adapter: &V770Adapter, packet_id: i32, payload: &[u8]) {
-    let result = adapter.handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload);
-    assert!(result.is_err(), "expected packet {packet_id} to be rejected");
+    let result =
+        adapter.handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload);
+    assert!(
+        result.is_err(),
+        "expected packet {packet_id} to be rejected"
+    );
 }
 
 /// Network-NBT bare string component: `TAG_String` tag, big-endian u16 length,
@@ -91,7 +95,9 @@ fn clear_titles_true_resets_times() {
     let directives = handle(&adapter, play::clientbound::CLEAR_TITLES, &[1]);
     assert_eq!(
         directives,
-        vec![Directive::Emit(ClientEvent::TitlesCleared { reset_times: true })]
+        vec![Directive::Emit(ClientEvent::TitlesCleared {
+            reset_times: true
+        })]
     );
 }
 

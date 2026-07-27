@@ -255,7 +255,10 @@ pub fn check_despawn(
     }
     let immune = f64::from(category.no_despawn_distance());
     let immune_sqr = immune * immune;
-    if no_action_time > 600 && rng_hit_800 && dist_sqr_to_player > immune_sqr && remove_when_far_away
+    if no_action_time > 600
+        && rng_hit_800
+        && dist_sqr_to_player > immune_sqr
+        && remove_when_far_away
     {
         DespawnOutcome::DISCARD
     } else if dist_sqr_to_player < immune_sqr {
@@ -390,11 +393,17 @@ mod tests {
         // Young timer, roll misses: kept, not reset.
         let out = check_despawn(MobCategory::Monster, dist_sqr, 100, false, true);
         assert_eq!(out, DespawnOutcome::KEEP);
-        assert!(!out.reset_timer, "40-block mob must NOT have its age timer reset");
+        assert!(
+            !out.reset_timer,
+            "40-block mob must NOT have its age timer reset"
+        );
 
         // Once it has aged past 600 and the 1/800 roll hits, gate B fires.
         let aged = check_despawn(MobCategory::Monster, dist_sqr, 601, true, true);
-        assert!(aged.discard, "aged idle mob past 600 ticks should random-despawn");
+        assert!(
+            aged.discard,
+            "aged idle mob past 600 ticks should random-despawn"
+        );
 
         // A mob at 20 blocks (inside the immune radius) is reset every check and
         // can therefore never reach gate B — the immortality the fold would give

@@ -113,7 +113,11 @@ fn acknowledged_bits_are_oldest_first_from_tail() {
         .enumerate()
         .filter_map(|(i, &s)| s.then_some(i))
         .collect();
-    assert_eq!(set_bits, vec![17, 18, 19], "3 messages set exactly bits 17,18,19");
+    assert_eq!(
+        set_bits,
+        vec![17, 18, 19],
+        "3 messages set exactly bits 17,18,19"
+    );
     checked += 1;
 
     // Oldest-first order preserved.
@@ -139,7 +143,11 @@ fn unshown_message_leaves_a_gap_but_advances_the_window() {
     t.add_pending(a.clone(), true);
     t.add_pending(sig(&[99]), false);
     t.add_pending(b.clone(), true);
-    assert_eq!(t.offset(), 3, "an unshown message still advances the window");
+    assert_eq!(
+        t.offset(),
+        3,
+        "an unshown message still advances the window"
+    );
     checked += 1;
 
     let update = t.generate_and_apply_update();
@@ -150,9 +158,17 @@ fn unshown_message_leaves_a_gap_but_advances_the_window() {
         .filter_map(|(i, &s)| s.then_some(i))
         .collect();
     // A at ring 0 -> bit 17; gap at ring 1 -> bit 18 clear; B at ring 2 -> bit 19.
-    assert_eq!(set_bits, vec![17, 19], "the unshown slot is a gap, not acknowledged");
+    assert_eq!(
+        set_bits,
+        vec![17, 19],
+        "the unshown slot is a gap, not acknowledged"
+    );
     checked += 1;
-    assert_eq!(update.last_seen, vec![a, b], "only shown messages are reported");
+    assert_eq!(
+        update.last_seen,
+        vec![a, b],
+        "only shown messages are reported"
+    );
     checked += 1;
 
     assert!(checked >= 3);
@@ -167,11 +183,17 @@ fn consecutive_duplicate_signature_is_ignored() {
     let mut t = LastSeenTracker::vanilla();
     let x = sig(&[7]);
     assert!(t.add_pending(x.clone(), true), "first add is recorded");
-    assert!(!t.add_pending(x.clone(), true), "identical consecutive add is dropped");
+    assert!(
+        !t.add_pending(x.clone(), true),
+        "identical consecutive add is dropped"
+    );
     assert_eq!(t.offset(), 1, "the duplicate does not advance the window");
     // A different signature in between re-arms the guard.
     assert!(t.add_pending(sig(&[8]), true));
-    assert!(t.add_pending(x, true), "same signature after another is recorded again");
+    assert!(
+        t.add_pending(x, true),
+        "same signature after another is recorded again"
+    );
     assert_eq!(t.offset(), 3);
 }
 
@@ -224,7 +246,12 @@ fn mark_processed_flushes_once_past_the_threshold() {
     // The first 64 processed messages accumulate without a flush.
     for i in 0..64u32 {
         let s = sig(&i.to_le_bytes());
-        assert_eq!(t.mark_processed(s, true), None, "no flush at offset {}", i + 1);
+        assert_eq!(
+            t.mark_processed(s, true),
+            None,
+            "no flush at offset {}",
+            i + 1
+        );
     }
     assert_eq!(t.offset(), 64);
     // The 65th crosses offset > 64 and flushes exactly 65.
@@ -262,7 +289,11 @@ fn signature_cache_packs_most_recent_first() {
     cache.push(&[], Some(&b));
     assert_eq!(cache.pack(&b), Some(0));
     assert_eq!(cache.pack(&a), Some(1));
-    assert_eq!(cache.pack(&sig(&[99])), None, "absent signature is NOT_FOUND");
+    assert_eq!(
+        cache.pack(&sig(&[99])),
+        None,
+        "absent signature is NOT_FOUND"
+    );
     assert_eq!(cache.unpack(0), Some(&b));
     assert_eq!(cache.unpack(1), Some(&a));
 }

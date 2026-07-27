@@ -11,7 +11,12 @@ use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::{configuration, play};
 use lodestone_world::World;
 
-fn handle(adapter: &V770Adapter, state: ConnectionState, id: i32, payload: &[u8]) -> Vec<Directive> {
+fn handle(
+    adapter: &V770Adapter,
+    state: ConnectionState,
+    id: i32,
+    payload: &[u8],
+) -> Vec<Directive> {
     adapter
         .handle_packet(&mut World::new(), state, id, payload)
         .expect("handle ping packet")
@@ -26,7 +31,10 @@ fn play_ping_emits_client_event_ping() {
         play::clientbound::PING,
         &42i32.to_be_bytes(),
     );
-    assert_eq!(directives, vec![Directive::Emit(ClientEvent::Ping { id: 42 })]);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::Ping { id: 42 })]
+    );
 }
 
 #[test]
@@ -38,5 +46,8 @@ fn configuration_ping_emits_client_event_ping() {
         configuration::clientbound::PING,
         &7i32.to_be_bytes(),
     );
-    assert_eq!(directives, vec![Directive::Emit(ClientEvent::Ping { id: 7 })]);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::Ping { id: 7 })]
+    );
 }
