@@ -19,6 +19,16 @@ pub enum ChatKind {
     GameInfo,
 }
 
+/// A last-death location, from the optional `GlobalPos` field of
+/// `ClientboundRespawnPacket` (and the game-join packet's equivalent).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DeathLocation {
+    /// Dimension the death occurred in.
+    pub dimension: DimensionId,
+    /// Block position of the death.
+    pub pos: BlockPos,
+}
+
 /// A signed player-chat acknowledgement input.
 ///
 /// Only signed player chat carries this. System chat, disguised chat, and older
@@ -34,6 +44,39 @@ pub struct ChatAckInfo {
     pub global_index: i32,
     /// Whether the message was shown to the user after filtering.
     pub was_shown: bool,
+}
+
+/// A packed message signature, from `MessageSignature.Packed`.
+///
+/// The wire form is either a full 256-byte signature (for a signature the
+/// client has not cached yet) or an index into the last-seen signature
+/// cache. This adapter does not track that cache, so `Cached` indices are
+/// carried as-is rather than resolved.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PackedMessageSignature {
+    /// A full 256-byte signature.
+    Full(Vec<u8>),
+    /// An index into the last-seen signature cache.
+    Cached(i32),
+}
+
+/// The anchor point used by `ClientboundPlayerLookAtPacket`'s
+/// `EntityAnchorArgument.Anchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LookAnchor {
+    /// Anchor at the entity's feet.
+    Feet,
+    /// Anchor at the entity's eyes.
+    Eyes,
+}
+
+/// Entity-target details for [`ClientEvent::PlayerLookAt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerLookAtEntity {
+    /// Target entity id.
+    pub entity_id: i32,
+    /// Anchor point on the target entity.
+    pub to_anchor: LookAnchor,
 }
 
 /// Relative components of a player teleport.
@@ -1288,5 +1331,251 @@ pub enum ClientEvent {
         difficulty: Difficulty,
         /// Whether the difficulty is locked from further changes in the UI.
         locked: bool,
+    },
+    /// The server instructed the local player to rotate to (or by) a specific
+    /// yaw/pitch, from `ClientboundPlayerRotationPacket`.
+    PlayerRotationSet {
+        /// New (or delta) body yaw, in degrees.
+        y_rot: f32,
+        /// Whether `y_rot` is relative to the current yaw rather than absolute.
+        relative_y: bool,
+        /// New (or delta) pitch, in degrees.
+        x_rot: f32,
+        /// Whether `x_rot` is relative to the current pitch rather than absolute.
+        relative_x: bool,
+    },
+    /// The client's camera was attached to (or detached from) an entity, from
+    /// `ClientboundSetCameraPacket`.
+    CameraSet {
+        /// The entity id the camera now follows. Vanilla sends the local
+        /// player's own id to reset the camera to the first-person view.
+        entity_id: i32,
+    },
+    /// A written book screen should open, from `ClientboundOpenBookPacket`.
+    BookOpened {
+        /// `true` for the main hand, `false` for the off hand.
+        main_hand: bool,
+    },
+    /// A sound (or sounds) should stop playing, from
+    /// `ClientboundStopSoundPacket`. Absent fields are wildcards: `sound: None`
+    /// stops every sound in `category` (or all sounds if `category` is also
+    /// `None`), not "no sound".
+    SoundStopped {
+        /// Sound to stop, or `None` to match any sound.
+        sound: Option<ResourceKey>,
+        /// Category to restrict the stop to, or `None` to match any category.
+        category: Option<SoundCategory>,
+    },
+    /// The player list header/footer text changed, from
+    /// `ClientboundTabListPacket`.
+    TabListChanged {
+        /// Header text shown above the player list.
+        header: Text,
+        /// Footer text shown below the player list.
+        footer: Text,
+    },
+    /// The world border's center moved, from
+    /// `ClientboundSetBorderCenterPacket`.
+    WorldBorderCenterChanged {
+        /// New center X coordinate.
+        x: f64,
+        /// New center Z coordinate.
+        z: f64,
+    },
+    /// The world border began (or continued) smoothly resizing, from
+    /// `ClientboundSetBorderLerpSizePacket`.
+    WorldBorderSizeLerping {
+        /// Size (diameter, in blocks) the border is resizing from.
+        old_size: f64,
+        /// Size (diameter, in blocks) the border is resizing to.
+        new_size: f64,
+        /// Duration of the resize, in milliseconds.
+        lerp_time_ms: i64,
+    },
+    /// The world border's size changed instantly (no interpolation), from
+    /// `ClientboundSetBorderSizePacket`.
+    WorldBorderSizeChanged {
+        /// New size (diameter, in blocks).
+        size: f64,
+    },
+    /// The world border's warning delay changed, from
+    /// `ClientboundSetBorderWarningDelayPacket`.
+    WorldBorderWarningDelayChanged {
+        /// New warning delay, in seconds, before the border starts closing in.
+        warning_time: i32,
+    },
+    /// The world border's warning distance changed, from
+    /// `ClientboundSetBorderWarningDistancePacket`.
+    WorldBorderWarningDistanceChanged {
+        /// New distance, in blocks, at which the warning effect appears.
+        warning_blocks: i32,
+    },
+    /// The world border was fully (re)initialized, from
+    /// `ClientboundInitializeBorderPacket` — sent on join/respawn instead of
+    /// the incremental variants above.
+    WorldBorderInitialized {
+        /// New center X coordinate.
+        x: f64,
+        /// New center Z coordinate.
+        z: f64,
+        /// Size (diameter, in blocks) the border is resizing from.
+        old_size: f64,
+        /// Size (diameter, in blocks) the border is resizing to.
+        new_size: f64,
+        /// Duration of the resize, in milliseconds.
+        lerp_time_ms: i64,
+        /// Absolute maximum size the border can ever reach.
+        absolute_max_size: i32,
+        /// Distance, in blocks, at which the warning effect appears.
+        warning_blocks: i32,
+        /// Warning delay, in seconds, before the border starts closing in.
+        warning_time: i32,
+    },
+    /// Combat tracking began for the local player, from
+    /// `ClientboundPlayerCombatEnterPacket` (no payload).
+    PlayerCombatEntered,
+    /// Combat tracking ended for the local player, from
+    /// `ClientboundPlayerCombatEndPacket`.
+    PlayerCombatEnded {
+        /// Duration of the combat encounter, in ticks.
+        duration_ticks: i32,
+    },
+    /// The server opened a sign-editing UI, from
+    /// `ClientboundOpenSignEditorPacket`.
+    SignEditorOpened {
+        /// Block position of the sign.
+        pos: BlockPos,
+        /// Whether the front (vs. back) text is being edited.
+        is_front_text: bool,
+    },
+    /// The advancements screen should switch to a given tab, from
+    /// `ClientboundSelectAdvancementsTabPacket`.
+    AdvancementsTabSelected {
+        /// Tab identifier, or `None` to close/deselect the tab.
+        tab: Option<Identifier>,
+    },
+    /// A projectile's acceleration power changed (e.g. a charged crossbow
+    /// bolt), from `ClientboundProjectilePowerPacket`.
+    ProjectilePowerChanged {
+        /// Projectile entity id.
+        entity_id: i32,
+        /// New acceleration power.
+        acceleration_power: f64,
+    },
+    /// A ridden entity's (e.g. horse, llama) inventory screen was opened,
+    /// from `ClientboundMountScreenOpenPacket`.
+    MountScreenOpened {
+        /// Window/container id.
+        container_id: i32,
+        /// Number of inventory columns (varies by the ridden entity's
+        /// carrying capacity).
+        inventory_columns: i32,
+        /// Ridden entity id.
+        entity_id: i32,
+    },
+    /// The server's game rule values, from
+    /// `ClientboundGameRuleValuesPacket`.
+    GameRulesChanged {
+        /// Game rule identifier and its raw string value, in wire order.
+        values: Vec<(Identifier, String)>,
+    },
+    /// The server asked the client to reconnect to a different address, from
+    /// `ClientboundTransferPacket`.
+    TransferRequested {
+        /// Target server host.
+        host: String,
+        /// Target server port.
+        port: i32,
+    },
+    /// The server requested a previously stored cookie, from
+    /// `ClientboundCookieRequestPacket`.
+    CookieRequested {
+        /// Cookie key.
+        key: Identifier,
+    },
+    /// The server asked the client to persist an opaque cookie, from
+    /// `ClientboundStoreCookiePacket`.
+    CookieStored {
+        /// Cookie key.
+        key: Identifier,
+        /// Opaque payload (at most 5120 bytes).
+        payload: Vec<u8>,
+    },
+    /// The server offered a resource pack, from
+    /// `ClientboundResourcePackPushPacket`.
+    ResourcePackPushed {
+        /// Pack id, echoed back in the client's accept/decline response.
+        id: Uuid,
+        /// Download URL.
+        url: String,
+        /// SHA-1 hash of the pack (hex; may be empty if not provided).
+        hash: String,
+        /// Whether declining or failing to download disconnects the client.
+        required: bool,
+        /// Optional prompt message shown to the user.
+        prompt: Option<Text>,
+    },
+    /// The server withdrew a previously pushed resource pack, from
+    /// `ClientboundResourcePackPopPacket`.
+    ResourcePackPopped {
+        /// Pack id to remove, or `None` to remove all packs.
+        id: Option<Uuid>,
+    },
+    /// A plugin (custom payload) message arrived, from
+    /// `ClientboundCustomPayloadPacket`.
+    ///
+    /// `data` is the raw payload bytes for `channel`, undecoded: only
+    /// `minecraft:brand` is specially typed by vanilla (as a single UTF-8
+    /// string) and every other channel is opaque plugin data, so this
+    /// adapter carries the bytes as-is rather than guessing a shape.
+    CustomPayload {
+        /// Channel identifier.
+        channel: Identifier,
+        /// Raw payload bytes.
+        data: Vec<u8>,
+    },
+    /// Public server metadata pushed proactively during play, from
+    /// `ClientboundServerDataPacket`.
+    ServerDataReceived {
+        /// Message of the day.
+        motd: Text,
+        /// Favicon PNG bytes, if the server sent one.
+        icon: Option<Vec<u8>>,
+    },
+    /// A play-state pong echo, from `ClientboundPongResponsePacket` (distinct
+    /// from the keep-alive-like `Ping`/`ClientAction::PongResponse` pair).
+    PongReceived {
+        /// Echoed time value.
+        time: i64,
+    },
+    /// A previously sent chat message was deleted/withdrawn, from
+    /// `ClientboundDeleteChatPacket`.
+    ChatMessageDeleted {
+        /// The message's identity as carried on the wire.
+        signature: PackedMessageSignature,
+    },
+    /// The local player should look toward a fixed point or another entity,
+    /// from `ClientboundPlayerLookAtPacket`.
+    PlayerLookAt {
+        /// Anchor point on the local player to rotate from.
+        from_anchor: LookAnchor,
+        /// Target position (already resolved by the server for the entity
+        /// case).
+        target: Vec3,
+        /// If set, the target was an entity at send time; carries its id and
+        /// the anchor point used on it.
+        at_entity: Option<PlayerLookAtEntity>,
+    },
+    /// The local player changed dimension (portal travel) or respawned after
+    /// death, from `ClientboundRespawnPacket`.
+    Respawned {
+        /// New dimension.
+        dimension: DimensionId,
+        /// New game mode.
+        game_mode: GameMode,
+        /// Game mode before this respawn, if the server reported one.
+        previous_game_mode: Option<GameMode>,
+        /// Last death location, if the server tracks one for this dimension.
+        last_death_location: Option<DeathLocation>,
     },
 }
