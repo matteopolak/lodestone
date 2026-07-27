@@ -1,40 +1,68 @@
 //! Terrain source for the integrated server.
 //!
 //! A [`ChunkSource`] answers "what blocks are in column `(cx, cz)`?".
-//! [`WorldgenChunkSource`] implements it from the version-free density-function
-//! noise router in [`lodestone_worldgen`].
 //!
-//! # Honest scope of [`WorldgenChunkSource`]
+//! Two implementations ship, and the distinction matters:
 //!
-//! It samples the router's `final_density` per block and treats `> 0` as solid.
-//! This is the **noise-router terrain-shape stage only**. Two deliberate,
-//! documented gaps remain before this equals a vanilla chunk block-for-block:
+//! * [`OverworldChunkSource`] is the **real** pipeline. It wraps
+//!   [`lodestone_worldgen::overworld::OverworldGenerator`] — the composed,
+//!   JVM-verified generator (interpolated `final_density` shape + sea-level
+//!   aquifer + surface rules) — so its columns carry actual vanilla block-state
+//!   strings (grass, dirt, stone, gravel, water, …), not a solid/air mask. This
+//!   is the source a real client should be served, and the one the shell renders.
+//! * [`WorldgenChunkSource`] is a **solidity-only** source kept for the
+//!   transport/seam tests. It point-samples a bare [`Density`] node per block and
+//!   maps `> 0` to stone — no cell interpolation, no surface, no fluid. It exists
+//!   because the in-memory-transport tests only need *a* deterministic terrain to
+//!   prove the wire round-trip, not a vanilla-accurate one. Do not reach for it
+//!   as "the generator"; that is what [`OverworldChunkSource`] is.
 //!
-//! * **Cell interpolation.** Vanilla evaluates `final_density` only at cell
-//!   corners (cells are 4×8×4 blocks for the overworld) and trilinearly
-//!   interpolates the interior; this source point-samples every block instead.
-//!   The interpreter tree is proven bit-exact at points (see
-//!   `lodestone-worldgen`'s `density_parity` test), but per-block interpolation
-//!   is a separate stage not yet implemented here.
-//! * **Surface rules, aquifers, carvers, features.** None are applied, so the
-//!   column is `default_block`/air only — no grass, water table, caves, or ores.
+//! # The column carries block states, not just solidity
 //!
-//! The type is therefore useful as a real, self-contained terrain-shape source
-//! and as the integration point the remaining stages will slot into, but it is
-//! not represented as vanilla-accurate blocks.
+//! [`ChunkColumn`] stores a per-column palette of block-state strings plus a
+//! dense index grid (the same representation [`GeneratedColumn`] uses), so a
+//! `ServerProtocol::encode_chunk` can emit a real chunk. The historical
+//! solid/air API ([`ChunkColumn::set_solid`]/[`ChunkColumn::is_solid`]) is
+//! preserved as a view over that field: a block is "solid" when it is neither air
+//! nor a fluid, and `set_solid(true)` writes canonical stone.
 
 use lodestone_worldgen::density::{Context, Density};
+use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
-/// A decoded chunk column: solid/non-solid for every block in a 16×`height`×16
+const AIR: &str = "minecraft:air";
+const STONE: &str = "minecraft:stone";
+
+/// Returns `true` for blocks that do not count as collidable terrain: air
+/// variants and fluids. `is_solid` is the negation of this over the block name.
+fn is_air_or_fluid(name: &str) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    matches!(
+        base,
+        "minecraft:air"
+            | "minecraft:cave_air"
+            | "minecraft:void_air"
+            | "minecraft:water"
+            | "minecraft:lava"
+    )
+}
+
+/// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
+///
+/// Blocks are stored as indices into a small per-column `palette` of block-state
+/// strings, with `palette[0] == "minecraft:air"`. The index layout matches
+/// [`GeneratedColumn`] exactly (`blocks[(ly * 16 + z) * 16 + x]`, `ly = y -
+/// min_y`) so [`ChunkColumn::from_generated`] is a zero-copy adoption.
 #[derive(Debug, Clone)]
 pub struct ChunkColumn {
     /// World Y of the lowest block row.
     pub min_y: i32,
     /// Number of block rows (world height).
     pub height: i32,
-    /// `solid[(y * 16 + z) * 16 + x]`, `x`/`z` in `0..16`, `y` in `0..height`.
-    solid: Vec<bool>,
+    /// Block-state palette; `palette[0]` is always `"minecraft:air"`.
+    palette: Vec<String>,
+    /// `blocks[(y_local * 16 + z) * 16 + x]` indexes into `palette`.
+    blocks: Vec<u16>,
 }
 
 impl ChunkColumn {
@@ -45,7 +73,27 @@ impl ChunkColumn {
         Self {
             min_y,
             height,
-            solid: vec![false; 16 * 16 * height as usize],
+            palette: vec![AIR.to_string()],
+            blocks: vec![0u16; 16 * 16 * height as usize],
+        }
+    }
+
+    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Zero-copy:
+    /// the palette and block grid are moved as-is (their index layout is the
+    /// same).
+    #[must_use]
+    pub fn from_generated(column: GeneratedColumn) -> Self {
+        let (min_y, height, palette, blocks) = column.into_raw();
+        debug_assert_eq!(
+            palette.first().map(String::as_str),
+            Some(AIR),
+            "generated palette must start with air"
+        );
+        Self {
+            min_y,
+            height,
+            palette,
+            blocks,
         }
     }
 
@@ -57,28 +105,56 @@ impl ChunkColumn {
         ((y_local * 16 + z) * 16 + x) as usize
     }
 
-    /// Sets solidity at a local `(x, z)` in `0..16` and world `y`.
-    pub fn set_solid(&mut self, x: i32, y: i32, z: i32, solid: bool) {
+    /// Interns a block-state string into the palette, returning its index.
+    fn intern(&mut self, name: &str) -> u16 {
+        if let Some(i) = self.palette.iter().position(|p| p == name) {
+            return i as u16;
+        }
+        self.palette.push(name.to_string());
+        (self.palette.len() - 1) as u16
+    }
+
+    /// Sets the block state at a local `(x, z)` in `0..16` and world `y`.
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
+        let id = self.intern(name);
         let y_local = y - self.min_y;
         let i = self.index(x, y_local, z);
-        self.solid[i] = solid;
+        self.blocks[i] = id;
     }
 
-    /// Returns solidity at a local `(x, z)` in `0..16` and world `y`. Blocks
-    /// outside the vertical range are non-solid.
+    /// Sets solidity at a local `(x, z)` in `0..16` and world `y`. `true` writes
+    /// canonical stone, `false` writes air — the solid/air view preserved for
+    /// callers that only reason about collidable terrain.
+    pub fn set_solid(&mut self, x: i32, y: i32, z: i32, solid: bool) {
+        self.set_block(x, y, z, if solid { STONE } else { AIR });
+    }
+
+    /// Canonical block-state string at a local `(x, z)` in `0..16` and world `y`.
+    /// Out-of-range Y is `"minecraft:air"`.
     #[must_use]
-    pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
+    pub fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
         let y_local = y - self.min_y;
         if !(0..self.height).contains(&y_local) {
-            return false;
+            return AIR;
         }
-        self.solid[self.index(x, y_local, z)]
+        &self.palette[self.blocks[self.index(x, y_local, z)] as usize]
     }
 
-    /// Total number of solid blocks (useful for tests/telemetry).
+    /// Returns solidity at a local `(x, z)` in `0..16` and world `y`. A block is
+    /// solid when it is neither air nor a fluid; blocks outside the vertical
+    /// range are non-solid.
+    #[must_use]
+    pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
+        !is_air_or_fluid(self.block_state(x, y, z))
+    }
+
+    /// Total number of solid (non-air, non-fluid) blocks.
     #[must_use]
     pub fn solid_count(&self) -> usize {
-        self.solid.iter().filter(|s| **s).count()
+        self.blocks
+            .iter()
+            .filter(|&&id| !is_air_or_fluid(&self.palette[id as usize]))
+            .count()
     }
 }
 
@@ -88,11 +164,44 @@ pub trait ChunkSource: Send + Sync {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
 }
 
-/// A [`ChunkSource`] backed by the density-function noise router.
+/// The real terrain source: the composed, JVM-verified overworld generator.
 ///
-/// Build the router `final_density` once (via
-/// [`lodestone_worldgen::density::Builder`]) and hand it here; the source then
-/// point-samples it per block. See the module docs for the scope limits.
+/// This is what a client connecting to the integrated server should be served —
+/// its columns carry real vanilla block states (shape + sea-level aquifer +
+/// surface rules), the same output the shell renders directly. Build one per
+/// world (via [`crate::overworld_chunk_source`]) and share it across the view.
+pub struct OverworldChunkSource {
+    generator: OverworldGenerator,
+}
+
+impl OverworldChunkSource {
+    /// Wraps a pre-built [`OverworldGenerator`].
+    #[must_use]
+    pub fn new(generator: OverworldGenerator) -> Self {
+        Self { generator }
+    }
+}
+
+impl std::fmt::Debug for OverworldChunkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OverworldChunkSource")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChunkSource for OverworldChunkSource {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        ChunkColumn::from_generated(self.generator.column(cx, cz))
+    }
+}
+
+/// A solidity-only [`ChunkSource`] backed by a bare density node.
+///
+/// **Not the real generator** — see the module docs. It point-samples
+/// `final_density` per block and maps `> 0` to stone, with no cell
+/// interpolation, surface, or fluid. Kept for the in-memory-transport tests,
+/// which need a deterministic terrain to prove the wire round-trip, not a
+/// vanilla-accurate one. For real terrain use [`OverworldChunkSource`].
 #[derive(Debug, Clone)]
 pub struct WorldgenChunkSource {
     final_density: Density,
@@ -170,5 +279,21 @@ mod tests {
         let col = src.column(1, -3);
         assert!(!col.is_solid(0, 5000, 0));
         assert!(!col.is_solid(0, -5000, 0));
+    }
+
+    #[test]
+    fn set_block_round_trips_and_fluids_are_not_solid() {
+        let mut col = ChunkColumn::new(0, 16);
+        col.set_block(3, 5, 7, "minecraft:grass_block[snowy=false]");
+        col.set_block(3, 4, 7, "minecraft:water[level=0]");
+        assert_eq!(
+            col.block_state(3, 5, 7),
+            "minecraft:grass_block[snowy=false]"
+        );
+        // Grass is solid; water is a fluid and therefore not solid.
+        assert!(col.is_solid(3, 5, 7));
+        assert!(!col.is_solid(3, 4, 7));
+        // Only the grass block counts toward solidity.
+        assert_eq!(col.solid_count(), 1);
     }
 }

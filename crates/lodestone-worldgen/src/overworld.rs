@@ -277,4 +277,17 @@ impl GeneratedColumn {
     pub fn non_air_count(&self) -> usize {
         self.blocks.iter().filter(|b| **b != 0).count()
     }
+
+    /// Consumes the column into its raw parts: `(min_y, height, palette,
+    /// blocks)`, where `blocks[(ly * 16 + lz) * 16 + lx]` indexes into `palette`
+    /// (`palette[0] == "minecraft:air"`) and `ly = y - min_y`.
+    ///
+    /// This is the zero-copy hand-off a downstream carrier (e.g. the integrated
+    /// server's chunk column) uses to adopt the generated block field without
+    /// re-interning every block. The index layout is stable and part of the
+    /// contract.
+    #[must_use]
+    pub fn into_raw(self) -> (i32, i32, Vec<String>, Vec<u16>) {
+        (self.min_y, self.height, self.palette, self.blocks)
+    }
 }
