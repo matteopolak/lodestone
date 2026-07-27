@@ -1,0 +1,10 @@
+[package]
+name = "lodestone-v1"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lodestone-core = { path = "../../lodestone-core" }
+lodestone-model = { path = "../../lodestone-model" }
+lodestone-macros = { path = "../../lodestone-macros" }
+

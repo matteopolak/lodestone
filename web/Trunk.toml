@@ -1,0 +1,11 @@
+# Trunk dev-server config for the wasm render spike.
+#
+# The COOP/COEP headers are set NOW even though this spike is single-threaded and
+# does not yet need SharedArrayBuffer. They are required the moment we adopt
+# `wasm-bindgen-rayon`/threads, they are free today, and a missing cross-origin
+# isolation header is a genuinely confusing thing to debug later. Setting them
+# early means the browser is already cross-origin isolated when threading lands.
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+headers = { "Cross-Origin-Opener-Policy" = "same-origin", "Cross-Origin-Embedder-Policy" = "require-corp" }

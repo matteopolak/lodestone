@@ -1,0 +1,480 @@
+//! Swept-AABB collision against block collision shapes, reproducing vanilla's
+//! axis order, per-box epsilon semantics, and the 0.6-block auto-step mechanic.
+//!
+//! Vanilla resolves movement in [`Shapes.collide`] one axis at a time, in an
+//! order chosen by [`Direction.axisStepOrder`]: always `Y` first, then `X`/`Z`
+//! with the smaller-magnitude horizontal component last. Collision against a
+//! block's [`VoxelShape`] reduces, for the box shapes used by real blocks, to a
+//! per-box sweep with a `1.0E-7` epsilon on every comparison. We reproduce that
+//! epsilon placement rather than the classic pre-1.13 form, because the epsilon
+//! decides borderline contacts that the server's anti-cheat also sees.
+
+use crate::geometry::{Aabb, Axis, Vec3d};
+use crate::fluid::{FluidCell, HorizontalDir};
+
+/// Vanilla's collision epsilon (`1.0E-7`), used throughout `VoxelShape.collideX`.
+const EPSILON: f64 = 1.0E-7;
+
+/// Read-only view of the world's block collision geometry, in world space.
+///
+/// This is intentionally a trait rather than a dependency on `lodestone-world`:
+/// physics must be testable against synthetic worlds, and the real world crate
+/// can implement it later. Coordinates are block coordinates; shapes are
+/// returned as **world-space** [`Aabb`]s (block-local box plus the block
+/// offset), matching how vanilla gathers colliders over an expanded box.
+pub trait CollisionView {
+    /// Appends the world-space collision boxes for the block at `(x, y, z)` to
+    /// `out`. A block with no collision (air, most plants) appends nothing.
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>);
+
+    /// Block-local top surface Y of the collision shape at `(x, y, z)` —
+    /// vanilla's `shape.max(Axis.Y)`. **Uncapped**: this is *not* clamped to
+    /// `1.0`. Fences, walls and fence gates return **1.5**; `soul_sand` `0.875`;
+    /// a bottom slab `0.5`; air / water / lava / cobweb `0.0`.
+    ///
+    /// The uncapped contract is load-bearing for consumers (e.g. a pathfinder's
+    /// step-up check): the 0.6-block auto-step *cannot* mount a 1.5-tall fence,
+    /// so clamping this to `1.0` would make fences look step-able and route
+    /// navigation straight through them. Do not clamp.
+    ///
+    /// The default derives the value from [`Self::collision_boxes`] (the true,
+    /// already-uncapped shapes), so implementers that return correct boxes get a
+    /// correct top for free; override only to serve it directly from a shape
+    /// table. Returns `0.0` for a block with no collision boxes.
+    fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
+        let mut boxes = Vec::new();
+        self.collision_boxes(x, y, z, &mut boxes);
+        boxes
+            .iter()
+            .map(|b| b.max_y - f64::from(y))
+            .fold(0.0_f64, f64::max)
+    }
+
+    /// Friction (`Block.getFriction`) of the block at `(x, y, z)`; default `0.6`.
+    fn friction(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        0.6
+    }
+
+    /// Speed factor (`Block.getSpeedFactor`); default `1.0`. Soul sand is
+    /// `0.4`, honey `0.4`.
+    fn speed_factor(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        1.0
+    }
+
+    /// Jump factor (`Block.getJumpFactor`); default `1.0`. Honey is `0.5`.
+    fn jump_factor(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        1.0
+    }
+
+    /// Whether the block at `(x, y, z)` is a water source/flowing water column
+    /// for the purposes of `Entity.isInWater`. Default `false`.
+    ///
+    /// This is a deliberately coarse hook: it models a fully-submerged player
+    /// (the tractable, well-defined part of fluid movement). It does **not**
+    /// model per-block fluid height, fluid-push, or the partial-submersion
+    /// transition tick, which vanilla derives from the fluid's `level`.
+    fn is_water(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Whether the block at `(x, y, z)` is climbable (in `BlockTags.CLIMBABLE`:
+    /// ladders, vines, twisting/weeping vines, scaffolding). Default `false`.
+    ///
+    /// Vanilla's `LivingEntity.onClimbable` tests the block at the entity's
+    /// *feet* block position, so a consumer maps this to the ladder/vine tag.
+    /// The sneak-to-hold behaviour differs for scaffolding, which this coarse
+    /// hook does not distinguish; ladders and vines (the common case) hold.
+    fn is_climbable(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Whether the block at `(x, y, z)` is lava for `Entity.isInLava`. Default
+    /// `false`. Like [`Self::is_water`], this is the coarse fully-submerged hook:
+    /// it does not model lava's fluid height (the shallow-vs-deep branch in
+    /// `travelInLava`), so a consumer modelling *deep* lava returns `true` here.
+    fn is_lava(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// The fluid occupying `(x, y, z)`, if any, for **flow-current** (fluid-push)
+    /// computation (`FlowingFluid.getFlow` / `EntityFluidInteraction.update`).
+    /// Default `None` (no fluid) → no current, preserving existing behaviour.
+    ///
+    /// This is the finer-grained companion to [`Self::is_water`]/[`Self::is_lava`]:
+    /// where those coarse booleans only report *presence* (enough for buoyancy and
+    /// drag), the current push needs each cell's fluid **level** and its
+    /// neighbours' levels, because a fluid flows from a higher column toward a
+    /// lower one. Return the fluid's [`FluidCell`] (kind, `getAmount()` in
+    /// `1..=8`, and the `FALLING` flag).
+    fn fluid_at(&self, _x: i32, _y: i32, _z: i32) -> Option<FluidCell> {
+        None
+    }
+
+    /// `BlockState.blocksMotion()` for the block at `(x, y, z)`, consulted only by
+    /// [`crate::fluid::get_flow`]'s empty-neighbour downflow branch (a fluid spills
+    /// over an open edge but not through a solid wall). Default `false` (air-like).
+    fn blocks_motion(&self, _x: i32, _y: i32, _z: i32) -> bool {
+        false
+    }
+
+    /// Whether the block at `(x, y, z)` presents a sturdy solid face toward `dir`
+    /// (`FlowingFluid.isSolidFace`), used only by a *falling* fluid's downward jet.
+    /// Default `false`.
+    fn is_solid_face(&self, _x: i32, _y: i32, _z: i32, _dir: HorizontalDir) -> bool {
+        false
+    }
+
+    /// Effective bounce restitution of the block at `(x, y, z)`
+    /// (`Block.getBounceRestitution`, already accounting for
+    /// `BlockTags.SUPPRESSES_BOUNCE` → `0.0`). Default `0.0`.
+    ///
+    /// Slime is `1.0`, bed `0.75`. Consulted by `restituteMovementAfterCollisions`
+    /// when the entity lands (vertical-collision-below) *fast enough*
+    /// (`-vy >= effectiveGravity`) and is **not** sneaking — the sneak-cancels-
+    /// bounce rule (`isSuppressingBounce`). A `LivingEntity` (player) does **not**
+    /// get the `×0.8` that non-living entities do, so return the raw value.
+    fn bounce_restitution(&self, _x: i32, _y: i32, _z: i32) -> f32 {
+        0.0
+    }
+}
+
+/// `Direction.axisStepOrder(Vec3)` — the per-axis resolution order.
+///
+/// `Math.abs(x) < Math.abs(z) ? [Y, Z, X] : [Y, X, Z]`.
+fn axis_step_order(movement: Vec3d) -> [Axis; 3] {
+    if movement.x.abs() < movement.z.abs() {
+        [Axis::Y, Axis::Z, Axis::X]
+    } else {
+        [Axis::Y, Axis::X, Axis::Z]
+    }
+}
+
+/// Gathers every block collision box overlapping `region`, expanded to include
+/// the blocks the box touches, mirroring `level.getBlockCollisions`.
+fn gather_colliders(view: &dyn CollisionView, region: Aabb) -> Vec<Aabb> {
+    // Vanilla iterates the block cursor over floor(min) ..= (ceil(max) - 1),
+    // i.e. every block cell the AABB overlaps. We use inclusive floor bounds.
+    let min_x = region.min_x.floor() as i32 - 1;
+    let min_y = region.min_y.floor() as i32 - 1;
+    let min_z = region.min_z.floor() as i32 - 1;
+    let max_x = region.max_x.floor() as i32 + 1;
+    let max_y = region.max_y.floor() as i32 + 1;
+    let max_z = region.max_z.floor() as i32 + 1;
+    let mut out = Vec::new();
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                view.collision_boxes(x, y, z, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// `Shapes.collide(axis, moving, shapes, distance)` for one axis, iterating the
+/// candidate boxes and short-circuiting to `0.0` once the residual distance is
+/// within epsilon.
+fn collide_axis(axis: Axis, moving: &Aabb, shapes: &[Aabb], mut distance: f64) -> f64 {
+    for shape in shapes {
+        if distance.abs() < EPSILON {
+            return 0.0;
+        }
+        distance = collide_one_box(axis, shape, moving, distance);
+    }
+    distance
+}
+
+/// One box's contribution to `VoxelShape.collideX`, specialised for a single
+/// axis-aligned box (which is what real block shapes decompose into).
+///
+/// The epsilon placement is derived directly from vanilla's index arithmetic in
+/// `VoxelShape.collideX`/`findIndex` (see the crate docs), so borderline
+/// contacts resolve identically.
+fn collide_one_box(axis: Axis, shape: &Aabb, moving: &Aabb, distance: f64) -> f64 {
+    let (a, b, c) = perpendicular_axes(axis);
+
+    // Perpendicular overlap on the two other axes, using vanilla's asymmetric
+    // epsilon: `mv_max > box_min + eps` and `mv_min + eps < box_max`.
+    if !(moving.max(b) - EPSILON > shape.min(b) && moving.min(b) + EPSILON < shape.max(b)) {
+        return distance;
+    }
+    if !(moving.max(c) - EPSILON > shape.min(c) && moving.min(c) + EPSILON < shape.max(c)) {
+        return distance;
+    }
+
+    let max_a = moving.max(a);
+    let min_a = moving.min(a);
+    if distance > 0.0 {
+        // Moving in +A: only boxes ahead of our leading face can stop us.
+        if max_a - EPSILON <= shape.min(a) {
+            let new_distance = shape.min(a) - max_a;
+            if new_distance >= -EPSILON {
+                return distance.min(new_distance);
+            }
+        }
+    } else if distance < 0.0 {
+        // Moving in -A: only boxes behind our trailing face can stop us.
+        if min_a + EPSILON >= shape.max(a) {
+            let new_distance = shape.max(a) - min_a;
+            if new_distance <= EPSILON {
+                return distance.max(new_distance);
+            }
+        }
+    }
+    distance
+}
+
+/// Returns `(moving_axis, perp1, perp2)` for a step axis.
+fn perpendicular_axes(axis: Axis) -> (Axis, Axis, Axis) {
+    match axis {
+        Axis::X => (Axis::X, Axis::Y, Axis::Z),
+        Axis::Y => (Axis::Y, Axis::X, Axis::Z),
+        Axis::Z => (Axis::Z, Axis::X, Axis::Y),
+    }
+}
+
+/// `Entity.collideWithShapes(Vec3, AABB, List<VoxelShape>)` — resolves movement
+/// axis by axis, moving the box after each resolved axis.
+fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> Vec3d {
+    if shapes.is_empty() {
+        return movement;
+    }
+    let mut resolved = Vec3d::ZERO;
+    for axis in axis_step_order(movement) {
+        let axis_movement = movement.get(axis);
+        if axis_movement != 0.0 {
+            let moved = bounding_box.move_vec(resolved);
+            let collision = collide_axis(axis, &moved, shapes, axis_movement);
+            resolved = resolved.with(axis, collision);
+        }
+    }
+    resolved
+}
+
+/// `Entity.collideBoundingBox` — gather colliders over the swept box, then
+/// resolve.
+fn collide_bounding_box(view: &dyn CollisionView, movement: Vec3d, bounding_box: Aabb) -> Vec3d {
+    let region = bounding_box.expand_towards(movement.x, movement.y, movement.z);
+    let shapes = gather_colliders(view, region);
+    collide_with_shapes(movement, bounding_box, &shapes)
+}
+
+/// `Entity.collide(Vec3)` including the auto-step mechanic.
+///
+/// `on_ground` and `max_up_step` come from the entity; for a player on the
+/// ground `max_up_step` is `0.6`. Returns the resolved movement.
+#[must_use]
+pub fn collide(
+    view: &dyn CollisionView,
+    movement: Vec3d,
+    bounding_box: Aabb,
+    on_ground: bool,
+    max_up_step: f32,
+) -> Vec3d {
+    let movement_step = if movement.length_sqr() == 0.0 {
+        movement
+    } else {
+        collide_bounding_box(view, movement, bounding_box)
+    };
+
+    let x_collision = movement.x != movement_step.x;
+    let y_collision = movement.y != movement_step.y;
+    let z_collision = movement.z != movement_step.z;
+    let on_ground_after = y_collision && movement.y < 0.0;
+
+    if max_up_step > 0.0 && (on_ground_after || on_ground) && (x_collision || z_collision) {
+        let grounded = if on_ground_after {
+            bounding_box.moved(0.0, movement_step.y, 0.0)
+        } else {
+            bounding_box
+        };
+        let mut step_up_box =
+            grounded.expand_towards(movement.x, f64::from(max_up_step), movement.z);
+        if !on_ground_after {
+            step_up_box = step_up_box.expand_towards(0.0, -EPSILON, 0.0);
+        }
+
+        let colliders = gather_colliders(view, step_up_box);
+        let step_height_to_skip = movement_step.y as f32;
+        let candidates =
+            candidate_step_up_heights(&grounded, &colliders, max_up_step, step_height_to_skip);
+
+        for candidate in candidates {
+            let step = collide_with_shapes(
+                Vec3d::new(movement.x, f64::from(candidate), movement.z),
+                grounded,
+                &colliders,
+            );
+            if step.horizontal_distance_sqr() > movement_step.horizontal_distance_sqr() {
+                let distance_to_ground = bounding_box.min_y - grounded.min_y;
+                return step.subtract(Vec3d::new(0.0, distance_to_ground, 0.0));
+            }
+        }
+    }
+
+    movement_step
+}
+
+/// `Entity.collectCandidateStepUpHeights` — the sorted set of candidate step
+/// heights derived from the top faces of nearby colliders.
+fn candidate_step_up_heights(
+    bounding_box: &Aabb,
+    colliders: &[Aabb],
+    max_step_height: f32,
+    step_height_to_skip: f32,
+) -> Vec<f32> {
+    let mut candidates: Vec<f32> = Vec::with_capacity(4);
+    'outer: for collider in colliders {
+        // A box shape contributes its two Y coordinates (min then max).
+        for coord in [collider.min_y, collider.max_y] {
+            let relative = (coord - bounding_box.min_y) as f32;
+            if relative >= 0.0 && relative != step_height_to_skip {
+                if relative > max_step_height {
+                    // Vanilla `break`s the inner loop when coords exceed the max
+                    // step; coords are ascending per box, so continue to next box.
+                    continue 'outer;
+                }
+                if !candidates.contains(&relative) {
+                    candidates.push(relative);
+                }
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+    candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic world: a set of solid unit-cube block coordinates plus
+    /// optional custom boxes and frictions keyed by block coordinate.
+    #[derive(Default)]
+    struct TestWorld {
+        solid: std::collections::HashSet<(i32, i32, i32)>,
+        boxes: std::collections::HashMap<(i32, i32, i32), Vec<Aabb>>,
+        friction: std::collections::HashMap<(i32, i32, i32), f32>,
+    }
+
+    impl TestWorld {
+        fn solid(mut self, x: i32, y: i32, z: i32) -> Self {
+            self.solid.insert((x, y, z));
+            self
+        }
+        fn shape(mut self, x: i32, y: i32, z: i32, local: Aabb) -> Self {
+            let world = Aabb::new(
+                local.min_x + f64::from(x),
+                local.min_y + f64::from(y),
+                local.min_z + f64::from(z),
+                local.max_x + f64::from(x),
+                local.max_y + f64::from(y),
+                local.max_z + f64::from(z),
+            );
+            self.boxes.entry((x, y, z)).or_default().push(world);
+            self
+        }
+    }
+
+    impl CollisionView for TestWorld {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+            if let Some(bs) = self.boxes.get(&(x, y, z)) {
+                out.extend_from_slice(bs);
+            } else if self.solid.contains(&(x, y, z)) {
+                out.push(Aabb::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(z),
+                    f64::from(x) + 1.0,
+                    f64::from(y) + 1.0,
+                    f64::from(z) + 1.0,
+                ));
+            }
+        }
+        fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
+            *self.friction.get(&(x, y, z)).unwrap_or(&0.6)
+        }
+    }
+
+    fn player_box(x: f64, y: f64, z: f64) -> Aabb {
+        Aabb::new(x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3)
+    }
+
+    #[test]
+    fn collision_top_is_uncapped_and_local() {
+        // Contract enforcement for the pathfinder seam (impl-entity): the top
+        // surface is vanilla's `shape.max(Axis.Y)`, block-local and NOT clamped
+        // to 1.0. A fence's 1.5 must survive so 0.6 auto-step can't mount it.
+        let fence = Aabb::new(0.375, 0.0, 0.375, 0.625, 1.5, 0.625);
+        let slab = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0);
+        let soul_sand = Aabb::new(0.0, 0.0, 0.0, 1.0, 0.875, 1.0);
+        let w = TestWorld::default()
+            .shape(2, 64, 2, fence)
+            .shape(3, 64, 3, slab)
+            .shape(4, 64, 4, soul_sand)
+            .solid(5, 64, 5);
+        assert_eq!(
+            w.collision_top(2, 64, 2),
+            1.5,
+            "fence must not be capped to 1.0"
+        );
+        assert_eq!(w.collision_top(3, 64, 3), 0.5);
+        assert_eq!(w.collision_top(4, 64, 4), 0.875);
+        assert_eq!(w.collision_top(5, 64, 5), 1.0, "full cube");
+        assert_eq!(w.collision_top(0, 64, 0), 0.0, "air => 0.0");
+    }
+
+    #[test]
+    fn falls_onto_floor_stops_at_surface() {
+        // Floor of solid blocks at y=0 (top face at y=1). Player at y=1.2 moving
+        // down 0.5 should stop with min_y at exactly 1.0 => resolved dy=-0.2.
+        let mut w = TestWorld::default();
+        for x in -1..=1 {
+            for z in -1..=1 {
+                w = w.solid(x, 0, z);
+            }
+        }
+        let bb = player_box(0.5, 1.2, 0.5);
+        let resolved = collide(&w, Vec3d::new(0.0, -0.5, 0.0), bb, false, 0.0);
+        // Bit-exact IEEE result of 1.0 - 1.2, not the naive -0.2.
+        assert_eq!(resolved.y, -0.19999999999999996);
+    }
+
+    #[test]
+    fn walks_into_wall_is_blocked() {
+        // Wall block at x=1. Player leading face at x=0.8 moving +0.5 stops at
+        // x=1.0 => dx = 0.2.
+        let w = TestWorld::default().solid(1, 5, 0).solid(1, 6, 0);
+        let bb = player_box(0.5, 5.0, 0.5);
+        let resolved = collide(&w, Vec3d::new(0.5, 0.0, 0.0), bb, true, 0.6);
+        // Bit-exact IEEE result of 1.0 - 0.8.
+        assert_eq!(resolved.x, 0.19999999999999996);
+    }
+
+    #[test]
+    fn steps_up_half_slab() {
+        // A slab (height 0.5) at x=1, floor at y=0. Player on ground walking +x
+        // should auto-step up onto the slab: resolved y becomes +0.5.
+        let mut w = TestWorld::default();
+        for x in -1..=2 {
+            for z in -1..=1 {
+                w = w.solid(x, 0, z);
+            }
+        }
+        // Slab occupying x=1 from y=1..1.5.
+        w = w.shape(1, 1, 0, Aabb::new(0.0, 0.0, 0.0, 1.0, 0.5, 1.0));
+        let bb = player_box(0.5, 1.0, 0.5);
+        let resolved = collide(&w, Vec3d::new(0.4, 0.0, 0.0), bb, true, 0.6);
+        // Horizontal movement is preserved and we rise by the slab height.
+        assert_eq!(resolved.x, 0.4);
+        assert_eq!(resolved.y, 0.5);
+    }
+
+    #[test]
+    fn no_colliders_returns_movement_unchanged() {
+        let w = TestWorld::default();
+        let bb = player_box(0.5, 50.0, 0.5);
+        let m = Vec3d::new(0.1, -0.2, 0.3);
+        assert_eq!(collide(&w, m, bb, false, 0.0), m);
+    }
+}

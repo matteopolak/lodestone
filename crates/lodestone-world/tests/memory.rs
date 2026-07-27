@@ -1,0 +1,239 @@
+//! Measures the real heap footprint of representative chunk columns.
+//!
+//! Run with `cargo test -p lodestone-world --test memory -- --nocapture` to see
+//! the printed numbers. The assertions guard the qualitative claims: a
+//! flat-world column costs a tiny fraction of a fully dense one, and a dense
+//! column stays within the paletted-storage budget rather than the naive
+//! `2 bytes * 98304` layout.
+
+use lodestone_world::{ChunkColumn, ColumnLight, LightData, NibbleArray, PaletteKind};
+
+const MODERN_MIN_Y: i32 = -64;
+const MODERN_SECTIONS: usize = 24; // 1.18+ overworld: y = -64..320.
+
+fn modern_column() -> ChunkColumn {
+    ChunkColumn::new(
+        MODERN_MIN_Y,
+        MODERN_SECTIONS,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    )
+}
+
+/// Naive lower bound for the block data alone: one u16 per block.
+const NAIVE_BLOCK_BYTES: usize = MODERN_SECTIONS * 4096 * 2;
+
+#[test]
+fn measure_flatworld_like_column() {
+    // Flat-world profile: bedrock, three dirt layers, a grass layer, then air.
+    // Only the lowest section carries blocks; everything above is elided air.
+    let mut col = modern_column();
+    let bedrock = 1u32;
+    let dirt = 10u32;
+    let grass = 9u32;
+
+    for x in 0..16 {
+        for z in 0..16 {
+            col.set_block(x, -64, z, bedrock);
+            for y in -63..-60 {
+                col.set_block(x, y, z, dirt);
+            }
+            col.set_block(x, -60, z, grass);
+        }
+    }
+
+    let bytes = col.heap_bytes();
+    println!(
+        "flatworld-like column heap: {bytes} bytes ({} allocated sections)",
+        col.allocated_sections()
+    );
+    println!("  naive block-only baseline: {NAIVE_BLOCK_BYTES} bytes");
+
+    // Only one section is populated; the rest are None.
+    assert_eq!(col.allocated_sections(), 1);
+    // Comfortably under 10 KiB, versus ~192 KiB naive.
+    assert!(
+        bytes < 10 * 1024,
+        "flatworld column unexpectedly large: {bytes}"
+    );
+    assert!(
+        bytes * 15 < NAIVE_BLOCK_BYTES,
+        "no meaningful saving vs naive"
+    );
+}
+
+#[test]
+fn measure_dense_varied_column() {
+    // Worst-ish case: every section filled with enough variety to force direct
+    // storage in the block container. This is the upper bound our layout admits.
+    let mut col = modern_column();
+    for s in 0..MODERN_SECTIONS {
+        let base_y = MODERN_MIN_Y + (s as i32) * 16;
+        for y in 0..16 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    // A varied but deterministic id well above any palette floor.
+                    let id = ((x + z * 16 + y * 256 + s * 4096) % 4000 + 1) as u32;
+                    col.set_block(x, base_y + y as i32, z, id);
+                }
+            }
+        }
+    }
+
+    let bytes = col.heap_bytes();
+    let per_column_kib = bytes as f64 / 1024.0;
+    println!("dense/varied column heap: {bytes} bytes ({per_column_kib:.1} KiB)");
+    // Project a render distance of 32 (4225 columns) of block data.
+    let rd32 = bytes * 4225;
+    println!(
+        "  projected at render distance 32 (4225 columns): {:.1} MiB",
+        rd32 as f64 / (1024.0 * 1024.0)
+    );
+
+    assert_eq!(col.allocated_sections(), MODERN_SECTIONS);
+    // Direct block storage is 15 bits => 1024 longs => 8192 bytes per section.
+    // 24 sections plus biomes and the section vector: keep it near that budget.
+    assert!(
+        bytes < 220 * 1024,
+        "dense column exceeded direct-storage budget: {bytes}"
+    );
+}
+
+#[test]
+fn measure_realistic_terrain_column() {
+    // A more life-like column: solid stone below the surface (single-valued or
+    // tiny palette per section), a shallow varied surface band, air above.
+    let mut col = modern_column();
+    let stone = 1u32;
+
+    // Fill y = -64..40 with stone (full sections become single-valued).
+    for y in -64..40 {
+        for z in 0..16 {
+            for x in 0..16 {
+                col.set_block(x, y, z, stone);
+            }
+        }
+    }
+    // A varied surface band y = 40..48 with a handful of block types.
+    for y in 40..48 {
+        for z in 0..16 {
+            for x in 0..16 {
+                let id = 1 + ((x + z + (y as usize)) % 6) as u32;
+                col.set_block(x, y, z, id);
+            }
+        }
+    }
+
+    let bytes = col.heap_bytes();
+    println!(
+        "realistic terrain column heap: {bytes} bytes ({} allocated sections)",
+        col.allocated_sections()
+    );
+    let rd32 = bytes * 4225;
+    println!(
+        "  projected at render distance 32 (4225 columns): {:.1} MiB",
+        rd32 as f64 / (1024.0 * 1024.0)
+    );
+
+    // Solid-stone sections are single-valued (0 heap); only the surface band and
+    // the partially filled boundary sections allocate.
+    assert!(
+        bytes < 32 * 1024,
+        "realistic column unexpectedly large: {bytes}"
+    );
+}
+
+const RD32_COLUMNS: usize = 4225;
+
+/// Naive light lower bound: 2048 bytes per section, two light types, all sections
+/// materialised. For a 24-section column that is 24 * 2 * 2048 = 98304 bytes.
+const NAIVE_LIGHT_BYTES: usize = MODERN_SECTIONS * 2 * 2048;
+
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+#[test]
+fn measure_realistic_light_column() {
+    // Realistic terrain lighting: block light is uniform 0 (dark) everywhere
+    // except a couple of surface sections; sky light is uniform 15 (full) above
+    // the surface and uniform 0 below it, with a thin varied band at the terrain
+    // boundary. This is the overwhelmingly common shape and should elide to a
+    // handful of arrays.
+    let mut light = ColumnLight::new(MODERN_SECTIONS);
+    let n = light.light_section_count();
+
+    for i in 0..n {
+        // Section index 0 is below the world; surface is roughly light section 8.
+        *light.block_mut(i) = LightData::Uniform(0);
+        *light.sky_mut(i) = if i >= 9 {
+            LightData::Uniform(15)
+        } else {
+            LightData::Uniform(0)
+        };
+    }
+    // Two varied surface sections carry real arrays for each light type.
+    for i in 8..=9 {
+        let mut sky = NibbleArray::filled(8);
+        let mut block = NibbleArray::filled(0);
+        for idx in (0..NibbleArray::LEN).step_by(37) {
+            sky.set(idx, (idx % 16) as u8);
+            block.set(idx, (idx % 5) as u8);
+        }
+        *light.sky_mut(i) = LightData::Values(sky);
+        *light.block_mut(i) = LightData::Values(block);
+    }
+
+    let bytes = light.heap_bytes();
+    println!("realistic light column heap: {bytes} bytes");
+    println!("  naive all-materialised baseline: {NAIVE_LIGHT_BYTES} bytes");
+    println!(
+        "  projected at render distance 32 ({RD32_COLUMNS} columns): {:.1} MiB (naive {:.1} MiB)",
+        mib(bytes * RD32_COLUMNS),
+        mib(NAIVE_LIGHT_BYTES * RD32_COLUMNS)
+    );
+
+    // Only four arrays allocate (sky+block across two sections); the rest are
+    // one-byte tags. Comfortably under 10 KiB versus ~96 KiB naive.
+    assert!(
+        bytes < 10 * 1024,
+        "realistic light unexpectedly large: {bytes}"
+    );
+}
+
+#[test]
+fn measure_dense_light_column() {
+    // Worst case: every light section, both types, holds a genuinely varied
+    // array. This is the upper bound and matches the naive footprint.
+    let mut light = ColumnLight::new(MODERN_SECTIONS);
+    let n = light.light_section_count();
+    for i in 0..n {
+        let mut sky = NibbleArray::filled(0);
+        let mut block = NibbleArray::filled(0);
+        for idx in 0..NibbleArray::LEN {
+            sky.set(idx, (idx % 16) as u8);
+            block.set(idx, ((idx / 3) % 16) as u8);
+        }
+        *light.sky_mut(i) = LightData::Values(sky);
+        *light.block_mut(i) = LightData::Values(block);
+    }
+
+    let bytes = light.heap_bytes();
+    println!("dense light column heap: {bytes} bytes");
+    println!(
+        "  projected at render distance 32 ({RD32_COLUMNS} columns): {:.1} MiB",
+        mib(bytes * RD32_COLUMNS)
+    );
+
+    // 26 light sections * 2 types * 2048 bytes = 106496 bytes of arrays.
+    assert!(
+        bytes >= n * 2 * 2048,
+        "dense light smaller than array total"
+    );
+    assert!(
+        bytes < n * 2 * 2048 + 4096,
+        "dense light has unexpected overhead"
+    );
+}

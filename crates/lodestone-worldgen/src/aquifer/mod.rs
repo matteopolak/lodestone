@@ -1,0 +1,701 @@
+//! Version-free port of vanilla's `Aquifer.NoiseBasedAquifer` and the
+//! `NoiseBasedChunkGenerator` fill step (`doFill`).
+//!
+//! This is the stage *below* surface rules. Vanilla's `NoiseChunk` produces an
+//! interpolated `final_density` field; `doFill` then asks the aquifer, for every
+//! block, `computeSubstance(context, density)`, which decides whether the block
+//! is solid (the default block, stone), a fluid (water/lava), or air. The result
+//! is the **pre-surface column** that [`crate::surface::SurfaceSystem`] consumes.
+//!
+//! The aquifer is not "water below sea level": it builds *local* water tables
+//! and air pockets from four noise fields (barrier, floodedness, spread, lava)
+//! and a positional aquifer-centre RNG, and it can override the density decision
+//! by pushing a barrier pressure back into `density + barrier`. Approximating it
+//! looks right on a surface screenshot and is wrong everywhere underground, so
+//! this is a faithful port checked block-for-block against the JVM.
+//!
+//! # Version split (plan §3)
+//!
+//! The engine is data-driven and version-free: it interprets the `noise_router`
+//! routes (`barrier`, `fluid_level_floodedness`, `fluid_level_spread`, `lava`,
+//! `erosion`, `depth`, `preliminary_surface_level`, `final_density`) and the
+//! `sea_level` from the supplied `noise_settings`. It returns a [`BlockKind`]
+//! enum, never a block string — the caller maps that to canonical block states
+//! from the version's block data, exactly like the surface system.
+//!
+//! # Parity discipline (plan §11)
+//!
+//! No Mojang source is transliterated: this is written from the documented
+//! algorithm and checked against the running server's own `doFill` output
+//! (`scripts/worldgen-oracle/SurfaceOracle.java` dumps the `pre.*` column). The
+//! test compares block-for-block over a whole chunk column and names the
+//! divergent `x,y,z`.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use serde_json::Value;
+
+use crate::density::{Builder, Context as DfContext, Density, NoiseChunkSampler};
+use crate::math::{clamp, clamped_map, floor, map};
+use crate::rng::{PositionalRandomFactory, RandomSource, XoroshiroPositionalFactory};
+
+const CELL_WIDTH: i32 = 4;
+const CELL_HEIGHT: i32 = 8;
+
+/// `DimensionType.WAY_BELOW_MIN_Y` for the standard 1.18+ height (`MIN_Y << 4`,
+/// `MIN_Y = -2032`). Used as the "no fluid here" sentinel level.
+const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
+
+/// The block a filled position resolves to. Version-free: the caller maps each
+/// variant to a canonical block string (the default block for [`Stone`], the
+/// dimension's fluids for the rest).
+///
+/// [`Stone`]: BlockKind::Stone
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A solid block — vanilla writes the settings' `default_block` (stone).
+    Stone,
+    /// Air (`computeSubstance` returned an air fluid state).
+    Air,
+    /// The default fluid (overworld: water).
+    Water,
+    /// Lava.
+    Lava,
+}
+
+/// The fluid identity carried inside vanilla's `Aquifer.FluidStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fluid {
+    Air,
+    Water,
+    Lava,
+}
+
+impl Fluid {
+    fn to_block(self) -> BlockKind {
+        match self {
+            Fluid::Air => BlockKind::Air,
+            Fluid::Water => BlockKind::Water,
+            Fluid::Lava => BlockKind::Lava,
+        }
+    }
+}
+
+/// Vanilla `Aquifer.FluidStatus`: a fluid type and the y below which it exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FluidStatus {
+    fluid_level: i32,
+    fluid_type: Fluid,
+}
+
+impl FluidStatus {
+    fn at(self, block_y: i32) -> Fluid {
+        if block_y < self.fluid_level {
+            self.fluid_type
+        } else {
+            Fluid::Air
+        }
+    }
+}
+
+// Grid constant (Aquifer.NoiseBasedAquifer): Y_SPACING.
+const Y_SPACING: i32 = 12;
+
+const SURFACE_SAMPLING_OFFSETS_IN_CHUNKS: [[i32; 2]; 13] = [
+    [0, 0],
+    [-2, -1],
+    [-1, -1],
+    [0, -1],
+    [1, -1],
+    [-3, 0],
+    [-2, 0],
+    [-1, 0],
+    [1, 0],
+    [-2, 1],
+    [-1, 1],
+    [0, 1],
+    [1, 1],
+];
+
+#[inline]
+fn grid_x(block: i32) -> i32 {
+    block >> 4
+}
+#[inline]
+fn grid_z(block: i32) -> i32 {
+    block >> 4
+}
+#[inline]
+fn grid_y(block: i32) -> i32 {
+    block.div_euclid(Y_SPACING)
+}
+#[inline]
+fn from_grid_x(grid: i32, offset: i32) -> i32 {
+    (grid << 4) + offset
+}
+#[inline]
+fn from_grid_z(grid: i32, offset: i32) -> i32 {
+    (grid << 4) + offset
+}
+#[inline]
+fn from_grid_y(grid: i32, offset: i32) -> i32 {
+    grid * Y_SPACING + offset
+}
+#[inline]
+fn section_to_block(section: i32) -> i32 {
+    section << 4
+}
+#[inline]
+fn similarity(distance_sqr1: i32, distance_sqr2: i32) -> f64 {
+    1.0 - f64::from(distance_sqr2 - distance_sqr1) / 25.0
+}
+#[inline]
+fn quantize(value: f64, resolution: i32) -> i32 {
+    floor(value / f64::from(resolution)) * resolution
+}
+
+/// The overworld density-noise fill with aquifers.
+///
+/// Construct once per chunk with [`AquiferSystem::new`], then read blocks with
+/// [`AquiferSystem::block_at`]. Grid caches make repeated `block_at` calls over a
+/// column cheap; the structure is single-chunk (its grid bounds are fixed at
+/// construction from the chunk position), matching vanilla's per-chunk
+/// `NoiseChunk`.
+#[allow(missing_debug_implementations)]
+pub struct AquiferSystem {
+    final_density: NoiseChunkSampler,
+    erosion: NoiseChunkSampler,
+    depth: NoiseChunkSampler,
+    barrier: Density,
+    floodedness: Density,
+    spread: Density,
+    lava: Density,
+    prelim: Density,
+
+    positional: XoroshiroPositionalFactory,
+    sea_level: i32,
+
+    min_grid_x: i32,
+    min_grid_y: i32,
+    min_grid_z: i32,
+    grid_size_x: i32,
+    grid_size_z: i32,
+    skip_sampling_above_y: i32,
+
+    aquifer_cache: RefCell<Vec<Option<FluidStatus>>>,
+    location_cache: RefCell<Vec<Option<(i32, i32, i32)>>>,
+    prelim_cache: RefCell<HashMap<(i32, i32), i32>>,
+}
+
+impl AquiferSystem {
+    /// Builds the aquifer + fill for chunk `(chunk_x, chunk_z)` from a
+    /// `noise_settings` JSON value, using `builder` (seeded with the same seed as
+    /// `RandomState`) to instantiate the router functions and the aquifer RNG.
+    #[must_use]
+    pub fn new(settings: &Value, builder: &Builder, chunk_x: i32, chunk_z: i32) -> Self {
+        let router = &settings["noise_router"];
+        let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
+        let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
+        let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
+
+        let final_density_node = builder.build(&router["final_density"]);
+        let erosion_node = builder.build(&router["erosion"]);
+        let depth_node = builder.build(&router["depth"]);
+        let barrier = builder.build(&router["barrier"]);
+        let floodedness = builder.build(&router["fluid_level_floodedness"]);
+        let spread = builder.build(&router["fluid_level_spread"]);
+        let lava = builder.build(&router["lava"]);
+        let prelim = builder.build(&router["preliminary_surface_level"]);
+
+        // `randomState.aquiferRandom()` = random.fromHashOf("minecraft:aquifer").forkPositional().
+        let mut aquifer_src = builder
+            .positional_factory()
+            .from_hash_of("minecraft:aquifer");
+        let positional = aquifer_src.fork_positional();
+
+        let slots = builder.slot_count();
+        let final_density =
+            NoiseChunkSampler::new(final_density_node, slots, CELL_WIDTH, CELL_HEIGHT);
+        let erosion = NoiseChunkSampler::new(erosion_node, slots, CELL_WIDTH, CELL_HEIGHT);
+        let depth = NoiseChunkSampler::new(depth_node, slots, CELL_WIDTH, CELL_HEIGHT);
+
+        // Grid bounds, verbatim from NoiseBasedAquifer's constructor.
+        let min_block_x = chunk_x * 16;
+        let max_block_x = min_block_x + 15;
+        let min_block_z = chunk_z * 16;
+        let max_block_z = min_block_z + 15;
+
+        let min_grid_x = grid_x(min_block_x + -5);
+        let max_grid_x = grid_x(max_block_x + -5) + 1;
+        let grid_size_x = max_grid_x - min_grid_x + 1;
+        let min_grid_y = grid_y(min_y + 1) + -1;
+        let max_grid_y = grid_y(min_y + height + 1) + 1;
+        let grid_size_y = max_grid_y - min_grid_y + 1;
+        let min_grid_z = grid_z(min_block_z + -5);
+        let max_grid_z = grid_z(max_block_z + -5) + 1;
+        let grid_size_z = max_grid_z - min_grid_z + 1;
+        let total = (grid_size_x * grid_size_y * grid_size_z) as usize;
+
+        let mut system = Self {
+            final_density,
+            erosion,
+            depth,
+            barrier,
+            floodedness,
+            spread,
+            lava,
+            prelim,
+            positional,
+            sea_level,
+            min_grid_x,
+            min_grid_y,
+            min_grid_z,
+            grid_size_x,
+            grid_size_z,
+            skip_sampling_above_y: 0,
+            aquifer_cache: RefCell::new(vec![None; total]),
+            location_cache: RefCell::new(vec![None; total]),
+            prelim_cache: RefCell::new(HashMap::new()),
+        };
+
+        let max_prelim = system.max_preliminary_surface_level(
+            from_grid_x(min_grid_x, 0),
+            from_grid_z(min_grid_z, 0),
+            from_grid_x(max_grid_x, 9),
+            from_grid_z(max_grid_z, 9),
+        );
+        let max_adjusted = system.adjust_surface_level(max_prelim);
+        let skip_grid_y = grid_y(max_adjusted + 12) - -1;
+        system.skip_sampling_above_y = from_grid_y(skip_grid_y, 11) - 1;
+
+        system
+    }
+
+    /// The pre-surface block at world coordinates — vanilla `doFill`'s decision:
+    /// `computeSubstance(context, final_density(x,y,z))`, mapped to a
+    /// [`BlockKind`] (`None` → the default block, stone).
+    #[must_use]
+    pub fn block_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
+        let density = self.final_density.final_density(x, y, z);
+        match self.compute_substance(x, y, z, density) {
+            None => BlockKind::Stone,
+            Some(fluid) => fluid.to_block(),
+        }
+    }
+
+    /// Vanilla `WorldCarver.getCarveState`'s aquifer branch:
+    /// `aquifer.computeSubstance(SinglePointContext(x,y,z), 0.0)`. `None` means
+    /// "do not carve — keep the existing block" (only reachable if the local
+    /// density were positive, which the carver never passes); `Some` is the
+    /// carve substance (air below the surface, or the local water/lava table).
+    #[must_use]
+    pub fn carve_substance(&self, x: i32, y: i32, z: i32) -> Option<BlockKind> {
+        self.compute_substance(x, y, z, 0.0).map(Fluid::to_block)
+    }
+
+    fn adjust_surface_level(&self, preliminary_surface_level: i32) -> i32 {
+        preliminary_surface_level + 8
+    }
+
+    fn preliminary_surface_level(&self, sample_x: i32, sample_z: i32) -> i32 {
+        let qx = (sample_x >> 2) << 2;
+        let qz = (sample_z >> 2) << 2;
+        if let Some(v) = self.prelim_cache.borrow().get(&(qx, qz)) {
+            return *v;
+        }
+        let v = floor(self.prelim.compute(DfContext::new(qx, 0, qz)));
+        self.prelim_cache.borrow_mut().insert((qx, qz), v);
+        v
+    }
+
+    fn max_preliminary_surface_level(
+        &self,
+        min_block_x: i32,
+        min_block_z: i32,
+        max_block_x: i32,
+        max_block_z: i32,
+    ) -> i32 {
+        let mut max_y = i32::MIN;
+        let mut block_z = min_block_z;
+        while block_z <= max_block_z {
+            let mut block_x = min_block_x;
+            while block_x <= max_block_x {
+                let surface_level = self.preliminary_surface_level(block_x, block_z);
+                if surface_level > max_y {
+                    max_y = surface_level;
+                }
+                block_x += 4;
+            }
+            block_z += 4;
+        }
+        max_y
+    }
+
+    fn global_fluid(&self, y: i32) -> FluidStatus {
+        // createFluidPicker: lava below min(-54, seaLevel), else the sea fluid.
+        if y < (-54).min(self.sea_level) {
+            FluidStatus {
+                fluid_level: -54,
+                fluid_type: Fluid::Lava,
+            }
+        } else {
+            FluidStatus {
+                fluid_level: self.sea_level,
+                fluid_type: Fluid::Water,
+            }
+        }
+    }
+
+    fn get_index(&self, grid_x: i32, grid_y: i32, grid_z: i32) -> usize {
+        let x = grid_x - self.min_grid_x;
+        let y = grid_y - self.min_grid_y;
+        let z = grid_z - self.min_grid_z;
+        ((y * self.grid_size_z + z) * self.grid_size_x + x) as usize
+    }
+
+    fn location(&self, grid_x: i32, grid_y: i32, grid_z: i32, index: usize) -> (i32, i32, i32) {
+        if let Some(loc) = self.location_cache.borrow()[index] {
+            return loc;
+        }
+        let mut random = self.positional.at(grid_x, grid_y, grid_z);
+        let loc = (
+            from_grid_x(grid_x, random.next_int_bounded(10)),
+            from_grid_y(grid_y, random.next_int_bounded(9)),
+            from_grid_z(grid_z, random.next_int_bounded(10)),
+        );
+        self.location_cache.borrow_mut()[index] = Some(loc);
+        loc
+    }
+
+    fn aquifer_status(&self, index: usize) -> FluidStatus {
+        if let Some(status) = self.aquifer_cache.borrow()[index] {
+            return status;
+        }
+        let (x, y, z) = self.location_cache.borrow()[index].expect("location computed first");
+        let status = self.compute_aquifer_fluid(x, y, z);
+        self.aquifer_cache.borrow_mut()[index] = Some(status);
+        status
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn compute_substance(&self, pos_x: i32, pos_y: i32, pos_z: i32, density: f64) -> Option<Fluid> {
+        if density > 0.0 {
+            return None;
+        }
+
+        let global_fluid = self.global_fluid(pos_y);
+        if pos_y > self.skip_sampling_above_y {
+            return Some(global_fluid.at(pos_y));
+        }
+        if global_fluid.at(pos_y) == Fluid::Lava {
+            return Some(Fluid::Lava);
+        }
+
+        let x_anchor = grid_x(pos_x + -5);
+        let y_anchor = grid_y(pos_y + 1);
+        let z_anchor = grid_z(pos_z + -5);
+        let mut distance_sqr1 = i32::MAX;
+        let mut distance_sqr2 = i32::MAX;
+        let mut distance_sqr3 = i32::MAX;
+        let mut closest_index1 = 0usize;
+        let mut closest_index2 = 0usize;
+        let mut closest_index3 = 0usize;
+
+        for x1 in 0..=1 {
+            for y1 in -1..=1 {
+                for z1 in 0..=1 {
+                    let spaced_grid_x = x_anchor + x1;
+                    let spaced_grid_y = y_anchor + y1;
+                    let spaced_grid_z = z_anchor + z1;
+                    let index = self.get_index(spaced_grid_x, spaced_grid_y, spaced_grid_z);
+                    let (lx, ly, lz) =
+                        self.location(spaced_grid_x, spaced_grid_y, spaced_grid_z, index);
+                    let dx = lx - pos_x;
+                    let dy = ly - pos_y;
+                    let dz = lz - pos_z;
+                    let new_distance = dx * dx + dy * dy + dz * dz;
+                    if distance_sqr1 >= new_distance {
+                        closest_index3 = closest_index2;
+                        closest_index2 = closest_index1;
+                        closest_index1 = index;
+                        distance_sqr3 = distance_sqr2;
+                        distance_sqr2 = distance_sqr1;
+                        distance_sqr1 = new_distance;
+                    } else if distance_sqr2 >= new_distance {
+                        closest_index3 = closest_index2;
+                        closest_index2 = index;
+                        distance_sqr3 = distance_sqr2;
+                        distance_sqr2 = new_distance;
+                    } else if distance_sqr3 >= new_distance {
+                        closest_index3 = index;
+                        distance_sqr3 = new_distance;
+                    }
+                }
+            }
+        }
+
+        let closest_status1 = self.aquifer_status(closest_index1);
+        let similarity12 = similarity(distance_sqr1, distance_sqr2);
+        let fluid_state = closest_status1.at(pos_y);
+        if similarity12 <= 0.0 {
+            return Some(fluid_state);
+        }
+
+        if fluid_state == Fluid::Water && self.global_fluid(pos_y - 1).at(pos_y - 1) == Fluid::Lava
+        {
+            return Some(fluid_state);
+        }
+
+        let mut barrier_noise_value = f64::NAN;
+        let closest_status2 = self.aquifer_status(closest_index2);
+        let barrier12 = similarity12
+            * self.calculate_pressure(
+                pos_x,
+                pos_y,
+                pos_z,
+                &mut barrier_noise_value,
+                closest_status1,
+                closest_status2,
+            );
+        if density + barrier12 > 0.0 {
+            return None;
+        }
+
+        let closest_status3 = self.aquifer_status(closest_index3);
+        let similarity13 = similarity(distance_sqr1, distance_sqr3);
+        if similarity13 > 0.0 {
+            let barrier13 = similarity12
+                * similarity13
+                * self.calculate_pressure(
+                    pos_x,
+                    pos_y,
+                    pos_z,
+                    &mut barrier_noise_value,
+                    closest_status1,
+                    closest_status3,
+                );
+            if density + barrier13 > 0.0 {
+                return None;
+            }
+        }
+
+        let similarity23 = similarity(distance_sqr2, distance_sqr3);
+        if similarity23 > 0.0 {
+            let barrier23 = similarity12
+                * similarity23
+                * self.calculate_pressure(
+                    pos_x,
+                    pos_y,
+                    pos_z,
+                    &mut barrier_noise_value,
+                    closest_status2,
+                    closest_status3,
+                );
+            if density + barrier23 > 0.0 {
+                return None;
+            }
+        }
+
+        // `shouldScheduleFluidUpdate` is a fluid-tick side effect and does not
+        // change the block placed, so the flow branches below it are omitted.
+        Some(fluid_state)
+    }
+
+    fn calculate_pressure(
+        &self,
+        pos_x: i32,
+        pos_y: i32,
+        pos_z: i32,
+        barrier_noise_value: &mut f64,
+        status1: FluidStatus,
+        status2: FluidStatus,
+    ) -> f64 {
+        let type1 = status1.at(pos_y);
+        let type2 = status2.at(pos_y);
+        let lava_water = type1 == Fluid::Lava && type2 == Fluid::Water;
+        let water_lava = type1 == Fluid::Water && type2 == Fluid::Lava;
+        if lava_water || water_lava {
+            return 2.0;
+        }
+
+        let fluid_y_diff = (status1.fluid_level - status2.fluid_level).abs();
+        if fluid_y_diff == 0 {
+            return 0.0;
+        }
+
+        let average_fluid_y = 0.5 * f64::from(status1.fluid_level + status2.fluid_level);
+        let how_far_above = f64::from(pos_y) + 0.5 - average_fluid_y;
+        let base_value = f64::from(fluid_y_diff) / 2.0;
+        let distance_from_edge = base_value - how_far_above.abs();
+        let gradient = if how_far_above > 0.0 {
+            let center_point = 0.0 + distance_from_edge;
+            if center_point > 0.0 {
+                center_point / 1.5
+            } else {
+                center_point / 2.5
+            }
+        } else {
+            let center_point = 3.0 + distance_from_edge;
+            if center_point > 0.0 {
+                center_point / 3.0
+            } else {
+                center_point / 10.0
+            }
+        };
+
+        // Preserves vanilla's exact `!(d < -2.0) && !(d > 2.0)` bounds check
+        // rather than `(-2.0..=2.0).contains(&d)`, so NaN handling matches.
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        let noise_value = if !(gradient < -2.0) && !(gradient > 2.0) {
+            if barrier_noise_value.is_nan() {
+                let b = self.barrier.compute(DfContext::new(pos_x, pos_y, pos_z));
+                *barrier_noise_value = b;
+                b
+            } else {
+                *barrier_noise_value
+            }
+        } else {
+            0.0
+        };
+
+        2.0 * (noise_value + gradient)
+    }
+
+    fn compute_aquifer_fluid(&self, x: i32, y: i32, z: i32) -> FluidStatus {
+        let global_fluid = self.global_fluid(y);
+        let mut lowest_preliminary_surface = i32::MAX;
+        let top_of_cell = y + 12;
+        let bottom_of_cell = y - 12;
+        let mut surface_at_center_under_global = false;
+
+        for offset in SURFACE_SAMPLING_OFFSETS_IN_CHUNKS {
+            let sample_x = x + section_to_block(offset[0]);
+            let sample_z = z + section_to_block(offset[1]);
+            let preliminary_surface_level = self.preliminary_surface_level(sample_x, sample_z);
+            let adjusted_surface_level = self.adjust_surface_level(preliminary_surface_level);
+            let start = offset[0] == 0 && offset[1] == 0;
+            if start && bottom_of_cell > adjusted_surface_level {
+                return global_fluid;
+            }
+
+            let top_pokes_above = top_of_cell > adjusted_surface_level;
+            if top_pokes_above || start {
+                let global_at_surface = self.global_fluid(adjusted_surface_level);
+                if global_at_surface.at(adjusted_surface_level) != Fluid::Air {
+                    if start {
+                        surface_at_center_under_global = true;
+                    }
+                    if top_pokes_above {
+                        return global_at_surface;
+                    }
+                }
+            }
+
+            lowest_preliminary_surface = lowest_preliminary_surface.min(preliminary_surface_level);
+        }
+
+        let fluid_surface_level = self.compute_surface_level(
+            x,
+            y,
+            z,
+            global_fluid,
+            lowest_preliminary_surface,
+            surface_at_center_under_global,
+        );
+        FluidStatus {
+            fluid_level: fluid_surface_level,
+            fluid_type: self.compute_fluid_type(x, y, z, global_fluid, fluid_surface_level),
+        }
+    }
+
+    fn is_deep_dark_region(&self, x: i32, y: i32, z: i32) -> bool {
+        // Vanilla compares against float literals (`-0.225F`, `0.9F`); the double
+        // promotion of those floats is not the same as the double literals, so
+        // the thresholds must be built from `f32` to match bit-for-bit.
+        self.erosion.sample(x, y, z) < f64::from(-0.225_f32)
+            && self.depth.sample(x, y, z) > f64::from(0.9_f32)
+    }
+
+    fn compute_surface_level(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        global_fluid: FluidStatus,
+        lowest_preliminary_surface: i32,
+        surface_at_center_under_global: bool,
+    ) -> i32 {
+        let (partially_floodedness, fully_floodedness) = if self.is_deep_dark_region(x, y, z) {
+            (-1.0, -1.0)
+        } else {
+            let distance_below_surface = lowest_preliminary_surface + 8 - y;
+            let floodedness_factor = if surface_at_center_under_global {
+                clamped_map(f64::from(distance_below_surface), 0.0, 64.0, 1.0, 0.0)
+            } else {
+                0.0
+            };
+            let floodedness_noise =
+                clamp(self.floodedness.compute(DfContext::new(x, y, z)), -1.0, 1.0);
+            let fully_threshold = map(floodedness_factor, 1.0, 0.0, -0.3, 0.8);
+            let partially_threshold = map(floodedness_factor, 1.0, 0.0, -0.8, 0.4);
+            (
+                floodedness_noise - partially_threshold,
+                floodedness_noise - fully_threshold,
+            )
+        };
+
+        if fully_floodedness > 0.0 {
+            global_fluid.fluid_level
+        } else if partially_floodedness > 0.0 {
+            self.compute_randomized_fluid_surface_level(x, y, z, lowest_preliminary_surface)
+        } else {
+            WAY_BELOW_MIN_Y
+        }
+    }
+
+    fn compute_randomized_fluid_surface_level(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        lowest_preliminary_surface: i32,
+    ) -> i32 {
+        let fluid_level_cell_x = x.div_euclid(16);
+        let fluid_level_cell_y = y.div_euclid(40);
+        let fluid_level_cell_z = z.div_euclid(16);
+        let fluid_cell_middle_y = fluid_level_cell_y * 40 + 20;
+        let fluid_level_spread = self.spread.compute(DfContext::new(
+            fluid_level_cell_x,
+            fluid_level_cell_y,
+            fluid_level_cell_z,
+        )) * 10.0;
+        let quantized = quantize(fluid_level_spread, 3);
+        let target = fluid_cell_middle_y + quantized;
+        lowest_preliminary_surface.min(target)
+    }
+
+    fn compute_fluid_type(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        global_fluid: FluidStatus,
+        fluid_surface_level: i32,
+    ) -> Fluid {
+        let mut fluid_type = global_fluid.fluid_type;
+        if fluid_surface_level <= -10
+            && fluid_surface_level != WAY_BELOW_MIN_Y
+            && global_fluid.fluid_type != Fluid::Lava
+        {
+            let cell_x = x.div_euclid(64);
+            let cell_y = y.div_euclid(40);
+            let cell_z = z.div_euclid(64);
+            let lava_noise = self.lava.compute(DfContext::new(cell_x, cell_y, cell_z));
+            if lava_noise.abs() > 0.3 {
+                fluid_type = Fluid::Lava;
+            }
+        }
+        fluid_type
+    }
+}

@@ -1,0 +1,618 @@
+//! The user-facing handle and event stream.
+
+use std::time::Duration;
+
+use lodestone_model::{
+    BlockPos, ChunkPos, ClientAction, ClientEvent, GameMode, Hand, PlayerListEntry, Rotation, Vec3,
+};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::error::{BotError, ClientClosed, SessionOutcome, WaitError};
+use crate::scoreboard::{BossBar, Scoreboard};
+use crate::spawn::DriverTask;
+use crate::state::{EntityView, PlayerSnapshot, SharedState};
+use lodestone_world::ChunkSection;
+
+/// A handle to a running client session.
+///
+/// This is the programmable surface a bot author uses. Beyond submitting raw
+/// [`ClientAction`]s, it exposes a maintained **read-model** (query where you
+/// are, your health, nearby entities, loaded blocks), ergonomic **actions**
+/// (chat, look, move), and **awaiting** primitives (`wait_for_*`) so bots can be
+/// written as `await` sequences.
+///
+/// All queries read a cheap shared snapshot and never block the driver; all
+/// waits are woken by driver state changes and time out rather than hang. The
+/// game shell is just another consumer of this same surface: a human player is a
+/// bot driven by a keyboard.
+///
+/// Use it to submit actions, request a clean shutdown, and await the final
+/// [`SessionOutcome`]. Dropping the handle does *not* end the session (a
+/// fire-and-forget bot can keep receiving events); call [`ClientHandle::shutdown`]
+/// to stop it deliberately.
+#[derive(Debug)]
+pub struct ClientHandle {
+    actions: mpsc::UnboundedSender<ClientAction>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: DriverTask,
+    state: SharedState,
+}
+
+impl ClientHandle {
+    pub(crate) fn new(
+        actions: mpsc::UnboundedSender<ClientAction>,
+        shutdown: oneshot::Sender<()>,
+        task: DriverTask,
+        state: SharedState,
+    ) -> Self {
+        Self {
+            actions,
+            shutdown: Some(shutdown),
+            task,
+            state,
+        }
+    }
+
+    /// Submits an action to be encoded against the driver's *live* connection
+    /// state and written to the server.
+    ///
+    /// This never blocks. Actions the adapter cannot represent in the current
+    /// state are dropped quietly by the driver rather than surfaced here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosed`] if the session has already ended.
+    pub fn send_action(&self, action: ClientAction) -> Result<(), ClientClosed> {
+        self.actions.send(action).map_err(|_| ClientClosed)
+    }
+
+    /// Requests a clean local shutdown.
+    ///
+    /// The driver attempts to send a protocol disconnect (if the adapter
+    /// encodes one) and then stops, yielding [`SessionOutcome::LocalClose`].
+    /// Idempotent: later calls are no-ops.
+    pub fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+    }
+
+    /// Returns `true` once the driver task has finished.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    /// Waits for the session to end and returns why.
+    ///
+    /// Consumes the handle, since no further actions can be submitted once the
+    /// session has ended.
+    pub async fn join(self) -> SessionOutcome {
+        self.task.join().await
+    }
+
+    // --- Read-model queries -------------------------------------------------
+    //
+    // Each of these clones a small snapshot out from behind a short-lived read
+    // lock; none of them block the driver.
+
+    /// Returns a snapshot of the local player's state.
+    #[must_use]
+    pub fn player(&self) -> PlayerSnapshot {
+        self.state.player()
+    }
+
+    /// Returns the player's current position, or `None` if the server has not
+    /// placed the player yet.
+    #[must_use]
+    pub fn position(&self) -> Option<Vec3> {
+        self.state.player().position
+    }
+
+    /// Returns the player's current look direction.
+    #[must_use]
+    pub fn rotation(&self) -> Rotation {
+        self.state.player().rotation
+    }
+
+    /// Returns the player's current health in half-hearts, or `None` if the
+    /// server has not reported it yet.
+    #[must_use]
+    pub fn health(&self) -> Option<f32> {
+        let player = self.state.player();
+        player.health_known.then_some(player.health)
+    }
+
+    /// Returns the player's current food level, or `None` if unknown yet.
+    #[must_use]
+    pub fn food(&self) -> Option<i32> {
+        let player = self.state.player();
+        player.health_known.then_some(player.food)
+    }
+
+    /// Returns whether the player is currently alive.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.state.player().alive
+    }
+
+    /// Returns the player's current game mode, or `None` if unknown yet.
+    #[must_use]
+    pub fn game_mode(&self) -> Option<GameMode> {
+        self.state.player().game_mode
+    }
+
+    /// Returns a view of a tracked entity by id, if present.
+    #[must_use]
+    pub fn entity(&self, entity_id: i32) -> Option<EntityView> {
+        self.state.entity(entity_id)
+    }
+
+    /// Returns views of all currently tracked entities.
+    #[must_use]
+    pub fn entities(&self) -> Vec<EntityView> {
+        self.state.entities()
+    }
+
+    /// Returns the currently known player-list entries.
+    #[must_use]
+    pub fn players(&self) -> Vec<PlayerListEntry> {
+        self.state.players()
+    }
+
+    /// Returns a snapshot of the folded scoreboard — objectives, per-objective
+    /// scores, display-slot assignments and teams.
+    ///
+    /// Query the returned [`Scoreboard`] with its accessors (`objective`,
+    /// `scores`, `scores_in_slot`, `displayed`, `team_of`, ...). The snapshot is
+    /// a point-in-time clone; call again to observe later updates.
+    #[must_use]
+    pub fn scoreboard(&self) -> Scoreboard {
+        self.state.scoreboard()
+    }
+
+    /// Returns the currently active boss bars, in server insertion (render)
+    /// order.
+    #[must_use]
+    pub fn boss_bars(&self) -> Vec<BossBar> {
+        self.state.boss_bars()
+    }
+
+    /// Returns the block-state id at `pos`, or `None` if that block's chunk is
+    /// not currently loaded.
+    ///
+    /// The value is the version-free block-state id; mapping it to a block name
+    /// is a registry concern, deliberately outside this crate.
+    #[must_use]
+    pub fn block_at(&self, pos: BlockPos) -> Option<u32> {
+        self.state.block_at(pos)
+    }
+
+    /// Returns whether the chunk at `pos` is currently loaded.
+    #[must_use]
+    pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
+        self.state.is_chunk_loaded(pos)
+    }
+
+    /// Returns the number of currently loaded chunk columns.
+    #[must_use]
+    pub fn loaded_chunk_count(&self) -> usize {
+        self.state.loaded_chunk_count()
+    }
+
+    /// Returns the positions of all currently loaded chunk columns.
+    #[must_use]
+    pub fn loaded_chunks(&self) -> Vec<ChunkPos> {
+        self.state.loaded_chunks()
+    }
+
+    /// Returns an owned snapshot of the chunk section at `section_index` within
+    /// the column at `pos`, or `None` if that chunk is not loaded or the section
+    /// is elided (all air).
+    ///
+    /// The returned [`Arc`](std::sync::Arc) carries no borrow into the client's
+    /// world and pins no lock: hold it for the whole duration of a mesh while
+    /// chunk streaming continues. A later edit of that section forks it
+    /// copy-on-write, so the snapshot you hold stays valid and unchanged. This is
+    /// the seam a mesher reads through; single-block reads should use
+    /// [`block_at`](ClientHandle::block_at).
+    ///
+    /// This hands out block-state sections only. Lit meshing also needs the
+    /// column's light, which is not yet reachable lock-free from the client-owned
+    /// world; that is a pending `lodestone-world` seam (see crate docs).
+    #[must_use]
+    pub fn section_at(
+        &self,
+        pos: ChunkPos,
+        section_index: usize,
+    ) -> Option<std::sync::Arc<ChunkSection>> {
+        self.state.section_at(pos, section_index)
+    }
+
+    /// Returns one owned section snapshot per requested `(chunk, section_index)`,
+    /// in order, acquiring the internal world lock exactly once.
+    ///
+    /// This is the bulk-read primitive for meshing: pull a whole 27-section
+    /// neighbourhood in a single lock acquisition, then work off the returned
+    /// [`Arc`](std::sync::Arc)s with no lock held. A request that is not loaded
+    /// (or an all-air section) yields a `None` slot rather than being omitted, so
+    /// the result stays aligned with the input.
+    #[must_use]
+    pub fn sections_at(
+        &self,
+        requests: &[(ChunkPos, usize)],
+    ) -> Vec<Option<std::sync::Arc<ChunkSection>>> {
+        self.state.sections_at(requests)
+    }
+
+    /// Returns `(world_age, time_of_day)` as last reported by the server.
+    #[must_use]
+    pub fn world_time(&self) -> (i64, i64) {
+        self.state.time()
+    }
+
+    // --- Ergonomic actions --------------------------------------------------
+
+    /// Sends a chat message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosed`] if the session has already ended.
+    pub fn chat(&self, text: impl Into<String>) -> Result<(), ClientClosed> {
+        self.send_action(ClientAction::SendChat { text: text.into() })
+    }
+
+    /// Sends a command (the leading slash is added by the adapter as the
+    /// protocol requires; pass the command without it).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosed`] if the session has already ended.
+    pub fn command(&self, command: impl Into<String>) -> Result<(), ClientClosed> {
+        self.send_action(ClientAction::SendCommand {
+            command: command.into(),
+        })
+    }
+
+    /// Swings the given arm (a visible, server-observable animation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosed`] if the session has already ended.
+    pub fn swing(&self, hand: Hand) -> Result<(), ClientClosed> {
+        self.send_action(ClientAction::SwingArm { hand })
+    }
+
+    /// Sends the player's complete movement state for a single tick — absolute
+    /// position, look rotation, and ground contact — as one
+    /// [`ClientAction::Move`].
+    ///
+    /// This is the **lowest-level movement primitive**, and the one a tick-driven
+    /// controller wants: a real client (or `lodestone-shell`) integrates position
+    /// from held keys and gravity every tick and emits exactly one move per tick.
+    /// Compute the next state with your own physics and call this once per tick.
+    /// [`set_position`](Self::set_position), [`look_at`](Self::look_at),
+    /// [`step_toward`](Self::step_toward) and [`walk_to`](Self::walk_to) are all
+    /// thin conveniences layered over it for goal-seeking bot usage.
+    ///
+    /// The client performs **no physics of its own** — gravity, collision and
+    /// input integration are the caller's. The read-model updates
+    /// *optimistically*: the predicted position is written locally before the
+    /// server confirms it, and the server only overrides it via a corrective
+    /// teleport. So a position read back after this call is a local prediction,
+    /// not a server-confirmed location.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::Closed`] if the session has ended.
+    pub fn move_to(&self, pos: Vec3, rotation: Rotation, on_ground: bool) -> Result<(), BotError> {
+        self.send_action(ClientAction::Move {
+            pos,
+            rotation,
+            on_ground,
+        })?;
+        Ok(())
+    }
+
+    /// Moves the player to an absolute position, keeping the current look
+    /// direction. A goal-seeking convenience over [`move_to`](Self::move_to); the
+    /// read-model updates optimistically (a local prediction, not a server
+    /// confirmation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::Closed`] if the session has ended.
+    pub fn set_position(&self, pos: Vec3) -> Result<(), BotError> {
+        let player = self.state.player();
+        self.move_to(pos, player.rotation, player.on_ground)
+    }
+
+    /// Turns the player to face `target`, keeping the current position. A
+    /// convenience over [`move_to`](Self::move_to).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::PositionUnknown`] if the server has not placed the
+    /// player yet, or [`BotError::Closed`] if the session has ended.
+    pub fn look_at(&self, target: Vec3) -> Result<(), BotError> {
+        let player = self.state.player();
+        let pos = player.position.ok_or(BotError::PositionUnknown)?;
+        let rotation = look_at_rotation(eye_of(pos), target);
+        self.move_to(pos, rotation, player.on_ground)
+    }
+
+    /// Takes a single step of at most `max_distance` blocks toward `target`,
+    /// facing it. A goal-seeking convenience over [`move_to`](Self::move_to) that
+    /// a caller can drive from its own per-tick loop; [`walk_to`](Self::walk_to)
+    /// loops it until arrival.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::PositionUnknown`] if the server has not placed the
+    /// player yet, or [`BotError::Closed`] if the session has ended.
+    pub fn step_toward(&self, target: Vec3, max_distance: f64) -> Result<(), BotError> {
+        let player = self.state.player();
+        let pos = player.position.ok_or(BotError::PositionUnknown)?;
+        let delta = target - pos;
+        let distance = delta.length();
+        let next = if distance <= max_distance || distance == 0.0 {
+            target
+        } else {
+            pos + delta.normalize().scale(max_distance)
+        };
+        let rotation = look_at_rotation(eye_of(pos), target);
+        self.move_to(next, rotation, player.on_ground)
+    }
+
+    /// Walks toward `target`, stepping every tick until the local prediction is
+    /// within `tolerance` blocks (horizontally) or the `timeout` elapses.
+    ///
+    /// A goal-seeking convenience loop over [`step_toward`](Self::step_toward)
+    /// (itself over [`move_to`](Self::move_to)); it drives simple straight-line
+    /// movement and does not path around obstacles. A tick-driven controller
+    /// should drive [`move_to`](Self::move_to) directly instead — one function
+    /// cannot serve both a per-tick input loop and a goal-with-arrival call.
+    /// Native-only, because it relies on a runtime timer that does not exist on
+    /// `wasm32`; on the browser, loop [`step_toward`](Self::step_toward) yourself.
+    ///
+    /// # What the outcome means
+    ///
+    /// This tracks the driver's optimistic **local prediction**, so
+    /// [`WalkOutcome::Arrived`] means the prediction converged on the target —
+    /// **not** that the server acknowledged the displacement (server-confirmed
+    /// movement is a stronger, separate gate: observe your own entity from a
+    /// second connection). It is nonetheless a real signal: it is *not* reached
+    /// if the timeout is too short for the distance, if the session ends, or if
+    /// the server rubber-bands the player back with corrective teleports faster
+    /// than the walk can advance. On timeout it returns
+    /// [`WalkOutcome::TimedOut`] carrying the distance still remaining, so a
+    /// caller can retry or treat it as blocked — the previous "always `Ok`"
+    /// return could express none of this.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BotError::PositionUnknown`] if the server has not placed the
+    /// player yet, or [`BotError::Closed`] if the session ends before arriving.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn walk_to(
+        &self,
+        target: Vec3,
+        tolerance: f64,
+        timeout: Duration,
+    ) -> Result<WalkOutcome, BotError> {
+        /// One server tick. Movement is sent at roughly this cadence, as a real
+        /// client does; blasting positions instantly is trivially detectable.
+        const TICK: Duration = Duration::from_millis(50);
+        /// Blocks per tick (~4.3 b/s, close to vanilla walking speed).
+        const STEP: f64 = 0.215;
+
+        let horizontal_distance = |pos: Vec3| -> f64 {
+            let dx = pos.x - target.x;
+            let dz = pos.z - target.z;
+            (dx * dx + dz * dz).sqrt()
+        };
+
+        let walk = async {
+            loop {
+                let pos = self.position().ok_or(BotError::PositionUnknown)?;
+                if horizontal_distance(pos) <= tolerance {
+                    return Ok(());
+                }
+                if self.is_finished() {
+                    return Err(BotError::Closed);
+                }
+                self.step_toward(target, STEP)?;
+                crate::native_time::sleep(TICK).await;
+            }
+        };
+
+        match crate::native_time::timeout(timeout, walk).await {
+            Ok(Ok(())) => Ok(WalkOutcome::Arrived),
+            Ok(Err(error)) => Err(error),
+            Err(_) => {
+                let remaining = self.position().map_or(f64::INFINITY, horizontal_distance);
+                Ok(WalkOutcome::TimedOut { remaining })
+            }
+        }
+    }
+
+    // --- Awaiting -----------------------------------------------------------
+
+    /// Waits until `predicate` returns `true`, or the `timeout` elapses.
+    ///
+    /// The predicate is re-evaluated every time the read-model changes, and it
+    /// is given this handle so it can query any part of the read-model:
+    ///
+    /// ```no_run
+    /// # async fn demo(handle: lodestone_client::ClientHandle) {
+    /// use std::time::Duration;
+    /// handle
+    ///     .wait_for(Duration::from_secs(5), |h| h.health().unwrap_or(0.0) > 10.0)
+    ///     .await
+    ///     .ok();
+    /// # }
+    /// ```
+    ///
+    /// Awaiting never blocks the driver: the driver keeps processing packets and
+    /// answering keep-alives while a bot waits.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WaitError::Timeout`] if the condition is not met in time, or
+    /// [`WaitError::Closed`] if the session ends first.
+    pub async fn wait_for<F>(&self, timeout: Duration, predicate: F) -> Result<(), WaitError>
+    where
+        F: FnMut(&Self) -> bool,
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            match crate::native_time::timeout(timeout, self.wait_loop(predicate)).await {
+                Ok(result) => result,
+                Err(_) => Err(WaitError::Timeout),
+            }
+        }
+        // wasm32 has no runtime timer (a timeout would panic like a wall-clock
+        // read), so the timeout is not enforced there; the wait is
+        // still cancellable by the session ending.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = timeout;
+            self.wait_loop(predicate).await
+        }
+    }
+
+    /// Core wait loop shared by both targets. Registers interest *before*
+    /// checking the predicate to avoid a lost-wakeup race with the driver.
+    async fn wait_loop<F>(&self, mut predicate: F) -> Result<(), WaitError>
+    where
+        F: FnMut(&Self) -> bool,
+    {
+        let notify = self.state.notifier();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        loop {
+            // `enable()` registers this waiter now, so a notify that races the
+            // predicate check below is not missed.
+            notified.as_mut().enable();
+            if predicate(self) {
+                return Ok(());
+            }
+            if self.is_finished() {
+                return Err(WaitError::Closed);
+            }
+            notified.as_mut().await;
+            notified.set(notify.notified());
+        }
+    }
+
+    /// Waits until the client has entered the world (a `Login` event was seen).
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientHandle::wait_for`].
+    pub async fn wait_for_login(&self, timeout: Duration) -> Result<(), WaitError> {
+        self.wait_for(timeout, |h| h.player().entity_id.is_some())
+            .await
+    }
+
+    /// Waits until the server has placed the player (a position is known).
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientHandle::wait_for`].
+    pub async fn wait_for_spawn(&self, timeout: Duration) -> Result<(), WaitError> {
+        self.wait_for(timeout, |h| h.position().is_some()).await
+    }
+
+    /// Waits until the chunk at `pos` is loaded.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientHandle::wait_for`].
+    pub async fn wait_for_chunk(&self, pos: ChunkPos, timeout: Duration) -> Result<(), WaitError> {
+        self.wait_for(timeout, move |h| h.is_chunk_loaded(pos))
+            .await
+    }
+
+    /// Waits until at least `count` chunk columns are loaded.
+    ///
+    /// # Errors
+    ///
+    /// See [`ClientHandle::wait_for`].
+    pub async fn wait_for_chunks(&self, count: usize, timeout: Duration) -> Result<(), WaitError> {
+        self.wait_for(timeout, move |h| h.loaded_chunk_count() >= count)
+            .await
+    }
+}
+
+/// The player's eye position: a block above the feet, so `look_at` aims from the
+/// head as a player does.
+fn eye_of(feet: Vec3) -> Vec3 {
+    Vec3::new(feet.x, feet.y + 1.62, feet.z)
+}
+
+/// Computes the Minecraft `(yaw, pitch)` that points from `eye` to `target`.
+fn look_at_rotation(eye: Vec3, target: Vec3) -> Rotation {
+    let delta = target - eye;
+    let horizontal = (delta.x * delta.x + delta.z * delta.z).sqrt();
+    // Minecraft yaw: 0 faces +Z, increasing toward -X.
+    let yaw = (-delta.x).atan2(delta.z).to_degrees() as f32;
+    let pitch = (-delta.y).atan2(horizontal).to_degrees() as f32;
+    Rotation::new(yaw, pitch)
+}
+
+/// The outcome of a [`ClientHandle::walk_to`] call that ran without a hard
+/// error.
+///
+/// `walk_to` speaks only about the driver's optimistic **local prediction** —
+/// each `Move` is folded into the read-model before the server confirms it — so
+/// [`Arrived`](WalkOutcome::Arrived) means the prediction converged on the
+/// target, not that the server acknowledged the displacement. Confirmed
+/// movement is a separate, stronger gate (observe your own entity from a second
+/// connection).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum WalkOutcome {
+    /// The local prediction reached within `tolerance` of the target before the
+    /// timeout elapsed.
+    Arrived,
+
+    /// The timeout elapsed first. `remaining` is the horizontal distance in
+    /// blocks still separating the prediction from the target (or infinity if
+    /// the position became unknown); a caller may `walk_to` again to continue or
+    /// treat it as blocked.
+    TimedOut {
+        /// Horizontal blocks still remaining to the target when time ran out.
+        remaining: f64,
+    },
+}
+
+/// The stream of [`ClientEvent`]s produced by a session.
+///
+/// Call [`EventStream::recv`] in a loop; it returns `None` once the session has
+/// ended and all buffered events have been drained.
+#[derive(Debug)]
+pub struct EventStream {
+    rx: mpsc::Receiver<ClientEvent>,
+}
+
+impl EventStream {
+    pub(crate) fn new(rx: mpsc::Receiver<ClientEvent>) -> Self {
+        Self { rx }
+    }
+
+    /// Waits for the next event, returning `None` when the session has ended.
+    pub async fn recv(&mut self) -> Option<ClientEvent> {
+        self.rx.recv().await
+    }
+
+    /// Attempts to receive an event without waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`tokio::sync::mpsc::error::TryRecvError`] when no event is ready
+    /// or the session has ended.
+    pub fn try_recv(&mut self) -> Result<ClientEvent, mpsc::error::TryRecvError> {
+        self.rx.try_recv()
+    }
+}

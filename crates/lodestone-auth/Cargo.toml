@@ -1,0 +1,35 @@
+[package]
+name = "lodestone-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+# The Minecraft server-ID hash is a non-standard SHA-1 rendered as a *signed*
+# two's-complement hex string (Java `BigInteger(bytes).toString(16)`), so we need
+# both a SHA-1 implementation and a big-integer type to reproduce Java's exact
+# textual output. `num-bigint`'s `from_signed_bytes_be` + `to_str_radix(16)` is
+# the direct analog and avoids hand-rolled two's-complement bit-twiddling.
+sha1 = { workspace = true }
+num-bigint = { workspace = true }
+base64 = { workspace = true }
+
+# HTTP client for the Microsoft OAuth / Xbox Live / XSTS / Minecraft-services
+# call chain and the session-server `join` POST. Native-only: a browser build
+# authenticates over a different path and cannot open these sockets directly.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }

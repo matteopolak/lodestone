@@ -1,0 +1,79 @@
+[package]
+name = "lodestone-game"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Version-free Minecraft client game-state layer: inventory, crafting, scoreboard, tab list, and HUD state."
+
+[dependencies]
+lodestone-model = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true, optional = true }
+# Live-oracle-only, feature-gated dependencies. These are SHARED infrastructure
+# crates (wire primitives + the transport), never version crates, so enabling
+# them cannot break version isolation (`cargo xtask check-isolation` stays
+# clean). The live reconciliation test hand-drives the protocol-776 handshake
+# with these plus a handful of documented, test-local packet-id constants, so it
+# depends on no `crates/protocol/*` family and deleting one wouldn't touch it.
+lodestone-core = { workspace = true, optional = true }
+lodestone-net = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+# Used only by the `live-tablist` end-to-end test, which drives the *real*
+# high-level client and asserts through its public `ClientHandle::players()`.
+# `lodestone-client` and `lodestone-registry` are version-free shared crates
+# (the registry aggregates version families through optional features), so this
+# crate still never names a `crates/protocol/*` family and isolation stays clean.
+lodestone-client = { workspace = true, optional = true }
+lodestone-registry = { workspace = true, optional = true }
+
+[features]
+# JSON loading of recipes/tags from Mojang generated data. Off by default so the
+# hermetic build carries no JSON dependency; enabled by the corpus test.
+json = ["dep:serde_json"]
+# Wires the predict->click->reconcile oracle against a live vanilla 26.2 server.
+# Off by default so `cargo test` stays hermetic and version-free; the test is
+# additionally `#[ignore]`d.
+live-reconcile = ["dep:lodestone-core", "dep:lodestone-net", "dep:tokio"]
+# Wires the tab list end-to-end through the *real* client: connect with
+# `lodestone-client`, resolve the v770 adapter through the registry, and assert
+# the server's `player_info_update` reaches `ClientHandle::players()`. Off by
+# default and `#[ignore]`d. Enables the registry's v770 family via the client's
+# `live-v770` feature; `lodestone-game` itself still names no version crate.
+live-tablist = [
+    "dep:lodestone-client",
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
+# Wires scoreboard, teams and boss bar end-to-end through the *real* client:
+# drive `/scoreboard`, `/team` and `/bossbar` over RCON against a live 26.2
+# server, then assert the values are readable through `ClientHandle::scoreboard()`
+# and `ClientHandle::boss_bars()`. Off by default and `#[ignore]`d; still names
+# no version crate.
+live-scoreboard = [
+    "dep:lodestone-client",
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
+# Wires an inventory mutation end-to-end through the *real* client: connect with
+# `lodestone-client`, seed a known held item over RCON, and assert the item
+# reaches our `Menu` model through the real `ClientEvent` stream (clientbound
+# half) — then send an encodable serverbound action (`DropSelectedItem`,
+# `SwapItemWithOffhand`) via `ClientHandle::send_action` and assert the server's
+# authoritative response matches the click machine's prediction (serverbound
+# half). Off by default and `#[ignore]`d; still names no version crate.
+live-inventory = [
+    "dep:lodestone-client",
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+lodestone-testsupport = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+# Cargo aliases for the workspace's `xtask` automation crate.
+#
+# This makes the documented `cargo xtask <command>` invocations work as a
+# shorthand for `cargo run --package xtask --`, e.g.:
+#   cargo xtask check-isolation
+#   cargo xtask gen-packet-ids --source minecraft-data --version 1.8 --protocol 47
+[alias]
+xtask = "run --quiet --package xtask --"

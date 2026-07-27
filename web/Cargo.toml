@@ -1,0 +1,110 @@
+# Isolated feasibility-spike crate for the browser build.
+#
+# This is its OWN workspace (note the empty `[workspace]` table below) and lives
+# *outside* the parent `crates/lodestone-*` glob, so it never affects any other
+# agent's `cargo build --workspace`. It exists purely to prove the wasm render
+# path end to end. Delete it (or promote it deliberately) once the spike is done.
+[package]
+name = "lodestone-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Empty workspace table => this crate is its own workspace root and is NOT
+# attached to the parent Lodestone workspace.
+[workspace]
+
+[dependencies]
+# Path deps into the parent workspace. `workspace = true` inheritance inside
+# these crates still resolves against the parent workspace, which is exactly
+# what we want.
+lodestone-render = { path = "../crates/lodestone-render" }
+# Assets: proves the sync, byte-based `ResourceSource`/`ZipSource::from_bytes`
+# pipeline runs unchanged in the browser once bytes are fetched.
+lodestone-assets = { path = "../crates/lodestone-assets" }
+# Net: the browser `WsWebTransport` (a `web_sys::WebSocket` behind
+# `AsyncRead`/`AsyncWrite`) used for the live relay ping.
+lodestone-net = { path = "../crates/lodestone-net", default-features = false, features = [
+  "ws-web",
+] }
+# World + v770: decode real `level_chunk_with_light` bytes (captured from the
+# live server) straight in the browser — no `lodestone-client`, no tokio runtime,
+# so this path sidesteps the client wall entirely. Both are pure compute and
+# already pass `wasm-check.sh`.
+lodestone-world = { path = "../crates/lodestone-world" }
+lodestone-v770 = { path = "../crates/protocol/v770" }
+lodestone-core = { path = "../crates/lodestone-core" }
+# The shared, wasm-safe player controller (held-key model, vanilla mouse-look
+# curve, forward-gated sprint, and the `move_action` wire lowering). Consuming it
+# here is what keeps browser and native movement ONE implementation instead of a
+# fork. It pulls `lodestone-client` transitively (for `ClientAction`), which is
+# wasm-lean (its tokio/net deps are `cfg(not(wasm32))`-gated); the bundle cost is
+# measured in the W-next report.
+lodestone-controller = { path = "../crates/lodestone-controller" }
+
+# Browser singleplayer probe (W-next item 1): the REAL integrated server and the
+# REAL client, connected in-process over an in-memory `DuplexStream` — no socket,
+# no port, no relay, no Docker. This is the first time `lodestone-client` +
+# `lodestone-server` + `lodestone-worldgen` run inside a browser at all, and it
+# converts the "spawn_local drives the client/server with no tokio runtime"
+# claim from *believed* to *reproduced*. `lodestone-model` is needed directly for
+# `AdapterError` (not re-exported by the client); `lodestone-worldgen` for the
+# density router; `serde_json`/`uuid` for the stand-in wire + login profile. All
+# five compile to wasm32 (verified by `wasm-check.sh`); tokio/net stay
+# `cfg(not(wasm32))`-gated, and the server's task spawner is the `spawn_local`
+# seam. `gloo-timers` gives a wasm-safe async sleep for the poll loop (the native
+# test uses `tokio::time::sleep`, which panics with no runtime).
+lodestone-client = { path = "../crates/lodestone-client" }
+lodestone-server = { path = "../crates/lodestone-server" }
+lodestone-worldgen = { path = "../crates/lodestone-worldgen" }
+lodestone-model = { path = "../crates/lodestone-model" }
+serde_json = "1"
+uuid = { version = "1" }
+gloo-timers = { version = "0.3", features = ["futures"] }
+
+# WebGPU-only — no `webgl` feature. Measured (W-next): the WebGL2 fallback added
+# 537 KB brotli (786 KB → 249 KB) AND never rendered a frame: our terrain pipeline
+# uses a vertex-stage storage buffer (`VERTEX_STORAGE` downlevel flag) that WebGL2
+# categorically lacks, so `Device::create_bind_group_layout('lodestone-atlas-bgl')`
+# panics before frame 0 (verified in Chrome: WebGPU renders, forced-GL panics). The
+# feature was pure cost. Re-adding it requires a downlevel-compatible render path in
+# lodestone-render (avoid vertex-stage storage), not just this flag.
+wgpu = { version = "30" }
+glam = "0.33"
+
+# `io-util` gives the `AsyncReadExt`/`AsyncWriteExt` helpers for the SLP framing;
+# it is one of the wasm-safe tokio features (no `net`, no `rt-multi-thread`).
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "HtmlCanvasElement",
+  "Node",
+  "Performance",
+  "Response",
+  "EventTarget",
+  "KeyboardEvent",
+  "MouseEvent",
+] }
+console_error_panic_hook = "0.1"
+log = "0.4"
+console_log = "1"
+
+# Release profile tuned for a browser bundle: small code + stripped symbols. LTO
+# and a single codegen unit let the linker drop cross-crate dead code (most of
+# wgpu's native backends), `panic = "abort"` removes unwinding tables, and
+# `strip` drops debuginfo/symbol names. `opt-level = "z"` measured smallest
+# over-the-wire in the W4 report (1.21 MiB gzip, vs "s" 1.34 / 3 1.62); at ~250
+# quads the frame budget is nowhere near limiting, so size beats speed here.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

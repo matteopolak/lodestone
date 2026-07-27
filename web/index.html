@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lodestone — wasm render spike</title>
+    <!-- Inline data-URI favicon: the browser never issues a /favicon.ico request,
+         so there is no 404 under a plain static server (trunk's dev server hides
+         it behind an SPA fallback, but `dist/` served by anything else would 404). -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230a0a12'/%3E%3Crect x='4' y='4' width='8' height='8' fill='%232ea22e'/%3E%3C/svg%3E"
+    />
+    <link data-trunk rel="rust" data-wasm-opt="0" />
+    <!-- A trimmed real vanilla resource pack (blockstates + models + textures for
+         exactly the blocks the fixture contains), fetched at runtime and parsed by
+         the real lodestone-assets pipeline (proof the sync byte-based
+         ResourceSource crosses the "no filesystem" wall). -->
+    <link data-trunk rel="copy-file" href="assets/blocks_pack.zip" />
+    <!-- Worldgen density/noise JSON for in-browser singleplayer (the native test
+         reads these with std::fs; a browser fetches them). 97 files concatenated
+         into one ~145 KB map. -->
+    <link data-trunk rel="copy-file" href="assets/worldgen.json" />
+    <!-- Real level_chunk_with_light payloads captured from the live vanilla 26.2
+         server. Decoded in-browser by the real v770 parser → world storage →
+         renderer mesher. -->
+    <link data-trunk rel="copy-dir" href="fixtures" />
+    <style>
+      body {
+        margin: 0;
+        background: #0a0a12;
+        color: #cfe;
+        font: 13px/1.45 ui-monospace, monospace;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        padding: 16px;
+      }
+      #hud {
+        width: 900px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      #hud p {
+        margin: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #scene {
+        border: 1px solid #333;
+        image-rendering: pixelated;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">
+      <p id="status">initialising…</p>
+      <p id="assets">assets: —</p>
+      <p id="net">net: —</p>
+      <p id="singleplayer">singleplayer: —</p>
+      <p id="frame">clock: —</p>
+      <p id="controls">controls: —</p>
+    </div>
+    <canvas id="scene"></canvas>
+  </body>
+</html>

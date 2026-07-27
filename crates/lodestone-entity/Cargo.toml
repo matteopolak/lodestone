@@ -1,0 +1,28 @@
+[package]
+name = "lodestone-entity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-model = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+lodestone-testsupport = { workspace = true }
+
+# E4 acceptance gate only (`tests/live_entity_seam.rs`): drives the *public*
+# lodestone-client API against the live oracle to establish whether real entity
+# packets cross the seam. Test-only — none of this reaches the crate's own
+# dependency graph, so the default build stays version-free. Version selection
+# goes through the registry; this crate never names a concrete version crate in
+# its `src/`. The `v770` family is enabled here (not via a crate feature, which
+# cannot reference dev-dependencies) so the ignored live test compiles on demand.
+lodestone-client = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v770"] }
+tokio = { workspace = true }

@@ -1,0 +1,46 @@
+[package]
+name = "lodestone-v47"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+lodestone-world = { workspace = true }
+
+[features]
+# Enables the white-box live chunk-decode test, which drives a real 1.8.9 join
+# at the packet level and decodes `map_chunk`/`map_chunk_bulk` into
+# `lodestone-world` storage. Off by default so the default build stays hermetic.
+# It lives in this crate (not `lodestone-client`) because it names this crate's
+# concrete chunk types, keeping `lodestone-client` free of any version-crate
+# reference.
+live-chunk = []
+
+# Enables the white-box live entity-metadata test: drives a real 1.8.9 join and
+# decodes naturally-spawned `spawn_entity_living` / `entity_metadata` packets
+# (plus any window packets the server pushes) with this crate's codecs. Off by
+# default so the default build stays hermetic; lives here to keep
+# `lodestone-client` free of any version-crate reference.
+live-entity = []
+
+# Enables the white-box live interaction test: drives a real 1.8.9 join and
+# breaks the block beneath the player through this crate's `encode_action`
+# serverbound path, confirming the break against the server-originated
+# `block_change` packet (1.8.9 has no RCON/console on the test server, so the
+# wire block_change is the independent oracle). Off by default so the default
+# build stays hermetic; lives here to keep `lodestone-client` free of any
+# version-crate reference.
+live-interaction = []
+
+[dev-dependencies]
+uuid = { workspace = true }
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

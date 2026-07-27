@@ -1,0 +1,21 @@
+[package]
+name = "lodestone-assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-model.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+zip.workspace = true
+png.workspace = true
+
+[dev-dependencies]
+lodestone-model.workspace = true
+tempfile.workspace = true
+png.workspace = true
+serde_json.workspace = true

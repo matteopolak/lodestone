@@ -1,0 +1,11 @@
+[package]
+name = "lodestone-registry"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lodestone-v1 = { path = "../protocol/v1", optional = true }
+
+[features]
+v1 = ["dep:lodestone-v1"]
+

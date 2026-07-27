@@ -1,0 +1,11 @@
+[package]
+name = "lodestone-registry"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.lodestone-isolation]
+role = "version-registry"
+
+[dependencies]
+lodestone-v1 = { path = "../protocol/v1" }
+

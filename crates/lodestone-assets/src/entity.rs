@@ -1,0 +1,565 @@
+//! Code-defined entity model geometry (mobs, the player, block entities).
+//!
+//! # Why this is a separate pipeline
+//!
+//! Block models are JSON and resolve through [`crate::model`]. Entity models are
+//! **not data** in vanilla — they are Java code that assembles a cuboid hierarchy
+//! (`LayerDefinition` → `MeshDefinition` → `PartDefinition` → `CubeDefinition`),
+//! each part carrying a pivot (`PartPose`) and each cube carrying a box + a
+//! texel offset that is unwrapped onto a single per-entity texture sheet by a
+//! fixed "box unwrap". Nothing in `.cache/mc/26.2/generated/` or
+//! `vendor/minecraft-data/` exposes this geometry as data — `entities.json` is
+//! metadata (hitbox, id, type) only. So the geometry has to be *described* on our
+//! side; there is no extraction path short of running an exporter mod.
+//!
+//! # The seam
+//!
+//! This module owns the **version-free primitive**: the cube unwrap (faithful to
+//! `ModelPart.Cube` in the decompiled 26.2 client) and the part-hierarchy
+//! transform (translate by `pivot/16`, then `rotationZYX(zRot, yRot, xRot)`, then
+//! scale — exactly `ModelPart.translateAndRotate`). A version crate supplies the
+//! per-mob [`EntityModelDef`] data; [`bake_entity`] turns it into posed,
+//! UV-mapped [`EntityQuad`]s the renderer can upload. The renderer poses parts at
+//! runtime (walk cycles etc.) by adjusting each [`PartPose`] before baking, or by
+//! transforming the emitted parts — that animation layer lives above this crate.
+//!
+//! Textures resolve through the normal [`crate::ResourceManager`] path
+//! (`assets/<ns>/textures/entity/...`, and skins likewise); this crate does not
+//! special-case them.
+
+use crate::model::Direction;
+
+/// A cuboid "grow"/inflation applied symmetrically to a box before unwrapping,
+/// mirroring vanilla's `CubeDeformation`. Overlay layers (hat, sleeves, armour)
+/// use a small positive grow so they sit just outside the base layer.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Deformation {
+    /// Grow along X, in model texels.
+    pub x: f32,
+    /// Grow along Y, in model texels.
+    pub y: f32,
+    /// Grow along Z, in model texels.
+    pub z: f32,
+}
+
+impl Deformation {
+    /// A uniform grow of `v` texels on every axis (vanilla `CubeDeformation(v)`).
+    pub fn uniform(v: f32) -> Self {
+        Self { x: v, y: v, z: v }
+    }
+}
+
+/// The six box faces, in the order vanilla emits them.
+const FACE_ORDER: [Direction; 6] = [
+    Direction::Down,
+    Direction::Up,
+    Direction::West,
+    Direction::North,
+    Direction::East,
+    Direction::South,
+];
+
+/// A single box within a part, unwrapped onto the entity's texture sheet exactly
+/// as vanilla's `CubeDefinition`/`ModelPart.Cube` does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeDef {
+    /// Box origin `(minX, minY, minZ)` in model texels, relative to the part
+    /// pivot.
+    pub origin: [f32; 3],
+    /// Box `(width, height, depth)` in model texels.
+    pub size: [f32; 3],
+    /// Texel offset `(xTexOffs, yTexOffs)` of the unwrap on the sheet.
+    pub tex_offset: [f32; 2],
+    /// Symmetric inflation applied before unwrapping.
+    pub grow: Deformation,
+    /// Whether the box is mirrored across X (flips X extent and winding).
+    pub mirror: bool,
+    /// Per-cube texture-scale multiplier (`texScale`, default `1.0`), used by the
+    /// handful of models that stretch the sheet.
+    pub tex_scale: [f32; 2],
+    /// Which faces to emit; `[true; 6]` (all) by default.
+    pub visible_faces: [bool; 6],
+}
+
+impl CubeDef {
+    /// A box with all faces visible, no grow, no mirror, unit texture scale.
+    pub fn new(origin: [f32; 3], size: [f32; 3], tex_offset: [f32; 2]) -> Self {
+        Self {
+            origin,
+            size,
+            tex_offset,
+            grow: Deformation::default(),
+            mirror: false,
+            tex_scale: [1.0, 1.0],
+            visible_faces: [true; 6],
+        }
+    }
+
+    /// Returns the box with a uniform grow (overlay layers).
+    pub fn grown(mut self, v: f32) -> Self {
+        self.grow = Deformation::uniform(v);
+        self
+    }
+
+    /// Returns the box mirrored across X.
+    pub fn mirrored(mut self) -> Self {
+        self.mirror = true;
+        self
+    }
+}
+
+/// A part's pivot and orientation, mirroring vanilla's `PartPose`. Rotations are
+/// radians and applied `rotationZYX(zRot, yRot, xRot)` (Z, then Y, then X).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PartPose {
+    /// Pivot X in model texels.
+    pub x: f32,
+    /// Pivot Y in model texels.
+    pub y: f32,
+    /// Pivot Z in model texels.
+    pub z: f32,
+    /// Rotation about X, radians.
+    pub x_rot: f32,
+    /// Rotation about Y, radians.
+    pub y_rot: f32,
+    /// Rotation about Z, radians.
+    pub z_rot: f32,
+    /// Per-axis scale (default `1.0`).
+    pub scale: [f32; 3],
+}
+
+impl PartPose {
+    /// The identity pose.
+    pub const ZERO: PartPose = PartPose {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        x_rot: 0.0,
+        y_rot: 0.0,
+        z_rot: 0.0,
+        scale: [1.0, 1.0, 1.0],
+    };
+
+    /// A pose translated to `(x, y, z)` model texels with no rotation.
+    pub fn offset(x: f32, y: f32, z: f32) -> Self {
+        Self {
+            x,
+            y,
+            z,
+            ..Self::ZERO
+        }
+    }
+
+    /// A pose rotated `(x, y, z)` radians at the origin.
+    pub fn rotation(x_rot: f32, y_rot: f32, z_rot: f32) -> Self {
+        Self {
+            x_rot,
+            y_rot,
+            z_rot,
+            ..Self::ZERO
+        }
+    }
+
+    /// A pose with both an offset and a rotation.
+    pub fn offset_and_rotation(x: f32, y: f32, z: f32, x_rot: f32, y_rot: f32, z_rot: f32) -> Self {
+        Self {
+            x,
+            y,
+            z,
+            x_rot,
+            y_rot,
+            z_rot,
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// A node in the entity's part hierarchy: a pivot, its boxes, and named children.
+/// Children are an ordered list (not a map) so baking is deterministic.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartDef {
+    /// This part's pivot and orientation.
+    pub pose: PartPose,
+    /// Boxes attached directly to this part.
+    pub cubes: Vec<CubeDef>,
+    /// Named child parts, in insertion order.
+    pub children: Vec<(String, PartDef)>,
+}
+
+impl PartDef {
+    /// An empty part with the given pose.
+    pub fn new(pose: PartPose) -> Self {
+        Self {
+            pose,
+            cubes: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Adds a box to this part (builder style).
+    pub fn with_cube(mut self, cube: CubeDef) -> Self {
+        self.cubes.push(cube);
+        self
+    }
+
+    /// Adds a named child part (builder style).
+    pub fn with_child(mut self, name: &str, child: PartDef) -> Self {
+        self.children.push((name.to_string(), child));
+        self
+    }
+
+    /// Looks up a mutable child by name (for authoring meshes incrementally).
+    pub fn child_mut(&mut self, name: &str) -> Option<&mut PartDef> {
+        self.children
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, c)| c)
+    }
+}
+
+/// A complete entity model: a texture-sheet size and a root part.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityModelDef {
+    /// Texture sheet width in pixels (the UV normaliser).
+    pub texture_width: u32,
+    /// Texture sheet height in pixels.
+    pub texture_height: u32,
+    /// The root part; its children are the model's top-level parts.
+    pub root: PartDef,
+}
+
+/// One baked quad of an entity model: four corners in world units (model texels
+/// divided by 16, with the full part transform applied), UVs normalised to
+/// `[0, 1]` against the texture sheet, and the outward face direction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityQuad {
+    /// The four corner positions, world units.
+    pub positions: [[f32; 3]; 4],
+    /// The four corner UVs, normalised to `[0, 1]`.
+    pub uvs: [[f32; 2]; 4],
+    /// The transformed outward normal (unit length).
+    pub normal: [f32; 3],
+    /// The box face this quad came from, in the part's local frame.
+    pub direction: Direction,
+}
+
+/// A 3×3 linear map plus a translation, used to accumulate the part hierarchy.
+#[derive(Debug, Clone, Copy)]
+struct Affine {
+    m: [[f32; 3]; 3],
+    t: [f32; 3],
+}
+
+impl Affine {
+    const IDENTITY: Affine = Affine {
+        m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        t: [0.0, 0.0, 0.0],
+    };
+
+    fn apply(&self, p: [f32; 3]) -> [f32; 3] {
+        [
+            self.m[0][0] * p[0] + self.m[0][1] * p[1] + self.m[0][2] * p[2] + self.t[0],
+            self.m[1][0] * p[0] + self.m[1][1] * p[1] + self.m[1][2] * p[2] + self.t[1],
+            self.m[2][0] * p[0] + self.m[2][1] * p[1] + self.m[2][2] * p[2] + self.t[2],
+        ]
+    }
+
+    /// Applies only the linear part (for normals).
+    fn apply_linear(&self, p: [f32; 3]) -> [f32; 3] {
+        [
+            self.m[0][0] * p[0] + self.m[0][1] * p[1] + self.m[0][2] * p[2],
+            self.m[1][0] * p[0] + self.m[1][1] * p[1] + self.m[1][2] * p[2],
+            self.m[2][0] * p[0] + self.m[2][1] * p[1] + self.m[2][2] * p[2],
+        ]
+    }
+
+    /// `self ∘ other` (apply `other` first).
+    fn compose(&self, other: &Affine) -> Affine {
+        let mut m = [[0.0f32; 3]; 3];
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                *cell = self.m[i][0] * other.m[0][j]
+                    + self.m[i][1] * other.m[1][j]
+                    + self.m[i][2] * other.m[2][j];
+            }
+        }
+        let t = self.apply(other.t);
+        Affine { m, t }
+    }
+}
+
+/// Builds the local transform for a part: translate(pivot/16) ∘ rotZYX ∘ scale,
+/// matching `ModelPart.translateAndRotate`.
+fn part_transform(pose: &PartPose) -> Affine {
+    // Rotation R = Rz * Ry * Rx (JOML rotationZYX), so a vector is rotated X, then
+    // Y, then Z.
+    let (sx, cx) = pose.x_rot.sin_cos();
+    let (sy, cy) = pose.y_rot.sin_cos();
+    let (sz, cz) = pose.z_rot.sin_cos();
+    let rx = [[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]];
+    let ry = [[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]];
+    let rz = [[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]];
+    let rzy = mat_mul(rz, ry);
+    let rot = mat_mul(rzy, rx);
+    // Fold the per-axis scale into the columns of the rotation matrix.
+    let mut m = rot;
+    for row in m.iter_mut() {
+        row[0] *= pose.scale[0];
+        row[1] *= pose.scale[1];
+        row[2] *= pose.scale[2];
+    }
+    Affine {
+        m,
+        t: [pose.x / 16.0, pose.y / 16.0, pose.z / 16.0],
+    }
+}
+
+fn mat_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut m = [[0.0f32; 3]; 3];
+    for (i, row) in m.iter_mut().enumerate() {
+        for (j, cell) in row.iter_mut().enumerate() {
+            *cell = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+    }
+    m
+}
+
+/// Bakes an entity model into posed, UV-mapped quads.
+pub fn bake_entity(model: &EntityModelDef) -> Vec<EntityQuad> {
+    let mut out = Vec::new();
+    bake_part(
+        &model.root,
+        Affine::IDENTITY,
+        model.texture_width as f32,
+        model.texture_height as f32,
+        &mut out,
+    );
+    out
+}
+
+fn bake_part(part: &PartDef, parent: Affine, tw: f32, th: f32, out: &mut Vec<EntityQuad>) {
+    let world = parent.compose(&part_transform(&part.pose));
+    for cube in &part.cubes {
+        bake_cube(cube, &world, tw, th, out);
+    }
+    for (_, child) in &part.children {
+        bake_part(child, world, tw, th, out);
+    }
+}
+
+/// Emits the visible faces of one box, faithful to `ModelPart.Cube`.
+fn bake_cube(cube: &CubeDef, world: &Affine, tw: f32, th: f32, out: &mut Vec<EntityQuad>) {
+    let [ox, oy, oz] = cube.origin;
+    let [w, h, d] = cube.size;
+    let (mut min_x, mut min_y, mut min_z) = (ox, oy, oz);
+    let (mut max_x, mut max_y, mut max_z) = (ox + w, oy + h, oz + d);
+    // Grow (CubeDeformation) inflates the box symmetrically.
+    min_x -= cube.grow.x;
+    min_y -= cube.grow.y;
+    min_z -= cube.grow.z;
+    max_x += cube.grow.x;
+    max_y += cube.grow.y;
+    max_z += cube.grow.z;
+    if cube.mirror {
+        std::mem::swap(&mut min_x, &mut max_x);
+    }
+
+    // Eight corners in model texels (named as in ModelPart.Cube: t = near z=min,
+    // l = far z=max).
+    let t0 = [min_x, min_y, min_z];
+    let t1 = [max_x, min_y, min_z];
+    let t2 = [max_x, max_y, min_z];
+    let t3 = [min_x, max_y, min_z];
+    let l0 = [min_x, min_y, max_z];
+    let l1 = [max_x, min_y, max_z];
+    let l2 = [max_x, max_y, max_z];
+    let l3 = [min_x, max_y, max_z];
+
+    // Texel unwrap offsets.
+    let xo = cube.tex_offset[0];
+    let yo = cube.tex_offset[1];
+    let u0 = xo;
+    let u1 = xo + d;
+    let u2 = xo + d + w;
+    let u22 = xo + d + w + w;
+    let u3 = xo + d + w + d;
+    let u4 = xo + d + w + d + w;
+    let v0 = yo;
+    let v1 = yo + d;
+    let v2 = yo + d + h;
+
+    let x_tex_size = tw * cube.tex_scale[0];
+    let y_tex_size = th * cube.tex_scale[1];
+
+    // (verts, uMinTex, vMinTex, uMaxTex, vMaxTex) per face, exactly as vanilla.
+    type FaceSpec = ([[f32; 3]; 4], f32, f32, f32, f32);
+    let faces: [FaceSpec; 6] = [
+        ([l1, l0, t0, t1], u1, v0, u2, v1),  // DOWN
+        ([t2, t3, l3, l2], u2, v1, u22, v0), // UP
+        ([t0, l0, l3, t3], u0, v1, u1, v2),  // WEST
+        ([t1, t0, t3, t2], u1, v1, u2, v2),  // NORTH
+        ([l1, t1, t2, l2], u2, v1, u3, v2),  // EAST
+        ([l0, l1, l2, l3], u3, v1, u4, v2),  // SOUTH
+    ];
+
+    for (fi, dir) in FACE_ORDER.iter().enumerate() {
+        if !cube.visible_faces[fi] {
+            continue;
+        }
+        let (verts, umin, vmin, umax, vmax) = faces[fi];
+        // Polygon remap: [0]=(uMax,vMin) [1]=(uMin,vMin) [2]=(uMin,vMax) [3]=(uMax,vMax).
+        let mut positions = [
+            world.apply([verts[0][0] / 16.0, verts[0][1] / 16.0, verts[0][2] / 16.0]),
+            world.apply([verts[1][0] / 16.0, verts[1][1] / 16.0, verts[1][2] / 16.0]),
+            world.apply([verts[2][0] / 16.0, verts[2][1] / 16.0, verts[2][2] / 16.0]),
+            world.apply([verts[3][0] / 16.0, verts[3][1] / 16.0, verts[3][2] / 16.0]),
+        ];
+        let mut uvs = [
+            [umax / x_tex_size, vmin / y_tex_size],
+            [umin / x_tex_size, vmin / y_tex_size],
+            [umin / x_tex_size, vmax / y_tex_size],
+            [umax / x_tex_size, vmax / y_tex_size],
+        ];
+        if cube.mirror {
+            positions.reverse();
+            uvs.reverse();
+        }
+        let n = face_normal(*dir, cube.mirror);
+        let normal = normalize(world.apply_linear(n));
+        out.push(EntityQuad {
+            positions,
+            uvs,
+            normal,
+            direction: *dir,
+        });
+    }
+}
+
+fn face_normal(dir: Direction, mirror: bool) -> [f32; 3] {
+    let n = match dir {
+        Direction::Down => [0.0, -1.0, 0.0],
+        Direction::Up => [0.0, 1.0, 0.0],
+        Direction::North => [0.0, 0.0, -1.0],
+        Direction::South => [0.0, 0.0, 1.0],
+        Direction::West => [-1.0, 0.0, 0.0],
+        Direction::East => [1.0, 0.0, 0.0],
+    };
+    // Vanilla flips only X-axis facings when mirrored.
+    if mirror && matches!(dir, Direction::East | Direction::West) {
+        [-n[0], n[1], n[2]]
+    } else {
+        n
+    }
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len <= f32::EPSILON {
+        v
+    } else {
+        [v[0] / len, v[1] / len, v[2] / len]
+    }
+}
+
+/// The vanilla player model (`net/minecraft/client/model/player/PlayerModel`)
+/// on a 64×64 sheet, as the concrete case that exercises the whole primitive:
+/// pivots, overlay layers (`grow`), and the wide-vs-slim arm variants.
+///
+/// `slim` selects the 3-wide-arm ("Alex") variant; `false` is the classic
+/// 4-wide ("Steve") model. Texel offsets and poses are the vanilla values.
+pub fn player_model(slim: bool) -> EntityModelDef {
+    let mut root = PartDef::new(PartPose::ZERO);
+
+    // Head + hat overlay (grow 0.5).
+    let head = PartDef::new(PartPose::offset(0.0, 0.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-4.0, -8.0, -4.0],
+            [8.0, 8.0, 8.0],
+            [0.0, 0.0],
+        ))
+        .with_child(
+            "hat",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [32.0, 0.0]).grown(0.5),
+            ),
+        );
+    root = root.with_child("head", head);
+
+    // Body + jacket overlay.
+    let body = PartDef::new(PartPose::offset(0.0, 0.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-4.0, 0.0, -2.0],
+            [8.0, 12.0, 4.0],
+            [16.0, 16.0],
+        ))
+        .with_child(
+            "jacket",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 32.0]).grown(0.25),
+            ),
+        );
+    root = root.with_child("body", body);
+
+    // Arms differ between wide and slim.
+    let arm_w = if slim { 3.0 } else { 4.0 };
+    let right_arm = PartDef::new(PartPose::offset(-5.0, 2.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-3.0, -2.0, -2.0],
+            [arm_w, 12.0, 4.0],
+            [40.0, 16.0],
+        ))
+        .with_child(
+            "right_sleeve",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-3.0, -2.0, -2.0], [arm_w, 12.0, 4.0], [40.0, 32.0]).grown(0.25),
+            ),
+        );
+    let left_arm = PartDef::new(PartPose::offset(5.0, 2.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-1.0, -2.0, -2.0],
+            [arm_w, 12.0, 4.0],
+            [32.0, 48.0],
+        ))
+        .with_child(
+            "left_sleeve",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-1.0, -2.0, -2.0], [arm_w, 12.0, 4.0], [48.0, 48.0]).grown(0.25),
+            ),
+        );
+    root = root.with_child("right_arm", right_arm);
+    root = root.with_child("left_arm", left_arm);
+
+    // Legs + overlay.
+    let right_leg = PartDef::new(PartPose::offset(-1.9, 12.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-2.0, 0.0, -2.0],
+            [4.0, 12.0, 4.0],
+            [0.0, 16.0],
+        ))
+        .with_child(
+            "right_pants",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 32.0]).grown(0.25),
+            ),
+        );
+    let left_leg = PartDef::new(PartPose::offset(1.9, 12.0, 0.0))
+        .with_cube(CubeDef::new(
+            [-2.0, 0.0, -2.0],
+            [4.0, 12.0, 4.0],
+            [16.0, 48.0],
+        ))
+        .with_child(
+            "left_pants",
+            PartDef::new(PartPose::ZERO).with_cube(
+                CubeDef::new([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 48.0]).grown(0.25),
+            ),
+        );
+    root = root.with_child("right_leg", right_leg);
+    root = root.with_child("left_leg", left_leg);
+
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}

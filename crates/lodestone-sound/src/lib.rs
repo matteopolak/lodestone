@@ -1,0 +1,52 @@
+//! `lodestone-sound`: the bridge from version-free game events to the
+//! device-free audio engine.
+//!
+//! # Why this crate exists
+//!
+//! [`lodestone-audio`](lodestone_audio) is a deliberately standalone core: it
+//! knows how to decode Ogg Vorbis, mix voices, spatialise them and select a
+//! weighted variant from a seed, but it has **never seen a sound name, a
+//! protocol number, or a resource pack**. That confinement is what let it port
+//! to the browser for free and unit-test with no audio hardware.
+//!
+//! Something still has to connect a [`ClientEvent::Sound`] arriving from the
+//! network to a decoded `.ogg` playing on a bus. That glue needs three things
+//! at once — the model's event carriers, the assets crate's `sounds.json`
+//! resolver, and the audio engine — so it lives *here*, in its own crate,
+//! rather than forcing `lodestone-audio` to grow an assets dependency or
+//! `lodestone-client` to grow an audio one.
+//!
+//! # What it does, matched to vanilla
+//!
+//! Given a [`ClientEvent::Sound`] the [`SoundDriver`]:
+//!
+//! 1. Seeds a single [`JavaRandom`](lodestone_audio::JavaRandom) with the
+//!    packet's `seed` (the server-rolled value — client-side selection would
+//!    desync every client), and asks the [`SoundRegistry`] to resolve the event
+//!    name to a concrete `.ogg` via its weighted selection. Because the roll
+//!    closure is one RNG shared across the whole `type: event` chain, this
+//!    reproduces vanilla's `WeighedSoundEvents.getSound(RandomSource)` exactly
+//!    for the (constant-volume/pitch) vanilla corpus.
+//! 2. Reads the resolved file's bytes from an injected [`ResourceSource`] and
+//!    decodes it (cached, so a repeated footstep decodes once).
+//! 3. Builds a [`SoundInstance`] whose parameters match
+//!    `SoundEngine`/`AbstractSoundInstance`:
+//!    * `volume = packet_volume * entry_volume` (they multiply)
+//!    * `pitch  = packet_pitch  * entry_pitch`
+//!    * audible range `= max(volume, 1) * entry.attenuation_distance` — the
+//!      audio crate's `Spatialization::range` already computes this.
+//!
+//! ## An honest correction, verified against decompiled 26.2
+//!
+//! The packet's `fixed_range` does **not** drive client-side attenuation. Zero
+//! `SoundEvent.getRange` call sites exist in the client; `SoundEngine.java`
+//! computes range purely from the `sounds.json` entry's `attenuation_distance`
+//! (`max(instanceVolume, 1) * sound.getAttenuationDistance()`). `fixed_range`
+//! is a *server-side* culling parameter (which players receive the packet at
+//! all). The driver therefore ignores `fixed_range` for attenuation and
+//! documents the field as carried-but-unused on the client audio path. See
+//! `SoundEngine.java:363-421` and `AbstractSoundInstance.java:79-85`.
+
+mod driver;
+
+pub use driver::{DriverError, SoundDriver};

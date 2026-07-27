@@ -1,0 +1,70 @@
+[package]
+name = "lodestone-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-model = { workspace = true }
+lodestone-net = { workspace = true }
+# The read-model stores decoded chunk columns that arrive on
+# `ClientEvent::ChunkLoaded`; this is the same version-free `ChunkColumn` type
+# the model exposes, not any protocol-version knowledge.
+lodestone-world = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+# Version selection is delegated entirely to the registry crate: this crate never
+# names a concrete protocol version for adapter selection. Enabling a live-join
+# feature turns on the matching family *inside the registry* (see `[features]`),
+# so deleting a version family never requires editing this manifest.
+lodestone-registry = { workspace = true }
+
+# --- Native (non-wasm) target dependencies ---
+# The full workspace tokio (runtime, `net`, `time`). The driver is spawned onto
+# the multi-threaded runtime here via `tokio::spawn`. This target is the primary
+# one and its behaviour, API and performance are unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+
+# --- wasm32 target dependencies ---
+# `wasm32-unknown-unknown` cannot build `mio`, so tokio must NOT pull `net`/`rt-
+# multi-thread`. The driver only uses the runtime-agnostic pieces there: channels
+# (`sync`) and `select!` (`macros`). The executor is `wasm-bindgen-futures`'
+# `spawn_local` (single-threaded, `!Send`), and the browser transport comes from
+# `lodestone-net`'s `ws-web` `WebSocket` — never from tokio.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = ["sync", "macros"] }
+wasm-bindgen-futures = { workspace = true }
+
+[features]
+# Enables the high-level live-join test that joins a real vanilla server using the
+# v770 protocol adapter, resolved through the registry. Off by default so the
+# default build stays version-free and hermetic.
+live-v770 = ["lodestone-registry/v770"]
+# Enables the high-level live-join test that joins a real 1.8.x server using the
+# v47 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v770`.
+live-v47 = ["lodestone-registry/v47"]
+# Enables the high-level live-join test that joins a real 1.12.2 server using the
+# v340 protocol adapter, resolved through the registry. Off by default for the
+# same reason as `live-v770`.
+live-v340 = ["lodestone-registry/v340"]
+# The white-box chunk/respawn decode tests moved into the version crate whose
+# concrete packet types they name (see that crate's `live-chunk` feature). This
+# client no longer references any protocol version except through the registry.
+# Enables the cross-format text oracle: a live capture harness that records real
+# chat components from both a 1.8 (JSON) and a modern (NBT) server, plus a live
+# join-message equivalence test. Both families are resolved through the registry,
+# so this feature names no concrete version crate.
+capture-text-oracle = ["lodestone-registry/v47", "lodestone-registry/v770"]
+
+[dev-dependencies]
+tokio = { workspace = true }
+lodestone-core = { workspace = true }
+lodestone-testsupport = { workspace = true }

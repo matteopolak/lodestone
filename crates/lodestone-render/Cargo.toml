@@ -1,0 +1,67 @@
+[package]
+name = "lodestone-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Headless (offscreen texture target) is the default so the crate builds and
+# tests without a window server. Windowing is strictly additive.
+#
+# Section meshing fans across a rayon pool on native targets; this is gated on
+# `cfg(not(target_arch = "wasm32"))` rather than a Cargo feature. A default-on
+# feature is the wrong tool here: feature unification lets any consumer re-enable
+# it across the whole graph (see scripts/wasm-check.sh), which would drag the
+# non-wasm-safe rayon into the browser build. Target-gating the dependency (below)
+# is immune to that — wasm simply never sees rayon, and `mesher::build_batch`
+# falls back to a serial loop there.
+default = []
+window = ["dep:winit"]
+# Enables the Phase-5 acceptance gate test (`tests/live_gate.rs`): connect to a
+# real vanilla 26.2 server, pull real chunks, bake + mesh + render them
+# headlessly, and read back pixels. Off by default so the default build stays
+# version-free and hermetic.
+#
+# VERSION-FREE: the gate drives a real login through `lodestone-client`'s public
+# session driver, obtaining the concrete adapter from `lodestone-registry` (the
+# one sanctioned aggregation point that may name a version, behind its own
+# feature-gated optional dep). The gate names no version crate, no packet id, and
+# no wire type: it connects, waits for chunks, and reads `Arc<ChunkSection>`
+# snapshots back through `ClientHandle::sections_at`. This proves the whole path
+# (live server -> client -> world -> mesher -> pixels) rather than a chunk the
+# test hand-decoded, and keeps v770 deletable via its folder plus the registry's
+# one feature line.
+live-chunk-gate = ["dep:lodestone-client", "dep:lodestone-registry", "dep:tokio", "dep:uuid"]
+
+[dependencies]
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+glam.workspace = true
+lodestone-assets.workspace = true
+lodestone-world.workspace = true
+winit = { workspace = true, optional = true }
+
+# Live-gate deps: optional, enabled only by `live-chunk-gate`. The gate connects
+# through the client's public API and selects the adapter by protocol number via
+# the registry (the sanctioned version aggregator), so this crate names no
+# version crate directly and `check-isolation` stays clean.
+lodestone-client = { workspace = true, optional = true }
+lodestone-registry = { workspace = true, optional = true, features = ["v770"] }
+tokio = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+
+# Off-thread section meshing. Target-gated (not feature-gated) so it is absent
+# from the wasm build unconditionally — see the [features] note above.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+lodestone-model.workspace = true
+serde_json.workspace = true
+lodestone-testsupport.workspace = true

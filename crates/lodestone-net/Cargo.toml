@@ -1,0 +1,100 @@
+[package]
+name = "lodestone-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+thiserror = { workspace = true }
+flate2 = { workspace = true }
+tracing = { workspace = true }
+
+# --- Encryption ---
+# AES-128-CFB8 is the online-mode stream cipher. `aes` + `cfb8` are pure-Rust
+# RustCrypto crates with no I/O and no RNG, so they compile to wasm untouched and
+# the browser path gets the cipher for free (exactly as framing did). `cfb8`
+# 0.9's `Encryptor::encrypt(&mut self, ..)` is *stateful* across calls, which is
+# what a per-connection CFB8 stream requires.
+aes = { workspace = true }
+cfb8 = { workspace = true }
+
+# Optional WebSocket transports. Browsers cannot open raw TCP, so a browser
+# build (or a native build talking to a WebSocket relay) needs a `Transport`
+# that rides a WebSocket. Both are off by default, so a default native build
+# pulls none of these dependencies and is entirely unaffected.
+#
+#   * `ws-native` — a tokio-tungstenite backed transport, used to prove the
+#     relay path from a native client (and by tests).
+#   * `ws-web`     — a web-sys `WebSocket` backed transport for the browser.
+[features]
+default = []
+ws-native = ["dep:tokio-tungstenite", "dep:futures-util"]
+ws-web = [
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:web-sys",
+]
+
+# --- Native (non-wasm) target dependencies ---
+# Tokio keeps the full workspace feature set (including `net` and
+# `rt-multi-thread`); the `Connection::connect` TCP path is `cfg`-gated to this
+# target. This is a build-configuration split only: native behaviour is
+# unchanged.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { workspace = true }
+# `rsa` encrypts the shared secret + verify token with the server's public key
+# during the handshake, and `rand` supplies the CSPRNG for the secret and for
+# PKCS#1 v1.5 padding. `rsa` 0.9 is built against `rand_core` 0.6, so `rand` is
+# pinned to 0.8 (whose `OsRng` implements that `rand_core`) for interop.
+#
+# These are **native-only on purpose**: `rsa` 0.9 → `rand_core` 0.6 →
+# `getrandom` 0.2, whose wasm support is a separate opt-in from the `getrandom`
+# 0.4 the rest of the tree uses. Rather than shim a third `getrandom` major into
+# the browser build for a path it cannot reach yet (online-mode auth needs the
+# native-only `lodestone-auth`), the handshake RNG/RSA helpers are confined here
+# and the pure `Cfb8Cipher` stays cross-platform. This also shrinks the `.wasm`.
+rsa = { workspace = true }
+rand = { workspace = true }
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink"] }
+# SRV resolution (`_minecraft._tcp.<host>`). Real servers are very often behind a
+# service record and cannot be reached by their advertised address without it.
+# Native-only: it needs UDP sockets, which the browser transport does not have.
+hickory-resolver = { workspace = true }
+
+# Dev-only: the `#[ignore]`d online-mode handshake smoke test builds login
+# packets by hand and needs a profile UUID.
+[dev-dependencies]
+uuid = { workspace = true }
+# `test-util` enables a paused clock so the connect-timeout test fires
+# deterministically without real waiting or network access.
+tokio = { workspace = true, features = ["test-util"] }
+
+# --- wasm32 target dependencies ---
+# `wasm32-unknown-unknown` cannot build `mio`, so tokio takes only the features
+# it actually supports there (`sync, macros, io-util, rt, time`). The sans-IO
+# `Codec` and the generic `Transport` trait carry over untouched.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", default-features = false, features = [
+    "sync",
+    "macros",
+    "io-util",
+    "rt",
+    "time",
+] }
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "BinaryType",
+    "CloseEvent",
+    "ErrorEvent",
+    "Event",
+    "MessageEvent",
+    "WebSocket",
+] }

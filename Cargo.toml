@@ -1,0 +1,82 @@
+[workspace]
+resolver = "3"
+# `crates/lodestone-*` deliberately avoids matching the `crates/protocol/` grouping dir.
+members = ["crates/lodestone-*", "crates/protocol/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/matthew/lodestone"
+
+[workspace.dependencies]
+lodestone-core   = { path = "crates/lodestone-core" }
+lodestone-macros = { path = "crates/lodestone-macros" }
+lodestone-model  = { path = "crates/lodestone-model" }
+lodestone-world  = { path = "crates/lodestone-world" }
+lodestone-net    = { path = "crates/lodestone-net" }
+lodestone-client = { path = "crates/lodestone-client" }
+lodestone-assets = { path = "crates/lodestone-assets" }
+lodestone-registry = { path = "crates/lodestone-registry" }
+lodestone-testsupport = { path = "crates/lodestone-testsupport" }
+lodestone-v770   = { path = "crates/protocol/v770" }
+lodestone-v47    = { path = "crates/protocol/v47" }
+lodestone-v340 = { path = "crates/protocol/v340" }
+lodestone-v735 = { path = "crates/protocol/v735" }
+
+thiserror = "2"
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+tempfile = "3"
+png = "0.18"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v3", "v4", "js"] }
+flate2 = "1"
+wasm-bindgen-futures = "0.4"
+syn = { version = "3", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+serde_json = "1"
+anyhow = "1"
+wgpu = "30"
+winit = "0.30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.33"
+rayon = "1.12"
+
+# --- Networking / crypto / auth (owned by lodestone-net + lodestone-auth) ---
+# AES-128-CFB8 online-mode cipher (pure-Rust RustCrypto, wasm-safe). `rsa` 0.9 is
+# built against `rand_core` 0.6, so `rand` is pinned to 0.8 for interop.
+aes = "0.9"
+cfb8 = "0.9"
+rsa = "0.9"
+rand = "0.8"
+sha1 = "0.10"
+num-bigint = "0.4"
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+# HTTP client for the MS OAuth / Xbox / XSTS / Minecraft-services chain and the
+# session-server join. `rustls` avoids a system OpenSSL dependency.
+reqwest = { version = "0.13", default-features = false, features = [
+    "json",
+    "form",
+    "rustls",
+    "http2",
+    "charset",
+] }
+# SRV record resolution (`_minecraft._tcp.<host>`) for real servers behind a
+# service record. Native-only (needs UDP sockets).
+hickory-resolver = "0.26"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
