@@ -1078,24 +1078,31 @@ async fn mid_frame_eof_is_transport_error() {
     }
 }
 
-/// An adapter error from `handle_packet` is surfaced, not swallowed.
+/// A decode error from `handle_packet` is **not** fatal: the packet is dropped
+/// and the session keeps running. Each packet is transport-framed, so a payload
+/// the adapter cannot parse never desyncs the stream — killing the session on
+/// one would turn every future forward-compatible wire addition into an outage.
 #[tokio::test]
-async fn adapter_error_is_surfaced() {
+async fn decode_error_drops_packet_and_keeps_session() {
     const BAD: i32 = 9;
-    let adapter = FakeAdapter::new().fail_on(ConnectionState::Handshaking, BAD);
+    const GOOD: i32 = 0x50;
+    let adapter = FakeAdapter::new().fail_on(ConnectionState::Handshaking, BAD).on(
+        ConnectionState::Handshaking,
+        GOOD,
+        vec![Directive::Emit(ClientEvent::KeepAlive { id: 7 })],
+    );
 
-    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Manual);
 
+    // The undecodable packet must be dropped, not fatal.
     peer.write_packet(BAD, &[]).await.unwrap();
+    // A well-formed packet after it must still be processed, proving the read
+    // loop survived and stayed in sync.
+    peer.write_packet(GOOD, &[]).await.unwrap();
 
-    // Stream closes because the session ended.
-    assert_eq!(events.recv().await, None);
-
-    match handle.join().await {
-        SessionOutcome::Failed(lodestone_client::ClientError::Adapter(AdapterError::Decode(_))) => {
-        }
-        other => panic!("expected adapter error, got {other:?}"),
-    }
+    assert_eq!(events.recv().await, Some(ClientEvent::KeepAlive { id: 7 }));
+    assert!(!handle.is_finished(), "decode error must not end the session");
+    drop(handle);
 }
 
 /// An action the adapter cannot encode (returns `None`) is dropped without

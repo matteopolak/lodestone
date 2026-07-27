@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
-    ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress,
-    VersionAdapter,
+    AdapterError, ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile,
+    ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
 use tokio::sync::{mpsc, oneshot};
@@ -205,6 +205,25 @@ impl<T: Transport> Driver<T> {
                                     if let Step::Stop(outcome) = self.execute(directives).await {
                                         return *outcome;
                                     }
+                                }
+                                Err(AdapterError::Decode(message)) => {
+                                    // Fail-open on decode errors. Each packet is
+                                    // length-framed by the transport, so a
+                                    // payload we cannot parse never desyncs the
+                                    // next packet — dropping it keeps the session
+                                    // alive. This matters because the wire is
+                                    // forward-compatible and open-ended (item
+                                    // data components, entity metadata, …): a
+                                    // client that dies on the first unrecognised
+                                    // structure turns every future server-side
+                                    // addition into an outage. Genuinely
+                                    // unrecoverable errors (unsupported feature
+                                    // or state) still fall through and end it.
+                                    tracing::error!(
+                                        packet_id,
+                                        %message,
+                                        "dropping undecodable packet and continuing session",
+                                    );
                                 }
                                 Err(error) => {
                                     tracing::error!(%error, packet_id, "adapter rejected packet");
