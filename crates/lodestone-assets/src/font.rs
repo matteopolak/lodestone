@@ -41,6 +41,28 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// The advance of vanilla's "missing glyph" (a 5px hollow box, `width + 1`).
 pub const MISSING_ADVANCE: f32 = 6.0;
 
+/// Vanilla draw-side metrics the renderer needs to reproduce the game's text
+/// exactly. These are *render constants*, not per-pack data — the asset side
+/// exposes them by name so the shell/renderer don't hardcode magic numbers that
+/// silently drift from vanilla. All values are in logical (GUI) pixels and match
+/// `net.minecraft.client.gui.Font` in the 26.2 client.
+pub mod metrics {
+    /// Baseline-to-baseline line height (`Font.lineHeight`). Chat, tab list and
+    /// tooltips advance by this per line.
+    pub const LINE_HEIGHT: f32 = 9.0;
+    /// Drop-shadow offset: the shadow copy is drawn `+1` px right and down.
+    pub const SHADOW_OFFSET: f32 = 1.0;
+    /// Drop-shadow brightness: the shadow colour is the text colour scaled to
+    /// 25% (`* 0.25`), alpha preserved.
+    pub const SHADOW_BRIGHTNESS: f32 = 0.25;
+    /// Bold extra advance: bold text advances `+1` px per glyph (the glyph is
+    /// also drawn a second time offset by this to thicken it).
+    pub const BOLD_OFFSET: f32 = 1.0;
+    /// Italic shear: the top of each glyph is sheared `+1` px relative to the
+    /// bottom (vanilla shears by 1 over the glyph height).
+    pub const ITALIC_SHEAR: f32 = 1.0;
+}
+
 /// A font option that can gate a conditional provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FontOption {

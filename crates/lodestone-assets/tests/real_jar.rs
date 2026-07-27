@@ -1266,6 +1266,21 @@ fn font_default_advances_and_whole_corpus_coverage() {
         );
     }
 
+    // The total measured width of a known string must equal the sum of its
+    // glyph advances, computed against the REAL ascii.png bitmaps. "ilI!." mixes
+    // the narrowest glyphs (2+3+4+2+2 = 13); a fixed-advance font would report
+    // 5 * cell_width instead and fail here.
+    assert_eq!(
+        font.string_width("ilI!."),
+        13.0,
+        "string width must sum real per-glyph advances"
+    );
+    let independent: f32 = "ilI!."
+        .chars()
+        .map(|c| font.advance(c as u32).unwrap())
+        .sum();
+    assert_eq!(font.string_width("ilI!."), independent);
+
     // Whole-corpus census of every font definition in the jar.
     let prefix = "assets/minecraft/font/";
     let mut names: Vec<String> = manager
