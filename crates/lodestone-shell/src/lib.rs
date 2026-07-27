@@ -38,7 +38,9 @@ pub mod mesher;
 pub mod net;
 pub mod overlay;
 pub mod raycast;
+pub mod scoreboard;
 pub mod sim;
+pub mod tablist;
 pub mod worldgen;
 
 pub use config::{CliOutcome, Config, Mode};
