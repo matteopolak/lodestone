@@ -54,6 +54,9 @@ pub enum AssetError {
     /// `pack.mcmeta` was present but could not be parsed.
     #[error("malformed pack.mcmeta: {0}")]
     MetaMalformed(String),
+    /// A language file was present but was not a valid flat JSON object.
+    #[error("malformed language file: {0}")]
+    LangMalformed(String),
 }
 
 /// Errors produced while parsing blockstate JSON.
