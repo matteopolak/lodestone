@@ -241,8 +241,13 @@ struct SectionGpu {
 /// [`ModelPipeline`].
 #[derive(Debug)]
 struct ModelSectionGpu {
-    mesh: GpuModelMesh,
+    /// Opaque block geometry (with lava merged in), if any.
+    mesh: Option<GpuModelMesh>,
     quad_count: usize,
+    /// Translucent water surface geometry for this section, if any. Drawn on the
+    /// fluid pass after all opaque geometry so the sea floor shows through.
+    water: Option<GpuModelMesh>,
+    water_quad_count: usize,
     origin: [f32; 3],
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
@@ -256,6 +261,10 @@ struct ModelSectionGpu {
 #[derive(Debug)]
 struct ModelRenderer {
     pipeline: ModelPipeline,
+    /// The translucent fluid pipeline (no cutout discard, water tint, alpha
+    /// blend, depth-test on / depth-write off). Shares the model camera and
+    /// atlas bind groups.
+    water_pipeline: ModelPipeline,
     #[allow(dead_code)]
     atlas: GpuAtlas,
     atlas_bind_group: wgpu::BindGroup,
@@ -452,10 +461,12 @@ impl RenderState {
         // so this stays `None` and terrain draws through the packed pipeline.
         let model = vanilla.and_then(BlockAtlas::models).map(|models| {
             let pipeline = ModelPipeline::new(device, color_format);
+            let water_pipeline = ModelPipeline::for_fluid(device, color_format);
             let atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
             let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
             ModelRenderer {
                 pipeline,
+                water_pipeline,
                 atlas,
                 atlas_bind_group,
                 sections: HashMap::new(),
@@ -508,39 +519,42 @@ impl RenderState {
     ) {
         match mesh {
             SectionGeometry::Packed(mesh) => self.upload_packed_section(device, key, mesh),
-            SectionGeometry::Model(mesh) => {
+            SectionGeometry::Model { opaque, water } => {
                 let Some(model) = self.model.as_mut() else {
                     return;
                 };
                 let origin = key.origin();
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
-                match GpuModelMesh::upload(device, mesh) {
-                    None => {
-                        model.sections.remove(&key);
-                    }
-                    Some(gpu_mesh) => {
-                        // Placeholder uniform; overwritten every frame with the live camera.
-                        let cam_buffer = model_camera_buffer(
-                            device,
-                            CameraUniform {
-                                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                                section_origin: [origin_f[0], origin_f[1], origin_f[2], 0.0],
-                            },
-                        );
-                        let cam_bind_group =
-                            model.pipeline.camera_bind_group(device, &cam_buffer);
-                        model.sections.insert(
-                            key,
-                            ModelSectionGpu {
-                                mesh: gpu_mesh,
-                                quad_count: mesh.quad_count(),
-                                origin: origin_f,
-                                cam_buffer,
-                                cam_bind_group,
-                            },
-                        );
-                    }
+                let opaque_gpu = GpuModelMesh::upload(device, opaque);
+                let water_gpu = GpuModelMesh::upload(device, water);
+                // A section may carry only opaque terrain, only water (an ocean
+                // surface section with no solid blocks), or both. Drop it only
+                // when neither has geometry.
+                if opaque_gpu.is_none() && water_gpu.is_none() {
+                    model.sections.remove(&key);
+                    return;
                 }
+                // Placeholder uniform; overwritten every frame with the live camera.
+                let cam_buffer = model_camera_buffer(
+                    device,
+                    CameraUniform {
+                        view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                        section_origin: [origin_f[0], origin_f[1], origin_f[2], 0.0],
+                    },
+                );
+                let cam_bind_group = model.pipeline.camera_bind_group(device, &cam_buffer);
+                model.sections.insert(
+                    key,
+                    ModelSectionGpu {
+                        mesh: opaque_gpu,
+                        quad_count: opaque.quad_count(),
+                        water: water_gpu,
+                        water_quad_count: water.quad_count(),
+                        origin: origin_f,
+                        cam_buffer,
+                        cam_bind_group,
+                    },
+                );
             }
         }
     }
@@ -699,16 +713,34 @@ impl RenderState {
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 for section in model.sections.values() {
+                    let Some(mesh) = section.mesh.as_ref() else {
+                        continue;
+                    };
                     pass.set_bind_group(0, &section.cam_bind_group, &[]);
-                    pass.set_vertex_buffer(0, section.mesh.vertices.slice(..));
-                    pass.set_index_buffer(
-                        section.mesh.indices.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(0..section.mesh.index_count, 0, 0..1);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
                     stats.sections_drawn += 1;
                     stats.draw_calls += 1;
                     stats.total_quads += section.quad_count;
+                }
+
+                // Translucent water, drawn after all opaque model terrain so the
+                // sea floor already written to depth shows through the surface
+                // (depth test on, depth write off, alpha blend — the fluid
+                // pipeline). Same camera + atlas bind groups as the opaque pass.
+                pass.set_pipeline(&model.water_pipeline.pipeline);
+                pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                for section in model.sections.values() {
+                    let Some(water) = section.water.as_ref() else {
+                        continue;
+                    };
+                    pass.set_bind_group(0, &section.cam_bind_group, &[]);
+                    pass.set_vertex_buffer(0, water.vertices.slice(..));
+                    pass.set_index_buffer(water.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..water.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                    stats.total_quads += section.water_quad_count;
                 }
             }
 
