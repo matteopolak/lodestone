@@ -26,8 +26,48 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use super::{Context, Density};
+
+/// Minimal FxHash-style hasher for the corner cache's `(i32, i32, i32)` keys.
+/// The default `HashMap` uses SipHash, which is DoS-resistant but slow; these
+/// keys are trusted internal cell coordinates, so a multiply-xor fold is both
+/// correct and far cheaper. Choice of hasher is value-invariant — it changes
+/// only lookup speed, never which corner value is stored or returned — so it
+/// cannot affect worldgen parity.
+#[derive(Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, i: u64) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        self.hash = (self.hash.rotate_left(5) ^ i).wrapping_mul(K);
+    }
+}
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.add(u64::from(b));
+        }
+    }
+    #[inline]
+    fn write_i32(&mut self, i: i32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+type FxBuild = BuildHasherDefault<FxHasher>;
+type CornerCache = HashMap<(i32, i32, i32), f64, FxBuild>;
 
 /// A stateless-per-block reimplementation of vanilla's `NoiseChunk` block field
 /// for one column of density functions.
@@ -43,7 +83,7 @@ pub struct NoiseChunkSampler {
     root: Density,
     cell_width: i32,
     cell_height: i32,
-    caches: Vec<RefCell<HashMap<(i32, i32, i32), f64>>>,
+    caches: Vec<RefCell<CornerCache>>,
 }
 
 impl NoiseChunkSampler {
@@ -53,7 +93,7 @@ impl NoiseChunkSampler {
     #[must_use]
     pub fn new(root: Density, slot_count: usize, cell_width: i32, cell_height: i32) -> Self {
         let caches = (0..slot_count)
-            .map(|_| RefCell::new(HashMap::new()))
+            .map(|_| RefCell::new(CornerCache::default()))
             .collect();
         Self {
             root,
