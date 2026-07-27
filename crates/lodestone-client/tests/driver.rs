@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use lodestone_client::{
     ChatAckInfo, ChatKind, ClientAction, ClientBuilder, ClientEvent, ConnectionState, Directive,
-    KeepAlivePolicy, LoginProfile, RespawnPolicy, ServerAddress, SessionOutcome, VersionAdapter,
+    KeepAlivePolicy, LoginProfile, PlayerLoadedPolicy, RespawnPolicy, ServerAddress,
+    SessionOutcome, VersionAdapter,
 };
 use lodestone_model::{AdapterError, GameMode, Identifier, Rotation, TeleportFlags, Text, Vec3};
 use lodestone_net::{Connection, memory_pair};
@@ -270,6 +271,21 @@ fn start_with(
     let (handle, events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
         .keep_alive_policy(keep_alive)
         .respawn_policy(respawn)
+        .connect_with(client_io);
+    (handle, events, Connection::new(server_io))
+}
+
+fn start_with_player_loaded(
+    adapter: FakeAdapter,
+    player_loaded: PlayerLoadedPolicy,
+) -> (
+    lodestone_client::ClientHandle,
+    lodestone_client::EventStream,
+    Connection<tokio::io::DuplexStream>,
+) {
+    let (client_io, server_io) = memory_pair();
+    let (handle, events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .player_loaded_policy(player_loaded)
         .connect_with(client_io);
     (handle, events, Connection::new(server_io))
 }
@@ -609,6 +625,59 @@ async fn player_loaded_not_sent_before_login() {
     assert_eq!(
         id, KEEPALIVE_RESP_ID,
         "no player_loaded should be sent before entering the world"
+    );
+
+    drop(handle);
+}
+
+/// Negative control for the `player_loaded` mechanism: under
+/// [`PlayerLoadedPolicy::Manual`] the driver must NOT announce readiness, even on
+/// the placement teleport that would normally trigger it. This is the suppression
+/// path a live gate uses to demonstrate the server's client-load window — with it
+/// the server keeps ignoring movement; with the default automatic policy it does
+/// not. Proven the same way as the pre-login control: the keep-alive response is
+/// the first packet on the wire, which only holds if no `player_loaded` preceded
+/// it despite login + a placement teleport.
+#[tokio::test]
+async fn player_loaded_suppressed_under_manual_policy() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const KEEPALIVE_PKT: i32 = 0x41;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            KEEPALIVE_PKT,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 7 })],
+        );
+
+    let (handle, mut events, mut peer) =
+        start_with_player_loaded(adapter, PlayerLoadedPolicy::Manual);
+
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Login
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // TeleportPlayer — no player_loaded under Manual
+
+    // If a player_loaded had leaked, it would be the first wire packet; instead
+    // the keep-alive response is, proving the placement teleport sent nothing.
+    peer.write_packet(KEEPALIVE_PKT, &[]).await.unwrap();
+    let (id, _payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(
+        id, KEEPALIVE_RESP_ID,
+        "Manual policy must suppress player_loaded entirely"
     );
 
     drop(handle);

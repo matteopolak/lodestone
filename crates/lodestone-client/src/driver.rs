@@ -10,7 +10,7 @@ use lodestone_model::{
 use lodestone_net::{Connection, NetError, Transport};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::{KeepAlivePolicy, RespawnPolicy};
+use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 use crate::error::{ClientError, SessionOutcome};
 use crate::state::SharedState;
 
@@ -49,6 +49,7 @@ pub(crate) struct Driver<T: Transport> {
     events: mpsc::Sender<ClientEvent>,
     keep_alive: KeepAlivePolicy,
     respawn: RespawnPolicy,
+    player_loaded: PlayerLoadedPolicy,
     read_timeout: Option<Duration>,
     profile: LoginProfile,
     server: ServerAddress,
@@ -92,6 +93,7 @@ impl<T: Transport> Driver<T> {
         events: mpsc::Sender<ClientEvent>,
         keep_alive: KeepAlivePolicy,
         respawn: RespawnPolicy,
+        player_loaded: PlayerLoadedPolicy,
         read_timeout: Option<Duration>,
         profile: LoginProfile,
         server: ServerAddress,
@@ -104,6 +106,7 @@ impl<T: Transport> Driver<T> {
             events,
             keep_alive,
             respawn,
+            player_loaded,
             read_timeout,
             profile,
             server,
@@ -328,11 +331,15 @@ impl<T: Transport> Driver<T> {
             ClientEvent::TeleportPlayer { .. } if self.awaiting_player_load => {
                 // The first teleport after entering the world (or after a
                 // respawn) is the server placing us — the moment vanilla is
-                // genuinely ready to be moved and sends `player_loaded`. Fire
-                // exactly once per load-epoch; a later teleport in the same epoch
-                // finds the latch disarmed and falls through untouched.
-                auto_actions.push(ClientAction::PlayerLoaded);
+                // genuinely ready to be moved and sends `player_loaded`. Consume
+                // the latch here regardless of policy (it tracks the load-epoch),
+                // but only announce readiness when the policy is automatic; a
+                // later teleport in the same epoch finds the latch disarmed and
+                // falls through untouched.
                 self.awaiting_player_load = false;
+                if self.player_loaded.is_automatic() {
+                    auto_actions.push(ClientAction::PlayerLoaded);
+                }
             }
             ClientEvent::Death { .. } => {
                 // The server re-seeds its load-timeout timer on respawn, so

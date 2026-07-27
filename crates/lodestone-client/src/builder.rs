@@ -6,7 +6,7 @@ use lodestone_model::{LoginProfile, ServerAddress, VersionAdapter};
 use lodestone_net::{Connection, Transport};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::config::{KeepAlivePolicy, RespawnPolicy};
+use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 use crate::driver::Driver;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::ClientError;
@@ -28,6 +28,7 @@ pub struct ClientBuilder {
     adapter: Box<dyn VersionAdapter>,
     keep_alive: KeepAlivePolicy,
     respawn: RespawnPolicy,
+    player_loaded: PlayerLoadedPolicy,
     read_timeout: Option<Duration>,
     // Only read by the native-only `connect()` (TCP). On wasm the transport is
     // always supplied via `connect_with`, so this is intentionally unused there.
@@ -50,6 +51,7 @@ impl ClientBuilder {
             adapter,
             keep_alive: KeepAlivePolicy::default(),
             respawn: RespawnPolicy::default(),
+            player_loaded: PlayerLoadedPolicy::default(),
             read_timeout: None,
             connect_timeout: None,
             event_buffer: DEFAULT_EVENT_BUFFER,
@@ -68,6 +70,17 @@ impl ClientBuilder {
     #[must_use]
     pub fn respawn_policy(mut self, policy: RespawnPolicy) -> Self {
         self.respawn = policy;
+        self
+    }
+
+    /// Sets the client-loaded policy. Defaults to
+    /// [`PlayerLoadedPolicy::Automatic`], which announces client-readiness after
+    /// each join/respawn so the server stops ignoring the player's movement.
+    /// Choose [`PlayerLoadedPolicy::Manual`] only to deliberately observe the
+    /// server's client-load window.
+    #[must_use]
+    pub fn player_loaded_policy(mut self, policy: PlayerLoadedPolicy) -> Self {
+        self.player_loaded = policy;
         self
     }
 
@@ -156,6 +169,7 @@ impl ClientBuilder {
             events_tx,
             self.keep_alive,
             self.respawn,
+            self.player_loaded,
             self.read_timeout,
             self.profile,
             self.server,
