@@ -841,6 +841,7 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
     let item = ItemStack {
         item: ResourceKey::from_str("minecraft:stone").expect("item key"),
         count: 64,
+        components: ItemComponents::default(),
     };
 
     let events = [
@@ -1023,10 +1024,12 @@ fn client_actions_cover_modern_play_interactions_without_protocol_ids() {
     let stone = ItemStack {
         item: ResourceKey::from_str("minecraft:stone").expect("item key"),
         count: 32,
+        components: ItemComponents::default(),
     };
     let stick = ItemStack {
         item: ResourceKey::from_str("minecraft:stick").expect("item key"),
         count: 1,
+        components: ItemComponents::default(),
     };
 
     let actions = vec![
