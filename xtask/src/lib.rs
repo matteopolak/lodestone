@@ -4722,6 +4722,27 @@ pub fn default_registry_specs() -> Vec<RegistryCodegenSpec> {
     ]
 }
 
+/// Registry specs recognised by `--registries` beyond [`default_registry_specs`].
+///
+/// The default set is what conformance regenerates and drift-checks for every
+/// family; `data_component_type` is opt-in because only 1.20.5+ reports it, so
+/// it is generated explicitly for the families that carry item component
+/// patches rather than folded into the family-agnostic default sweep.
+#[must_use]
+pub fn known_registry_specs() -> Vec<RegistryCodegenSpec> {
+    let mut specs = default_registry_specs();
+    specs.push(RegistryCodegenSpec {
+        registry_key: "minecraft:data_component_type",
+        file_name: "data_component_types.rs",
+        module_stem: "data_component_types",
+        count_const: "DATA_COMPONENT_TYPE_COUNT",
+        names_const: "DATA_COMPONENT_TYPE_NAMES",
+        noun: "data component type",
+        packet_context: "an item stack's DataComponentPatch identifies each added or removed component by a data-component-type registry id",
+    });
+    specs
+}
+
 pub fn parse_registry_report(
     json: &str,
     specs: &[RegistryCodegenSpec],
@@ -4960,19 +4981,22 @@ fn load_registry_tables(
 }
 
 fn resolve_registry_specs(registry_keys: &[String]) -> Result<Vec<RegistryCodegenSpec>> {
-    let defaults = default_registry_specs();
+    let known = known_registry_specs();
     registry_keys
         .iter()
         .map(|key| {
             let normalized = normalize_registry_key(key);
-            defaults
+            known
                 .iter()
                 .copied()
                 .find(|spec| spec.registry_key == normalized)
                 .ok_or_else(|| {
-                    anyhow!(
-                        "unsupported registry {normalized:?}; supported registries are sound_event, particle_type, menu, item"
-                    )
+                    let supported = known
+                        .iter()
+                        .map(|spec| spec.registry_key.trim_start_matches("minecraft:"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow!("unsupported registry {normalized:?}; supported registries are {supported}")
                 })
         })
         .collect()
