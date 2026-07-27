@@ -26,14 +26,15 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 
 use lodestone_render::{
-    ChunkSectionView, Mesh, SectionLight, SectionNeighborhood, SkyDefault, UniformLight,
-    WorldSectionLight, mesh_simple,
+    BlockClassifier, ChunkSectionView, Mesh, SectionLight, SectionNeighborhood, SkyDefault,
+    UniformLight, WorldSectionLight, mesh_simple,
 };
 use lodestone_world::{
     ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
 
-use crate::blocks::{DemoClassifier, id};
+use crate::blocks::{ShellClassifier, id};
+use crate::net::NetClient;
 
 /// Identifies one 16³ section: its column plus the section index within that
 /// column (`0` is the lowest section).
@@ -164,6 +165,84 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
     })
 }
 
+/// Build a [`SectionSnapshot`] for `key` from the **live client world**, reading
+/// blocks and light for the whole 27-section neighbourhood under one lock via
+/// [`NetClient::sections_and_light_at`]. Returns `None` when the centre section
+/// holds no geometry (unloaded or all-air), exactly like [`snapshot_section`].
+///
+/// `section_count` is the column's block-section count from
+/// [`NetClient::world_dimensions`]; `key.min_y` must be the dimension's `min_y`.
+/// Light is **server-authoritative**: this never recomputes it (recomputing on
+/// multiplayer would overwrite the server's seam-complete cross-chunk light with
+/// a partial result — a divergence bug). Light-section indexing is the
+/// off-by-one-by-design `(n, n + 1)` the handle documents.
+///
+/// Only vertically in-range neighbours (`0 <= si + dy < section_count`) are
+/// requested; a neighbour above the top or below the bottom of the world is an
+/// air section with the full-bright bridge for light (open sky above is bright
+/// anyway, and below-world is rarely visible) — the same absent-neighbour policy
+/// [`mesh_snapshot`] applies at horizontal world edges.
+#[must_use]
+pub fn snapshot_section_live(
+    net: &NetClient,
+    key: SectionKey,
+    section_count: usize,
+) -> Option<SectionSnapshot> {
+    let idx = |dx: i32, dy: i32, dz: i32| ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
+
+    // Gather requests only for vertically in-range neighbours; remember which of
+    // the 27 slots each result belongs to so the snapshot stays aligned. The
+    // request key is the client's `ChunkPos` (the network world's id type), which
+    // is distinct from `lodestone_world::ChunkPos` used for the local world.
+    let mut reqs: Vec<(lodestone_client::ChunkPos, usize, usize)> = Vec::with_capacity(27);
+    let mut slot_of_req: Vec<usize> = Vec::with_capacity(27);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let bsec = key.si as i32 + dy;
+                if bsec >= 0 && (bsec as usize) < section_count {
+                    let pos = lodestone_client::ChunkPos {
+                        x: key.cx + dx,
+                        z: key.cz + dz,
+                    };
+                    // Block section `bsec` reads light section `bsec + 1`
+                    // (off-by-one BY DESIGN — do not "align" it).
+                    reqs.push((pos, bsec as usize, (bsec + 1) as usize));
+                    slot_of_req.push(idx(dx, dy, dz));
+                }
+            }
+        }
+    }
+
+    let results = net.sections_and_light_at(&reqs);
+
+    // Absent slots (out-of-range vertical neighbours) start as lit air + bridge.
+    let mut sections: Vec<ChunkSection> = (0..27).map(|_| air_section()).collect();
+    let mut lights: Vec<Option<SectionLightData>> = (0..27).map(|_| None).collect();
+    for ((block, light), &slot) in results.into_iter().zip(slot_of_req.iter()) {
+        if let Some(block) = block {
+            // Clone the section out of the shared Arc so the snapshot is owned and
+            // `Send`; the live world is never locked while meshing.
+            sections[slot] = (*block).clone();
+        }
+        lights[slot] = light;
+    }
+
+    // Nothing to mesh if the centre is unloaded / all-air.
+    if is_all_air(&sections[idx(0, 0, 0)]) {
+        return None;
+    }
+
+    Some(SectionSnapshot {
+        key,
+        sections,
+        lights,
+        // The live path currently drives the overworld; a nether/end driver would
+        // pass `SkyDefault::None` here (the too-bright-nether guard).
+        sky_default: SkyDefault::Full,
+    })
+}
+
 fn is_all_air(section: &ChunkSection) -> bool {
     // A cheap proxy: scan is unnecessary because ChunkSection tracks non-air.
     // We conservatively mesh any section that has at least one non-air block.
@@ -210,9 +289,12 @@ impl SectionLight for SnapLight<'_> {
 }
 
 /// Mesh a snapshot into geometry. Pure and thread-safe: touches only the owned
-/// snapshot and a stateless classifier.
+/// snapshot and a stateless classifier. Generic over the [`BlockClassifier`] so
+/// the same code meshes the demo world (via [`crate::blocks::DemoClassifier`])
+/// and the live vanilla world (via a [`crate::blocks::ShellClassifier::Vanilla`]
+/// atlas) without duplication.
 #[must_use]
-pub fn mesh_snapshot(snapshot: &SectionSnapshot, classifier: &DemoClassifier) -> Mesh {
+pub fn mesh_snapshot<C: BlockClassifier>(snapshot: &SectionSnapshot, classifier: &C) -> Mesh {
     // Real per-section light, replacing the retired full-bright bridge. Each
     // present neighbour forwards the world's resolved sky/block levels verbatim
     // (with the dimension's `SkyDefault` applied only to genuinely-absent sky);
@@ -234,7 +316,7 @@ pub fn mesh_snapshot(snapshot: &SectionSnapshot, classifier: &DemoClassifier) ->
     }
 
     // Build a view per neighbour section, then assemble the neighbourhood.
-    let mut views: Vec<ChunkSectionView<'_, DemoClassifier, SnapLight<'_>>> = Vec::with_capacity(27);
+    let mut views: Vec<ChunkSectionView<'_, C, SnapLight<'_>>> = Vec::with_capacity(27);
     let mut i = 0usize;
     for dx in -1..=1 {
         for dy in -1..=1 {
@@ -289,9 +371,14 @@ pub struct MeshScheduler {
 }
 
 impl MeshScheduler {
-    /// Spawn `worker_count` (min 1) meshing threads.
+    /// Spawn `worker_count` (min 1) meshing threads, each meshing with a clone of
+    /// `classifier`. The classifier picks the id space: a
+    /// [`ShellClassifier::Demo`] pool meshes the offline demo world, a
+    /// [`ShellClassifier::Vanilla`] pool meshes the live server's vanilla world.
+    /// The atlas behind the vanilla variant is `Arc`-shared, so a per-worker
+    /// clone is a refcount bump.
     #[must_use]
-    pub fn new(worker_count: usize) -> Self {
+    pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
         let worker_count = worker_count.max(1);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (result_tx, result_rx) = mpsc::channel::<Meshed>();
@@ -301,8 +388,8 @@ impl MeshScheduler {
         for _ in 0..worker_count {
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
+            let classifier = classifier.clone();
             workers.push(thread::spawn(move || {
-                let classifier = DemoClassifier;
                 loop {
                     let job = {
                         let lock = job_rx.lock().expect("mesh job queue poisoned");
@@ -391,6 +478,7 @@ impl Drop for MeshScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::DemoClassifier;
 
     fn assert_send<T: Send>() {}
 
@@ -445,7 +533,7 @@ mod tests {
     #[test]
     fn scheduler_meshes_many_sections() {
         let world = crate::worldgen::generate(1);
-        let mut scheduler = MeshScheduler::new(3);
+        let mut scheduler = MeshScheduler::new(3, ShellClassifier::Demo(DemoClassifier));
         let mut submitted = 0;
         for cz in -1..=1 {
             for cx in -1..=1 {

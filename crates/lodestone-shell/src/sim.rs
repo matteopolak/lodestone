@@ -4,13 +4,14 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use lodestone_client::{ClientAction, OpenMenuSnapshot};
 use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
 use lodestone_game::menu::Menu;
 use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
-use lodestone_render::Camera;
+use lodestone_render::{BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
 
 use crate::audio::ShellAudio;
@@ -21,10 +22,11 @@ use crate::collision::WorldCollision;
 use crate::config::Config;
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
-use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section};
+use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section, snapshot_section_live};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
 use crate::raycast::{REACH, RayHit, raycast};
+use crate::resources::BlockResources;
 use crate::worldgen;
 
 /// Fixed physics timestep: 20 ticks per second, like vanilla.
@@ -75,6 +77,15 @@ pub struct Sim {
     /// Sections whose geometry vanished (all-air after an edit) and must be
     /// dropped from the GPU. Drained by the app each frame.
     pending_removals: Vec<SectionKey>,
+    /// The stitched vanilla atlas for the live world, or `None` when running on
+    /// the demo palette. Its presence is the single discriminant for "render the
+    /// live server world with the vanilla atlas" vs "mesh the demo world": the
+    /// two use disjoint block-id spaces and must never be meshed with the wrong
+    /// classifier.
+    vanilla_atlas: Option<Arc<BlockAtlas>>,
+    /// Debug-overlay line set when vanilla assets failed to load and the session
+    /// fell back to the demo palette.
+    asset_banner: Option<String>,
     /// Coarse lifecycle of the live connection, driven by [`NetUpdate`]s. The
     /// app maps this onto the menu state machine (Connecting → ready on
     /// [`SessionPhase::Connected`], → failed on [`SessionPhase::Ended`]).
@@ -163,25 +174,44 @@ impl Sim {
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(2);
-        let mut scheduler = MeshScheduler::new(workers);
 
-        // Schedule every section that holds geometry.
-        for (pos, chunk) in world_sections(&world) {
-            for si in 0..chunk {
-                let key = SectionKey {
-                    cx: pos.0,
-                    cz: pos.1,
-                    si,
-                    min_y: worldgen::MIN_Y,
-                };
-                if let Some(snap) = snapshot_section(&world, key) {
-                    scheduler.submit(snap);
+        // Pick the block-id world once. A live multiplayer session wants the
+        // vanilla atlas (its world streams vanilla ids); the offline dev world
+        // uses the demo palette. A vanilla load failure falls back to demo and
+        // records a banner rather than rendering an invisible world.
+        let resources = BlockResources::load(config.connect_in_window);
+        let render_live = resources.vanilla_atlas.is_some();
+        let mut scheduler = MeshScheduler::new(workers, resources.classifier);
+
+        // Schedule the demo world only when meshing on the demo palette. Under
+        // the vanilla atlas the demo world's ids would misclassify, so it is left
+        // unmeshed and the live server world is meshed instead (on chunk arrival,
+        // see `mark_column_dirty`).
+        if !render_live {
+            for (pos, chunk) in world_sections(&world) {
+                for si in 0..chunk {
+                    let key = SectionKey {
+                        cx: pos.0,
+                        cz: pos.1,
+                        si,
+                        min_y: worldgen::MIN_Y,
+                    };
+                    if let Some(snap) = snapshot_section(&world, key) {
+                        scheduler.submit(snap);
+                    }
                 }
             }
         }
 
+        let status = if render_live {
+            "live world (vanilla atlas)".to_string()
+        } else if let Some(banner) = &resources.banner {
+            format!("demo palette — {banner}")
+        } else {
+            "local world".to_string()
+        };
         let mut stats = DebugStats {
-            status: "local world".into(),
+            status: status.clone(),
             ..Default::default()
         };
         stats.chunk_count = world.len();
@@ -198,13 +228,15 @@ impl Sim {
             net: None,
             accumulator: 0.0,
             last_step: Instant::now(),
-            status: "local world".into(),
+            status,
             prev_position: player.position,
             interp_alpha: 0.0,
             tick_count: 0,
             frame_count: 0,
             fly: false,
             pending_removals: Vec::new(),
+            vanilla_atlas: resources.vanilla_atlas,
+            asset_banner: resources.banner,
             phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
             tab_list: lodestone_game::tablist::TabList::new(),
@@ -221,6 +253,21 @@ impl Sim {
             audio: ShellAudio::from_env(),
             local_entity_id: None,
         }
+    }
+
+    /// The stitched vanilla atlas, when the session is rendering the live server
+    /// world. `None` on the demo palette. The app threads this into the GPU atlas
+    /// so the live world draws real textures instead of procedural colours.
+    #[must_use]
+    pub fn vanilla_atlas(&self) -> Option<&BlockAtlas> {
+        self.vanilla_atlas.as_deref()
+    }
+
+    /// A one-line note when vanilla assets failed to load and the session fell
+    /// back to the demo palette, for the debug overlay. `None` on success.
+    #[must_use]
+    pub fn asset_banner(&self) -> Option<&str> {
+        self.asset_banner.as_deref()
     }
 
     /// Attach a live connection whose updates are polled each frame.
@@ -726,25 +773,44 @@ impl Sim {
     }
 
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
-    /// world at column `(cx, cz)` changed, so re-mesh every section it holds.
-    /// Reads the column's own `min_y`/`section_count`, so it is correct for the
-    /// locally generated world.
+    /// column at `(cx, cz)` changed, so re-mesh every section it holds.
     ///
-    /// It does **not** re-mesh from the *live* client world. The seams that used
-    /// to block that now all exist: [`crate::net::NetClient::sections_and_light_at`]
-    /// reads a neighbourhood's blocks + light under one lock and
-    /// [`crate::net::NetClient::world_dimensions`] supplies the column geometry
-    /// (`min_y` / `section_count`) needed to place them. What still blocks it is
-    /// the **classifier**, not a client seam: the shell meshes with
-    /// [`crate::blocks::DemoClassifier`] (a 10-id demo palette), so a live 26.2
-    /// server's *vanilla* block-state ids map to non-occluding air for everything
-    /// outside those 10 ids — meshing the live world through it renders almost
-    /// nothing, and a lighting gate over it would pass vacuously. Rendering live
-    /// terrain needs the real vanilla `state_id → sprite` classifier (the parked
-    /// "texture swap"); see the `net` module docs. Until then this meshes only the
-    /// locally generated world, whose `DemoClassifier` ids are correct by
-    /// construction.
+    /// Two paths, chosen by which block-id world the session is meshing:
+    ///
+    /// * **Live** (vanilla atlas active) — mesh the *client-owned* world via
+    ///   [`snapshot_section_live`], reading geometry from
+    ///   [`NetClient::world_dimensions`] and blocks + server-authoritative light
+    ///   from [`NetClient::sections_and_light_at`]. This never recomputes light
+    ///   (that would overwrite the server's seam-complete cross-chunk light — a
+    ///   divergence bug); multiplayer *consumes* light, singleplayer computes it.
+    /// * **Demo** (demo palette) — mesh the locally generated world, reading the
+    ///   column's own `min_y`/`section_count`.
     fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
+        // Live path: mesh the server world under the vanilla atlas. Snapshots are
+        // built first (borrowing `net`), then submitted (borrowing the scheduler),
+        // so the two borrows don't overlap.
+        if self.vanilla_atlas.is_some()
+            && let Some(net) = &self.net
+            && let Some(dims) = net.world_dimensions()
+        {
+            let count = dims.section_count();
+            let min_y = dims.min_y;
+            let jobs: Vec<Result<_, SectionKey>> = (0..count)
+                .map(|si| {
+                    let key = SectionKey { cx, cz, si, min_y };
+                    snapshot_section_live(net, key, count).ok_or(key)
+                })
+                .collect();
+            for job in jobs {
+                match job {
+                    Ok(snap) => self.scheduler.submit(snap),
+                    Err(key) => self.pending_removals.push(key),
+                }
+            }
+            return;
+        }
+
+        // Demo path: re-mesh the locally generated column.
         let Some(chunk) = self.world.get(ChunkPos { x: cx, z: cz }) else {
             return;
         };

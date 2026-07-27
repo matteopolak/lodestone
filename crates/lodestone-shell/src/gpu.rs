@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet,
+    BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet,
     EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, Mesh,
     block::{camera_buffer, sprite_uv_buffer},
     plan_entities, upload_instances,
@@ -387,19 +387,33 @@ impl RenderState {
         color_format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        vanilla: Option<&BlockAtlas>,
     ) -> Self {
         let pipeline = BlockPipeline::new(device, color_format);
 
-        let atlas_data = crate::blocks::build_atlas();
-        let atlas = GpuAtlas::from_rgba(
-            device,
-            queue,
-            atlas_data.width,
-            atlas_data.height,
-            &atlas_data.rgba,
-            &atlas_data.sprite_rects,
-        );
-        let uv_buffer = sprite_uv_buffer(device, &atlas_data.uv_table);
+        // The live world binds the real stitched vanilla atlas; the demo world
+        // binds the procedural colour atlas. The two are disjoint id spaces, so
+        // the choice is made once here and mirrors the mesh classifier.
+        let (atlas, uv_buffer) = match vanilla {
+            Some(va) => {
+                let atlas = GpuAtlas::from_atlas(device, queue, va.atlas());
+                let uv_buffer = sprite_uv_buffer(device, va.uv_table());
+                (atlas, uv_buffer)
+            }
+            None => {
+                let atlas_data = crate::blocks::build_atlas();
+                let atlas = GpuAtlas::from_rgba(
+                    device,
+                    queue,
+                    atlas_data.width,
+                    atlas_data.height,
+                    &atlas_data.rgba,
+                    &atlas_data.sprite_rects,
+                );
+                let uv_buffer = sprite_uv_buffer(device, &atlas_data.uv_table);
+                (atlas, uv_buffer)
+            }
+        };
         let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas, &uv_buffer);
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
@@ -676,7 +690,7 @@ mod tests {
 
         let world = crate::worldgen::generate(2);
         let classifier = crate::blocks::DemoClassifier;
-        let mut state = RenderState::new(device, queue, format, w, h);
+        let mut state = RenderState::new(device, queue, format, w, h, None);
 
         let mut total_quads = 0usize;
         let mut sections = 0usize;
@@ -795,7 +809,7 @@ mod tests {
 
         let world = crate::worldgen::generate(2);
         let classifier = crate::blocks::DemoClassifier;
-        let mut state = RenderState::new(device, queue, format, w, h);
+        let mut state = RenderState::new(device, queue, format, w, h, None);
         for cz in -2..=2 {
             for cx in -2..=2 {
                 for si in 0..crate::worldgen::SECTION_COUNT {
@@ -1115,7 +1129,7 @@ mod tests {
         let (w, h) = (320u32, 240u32);
         let mut target = HeadlessTarget::new(device, w, h, format);
 
-        let state = RenderState::new(device, queue, format, w, h);
+        let state = RenderState::new(device, queue, format, w, h, None);
 
         // A pig standing just in front of the camera, which looks south (+Z,
         // yaw 0) at eye level with the pig's body — mirrors the render-crate

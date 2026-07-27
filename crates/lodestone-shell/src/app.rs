@@ -428,7 +428,14 @@ impl ApplicationHandler for WindowApp {
 
         let (w, h) = target.size();
         let format = target.format();
-        let mut render = RenderState::new(gpu.device(), gpu.queue(), format, w, h);
+        let mut render = RenderState::new(
+            gpu.device(),
+            gpu.queue(),
+            format,
+            w,
+            h,
+            self.sim.vanilla_atlas(),
+        );
         let hud = HudRenderer::new(gpu.device(), format);
         let effects = EffectsRenderer::new(gpu.device(), format);
         let container = ContainerRenderer::new(gpu.device(), format);
@@ -648,7 +655,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let mut target = HeadlessTarget::new(device, w, h, format);
 
     let mut sim = Sim::new(config);
-    let mut render = RenderState::new(device, queue, format, w, h);
+    let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
 
     // Mesh everything and upload.
     let meshes = sim.drain_all_meshes();
