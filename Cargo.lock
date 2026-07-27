@@ -1716,6 +1716,7 @@ dependencies = [
  "lodestone-testsupport",
  "serde_json",
  "tokio",
+ "tracing-subscriber",
  "uuid",
 ]
 

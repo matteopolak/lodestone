@@ -45,6 +45,7 @@ pub mod hud;
 pub mod item;
 pub mod menu;
 pub mod menus;
+pub mod mining;
 pub mod player_state;
 pub mod progress;
 pub mod recipe;
