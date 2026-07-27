@@ -63,16 +63,31 @@
 //! world-`y`. [`NetClient::sections_and_light_at`] / [`NetClient::world_dimensions`]
 //! wrap them here, ready for a live mesher to consume.
 //!
-//! **What still blocks *rendered* live terrain is no longer a client seam — it
-//! is the classifier.** The shell meshes with [`crate::blocks::DemoClassifier`],
-//! whose palette is a hand-built 10-id demo namespace ([`crate::blocks::id`]).
-//! A live 26.2 server streams *vanilla* block-state ids (tens of thousands of
-//! them), which that classifier maps to non-occluding air for everything outside
-//! its 10 ids — so meshing the live world through it renders almost nothing, and
-//! any lighting gate over it would pass vacuously. Rendering live terrain needs
-//! the real `lodestone-assets` `AtlasBuilder` + a `state_id → sprite` classifier
-//! keyed on vanilla ids (the parked "texture swap"), *not* another client seam.
-//! That is why `mark_column_dirty` (sim.rs) still meshes only the local world.
+//! **Live terrain now renders** (landed 2026-07-29, commits `93a2c1e` +
+//! `f5800d9`). The last blocker was never a client seam — it was the
+//! *classifier*: the shell used to mesh with [`crate::blocks::DemoClassifier`],
+//! whose palette is a hand-built 10-id demo namespace ([`crate::blocks::id`]),
+//! while a live 26.2 server streams *vanilla* block-state ids (tens of
+//! thousands). Everything outside those 10 ids classified to non-occluding air,
+//! so the live world meshed to nothing — and, critically, **any lighting gate
+//! over it would have passed vacuously**, because an empty world is trivially
+//! not full-bright.
+//!
+//! [`crate::resources::BlockResources::load`] now builds a vanilla
+//! `state_id → sprite` classifier from `blocks_json_registry` + `BlockAtlas`,
+//! and `mark_column_dirty` (sim.rs) meshes live columns through it. Two
+//! invariants that are easy to "fix" into bugs:
+//!
+//! - **MP consumes server light; SP computes it.** Do not run
+//!   `compute_column_light` on live columns — `merge_light` already carries the
+//!   server's seam-complete cross-chunk light, and recomputing replaces
+//!   authoritative values with a partial result.
+//! - **Light section indexing is off-by-one by design**: light section `i`
+//!   covers block section `i−1` (26 light sections for 24 block sections), which
+//!   is why [`NetClient::sections_and_light_at`] takes an explicit `(n, n+1)`.
+//!
+//! If the vanilla pack is missing, `load` falls back to the demo palette and
+//! logs a banner naming the fix rather than silently rendering an empty world.
 
 use std::sync::{
     Arc, OnceLock,

@@ -728,7 +728,16 @@ Surfaces proven to pixels so far, with their evidence:
 | scoreboard | 7216 px | 0 | — |
 | container (chest) | 23271 px in rect | 0 | 0 |
 
-## Addendum — THE BIGGEST ISLAND: live server terrain never renders
+## Addendum — THE BIGGEST ISLAND: live server terrain never renders — **CLOSED 2026-07-29**
+
+> **RESOLVED.** Commits `93a2c1e` (classifier swap) + `f5800d9` (two-stage gate). Verified
+> independently by the director: the live gate reproduces at **2690 quads, sky `[0..255]`**,
+> and the real release binary against the flat-creative 26.2 oracle reports
+> **`loaded vanilla block atlas … sprites=929`, `live_cols=329`, `sections=334`,
+> `quads=210124`** at 120 fps / 8.0 ms frame / 94 MB RSS. The server's world is what you see.
+>
+> The history below is kept because the **diagnosis** is the reusable part, and because the
+> ordering trap it describes is live again for anyone touching this path.
 
 **Read this before believing any screenshot.** When the client is run with `--window --live`,
 the terrain on screen is the **locally generated demo world**, not the server's. The live
@@ -841,3 +850,36 @@ A gate is only worth writing if you can state **what would make it fail**, and t
 fail*. Every gate that has caught a real bug in this project had a negative control that was
 executed and observed — not merely described. Where a negative control is impractical, say so
 explicitly rather than shipping an unfalsifiable assertion.
+
+## How the live-world gate was actually made to bite
+
+Worth copying, because the first attempt at stage 2 quietly produced a wrong answer and the
+fix is not obvious.
+
+**Stage 1 — geometry before lighting (non-negotiable ordering).** Assert a real quad count
+from *live server chunks* **first**. With the demo palette this number was ~0, so the count
+itself is what proves the island is connected. Asserting lighting first would have passed
+vacuously: an empty world is trivially "not full-bright".
+
+**Stage 2 — construct the shadow, don't hunt for it.** `forceload` the spawn column, then
+RCON-fill a fully sealed stone room so the server relights the interior to sky `0`. Hunting
+for a naturally dark spot makes the gate depend on worldgen.
+
+**The subtlety that produced a wrong reading:** pushing the relight to an *already-connected*
+client was unreliable — the incremental `LIGHT_UPDATE` path first read sky `251`, i.e. stale
+open-sky light. The fix is to connect a **fresh** client after the fill, so the relit column
+arrives as a seam-complete chunk-data packet. Sky then spans `[0..255]`.
+
+**Negative control, executed:** `full_bright_control()` (the retired `UniformLight` bridge)
+renders flat at `255` and **fails** the same shadow assertion — so the gate demonstrably
+distinguishes real light from no light.
+
+### Run it
+
+```
+cargo test -p lodestone-shell --features live --test live_world_mesh -- --ignored --nocapture
+```
+
+Needs the flat-creative 26.2 oracle on :25570 (RCON :25571) and a vanilla pack under
+`.cache/mc/<version>` (or `LODESTONE_ASSETS`). Per §12.52 it **fails loudly** when those are
+absent rather than skipping, and the failure message names the fix.

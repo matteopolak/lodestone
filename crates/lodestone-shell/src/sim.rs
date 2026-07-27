@@ -848,12 +848,9 @@ impl Sim {
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
                     // event — the client applies decoded chunks to its own
-                    // `World`, which we can read via `NetClient::sections_and_light_at`
-                    // (+ `world_dimensions` for geometry). Meshing the *live*
-                    // column is not blocked on a client seam any more; it is
-                    // blocked on the vanilla `state_id → sprite` classifier (see
-                    // `mark_column_dirty`). Until that lands this only re-meshes
-                    // locally generated columns.
+                    // `World`, which we read via `NetClient::sections_and_light_at`
+                    // (+ `world_dimensions` for geometry). `mark_column_dirty`
+                    // meshes live columns through the vanilla classifier.
                     self.mark_column_dirty(x, z);
                 }
                 NetUpdate::Chat { text, player } => {
