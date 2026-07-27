@@ -63,7 +63,10 @@ impl AudioEngine {
     /// stream cannot start — a real, loud failure, never a silent no-op. Callers
     /// that want the game to run without audio should treat the error as
     /// "audio unavailable" explicitly rather than swallowing it.
-    pub fn new(registry: SoundRegistry, source: Box<dyn ResourceSource>) -> Result<Self, AudioError> {
+    pub fn new(
+        registry: SoundRegistry,
+        source: Box<dyn ResourceSource>,
+    ) -> Result<Self, AudioError> {
         let (sink, mixer) = CpalSink::new()?;
         // The stream is created paused on some platforms; start it now so the
         // callback begins pulling from the shared mixer.
@@ -118,14 +121,13 @@ impl AudioEngine {
         // Decode OUTSIDE the lock — this is the slow step (file read + Vorbis
         // decode on a cache miss) and must never be held against the audio
         // callback.
-        let instance =
-            match self
-                .resolver
-                .resolve_instance(event_name, category, position, volume, pitch, seed)?
-            {
-                Some(instance) => instance,
-                None => return Ok(None),
-            };
+        let instance = match self
+            .resolver
+            .resolve_instance(event_name, category, position, volume, pitch, seed)?
+        {
+            Some(instance) => instance,
+            None => return Ok(None),
+        };
         // Now a brief O(1) lock just to enqueue the voice.
         Ok(Some(self.lock_mixer().play(instance)))
     }

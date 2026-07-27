@@ -100,7 +100,10 @@ where
             ServerBound::Handshake { next_state } => {
                 state = next_state;
             }
-            ServerBound::LoginStart { username: name, uuid } => {
+            ServerBound::LoginStart {
+                username: name,
+                uuid,
+            } => {
                 username = Some(name.clone());
                 for directive in proto.login_success(&name, uuid) {
                     apply(conn, &mut state, directive).await?;

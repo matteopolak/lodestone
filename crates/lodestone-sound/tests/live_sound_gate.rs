@@ -261,7 +261,14 @@ async fn live_sound_packet_crosses_the_public_api_and_reaches_the_mixer() {
                     seed,
                     ..
                 }) => {
-                    let _ = sound_tx.send((sound.path().to_string(), category, pos, volume, pitch, seed));
+                    let _ = sound_tx.send((
+                        sound.path().to_string(),
+                        category,
+                        pos,
+                        volume,
+                        pitch,
+                        seed,
+                    ));
                 }
                 Some(ClientEvent::Disconnect { reason }) => {
                     eprintln!("[live-gate] DISCONNECTED: {}", reason.to_plain_string());
@@ -302,14 +309,7 @@ async fn live_sound_packet_crosses_the_public_api_and_reaches_the_mixer() {
             let mut driver = build_driver();
             // Co-locate the voice and listener at the origin so distance
             // attenuation cannot mask a genuinely non-silent decode.
-            let played = match driver.play_sound(
-                &name,
-                category,
-                Vec3::ZERO,
-                volume,
-                pitch,
-                seed,
-            ) {
+            let played = match driver.play_sound(&name, category, Vec3::ZERO, volume, pitch, seed) {
                 Ok(Some(h)) => h,
                 // Event not in the vanilla registry, or resolved to nothing —
                 // not our failure; wait for the next server sound.

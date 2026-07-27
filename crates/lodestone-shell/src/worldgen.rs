@@ -82,9 +82,14 @@ fn map_block(name: &str) -> u32 {
     match base(name) {
         "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air" => id::AIR,
         "minecraft:grass_block" => id::GRASS,
-        "minecraft:dirt" | "minecraft:coarse_dirt" | "minecraft:rooted_dirt" | "minecraft:mud"
+        "minecraft:dirt"
+        | "minecraft:coarse_dirt"
+        | "minecraft:rooted_dirt"
+        | "minecraft:mud"
         | "minecraft:podzol" => id::DIRT,
-        "minecraft:sand" | "minecraft:red_sand" | "minecraft:sandstone"
+        "minecraft:sand"
+        | "minecraft:red_sand"
+        | "minecraft:sandstone"
         | "minecraft:red_sandstone" => id::SAND,
         "minecraft:gravel" => id::GRAVEL,
         "minecraft:water" | "minecraft:lava" => id::WATER,
@@ -152,14 +157,47 @@ pub fn generate_column(cx: i32, cz: i32) -> LoadedChunk {
 
 /// Generate a square patch of chunks of radius `radius` (in chunks) centred on
 /// chunk `(0,0)`, loaded into a fresh [`World`].
+///
+/// Real worldgen is ~100× the cost of the old sine stand-in (measured
+/// ≈250 ms/chunk single-threaded in release), so a full `render_distance`
+/// patch is generated in parallel across the machine's cores. This is a
+/// coarse, per-chunk split over the *same* [`generate_column`] entry point —
+/// the seam the integrated-server path will later replace — so nothing about
+/// the generator or its determinism changes; only the batch driver fans out.
 #[must_use]
 pub fn generate(radius: i32) -> World {
+    let coords: Vec<(i32, i32)> = (-radius..=radius)
+        .flat_map(|cz| (-radius..=radius).map(move |cx| (cx, cz)))
+        .collect();
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, coords.len().max(1));
+
+    let batch = coords.len().div_ceil(workers);
     let mut world = World::new();
-    for cz in -radius..=radius {
-        for cx in -radius..=radius {
-            world.load(ChunkPos { x: cx, z: cz }, generate_column(cx, cz));
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = coords
+            .chunks(batch.max(1))
+            .map(|slice| {
+                scope.spawn(move || {
+                    slice
+                        .iter()
+                        .map(|&(cx, cz)| (ChunkPos { x: cx, z: cz }, generate_column(cx, cz)))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            for (pos, chunk) in handle.join().expect("worldgen worker panicked") {
+                world.load(pos, chunk);
+            }
         }
-    }
+    });
+
     world
 }
 

@@ -1,0 +1,227 @@
+cargo:rustc-env=BUILD_TARGET_OS=macos
+cargo:rustc-env=BUILD_TARGET_ENV=
+cargo:rustc-env=BUILD_TARGET_FAMILY=unix
+cargo:rustc-env=BUILD_TARGET=aarch64-apple-darwin
+cargo:rustc-env=BUILD_CC=Clang
+cargo:rustc-env=BUILD_TYPE=Release
+cargo:rustc-env=BUILD_DEBUG=false
+cargo:rustc-env=BUILD_OPTIM_LEVEL=-O3
+cargo:rustc-env=BUILD_CXX_STANDARD=20
+cargo:rustc-link-search=/usr/local/lib
+cargo:rustc-link-search=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out
+cargo:rustc-link-search=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build
+cargo:rustc-link-search=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/Debug
+cargo:rustc-link-search=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/Release
+CMAKE_TOOLCHAIN_FILE_aarch64-apple-darwin = None
+CMAKE_TOOLCHAIN_FILE_aarch64_apple_darwin = None
+HOST_CMAKE_TOOLCHAIN_FILE = None
+CMAKE_TOOLCHAIN_FILE = None
+CMAKE_GENERATOR_aarch64-apple-darwin = None
+CMAKE_GENERATOR_aarch64_apple_darwin = None
+HOST_CMAKE_GENERATOR = None
+CMAKE_GENERATOR = None
+CMAKE_PREFIX_PATH_aarch64-apple-darwin = None
+CMAKE_PREFIX_PATH_aarch64_apple_darwin = None
+HOST_CMAKE_PREFIX_PATH = None
+CMAKE_PREFIX_PATH = None
+CMAKE_aarch64-apple-darwin = None
+CMAKE_aarch64_apple_darwin = None
+HOST_CMAKE = None
+CMAKE = None
+Running with debug output on.
+-- The CXX compiler identification is Clang 22.1.1
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCXXCompiler.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCompilerId.cmake
+-- Detecting CXX compiler ABI info
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CMakeTestCXXCompiler.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCompilerABI.cmake
+-- Detecting CXX compiler ABI info - done
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CMakeTestCXXCompiler.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCompilerABI.cmake
+-- Check for working CXX compiler: /opt/homebrew/opt/llvm/bin/clang++ - skipped
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeTestCXXCompiler.cmake
+-- Detecting CXX compile features
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CMakeTestCXXCompiler.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCompilerSupport.cmake
+-- Detecting CXX compile features - done
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CMakeTestCXXCompiler.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CMakeDetermineCompilerSupport.cmake
+-- Performing Test SNMALLOC_MEMCPY_OVERRIDE
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_MEMCPY_OVERRIDE - Success
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_NOSTDLIBXX
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_NOSTDLIBXX - Success
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_PTHREAD_ATFORK_WORKS
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_PTHREAD_ATFORK_WORKS - Success
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test CONST_QUALIFIED_MALLOC_USABLE_SIZE
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test CONST_QUALIFIED_MALLOC_USABLE_SIZE - Success
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_PLATFORM_HAS_GETENTROPY
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_PLATFORM_HAS_GETENTROPY - Success
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Looking for C++ include linux/random.h
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/CheckIncludeFileCXX.cmake
+-- Looking for C++ include linux/random.h - not found
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/CheckIncludeFileCXX.cmake
+-- Looking for C++ include linux/futex.h
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/CheckIncludeFileCXX.cmake
+-- Looking for C++ include linux/futex.h - not found
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/CheckIncludeFileCXX.cmake
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+   Called from: [5]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [4]	/opt/homebrew/share/cmake/Modules/FindThreads.cmake
+                [3]	/opt/homebrew/share/cmake/Modules/FindThreads.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+   Called from: [5]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [4]	/opt/homebrew/share/cmake/Modules/FindThreads.cmake
+                [3]	/opt/homebrew/share/cmake/Modules/FindThreads.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Found Threads: TRUE
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/FindThreads.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/FindPackageHandleStandardArgs.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/FindPackageMessage.cmake
+-- Performing Test SNMALLOC_COMPILER_SUPPORT_MCX16
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckCXXCompilerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckCompilerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_COMPILER_SUPPORT_MCX16 - Failed
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckCXXCompilerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckCompilerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Looking for backtrace
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/FindBacktrace.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/CheckSymbolExists.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CheckSymbolExists.cmake
+-- Looking for backtrace - found
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/FindBacktrace.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/CheckSymbolExists.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/CheckSymbolExists.cmake
+-- backtrace facility detected in default set of libraries
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/opt/homebrew/share/cmake/Modules/FindBacktrace.cmake
+-- Found Backtrace: /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/FindBacktrace.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/FindPackageHandleStandardArgs.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/FindPackageMessage.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_RDYNAMIC
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckLinkerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckLinkerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_RDYNAMIC - Success
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckLinkerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckLinkerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_NO_ALLOW_SHLIB_UNDEF
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckLinkerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckLinkerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SNMALLOC_LINKER_SUPPORT_NO_ALLOW_SHLIB_UNDEF - Failed
+   Called from: [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckLinkerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckLinkerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test LLD_WORKS
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test LLD_WORKS - Failed
+   Called from: [3]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [2]	/opt/homebrew/share/cmake/Modules/CheckCXXSourceCompiles.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- snmalloc: Using static TLS model
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+-- Performing Test SUPPORT_PREFETCH_WRITE
+   Called from: [5]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckCXXCompilerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckCompilerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Performing Test SUPPORT_PREFETCH_WRITE - Failed
+   Called from: [5]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [4]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [3]	/opt/homebrew/share/cmake/Modules/CheckCXXCompilerFlag.cmake
+                [2]	/opt/homebrew/share/cmake/Modules/Internal/CheckCompilerFlag.cmake
+                [1]	/opt/homebrew/share/cmake/Modules/Internal/CheckSourceCompiles.cmake
+-- Generating clangformat target using /opt/homebrew/opt/llvm/bin/clang-format /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build
+   Called from: [2]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+                [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+-- Configuring done (3.9s)
+-- Generating /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build
+   Called from: [1]	/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/CMakeLists.txt
+-- Generating done (0.2s)
+-- Build files have been written to: /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build
+Change Dir: '/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build'
+
+Run Build Command(s): /opt/homebrew/bin/cmake -E env VERBOSE=1 /usr/bin/make -f Makefile -j10 snmallocshim-rust
+/opt/homebrew/bin/cmake -P /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/CMakeFiles/VerifyGlobs.cmake
+/opt/homebrew/bin/cmake -S/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream -B/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build --check-build-system CMakeFiles/Makefile.cmake 0
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/Makefile2 snmallocshim-rust
+/opt/homebrew/bin/cmake -P /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/CMakeFiles/VerifyGlobs.cmake
+/opt/homebrew/bin/cmake -S/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream -B/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build --check-build-system CMakeFiles/Makefile.cmake 0
+/opt/homebrew/bin/cmake -E cmake_progress_start /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/CMakeFiles 1
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/Makefile2 CMakeFiles/snmallocshim-rust.dir/all
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/snmallocshim-rust.dir/build.make CMakeFiles/snmallocshim-rust.dir/depend
+cd /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build && /opt/homebrew/bin/cmake -E cmake_depends "Unix Makefiles" /Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream /Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/CMakeFiles/snmallocshim-rust.dir/DependInfo.cmake "--color=" snmallocshim-rust
+/Applications/Xcode.app/Contents/Developer/usr/bin/make  -f CMakeFiles/snmallocshim-rust.dir/build.make CMakeFiles/snmallocshim-rust.dir/build
+[  0%] Building CXX object CMakeFiles/snmallocshim-rust.dir/src/snmalloc/override/rust.cc.o
+/opt/homebrew/opt/llvm/bin/clang++ -DMALLOC_USABLE_SIZE_QUALIFIER=const -DSNMALLOC_CHECK_LOADS=false -DSNMALLOC_EXPORT="__attribute__((visibility(\"default\")))" -DSNMALLOC_NO_REALLOCARR -DSNMALLOC_NO_REALLOCARRAY -DSNMALLOC_PAGEID=false -DSNMALLOC_PLATFORM_HAS_GETENTROPY -DSNMALLOC_PTHREAD_ATFORK_WORKS -DSNMALLOC_USE_CXX11_DESTRUCTORS -DSNMALLOC_USE_WAIT_ON_ADDRESS=1 -I/Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/src -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w -O3 -DNDEBUG -std=gnu++20 -arch arm64 -fPIC -fvisibility=hidden -fno-rtti -Wall -Wextra -Werror -Wundef -Wsign-conversion -Wconversion -fomit-frame-pointer -ftls-model=initial-exec -ffunction-sections -MD -MT CMakeFiles/snmallocshim-rust.dir/src/snmalloc/override/rust.cc.o -MF CMakeFiles/snmallocshim-rust.dir/src/snmalloc/override/rust.cc.o.d -o CMakeFiles/snmallocshim-rust.dir/src/snmalloc/override/rust.cc.o -c /Users/matthew/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snmalloc-sys-0.7.4/upstream/src/snmalloc/override/rust.cc
+[100%] Linking CXX static library libsnmallocshim-rust.a
+/opt/homebrew/bin/cmake -P CMakeFiles/snmallocshim-rust.dir/cmake_clean_target.cmake
+/opt/homebrew/bin/cmake -E cmake_link_script CMakeFiles/snmallocshim-rust.dir/link.txt --verbose=1
+/usr/bin/ar qc libsnmallocshim-rust.a "CMakeFiles/snmallocshim-rust.dir/src/snmalloc/override/rust.cc.o"
+/opt/homebrew/opt/llvm/bin/llvm-ranlib libsnmallocshim-rust.a
+[100%] Built target snmallocshim-rust
+/opt/homebrew/bin/cmake -E cmake_progress_start /Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out/build/CMakeFiles 0
+
+cargo:root=/Users/matthew/projects/lodestone/crates/lodestone-allocbench/target-snmalloc/release/build/snmalloc-sys-45d94dc1a081f78f/out
+cargo:rustc-link-lib=snmallocshim-rust
+cargo:rustc-link-lib=c++

@@ -42,10 +42,12 @@ fn set_equipment_decodes_two_slots_via_continuation_bit() {
         0x01, 0x9E, 0x07, 0x00, 0x00, // 1 × diamond, empty patch
     ];
     match handle(&payload).as_slice() {
-        [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
-            entity_id,
-            equipment,
-        })] => {
+        [
+            Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                entity_id,
+                equipment,
+            }),
+        ] => {
             assert_eq!(*entity_id, 42);
             assert_eq!(equipment.len(), 2);
             assert_eq!(equipment[0].slot, EquipmentSlot::Head);
@@ -68,10 +70,12 @@ fn set_equipment_decodes_a_single_terminal_slot() {
     // entity 1; saddle (ordinal 7) terminal, empty stack.
     let payload = vec![0x01, 0x07, 0x00];
     match handle(&payload).as_slice() {
-        [Directive::Emit(ClientEvent::EntityEquipmentUpdated {
-            entity_id,
-            equipment,
-        })] => {
+        [
+            Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                entity_id,
+                equipment,
+            }),
+        ] => {
             assert_eq!(*entity_id, 1);
             assert_eq!(equipment.len(), 1);
             assert_eq!(equipment[0].slot, EquipmentSlot::Saddle);

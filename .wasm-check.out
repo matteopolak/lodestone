@@ -1,0 +1,13 @@
+== Lodestone wasm32 compile guard ==
+target: wasm32-unknown-unknown
+
+  lodestone-core                     PASS
+  lodestone-model                    PASS
+  lodestone-world                    PASS
+  lodestone-physics                  PASS
+  lodestone-assets                   PASS
+  lodestone-registry                 PASS
+  lodestone-render                   PASS
+  lodestone-audio                    PASS
+  lodestone-sound                    PASS
+  lodestone-v770                     

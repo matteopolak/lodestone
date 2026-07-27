@@ -43,6 +43,7 @@ pollster.workspace = true
 thiserror.workspace = true
 glam.workspace = true
 lodestone-assets.workspace = true
+lodestone-model.workspace = true
 lodestone-world.workspace = true
 winit = { workspace = true, optional = true }
 

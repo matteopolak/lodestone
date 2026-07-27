@@ -54,8 +54,8 @@ mod worldgen_data;
 pub use chunk::{ChunkColumn, ChunkSource, WorldgenChunkSource};
 pub use integrated::IntegratedServer;
 pub use mob_spawn::{
-    DespawnOutcome, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng, SpawnState,
-    check_despawn, MAGIC_NUMBER,
+    DespawnOutcome, MAGIC_NUMBER, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng,
+    SpawnState, check_despawn,
 };
 pub use mobs::{ChunkWorld, MobSim, SimMob};
 pub use protocol::{ServerBound, ServerDirective, ServerProtocol};

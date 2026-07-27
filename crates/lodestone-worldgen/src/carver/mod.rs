@@ -572,7 +572,15 @@ impl CaveConfig {
             }
 
             if random.next_int_bounded(4) != 0 {
-                if !can_reach(env.center_x, env.center_z, x, z, current_step, dist, thickness) {
+                if !can_reach(
+                    env.center_x,
+                    env.center_z,
+                    x,
+                    z,
+                    current_step,
+                    dist,
+                    thickness,
+                ) {
                     return;
                 }
                 carve_ellipsoid(
@@ -696,7 +704,15 @@ impl CanyonConfig {
             y_rota += (random.next_float() - random.next_float()) * random.next_float() * 4.0;
 
             if random.next_int_bounded(4) != 0 {
-                if !can_reach(env.center_x, env.center_z, x, z, current_step, distance, thickness) {
+                if !can_reach(
+                    env.center_x,
+                    env.center_z,
+                    x,
+                    z,
+                    current_step,
+                    distance,
+                    thickness,
+                ) {
                     return;
                 }
                 let min_gen_y = env.min_gen_y;

@@ -37,13 +37,13 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress, VersionAdapter,
+    ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress,
+    VersionAdapter,
 };
 use lodestone_net::Connection;
 use lodestone_testsupport::RconClient;
 use lodestone_v770::V770Adapter;
 use lodestone_v770::block_states;
-use lodestone_v770::packet_ids::play;
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ColumnLight, LightData, LightProperties, World,
     compute_column_light, diff_column_light,
@@ -94,7 +94,10 @@ impl V770LightProps {
 
         let mut by_name: HashMap<String, (u8, u8)> = HashMap::new();
         for block in blocks.as_array().expect("blocks.json is a JSON array") {
-            let name = block["name"].as_str().expect("block has a name").to_string();
+            let name = block["name"]
+                .as_str()
+                .expect("block has a name")
+                .to_string();
             let opacity = block["filterLight"].as_u64().unwrap_or(0) as u8;
             let emission = block["emitLight"].as_u64().unwrap_or(0) as u8;
             by_name.insert(name, (opacity, emission));
@@ -135,7 +138,11 @@ impl LightProperties for V770LightProps {
 
 /// Applies one non-chunk directive against the live connection, updating the
 /// tracked connection state (keep-alive/ack replies ride through here).
-async fn apply(conn: &mut Connection<TcpStream>, state: &mut ConnectionState, directive: Directive) {
+async fn apply(
+    conn: &mut Connection<TcpStream>,
+    state: &mut ConnectionState,
+    directive: Directive,
+) {
     match directive {
         Directive::Send { packet_id, payload } => {
             conn.write_packet(packet_id, &payload)
@@ -152,6 +159,28 @@ async fn apply(conn: &mut Connection<TcpStream>, state: &mut ConnectionState, di
     }
 }
 
+/// Answers a Play keep-alive so a long-lived driver is not timed out (~15s).
+///
+/// Unlike Configuration, the adapter does **not** auto-reply to a Play
+/// `keep_alive`: it surfaces [`ClientEvent::KeepAlive`] and expects the driver to
+/// send the matching [`ClientAction::KeepAliveResponse`]. This test's phase 3
+/// waits up to 30s for the server to relight, so without answering we are
+/// disconnected ("Timed out") before the light ever arrives.
+async fn answer_keep_alive(
+    conn: &mut Connection<TcpStream>,
+    state: ConnectionState,
+    adapter: &V770Adapter,
+    id: i64,
+) {
+    if let Ok(Some((packet_id, payload))) =
+        adapter.encode_action(state, &ClientAction::KeepAliveResponse { id })
+    {
+        conn.write_packet(packet_id, &payload)
+            .await
+            .expect("write keep-alive response");
+    }
+}
+
 /// Parse a `data get entity ... Pos` RCON response's `[x, y, z]` list.
 fn parse_list3(resp: &str) -> Option<(f64, f64, f64)> {
     let open = resp.find('[')?;
@@ -162,6 +191,63 @@ fn parse_list3(resp: &str) -> Option<(f64, f64, f64)> {
         .filter_map(|s| s.trim().trim_end_matches('d').parse::<f64>().ok())
         .collect();
     (nums.len() == 3).then(|| (nums[0], nums[1], nums[2]))
+}
+
+/// Connects to the oracle and drives the login handshake through the adapter,
+/// returning the live connection in whatever state `begin_login` leaves it.
+async fn connect_and_login(
+    server: &ServerAddress,
+    profile: &LoginProfile,
+    adapter: &V770Adapter,
+) -> (Connection<TcpStream>, ConnectionState) {
+    let mut conn = Connection::connect(GAME_ADDR)
+        .await
+        .expect("connect to the vanilla-26.2 oracle on :25567 (gate fails, never skips)");
+    let mut state = ConnectionState::Handshaking;
+    for directive in adapter.begin_login(profile, server).expect("begin login") {
+        apply(&mut conn, &mut state, directive).await;
+    }
+    (conn, state)
+}
+
+/// Pumps packets through the adapter — applying chunks/light to `world` and
+/// answering keep-alive so the session survives — until `done(world, state)` is
+/// true or `deadline` passes. Returns the final value of `done`.
+async fn pump_until(
+    conn: &mut Connection<TcpStream>,
+    state: &mut ConnectionState,
+    adapter: &V770Adapter,
+    world: &mut World,
+    deadline: Instant,
+    read_timeout: Duration,
+    mut done: impl FnMut(&World, ConnectionState) -> bool,
+) -> bool {
+    while Instant::now() < deadline {
+        if done(world, *state) {
+            return true;
+        }
+        let read = tokio::time::timeout(read_timeout, conn.read_packet()).await;
+        let packet = match read {
+            Err(_) => continue,
+            Ok(Ok(Some(p))) => p,
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => panic!("read error: {err}"),
+        };
+        let (packet_id, payload) = packet;
+        let directives = adapter
+            .handle_packet(world, *state, packet_id, &payload)
+            .unwrap_or_default();
+        for directive in directives {
+            match directive {
+                Directive::Emit(ClientEvent::KeepAlive { id }) => {
+                    answer_keep_alive(conn, *state, adapter, id).await;
+                }
+                Directive::Emit(_) => {}
+                other => apply(conn, state, other).await,
+            }
+        }
+    }
+    done(world, *state)
 }
 
 /// The light-section index and section-local coordinates of world cell
@@ -237,132 +323,118 @@ async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
         uuid: Uuid::new_v4(),
     };
     let adapter = V770Adapter::new();
-    let mut world = World::new();
+    let read_timeout = Duration::from_secs(5);
 
-    // FAIL, never skip, when the oracle is unreachable (§12.52).
-    let mut conn = Connection::connect(GAME_ADDR)
-        .await
-        .expect("connect to the vanilla-26.2 oracle on :25567 (gate fails, never skips)");
-    let mut state = ConnectionState::Handshaking;
-    for directive in adapter.begin_login(&profile, &server).expect("begin login") {
-        apply(&mut conn, &mut state, directive).await;
+    // --- Round 1: join, learn where the server spawned us, place the source. --
+    // A fresh offline player spawns at the world spawn point, so this position is
+    // reproducible for the second join below. v770 does not emit TeleportPlayer,
+    // so the read-model's position never populates on 26.2 — RCON is the only way
+    // to learn where the server actually put the player.
+    let (gx, gy, gz, cx, cz);
+    {
+        // FAIL, never skip, when the oracle is unreachable (§12.52).
+        let (mut conn, mut state) = connect_and_login(&server, &profile, &adapter).await;
+        let mut world = World::new();
+        let reached = pump_until(
+            &mut conn,
+            &mut state,
+            &adapter,
+            &mut world,
+            Instant::now() + Duration::from_secs(60),
+            read_timeout,
+            |w, s| s == ConnectionState::Play && w.iter().next().is_some(),
+        )
+        .await;
+        assert!(
+            reached && state == ConnectionState::Play,
+            "never reached Play with a loaded chunk on the oracle {GAME_ADDR} — login/connection \
+             fault, not the light path"
+        );
+
+        let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
+            "oracle RCON reachable/authenticated at :25575 — is the vanilla-26.2 oracle up? \
+             A missing RCON is a harness failure, not a passing light path.",
+        );
+        let pos = rcon.cmd("data get entity @p Pos");
+        let (px, py, pz) = parse_list3(&pos)
+            .expect("player Pos readable via RCON after join — otherwise the bot never spawned");
+        gx = px.floor() as i32;
+        gz = pz.floor() as i32;
+        gy = py.floor() as i32 + SOURCE_ELEVATION;
+        cx = gx >> 4;
+        cz = gz >> 4;
+
+        // Force-load the column so its light is computed and retained, clear any
+        // stale source from a prior run, then place a glowstone (emission 15) high
+        // in the air above the spawn — far from terrain, so the lit region is pure
+        // air lit by a single in-column source.
+        rcon.cmd(&format!("forceload add {gx} {gz}"));
+        rcon.cmd(&format!("setblock {gx} {gy} {gz} minecraft:air"));
+        let placed = rcon.cmd(&format!("setblock {gx} {gy} {gz} minecraft:glowstone"));
+        eprintln!(
+            "placed source: setblock {gx} {gy} {gz} minecraft:glowstone -> {}",
+            placed.trim()
+        );
+        // Round-1 connection drops here, disconnecting the first bot.
     }
 
-    // --- Phase 1: reach Play and let the player's neighbourhood stream in. ----
-    let read_timeout = Duration::from_secs(5);
-    let mut chunks = 0usize;
-    let mut first_chunk_at: Option<Instant> = None;
-    let collect_window = Duration::from_secs(8);
-    let _ = tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            if let Some(t) = first_chunk_at
-                && (chunks >= 64 || t.elapsed() >= collect_window)
-            {
-                break;
-            }
-            let read = tokio::time::timeout(read_timeout, conn.read_packet()).await;
-            let packet = match read {
-                Err(_) => break,
-                Ok(Ok(Some(p))) => p,
-                Ok(Ok(None)) => break,
-                Ok(Err(err)) => panic!("read error: {err}"),
-            };
-            let (packet_id, payload) = packet;
-            let directives = adapter
-                .handle_packet(&mut world, state, packet_id, &payload)
-                .unwrap_or_default();
-            for directive in directives {
-                match directive {
-                    Directive::Emit(ClientEvent::ChunkLoaded { .. }) => {
-                        chunks += 1;
-                        first_chunk_at.get_or_insert_with(Instant::now);
-                    }
-                    Directive::Emit(_) => {}
-                    other => apply(&mut conn, &mut state, other).await,
-                }
-            }
-        }
-    })
-    .await;
+    // --- Round 2: rejoin fresh; the chunk now streams in with the glowstone's --
+    // light already baked into its LEVEL_CHUNK_WITH_LIGHT. A full chunk packet
+    // always carries the server's *current* light, sidestepping the unreliable
+    // mid-session light-delta broadcast (the server only emits a LIGHT_UPDATE when
+    // its per-chunk light-section filter is non-empty for a tracking player).
+    let profile_b = LoginProfile {
+        username: unique_username(),
+        uuid: Uuid::new_v4(),
+    };
+    let (mut conn, mut state) = connect_and_login(&server, &profile_b, &adapter).await;
+    let mut world = World::new();
 
-    assert_eq!(
-        state,
-        ConnectionState::Play,
-        "never reached Play on the oracle {GAME_ADDR} — login/connection fault, not the light path"
-    );
-    assert!(
-        chunks > 0,
-        "the oracle streamed no chunks; without a loaded column there is nothing to light"
-    );
-
-    // --- Phase 2: place a known light source in mid-air over RCON. -----------
-    // v770 does not emit TeleportPlayer, so the read-model's position never
-    // populates on 26.2 — RCON is the only way to learn where the server put us.
-    let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
-        "oracle RCON reachable/authenticated at :25575 — is the vanilla-26.2 oracle up? \
-         A missing RCON is a harness failure, not a passing light path.",
-    );
-    let pos = rcon.cmd("data get entity @p Pos");
-    let (px, py, pz) =
-        parse_list3(&pos).expect("player Pos readable via RCON after join — otherwise no spawn");
-
-    let gx = px.floor() as i32;
-    let gz = pz.floor() as i32;
-    let gy = py.floor() as i32 + SOURCE_ELEVATION;
-    let cx = gx >> 4;
-    let cz = gz >> 4;
-
-    // Force-load the column so it keeps ticking (and relighting) while we watch,
-    // clear any stale source from a prior run, then place a glowstone (emission
-    // 15) high in the air above the player.
-    rcon.cmd(&format!("forceload add {gx} {gz}"));
-    rcon.cmd(&format!("setblock {gx} {gy} {gz} minecraft:air"));
-    let placed = rcon.cmd(&format!("setblock {gx} {gy} {gz} minecraft:glowstone"));
-    eprintln!("placed source: setblock {gx} {gy} {gz} minecraft:glowstone -> {}", placed.trim());
-
-    // --- Phase 3: pump packets until the server relights and sends it back. ---
-    // The block update lands the glowstone in our column; a follow-up
-    // light_update carries the server's recomputed block light. They can arrive a
-    // tick apart, so poll until BOTH are visible at the source cell.
     let lx = gx.rem_euclid(16) as usize;
     let lz = gz.rem_euclid(16) as usize;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut lit = false;
-    while Instant::now() < deadline {
-        let read = tokio::time::timeout(read_timeout, conn.read_packet()).await;
-        let packet = match read {
-            Err(_) => continue,
-            Ok(Ok(Some(p))) => p,
-            Ok(Ok(None)) => break,
-            Ok(Err(err)) => panic!("read error: {err}"),
+    let lit = pump_until(
+        &mut conn,
+        &mut state,
+        &adapter,
+        &mut world,
+        Instant::now() + Duration::from_secs(60),
+        read_timeout,
+        |w, _| match w.get(WorldChunkPos::new(cx, cz)) {
+            Some(l) => {
+                let block_present = l.column.get_block(lx, gy, lz) != 0;
+                let (ls, slx, sly, slz) = light_cell(&l.column, gx, gy, gz);
+                let server_lit = ls < l.light.light_section_count()
+                    && l.light.section_light(ls).block_at(slx, sly, slz) >= 14;
+                block_present && server_lit
+            }
+            None => false,
+        },
+    )
+    .await;
+
+    if !lit {
+        let loaded = world.get(WorldChunkPos::new(cx, cz));
+        let (blk, light_val) = match loaded {
+            Some(l) => {
+                let (ls, slx, sly, slz) = light_cell(&l.column, gx, gy, gz);
+                let lv = (ls < l.light.light_section_count())
+                    .then(|| l.light.section_light(ls).block_at(slx, sly, slz));
+                (Some(l.column.get_block(lx, gy, lz)), lv)
+            }
+            None => (None, None),
         };
-        let (packet_id, payload) = packet;
-        let directives = adapter
-            .handle_packet(&mut world, state, packet_id, &payload)
-            .unwrap_or_default();
-        for directive in directives {
-            if let Directive::Emit(_) = directive {
-                // notifications only
-            } else {
-                apply(&mut conn, &mut state, directive).await;
-            }
-        }
-        if let Some(loaded) = world.get(WorldChunkPos::new(cx, cz)) {
-            let block_present = loaded.column.get_block(lx, gy, lz) != 0;
-            let (light_sec, slx, sly, slz) = light_cell(&loaded.column, gx, gy, gz);
-            let server_lit = light_sec < loaded.light.light_section_count()
-                && loaded.light.section_light(light_sec).block_at(slx, sly, slz) >= 14;
-            if block_present && server_lit {
-                lit = true;
-                break;
-            }
-        }
+        eprintln!(
+            "DIAG: chunk ({cx}, {cz}) loaded={} block_at_cell={blk:?} \
+             server_block_light_at_cell={light_val:?} chunks_loaded={}",
+            loaded.is_some(),
+            world.iter().count()
+        );
     }
     assert!(
         lit,
-        "timed out waiting for the server's recomputed block light to reach the source cell \
-         at ({gx}, {gy}, {gz}) in chunk ({cx}, {cz}) — the setblock or the light_update path \
-         did not complete (gate fails, never skips)"
+        "the rejoined client never received chunk ({cx}, {cz}) with the glowstone lit at \
+         ({gx}, {gy}, {gz}) — the second bot spawned out of view distance of the source, or the \
+         server did not bake the light into the chunk (gate fails, never skips)"
     );
 
     // --- Judge our engine against the server's recomputed block light. -------
@@ -418,6 +490,8 @@ async fn computed_block_light_matches_server_oracle_around_a_placed_source() {
     eprintln!("=====================================================\n");
 
     // Best-effort cleanup so repeated runs start clean; failure here is harmless.
-    let _ = rcon.command(&format!("setblock {gx} {gy} {gz} minecraft:air"));
-    let _ = rcon.command(&format!("forceload remove {gx} {gz}"));
+    if let Ok(mut rcon) = RconClient::connect(RCON_ADDR, RCON_PASSWORD) {
+        let _ = rcon.command(&format!("setblock {gx} {gy} {gz} minecraft:air"));
+        let _ = rcon.command(&format!("forceload remove {gx} {gz}"));
+    }
 }

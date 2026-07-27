@@ -61,7 +61,10 @@ fn chat_type_bound(sender_name: &str) -> Vec<u8> {
 fn chat_ack_encodes_offset_as_varint() {
     let adapter = V770Adapter::new();
     let out = adapter
-        .encode_action(ConnectionState::Play, &ClientAction::ChatAck { offset: 300 })
+        .encode_action(
+            ConnectionState::Play,
+            &ClientAction::ChatAck { offset: 300 },
+        )
         .expect("encode chat_ack");
     let (id, payload) = out.expect("chat_ack must produce a packet");
     assert_eq!(id, play::serverbound::CHAT_ACK);

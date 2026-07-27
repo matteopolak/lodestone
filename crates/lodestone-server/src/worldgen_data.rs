@@ -69,7 +69,8 @@ impl Resolver for EmbeddedResolver {
         NoiseParams {
             first_octave: v["firstOctave"]
                 .as_i64()
-                .unwrap_or_else(|| panic!("noise '{name}' missing firstOctave")) as i32,
+                .unwrap_or_else(|| panic!("noise '{name}' missing firstOctave"))
+                as i32,
             amplitudes: v["amplitudes"]
                 .as_array()
                 .unwrap_or_else(|| panic!("noise '{name}' missing amplitudes"))
@@ -128,7 +129,9 @@ mod tests {
             "noise/continentalness",
         ] {
             assert!(
-                EMBEDDED_WORLDGEN.binary_search_by(|(id, _)| (*id).cmp(key)).is_ok(),
+                EMBEDDED_WORLDGEN
+                    .binary_search_by(|(id, _)| (*id).cmp(key))
+                    .is_ok(),
                 "embedded table missing '{key}'"
             );
         }

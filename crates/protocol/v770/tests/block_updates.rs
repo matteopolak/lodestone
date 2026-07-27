@@ -8,10 +8,10 @@
 //! packed `BlockPos`/`SectionPos` long plus VarInt/VarLong bodies, so a
 //! symmetric encode/decode bug cannot pass silently.
 
+use lodestone_core::Nbt;
 use lodestone_model::{ConnectionState, VersionAdapter};
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
-use lodestone_core::Nbt;
 use lodestone_world::{ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink};
 
 /// A [`WorldSink`] that records single- and multi-block writes for assertion.

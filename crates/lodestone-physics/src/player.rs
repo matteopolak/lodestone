@@ -275,8 +275,21 @@ fn modify_input_unit_square(
     (dir_x * modified_length, dir_y * modified_length)
 }
 
-/// `Entity.getInputVector(input, speed, yRot)` — yaw-rotated, speed-scaled input.
-fn input_vector(strafe: f32, forward: f32, speed: f32, yaw: f32) -> Vec3d {
+/// `Entity.getInputVector(relativeInput, speed, yRot)` — the yaw-rotated,
+/// speed-scaled acceleration that `moveRelative` adds to velocity.
+///
+/// This is entity-agnostic and public so a mob loop can produce its per-tick
+/// velocity *contribution* the same way the player pipeline does — vanilla drives
+/// both players and mobs through `moveRelative`, and re-deriving this yaw rotation
+/// by hand is a divergence surface (the `Mth.sin`/`Mth.cos` LUT and the exact
+/// `f32`/`f64` widths must match). Feed the result (plus gravity) into
+/// [`crate::entity::move_entity`] as `motion.velocity`.
+///
+/// Scope: `strafe`/`forward` are the horizontal relative-movement axes (vanilla's
+/// `xxa`/`zza`); the vertical relative component is fixed at `0`, which covers
+/// walking mobs. A fully-general `moveRelative(Vec3)` with a vertical input (a
+/// swimming or flying mob) can be added when one is wired.
+pub fn input_vector(strafe: f32, forward: f32, speed: f32, yaw: f32) -> Vec3d {
     let input = Vec3d::new(f64::from(strafe), 0.0, f64::from(forward));
     let length_sqr = input.length_sqr();
     if length_sqr < 1.0E-7 {
@@ -388,11 +401,8 @@ pub(crate) fn restitute_movement_after_collisions(
             let ey = mth::floor(position.y - f64::from(0.2f32));
             let ez = mth::floor(position.z);
             let block_bounciness = f64::from(view.bounce_restitution(ex, ey, ez));
-            let effective_gravity = effective_gravity(
-                f64::from(profile.gravity),
-                current.y <= 0.0,
-                slow_falling,
-            );
+            let effective_gravity =
+                effective_gravity(f64::from(profile.gravity), current.y <= 0.0, slow_falling);
             // `!(-current.y < effGravity)`: only a fast-enough landing bounces (a
             // resting entity does not jitter). Kept as vanilla's negated `<` rather
             // than `>=` so the NaN edge matches its float expression exactly.
@@ -407,11 +417,8 @@ pub(crate) fn restitute_movement_after_collisions(
 
         let (gravity_compensation, effective_drag) = if restitution > 0.0 {
             let portion_with_movement = resolved.y / current.y;
-            let effective_gravity = effective_gravity(
-                f64::from(profile.gravity),
-                current.y <= 0.0,
-                slow_falling,
-            );
+            let effective_gravity =
+                effective_gravity(f64::from(profile.gravity), current.y <= 0.0, slow_falling);
             (
                 portion_with_movement * effective_gravity,
                 mth::lerp_f64(portion_with_movement, 1.0, f64::from(0.98f32)),

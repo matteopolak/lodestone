@@ -273,7 +273,11 @@ mod tests {
         for _ in 0..40 {
             tick(&mut s, MovementInput::NONE, &Air, &p);
         }
-        assert!(s.position.y > 100.5, "levitation-by-id y = {}", s.position.y);
+        assert!(
+            s.position.y > 100.5,
+            "levitation-by-id y = {}",
+            s.position.y
+        );
     }
 
     /// End-to-end seam proof for the attribute path: folding a Speed modifier
@@ -295,8 +299,8 @@ mod tests {
         let base_speed = f64::from(p.base_movement_speed); // 0.1F widened
 
         let walk = |movement_speed: f64| -> f64 {
-            let mut s = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0)
-                .with_movement_speed(movement_speed);
+            let mut s =
+                PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0).with_movement_speed(movement_speed);
             s.on_ground = true;
             let input = MovementInput {
                 forward: 1.0,

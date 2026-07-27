@@ -226,6 +226,28 @@ fn loaded_chunk_with_light(light: ColumnLight) -> LoadedChunk {
     LoadedChunk::new(column, light, Heightmaps::new(), Vec::new())
 }
 
+/// Builds a single-chunk [`LoadedChunk`] with one non-air block at local
+/// `(x, y, z)` *and* a caller-supplied light column, so both a real block
+/// section and independent per-light-section data are present at once.
+fn loaded_chunk_with_block_and_light(
+    x: usize,
+    y: i32,
+    z: usize,
+    id: u32,
+    light: ColumnLight,
+) -> LoadedChunk {
+    let mut column = ChunkColumn::new(
+        0,
+        16,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    );
+    column.set_block(x, y, z, id);
+    LoadedChunk::new(column, light, Heightmaps::new(), Vec::new())
+}
+
 /// The read-model folds login, health, and teleport into queryable player
 /// state.
 #[tokio::test]
@@ -578,6 +600,100 @@ async fn light_snapshot_is_served_and_outlives_unload() {
         "held light snapshot outlives the unload"
     );
     assert_eq!(held.block_at(7, 8, 9), 7);
+
+    drop(handle);
+}
+
+/// The bulk `sections_and_light_at` pairs a block-section `Arc` with a
+/// light-section snapshot in a single lock acquisition, so a mesher never meshes
+/// geometry from one tick against light from another. The two indices are
+/// *distinct spaces* and must be passed straight through with no silent
+/// translation: block-section index for the `Arc`, light-section index for the
+/// light (a mesher meshing block section 4 asks for light section 5). This test
+/// pins that the returned pairs stay aligned, that the block side elides all-air
+/// sections while the light side still serves them, and that each half is the
+/// same snapshot the singular reads return.
+#[tokio::test]
+async fn sections_and_light_read_pairwise_in_one_epoch() {
+    const LOAD: i32 = 1;
+
+    // A real block in block section 4, plus light written into light section 5
+    // (which covers block section 4). Distinct indices, distinct data.
+    let sky_idx = NibbleArray::index(1, 2, 3);
+    let mut light = ColumnLight::new(16);
+    light.set_sky_light(5, sky_idx, 12);
+    let chunk = loaded_chunk_with_block_and_light(1, 64, 2, 5, light);
+
+    let pos = ChunkPos::new(0, 0);
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .world_write(
+            ConnectionState::Play,
+            LOAD,
+            WorldWrite::Load(WorldChunkPos::new(0, 0), chunk),
+        )
+        .on(
+            ConnectionState::Play,
+            LOAD,
+            vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })],
+        );
+    let (handle, _events, mut peer) = start(adapter);
+
+    peer.write_packet(LOAD, &[]).await.unwrap();
+    handle
+        .wait_for_chunk(pos, Duration::from_secs(2))
+        .await
+        .expect("chunk should load");
+
+    // Each request names (chunk, block_section_index, light_section_index).
+    let batch = handle.sections_and_light_at(&[
+        (pos, 4, 5),                 // real block section + its covering light section
+        (pos, 6, 7),                 // all-air (elided) block section + its light section
+        (ChunkPos::new(9, 9), 4, 5), // unloaded chunk
+    ]);
+    assert_eq!(batch.len(), 3, "one aligned pair per request");
+
+    let (sec, lit) = &batch[0];
+    assert!(
+        sec.is_some(),
+        "block section 4 holds a block, so its Arc is present"
+    );
+    assert_eq!(
+        lit.as_ref()
+            .expect("light section 5 present")
+            .sky_at(1, 2, 3),
+        12,
+        "light comes from the light index (5), not the block index (4)"
+    );
+
+    let (air_sec, air_lit) = &batch[1];
+    assert!(air_sec.is_none(), "block section 6 is all air -> elided");
+    assert!(
+        air_lit.is_some(),
+        "air still carries light: the light side must not elide it"
+    );
+
+    let (miss_sec, miss_lit) = &batch[2];
+    assert!(
+        miss_sec.is_none() && miss_lit.is_none(),
+        "an unloaded chunk is None on both halves"
+    );
+
+    // Each half is the very snapshot the singular reads hand out — proving the
+    // bulk call reads the same block-index and light-index spaces, not a fused or
+    // silently-corrected index.
+    assert!(
+        std::sync::Arc::ptr_eq(
+            batch[0].0.as_ref().unwrap(),
+            &handle.section_at(pos, 4).unwrap()
+        ),
+        "bulk block Arc is pointer-identical to the singular section_at(4)"
+    );
+    assert_eq!(
+        batch[0].1.as_ref().unwrap().sky_at(1, 2, 3),
+        handle.light_at(pos, 5).unwrap().sky_at(1, 2, 3),
+        "bulk light matches the singular light_at(5)"
+    );
 
     drop(handle);
 }

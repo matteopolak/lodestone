@@ -19,12 +19,12 @@ serde_json = { workspace = true, optional = true }
 lodestone-core = { workspace = true, optional = true }
 lodestone-net = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
-# Used only by the `live-tablist` end-to-end test, which drives the *real*
-# high-level client and asserts through its public `ClientHandle::players()`.
-# `lodestone-client` and `lodestone-registry` are version-free shared crates
-# (the registry aggregates version families through optional features), so this
-# crate still never names a `crates/protocol/*` family and isolation stays clean.
-lodestone-client = { workspace = true, optional = true }
+# Used only by the live end-to-end tests, which drive the *real* high-level
+# client and assert through its public `ClientHandle` API. `lodestone-registry`
+# is a version-free shared crate (it aggregates version families behind optional
+# features), so this crate still never names a `crates/protocol/*` family and
+# isolation stays clean. NOTE: `lodestone-client` itself is a **dev-dependency**
+# (below), not a normal optional dep — see the rationale there.
 lodestone-registry = { workspace = true, optional = true }
 
 [features]
@@ -35,37 +35,33 @@ json = ["dep:serde_json"]
 # Off by default so `cargo test` stays hermetic and version-free; the test is
 # additionally `#[ignore]`d.
 live-reconcile = ["dep:lodestone-core", "dep:lodestone-net", "dep:tokio"]
-# Wires the tab list end-to-end through the *real* client: connect with
-# `lodestone-client`, resolve the v770 adapter through the registry, and assert
-# the server's `player_info_update` reaches `ClientHandle::players()`. Off by
-# default and `#[ignore]`d. Enables the registry's v770 family via the client's
-# `live-v770` feature; `lodestone-game` itself still names no version crate.
+# The `live-*` client oracles below drive the *real* client. `lodestone-client`
+# is a dev-dependency (see `[dev-dependencies]`), so these features do NOT list
+# `dep:lodestone-client` — they only turn on the registry + tokio and enable the
+# client's `live-v770` family so the real v770 adapter is available to the test.
+# `lodestone-game` still names no version crate, so isolation stays clean.
+#
+# Wires the tab list end-to-end through the real client and asserts the server's
+# `player_info_update` reaches `ClientHandle::players()`. `#[ignore]`d.
 live-tablist = [
-    "dep:lodestone-client",
     "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
-# Wires scoreboard, teams and boss bar end-to-end through the *real* client:
-# drive `/scoreboard`, `/team` and `/bossbar` over RCON against a live 26.2
-# server, then assert the values are readable through `ClientHandle::scoreboard()`
-# and `ClientHandle::boss_bars()`. Off by default and `#[ignore]`d; still names
-# no version crate.
+# Wires scoreboard, teams and boss bar end-to-end through the real client via
+# RCON `/scoreboard`, `/team`, `/bossbar`, then asserts through
+# `ClientHandle::scoreboard()` / `boss_bars()`. `#[ignore]`d.
 live-scoreboard = [
-    "dep:lodestone-client",
     "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
-# Wires an inventory mutation end-to-end through the *real* client: connect with
-# `lodestone-client`, seed a known held item over RCON, and assert the item
-# reaches our `Menu` model through the real `ClientEvent` stream (clientbound
-# half) — then send an encodable serverbound action (`DropSelectedItem`,
-# `SwapItemWithOffhand`) via `ClientHandle::send_action` and assert the server's
-# authoritative response matches the click machine's prediction (serverbound
-# half). Off by default and `#[ignore]`d; still names no version crate.
+# Wires an inventory mutation end-to-end through the real client: seed a held
+# item over RCON, assert it reaches our `Menu` via the real `ClientEvent` stream
+# (clientbound), then send a real `ContainerClick`/`DropSelectedItem` via
+# `ClientHandle::send_action` and assert the server's authoritative response
+# matches the click machine's prediction (serverbound). `#[ignore]`d.
 live-inventory = [
-    "dep:lodestone-client",
     "dep:lodestone-registry",
     "dep:tokio",
     "lodestone-client/live-v770",
@@ -74,6 +70,16 @@ live-inventory = [
 [dev-dependencies]
 serde_json = { workspace = true }
 lodestone-testsupport = { workspace = true }
+# `lodestone-client` is a **dev-dependency**, not a normal dependency, and this
+# is load-bearing architecture, not a convenience. `lodestone-game` is the
+# version-free game-state layer: it folds `lodestone_model::ClientEvent`s into
+# game state and must be depend-able *by* the client/shell, never the reverse.
+# A normal `game -> client` edge makes `client -> game` look circular from the
+# client's side, which is exactly what pushed a *duplicate* scoreboard fold into
+# `lodestone-client`. `lodestone-client` is only needed to drive the live oracle
+# tests, so it belongs here: dev-deps do not count toward the dependency cycle,
+# so `lodestone-client`/`lodestone-shell` can now depend on this crate cleanly.
+lodestone-client = { workspace = true }
 
 [lints]
 workspace = true

@@ -627,7 +627,13 @@ mod tests {
         //      position over the final 500 ticks stays inside a <1-block box.
         let world = sealed_shell();
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.25, 600);
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.5, 0.0, 0.5),
+            0.25,
+            600,
+        );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
         ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
@@ -659,7 +665,10 @@ mod tests {
             max_z - min_z
         );
         // Never phased through the shell.
-        assert!(mob.attacks().is_empty(), "unreachable target must never be struck");
+        assert!(
+            mob.attacks().is_empty(),
+            "unreachable target must never be struck"
+        );
     }
 
     #[test]
@@ -668,9 +677,17 @@ mod tests {
         // keeps ticking for thousands more ticks must stay *at* the target, not
         // drift away or orbit it. Asserts the end state after long idling — the
         // "works then wanders" bug a short test that breaks-on-reach cannot see.
-        let world = Arena { walls: HashSet::new() };
+        let world = Arena {
+            walls: HashSet::new(),
+        };
         let target = Vec3::new(10.5, 0.0, 0.5);
-        let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), Vec3::new(0.5, 0.0, 0.5), 0.25, 800);
+        let mut mob = NavigatingMob::new(
+            &world,
+            MobShape::land(0.6, 1.95),
+            Vec3::new(0.5, 0.0, 0.5),
+            0.25,
+            800,
+        );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
         ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));

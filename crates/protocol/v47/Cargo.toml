@@ -29,13 +29,15 @@ live-chunk = []
 # `lodestone-client` free of any version-crate reference.
 live-entity = []
 
-# Enables the white-box live interaction test: drives a real 1.8.9 join and
-# breaks the block beneath the player through this crate's `encode_action`
-# serverbound path, confirming the break against the server-originated
-# `block_change` packet (1.8.9 has no RCON/console on the test server, so the
-# wire block_change is the independent oracle). Off by default so the default
-# build stays hermetic; lives here to keep `lodestone-client` free of any
-# version-crate reference.
+# Enables the white-box live interaction tests: drive a real 1.8.9 join and
+# exercise this crate's `encode_action` serverbound path against server-computed
+# oracles. `breaks_a_block_on_live_1_8_server` digs the block beneath the player
+# and confirms via the server-originated `block_change` packet (no admin channel
+# needed). `places_a_block_on_live_1_8_server` uses `mc189`'s RCON (:25576) to
+# grant a placeable item — 1.8's `block_place` sends an empty inline item, so the
+# server needs one in inventory — and reads the result back with a server-side
+# `testforblock`. Off by default so the default build stays hermetic; lives here
+# to keep `lodestone-client` free of any version-crate reference.
 live-interaction = []
 
 [dev-dependencies]

@@ -129,7 +129,9 @@ fn composed_surface_and_fluid_are_applied() {
             for y in col.min_y()..col.min_y() + col.height() {
                 match base(col.block_state(lx, y, lz)) {
                     "minecraft:water" => water += 1,
-                    "minecraft:sand" | "minecraft:gravel" | "minecraft:dirt"
+                    "minecraft:sand"
+                    | "minecraft:gravel"
+                    | "minecraft:dirt"
                     | "minecraft:grass_block" => floor_surface += 1,
                     "minecraft:stone" => stone += 1,
                     _ => {}
@@ -138,7 +140,10 @@ fn composed_surface_and_fluid_are_applied() {
         }
     }
 
-    assert!(water > 500, "expected an ocean column, got {water} water blocks");
+    assert!(
+        water > 500,
+        "expected an ocean column, got {water} water blocks"
+    );
     assert!(
         floor_surface > 100,
         "surface rules did not run — {floor_surface} surface blocks (stone sign-field?)"
@@ -188,4 +193,3 @@ fn composed_surface_and_fluid_are_applied() {
         col.non_air_count()
     );
 }
-

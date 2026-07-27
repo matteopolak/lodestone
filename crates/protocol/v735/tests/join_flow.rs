@@ -37,6 +37,16 @@ const PROFILE_UUID: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
 const PROFILE_UUID_BYTES: [u8; 16] = [
     0x06, 0x9a, 0x79, 0xf4, 0x44, 0xe9, 0x47, 0x26, 0xa5, 0xbe, 0xfc, 0xa9, 0x0e, 0x38, 0xaa, 0xf5,
 ];
+const EMPTY_NAMED_NBT: &[u8] = &[0x00];
+const RAW_DIMENSION_CODEC_NBT: &[u8] = &[
+    0x0a, 0x00, 0x04, b'r', b'o', b'o', b't', 0x08, 0x00, 0x04, b'n', b'a', b'm', b'e', 0x00, 0x13,
+    b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':', b'o', b'v', b'e', b'r', b'w', b'o',
+    b'r', b'l', b'd', 0x00,
+];
+const RAW_DIMENSION_TYPE_NBT: &[u8] = &[
+    0x0a, 0x00, 0x03, b'd', b'i', b'm', 0x01, 0x00, 0x07, b'n', b'a', b't', b'u', b'r', b'a', b'l',
+    0x01, 0x00,
+];
 
 fn profile_uuid() -> Uuid {
     PROFILE_UUID.parse().expect("valid uuid")
@@ -50,6 +60,8 @@ fn join_game(entity_id: i32, game_mode: u8, world: &str) -> JoinGame {
         game_mode,
         previous_game_mode: 255,
         world_names: vec![world.to_owned()],
+        dimension_codec: EMPTY_NAMED_NBT.to_vec(),
+        dimension: EMPTY_NAMED_NBT.to_vec(),
         world_name: world.to_owned(),
         hashed_seed: 0,
         max_players: 20,
@@ -246,7 +258,9 @@ fn all_packets_round_trip() {
         food_saturation: 5.0,
     });
     round_trip(&Respawn {
+        dimension: EMPTY_NAMED_NBT.to_vec(),
         world_name: "minecraft:the_nether".to_owned(),
+        hashed_seed: 0,
         game_mode: 0,
         previous_game_mode: 255,
         is_debug: false,
@@ -276,6 +290,52 @@ fn all_packets_round_trip() {
         on_ground: true,
     });
     round_trip(&ServerboundFlying { on_ground: true });
+}
+
+#[test]
+fn join_game_captures_raw_named_nbt_spans_from_external_bytes() {
+    let mut w = Writer::default();
+    w.i32(99);
+    w.bool(false);
+    w.u8(1);
+    w.u8(255);
+    w.var_i32(1);
+    w.string("minecraft:overworld");
+    w.bytes(RAW_DIMENSION_CODEC_NBT);
+    w.bytes(RAW_DIMENSION_TYPE_NBT);
+    w.string("minecraft:overworld");
+    w.i64(123);
+    w.var_i32(20);
+    w.var_i32(10);
+    w.bool(false);
+    w.bool(true);
+    w.bool(false);
+    w.bool(false);
+    let bytes = w.into_vec();
+
+    let decoded = decode::<JoinGame>(&bytes);
+    assert_eq!(decoded.dimension_codec, RAW_DIMENSION_CODEC_NBT);
+    assert_eq!(decoded.dimension, RAW_DIMENSION_TYPE_NBT);
+    assert_eq!(encode(&decoded), bytes);
+}
+
+#[test]
+fn respawn_captures_raw_named_nbt_span_from_external_bytes() {
+    let mut w = Writer::default();
+    w.bytes(RAW_DIMENSION_TYPE_NBT);
+    w.string("minecraft:the_nether");
+    w.i64(456);
+    w.u8(0);
+    w.u8(255);
+    w.bool(false);
+    w.bool(false);
+    w.bool(true);
+    let bytes = w.into_vec();
+
+    let decoded = decode::<Respawn>(&bytes);
+    assert_eq!(decoded.dimension, RAW_DIMENSION_TYPE_NBT);
+    assert_eq!(decoded.hashed_seed, 456);
+    assert_eq!(encode(&decoded), bytes);
 }
 
 #[test]

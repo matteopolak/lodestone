@@ -65,7 +65,7 @@
 //! Both are avoided for this file's *attribute* tests because RCON runs as the
 //! server console (op level 4), never joins as a player, and never dies.
 
-use lodestone_entity::attribute::default_def;
+use lodestone_entity::attribute::{default_attributes, default_def};
 use lodestone_model::Identifier;
 use lodestone_testsupport::RconClient;
 use std::str::FromStr;
@@ -118,6 +118,31 @@ impl Rcon {
             .and_then(|s| s.trim().trim_end_matches('.').parse::<f64>().ok())
             .unwrap_or_else(|| panic!("could not parse attribute value from: {resp:?}"))
     }
+
+    /// Summons `ty` carrying a unique `tag`, and returns a tag-scoped selector.
+    ///
+    /// `cargo test` runs the `#[ignore]`d tests in this file **in parallel**
+    /// against the one shared oracle server. Selecting by `@e[type=zombie]`
+    /// alone lets two concurrently-running tests summon, query, and `kill` each
+    /// other's mobs — which surfaced as a real flake (a zombie's
+    /// `max_absorption` read back `0.6`, another attribute's value, because the
+    /// entity under the selector changed mid-loop). Tagging every summon and
+    /// scoping every kill/select to that tag isolates each test's entities so
+    /// the tests are collision-free regardless of thread interleaving.
+    fn summon_tagged(&mut self, ty: &str, tag: &str) -> String {
+        self.cmd(&format!("kill @e[tag={tag}]"));
+        self.cmd(&format!(
+            "summon minecraft:{ty} 0 -60 0 {{NoAI:1b,NoGravity:1b,Tags:[\"{tag}\"]}}"
+        ));
+        let selector = format!("@e[tag={tag},limit=1]");
+        self.wait_for_entity(&selector);
+        selector
+    }
+
+    /// Removes every entity carrying `tag`.
+    fn kill_tagged(&mut self, tag: &str) {
+        self.cmd(&format!("kill @e[tag={tag}]"));
+    }
 }
 
 fn approx(a: f64, b: f64) {
@@ -169,4 +194,66 @@ fn live_zombie_step_height_and_speed() {
     approx(rcon.base_value(sel, "minecraft:movement_speed"), 0.23);
 
     rcon.cmd("kill @e[type=zombie]");
+}
+
+/// The strong version of the oracle: for each rendered mob type, build our
+/// `default_attributes` supplier and assert **every** attribute in the set — not
+/// a hand-picked few — matches the running server's base value. This is the
+/// whole-set coverage the project favours over fixtures: a wrong base value or a
+/// wrong set membership (claiming an attribute the mob lacks, which makes the
+/// server reject the query) both fail here instantly.
+#[test]
+#[ignore = "needs the isolated lodestone-entity-oracle Docker server with RCON"]
+fn our_supplier_matches_the_live_server_for_every_rendered_mob() {
+    let mut rcon = Rcon::connect();
+    rcon.cmd("difficulty easy"); // monsters cannot spawn/persist on peaceful
+
+    // The mobs the client currently renders, plus two that share a builder
+    // (husk == zombie, mooshroom == cow) to prove the sharing is faithful.
+    let types = [
+        "zombie",
+        "husk",
+        "skeleton",
+        "creeper",
+        "spider",
+        "pig",
+        "cow",
+        "mooshroom",
+        "sheep",
+        "chicken",
+    ];
+
+    let mut checked_attributes = 0usize;
+    for ty in types {
+        let type_key = Identifier::from_str(&format!("minecraft:{ty}")).unwrap();
+        let ours = default_attributes(&type_key)
+            .unwrap_or_else(|| panic!("no supplier for {ty}"));
+
+        rcon.cmd(&format!("kill @e[type={ty}]"));
+        rcon.cmd(&format!(
+            "summon minecraft:{ty} 0 -60 0 {{NoAI:1b,NoGravity:1b}}"
+        ));
+        let sel = format!("@e[type={ty},limit=1]");
+        rcon.wait_for_entity(&sel);
+
+        for (key, instance) in ours.iter() {
+            let attr = key.to_string();
+            let live = rcon.base_value(&sel, &attr);
+            let mine = instance.base_value();
+            assert!(
+                (live - mine).abs() < 1e-6,
+                "{ty} {attr}: ours {mine}, live {live}"
+            );
+            checked_attributes += 1;
+        }
+
+        rcon.cmd(&format!("kill @e[type={ty}]"));
+    }
+
+    // Guard against a vacuously-passing loop: every mob has >=27 attributes, so
+    // ten mobs must have checked well over 200 real comparisons.
+    assert!(
+        checked_attributes > 200,
+        "only {checked_attributes} attribute comparisons ran"
+    );
 }

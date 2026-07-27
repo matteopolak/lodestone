@@ -285,6 +285,34 @@ impl ClientHandle {
         self.state.lights_at(requests)
     }
 
+    /// Returns a `(block section, light section)` snapshot pair for each requested
+    /// `(chunk, block_section_index, light_section_index)`, in order, acquiring the
+    /// internal world lock exactly once for the whole batch.
+    ///
+    /// This is the atomic companion to [`sections_at`](ClientHandle::sections_at)
+    /// and [`lights_at`](ClientHandle::lights_at): calling those two separately
+    /// pulls blocks and light under *different* lock epochs, so a `BLOCK_UPDATE` or
+    /// `LIGHT_UPDATE` landing between them could hand a mesher geometry from one
+    /// tick and light from another. This call reads both halves under one lock, so
+    /// a whole meshing neighbourhood is internally consistent.
+    ///
+    /// The two indices are **distinct spaces and are passed through unchanged** —
+    /// there is deliberately no silent `+1`. The first is a block-section index
+    /// (selecting the `Arc<ChunkSection>`, `None` when the section is unloaded or
+    /// all-air/elided); the second is a light-section index (selecting the
+    /// [`SectionLight`], where `0` is the boundary below the world and light
+    /// section `i` covers block section `i - 1`, and where an all-air section still
+    /// yields `Some`). A mesher meshing block section `n` typically asks for
+    /// `(pos, n, n + 1)`. Each half carries no borrow into the world and pins no
+    /// lock, exactly like the singular reads.
+    #[must_use]
+    pub fn sections_and_light_at(
+        &self,
+        requests: &[(ChunkPos, usize, usize)],
+    ) -> Vec<(Option<std::sync::Arc<ChunkSection>>, Option<SectionLight>)> {
+        self.state.sections_and_light_at(requests)
+    }
+
     /// Returns `(world_age, time_of_day)` as last reported by the server.
     #[must_use]
     pub fn world_time(&self) -> (i64, i64) {

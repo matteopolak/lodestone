@@ -100,7 +100,11 @@ fn light_update_merges_sky_array_and_empty_block_then_notifies() {
     // Sky section 1 got the full array (nibble 15 everywhere).
     match chunk.light.sky(1) {
         LightData::Values(_) => {
-            assert_eq!(chunk.light.sky(1).get(0), Some(15), "sky nibble should be 15");
+            assert_eq!(
+                chunk.light.sky(1).get(0),
+                Some(15),
+                "sky nibble should be 15"
+            );
             assert_eq!(
                 chunk.light.sky(1).get(4095),
                 Some(15),

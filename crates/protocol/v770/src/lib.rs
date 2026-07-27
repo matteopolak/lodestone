@@ -3,11 +3,17 @@
 //! Phase 1 implements protocol 776 (Minecraft 26.2): the packet definitions for
 //! the handshake, login, configuration, and play join flow, plus the
 //! [`V770Adapter`] that lifts those packets into the version-free
-//! [`lodestone_model`] canonical model.
+//! [`lodestone_model`] canonical model, and [`server_protocol::V770ServerProtocol`]
+//! that implements the mirror-image [`lodestone_server::ServerProtocol`] seam so
+//! `lodestone-server` can drive the same wire format from the other side.
 //!
-//! This crate depends only on `lodestone-core`, `lodestone-model`, and
-//! `lodestone-macros`, so the whole version family can be removed by deleting
-//! this folder.
+//! This crate depends on the version-free `lodestone-core`, `lodestone-model`,
+//! `lodestone-macros`, and `lodestone-world` crates, plus `lodestone-server` (also
+//! version-free) for the `V770ServerProtocol` seam — never on another version
+//! crate — so the whole version family can be removed by deleting this folder.
+//! `cargo xtask check-isolation` enforces this in one direction only: a version
+//! crate may depend on version-free crates, but no version-free crate may depend
+//! back on this one.
 
 #![forbid(unsafe_code)]
 
@@ -76,6 +82,8 @@ pub mod mob_effects;
 pub mod packets;
 pub mod particle_types;
 pub mod path_types;
+pub mod server_protocol;
 pub mod sound_events;
 
 pub use adapter::{PROTOCOL, V770Adapter, adapter};
+pub use server_protocol::V770ServerProtocol;

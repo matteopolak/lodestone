@@ -781,8 +781,8 @@ fn entity_models_whole_corpus_coverage() {
                     e.name, tex_path
                 )
             });
-        let img = Image::decode_png(&bytes)
-            .unwrap_or_else(|_| panic!("{}: decode {}", e.name, tex_path));
+        let img =
+            Image::decode_png(&bytes).unwrap_or_else(|_| panic!("{}: decode {}", e.name, tex_path));
 
         // A variant-driven entry must have *every* variant sheet present in the
         // jar, not just its default — otherwise ByVariant is a latent 404. Prove
@@ -791,12 +791,14 @@ fn entity_models_whole_corpus_coverage() {
             for t in [Temperature::Temperate, Temperature::Cold, Temperature::Warm] {
                 let vpath = e.texture.resolve(EntityVariant::Temperature(t));
                 let vloc = ResourceLocation::parse(&format!("minecraft:{}", vpath)).unwrap();
-                let vbytes = manager.read_asset(&vloc, "textures", "png").unwrap_or_else(|| {
-                    panic!(
-                        "{}: variant texture {} ({t:?}) not found in client.jar",
-                        e.name, vpath
-                    )
-                });
+                let vbytes = manager
+                    .read_asset(&vloc, "textures", "png")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: variant texture {} ({t:?}) not found in client.jar",
+                            e.name, vpath
+                        )
+                    });
                 Image::decode_png(&vbytes)
                     .unwrap_or_else(|_| panic!("{}: decode variant {}", e.name, vpath));
             }

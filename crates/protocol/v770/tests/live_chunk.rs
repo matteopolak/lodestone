@@ -396,7 +396,10 @@ impl V770LightProps {
 
         let mut by_name: HashMap<String, (u8, u8)> = HashMap::new();
         for block in blocks.as_array().expect("blocks.json is a JSON array") {
-            let name = block["name"].as_str().expect("block has a name").to_string();
+            let name = block["name"]
+                .as_str()
+                .expect("block has a name")
+                .to_string();
             let opacity = block["filterLight"].as_u64().unwrap_or(0) as u8;
             let emission = block["emitLight"].as_u64().unwrap_or(0) as u8;
             by_name.insert(name, (opacity, emission));
@@ -647,8 +650,7 @@ async fn computed_light_matches_server_oracle_on_flat_world() {
         break;
     }
 
-    let (cx, cz, cells) =
-        report.expect("found no featureless flat column to judge light against");
+    let (cx, cz, cells) = report.expect("found no featureless flat column to judge light against");
     assert!(judged > 0);
     eprintln!("\n=== LIVE LIGHT ORACLE (compute_column_light vs server) ===");
     eprintln!("judged chunk              : ({cx}, {cz})");

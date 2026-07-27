@@ -35,6 +35,7 @@
 pub mod anim;
 pub mod arena;
 pub mod block;
+pub mod block_resolver;
 pub mod camera;
 pub mod caps;
 pub mod device;
@@ -64,6 +65,7 @@ pub mod window;
 pub use anim::{AnimFrame, AnimSample, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
+pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use camera::{Camera, Frustum, Intersection, Plane};
 pub use caps::{Backend, GpuCapabilities};
 pub use device::{GpuContext, GpuError};

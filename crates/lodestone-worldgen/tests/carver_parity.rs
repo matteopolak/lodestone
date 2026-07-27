@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lodestone_worldgen::aquifer::AquiferSystem;
-use lodestone_worldgen::carver::{apply_carvers, CarveGrid, CarveObserver, CarverConfig};
+use lodestone_worldgen::carver::{CarveGrid, CarveObserver, CarverConfig, apply_carvers};
 use lodestone_worldgen::density::{Builder, NoiseParams, Resolver};
 use lodestone_worldgen::rng::RandomSource;
 use lodestone_worldgen::surface::{BlockCanon, SurfaceSystem};
@@ -417,7 +417,10 @@ fn run_fixture(label: &str, surface_text: &str, carver_text: &str) {
     // Anti-vacuity: the fixture's own change count must agree, and it must be a
     // meaningful number of blocks — otherwise we would be comparing an
     // uncarved column to itself and calling it agreement.
-    assert_eq!(changed, r.changed, "[{label}] carved-block count vs fixture meta");
+    assert_eq!(
+        changed, r.changed,
+        "[{label}] carved-block count vs fixture meta"
+    );
     assert!(
         changed > 200,
         "[{label}] only {changed} blocks carved — suspiciously few, check the carve path"

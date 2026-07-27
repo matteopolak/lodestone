@@ -396,9 +396,7 @@ impl<'w> MobSim<'w> {
             let rng_hit_800 = rng.next_int(800) == 0;
             let outcome = check_despawn(m.category, dist_sqr, m.no_action_time, rng_hit_800, true);
             match outcome {
-                DespawnOutcome {
-                    discard: true, ..
-                } => false,
+                DespawnOutcome { discard: true, .. } => false,
                 DespawnOutcome {
                     reset_timer: true, ..
                 } => {

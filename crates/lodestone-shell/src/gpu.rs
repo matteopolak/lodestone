@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet, EntityPipeline,
-    GpuAtlas, GpuEntityModel, GpuMesh, Mesh,
+    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet,
+    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, Mesh,
     block::{camera_buffer, sprite_uv_buffer},
     plan_entities, upload_instances,
     vertex::vram_bytes,
@@ -833,7 +833,14 @@ mod tests {
         let plain = target.read_texels(device, queue);
 
         let frame = target.acquire().expect("acquire");
-        state.render(device, queue, frame.view(), &camera, Some(target_block), &[]);
+        state.render(
+            device,
+            queue,
+            frame.view(),
+            &camera,
+            Some(target_block),
+            &[],
+        );
         let outlined = target.read_texels(device, queue);
 
         // The only thing that changed between the two frames is the outline, so
@@ -907,8 +914,9 @@ mod tests {
             let mut hud = crate::hud::HudRenderer::new(device, format);
             let ht_frame = target.acquire().expect("headless acquire");
             {
-                let mut enc = device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear") });
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear"),
+                });
                 {
                     let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("hud-clear"),
@@ -1007,8 +1015,9 @@ mod tests {
             let mut hud = crate::hud::HudRenderer::new(device, format);
             let ht_frame = target.acquire().expect("headless acquire");
             {
-                let mut enc = device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear") });
+                let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("clear"),
+                });
                 {
                     let _pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("hud-clear"),

@@ -117,7 +117,10 @@ const MAX_LIGHT: u8 = 15;
 /// depends only on `blocks` and `props`, so it is trivially testable against a
 /// live server's light for the same chunk.
 #[must_use]
-pub fn compute_column_light(blocks: &impl BlockVolume, props: &impl LightProperties) -> ColumnLight {
+pub fn compute_column_light(
+    blocks: &impl BlockVolume,
+    props: &impl LightProperties,
+) -> ColumnLight {
     let section_count = blocks.section_count();
     let min_y = blocks.min_y();
     // Light sections span [section_count + 2]; the field covers that whole range
@@ -240,7 +243,12 @@ fn propagate(level: &mut [u8], opacity: &[u8], height: usize, buckets: &mut Buck
 /// The (up to) six in-bounds orthogonal neighbours. Horizontal moves outside
 /// `0..16` are dropped — the documented chunk seam.
 #[inline]
-fn neighbours(x: usize, y: usize, z: usize, height: usize) -> impl Iterator<Item = (usize, usize, usize)> {
+fn neighbours(
+    x: usize,
+    y: usize,
+    z: usize,
+    height: usize,
+) -> impl Iterator<Item = (usize, usize, usize)> {
     let mut out: [Option<(usize, usize, usize)>; 6] = [None; 6];
     if x > 0 {
         out[0] = Some((x - 1, y, z));
@@ -376,7 +384,11 @@ impl LightDiff {
 /// source left [`Missing`](LightData::Missing) are skipped — an elided section is
 /// not an assertion of zero, so there is nothing to check there.
 #[must_use]
-pub fn diff_column_light(ours: &ColumnLight, server: &ColumnLight, interior_margin: usize) -> LightDiff {
+pub fn diff_column_light(
+    ours: &ColumnLight,
+    server: &ColumnLight,
+    interior_margin: usize,
+) -> LightDiff {
     debug_assert!(
         interior_margin < EDGE / 2,
         "interior_margin {interior_margin} >= EDGE/2 ({}) compares zero cells — a vacuous pass",
@@ -451,7 +463,14 @@ mod tests {
 
     /// A small column: min_y = -64, 4 sections (y = -64..0), air-filled.
     fn column() -> ChunkColumn {
-        ChunkColumn::new(-64, 4, PaletteKind::block_states(), PaletteKind::biomes(), AIR, 0)
+        ChunkColumn::new(
+            -64,
+            4,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            AIR,
+            0,
+        )
     }
 
     /// Reads sky light at world `(x, y, z)` from a computed column.
@@ -473,7 +492,11 @@ mod tests {
         // An all-air column: every cell sees the sky, so every cell is 15 — a
         // per-step vertical decay would fail this at the bottom.
         for y in [-64, -40, -1] {
-            assert_eq!(sky_at(&light, -64, 5, y, 9), 15, "open column stays 15 at y={y}");
+            assert_eq!(
+                sky_at(&light, -64, 5, y, 9),
+                15,
+                "open column stays 15 at y={y}"
+            );
         }
     }
 
@@ -483,7 +506,11 @@ mod tests {
         col.set_block(4, -20, 4, GLASS);
         let light = compute_column_light(&col, &FakeProps::new());
         // Dampening 0 ⇒ still a sky source below the glass, no shadow.
-        assert_eq!(sky_at(&light, -64, 4, -21, 4), 15, "cell below glass keeps full sky");
+        assert_eq!(
+            sky_at(&light, -64, 4, -21, 4),
+            15,
+            "cell below glass keeps full sky"
+        );
     }
 
     #[test]
@@ -496,9 +523,21 @@ mod tests {
             }
         }
         let light = compute_column_light(&col, &FakeProps::new());
-        assert_eq!(sky_at(&light, -64, 8, -19, 8), 15, "above the layer is open");
-        assert_eq!(sky_at(&light, -64, 8, -20, 8), 0, "the opaque layer itself is dark");
-        assert_eq!(sky_at(&light, -64, 8, -21, 8), 0, "sealed below the layer is dark");
+        assert_eq!(
+            sky_at(&light, -64, 8, -19, 8),
+            15,
+            "above the layer is open"
+        );
+        assert_eq!(
+            sky_at(&light, -64, 8, -20, 8),
+            0,
+            "the opaque layer itself is dark"
+        );
+        assert_eq!(
+            sky_at(&light, -64, 8, -21, 8),
+            0,
+            "sealed below the layer is dark"
+        );
     }
 
     #[test]
@@ -516,7 +555,10 @@ mod tests {
         // step in from the open x=7 column (which is 15), so 14, then 13...
         let under_edge = sky_at(&light, -64, 8, -21, 8);
         let deeper = sky_at(&light, -64, 10, -21, 8);
-        assert!(under_edge < 15, "horizontal spread must attenuate, got {under_edge}");
+        assert!(
+            under_edge < 15,
+            "horizontal spread must attenuate, got {under_edge}"
+        );
         assert_eq!(under_edge, 14, "one block under the roof edge");
         assert_eq!(deeper, 12, "attenuates one per block deeper under the roof");
     }
@@ -526,10 +568,18 @@ mod tests {
         let mut col = column();
         col.set_block(8, -32, 8, TORCH);
         let light = compute_column_light(&col, &FakeProps::new());
-        assert_eq!(block_at(&light, -64, 8, -32, 8), 14, "torch cell holds emission");
+        assert_eq!(
+            block_at(&light, -64, 8, -32, 8),
+            14,
+            "torch cell holds emission"
+        );
         assert_eq!(block_at(&light, -64, 9, -32, 8), 13, "one block away");
         assert_eq!(block_at(&light, -64, 11, -32, 8), 11, "three blocks away");
-        assert_eq!(block_at(&light, -64, 8, -32 + 14, 8), 0, "beyond range is dark");
+        assert_eq!(
+            block_at(&light, -64, 8, -32 + 14, 8),
+            0,
+            "beyond range is dark"
+        );
     }
 
     #[test]
@@ -542,7 +592,10 @@ mod tests {
         // light has to go around, not through opacity-15 stone.
         let behind_wall = block_at(&light, -64, 10, -32, 8);
         let open_side = block_at(&light, -64, 6, -32, 8);
-        assert!(behind_wall < open_side, "wall shadows: {behind_wall} !< {open_side}");
+        assert!(
+            behind_wall < open_side,
+            "wall shadows: {behind_wall} !< {open_side}"
+        );
     }
 
     #[test]
@@ -550,7 +603,10 @@ mod tests {
         let mut col = column();
         col.set_block(8, -32, 8, TORCH);
         let lit = compute_column_light(&col, &FakeProps::new());
-        assert!(block_at(&lit, -64, 8, -32, 8) > 0, "lit while the torch is present");
+        assert!(
+            block_at(&lit, -64, 8, -32, 8) > 0,
+            "lit while the torch is present"
+        );
 
         // Remove the source and recompute from zero: correct by construction, so
         // no stale bright cell survives (the trap a naive increase-only re-flood
@@ -585,7 +641,11 @@ mod tests {
         assert_eq!(sky_at(&light, -64, 6, -19, 6), 15, "air above water");
         assert_eq!(sky_at(&light, -64, 6, -20, 6), 14, "first water cell");
         assert_eq!(sky_at(&light, -64, 6, -21, 6), 13, "second water cell");
-        assert_eq!(sky_at(&light, -64, 6, -22, 6), 12, "air just below the water");
+        assert_eq!(
+            sky_at(&light, -64, 6, -22, 6),
+            12,
+            "air just below the water"
+        );
     }
 
     #[test]
@@ -595,7 +655,11 @@ mod tests {
         // section_count + 2 light sections, indices 0..=5 for a 4-section column.
         assert_eq!(light.light_section_count(), 6);
         // The apron section above the world is open sky.
-        assert_eq!(light.sky(5), &LightData::Uniform(15), "above-world apron is full sky");
+        assert_eq!(
+            light.sky(5),
+            &LightData::Uniform(15),
+            "above-world apron is full sky"
+        );
     }
 
     #[test]
@@ -606,7 +670,10 @@ mod tests {
         let b = a.clone();
         let d = diff_column_light(&a, &b, 0);
         assert_eq!(d.disagreements(), 0, "identical light agrees");
-        assert!(d.cells_compared > 0, "and it actually compared cells (not vacuous)");
+        assert!(
+            d.cells_compared > 0,
+            "and it actually compared cells (not vacuous)"
+        );
         assert!(d.agrees());
     }
 

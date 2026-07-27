@@ -280,9 +280,14 @@ pub fn apply_fluid_push(
                     continue;
                 }
                 // getHeight() = hasSameAbove ? 1.0F : getOwnHeight().
-                let same_above =
-                    view.fluid_at(x, y + 1, z).is_some_and(|above| above.kind == kind);
-                let cell_height = if same_above { 1.0f32 } else { fluid.own_height() };
+                let same_above = view
+                    .fluid_at(x, y + 1, z)
+                    .is_some_and(|above| above.kind == kind);
+                let cell_height = if same_above {
+                    1.0f32
+                } else {
+                    fluid.own_height()
+                };
                 let fluid_top = f64::from(y) + f64::from(cell_height);
                 if fluid_top < box_min_y {
                     continue;

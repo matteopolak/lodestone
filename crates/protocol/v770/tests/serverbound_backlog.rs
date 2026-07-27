@@ -135,10 +135,7 @@ fn paddle_boat_is_two_plain_booleans() {
             },
         )
         .expect("encode paddle boat");
-    assert_eq!(
-        encoded,
-        Some((play::serverbound::PADDLE_BOAT, vec![1, 0]))
-    );
+    assert_eq!(encoded, Some((play::serverbound::PADDLE_BOAT, vec![1, 0])));
 }
 
 #[test]
