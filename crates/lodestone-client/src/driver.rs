@@ -61,7 +61,22 @@ pub(crate) struct Driver<T: Transport> {
     /// wire when the adapter encodes a `chat_ack` packet (older versions encode
     /// `None`).
     chat_tracker: LastSeenTracker,
+    /// Latch for the automatic `player_loaded` signal. Vanilla ignores our
+    /// movement until its per-join/-respawn `clientLoadedTimeoutTimer` elapses
+    /// unless the client zeroes it early with `player_loaded`. Armed on entering
+    /// the world (`Login`) and re-armed on `Death` (the server re-seeds the timer
+    /// on respawn); consumed by the first placement `TeleportPlayer`, so the
+    /// signal fires exactly once per load-epoch. Version-free: it only reaches
+    /// the wire when the adapter encodes a `player_loaded` packet (older versions
+    /// encode `None`).
+    awaiting_player_load: bool,
 }
+
+/// The client brand announced on entering Configuration, matching vanilla's
+/// `minecraft:brand` custom-payload default. A real client is free to advertise
+/// its own brand; this vanilla-compatible string keeps headless bots
+/// indistinguishable from the reference client.
+const CLIENT_BRAND: &str = "vanilla";
 
 impl<T: Transport> Driver<T> {
     // The driver constructor genuinely needs every collaborator it is handed
@@ -93,6 +108,7 @@ impl<T: Transport> Driver<T> {
             profile,
             server,
             chat_tracker: LastSeenTracker::vanilla(),
+            awaiting_player_load: false,
         }
     }
 
@@ -218,7 +234,22 @@ impl<T: Transport> Driver<T> {
                 }
                 Directive::SetState(next) => {
                     tracing::debug!(?next, "state transition");
+                    let entering_configuration = next == ConnectionState::Configuration;
                     self.state = next;
+                    if entering_configuration {
+                        // Announce our brand on entering Configuration, as
+                        // vanilla does. Protocol hygiene with no game/UI input;
+                        // the adapter maps it to the state-appropriate packet and
+                        // versions without a Configuration state never reach here.
+                        if let Step::Stop(outcome) = self
+                            .write_auto_action(ClientAction::SendBrand {
+                                brand: CLIENT_BRAND.to_owned(),
+                            })
+                            .await
+                        {
+                            return Step::Stop(outcome);
+                        }
+                    }
                 }
                 Directive::SetCompression(threshold) => {
                     tracing::debug!(threshold, "set compression");
@@ -288,8 +319,28 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::ChatAck { offset });
                 }
             }
-            ClientEvent::Death { .. } if self.respawn.is_automatic() => {
-                auto_actions.push(ClientAction::Respawn);
+            ClientEvent::Login { .. } => {
+                // Entering the world arms the client-loaded signal; the first
+                // placement teleport that follows zeroes the server's
+                // load-timeout timer so our movement stops being ignored.
+                self.awaiting_player_load = true;
+            }
+            ClientEvent::TeleportPlayer { .. } if self.awaiting_player_load => {
+                // The first teleport after entering the world (or after a
+                // respawn) is the server placing us — the moment vanilla is
+                // genuinely ready to be moved and sends `player_loaded`. Fire
+                // exactly once per load-epoch; a later teleport in the same epoch
+                // finds the latch disarmed and falls through untouched.
+                auto_actions.push(ClientAction::PlayerLoaded);
+                self.awaiting_player_load = false;
+            }
+            ClientEvent::Death { .. } => {
+                // The server re-seeds its load-timeout timer on respawn, so
+                // re-arm `player_loaded` for the post-respawn placement teleport.
+                self.awaiting_player_load = true;
+                if self.respawn.is_automatic() {
+                    auto_actions.push(ClientAction::Respawn);
+                }
             }
             ClientEvent::Chat {
                 ack: Some(info), ..
@@ -372,6 +423,30 @@ impl<T: Transport> Driver<T> {
                 tracing::warn!(%error, ?action, "adapter rejected action; dropping");
             }
         }
+    }
+
+    /// Encodes and writes a driver-injected protocol action, mirroring the
+    /// auto-response semantics in [`Self::emit`]: an unrepresentable action
+    /// (`Ok(None)`) is dropped quietly, while a transport or adapter failure is
+    /// fatal to the session and surfaced rather than swallowed.
+    async fn write_auto_action(&mut self, action: ClientAction) -> Step {
+        match self.adapter.encode_action(self.state, &action) {
+            Ok(Some((packet_id, payload))) => {
+                if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+                    return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
+                        error,
+                    ))));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, ?action, "failed to encode automatic action");
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Adapter(
+                    error,
+                ))));
+            }
+        }
+        Step::Continue
     }
 
     /// Best-effort protocol disconnect on local shutdown.
