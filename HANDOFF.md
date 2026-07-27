@@ -996,3 +996,64 @@ should be checked for the same island problem before more is added.
 Gates that read settled state cannot see ordering bugs, and gates near the origin cannot see
 placement or distance bugs. **Playing the client for five minutes found three defects that
 26 green suites did not.** Keep a manual-play pass in the loop; it is not redundant with tests.
+
+## Addendum — the full-cube assumption (found by the user, 2026-07-27)
+
+The user play-tested and diagnosed this himself: *"the grass is also not transparent, i think you have
+an assumption right now that every block is a full block?"* Correct, and it is the largest remaining
+renderer defect.
+
+`crates/lodestone-shell/src/blocks.rs` `classify()` returns
+
+```rust
+Cell { occludes: bool, surface: Option<Surface { sprites: [SpriteId; N] }>, .. }
+```
+
+— **full-cube-only by construction.** Every non-air block becomes an occluding cube with one sprite
+per face: no geometry, no alpha, no render layer, no tint, no per-face UV/rotation.
+
+**And the machinery to do it properly already exists, unused** — the same island pattern as the GUI
+atlas: `lodestone-render/src/models.rs` (baked quads, `tint_index`, `is_full_cube`),
+`model_pipeline.rs` (pipeline per `RenderLayer`), `translucency.rs` (`RenderLayer`, `SortViewpoint`,
+`TranslucentMesh`).
+
+Observed consequences, all one root cause:
+- **Water renders as an opaque grey cube.** The user's original spawn was deep ocean (confirmed by
+  RCON: water at every probe, sea level y=62), so the sea read as a flat grey stone plain and the
+  camera inside a water block showed a screen-filling grey blob.
+- **Cross-model plants (short_grass, kelp, seagrass) render as solid pillars** and wrongly occlude
+  their neighbours, because `occludes` is a flag rather than a property of the geometry.
+- **Blocks "look rotated wrong"** — per-face sprite assignment ignores model UV and `rotation`.
+- **Foliage is unnaturally dark** — `tint_index` quads never receive biome colours.
+
+Fixing it means resolving each state id to its baked model, emitting those quads, deriving occlusion
+from `is_full_cube`, splitting into opaque/cutout/translucent layers with sorting, and applying biome
+tint. Collision must **not** be derived from render quads — vanilla collision uses the block's
+collision shape, which is a different thing.
+
+## Addendum — fail-closed item decode kills the session
+
+Found by `impl-game` while gating mining live. Equipping any tool makes the server send
+`container_set_slot` carrying an item with a **data-component patch**; v770's `read_item_stack`
+fail-closes on component patches and the driver treats the decode error as **fatal**.
+
+**In 26.2 essentially every real item carries components, so picking up an item, opening a chest, or
+being handed a tool ends the session.** It was invisible until someone equipped a tool during live
+play.
+
+Two lessons, both instances of rules already in this file:
+- *When we own both sides of a round-trip test, it cannot detect a shared misunderstanding of the
+  wire format.* A self-round-trip of our own encoder passes happily while the real server
+  disconnects us.
+- **Fail-closed on a forward-compatible, open-ended wire structure turns every future addition into
+  an outage.** Unknown components must be skippable; an undecodable item must degrade loudly, not
+  tear down the connection.
+
+## Addendum — mining landed, with one genuinely surprising number
+
+`bd7c51c`. Break-time replayed at **f32 fidelity**, matching the server tick-for-tick. The result
+that would look like an off-by-one to a reviewer: **stone bare-handed breaks at tick 151, not the
+textbook 150**, because `1/1.5/100` in f32 sums to slightly under 1.0 after 150 additions. Diamond
+on stone is 6 ticks. Both server-confirmed over RCON (bare-hand stone measured at 7.99 s).
+
+Do not "correct" 151 to 150.
