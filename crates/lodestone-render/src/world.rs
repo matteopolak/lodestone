@@ -49,8 +49,25 @@ pub trait SectionLight {
 }
 
 /// A [`SectionLight`] that reports a constant sky light everywhere and no block
-/// light. Useful for tests and for sections above the heightmap where full sky
-/// light is a fine approximation until real light data is wired in.
+/// light.
+///
+/// This has two distinct uses that must not be confused:
+///
+/// * **Tests** legitimately want a constant, controllable light field.
+/// * The **live mesher** uses it as a *pre-light bridge* ([`Self::pre_light_bridge`])
+///   until `lodestone-world`'s `section_light` sampling and the matching
+///   lock-free handle accessor are wired. This is a bridge, not real light, and
+///   it is the dangerous kind: it renders *plausibly* (full-bright flat), so a
+///   world stuck on it looks merely a little flat rather than obviously broken.
+///   The bridge is therefore given a loud, greppable constructor and a canary
+///   test (`pre_light_bridge_is_the_declared_full_bright_source` in
+///   [`crate::mesher`]) so "real light never landed" surfaces as a named, tested
+///   state rather than a silent default. See that module's light-seam contract.
+///
+/// Note the bridge must **not** be read as "sky is 15 everywhere" once real
+/// light exists: an all-air nether section stores sky `0`, and defaulting it to
+/// 15 is the too-bright-nether bug. The bridge is a stand-in for *absent* data,
+/// not a claim about any dimension.
 #[derive(Debug, Clone, Copy)]
 pub struct UniformLight {
     /// Block light returned for every cell.
@@ -59,12 +76,32 @@ pub struct UniformLight {
     pub sky_light: u8,
 }
 
-impl Default for UniformLight {
-    fn default() -> Self {
+impl UniformLight {
+    /// The **pre-light bridge**: full sky light (`15`), no block light (`0`).
+    ///
+    /// This is the *only* sanctioned way for the live mesher to obtain light
+    /// before the real `section_light` seam is wired. It is named rather than
+    /// spelled `UniformLight::default()` at the call site precisely so it cannot
+    /// be mistaken for real light on a read of the meshing path: the word
+    /// *bridge* is right there. When real per-section light lands (entering via
+    /// the [`MeshJob`](crate::mesher::MeshJob) snapshot, not a shared parameter),
+    /// this constructor's single live call site is the exact spot to replace,
+    /// and the canary test guarding it must be updated deliberately.
+    #[must_use]
+    pub const fn pre_light_bridge() -> Self {
         Self {
             block_light: 0,
             sky_light: 15,
         }
+    }
+}
+
+impl Default for UniformLight {
+    /// Full sky light, no block light — identical to [`Self::pre_light_bridge`].
+    /// Prefer the named constructor on the live path so the bridge is
+    /// unmistakable; `default()` is a convenience for tests.
+    fn default() -> Self {
+        Self::pre_light_bridge()
     }
 }
 

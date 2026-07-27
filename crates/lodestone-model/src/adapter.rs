@@ -178,6 +178,14 @@ pub enum ClientActionKind {
     PickItemFromBlock,
     /// [`ClientAction::PickItemFromEntity`].
     PickItemFromEntity,
+    /// [`ClientAction::SetBeaconEffects`].
+    SetBeaconEffects,
+    /// [`ClientAction::EditBook`].
+    EditBook,
+    /// [`ClientAction::SignUpdate`].
+    SignUpdate,
+    /// [`ClientAction::SetCommandBlock`].
+    SetCommandBlock,
 }
 
 impl From<&ClientAction> for ClientActionKind {
@@ -216,6 +224,10 @@ impl From<&ClientAction> for ClientActionKind {
             ClientAction::SelectTrade { .. } => Self::SelectTrade,
             ClientAction::PickItemFromBlock { .. } => Self::PickItemFromBlock,
             ClientAction::PickItemFromEntity { .. } => Self::PickItemFromEntity,
+            ClientAction::SetBeaconEffects { .. } => Self::SetBeaconEffects,
+            ClientAction::EditBook { .. } => Self::EditBook,
+            ClientAction::SignUpdate { .. } => Self::SignUpdate,
+            ClientAction::SetCommandBlock { .. } => Self::SetCommandBlock,
         }
     }
 }

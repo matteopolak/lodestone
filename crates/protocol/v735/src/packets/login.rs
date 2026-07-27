@@ -1,21 +1,24 @@
-//! Login-state packets for protocol 340.
+//! Login-state packets for protocol 754 (Minecraft 1.16.5).
 //!
 //! Two fields here are architectural probes rather than routine ports:
 //!
 //! * [`LoginStart`] carries **only** a username. Unlike the modern `hello`
-//!   packet there is no client-provided profile UUID, so this crate needs no
-//!   `uuid` dependency at all on the serverbound path.
-//! * [`LoginSuccess`] sends the profile UUID as a **dashed string**, not the
-//!   modern 128-bit binary form. That is exactly why per-version duplicated
-//!   structs are the right design: the same logical field has a different wire
-//!   type across versions, and a shared struct could not express both.
+//!   packet there is no client-provided profile UUID, so the serverbound path
+//!   needs no `uuid` value at all.
+//! * [`LoginSuccess`] sends the profile UUID as a **128-bit binary** value. This
+//!   is the 1.16 change: 1.8 through 1.15 sent the UUID as a dashed *string*,
+//!   but protocol 735+ (1.16) switched to the binary form the modern client
+//!   uses. That is exactly why per-version duplicated structs are the right
+//!   design: the same logical field has a different wire type across versions,
+//!   and a shared struct could not express both.
 
 use lodestone_macros::{Decode, Encode, Packet};
+use uuid::Uuid;
 
 /// Serverbound `login_start` packet that begins login with the client's name.
 ///
-/// Wire layout: string username (max 16 chars). There is no profile UUID in
-/// 1.8, in contrast to the modern login `hello` packet.
+/// Wire layout: string username (max 16 chars). There is no profile UUID, in
+/// contrast to the modern login `hello` packet.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:login_start", state = Login, bound = Server)]
 pub struct LoginStart {
@@ -70,15 +73,14 @@ pub struct EncryptionRequest {
 
 /// Clientbound `success` packet carrying the authenticated game profile.
 ///
-/// Wire layout: string uuid (dashed, max 36 chars) followed by string username
-/// (max 16 chars). The UUID is sent as a **string** in 1.8 through 1.15, not
-/// the modern (1.16+) 128-bit binary UUID.
+/// Wire layout: 128-bit binary uuid followed by string username (max 16 chars).
+/// The UUID is sent as a **binary** value in 1.16+ (protocol 735+), not the
+/// dashed-string form used by 1.8 through 1.15.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:success", state = Login, bound = Client)]
 pub struct LoginSuccess {
-    /// Dashed profile UUID string, such as `069a79f4-44e9-4726-a5be-fca90e38aaf5`.
-    #[mc(max = 36)]
-    pub uuid: String,
+    /// Binary profile UUID.
+    pub uuid: Uuid,
     /// Authenticated profile name.
     #[mc(max = 16)]
     pub username: String,

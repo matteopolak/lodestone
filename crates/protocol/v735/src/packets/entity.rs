@@ -9,18 +9,17 @@ use uuid::Uuid;
 
 use super::metadata::EntityMetadata;
 
-/// Clientbound `spawn_entity_living` — spawns a mob with its initial metadata.
+/// Clientbound `spawn_entity_living` — spawns a mob.
 ///
-/// # 1.12 vs 1.8 divergence
+/// # 1.16 shape
 ///
-/// 1.12 carries an **entity UUID**, a **VarInt type** and **`f64`
-/// coordinates** — where 1.8 has no UUID, a `u8` type and fixed-point `i32`
-/// coordinates. The trailing metadata uses the modern indexed format terminated
-/// by `0xFF`.
+/// Carries an **entity UUID**, a **VarInt type** and **`f64` coordinates**. The
+/// trailing metadata list that pre-1.15 packets appended was **removed** in 1.15
+/// — metadata now arrives only via the separate `entity_metadata` packet — so
+/// this struct ends at the velocity components.
 ///
 /// Wire layout: varint entity id, UUID, varint type, three `f64` coordinates,
-/// signed-byte yaw/pitch/head-pitch, three `i16` velocity components, then the
-/// metadata list.
+/// signed-byte yaw/pitch/head-pitch, three `i16` velocity components.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:spawn_entity_living", state = Play, bound = Client)]
 pub struct SpawnEntityLiving {
@@ -29,7 +28,7 @@ pub struct SpawnEntityLiving {
     pub entity_id: i32,
     /// Entity UUID.
     pub entity_uuid: Uuid,
-    /// Mob type id (VarInt, 1.12 numbering).
+    /// Mob type id (VarInt, 1.16 numbering).
     #[mc(varint)]
     pub kind: i32,
     /// X coordinate.
@@ -50,8 +49,6 @@ pub struct SpawnEntityLiving {
     pub velocity_y: i16,
     /// Velocity Z (fixed-point).
     pub velocity_z: i16,
-    /// Initial data-watcher metadata.
-    pub metadata: EntityMetadata,
 }
 
 /// Clientbound `entity_metadata` — an incremental metadata update for an entity.
@@ -170,12 +167,11 @@ pub struct EntityVelocityPacket {
 
 /// Clientbound `spawn_entity` — spawns a non-living object entity.
 ///
-/// # 1.12 vs 1.8 divergence
+/// # 1.16 shape
 ///
-/// 1.12 adds a 128-bit `object_uuid`, uses `f64` coordinates, and — crucially —
-/// sends the `velocity` **unconditionally**, whereas 1.8 gates it behind a
-/// non-zero `object_data` switch. The unconditional shape means this is an
-/// ordinary derived struct here (1.8's cannot be).
+/// Carries a 128-bit `object_uuid`, a **VarInt `type`** (widened from the legacy
+/// byte), `f64` coordinates, and sends `velocity` **unconditionally**. The
+/// unconditional shape means this is an ordinary derived struct here.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:spawn_entity", state = Play, bound = Client)]
 pub struct SpawnObject {
@@ -184,8 +180,9 @@ pub struct SpawnObject {
     pub entity_id: i32,
     /// Entity UUID.
     pub object_uuid: Uuid,
-    /// Object type id (1.12 object numbering).
-    pub kind: i8,
+    /// Object type id (VarInt, 1.16 entity-type numbering).
+    #[mc(varint)]
+    pub kind: i32,
     /// X coordinate.
     pub x: f64,
     /// Y coordinate.
@@ -208,9 +205,9 @@ pub struct SpawnObject {
 
 /// Clientbound `named_entity_spawn` — spawns a player entity.
 ///
-/// 1.12 sends the player UUID as a 128-bit value (only Login Success uses the
-/// string form) and drops 1.8's `current_item` field. The trailing metadata is
-/// consumed by the derived [`EntityMetadata`] codec.
+/// 1.16 sends the player UUID as a 128-bit value and, since 1.15, no longer
+/// appends a metadata list (it arrives via the separate `entity_metadata`
+/// packet), so this struct ends at the pitch angle.
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:named_entity_spawn", state = Play, bound = Client)]
 pub struct NamedEntitySpawn {
@@ -229,8 +226,6 @@ pub struct NamedEntitySpawn {
     pub yaw: i8,
     /// Pitch as a signed-byte angle.
     pub pitch: i8,
-    /// Initial data-watcher metadata.
-    pub metadata: EntityMetadata,
 }
 
 /// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to

@@ -37,6 +37,7 @@
 
 pub mod bossbar;
 pub mod chat;
+pub mod chat_ack;
 pub mod click;
 pub mod container;
 pub mod effect;

@@ -1,14 +1,23 @@
-//! The 1.12.2 (protocol 340) `slot` wire type — a single inventory item stack.
+//! The 1.13.1+ `slot` wire type — a single inventory item stack.
 //!
 //! # Why this is hand-written and not derived
 //!
-//! A slot is a *tagged* structure whose tail depends on its head: `blockId`
-//! (`i16`) is `-1` for an empty slot (nothing follows), otherwise the count,
-//! damage and an **optional NBT tag** follow. That "field present iff a previous
-//! field has a particular value" shape has no derive attribute (it is the same
-//! `switch` the modern component list would need), so it is an explicit
+//! A slot is a *tagged* structure whose tail depends on its head: a leading
+//! `present` boolean says whether an item follows; when it does, a VarInt item
+//! id, a byte count and an **optional NBT tag** follow. That "field present iff
+//! a previous field has a particular value" shape has no derive attribute (it is
+//! the same `switch` the modern component list would need), so it is an explicit
 //! `Encode`/`Decode` pair. Because it implements those traits, packets can hold
 //! a `Slot` (or `Vec<Slot>`) and still derive their own codec.
+//!
+//! # 1.13 flattening: this is *not* the pre-1.13 slot
+//!
+//! Before 1.13 a slot led with a signed `i16` block id (`-1` = empty) and
+//! carried a separate `damage` (metadata) `i16`. The 1.13 flattening removed the
+//! `(id, meta)` split entirely: an item is now a single flat registry id, so
+//! this format is `present: bool`, `id: VarInt`, `count: i8`, `nbt`. There is no
+//! `damage` field. This crate therefore cannot share `Slot` with the pre-1.13
+//! v47/v340 crates — the wire shapes genuinely disagree.
 //!
 //! # The NBT-as-raw-bytes decision (a `lodestone-core` seam)
 //!
@@ -21,27 +30,20 @@
 //! constructing an item with *fresh* NBT from scratch would need an NBT writer,
 //! which is the seam to report if a higher layer ever needs it. `None` is the
 //! single `0x00` (`TAG_End`) "no NBT" marker.
-//!
-//! The 1.8 and 1.12.2 slot formats are byte-for-byte identical, so this type is
-//! duplicated verbatim in the v47 crate — the project's blessed "duplicate
-//! rather than share across versions" rule, here because the two versions
-//! genuinely agree.
 
 use lodestone_core::{Ctx, Decode, Encode, Error, Reader, Result, Writer, read_named_nbt};
 
 /// A single inventory slot: either empty or an item stack with optional NBT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slot {
-    /// An empty slot (`blockId == -1`).
+    /// An empty slot (`present == false`).
     Empty,
     /// An occupied slot.
     Item {
-        /// Item/block id.
-        id: i16,
+        /// Flat item registry id (1.13+ numbering, VarInt on the wire).
+        id: i32,
         /// Stack size.
         count: i8,
-        /// Damage / metadata value.
-        damage: i16,
         /// Raw NBT tag bytes (`None` for the `0x00` no-NBT marker). Stored as
         /// bytes because `lodestone-core` has no NBT writer; see the module docs.
         nbt: Option<Vec<u8>>,
@@ -59,16 +61,11 @@ impl Slot {
 impl Encode for Slot {
     fn encode(&self, w: &mut Writer, _ctx: Ctx) -> Result<()> {
         match self {
-            Slot::Empty => w.i16(-1),
-            Slot::Item {
-                id,
-                count,
-                damage,
-                nbt,
-            } => {
-                w.i16(*id);
+            Slot::Empty => w.bool(false),
+            Slot::Item { id, count, nbt } => {
+                w.bool(true);
+                w.var_i32(*id);
                 w.i8(*count);
-                w.i16(*damage);
                 match nbt {
                     None => w.u8(0), // TAG_End: no NBT
                     Some(raw) => w.bytes(raw),
@@ -81,19 +78,14 @@ impl Encode for Slot {
 
 impl Decode for Slot {
     fn decode(r: &mut Reader<'_>, _ctx: Ctx) -> Result<Self> {
-        let id = r.i16()?;
-        if id == -1 {
+        let present = r.bool()?;
+        if !present {
             return Ok(Slot::Empty);
         }
+        let id = r.var_i32()?;
         let count = r.i8()?;
-        let damage = r.i16()?;
         let nbt = decode_optional_nbt(r)?;
-        Ok(Slot::Item {
-            id,
-            count,
-            damage,
-            nbt,
-        })
+        Ok(Slot::Item { id, count, nbt })
     }
 }
 

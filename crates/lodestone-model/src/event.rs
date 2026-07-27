@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::{
-    common::GameMode,
+    common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
     item::ItemStack,
     math::{BlockPos, ChunkPos, Rotation, Vec3, Vec3f},
@@ -73,6 +73,30 @@ pub enum EntityPose {
     /// A pose this version has that the shared set does not name, kept as its
     /// raw protocol id.
     Other(u32),
+}
+
+/// A version-free entity animation kind, from `ClientboundAnimatePacket`.
+///
+/// `non_exhaustive` with an [`Other`](AnimationAction::Other) escape hatch for
+/// the same reason as [`EntityPose`]: vanilla's action byte is a small, fixed
+/// set of named constants (with one reserved/unused value, `1`, deliberately
+/// skipped by Mojang), so an id this table does not recognise still travels
+/// intact rather than being dropped.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnimationAction {
+    /// Swing the main hand.
+    SwingMainHand,
+    /// Play the "wake up" animation (leaving a bed).
+    WakeUp,
+    /// Swing the off hand.
+    SwingOffHand,
+    /// Show a critical-hit particle burst.
+    CriticalHit,
+    /// Show a magic-critical-hit particle burst.
+    MagicCriticalHit,
+    /// An action byte this list does not name, kept as its raw wire value.
+    Other(u8),
 }
 
 /// An incremental, version-free update to an entity's metadata.
@@ -957,5 +981,240 @@ pub enum ClientEvent {
     ChunkUnloaded {
         /// Chunk position.
         pos: ChunkPos,
+    },
+    /// A block-triggering "block event" (e.g. a note block playing, a piston
+    /// starting to move, a chest lid animating) occurred.
+    ///
+    /// `b0`/`b1` are opaque per-block-type parameters; their meaning depends on
+    /// `block` and is a rendering/audio concern for the consumer, not something
+    /// the adapter interprets.
+    BlockEvent {
+        /// Block position.
+        pos: BlockPos,
+        /// First event parameter, meaning depends on `block`.
+        b0: u8,
+        /// Second event parameter, meaning depends on `block`.
+        b1: u8,
+        /// Canonical block type key.
+        block: ResourceKey,
+    },
+    /// A block's break-progress overlay changed.
+    ///
+    /// `progress` is the raw wire byte (vanilla uses `0..=9`ish for visible
+    /// stages and other values to clear the overlay); the adapter does not
+    /// reinterpret it.
+    BlockDestruction {
+        /// Id of the entity breaking the block (usually a player).
+        entity_id: i32,
+        /// Block position.
+        pos: BlockPos,
+        /// Raw break-stage byte.
+        progress: u8,
+    },
+    /// The server acknowledged a client-predicted block change up to
+    /// `sequence`; predictions at or before it can be reconciled/discarded.
+    BlockChangedAck {
+        /// Acknowledged sequence number.
+        sequence: i32,
+    },
+    /// The chunk-loading center moved (usually following the player).
+    ChunkCacheCenterChanged {
+        /// New center chunk X.
+        x: i32,
+        /// New center chunk Z.
+        z: i32,
+    },
+    /// The server's view/loading radius changed.
+    ChunkCacheRadiusChanged {
+        /// New radius, in chunks.
+        radius: i32,
+    },
+    /// The simulation (entity-ticking) distance changed.
+    SimulationDistanceChanged {
+        /// New simulation distance, in chunks.
+        distance: i32,
+    },
+    /// An entity-specific status/animation code was triggered.
+    ///
+    /// `status` is Mojang's raw per-entity-type event byte (e.g. spawn
+    /// particles, play a sound, alter behavior); its meaning depends on the
+    /// entity's type and is a consumer-side concern.
+    EntityStatus {
+        /// Entity id.
+        entity_id: i32,
+        /// Raw status/event byte.
+        status: u8,
+    },
+    /// An entity's head yaw changed independently of its body rotation.
+    EntityHeadRotation {
+        /// Entity id.
+        entity_id: i32,
+        /// New head yaw, in degrees.
+        head_yaw: f32,
+    },
+    /// An entity's passenger list changed.
+    EntityPassengersChanged {
+        /// Vehicle entity id.
+        vehicle_id: i32,
+        /// Passenger entity ids, in mounting order.
+        passenger_ids: Vec<i32>,
+    },
+    /// An entity's leash holder changed.
+    EntityLeashed {
+        /// Leashed entity id.
+        entity_id: i32,
+        /// Holder entity id, or `None` if the leash was removed.
+        holder_id: Option<i32>,
+    },
+    /// An item entity was picked up (visually flies to the collector before
+    /// despawning).
+    ItemPickup {
+        /// Item entity id.
+        item_entity_id: i32,
+        /// Collecting entity id (usually a player).
+        player_id: i32,
+        /// Stack size collected.
+        amount: i32,
+    },
+    /// An entity took damage.
+    ///
+    /// `damage_type_id` is the raw `minecraft:damage_type` registry network id.
+    /// Unlike other registries this adapter resolves to canonical keys,
+    /// `minecraft:damage_type` is a purely data-driven registry with no default
+    /// protocol ids: its network id is assigned per-connection by the order the
+    /// server's registry-sync configuration packets listed entries, which this
+    /// adapter does not currently track. Carrying the raw id here is honest
+    /// about that gap rather than guessing a mapping.
+    EntityDamaged {
+        /// Damaged entity id.
+        entity_id: i32,
+        /// Raw `minecraft:damage_type` registry network id (unresolved; see above).
+        damage_type_id: i32,
+        /// Entity id that caused the damage (e.g. an arrow's shooter), when known.
+        cause_id: Option<i32>,
+        /// Entity id that directly dealt the damage (e.g. the arrow itself), when known.
+        direct_id: Option<i32>,
+        /// World-space damage source position, when the damage had no direct entity source.
+        source_pos: Option<Vec3>,
+    },
+    /// An entity played its hurt animation without necessarily taking damage
+    /// (e.g. a client-side prediction correction).
+    EntityHurtAnimation {
+        /// Entity id.
+        entity_id: i32,
+        /// Yaw the hurt animation should play at, in degrees.
+        yaw: f32,
+    },
+    /// An entity played a hand-swing or hit-effect animation.
+    EntityAnimation {
+        /// Entity id.
+        entity_id: i32,
+        /// Animation kind.
+        action: AnimationAction,
+    },
+    /// A mob effect (potion effect) was applied to or refreshed on an entity.
+    MobEffectApplied {
+        /// Entity id.
+        entity_id: i32,
+        /// Canonical mob effect key.
+        effect: ResourceKey,
+        /// Effect amplifier (0 = level I).
+        amplifier: i32,
+        /// Remaining duration, in ticks.
+        duration_ticks: i32,
+        /// Whether the effect originated from ambient sources (e.g. a beacon).
+        ambient: bool,
+        /// Whether particles are shown.
+        visible: bool,
+        /// Whether the effect icon is shown in the HUD.
+        show_icon: bool,
+        /// Whether the effect blends its particle color with others.
+        blend: bool,
+    },
+    /// A mob effect was removed from an entity.
+    MobEffectRemoved {
+        /// Entity id.
+        entity_id: i32,
+        /// Canonical mob effect key.
+        effect: ResourceKey,
+    },
+    /// The vehicle the player is riding moved to an absolute position.
+    VehicleMoved {
+        /// New absolute position.
+        pos: Vec3,
+        /// New yaw, in degrees.
+        yaw: f32,
+        /// New pitch, in degrees.
+        pitch: f32,
+    },
+    /// The local player's selected hotbar slot changed.
+    HeldSlotChanged {
+        /// New selected hotbar slot (`0..9`).
+        slot: i32,
+    },
+    /// The local player's experience bar or level changed.
+    ExperienceChanged {
+        /// Progress toward the next level, in `0.0..1.0`.
+        progress: f32,
+        /// Current experience level.
+        level: i32,
+        /// Total accumulated experience points.
+        total: i32,
+    },
+    /// The item held by the cursor (dragged item) changed.
+    CursorItemChanged {
+        /// New cursor item, or `None` if empty.
+        item: Option<ItemStack>,
+    },
+    /// A slot in the local player's own inventory changed outside of an open
+    /// container screen.
+    InventorySlotChanged {
+        /// Inventory slot index.
+        slot: i32,
+        /// New slot contents.
+        item: Option<ItemStack>,
+    },
+    /// One or more entries were removed from the player list.
+    PlayerListRemove {
+        /// Removed player profile ids.
+        profile_ids: Vec<Uuid>,
+    },
+    /// The main title text changed.
+    TitleText {
+        /// New title text.
+        text: Text,
+    },
+    /// The subtitle text changed.
+    SubtitleText {
+        /// New subtitle text.
+        text: Text,
+    },
+    /// Titles were cleared/hidden.
+    TitlesCleared {
+        /// Whether the fade/stay/fade-out timings should also reset to defaults.
+        reset_times: bool,
+    },
+    /// The title fade-in/stay/fade-out timings changed.
+    TitlesAnimation {
+        /// Fade-in duration, in ticks.
+        fade_in: i32,
+        /// Stay duration, in ticks.
+        stay: i32,
+        /// Fade-out duration, in ticks.
+        fade_out: i32,
+    },
+    /// An item (or shared cooldown group) started its use cooldown.
+    ItemCooldown {
+        /// Cooldown group identifier (an item id or a shared group name).
+        group: ResourceKey,
+        /// Cooldown duration, in ticks.
+        duration_ticks: i32,
+    },
+    /// The world's difficulty (and whether it is locked) changed.
+    DifficultyChanged {
+        /// New difficulty.
+        difficulty: Difficulty,
+        /// Whether the difficulty is locked from further changes in the UI.
+        locked: bool,
     },
 }

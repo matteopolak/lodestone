@@ -17,6 +17,7 @@ use crate::chat::{ChatLog, compose_chat_action};
 use crate::collision::WorldCollision;
 use crate::overlay::{BossBarView, Sidebar};
 use crate::config::Config;
+use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section};
 use crate::net::{NetClient, NetUpdate};
@@ -80,6 +81,9 @@ pub struct Sim {
     health: Option<f32>,
     /// Latest server-reported food level in `0..=20`, `None` until reported.
     food: Option<i32>,
+    /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
+    /// render-rate transforms the entity pass draws. Empty off a live server.
+    entity_interp: EntityInterpolator,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -159,6 +163,7 @@ impl Sim {
             chat_log: ChatLog::new(),
             health: None,
             food: None,
+            entity_interp: EntityInterpolator::new(),
         }
     }
 
@@ -340,7 +345,26 @@ impl Sim {
         self.frame_count += 1;
 
         self.poll_net();
+        self.update_entities(dt as f32);
         self.refresh_stats();
+    }
+
+    /// Fold this frame's entity snapshots into the interpolator so
+    /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
+    /// No live connection means no entities.
+    fn update_entities(&mut self, dt: f32) {
+        let snapshots = self
+            .net
+            .as_ref()
+            .map_or_else(Vec::new, NetClient::entity_snapshots);
+        self.entity_interp.update(&snapshots, dt);
+    }
+
+    /// The interpolated entities to draw this frame, resolved by the renderer
+    /// into instanced draws. Empty off a live server.
+    #[must_use]
+    pub fn entity_draws(&self) -> Vec<EntityDraw> {
+        self.entity_interp.draws()
     }
 
     /// One fixed physics tick through the real engine.

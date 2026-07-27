@@ -1,6 +1,7 @@
 //! Packets shared by the configuration and play states for protocol 776.
 
 use lodestone_macros::{Decode, Encode};
+use uuid::Uuid;
 
 /// The `keep_alive` packet body, identical in both directions and in both the
 /// configuration and play states: a single big-endian 64-bit id.
@@ -8,6 +9,41 @@ use lodestone_macros::{Decode, Encode};
 pub struct KeepAlive {
     /// Challenge id that must be echoed back unchanged.
     pub id: i64,
+}
+
+/// The `ping`/`pong` packet body, identical in both directions and in both the
+/// configuration and play states: a single big-endian 32-bit id, distinct from
+/// [`KeepAlive`]'s 64-bit id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+pub struct Pong {
+    /// Challenge id echoed back from the corresponding `ping`.
+    pub id: i32,
+}
+
+/// Serverbound `custom_payload` packet body for the `minecraft:brand` channel.
+///
+/// Wire layout: the channel identifier (a UTF string, since `writeIdentifier`
+/// writes the same VarInt-length-prefixed UTF-8 as `writeUtf`), then the
+/// brand-specific payload, which for `BrandPayload` is a single UTF string.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct BrandPayload {
+    /// Plugin channel identifier; always `minecraft:brand` for this payload.
+    pub channel: String,
+    /// Free-form client brand string, such as `vanilla`.
+    pub brand: String,
+}
+
+/// Serverbound `resource_pack` response packet.
+///
+/// Wire layout: a raw 16-byte UUID identifying the pack, then a VarInt
+/// `Action` enum ordinal (`0` successfully_loaded … `7` discarded).
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub struct ResourcePackResponse {
+    /// Id of the resource pack this response concerns.
+    pub id: Uuid,
+    /// Outcome ordinal (see the type's doc comment for the enum values).
+    #[mc(varint)]
+    pub action: i32,
 }
 
 /// Serverbound `client_information` packet describing client settings.

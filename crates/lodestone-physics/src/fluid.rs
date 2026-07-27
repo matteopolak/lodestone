@@ -230,6 +230,18 @@ impl Tracker {
 /// The `entityY` used for the depth is the **un-deflated** box minimum
 /// (`getBoundingBox().minY`), while the loop bounds and the `fluidTop >= minY`
 /// gate use the deflated box — reproduced exactly.
+///
+/// # Scope
+///
+/// [`crate::player::tick_water`]/[`crate::player::tick_lava`] invoke this from the
+/// in-fluid travel branch, which the caller selects via the coarse
+/// [`CollisionView::is_water`]/[`CollisionView::is_lava`] dispatch. Vanilla
+/// couples the two the same way — `updateFluidInteraction` sets `isInWater`, and
+/// `travel` picks the water branch iff `isInWater` — so a submerged or swimming
+/// player (the prioritised case) is pushed exactly. A player only *grazing*
+/// flowing water, where the coarse dispatch and vanilla's deflated box scan
+/// disagree on "in water" by a tick, inherits that existing approximation; a
+/// mismatch would surface as a server correction, which the live gates watch for.
 pub fn apply_fluid_push(
     state: &mut crate::player::PlayerState,
     view: &dyn CollisionView,

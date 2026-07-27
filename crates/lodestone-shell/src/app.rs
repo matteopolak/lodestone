@@ -277,7 +277,8 @@ impl WindowApp {
         self.sim.update_target(aspect);
         let camera = self.sim.camera(aspect);
         let outline = self.sim.target.map(|hit| hit.block);
-        let stats = render.render(device, queue, frame.view(), &camera, outline);
+        let entity_draws = self.sim.entity_draws();
+        let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -290,6 +291,7 @@ impl WindowApp {
         self.sim.stats.section_count = stats.sections_drawn;
         self.sim.stats.quads = stats.total_quads;
         self.sim.stats.vram_bytes = stats.vram_bytes;
+        self.sim.stats.entities_drawn = stats.entities_drawn;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
 
@@ -570,7 +572,8 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let frame = target
         .acquire()
         .map_err(|e: TargetError| anyhow::anyhow!("headless acquire failed: {e}"))?;
-    let stats = render.render(device, queue, frame.view(), &camera, outline);
+    let entity_draws = sim.entity_draws();
+    let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
     let pixels = target.read_texels(device, queue);
     let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
 

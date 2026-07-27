@@ -16,19 +16,37 @@
 //! this module holds valid and unchanged — which is what makes off-thread
 //! meshing sound.
 //!
-//! ## Light (world seam — contract settled, wiring pending)
+//! ## Light (world seam — accessors landed, per-section wiring pending)
 //!
-//! `section_at` exposes block-state sections lock-free today; per-section light
-//! is landing via `lodestone-world`'s `World::section_light` and a matching
-//! lock-free `handle` accessor (pending in `lodestone-client`). Until both are
-//! wired, this module meshes with [`UniformLight`] (full sky light, no block
-//! light) so no exposed face renders black in the interim (§7). The seam is a
-//! trait ([`SectionLight`], resolved-u8 per cell), so swapping real light in is
-//! a call-site change; the mesher — including the smooth-lighting corner blend,
-//! which averages individual cell levels across seams — does not change.
+//! The version-free light source is now published by `lodestone-world`:
+//! `World::section_light(pos, light_section_index) -> Option<SectionLight>`, and
+//! `SectionLight::sky_at(x,y,z) -> u8` / `block_at(x,y,z) -> u8` return resolved
+//! levels with the nibble unpacking kept on the storage side (single unpack
+//! path — this module's cross-seam corner averaging cannot drift a nibble
+//! against storage). Those accessors match this crate's [`SectionLight`] trait
+//! one-for-one, so the adapter is a rename-forward.
 //!
-//! The settled seam contract (agreed with the light-engine owner, since this
-//! module is the consumer that samples across section seams):
+//! Until the path below is wired, this module still meshes with the declared
+//! pre-light bridge ([`UniformLight::pre_light_bridge`], full sky / no block) so
+//! no exposed face renders black in the interim (§7). **Two things gate the live
+//! swap, and neither is a one-line call-site change:**
+//!
+//! 1. **A per-section refactor here.** [`SectionSnapshot::build_mesh`] today
+//!    takes *one* shared `light: &L` and applies it to all 27 neighbourhood
+//!    sections — correct for a uniform bridge, wrong for real light, since each
+//!    section carries its own [`SectionLight`] and the smooth-lighting corner
+//!    blend reads *neighbours'* light across seams. Real light therefore requires
+//!    the snapshot to carry per-section light and `build_mesh` to sample the
+//!    owning section's light per cell, not one global source.
+//! 2. **A lock-free `handle` accessor** (pending in `lodestone-client`): the
+//!    mesher runs off-thread on `Arc` snapshots, so it needs
+//!    `handle.section_light(pos, i)` mirroring `section_at`, not `World` access
+//!    under a lock. (`lodestone-world`'s real sky/block propagation is also still
+//!    landing; the accessors already work, the values are just uniform until it
+//!    does — no interface change when they become real.)
+//!
+//! The seam contract (agreed with the light-engine owner, since this module is
+//! the consumer that samples across section seams):
 //!
 //! * **Resolved u8 per cell, not raw `LightData`.** The smooth-lighting corner
 //!   blend (`face_corner_lighting` in [`crate::mesh`]) averages four individual
@@ -41,11 +59,14 @@
 //!   build range by sampling into the section beyond it — block-section index
 //!   cannot name section `-1`, light-section index can. The call site does the
 //!   `+1` translation from block- to light-section index.
-//! * **Never default absent sky light to 15.** An all-air section returns *its*
-//!   sky light from storage — 15 in the overworld, 0 in the nether/end — so
-//!   brightness comes from the authority, not a fallback. Coercing absent sky to
-//!   15 is the too-bright-nether bug; the [`UniformLight`] `sky_light: 15`
-//!   default is a pre-light bridge only and is dropped once real light samples.
+//! * **Never default absent sky light to 15 blindly.** `sky_at` resolves a
+//!   `Missing` section to `0`; the vanilla *above-the-world* sky default of `15`
+//!   is dimension- and heightmap-dependent (there is no sky light in the
+//!   nether/end), so it is applied by whoever knows the dimension via an explicit
+//!   policy, never coerced in the mesher — coercing absent sky to 15 is the
+//!   too-bright-nether bug. The [`UniformLight`] `sky_light: 15` bridge is a
+//!   stand-in for *absent* data, not a claim about any dimension, and is dropped
+//!   once real light samples.
 //! * **`None` means unloaded, not dark.** A `None` from `section_light` is an
 //!   unloaded chunk / out-of-range section (defer the seam, re-mesh on load),
 //!   distinct from a present-but-dark section.
@@ -308,15 +329,21 @@ pub struct BuiltSection {
 /// meshes with no lock held. On `wasm32` (which has no thread pool) it runs
 /// serially with identical results. The split is on `target_arch`, not a Cargo
 /// feature, so unification can never drag rayon into the browser build.
-/// `classifier` must be `Sync` for the parallel path; light is the module-level
-/// [`UniformLight`] fallback.
+/// `classifier` must be `Sync` for the parallel path; light is the
+/// [`UniformLight::pre_light_bridge`] stand-in until real per-section light is
+/// wired (see the module-level light-seam contract).
 #[must_use]
 pub fn build_batch<C: BlockClassifier + Sync>(
     jobs: Vec<MeshJob>,
     classifier: &C,
     greedy: bool,
 ) -> Vec<BuiltSection> {
-    let light = UniformLight::default();
+    // PRE-LIGHT BRIDGE — not real light. Named (rather than `default()`) so this
+    // masquerade is unmistakable on a read of the meshing path. When real light
+    // lands it enters per-section via each `MeshJob` snapshot, replacing this one
+    // shared source; the canary test `pre_light_bridge_is_the_declared_full_bright_source`
+    // guards the swap.
+    let light = UniformLight::pre_light_bridge();
     let build = |job: MeshJob| BuiltSection {
         coord: job.coord,
         mesh: job.snapshot.build_mesh(classifier, &light, greedy),
@@ -337,10 +364,37 @@ pub fn build_batch<C: BlockClassifier + Sync>(
 mod tests {
     use super::*;
     use crate::section::{Cell, SpriteId};
+    use crate::world::SectionLight;
     use lodestone_world::PaletteKind;
 
     const AIR: u32 = 0;
     const STONE: u32 = 1;
+
+    /// Canary for the pre-light bridge. `build_batch` meshes with
+    /// [`UniformLight::pre_light_bridge`] until real per-section light is wired;
+    /// this test pins that bridge's identity (full sky, no block light) so the
+    /// bridge cannot be quietly mistaken for real light, and so replacing it
+    /// with real sampling is a *deliberate* edit that must update this test.
+    ///
+    /// When the real seam lands, thread per-section light through the
+    /// [`MeshJob`] snapshot in `build_batch` and delete this canary — do not just
+    /// widen it, because a bridge that renders plausibly is the most dangerous
+    /// kind of dead path.
+    #[test]
+    fn pre_light_bridge_is_the_declared_full_bright_source() {
+        let bridge = UniformLight::pre_light_bridge();
+        assert_eq!(bridge.sky_light(0, 0, 0), 15, "bridge is full sky light");
+        assert_eq!(bridge.block_light(0, 0, 0), 0, "bridge has no block light");
+        // The bridge must NOT be read as a per-dimension truth: it stands in for
+        // absent data, so real light (e.g. nether sky 0) must override it, never
+        // the reverse. Default is the same value but the live path names it.
+        let d = UniformLight::default();
+        assert_eq!(
+            (d.sky_light(0, 0, 0), d.block_light(0, 0, 0)),
+            (bridge.sky_light(0, 0, 0), bridge.block_light(0, 0, 0)),
+            "default() delegates to the named bridge (one source of truth)"
+        );
+    }
 
     #[derive(Debug)]
     struct SimpleClassifier;

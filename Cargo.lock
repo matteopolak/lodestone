@@ -1819,6 +1819,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-client",
  "lodestone-core",
+ "lodestone-entity",
  "lodestone-model",
  "lodestone-net",
  "lodestone-world",

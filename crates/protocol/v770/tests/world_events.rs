@@ -1,5 +1,8 @@
 //! Hermetic tests for the protocol 776 world-event packets `game_event`,
-//! `set_default_spawn_position`, `player_abilities`, and `level_event`.
+//! `set_default_spawn_position`, `player_abilities`, `level_event`,
+//! `block_event`, `block_destruction`, `block_changed_ack`,
+//! `set_chunk_cache_center`, `set_chunk_cache_radius`,
+//! `set_simulation_distance`, and `change_difficulty`.
 //!
 //! Clientbound golden byte vectors are hand-built from the wire specification
 //! (behavioural reference only), so a symmetric encode/decode bug cannot pass
@@ -7,7 +10,7 @@
 //! helper so the adapter's unpacking is pinned against a separate implementation.
 
 use lodestone_model::{
-    BlockPos, ClientEvent, ConnectionState, Directive, GameMode, VersionAdapter,
+    BlockPos, ClientEvent, ConnectionState, Difficulty, Directive, GameMode, VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
@@ -26,6 +29,22 @@ fn handle(adapter: &V770Adapter, packet_id: i32, payload: &[u8]) -> Vec<Directiv
     adapter
         .handle_packet(&mut World::new(), ConnectionState::Play, packet_id, payload)
         .expect("handle packet")
+}
+
+/// Independent VarInt encoder (not the codec under test).
+fn var_i32(value: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut v = value as u32;
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+    out
 }
 
 // ---- game_event -----------------------------------------------------------
@@ -365,3 +384,296 @@ fn level_event_rejects_trailing_bytes() {
     );
     assert!(result.is_err(), "a misaligned level_event must be rejected");
 }
+
+// ---- block_event ------------------------------------------------------
+
+#[test]
+fn block_event_emits_pos_params_and_block_name() {
+    let adapter = V770Adapter::new();
+    let mut payload = pack_block_pos(3, 10, -4).to_be_bytes().to_vec();
+    payload.push(0); // note-block instrument byte
+    payload.push(6); // note pitch byte
+    payload.extend_from_slice(&var_i32(640)); // minecraft:note_block
+    let directives = handle(&adapter, play::clientbound::BLOCK_EVENT, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockEvent {
+            pos: BlockPos { x: 3, y: 10, z: -4 },
+            b0: 0,
+            b1: 6,
+            block: "minecraft:note_block".parse().unwrap(),
+        })]
+    );
+}
+
+#[test]
+fn block_event_rejects_unknown_block_id() {
+    let adapter = V770Adapter::new();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&var_i32(1_000_000)); // far out of range
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_EVENT,
+        &payload,
+    );
+    assert!(result.is_err(), "an unknown block id must be rejected");
+}
+
+#[test]
+fn block_event_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&var_i32(0));
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_EVENT,
+        &payload,
+    );
+    assert!(result.is_err(), "a misaligned block_event must be rejected");
+}
+
+#[test]
+fn block_event_rejects_truncated_payload() {
+    let adapter = V770Adapter::new();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.push(0); // missing b1 and block id
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_EVENT,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a truncated block_event must be rejected, not panic"
+    );
+}
+
+// ---- block_destruction --------------------------------------------------
+
+#[test]
+fn block_destruction_emits_entity_pos_and_stage() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(7); // breaker entity id
+    payload.extend_from_slice(&pack_block_pos(1, 2, 3).to_be_bytes());
+    payload.push(5); // break stage
+    let directives = handle(&adapter, play::clientbound::BLOCK_DESTRUCTION, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockDestruction {
+            entity_id: 7,
+            pos: BlockPos { x: 1, y: 2, z: 3 },
+            progress: 5,
+        })]
+    );
+}
+
+#[test]
+fn block_destruction_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(1);
+    payload.extend_from_slice(&pack_block_pos(0, 0, 0).to_be_bytes());
+    payload.push(0);
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_DESTRUCTION,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned block_destruction must be rejected"
+    );
+}
+
+// ---- block_changed_ack ---------------------------------------------------
+
+#[test]
+fn block_changed_ack_emits_sequence() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::BLOCK_CHANGED_ACK,
+        &var_i32(99),
+    );
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::BlockChangedAck { sequence: 99 })]
+    );
+}
+
+#[test]
+fn block_changed_ack_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(1);
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::BLOCK_CHANGED_ACK,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned block_changed_ack must be rejected"
+    );
+}
+
+// ---- set_chunk_cache_center / radius / simulation_distance ---------------
+
+#[test]
+fn set_chunk_cache_center_emits_coordinates() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(12);
+    payload.extend_from_slice(&var_i32(-7));
+    let directives = handle(&adapter, play::clientbound::SET_CHUNK_CACHE_CENTER, &payload);
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::ChunkCacheCenterChanged {
+            x: 12,
+            z: -7,
+        })]
+    );
+}
+
+#[test]
+fn set_chunk_cache_center_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(0);
+    payload.extend_from_slice(&var_i32(0));
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_CHUNK_CACHE_CENTER,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned set_chunk_cache_center must be rejected"
+    );
+}
+
+#[test]
+fn set_chunk_cache_radius_emits_radius() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::SET_CHUNK_CACHE_RADIUS,
+        &var_i32(16),
+    );
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::ChunkCacheRadiusChanged {
+            radius: 16
+        })]
+    );
+}
+
+#[test]
+fn set_chunk_cache_radius_rejects_truncated_payload() {
+    let adapter = V770Adapter::new();
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_CHUNK_CACHE_RADIUS,
+        &[0x80], // continuation bit set, no following byte
+    );
+    assert!(
+        result.is_err(),
+        "a truncated set_chunk_cache_radius must be rejected, not panic"
+    );
+}
+
+#[test]
+fn set_simulation_distance_emits_distance() {
+    let adapter = V770Adapter::new();
+    let directives = handle(
+        &adapter,
+        play::clientbound::SET_SIMULATION_DISTANCE,
+        &var_i32(10),
+    );
+    assert_eq!(
+        directives,
+        vec![Directive::Emit(ClientEvent::SimulationDistanceChanged {
+            distance: 10
+        })]
+    );
+}
+
+#[test]
+fn set_simulation_distance_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let mut payload = var_i32(5);
+    payload.push(0xFF);
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_SIMULATION_DISTANCE,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned set_simulation_distance must be rejected"
+    );
+}
+
+// ---- change_difficulty ----------------------------------------------------
+
+#[test]
+fn change_difficulty_decodes_each_known_id() {
+    let adapter = V770Adapter::new();
+    let cases = [
+        (0u8, Difficulty::Peaceful),
+        (1, Difficulty::Easy),
+        (2, Difficulty::Normal),
+        (3, Difficulty::Hard),
+    ];
+    for (id, expected) in cases {
+        let payload = [id, 1]; // difficulty id, locked = true
+        let directives = handle(&adapter, play::clientbound::CHANGE_DIFFICULTY, &payload);
+        assert_eq!(
+            directives,
+            vec![Directive::Emit(ClientEvent::DifficultyChanged {
+                difficulty: expected,
+                locked: true,
+            })]
+        );
+    }
+}
+
+#[test]
+fn change_difficulty_rejects_unknown_id() {
+    let adapter = V770Adapter::new();
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::CHANGE_DIFFICULTY,
+        &[4, 0],
+    );
+    assert!(result.is_err(), "an unknown difficulty id must be rejected");
+}
+
+#[test]
+fn change_difficulty_rejects_trailing_bytes() {
+    let adapter = V770Adapter::new();
+    let result = adapter.handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::CHANGE_DIFFICULTY,
+        &[2, 0, 0xFF],
+    );
+    assert!(
+        result.is_err(),
+        "a misaligned change_difficulty must be rejected"
+    );
+}
+
