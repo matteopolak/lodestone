@@ -39,17 +39,93 @@
 //! transparent* layer across a block's sprites so a block with one translucent
 //! face lands on the translucent pass.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lodestone_assets::fluid::{FluidState, SpriteUv};
+use lodestone_assets::tint::vanilla_tint_kind;
 use lodestone_assets::{
     Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker, BlockStates, FirstWeight,
     ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
 };
 use lodestone_model::BlockStateRegistry;
 
+use crate::block_resolver::DefaultTints;
 use crate::models::is_full_cube;
 use crate::translucency::RenderLayer;
+
+/// Number of slots in the tint palette uploaded to the model shader. A baked
+/// quad's (repurposed) `tint_index` indexes this array; the model shader reads
+/// `palette[tint]` and multiplies the sampled texel by it. 256 entries covers a
+/// `u8` index with room to spare — vanilla needs well under 50 distinct default
+/// tint colours (grass, foliage, dry-foliage, water, the fixed constants and the
+/// 16 redstone levels).
+pub(crate) const PALETTE_LEN: usize = 256;
+
+/// The reserved palette index meaning "no tint": its slot stays white so an
+/// untinted quad renders `tex.rgb * 1`. [`emit_baked_quad`](crate::models) writes
+/// this for any quad whose `tint_index` is `None`.
+pub(crate) const UNTINTED: u8 = 255;
+
+/// Interns each distinct **default tint colour** into a small palette so a baked
+/// quad can carry a stable palette index (in place of the raw model tint index)
+/// that the model shader looks up. Distinct tint *sources* — grass vs. foliage
+/// vs. a fixed constant — get distinct slots, which is exactly what the old
+/// single hardcoded shader green destroyed.
+pub(crate) struct TintPalette {
+    colors: Vec<[f32; 4]>,
+    lookup: HashMap<u32, u8>,
+    next: u8,
+}
+
+impl std::fmt::Debug for TintPalette {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TintPalette")
+            .field("distinct", &self.lookup.len())
+            .finish()
+    }
+}
+
+impl TintPalette {
+    /// An empty palette: every slot white (the untinted identity), nothing
+    /// interned yet.
+    pub(crate) fn new() -> Self {
+        Self {
+            colors: vec![[1.0, 1.0, 1.0, 1.0]; PALETTE_LEN],
+            lookup: HashMap::new(),
+            next: 0,
+        }
+    }
+
+    /// Intern a `0xRRGGBB` colour, returning its palette index. Repeated colours
+    /// reuse their slot. Saturates just below [`UNTINTED`] so the reserved white
+    /// sentinel is never overwritten (unreachable for any real vanilla pack).
+    pub(crate) fn intern(&mut self, rgb: u32) -> u8 {
+        if let Some(&idx) = self.lookup.get(&rgb) {
+            return idx;
+        }
+        let idx = self.next.min(UNTINTED - 1);
+        self.colors[idx as usize] = rgb_to_rgba(rgb);
+        self.lookup.insert(rgb, idx);
+        self.next = self.next.saturating_add(1);
+        idx
+    }
+
+    /// The `PALETTE_LEN` palette entries, as the model shader's uniform expects.
+    pub(crate) fn colors(&self) -> &[[f32; 4]] {
+        &self.colors
+    }
+}
+
+/// Decode a `0xRRGGBB` colour to a straight (non-linearised) RGBA multiplier,
+/// matching how the model shader multiplies the sampled texel. The bytes are
+/// used as-is — e.g. `0x91BD59` → `[0.5686, 0.7411, 0.349, 1.0]`, the exact
+/// value the shader previously hardcoded for grass.
+fn rgb_to_rgba(rgb: u32) -> [f32; 4] {
+    let r = ((rgb >> 16) & 0xFF) as f32 / 255.0;
+    let g = ((rgb >> 8) & 0xFF) as f32 / 255.0;
+    let b = (rgb & 0xFF) as f32 / 255.0;
+    [r, g, b, 1.0]
+}
 
 /// Which fluid occupies a cell. Water renders translucent and biome-tinted; lava
 /// renders opaque and full-bright.
@@ -193,6 +269,9 @@ pub struct BlockModels {
     /// Resolved still/flow UVs for water and lava, from the stitched atlas.
     water_sprites: FluidSprites,
     lava_sprites: FluidSprites,
+    /// The default (plains) tint colours the baked quads' `tint_index` values
+    /// index into. Uploaded to the model shader; see [`Self::tint_palette`].
+    tint_palette: Vec<[f32; 4]>,
 }
 
 impl BlockModels {
@@ -231,16 +310,38 @@ impl BlockModels {
             .collect();
 
         let baker = BlockBaker::new(manager, &resolver, &atlas);
+        // The fixed default (plains) tint colours, sampled from the pack's real
+        // colormap PNGs. Each tinted quad resolves its exact source colour here
+        // and carries a palette index the model shader looks up — replacing the
+        // single hardcoded green that made grass, leaves and every other tinted
+        // quad render identically.
+        let tints = DefaultTints::load(manager);
+        let mut palette = TintPalette::new();
         let count = registry.state_count();
         let mut models = Vec::with_capacity(count as usize);
         let mut fluids = Vec::with_capacity(count as usize);
         for id in 0..count {
+            let resolved = registry.resolve(id);
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
                 Ok(model) if !model.quads.is_empty() => {
-                    let layer = block_layer(&sprite_rects, &model.quads);
-                    let occludes = is_full_cube(&model.quads) && layer == RenderLayer::Solid;
+                    let mut quads = model.quads;
+                    // Rewrite each tinted quad's raw model tint index into a
+                    // palette index for its resolved source colour. `None` (an
+                    // untinted kind, e.g. a `tint_index` on a non-biome block)
+                    // clears the tint so the quad renders its texture unchanged.
+                    if let Some(r) = resolved.as_ref() {
+                        for quad in &mut quads {
+                            if let Some(raw) = quad.tint_index {
+                                let kind = vanilla_tint_kind(r.block, raw, r.properties);
+                                quad.tint_index =
+                                    tints.color(kind).map(|rgb| i32::from(palette.intern(rgb)));
+                            }
+                        }
+                    }
+                    let layer = block_layer(&sprite_rects, &quads);
+                    let occludes = is_full_cube(&quads) && layer == RenderLayer::Solid;
                     StateModel {
-                        quads: model.quads,
+                        quads,
                         occludes,
                         layer,
                     }
@@ -249,9 +350,7 @@ impl BlockModels {
             };
             models.push(sm);
 
-            let fluid = registry
-                .resolve(id)
-                .and_then(|r| classify_fluid(r.block.path(), r.properties));
+            let fluid = resolved.and_then(|r| classify_fluid(r.block.path(), r.properties));
             fluids.push(fluid);
         }
 
@@ -265,6 +364,7 @@ impl BlockModels {
             fluids,
             water_sprites,
             lava_sprites,
+            tint_palette: palette.colors().to_vec(),
         })
     }
 
@@ -275,6 +375,16 @@ impl BlockModels {
     #[must_use]
     pub fn atlas(&self) -> &Atlas {
         &self.atlas
+    }
+
+    /// The default (plains) tint palette the baked quads index. Exactly
+    /// [`PALETTE_LEN`] RGBA entries; a quad's `tint_index` (rewritten to a
+    /// palette index by [`build`](Self::build)) selects one, and slot
+    /// [`UNTINTED`] is white. Upload this to the model pipeline so tinted quads
+    /// get their real per-source colour instead of one hardcoded green.
+    #[must_use]
+    pub fn tint_palette(&self) -> &[[f32; 4]] {
+        &self.tint_palette
     }
 
     /// The baked geometry of a state, or an empty model for air / out-of-range
@@ -479,6 +589,47 @@ mod tests {
             shade: true,
             layer: 0,
         }
+    }
+
+    #[test]
+    fn tint_palette_interns_distinct_sources() {
+        // The whole point of the palette is that different tint *sources* keep
+        // different colours. Grass (#91BD59) and foliage (#77AB2F) are distinct
+        // in vanilla; the old single hardcoded green collapsed them to one.
+        let mut p = TintPalette::new();
+        let grass = p.intern(0x0091_BD59);
+        let foliage = p.intern(0x0077_AB2F);
+        assert_ne!(
+            grass, foliage,
+            "grass and foliage must not share a palette slot"
+        );
+        // Interning a repeat colour reuses its slot rather than growing.
+        assert_eq!(p.intern(0x0091_BD59), grass);
+
+        // The reserved untinted sentinel stays white so untinted quads render
+        // their texture unchanged (`tex.rgb * 1`).
+        assert_eq!(p.colors()[UNTINTED as usize], [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(p.colors().len(), PALETTE_LEN);
+
+        // Decoded colours carry vanilla's green-dominant ratios, and foliage is
+        // measurably greener than grass (G/R 1.44 vs 1.30) — the exact
+        // distinction the user measured missing.
+        let g = p.colors()[grass as usize];
+        let f = p.colors()[foliage as usize];
+        let gr_grass = g[1] / g[0];
+        let gr_foliage = f[1] / f[0];
+        assert!(
+            (gr_grass - 189.0 / 145.0).abs() < 1e-3,
+            "grass G/R should be ~1.303, got {gr_grass}"
+        );
+        assert!(
+            (gr_foliage - 171.0 / 119.0).abs() < 1e-3,
+            "foliage G/R should be ~1.437, got {gr_foliage}"
+        );
+        assert!(
+            gr_foliage > gr_grass + 0.1,
+            "foliage must render greener than grass: {gr_foliage} vs {gr_grass}"
+        );
     }
 
     #[test]

@@ -90,6 +90,50 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
     })
 }
 
+/// The in-jar texture path(s) for a model, in priority order — the first that
+/// the resource pack actually contains wins. Version-free: these are vanilla
+/// resource-pack paths keyed by the same model name [`canonical_model_name`]
+/// produces, not protocol data, so they live beside the model aliasing rather
+/// than in a version crate.
+///
+/// Two wrinkles this list absorbs so the caller never version-branches:
+///
+/// * 26.2 split several farm mobs into **temperature variants** — a plains pig
+///   is `pig_temperate.png`, not `pig.png` — while older packs ship the single
+///   `pig.png`. Listing the variant first and the legacy sheet second resolves
+///   both without the render crate learning a version. Biome/variant-correct
+///   selection (cold/warm) is a refinement; `temperate` is the plains default
+///   the live oracle spawns into.
+/// * The player uses the wide `steve.png` default skin (real skins arrive over
+///   the session, a separate seam).
+///
+/// Returns an empty slice for a model with no known sheet, so the caller falls
+/// back to a placeholder rather than failing.
+#[must_use]
+pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
+    match model_name {
+        "player_wide" => &["assets/minecraft/textures/entity/player/wide/steve.png"],
+        "zombie" => &["assets/minecraft/textures/entity/zombie/zombie.png"],
+        "skeleton" => &["assets/minecraft/textures/entity/skeleton/skeleton.png"],
+        "creeper" => &["assets/minecraft/textures/entity/creeper/creeper.png"],
+        "spider" => &["assets/minecraft/textures/entity/spider/spider.png"],
+        "pig" => &[
+            "assets/minecraft/textures/entity/pig/pig_temperate.png",
+            "assets/minecraft/textures/entity/pig/pig.png",
+        ],
+        "cow" => &[
+            "assets/minecraft/textures/entity/cow/cow_temperate.png",
+            "assets/minecraft/textures/entity/cow/cow.png",
+        ],
+        "sheep" => &["assets/minecraft/textures/entity/sheep/sheep.png"],
+        "chicken" => &[
+            "assets/minecraft/textures/entity/chicken/chicken_temperate.png",
+            "assets/minecraft/textures/entity/chicken/chicken.png",
+        ],
+        _ => &[],
+    }
+}
+
 /// A CPU entity mesh in the shared wide [`ModelVertex`] format, plus the model's
 /// local-space bounding box for culling.
 ///
@@ -501,6 +545,38 @@ mod tests {
         assert!(model_for_type("ender_dragon").is_none());
         assert!(model_for_type("armor_stand").is_none());
         assert!(model_for_type("").is_none());
+    }
+
+    #[test]
+    fn every_drawable_model_has_a_texture_candidate() {
+        // The corpus bakes far more models than the render path can resolve
+        // (`canonical_model_name` maps only a representative set). What must hold
+        // is that every model an entity type actually resolves *to* has a texture
+        // candidate, or that mob draws untextured. Drive this off the type→model
+        // mapping so it tracks the drawable set, not the whole baked corpus.
+        let drawable_types = [
+            "player", "zombie", "husk", "drowned", "skeleton", "stray", "creeper", "spider",
+            "cave_spider", "pig", "cow", "mooshroom", "sheep", "chicken",
+        ];
+        for ty in drawable_types {
+            let model = model_for_type(ty)
+                .unwrap_or_else(|| panic!("type {ty:?} should resolve to a model"));
+            let candidates = entity_texture_candidates(model.name);
+            assert!(
+                !candidates.is_empty(),
+                "drawable type {ty:?} (model {:?}) has no texture candidate",
+                model.name
+            );
+            for path in candidates {
+                assert!(
+                    path.starts_with("assets/minecraft/textures/entity/") && path.ends_with(".png"),
+                    "candidate {path:?} for {:?} is not an entity sheet path",
+                    model.name
+                );
+            }
+        }
+        // A type with no model resolves to nothing rather than a wrong sheet.
+        assert!(entity_texture_candidates("ender_dragon").is_empty());
     }
 
     #[test]

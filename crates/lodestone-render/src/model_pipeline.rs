@@ -14,11 +14,17 @@
 //!
 //! # Tint
 //!
-//! A baked quad with a `tint_index` needs a biome colour the renderer does not
-//! yet have wired from `lodestone-world`'s biome data. Until that lands the
-//! shader applies a single plains-foliage green to any tinted quad. That is
-//! enough to render grass/leaves as green terrain (and is exactly the signal the
-//! Phase-5 gate asserts), while being honest that per-biome tint is a follow-up.
+//! A baked quad with a `tint_index` carries a **palette index** rather than the
+//! raw model index: [`BlockModels::build`](crate::BlockModels::build) resolves
+//! each tinted quad's real default (plains) colour — grass, foliage, dry-foliage,
+//! water, the fixed constants, redstone levels — and interns it into a small
+//! palette ([`BlockModels::tint_palette`](crate::BlockModels::tint_palette)). The
+//! shader multiplies the sampled texel by `palette[tint]` (slot 255 is white, so
+//! untinted quads pass through). This replaces the earlier single hardcoded
+//! green, which collapsed every tinted source to one colour — the defect that
+//! made leaves render grass-green and grass side-overlays over-saturated.
+//! Per-*biome* tint (sampling the live biome instead of plains) is still a
+//! follow-up; the palette is the plains default the colormaps resolve to.
 //!
 //! # Render layer
 //!
@@ -80,6 +86,9 @@ pub struct ModelPipeline {
     pub camera_layout: wgpu::BindGroupLayout,
     /// Bind-group layout for the atlas texture + sampler (group 1).
     pub atlas_layout: wgpu::BindGroupLayout,
+    /// Bind-group layout for the tint palette uniform (group 2). Present only on
+    /// the model pipeline; the fluid pipeline carries its own tint and has none.
+    pub palette_layout: Option<wgpu::BindGroupLayout>,
 }
 
 impl ModelPipeline {
@@ -100,7 +109,7 @@ impl ModelPipeline {
         layer: RenderLayer,
     ) -> Self {
         let translucent = layer == RenderLayer::Translucent;
-        Self::build(device, color_format, MODEL_WGSL, translucent)
+        Self::build(device, color_format, MODEL_WGSL, translucent, true)
     }
 
     /// Build the translucent **fluid** pipeline: like a `Translucent` model
@@ -111,7 +120,7 @@ impl ModelPipeline {
     /// depth buffer shows through.
     #[must_use]
     pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        Self::build(device, color_format, FLUID_WGSL, true)
+        Self::build(device, color_format, FLUID_WGSL, true, false)
     }
 
     fn build(
@@ -119,6 +128,7 @@ impl ModelPipeline {
         color_format: wgpu::TextureFormat,
         shader_src: &str,
         translucent: bool,
+        with_palette: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
@@ -161,9 +171,29 @@ impl ModelPipeline {
             ],
         });
 
+        let palette_layout = with_palette.then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("lodestone-model-palette-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            })
+        });
+
+        let mut bind_group_layouts = vec![Some(&camera_layout), Some(&atlas_layout)];
+        if let Some(palette_layout) = &palette_layout {
+            bind_group_layouts.push(Some(palette_layout));
+        }
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lodestone-model-layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&atlas_layout)],
+            bind_group_layouts: &bind_group_layouts,
             immediate_size: 0,
         });
 
@@ -216,6 +246,7 @@ impl ModelPipeline {
             pipeline,
             camera_layout,
             atlas_layout,
+            palette_layout,
         }
     }
 
@@ -254,6 +285,45 @@ impl ModelPipeline {
             ],
         })
     }
+
+    /// Create the tint-palette bind group (group 2) from a palette uniform
+    /// buffer built with [`model_palette_buffer`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a pipeline built without a palette (the fluid
+    /// pipeline); only the model pipeline carries group 2.
+    #[must_use]
+    pub fn palette_bind_group(
+        &self,
+        device: &wgpu::Device,
+        palette_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        let layout = self
+            .palette_layout
+            .as_ref()
+            .expect("palette_bind_group requires a pipeline built with a palette");
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lodestone-model-palette-bg"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: palette_buffer.as_entire_binding(),
+            }],
+        })
+    }
+}
+
+/// Build the tint-palette uniform buffer the model shader looks up per tinted
+/// quad. `palette` is [`BlockModels::tint_palette`](crate::BlockModels::tint_palette)
+/// — one straight RGBA multiplier per palette index.
+#[must_use]
+pub fn model_palette_buffer(device: &wgpu::Device, palette: &[[f32; 4]]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lodestone-model-palette-uniform"),
+        contents: bytemuck::cast_slice(palette),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
 }
 
 /// Reuse the packed pass's camera uniform buffer builder for the model pass; the
@@ -273,15 +343,23 @@ struct Camera {
     section_origin: vec4<f32>,
 };
 
+// The default (plains) tint palette. A quad's tint byte indexes this; slot 255
+// is white (untinted). Replaces the single hardcoded green so grass, foliage and
+// every other tinted source render their own colour.
+struct Palette {
+    colors: array<vec4<f32>, 256>,
+};
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
+@group(2) @binding(0) var<uniform> palette: Palette;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
-    @location(2) tinted: f32,
+    @location(2) @interpolate(flat) tint_idx: u32,
 };
 
 @vertex
@@ -294,7 +372,6 @@ fn vs_main(
     let light_byte = packed.x;
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
     let block = f32(light_byte & 15u) / 15.0;
-    let tint_idx = packed.y;
 
     let world = position + camera.section_origin.xyz;
     // Lift a dark floor so unlit faces read dim rather than pure black.
@@ -304,7 +381,7 @@ fn vs_main(
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
     out.shade = ao * light_term;
-    out.tinted = select(0.0, 1.0, tint_idx != 255u);
+    out.tint_idx = packed.y;
     return out;
 }
 
@@ -316,9 +393,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (tex.a < 0.5) {
         discard;
     }
-    // Plains foliage green for tinted quads until per-biome tint is wired.
-    let grass = vec3<f32>(0.5686, 0.7411, 0.349);
-    let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), grass, in.tinted);
+    // Per-quad tint: the palette slot resolves grass/foliage/etc. to their real
+    // default colour; the untinted slot (255) is white, leaving the texel as-is.
+    let tint_col = palette.colors[in.tint_idx].rgb;
     return vec4<f32>(tex.rgb * tint_col * in.shade, tex.a);
 }
 ";

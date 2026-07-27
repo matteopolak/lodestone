@@ -1765,6 +1765,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-particle"
+version = "0.1.0"
+dependencies = [
+ "lodestone-physics",
+]
+
+[[package]]
 name = "lodestone-physics"
 version = "0.1.0"
 
