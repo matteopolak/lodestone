@@ -58,6 +58,7 @@ fn set_equipment_decodes_two_slots_via_continuation_bit() {
                 Some(ItemStack {
                     item: key("minecraft:diamond"),
                     count: 1,
+                    components: lodestone_model::ItemComponents::default(),
                 })
             );
         }

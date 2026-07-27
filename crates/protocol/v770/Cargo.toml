@@ -12,6 +12,7 @@ lodestone-core = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — this is the `V770ServerProtocol` seam: it implements the
@@ -77,3 +78,13 @@ live-terrain-light = []
 # server itself asserting our physics matches vanilla. Off by default and
 # `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
 live-physics = []
+
+# Enables the live item-component gate (`live_item_components`): joins the real
+# survival 26.2 server (game :25565, RCON :25566), RCON-`give`s the joined player
+# a `diamond_pickaxe` carrying a custom name, damage, and an enchantment, then
+# asserts the resulting `container_set_slot`/`container_set_content` decodes with
+# those components intact and the session stays alive. This is the case a
+# self-round-trip provably cannot catch: our own encoder and decoder could share
+# a wrong understanding of the component-patch wire and still agree. Off by
+# default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+live-item = []

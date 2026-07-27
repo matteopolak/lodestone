@@ -12,7 +12,8 @@ use lodestone_model::{
     ContainerSlotChange, DeathLocation, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
     EntityBaseDimensions,
     EntityEquipment,
-    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemStack, LoginProfile,
+    EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents,
+    ItemEnchantment, ItemStack, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, SoundCategory,
@@ -23,6 +24,7 @@ use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, Nibble
 
 use crate::block_states::block_type_name;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
+use crate::data_component_types::component_type_name;
 use crate::entity_types::entity_type_name;
 use crate::items::{item_id, item_name};
 use crate::menus::menu_name;
@@ -651,42 +653,162 @@ fn parse_key(name: &str, what: &str) -> Result<ResourceKey, AdapterError> {
         .map_err(|_| AdapterError::Decode(format!("invalid {what} key {name}")))
 }
 
+/// Outcome of decoding one clientbound item stack.
+struct DecodedStack {
+    /// The decoded stack, or `None` for the empty stack.
+    stack: Option<ItemStack>,
+    /// `false` when an unmodeled component halted decoding partway through the
+    /// stack's `DataComponentPatch`, leaving the reader positioned mid-patch.
+    ///
+    /// The patch codec length-prefixes neither the patch nor its individual
+    /// components (26.2 `DataComponentPatch.STREAM_CODEC`, the trusted variant
+    /// clientbound stacks use), so an unrecognised component cannot be skipped
+    /// in place. When this is `false`, the modeled fields that were decoded are
+    /// still valid, but the remainder of the packet is unreadable and callers
+    /// must stop reading further items and skip the trailing-bytes check rather
+    /// than raising a fatal decode error.
+    complete: bool,
+}
+
 /// Decodes a clientbound optional item stack.
 ///
 /// Wire shape (26.2 `ItemStack.OPTIONAL_STREAM_CODEC`): a VarInt count — `<= 0`
 /// means the empty stack — then the item registry id as a VarInt, then a
 /// `DataComponentPatch` (a VarInt count of added components and a VarInt count of
-/// removed components; both zero means an empty patch).
+/// removed components; both zero means an empty patch). Each added component is a
+/// `(type id VarInt, payload)` pair and each removed component a bare type id.
 ///
-/// The canonical [`ItemStack`] models item + count only. A non-empty component
-/// patch cannot be skipped, because the clientbound patch codec length-prefixes
-/// neither the patch nor its individual components — consuming it requires a
-/// bespoke codec for each of the 111 component types. Until those land, a stack
-/// carrying components is refused loudly rather than misparsed, which keeps the
-/// zero-trailing-bytes guarantee honest: plain stacks (empty patch) decode, and
-/// anything else is an explicit, attributed decode error.
-fn read_item_stack(reader: &mut Reader<'_>) -> Result<Option<ItemStack>, AdapterError> {
+/// Added component payloads are **not** length-prefixed in the clientbound
+/// (trusted) codec, so a component this build does not model cannot be skipped.
+/// Rather than tear down the session on the next unrecognised component — every
+/// future component addition would then be an outage — decoding degrades: the
+/// modeled components (custom name, damage, enchantments) are decoded, and the
+/// first unmodeled component stops the patch, flags the stack as partial
+/// ([`ItemComponents::has_unmodeled`]), and yields it with `complete == false`.
+fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if count <= 0 {
-        return Ok(None);
+        return Ok(DecodedStack {
+            stack: None,
+            complete: true,
+        });
     }
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let added = reader.var_i32().map_err(dec_err)?;
-    let removed = reader.var_i32().map_err(dec_err)?;
-    if added != 0 || removed != 0 {
-        return Err(AdapterError::Decode(format!(
-            "item id {item_id} carries {added} added and {removed} removed data \
-             components; component patches are not yet supported"
-        )));
-    }
     let name = item_name(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    Ok(Some(ItemStack {
-        item: parse_key(name, "item")?,
-        count,
-    }))
+    let (components, complete) = read_component_patch(reader, name)?;
+    Ok(DecodedStack {
+        stack: Some(ItemStack {
+            item: parse_key(name, "item")?,
+            count,
+            components,
+        }),
+        complete,
+    })
+}
+
+/// Decodes an item stack's `DataComponentPatch` into the modeled component set,
+/// returning whether the patch was fully consumed.
+///
+/// Modeled added components are read into their fields; the first unmodeled
+/// added component stops decoding (its payload is not length-prefixed and so
+/// cannot be skipped), flags the set, and returns `complete == false`. Removed
+/// components are bare type ids and are always skippable, so a patch that
+/// reaches them is fully consumed.
+fn read_component_patch(
+    reader: &mut Reader<'_>,
+    item: &str,
+) -> Result<(ItemComponents, bool), AdapterError> {
+    let added = reader.var_i32().map_err(dec_err)?;
+    let removed = reader.var_i32().map_err(dec_err)?;
+    let mut components = ItemComponents::default();
+
+    for _ in 0..added {
+        let type_id = reader.var_i32().map_err(dec_err)?;
+        match component_type_name(type_id) {
+            Some("minecraft:custom_name") => {
+                let nbt = read_network_nbt(reader).map_err(dec_err)?;
+                components.custom_name = Some(Text::from_nbt(&nbt));
+            }
+            Some("minecraft:damage") => {
+                let damage = reader.var_i32().map_err(dec_err)?;
+                components.damage = Some(u32::try_from(damage).map_err(|_| {
+                    AdapterError::Decode(format!("negative item damage {damage}"))
+                })?);
+            }
+            Some("minecraft:enchantments") => {
+                components.enchantments = read_enchantments(reader)?;
+            }
+            other => {
+                // An unmodeled component: its payload is not length-prefixed, so
+                // it and everything after it in this packet are unreadable. Keep
+                // the modeled fields decoded so far, flag the stack, and stop —
+                // the packet is dropped past this point, not fatal.
+                components.has_unmodeled = true;
+                tracing::warn!(
+                    item,
+                    component = other.unwrap_or("unknown"),
+                    component_id = type_id,
+                    "unmodeled item data component; delivering a partial stack and \
+                     skipping the rest of the packet",
+                );
+                return Ok((components, false));
+            }
+        }
+    }
+
+    for _ in 0..removed {
+        // Removed components carry only their type id (no payload) and clear a
+        // component to its item default. None of the modeled fields default to a
+        // meaningful value here, so consuming the id is enough.
+        reader.var_i32().map_err(dec_err)?;
+    }
+
+    Ok((components, true))
+}
+
+/// Decodes an `ItemEnchantments` component: a VarInt-counted map of
+/// `Holder<Enchantment>` (registry id, holder-encoded as `id + 1`) to a VarInt
+/// level.
+fn read_enchantments(reader: &mut Reader<'_>) -> Result<Vec<ItemEnchantment>, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid enchantment count {count}")))?;
+    let mut enchantments = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        let raw = reader.var_i32().map_err(dec_err)?;
+        if raw <= 0 {
+            // 0 is an inline holder (a full Enchantment definition); vanilla
+            // sends registry references for item enchantments, never inline.
+            return Err(AdapterError::Decode(
+                "inline enchantment holder is not supported".to_owned(),
+            ));
+        }
+        let level = reader.var_i32().map_err(dec_err)?;
+        let level = u32::try_from(level)
+            .map_err(|_| AdapterError::Decode(format!("negative enchantment level {level}")))?;
+        enchantments.push(ItemEnchantment {
+            id: raw - 1,
+            level,
+        });
+    }
+    Ok(enchantments)
+}
+
+/// Reads an item stack that is the final field of a packet, asserting no
+/// trailing bytes remain — unless an unmodeled component left the stack partial,
+/// in which case the unread remainder is deliberately dropped rather than raised
+/// as a fatal decode error.
+fn read_trailing_item_stack(
+    reader: &mut Reader<'_>,
+) -> Result<Option<ItemStack>, AdapterError> {
+    let decoded = read_item_stack(reader)?;
+    if decoded.complete {
+        reader.ensure_empty().map_err(dec_err)?;
+    }
+    Ok(decoded.stack)
 }
 
 /// Resolves an [`ItemStack`]'s canonical item key to protocol 776's numeric
@@ -702,9 +824,11 @@ fn item_registry_id(stack: &ItemStack) -> Result<i32, AdapterError> {
 /// empty stack), then, only if non-empty, the item registry id as a VarInt and
 /// an empty `DataComponentPatch` (VarInt `0` added, VarInt `0` removed).
 ///
-/// The canonical [`ItemStack`] carries no components, so it always encodes the
-/// empty patch — exactly the shape [`read_item_stack`] already accepts on
-/// decode, keeping both directions of this codec symmetric.
+/// Note: an [`ItemStack`] can now carry decoded components, but this serverbound
+/// encoder deliberately writes the **empty** patch and does not re-serialise
+/// them. Creative slot-set with custom components is out of Phase 1's scope; the
+/// server accepts the empty patch and applies its own defaults. If creative
+/// component round-tripping is ever needed, this is the single site to extend.
 fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) -> Result<(), AdapterError> {
     match item {
         None => w.var_i32(0),
@@ -1807,11 +1931,28 @@ impl V770Adapter {
             let len = usize::try_from(len)
                 .map_err(|_| AdapterError::Decode(format!("invalid item count {len}")))?;
             let mut items = Vec::with_capacity(len);
+            let mut complete = true;
             for _ in 0..len {
-                items.push(read_item_stack(&mut reader)?);
+                let decoded = read_item_stack(&mut reader)?;
+                items.push(decoded.stack);
+                if !decoded.complete {
+                    // An unmodeled component desynced the stream; the remaining
+                    // list entries and carried item are unreadable. Deliver what
+                    // decoded and drop the rest of the packet.
+                    complete = false;
+                    break;
+                }
             }
-            let carried_item = read_item_stack(&mut reader)?;
-            reader.ensure_empty().map_err(dec_err)?;
+            let carried_item = if complete {
+                let decoded = read_item_stack(&mut reader)?;
+                complete = decoded.complete;
+                decoded.stack
+            } else {
+                None
+            };
+            if complete {
+                reader.ensure_empty().map_err(dec_err)?;
+            }
             return Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
                 window_id,
                 state_id,
@@ -1824,8 +1965,7 @@ impl V770Adapter {
             let window_id = reader.var_i32().map_err(dec_err)?;
             let state_id = reader.var_i32().map_err(dec_err)?;
             let slot = i32::from(reader.i16().map_err(dec_err)?);
-            let item = read_item_stack(&mut reader)?;
-            reader.ensure_empty().map_err(dec_err)?;
+            let item = read_trailing_item_stack(&mut reader)?;
             return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
                 window_id,
                 state_id,
@@ -1860,19 +2000,31 @@ impl V770Adapter {
             let mut reader = Reader::new(payload);
             let entity_id = reader.var_i32().map_err(dec_err)?;
             let mut equipment = Vec::new();
+            let mut complete = true;
             loop {
                 let slot_byte = reader.u8().map_err(dec_err)?;
                 let ordinal = slot_byte & 0x7F;
                 let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
                     AdapterError::Decode(format!("unknown equipment slot ordinal {ordinal}"))
                 })?;
-                let item = read_item_stack(&mut reader)?;
-                equipment.push(EntityEquipment { slot, item });
+                let decoded = read_item_stack(&mut reader)?;
+                equipment.push(EntityEquipment {
+                    slot,
+                    item: decoded.stack,
+                });
+                if !decoded.complete {
+                    // An unmodeled component desynced the stream; further list
+                    // entries are unreadable. Deliver what decoded and stop.
+                    complete = false;
+                    break;
+                }
                 if slot_byte & 0x80 == 0 {
                     break;
                 }
             }
-            reader.ensure_empty().map_err(dec_err)?;
+            if complete {
+                reader.ensure_empty().map_err(dec_err)?;
+            }
             return Ok(vec![Directive::Emit(ClientEvent::EntityEquipmentUpdated {
                 entity_id,
                 equipment,
@@ -1908,8 +2060,7 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::SET_CURSOR_ITEM {
             let mut reader = Reader::new(payload);
-            let item = read_item_stack(&mut reader)?;
-            reader.ensure_empty().map_err(dec_err)?;
+            let item = read_trailing_item_stack(&mut reader)?;
             return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged {
                 item,
             })]);
@@ -1917,8 +2068,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::SET_PLAYER_INVENTORY {
             let mut reader = Reader::new(payload);
             let slot = reader.var_i32().map_err(dec_err)?;
-            let item = read_item_stack(&mut reader)?;
-            reader.ensure_empty().map_err(dec_err)?;
+            let item = read_trailing_item_stack(&mut reader)?;
             return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
                 slot,
                 item,

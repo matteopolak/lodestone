@@ -55,6 +55,7 @@ fn container_set_slot_decodes_a_plain_stack() {
                 Some(ItemStack {
                     item: key("minecraft:stone"),
                     count: 64,
+                    components: lodestone_model::ItemComponents::default(),
                 })
             );
         }
@@ -237,6 +238,7 @@ fn set_cursor_item_decodes_a_plain_stack() {
             item: Some(ItemStack {
                 item: key("minecraft:stone"),
                 count: 64,
+                components: lodestone_model::ItemComponents::default(),
             }),
         })]
     );
@@ -283,6 +285,7 @@ fn set_player_inventory_decodes_slot_and_stack() {
             item: Some(ItemStack {
                 item: key("minecraft:stone"),
                 count: 64,
+                components: lodestone_model::ItemComponents::default(),
             }),
         })]
     );
