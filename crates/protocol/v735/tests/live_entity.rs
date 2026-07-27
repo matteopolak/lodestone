@@ -272,7 +272,10 @@ async fn decodes_real_entity_metadata_from_live_1_16_server() {
         resolved.push((name, spawn.kind));
     }
 
-    let non_empty_meta = meta_updates.iter().filter(|m| !m.metadata.0.is_empty()).count();
+    let non_empty_meta = meta_updates
+        .iter()
+        .filter(|m| !m.metadata.0.is_empty())
+        .count();
     assert!(
         non_empty_meta > 0,
         "decoded {} entity_metadata packets but every list was empty — the 1.16.5 metadata \

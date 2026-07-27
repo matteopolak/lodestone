@@ -246,8 +246,7 @@ async fn decodes_real_chunks_from_live_1_16_server() {
              likely YZX-transposed, endian-swapped, or using the pre-1.16 \
              straddling long unpack"
         );
-        let uniform_grass =
-            (0..16).all(|x| (0..16).all(|z| col.get_block(x, 3, z) == GRASS_STATE));
+        let uniform_grass = (0..16).all(|x| (0..16).all(|z| col.get_block(x, 3, z) == GRASS_STATE));
         assert!(
             uniform_grass,
             "y=3 plane is not uniform grass_block (state {GRASS_STATE}) — the \

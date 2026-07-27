@@ -1,11 +1,12 @@
 //! [`IntegratedServer`] — the reachable entry point for singleplayer.
 //!
 //! Everything else in this crate is a *primitive*: [`serve_connection`] is an
-//! `async fn` that serves exactly one connection and returns when the initial
-//! view is delivered. That is the right shape for a test, but a menu / shell
-//! that wants to *start singleplayer* needs a handle it can hold, query for its
-//! address, and shut down cleanly without leaking a task. `IntegratedServer` is
-//! that handle.
+//! `async fn` that serves exactly one connection, delivers the initial view,
+//! and then keeps serving (keep-alives, movement, further acknowledgements)
+//! until the client disconnects. That is the right shape for a test, but a
+//! menu / shell that wants to *start singleplayer* needs a handle it can hold,
+//! query for its address, and shut down cleanly without leaking a task.
+//! `IntegratedServer` is that handle.
 //!
 //! It deliberately offers the two transports the plan (§8) calls for behind the
 //! **same** [`serve_connection`] loop, which is the whole point — singleplayer

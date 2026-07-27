@@ -10,9 +10,19 @@
 //!
 //! Careful reading of the reference source shows the version-varying pieces that
 //! *can* be expressed as profile scalars are limited to defaults such as the
-//! player step height (`0.6` via the modern `STEP_HEIGHT` attribute) and the
 //! sneak speed factor (`0.3` via `SNEAKING_SPEED`). The core arithmetic constants
 //! do not change.
+//!
+//! # What is per-*entity*, not per-version (moved out)
+//!
+//! The collision hitbox (width/height) and the auto-step height were previously
+//! fields here, but they are keyed on entity *type*, not on game version — a
+//! zombie and a player share a version and not a hitbox. They now live in
+//! [`crate::entity::EntityDimensions`], a per-call input to
+//! [`crate::entity::move_entity`], and are supplied by the caller. This is the
+//! category error in the "what cannot be a scalar" note below, in reverse: there,
+//! per-version *behaviour* was smuggled into a scalar; housing per-*entity* data
+//! on the per-version profile was the same mistake pointing the other way.
 //!
 //! # What canNOT be expressed as a profile scalar (architectural finding)
 //!
@@ -103,12 +113,6 @@ pub struct PhysicsProfile {
     /// (`Mth.cos(angle) * 0.2`), not `0.2F`. Storing it as `f32` and widening
     /// gives `0.20000000298…` and drifts the reported Z by ~3e-9 per jump.
     pub sprint_jump_boost: f64,
-    /// `STEP_HEIGHT` default / auto-step height (`0.6`).
-    pub step_height: f32,
-    /// Standing bounding-box width (`0.6`).
-    pub width: f32,
-    /// Standing bounding-box height (`1.8`).
-    pub height: f32,
     /// Water horizontal slow-down when not sprinting (`0.8F`).
     pub water_slow_down: f32,
     /// Water horizontal slow-down when sprinting (`0.9F`).
@@ -147,9 +151,6 @@ impl PhysicsProfile {
             flying_speed: 0.02,
             jump_power: 0.42,
             sprint_jump_boost: 0.2,
-            step_height: 0.6,
-            width: 0.6,
-            height: 1.8,
             water_slow_down: 0.8,
             water_sprint_slow_down: 0.9,
             fluid_input_speed: 0.02,

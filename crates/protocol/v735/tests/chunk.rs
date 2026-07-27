@@ -69,13 +69,20 @@ fn section_body(value_at: impl Fn(usize, usize, usize) -> u32) -> Vec<u8> {
 /// 1.16 framing: outer ints, `groundUp`, bitmask, heightmap NBT, 1024 VarInt
 /// biomes (full columns only), the length-prefixed `chunkData`, then the
 /// block-entity count.
-fn build_map_chunk(x: i32, z: i32, section_body: &[u8], biome: u32, block_entities: i32) -> Vec<u8> {
+fn build_map_chunk(
+    x: i32,
+    z: i32,
+    section_body: &[u8],
+    biome: u32,
+    block_entities: i32,
+) -> Vec<u8> {
     let mut w = Writer::default();
     w.i32(x);
     w.i32(z);
     w.bool(true); // groundUp (full column)
     w.var_i32(0x0001); // bitmask: section 0 present
     w.bytes(&HEIGHTMAPS_NBT);
+    w.var_i32(1024); // biomes array length prefix (1.16.2)
     for _ in 0..1024 {
         w.var_i32(biome as i32); // 3-D biomes: 1024 cells over the column
     }
@@ -213,6 +220,7 @@ fn truncated_blob_errors_cleanly() {
     w.bool(true);
     w.var_i32(0x0001);
     w.bytes(&HEIGHTMAPS_NBT);
+    w.var_i32(1024);
     for _ in 0..1024 {
         w.var_i32(1);
     }
@@ -239,6 +247,7 @@ fn extra_trailing_bytes_rejected() {
     w.bool(true);
     w.var_i32(0x0001);
     w.bytes(&HEIGHTMAPS_NBT);
+    w.var_i32(1024);
     for _ in 0..1024 {
         w.var_i32(1);
     }

@@ -47,10 +47,12 @@
 //! It does NOT prove long-distance travel. On this *shared* server the spawn area
 //! carries other agents' builds; a headless client that walks a long straight line
 //! eventually rams an obstruction and the server clamps it with an unbounded
-//! rubber-band storm unrelated to session survival. So movement is confined to a
-//! runway proven walkable with `block_at` and the client oscillates within it —
-//! this proves *sustained activity and a working per-tick movement send-path*, not
-//! net distance.
+//! rubber-band storm unrelated to session survival. So the controller stays glued
+//! to the server's own position each tick and steps only through columns it
+//! re-verifies walkable with `block_at`, reversing at anything blocked or unloaded.
+//! Because every command is within one step of where the server already believes we
+//! are, the server never rejects it, so the run proves *sustained activity and a
+//! working per-tick movement send-path* — not guaranteed net distance.
 //!
 //! It also does NOT prove server-confirmed displacement. `handle.position()` is
 //! the driver's optimistic local prediction; the only server truth this test reads

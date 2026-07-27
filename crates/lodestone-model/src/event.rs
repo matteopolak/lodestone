@@ -144,6 +144,12 @@ pub struct EntityMetadataUpdate {
     pub health: Option<f32>,
     /// Whether the entity is a baby, when present (ageable mobs only).
     pub baby: Option<bool>,
+    /// The cosmetic variant (sheep colour, villager profession, horse
+    /// colour/markings, biome-specific animal variant, …), when the version
+    /// adapter could raise one from this packet. `None` means the packet did
+    /// not carry a variant field; a consumer treats that as "the type's vanilla
+    /// default", not "unknown".
+    pub variant: Option<EntityVariant>,
 }
 
 impl EntityMetadataUpdate {
@@ -156,7 +162,53 @@ impl EntityMetadataUpdate {
             && self.pose.is_none()
             && self.health.is_none()
             && self.baby.is_none()
+            && self.variant.is_none()
     }
+}
+
+/// A version-free description of a mob's cosmetic *variant*, the thing that
+/// changes which texture is drawn for an otherwise-identical model (sheep wool
+/// colour, villager profession, horse colour/markings, biome-specific pig/cow
+/// variants, and so on).
+///
+/// The *metadata index* and *serializer* that carry a variant are version- and
+/// concrete-class-specific, so a version adapter resolves those and raises the
+/// decoded payload into one of these arms. The shared model deliberately holds
+/// only the version-free semantics: raw ordinals and canonical registry keys,
+/// never a per-version index. Per §3.4 the index must not escape the version
+/// crate.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EntityVariant {
+    /// Sheep-style dyed appearance with a shear flag. `color` is the vanilla
+    /// dye/wool ordinal in `0..=15`; `sheared` is the top bit of the wool byte.
+    Dyed {
+        /// Dye/wool colour ordinal, `0..=15`.
+        color: u8,
+        /// Whether the sheep has been sheared.
+        sheared: bool,
+    },
+    /// Villager / zombie-villager appearance. The type (biome), profession, and
+    /// level are kept as canonical registry keys and a raw level so no
+    /// version-specific index leaks out.
+    Villager {
+        /// Villager biome type, e.g. `minecraft:plains`.
+        kind: Identifier,
+        /// Villager profession, e.g. `minecraft:farmer`.
+        profession: Identifier,
+        /// Trade level (`1..=5` in vanilla).
+        level: i32,
+    },
+    /// Horse appearance: colour and markings packed as vanilla ordinals.
+    Horse {
+        /// Base coat colour ordinal.
+        color: u8,
+        /// Markings ordinal.
+        markings: u8,
+    },
+    /// Registry-holder variants (pig/cow/chicken/wolf/cat/frog/…): the canonical
+    /// variant key, e.g. `minecraft:temperate` / `minecraft:warm` /
+    /// `minecraft:cold`.
+    Keyed(Identifier),
 }
 
 /// A single attribute modifier in an [`EntityAttributeSnapshot`].

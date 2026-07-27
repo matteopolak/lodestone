@@ -77,6 +77,7 @@ use lodestone_client::{
     ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
     LoginProfile, PlayerListEntry, ServerAddress, Vec3,
 };
+use lodestone_model::event::SoundCategory;
 
 pub use lodestone_testsupport::unique_username;
 
@@ -97,7 +98,9 @@ pub enum NetUpdate {
         /// Server-assigned entity id for the local player.
         entity_id: i32,
     },
-    /// A chat/system message (plain text).
+    /// A chat/system message, flattened to a legacy `§`-code string so the HUD
+    /// can render colour and formatting. Translation keys are already resolved
+    /// through the model's built-in table by [`lodestone_model::Text`].
     Chat(String),
     /// A chunk became dirty at this position: the server sent (and the client
     /// applied to its world) chunk data here, so any mesh covering this column
@@ -119,6 +122,40 @@ pub enum NetUpdate {
     },
     /// The player died.
     Death,
+    /// A positioned sound to play (`SOUND` packet). `name` is the sound event
+    /// key's path (namespace stripped, e.g. `"entity.slime.squish"`); `seed` is
+    /// the server-rolled value that makes weighted variant selection
+    /// deterministic across clients. `category` is the source bus.
+    Sound {
+        /// Sound event key path (namespace stripped).
+        name: String,
+        /// Source bus (master/blocks/hostile/…).
+        category: SoundCategory,
+        /// World-space origin.
+        pos: Vec3,
+        /// Packet volume multiplier.
+        volume: f32,
+        /// Packet pitch multiplier.
+        pitch: f32,
+        /// Server RNG seed for variant selection.
+        seed: i64,
+    },
+    /// An entity-attached sound (`SOUND_ENTITY` packet). The origin is resolved
+    /// from `entity_id`'s live position when the sound is played.
+    EntitySound {
+        /// Sound event key path (namespace stripped).
+        name: String,
+        /// Source bus.
+        category: SoundCategory,
+        /// Entity the sound is attached to.
+        entity_id: i32,
+        /// Packet volume multiplier.
+        volume: f32,
+        /// Packet pitch multiplier.
+        pitch: f32,
+        /// Server RNG seed for variant selection.
+        seed: i64,
+    },
     /// The session ended (clean or with a reason).
     Disconnected(String),
     /// A transport or setup error.
@@ -412,13 +449,50 @@ fn run(
 fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
-        ClientEvent::Chat { text, .. } => NetUpdate::Chat(text.to_plain_string()),
+        ClientEvent::Chat { text, .. } => NetUpdate::Chat(text.to_legacy_string()),
         ClientEvent::Disconnect { reason } => {
             let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));
             return Err(());
         }
         ClientEvent::HealthChanged { health, food, .. } => NetUpdate::Health { health, food },
         ClientEvent::Death { .. } => NetUpdate::Death,
+        // Sound events: strip the namespace to the `sounds.json` key path and
+        // pass the server's seed through unchanged (client-side variant
+        // selection would desync every client). `fixed_range` is intentionally
+        // dropped — client attenuation uses the `sounds.json` entry distance,
+        // not the packet's server-side culling range (see `lodestone-sound`).
+        ClientEvent::Sound {
+            sound,
+            category,
+            pos,
+            volume,
+            pitch,
+            seed,
+            ..
+        } => NetUpdate::Sound {
+            name: sound.path().to_string(),
+            category,
+            pos,
+            volume,
+            pitch,
+            seed,
+        },
+        ClientEvent::EntitySound {
+            sound,
+            category,
+            entity_id,
+            volume,
+            pitch,
+            seed,
+            ..
+        } => NetUpdate::EntitySound {
+            name: sound.path().to_string(),
+            category,
+            entity_id,
+            volume,
+            pitch,
+            seed,
+        },
         // §12.24: the shell treats `ChunkLoaded` as a *dirty-region signal* and
         // ignores any payload — the ruling is that decoded chunks live in a
         // client-owned `World` that consumers query, not in the (bounded,

@@ -18,7 +18,7 @@
 
 use lodestone_physics::collision::{CollisionView, collide};
 use lodestone_physics::geometry::{Aabb, Vec3d};
-use lodestone_physics::{PhysicsProfile, PlayerState};
+use lodestone_physics::{EntityDimensions, PhysicsProfile, PlayerState};
 
 const REFERENCE: &str = include_str!("support/collision_shapes_jvm.txt");
 
@@ -134,7 +134,7 @@ fn drop_onto(local: &[[f64; 6]]) -> f64 {
         Vec3d::new(0.0, -start, 0.0),
         bb,
         false,
-        profile.step_height,
+        EntityDimensions::PLAYER.step_height,
     );
     start + resolved.y
 }
@@ -204,8 +204,7 @@ fn resting_height_matches_authoritative_top_face() {
 
 #[test]
 fn slab_is_steppable_but_fence_is_not() {
-    let profile = PhysicsProfile::mc_1_21();
-    let step = profile.step_height;
+    let step = EntityDimensions::PLAYER.step_height;
 
     // Player standing on a floor at y=1, an obstacle in the adjacent +x cell.
     let feet = 1.0;

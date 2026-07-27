@@ -16,7 +16,10 @@
 //!   [`collision::CollisionView`] trait (so physics stays decoupled from the
 //!   world crate and testable against synthetic worlds).
 //! * [`profile`] — [`profile::PhysicsProfile`], the version-parameterised knobs.
-//! * [`player`] — the per-tick player movement pipeline.
+//! * [`entity`] — the entity-agnostic move core ([`entity::move_entity`]) shared
+//!   by players and mobs, parameterised by [`entity::EntityDimensions`].
+//! * [`player`] — the per-tick player movement pipeline (a thin caller of the
+//!   entity core).
 //!
 //! The crate has no runtime dependencies; the sine table is generated once and
 //! checked in as [`sin_table`].
@@ -25,6 +28,7 @@ mod sin_table;
 
 pub mod collision;
 pub mod effect;
+pub mod entity;
 pub mod fluid;
 pub mod geometry;
 pub mod mth;
@@ -33,6 +37,7 @@ pub mod profile;
 
 pub use collision::CollisionView;
 pub use effect::{DirectEffect, MovementEffect, classify, movement_speed_modifier};
+pub use entity::{EntityDimensions, EntityMotion, MoveContext, move_entity};
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{

@@ -50,8 +50,6 @@ use lodestone_world::{
 
 /// Number of block sections in a 1.16.5 column (fixed world height 0..256).
 const SECTION_COUNT: usize = 16;
-/// Number of 4×4×4 biome cells over the whole column (16 sections × 64 cells).
-const BIOME_CELLS_TOTAL: usize = 1024;
 /// Biome cells per section (4×4×4).
 const BIOME_CELLS_PER_SECTION: usize = 64;
 /// Bytes for one nibble light array (4096 nibbles).
@@ -167,11 +165,16 @@ impl MapChunk {
         // recomputes heightmaps lazily and there is no consumer for the raw tag.
         read_named_nbt(r)?;
 
-        // Biomes: full columns carry 1024 VarInt biome ids (4×4×4 over the whole
-        // column) before the section blob. Partial updates carry none.
+        // Biomes: full columns carry a VarInt-length-prefixed array of biome
+        // ids (1024 = 4×4×4 over the whole column). The length prefix is a
+        // 1.16.2 change — 1.15/1.16.1 sent a bare fixed 1024-int array with no
+        // count. Partial updates carry no biomes at all.
         let biomes = if ground_up {
-            let mut all = Vec::with_capacity(BIOME_CELLS_TOTAL);
-            for _ in 0..BIOME_CELLS_TOTAL {
+            let count = r.var_i32()?;
+            let count =
+                usize::try_from(count).map_err(|_| lodestone_core::Error::NegativeLength(count))?;
+            let mut all = Vec::with_capacity(count);
+            for _ in 0..count {
                 all.push(u32::try_from(r.var_i32()?).unwrap_or(0));
             }
             Some(all)

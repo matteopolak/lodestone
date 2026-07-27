@@ -49,11 +49,14 @@ fn every_model_bakes_nonempty() {
     }
 }
 
-/// Every baked UV must lie within the model's declared sheet (`[0, 1]`). A UV
-/// outside means the texel offset or sheet size is wrong. Degenerate (zero-area)
-/// faces are skipped: vanilla flat planes (e.g. strider bristles, hoglin mane)
-/// are boxes with a zero dimension whose collapsed side faces are laid out
-/// off-sheet by vanilla itself and never sampled.
+/// UVs must be finite and within a *gross* sanity envelope of the model's
+/// declared sheet. Vanilla is emphatically not strictly `[0, 1]`: `SalmonModel`
+/// uses a negative `texOffs(-4, 0)`, `CodModel` a negative `texOffs(20, -6)`,
+/// and `PufferfishBigModel`'s fins run ~7 texels off the right edge of their
+/// 32x32 sheet — all ship in the game and sample off-sheet on purpose. So the
+/// real gates on UV correctness are the box-count test and the real-PNG
+/// sheet-size check; this one only catches a catastrophic offset (NaN, or a
+/// halved/doubled sheet that pushes UVs past 2x).
 #[test]
 fn every_uv_is_within_the_sheet() {
     for e in &entity_models() {
@@ -64,8 +67,13 @@ fn every_uv_is_within_the_sheet() {
             }
             for uv in q.uvs {
                 assert!(
-                    (-1e-6..=1.0 + 1e-6).contains(&uv[0]) && (-1e-6..=1.0 + 1e-6).contains(&uv[1]),
-                    "{}: UV {uv:?} escapes the {}x{} sheet",
+                    uv[0].is_finite() && uv[1].is_finite(),
+                    "{}: non-finite UV {uv:?}",
+                    e.name
+                );
+                assert!(
+                    (-1.0..=2.0).contains(&uv[0]) && (-1.0..=2.0).contains(&uv[1]),
+                    "{}: UV {uv:?} is wildly off the {}x{} sheet (sheet-size error?)",
                     e.name,
                     model.texture_width,
                     model.texture_height
@@ -172,6 +180,36 @@ fn quad_counts_match_vanilla_box_counts() {
         ("hoglin", 11),      // body+mane, head+2 ears+2 horns, 4 legs
         ("strider", 9),      // 2 legs, body + 6 bristles
         ("guardian", 22),    // head(5) + 12 spikes + eye + tail(3)
+        ("phantom", 8),      // body, tail(2), 2 wings(2 boxes each), head
+        ("warden", 10),      // body, 2 ribcages, head, 2 tendrils, 2 arms, 2 legs
+        ("wither", 9),       // shoulders, ribcage(4), tail, 3 heads
+        ("ender_dragon", 65), // head(6)+jaw, 5 neck*2, 12 tail*2, body(4), 2 wings*2*2, 4 legs*3
+        ("witch", 15),       // head, hat(+brim+3 stack), nose+mole, body, jacket, arms(3), 2 legs
+        // --- animal/npc/object half (owned by this agent) ---
+        ("armor_stand", 10), // baseplate, 2 shoulder sticks + torso stick, body, 2 arms, head, right_leg, left_leg (no hat)
+        ("boat", 9),         // bottom, back, front, right, left, 2 paddles(2 boxes each)
+        ("chest_boat", 12),  // boat(9) + chest(3: chest, lock, latch)
+        ("raft", 6),         // bottom(2 boxes), 2 paddles(2 boxes each)
+        ("chest_raft", 9),   // raft(6) + chest(3)
+        ("minecart", 5),     // 4 walls + bottom
+        ("end_crystal", 4),  // outer_glass, inner_glass, cube, base
+        ("rabbit", 9),       // head+ears(3), body, tail, 2 front feet, 2 back feet
+        ("fox", 10),         // head+ears(3), body, tail, 2 front legs, 2 back legs
+        ("panda", 9),        // head(4), body, 4 legs
+        ("goat", 12),        // head(3, incl. goatee)+2 horns, body, 4 legs, tail
+        ("bee", 9),          // body, stinger, 2 antennae, 2 wings, 3 legs (front/middle/back)
+        ("turtle", 8),       // head, body(2 boxes: shell+belly), egg_belly, 4 legs
+        ("camel", 12),       // head(3: muzzle/skull/snout)+2 ears, body+hump+tail, 4 legs
+        ("cod", 7),          // body, tail, nose, 2 side fins, top_fin, tail_fin... transcribed below
+        ("salmon", 8),       // body, tail, nose, 2 fins, top_fin, tail_fin, back_fin
+        ("pufferfish", 13),  // Big variant: body + 12 spikes
+        ("tropical_fish", 6),// Large variant: body, tail, 4 fins (right/left/top/bottom)
+        ("dolphin", 8),      // body, back_fin, left_fin, right_fin, tail+tail_fin, head+nose
+        ("axolotl", 11),     // body, tail, head, 3 gills, 4 legs
+        ("frog", 16),        // body(2), head(2), eyes(2), croaking_body, tongue, 2 arms+hands(4), 2 legs+feet(4)
+        ("tadpole", 2),      // body, tail
+        ("sniffer", 15),     // body(3), 6 legs, head(2), 2 ears, nose, lower_beak
+        ("armadillo", 11),   // body(2), tail, head_cube, 2 ear cubes, 4 legs, rolled-up cube
     ];
     let models = entity_models();
     for (name, boxes) in expected {
@@ -265,4 +303,53 @@ fn composition_order_matches_vanilla_zyx_hand_derived() {
     //   Rz(90)*(0,0,-1)=(0,0,-1). A swapped order would give (0,1,0).
     let b = transform_probe([16.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, h, h]);
     assert!(close(b, [0.0, 0.0, -1.0]), "case B got {b:?}, want [0,0,-1]");
+}
+
+/// The texture-variant seam must be non-vacuous: a `ByVariant` entry has to
+/// resolve *distinct* sheets for distinct variants (a selector that returns the
+/// same path for every variant is a silent bug the type system can't catch),
+/// and a `Fixed` entry must ignore the variant entirely. 26.2's pig is the
+/// canonical case: `_temperate`/`_cold`/`_warm` are three real sheets.
+#[test]
+fn variant_textures_resolve_distinctly() {
+    use lodestone_assets::entity::{EntityTexture, EntityVariant, Temperature};
+
+    let models = entity_models();
+    let pig = models
+        .iter()
+        .find(|e| e.name == "pig")
+        .expect("pig model registered");
+
+    assert!(pig.texture.is_variant(), "pig must be variant-driven in 26.2");
+
+    let temperate = pig.texture.resolve(EntityVariant::Temperature(Temperature::Temperate));
+    let cold = pig.texture.resolve(EntityVariant::Temperature(Temperature::Cold));
+    let warm = pig.texture.resolve(EntityVariant::Temperature(Temperature::Warm));
+
+    assert_eq!(temperate, pig.texture.default_path(), "default is the temperate sheet");
+    assert_ne!(temperate, cold, "cold variant must differ from temperate");
+    assert_ne!(temperate, warm, "warm variant must differ from temperate");
+    assert_ne!(cold, warm, "cold and warm variants must differ");
+
+    // A Fixed entry ignores the variant and always returns its one path.
+    let fixed = EntityTexture::Fixed("entity/creeper/creeper");
+    assert!(!fixed.is_variant());
+    assert_eq!(fixed.default_path(), "entity/creeper/creeper");
+    assert_eq!(
+        fixed.resolve(EntityVariant::Temperature(Temperature::Warm)),
+        "entity/creeper/creeper",
+        "Fixed must ignore the variant"
+    );
+
+    // Every registered ByVariant entry must resolve all three temperatures to
+    // distinct, non-empty paths — proves no selector is a constant fn.
+    for e in &models {
+        if e.texture.is_variant() {
+            let t = e.texture.resolve(EntityVariant::Temperature(Temperature::Temperate));
+            let c = e.texture.resolve(EntityVariant::Temperature(Temperature::Cold));
+            let w = e.texture.resolve(EntityVariant::Temperature(Temperature::Warm));
+            assert!(!t.is_empty() && !c.is_empty() && !w.is_empty(), "{}: empty path", e.name);
+            assert!(t != c && t != w && c != w, "{}: variant selector is constant", e.name);
+        }
+    }
 }

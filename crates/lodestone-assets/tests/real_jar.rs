@@ -745,7 +745,7 @@ fn entity_textures_resolve() {
 #[ignore = "requires a fetched vanilla client.jar"]
 fn entity_models_whole_corpus_coverage() {
     use lodestone_assets::Image;
-    use lodestone_assets::entity::bake_entity;
+    use lodestone_assets::entity::{EntityVariant, Temperature, bake_entity};
     use lodestone_assets::entity_models::entity_models;
 
     if client_jar().is_none() {
@@ -771,17 +771,36 @@ fn entity_models_whole_corpus_coverage() {
     let mut verified = 0usize;
     for e in &models {
         let model = (e.build)();
-        let loc = ResourceLocation::parse(&format!("minecraft:{}", e.texture)).unwrap();
+        let tex_path = e.texture.default_path();
+        let loc = ResourceLocation::parse(&format!("minecraft:{}", tex_path)).unwrap();
         let bytes = manager
             .read_asset(&loc, "textures", "png")
             .unwrap_or_else(|| {
                 panic!(
                     "{}: texture {} not found in client.jar — path wrong or asset missing",
-                    e.name, e.texture
+                    e.name, tex_path
                 )
             });
         let img = Image::decode_png(&bytes)
-            .unwrap_or_else(|_| panic!("{}: decode {}", e.name, e.texture));
+            .unwrap_or_else(|_| panic!("{}: decode {}", e.name, tex_path));
+
+        // A variant-driven entry must have *every* variant sheet present in the
+        // jar, not just its default — otherwise ByVariant is a latent 404. Prove
+        // it non-vacuously against the real PNGs across all temperature families.
+        if e.texture.is_variant() {
+            for t in [Temperature::Temperate, Temperature::Cold, Temperature::Warm] {
+                let vpath = e.texture.resolve(EntityVariant::Temperature(t));
+                let vloc = ResourceLocation::parse(&format!("minecraft:{}", vpath)).unwrap();
+                let vbytes = manager.read_asset(&vloc, "textures", "png").unwrap_or_else(|| {
+                    panic!(
+                        "{}: variant texture {} ({t:?}) not found in client.jar",
+                        e.name, vpath
+                    )
+                });
+                Image::decode_png(&vbytes)
+                    .unwrap_or_else(|_| panic!("{}: decode variant {}", e.name, vpath));
+            }
+        }
 
         // External-authority check: the real PNG must be a positive-integer
         // multiple of the model's declared UV resolution, with the same factor on
@@ -800,16 +819,20 @@ fn entity_models_whole_corpus_coverage() {
             e.name,
             model.texture_width,
             model.texture_height,
-            e.texture,
+            tex_path,
             img.width,
             img.height
         );
 
         let quads = bake_entity(&model);
         assert!(!quads.is_empty(), "{} baked no quads", e.name);
+        // UVs are normalised against the model's declared sheet. Vanilla is
+        // emphatically not strictly in-bounds: SalmonModel/CodModel use negative
+        // texOffs, and PufferfishBigModel's fins run ~7 texels off the right edge
+        // of their 32x32 sheet. So we only assert UVs are finite and within a
+        // gross 2x envelope (catches a NaN or a halved/doubled sheet); the real
+        // gate is the integer-multiple sheet-size check above plus box counts.
         for q in &quads {
-            // Skip degenerate (zero-area) faces of flat planes: vanilla lays
-            // their collapsed side faces off-sheet and never samples them.
             let p = &q.positions;
             let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
             let e2 = [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]];
@@ -822,15 +845,15 @@ fn entity_models_whole_corpus_coverage() {
                 continue;
             }
             for uv in q.uvs {
-                let u = uv[0] * img.width as f32;
-                let v = uv[1] * img.height as f32;
                 assert!(
-                    (-1e-3..=img.width as f32 + 1e-3).contains(&u)
-                        && (-1e-3..=img.height as f32 + 1e-3).contains(&v),
-                    "{}: UV {uv:?} escapes the real {}x{} sheet",
+                    uv[0].is_finite() && uv[1].is_finite(),
+                    "{}: non-finite UV {uv:?}",
+                    e.name
+                );
+                assert!(
+                    (-1.0..=2.0).contains(&uv[0]) && (-1.0..=2.0).contains(&uv[1]),
+                    "{}: UV {uv:?} is wildly off the declared sheet (sheet-size error?)",
                     e.name,
-                    img.width,
-                    img.height
                 );
             }
         }
@@ -841,7 +864,7 @@ fn entity_models_whole_corpus_coverage() {
             quads.len(),
             img.width,
             img.height,
-            e.texture
+            tex_path
         );
     }
 

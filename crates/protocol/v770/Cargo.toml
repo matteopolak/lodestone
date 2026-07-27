@@ -13,12 +13,22 @@ lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
 uuid = { workspace = true }
+# Direct path dep (not a workspace alias) so the addition stays inside this
+# crate's manifest — this is the `V770ServerProtocol` seam: it implements the
+# version-free `lodestone_server::ServerProtocol` trait so `lodestone-server`
+# can drive a real vanilla 26.2 wire format instead of the stand-in test
+# double. Production code; `check-isolation` allows a version crate to depend
+# on a version-free crate (only the reverse direction is forbidden).
+lodestone-server = { path = "../../lodestone-server" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }
+# Test-only: the real client talking to our real `V770ServerProtocol` over the
+# in-memory transport, proving the join sequence end-to-end without a socket.
+lodestone-client = { workspace = true }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — the live physics gate drives the version-free
 # `lodestone-physics` engine to walk a player and asserts the real server never
@@ -33,6 +43,15 @@ lodestone-physics = { path = "../../lodestone-physics" }
 # crate's concrete `packets::chunk` types — coupling a shared crate must not
 # express (see `cargo run -p xtask -- check-isolation`).
 live-chunk = []
+
+# Enables the live block-light oracle (`live_block_light`): joins the vanilla
+# 26.2 RCON oracle (game :25567, RCON :25575), places a glowstone in mid-air via
+# `/setblock`, then judges our light engine's *emission/decay* path against the
+# block light the server itself relights and sends back. Distinct from
+# `live-chunk` (which targets the flat :25565 world and exercises only sky
+# light — block light is 0 across a flat overworld). Off by default and
+# `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+live-block-light = []
 
 # Enables the live physics gate (`live_physics`): joins the real 26.2 server,
 # walks a player driven by `lodestone-physics`, and asserts the server sends

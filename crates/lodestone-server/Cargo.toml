@@ -20,6 +20,12 @@ lodestone-worldgen = { path = "../lodestone-worldgen" }
 lodestone-entity = { path = "../lodestone-entity" }
 lodestone-model = { path = "../lodestone-model" }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+# Client-supplied login UUID is echoed back in the login-success reply; this is
+# a normal (not dev-only) dependency because `ServerBound::LoginStart` and
+# `ServerProtocol::login_success` carry a `Uuid` in production code, not just
+# tests.
+uuid = { workspace = true }
 
 # --- Native (non-wasm) target dependencies ---
 # Native tokio keeps the full workspace feature set (including `net` and
@@ -54,4 +60,3 @@ serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
 lodestone-world = { path = "../lodestone-world" }
-uuid = { workspace = true }

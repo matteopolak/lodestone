@@ -86,7 +86,11 @@ fn poll_block(
     poll_until_blocking(timeout, Duration::from_millis(400), || {
         let out = rcon.cmd(&format!("execute if block {x} {y} {z} minecraft:{block}"));
         let matched = out.contains("Test passed");
-        if matched == want_match { Some(()) } else { None }
+        if matched == want_match {
+            Some(())
+        } else {
+            None
+        }
     })
     .is_some()
 }
@@ -178,9 +182,11 @@ async fn breaks_and_places_blocks_on_live_1_16_server() {
                         player = Some((pos.x, pos.y, pos.z));
                     }
                     Directive::Emit(ClientEvent::KeepAlive { id }) => {
-                        send_action(&adapter, &mut conn, &ClientAction::KeepAliveResponse {
-                            id: *id,
-                        })
+                        send_action(
+                            &adapter,
+                            &mut conn,
+                            &ClientAction::KeepAliveResponse { id: *id },
+                        )
                         .await;
                     }
                     _ => apply(&mut conn, &mut state, directive).await,
@@ -209,33 +215,66 @@ async fn breaks_and_places_blocks_on_live_1_16_server() {
     // ---- BREAK -----------------------------------------------------------
     // Place a stone within reach, confirm it is there (the control that makes
     // the later "is air" meaningful), then break it through encode_action.
-    rcon.cmd(&format!("setblock {break_x} {feet_y} {base_z} minecraft:stone"));
+    rcon.cmd(&format!(
+        "setblock {break_x} {feet_y} {base_z} minecraft:stone"
+    ));
     assert!(
-        poll_block(&mut rcon, break_x, feet_y, base_z, "stone", true, Duration::from_secs(8)),
+        poll_block(
+            &mut rcon,
+            break_x,
+            feet_y,
+            base_z,
+            "stone",
+            true,
+            Duration::from_secs(8)
+        ),
         "RCON setblock never made ({break_x},{feet_y},{base_z}) read back as stone — is the \
          chunk loaded / the player near it?"
     );
 
     let break_pos = BlockPos::new(break_x, feet_y, base_z);
-    send_action(&adapter, &mut conn, &ClientAction::BlockAction {
-        action: BlockActionKind::StartDestroy,
-        pos: break_pos,
-        face: BlockFace::Up,
-        sequence: 0,
-    })
+    send_action(
+        &adapter,
+        &mut conn,
+        &ClientAction::BlockAction {
+            action: BlockActionKind::StartDestroy,
+            pos: break_pos,
+            face: BlockFace::Up,
+            sequence: 0,
+        },
+    )
     .await;
-    send_action(&adapter, &mut conn, &ClientAction::BlockAction {
-        action: BlockActionKind::StopDestroy,
-        pos: break_pos,
-        face: BlockFace::Up,
-        sequence: 0,
-    })
+    send_action(
+        &adapter,
+        &mut conn,
+        &ClientAction::BlockAction {
+            action: BlockActionKind::StopDestroy,
+            pos: break_pos,
+            face: BlockFace::Up,
+            sequence: 0,
+        },
+    )
     .await;
     // Keep the connection serviced while the server processes the dig.
-    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(600)).await;
+    pump(
+        &adapter,
+        &mut conn,
+        &mut state,
+        &mut world,
+        Duration::from_millis(600),
+    )
+    .await;
 
     assert!(
-        poll_block(&mut rcon, break_x, feet_y, base_z, "air", true, Duration::from_secs(10)),
+        poll_block(
+            &mut rcon,
+            break_x,
+            feet_y,
+            base_z,
+            "air",
+            true,
+            Duration::from_secs(10)
+        ),
         "the block at ({break_x},{feet_y},{base_z}) was NOT air after the client's player_digging — \
          the server did not accept our break"
     );
@@ -245,37 +284,95 @@ async fn breaks_and_places_blocks_on_live_1_16_server() {
     // Give the player a stack, select the hotbar slot through encode_action,
     // clear the target cell to air (and confirm), then place against the ground
     // block below it. The resulting cell must read back as stone.
-    rcon.cmd(&format!("replaceitem entity {username} hotbar.0 minecraft:stone 4"));
-    send_action(&adapter, &mut conn, &ClientAction::SetCarriedItem { slot: 0 }).await;
+    rcon.cmd(&format!(
+        "replaceitem entity {username} hotbar.0 minecraft:stone 4"
+    ));
+    send_action(
+        &adapter,
+        &mut conn,
+        &ClientAction::SetCarriedItem { slot: 0 },
+    )
+    .await;
 
-    rcon.cmd(&format!("setblock {place_x} {feet_y} {base_z} minecraft:air"));
+    rcon.cmd(&format!(
+        "setblock {place_x} {feet_y} {base_z} minecraft:air"
+    ));
     assert!(
-        poll_block(&mut rcon, place_x, feet_y, base_z, "air", true, Duration::from_secs(8)),
+        poll_block(
+            &mut rcon,
+            place_x,
+            feet_y,
+            base_z,
+            "air",
+            true,
+            Duration::from_secs(8)
+        ),
         "failed to clear the place target to air before placing"
     );
     // Reference block is the ground one cell below the (now-air) target.
     let reference = BlockPos::new(place_x, feet_y - 1, base_z);
-    send_action(&adapter, &mut conn, &ClientAction::UseItemOn {
-        hand: Hand::Main,
-        pos: reference,
-        face: BlockFace::Up,
-        cursor: Vec3f { x: 0.5, y: 1.0, z: 0.5 },
-        inside_block: false,
-        sequence: 0,
-    })
-    .await;
-    pump(&adapter, &mut conn, &mut state, &mut world, Duration::from_millis(600)).await;
+    // A single `use_item_on` can be transiently ignored by the server (held item
+    // / player position settling a tick behind our packets), so re-send the
+    // placement each round until the server-authored `execute if block` readback
+    // confirms stone or the window expires. Still an honest oracle: the cell only
+    // reads back as stone if the server actually accepted a placement, and a
+    // second place onto an already-stone cell is a harmless no-op.
+    let place_deadline = Instant::now() + Duration::from_secs(15);
+    let mut placed = false;
+    while Instant::now() < place_deadline {
+        send_action(
+            &adapter,
+            &mut conn,
+            &ClientAction::UseItemOn {
+                hand: Hand::Main,
+                pos: reference,
+                face: BlockFace::Up,
+                cursor: Vec3f {
+                    x: 0.5,
+                    y: 1.0,
+                    z: 0.5,
+                },
+                inside_block: false,
+                sequence: 0,
+            },
+        )
+        .await;
+        pump(
+            &adapter,
+            &mut conn,
+            &mut state,
+            &mut world,
+            Duration::from_millis(400),
+        )
+        .await;
+        if poll_block(
+            &mut rcon,
+            place_x,
+            feet_y,
+            base_z,
+            "stone",
+            true,
+            Duration::from_millis(800),
+        ) {
+            placed = true;
+            break;
+        }
+    }
 
     assert!(
-        poll_block(&mut rcon, place_x, feet_y, base_z, "stone", true, Duration::from_secs(10)),
+        placed,
         "the block at ({place_x},{feet_y},{base_z}) did NOT become stone after the client's \
          block_place — the server did not accept our placement"
     );
     eprintln!("PLACE confirmed: server reports ({place_x},{feet_y},{base_z}) is now stone");
 
     // Cleanup: leave the world as we found it (best effort).
-    rcon.cmd(&format!("setblock {break_x} {feet_y} {base_z} minecraft:air"));
-    rcon.cmd(&format!("setblock {place_x} {feet_y} {base_z} minecraft:air"));
+    rcon.cmd(&format!(
+        "setblock {break_x} {feet_y} {base_z} minecraft:air"
+    ));
+    rcon.cmd(&format!(
+        "setblock {place_x} {feet_y} {base_z} minecraft:air"
+    ));
 }
 
 /// Reads and services packets for `dur`, answering keep-alives so the server

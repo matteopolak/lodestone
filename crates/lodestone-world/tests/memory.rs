@@ -6,7 +6,12 @@
 //! column stays within the paletted-storage budget rather than the naive
 //! `2 bytes * 98304` layout.
 
-use lodestone_world::{ChunkColumn, ColumnLight, LightData, NibbleArray, PaletteKind};
+use lodestone_world::{
+    ChunkColumn, ColumnLight, LightData, LightProperties, NibbleArray, PaletteKind,
+    compute_column_light,
+};
+use std::hint::black_box;
+use std::time::Instant;
 
 const MODERN_MIN_Y: i32 = -64;
 const MODERN_SECTIONS: usize = 24; // 1.18+ overworld: y = -64..320.
@@ -235,5 +240,90 @@ fn measure_dense_light_column() {
     assert!(
         bytes < n * 2 * 2048 + 4096,
         "dense light has unexpected overhead"
+    );
+}
+
+/// Opacity/emission for the recompute timing: anything non-air is fully opaque,
+/// air is transparent, one id emits like a torch so the block-light seed path is
+/// exercised too. Mirrors the injected-provider seam the real engine uses.
+struct TimingProps;
+
+impl LightProperties for TimingProps {
+    fn opacity(&self, state: u32) -> u8 {
+        match state {
+            0 => 0,       // air
+            7 => 0,       // a transparent non-air (glass-like)
+            _ => 15,      // everything else opaque
+        }
+    }
+    fn emission(&self, state: u32) -> u8 {
+        if state == 5 { 14 } else { 0 } // one emissive id in the surface band
+    }
+}
+
+/// A life-like full-height column: stone below the surface, a varied surface
+/// band, air above — the same shape as `measure_realistic_terrain_column`, which
+/// is what a player standing in the world actually holds.
+fn realistic_terrain_column() -> ChunkColumn {
+    let mut col = modern_column();
+    let stone = 1u32;
+    for y in -64..40 {
+        for z in 0..16 {
+            for x in 0..16 {
+                col.set_block(x, y, z, stone);
+            }
+        }
+    }
+    for y in 40..48 {
+        for z in 0..16 {
+            for x in 0..16 {
+                let id = 1 + ((x + z + (y as usize)) % 6) as u32;
+                col.set_block(x, y, z, id);
+            }
+        }
+    }
+    col
+}
+
+/// Puts a real number on the from-zero light recompute that a single block
+/// update currently triggers. Correct-by-construction removal recomputes the
+/// whole column; this measures whether that is cheap enough to leave deferred or
+/// whether incremental removal needs to move up the list — a deferral with a
+/// number is a decision, one without is a worry.
+#[test]
+fn measure_light_recompute_cost() {
+    let col = realistic_terrain_column();
+    let props = TimingProps;
+
+    // Warm up (allocator, caches) then time a batch and report per-call.
+    for _ in 0..8 {
+        black_box(compute_column_light(black_box(&col), black_box(&props)));
+    }
+
+    const ITERS: usize = 200;
+    let mut best = f64::INFINITY;
+    let start = Instant::now();
+    for _ in 0..ITERS {
+        let t0 = Instant::now();
+        let light = compute_column_light(black_box(&col), black_box(&props));
+        let dt = t0.elapsed().as_secs_f64() * 1e3; // ms
+        best = best.min(dt);
+        black_box(light);
+    }
+    let mean_ms = start.elapsed().as_secs_f64() * 1e3 / ITERS as f64;
+
+    println!("light recompute (from zero) over a realistic 24-section column:");
+    println!("  mean {mean_ms:.3} ms/call, best {best:.3} ms/call over {ITERS} calls");
+    println!(
+        "  a player mining ~1 block/several ticks (~5/s) costs ~{:.3} ms/s of light recompute",
+        mean_ms * 5.0
+    );
+
+    // Sanity ceiling only — timing is machine- and contention-dependent, so this
+    // catches a pathological regression (a full recompute creeping into tens of
+    // ms), not a microbenchmark target. The printed number is the deliverable.
+    assert!(
+        mean_ms < 50.0,
+        "column light recompute unexpectedly slow: {mean_ms:.3} ms"
     );
 }

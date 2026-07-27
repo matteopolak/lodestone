@@ -22,6 +22,8 @@ workspace = true
 # Library seams the shell is a thin client over.
 lodestone-client = { workspace = true }
 lodestone-model = { workspace = true }
+lodestone-assets = { workspace = true }
+lodestone-sound = { workspace = true }
 lodestone-world = { workspace = true }
 lodestone-registry = { workspace = true }
 lodestone-render = { path = "../lodestone-render", features = ["window"] }
@@ -30,6 +32,15 @@ lodestone-physics = { path = "../lodestone-physics" }
 # one implementation. The shell adds only the winit key/mouse mapping on top.
 lodestone-controller = { path = "../lodestone-controller" }
 lodestone-testsupport = { workspace = true }
+# The integrated server hosts the bundled singleplayer overworld generator
+# (`lodestone_server::overworld_generator`), which wraps the version-free,
+# JVM-verified `lodestone-worldgen` pipeline. Depending on it here is what
+# closes the worldgen island: the shell now renders real vanilla shape+surface
+# terrain instead of the old sine+hash stand-in. The eventual faithful shape is
+# the integrated server streaming chunks over a loopback `Connection`; this
+# direct call is structured so that path replaces the call site, not the
+# generator (plan §8).
+lodestone-server = { path = "../lodestone-server" }
 
 # GPU / windowing / math.
 wgpu = { workspace = true }
@@ -43,6 +54,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 uuid = { workspace = true }
 # Cross-platform resident-set-size (RSS) reader for the debug overlay's memory
 # gauge. Wraps the platform syscall (task_info on macOS, /proc on Linux) so the

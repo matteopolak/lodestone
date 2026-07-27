@@ -39,6 +39,9 @@ use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
 use lodestone_model::Vec3;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::mob_spawn::{
+    DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
+};
 
 /// A [`PathWorld`] over the server's version-free solid/air terrain.
 ///
@@ -182,6 +185,14 @@ pub struct SimMob<'w> {
     id: i32,
     mob: NavigatingMob<'w>,
     goals: GoalSelector,
+    category: MobCategory,
+    /// Vanilla `Mob.noActionTime`: ticks since the mob last "did something".
+    /// Advanced each [`MobSim::tick`] and consulted by the despawn gates; reset
+    /// when the mob is within a player's immune radius.
+    no_action_time: i32,
+    /// Whether the mob is exempt from natural despawn (named, persistence-
+    /// required, or a persistent category). Persistent mobs skip the gates.
+    persistent: bool,
 }
 
 impl<'w> SimMob<'w> {
@@ -220,6 +231,38 @@ impl<'w> SimMob<'w> {
     #[must_use]
     pub fn has_path(&self) -> bool {
         self.mob.has_path()
+    }
+
+    /// The mob's spawn category (drives its despawn distances).
+    #[must_use]
+    pub fn category(&self) -> MobCategory {
+        self.category
+    }
+
+    /// Sets the mob's spawn category. Used by the spawn driver so a mob's
+    /// despawn behaviour matches the category it was spawned as.
+    pub fn set_category(&mut self, category: MobCategory) -> &mut Self {
+        self.category = category;
+        self
+    }
+
+    /// The mob's current `no_action_time` age timer (ticks since it last acted).
+    #[must_use]
+    pub fn no_action_time(&self) -> i32 {
+        self.no_action_time
+    }
+
+    /// Whether the mob is exempt from natural despawn.
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
+    }
+
+    /// Marks the mob persistent (named / persistence-required) so it never
+    /// naturally despawns, mirroring vanilla `isPersistenceRequired`.
+    pub fn set_persistent(&mut self, persistent: bool) -> &mut Self {
+        self.persistent = persistent;
+        self
     }
 }
 
@@ -267,15 +310,22 @@ impl<'w> MobSim<'w> {
             id,
             mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget),
             goals: GoalSelector::new(),
+            category: MobCategory::Monster,
+            no_action_time: 0,
+            persistent: false,
         });
         self.mobs.last_mut().expect("just pushed")
     }
 
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
+    /// Each mob's `no_action_time` ages by one tick, mirroring vanilla
+    /// `serverAiStep`'s `noActionTime++`; [`despawn_pass`](MobSim::despawn_pass)
+    /// consumes and resets it.
     pub fn tick(&mut self) {
         for m in &mut self.mobs {
             m.mob.tick(&mut m.goals);
+            m.no_action_time = m.no_action_time.saturating_add(1);
         }
         self.tick_count += 1;
     }
@@ -321,6 +371,104 @@ impl<'w> MobSim<'w> {
     pub fn iter(&self) -> impl Iterator<Item = &SimMob<'w>> {
         self.mobs.iter()
     }
+
+    /// Runs one despawn check over every non-persistent mob, given the nearest
+    /// player's position (vanilla `getNearestPlayer(-1.0)`), removing mobs the
+    /// two distance gates discard and resetting the age timer of any within the
+    /// immune radius.
+    ///
+    /// `nearest_player` is `None` when no player is loaded, in which case vanilla
+    /// runs no despawn logic at all — the mobs are simply kept. The `1/800`
+    /// gate-B roll is drawn per candidate mob from `rng`, matching vanilla's
+    /// per-mob `random.nextInt(800)`.
+    ///
+    /// Returns the number of mobs discarded.
+    pub fn despawn_pass(&mut self, nearest_player: Option<Vec3>, rng: &mut SpawnRng) -> usize {
+        let Some(player) = nearest_player else {
+            return 0;
+        };
+        let before = self.mobs.len();
+        self.mobs.retain_mut(|m| {
+            if m.persistent {
+                return true;
+            }
+            let dist_sqr = dist_sqr(m.mob.position(), player);
+            let rng_hit_800 = rng.next_int(800) == 0;
+            let outcome = check_despawn(m.category, dist_sqr, m.no_action_time, rng_hit_800, true);
+            match outcome {
+                DespawnOutcome {
+                    discard: true, ..
+                } => false,
+                DespawnOutcome {
+                    reset_timer: true, ..
+                } => {
+                    m.no_action_time = 0;
+                    true
+                }
+                _ => true,
+            }
+        });
+        before - self.mobs.len()
+    }
+
+    /// Runs one natural-spawn cycle over `chunks`, respecting the per-category
+    /// global caps in `state`.
+    ///
+    /// For each chunk and each spawnable category still under its cap, the
+    /// [`SpawnCandidateSource`] is asked for a candidate; if it supplies one the
+    /// mob is spawned, tagged with its category, and counted so the cap is
+    /// honoured for the rest of the cycle. Nothing here decides *which* mob or
+    /// *where* — that is the source's version/terrain-dependent job.
+    ///
+    /// Returns the number of mobs spawned.
+    pub fn run_spawn_cycle(
+        &mut self,
+        state: &mut SpawnState,
+        source: &mut dyn SpawnCandidateSource,
+        chunks: &[(i32, i32)],
+    ) -> usize {
+        let mut spawned = 0;
+        for &(cx, cz) in chunks {
+            for category in MobCategory::SPAWNING {
+                if !state.can_spawn(category) {
+                    continue;
+                }
+                if let Some(candidate) = source.candidate(category, cx, cz) {
+                    let mob = self.spawn(
+                        candidate.pos,
+                        candidate.shape,
+                        candidate.step_per_tick,
+                        candidate.visited_budget,
+                    );
+                    mob.set_category(category)
+                        .set_persistent(category.is_persistent());
+                    state.record(category);
+                    spawned += 1;
+                }
+            }
+        }
+        spawned
+    }
+
+    /// Builds a [`SpawnState`] for `spawnable_chunks` from a census of the mobs
+    /// currently alive, exactly as vanilla rebuilds `SpawnState` each cycle.
+    #[must_use]
+    pub fn census(&self, spawnable_chunks: i32) -> SpawnState {
+        let mut state = SpawnState::new(spawnable_chunks);
+        for m in &self.mobs {
+            state.record(m.category);
+        }
+        state
+    }
+}
+
+/// Squared horizontal+vertical distance between two positions (vanilla
+/// `distanceToSqr`).
+fn dist_sqr(a: Vec3, b: Vec3) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    dx * dx + dy * dy + dz * dz
 }
 
 // NOTE: this module owns `ChunkWorld` + `MobSim`; the acceptance gate lives in

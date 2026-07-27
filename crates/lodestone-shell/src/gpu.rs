@@ -950,7 +950,7 @@ mod tests {
         };
         let empty_lit = lit_pixels(&empty_frame);
 
-        let chat = ["<Steve> hello world", "<Alex> hi there"];
+        let chat = [("<Steve> hello world", 0.0_f32), ("<Alex> hi there", 0.0)];
         let chat_frame = crate::hud::HudFrame {
             crosshair: false,
             show_debug: false,

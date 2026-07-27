@@ -96,6 +96,32 @@ pub trait CollisionView {
         false
     }
 
+    /// The **"stuck in block" speed multiplier** for the block at `(x, y, z)`,
+    /// if that block impedes movement (`Block.entityInside` →
+    /// `Entity.makeStuckInBlock`). Returns `None` for the overwhelming majority
+    /// of blocks (air and everything that does not grab you), so an implementer
+    /// only overrides for the handful that do:
+    ///
+    /// | block | multiplier `(x, y, z)` |
+    /// |-------|------------------------|
+    /// | cobweb | `(0.25, 0.05, 0.25)` |
+    /// | powder snow | `(0.9, 1.5, 0.9)` |
+    /// | sweet berry bush | `(0.8, 0.75, 0.8)` |
+    ///
+    /// The block *chooses* the vector, so the version crate — which alone knows
+    /// block-state ids — maps id → multiplier here, keeping physics version-free
+    /// (pre-1.17 worlds simply never return the powder-snow row). The physics
+    /// engine consumes it as a per-tick component-wise scale of movement, exactly
+    /// as vanilla, rather than folding it into drag.
+    ///
+    /// This is the base, entity-independent value. Vanilla lets a per-entity
+    /// effect override it (a `WEAVING` mob gets `(0.5, 0.25, 0.5)` in cobweb);
+    /// that refinement is deferred and, if ever needed, belongs on the entity,
+    /// not this block-keyed seam.
+    fn stuck_multiplier(&self, _x: i32, _y: i32, _z: i32) -> Option<Vec3d> {
+        None
+    }
+
     /// The fluid occupying `(x, y, z)`, if any, for **flow-current** (fluid-push)
     /// computation (`FlowingFluid.getFlow` / `EntityFluidInteraction.update`).
     /// Default `None` (no fluid) → no current, preserving existing behaviour.

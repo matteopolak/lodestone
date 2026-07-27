@@ -1,3 +1,0 @@
-thread 'bot_survives_extended_session' (10144569) panicked at crates/lodestone-client/tests/live_session.rs:753:5:
-test bot_survives_extended_session ... FAILED
-test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 185.48s

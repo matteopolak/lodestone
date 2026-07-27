@@ -96,3 +96,37 @@ fn set_equipment_rejects_trailing_bytes() {
         "a trailing byte must fail decode, got {result:?}"
     );
 }
+
+#[test]
+fn set_equipment_rejects_unknown_slot_ordinal() {
+    // Ordinal 9 is out of range (only 0..=7 are defined slots); this must be a
+    // hard decode error, not silently coerced to a nearby valid slot.
+    let payload = vec![0x01, 0x09, 0x00];
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_EQUIPMENT,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "an unknown equipment slot ordinal must fail decode, got {result:?}"
+    );
+}
+
+#[test]
+fn set_equipment_rejects_truncated_payload() {
+    // The continuation bit promises another entry, but the buffer ends before
+    // its slot byte arrives.
+    let payload = vec![0x01, 0x85, 0x00];
+    let result = V770Adapter::new().handle_packet(
+        &mut World::new(),
+        ConnectionState::Play,
+        play::clientbound::SET_EQUIPMENT,
+        &payload,
+    );
+    assert!(
+        result.is_err(),
+        "a truncated continuation must fail decode, got {result:?}"
+    );
+}

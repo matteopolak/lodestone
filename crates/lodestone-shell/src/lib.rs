@@ -24,6 +24,7 @@
 //! real chunk would use. See [`net`] and the accompanying report.
 
 pub mod app;
+pub mod audio;
 pub mod blocks;
 pub mod camera_rig;
 pub mod chat;

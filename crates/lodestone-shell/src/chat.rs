@@ -20,10 +20,14 @@ use lodestone_client::ClientAction;
 const MAX_LINES: usize = 100;
 
 /// A bounded, newest-last scrollback of received chat/system lines (already
-/// flattened to plain text by the caller).
+/// flattened to a legacy `§`-code string by the caller). Each line records the
+/// monotonic timestamp it arrived at — a plain `f64` supplied by the caller, so
+/// this module stays free of any clock (and thus wasm-safe and unit-testable
+/// without a real time source). The HUD uses the age to drive the vanilla
+/// fade-out.
 #[derive(Debug, Clone, Default)]
 pub struct ChatLog {
-    lines: VecDeque<String>,
+    lines: VecDeque<(String, f64)>,
 }
 
 impl ChatLog {
@@ -33,19 +37,25 @@ impl ChatLog {
         Self::default()
     }
 
-    /// Append a received line, evicting the oldest if at capacity.
-    pub fn push(&mut self, line: impl Into<String>) {
-        self.lines.push_back(line.into());
+    /// Append a received line stamped with the caller's monotonic clock (`at`,
+    /// in seconds), evicting the oldest if at capacity.
+    pub fn push(&mut self, line: impl Into<String>, at: f64) {
+        self.lines.push_back((line.into(), at));
         while self.lines.len() > MAX_LINES {
             self.lines.pop_front();
         }
     }
 
-    /// The most recent `n` lines, oldest-first (render order, top to bottom).
+    /// The most recent `n` lines, oldest-first (render order, top to bottom),
+    /// each paired with the timestamp it arrived at.
     #[must_use]
-    pub fn recent(&self, n: usize) -> Vec<&str> {
+    pub fn recent(&self, n: usize) -> Vec<(&str, f64)> {
         let start = self.lines.len().saturating_sub(n);
-        self.lines.iter().skip(start).map(String::as_str).collect()
+        self.lines
+            .iter()
+            .skip(start)
+            .map(|(line, at)| (line.as_str(), *at))
+            .collect()
     }
 
     /// Total retained lines.
@@ -156,10 +166,10 @@ mod tests {
     fn log_keeps_newest_and_bounds_length() {
         let mut log = ChatLog::new();
         for i in 0..(MAX_LINES + 10) {
-            log.push(format!("line {i}"));
+            log.push(format!("line {i}"), i as f64);
         }
         assert_eq!(log.len(), MAX_LINES, "log must evict oldest at capacity");
-        let recent = log.recent(3);
+        let recent: Vec<&str> = log.recent(3).into_iter().map(|(line, _)| line).collect();
         // The three newest survive, oldest-first.
         assert_eq!(
             recent,
@@ -177,9 +187,20 @@ mod tests {
     #[test]
     fn recent_handles_asking_for_more_than_exist() {
         let mut log = ChatLog::new();
-        log.push("only");
-        assert_eq!(log.recent(10), vec!["only"]);
+        log.push("only", 0.0);
+        assert_eq!(
+            log.recent(10).into_iter().map(|(l, _)| l).collect::<Vec<_>>(),
+            vec!["only"]
+        );
         assert!(ChatLog::new().recent(5).is_empty());
+    }
+
+    #[test]
+    fn recent_carries_arrival_timestamps() {
+        let mut log = ChatLog::new();
+        log.push("first", 1.5);
+        log.push("second", 4.25);
+        assert_eq!(log.recent(2), vec![("first", 1.5), ("second", 4.25)]);
     }
 
     #[test]

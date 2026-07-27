@@ -25,7 +25,7 @@ use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier, ItemStac
 use lodestone_net::{Connection, memory_pair};
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ChunkSection, ColumnLight, Heightmaps, LoadedChunk,
-    PaletteKind, WorldSink,
+    NibbleArray, PaletteKind, WorldSink,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -210,6 +210,20 @@ fn loaded_chunk_with_block(x: usize, y: i32, z: usize, id: u32) -> LoadedChunk {
     );
     column.set_block(x, y, z, id);
     LoadedChunk::new(column, ColumnLight::new(16), Heightmaps::new(), Vec::new())
+}
+
+/// Builds an all-air single-chunk [`LoadedChunk`] carrying the given light column,
+/// so block sections elide but light is still present per light section.
+fn loaded_chunk_with_light(light: ColumnLight) -> LoadedChunk {
+    let column = ChunkColumn::new(
+        0,
+        16,
+        PaletteKind::block_states(),
+        PaletteKind::biomes(),
+        0,
+        0,
+    );
+    LoadedChunk::new(column, light, Heightmaps::new(), Vec::new())
 }
 
 /// The read-model folds login, health, and teleport into queryable player
@@ -444,6 +458,130 @@ async fn section_snapshot_outlives_unload() {
 
     drop(handle);
 }
+
+/// `light_at` / `lights_at` serve owned [`SectionLight`] snapshots the same way
+/// `section_at` serves block sections: indexed in native *light-section* space
+/// (`0` is below the world, light section `i` covers block section `i - 1`), lock-
+/// free once returned, and — crucially — available for an all-air block section,
+/// because a face meshed against air must still sample its light. Every value
+/// asserted here is one this test wrote into the world's `ColumnLight`, read back
+/// through the public handle, not a number the read-model invented.
+#[tokio::test]
+async fn light_snapshot_is_served_and_outlives_unload() {
+    const LOAD: i32 = 1;
+    const UNLOAD: i32 = 2;
+
+    // An all-air column (no set_block) so its block sections are elided, carrying a
+    // light column with known sky/block nibbles in light section 5 (which covers
+    // block section 4) and in boundary light section 0 (below the world — a
+    // position block-section index cannot even name).
+    let sky_idx = NibbleArray::index(1, 2, 3);
+    let block_idx = NibbleArray::index(7, 8, 9);
+    let mut light = ColumnLight::new(16);
+    light.set_sky_light(5, sky_idx, 15);
+    light.set_block_light(5, block_idx, 7);
+    light.set_sky_light(0, sky_idx, 4);
+    let chunk = loaded_chunk_with_light(light);
+
+    let pos = ChunkPos::new(0, 0);
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .world_write(
+            ConnectionState::Play,
+            LOAD,
+            WorldWrite::Load(WorldChunkPos::new(0, 0), chunk),
+        )
+        .on(
+            ConnectionState::Play,
+            LOAD,
+            vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })],
+        )
+        .world_write(
+            ConnectionState::Play,
+            UNLOAD,
+            WorldWrite::Unload(WorldChunkPos::new(0, 0)),
+        )
+        .on(
+            ConnectionState::Play,
+            UNLOAD,
+            vec![Directive::Emit(ClientEvent::ChunkUnloaded { pos })],
+        );
+    let (handle, _events, mut peer) = start(adapter);
+
+    peer.write_packet(LOAD, &[]).await.unwrap();
+    handle
+        .wait_for_chunk(pos, Duration::from_secs(2))
+        .await
+        .expect("chunk should load");
+
+    // Light is served even though the block section is all-air (elided): the exact
+    // seam the mesher needs, and the one a "gate light on block presence" bug would
+    // break. `section_at` says None for the same section; `light_at` must not.
+    assert!(
+        handle.section_at(pos, 4).is_none(),
+        "block section 4 is all air, so section_at elides it"
+    );
+    let held: lodestone_client::SectionLight = handle
+        .light_at(pos, 5)
+        .expect("light section 5 present for an air block section");
+    assert_eq!(
+        held.sky_at(1, 2, 3),
+        15,
+        "sky nibble read back through handle"
+    );
+    assert_eq!(
+        held.block_at(7, 8, 9),
+        7,
+        "block nibble read back through handle"
+    );
+    // A cell we never set resolves to the Missing default (0), not stale garbage.
+    assert_eq!(held.block_at(1, 2, 3), 0);
+
+    // Boundary light section 0 (below the world) is reachable and carries what we
+    // wrote — block-section index has no name for it, which is why the handle
+    // exposes light-section indexing directly.
+    let below = handle
+        .light_at(pos, 0)
+        .expect("boundary light section 0 present");
+    assert_eq!(below.sky_at(1, 2, 3), 4);
+
+    // Bulk read: one aligned slot per request in a single lock, matching the
+    // singular reads. Unlike `sections_at`, an all-air section still yields Some
+    // light; only an unloaded chunk yields None.
+    let batch = handle.lights_at(&[(pos, 5), (pos, 0), (ChunkPos::new(9, 9), 5)]);
+    assert_eq!(batch.len(), 3);
+    assert_eq!(batch[0].as_ref().expect("loaded").sky_at(1, 2, 3), 15);
+    assert_eq!(
+        batch[1].as_ref().expect("boundary loaded").sky_at(1, 2, 3),
+        4
+    );
+    assert!(batch[2].is_none(), "absent chunk is a None slot");
+
+    // Out-of-range light section and unloaded chunk are None, never a silent zero.
+    assert!(handle.light_at(pos, 999).is_none());
+    assert!(handle.light_at(ChunkPos::new(9, 9), 5).is_none());
+
+    // Unload the chunk out from under the holder.
+    peer.write_packet(UNLOAD, &[]).await.unwrap();
+    handle
+        .wait_for(Duration::from_secs(2), |h| !h.is_chunk_loaded(pos))
+        .await
+        .expect("chunk should unload");
+    assert!(handle.light_at(pos, 5).is_none());
+
+    // The snapshot taken before the unload is a value carrying no borrow into the
+    // world: it keeps reading valid light with no lock held and no coupling to
+    // world liveness — the light-side twin of the section-snapshot invariant.
+    assert_eq!(
+        held.sky_at(1, 2, 3),
+        15,
+        "held light snapshot outlives the unload"
+    );
+    assert_eq!(held.block_at(7, 8, 9), 7);
+
+    drop(handle);
+}
+
 #[tokio::test]
 async fn entities_are_tracked_moved_and_removed() {
     const TRIGGER: i32 = 1;

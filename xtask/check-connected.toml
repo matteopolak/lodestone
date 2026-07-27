@@ -1,0 +1,19 @@
+# Explicit exceptions for `cargo xtask check-connected`.
+#
+# Each entry needs both an owner and a reason so unreachable work cannot hide in
+# terminal output. Delete entries as crates become reachable from shipped roots.
+
+[[allow]]
+crate = "xtask"
+owner = "impl-xtask"
+reason = "workspace build tool; it is intentionally not a shipped runtime artifact"
+
+[[allow]]
+crate = "lodestone-auth"
+owner = "impl-auth"
+reason = "authentication crate is work-in-progress and not yet wired into shipped login flow"
+
+[[allow]]
+crate = "lodestone-game"
+owner = "impl-game"
+reason = "game orchestration crate is work-in-progress while shell/server seams are being connected"

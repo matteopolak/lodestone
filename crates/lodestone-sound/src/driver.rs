@@ -32,18 +32,110 @@ pub enum DriverError {
     Decode(#[from] AudioError),
 }
 
-/// Bridges [`ClientEvent`](lodestone_model::ClientEvent) sound events to a
-/// [`Mixer`]. Construct with a parsed [`SoundRegistry`] and a byte source that
-/// can read `assets/<ns>/sounds/<path>.ogg`, then feed it events.
+/// The device-free resolve + decode core, shared by the headless
+/// [`SoundDriver`] and the device-backed [`AudioEngine`](crate::AudioEngine).
+///
+/// It owns the parsed `sounds.json`, the injected byte source, and a
+/// decoded-PCM cache, and turns an event into a ready-to-play
+/// [`SoundInstance`] — but it holds **no** mixer, device, clock, filesystem, or
+/// network. That is what lets the exact same resolution/decode path feed either
+/// an owned [`Mixer`] (tests) or a real output device's shared mixer (the game)
+/// with one implementation.
 #[derive(Debug)]
-pub struct SoundDriver {
-    mixer: Mixer,
+pub struct SoundResolver {
     registry: SoundRegistry,
     source: Box<dyn ResourceSource>,
     /// Decoded-PCM cache keyed by in-pack file path, so a repeated sound (a
     /// footstep, a block break) decodes exactly once. `Arc` is shared into
     /// every [`SoundInstance`], so playing does not clone the samples.
     cache: HashMap<String, Arc<PcmBuffer>>,
+}
+
+impl SoundResolver {
+    /// Builds a resolver over a parsed registry and a byte source.
+    pub fn new(registry: SoundRegistry, source: Box<dyn ResourceSource>) -> Self {
+        Self {
+            registry,
+            source,
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Number of `.ogg` files decoded and cached so far.
+    pub fn decoded_file_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Resolves an event to a ready-to-play [`SoundInstance`] without touching
+    /// any mixer. Decoding happens here, so callers holding a realtime mixer
+    /// lock must call this *outside* the lock. Returns `Ok(None)` for vanilla's
+    /// silent "empty sound" (unknown event or zero total weight).
+    ///
+    /// Applies vanilla's observable rules:
+    /// * `instanceVolume = packetVolume * entryVolume`,
+    /// * `instancePitch  = packetPitch  * entryPitch`
+    ///   (`AbstractSoundInstance.getVolume/getPitch`);
+    /// * client attenuation uses the `sounds.json` entry distance, **not** the
+    ///   packet's `fixed_range` (that is server-side culling only);
+    ///   [`Spatialization::range`](lodestone_audio) then applies the
+    ///   `max(volume, 1)` scaling, matching `SoundEngine`.
+    pub fn resolve_instance(
+        &mut self,
+        event_name: &str,
+        category: ModelCategory,
+        position: Vec3,
+        packet_volume: f32,
+        packet_pitch: f32,
+        seed: i64,
+    ) -> Result<Option<SoundInstance>, DriverError> {
+        // One RNG for the whole resolution chain, seeded with the server's
+        // value. `resolve` calls the closure once per weighted level (including
+        // `type: event` recursion), exactly as vanilla's single `RandomSource`
+        // is threaded through `WeighedSoundEvents.getSound`.
+        let mut rng = JavaRandom::new(seed);
+        let resolved = self
+            .registry
+            .resolve(event_name, &mut |bound| rng.roll(bound))?;
+        let Some(resolved) = resolved else {
+            return Ok(None);
+        };
+
+        let path = resolved.file_path();
+        let pcm = self.decode_cached(&path)?;
+
+        let mut instance = SoundInstance::positional(pcm, map_category(category), position);
+        instance.volume = packet_volume * resolved.volume;
+        instance.pitch = packet_pitch * resolved.pitch;
+        instance.attenuation_distance = resolved.attenuation_distance as f32;
+        Ok(Some(instance))
+    }
+
+    fn decode_cached(&mut self, path: &str) -> Result<Arc<PcmBuffer>, DriverError> {
+        if let Some(pcm) = self.cache.get(path) {
+            return Ok(pcm.clone());
+        }
+        let bytes = self
+            .source
+            .read(path)
+            .ok_or_else(|| DriverError::MissingFile(path.to_string()))?;
+        let pcm = Arc::new(decode_vorbis(&bytes)?);
+        self.cache.insert(path.to_string(), pcm.clone());
+        Ok(pcm)
+    }
+}
+
+/// Bridges [`ClientEvent`](lodestone_model::ClientEvent) sound events to a
+/// [`Mixer`]. Construct with a parsed [`SoundRegistry`] and a byte source that
+/// can read `assets/<ns>/sounds/<path>.ogg`, then feed it events.
+///
+/// This is the headless, device-free driver: it owns its mixer and the caller
+/// renders it (tests, the browser worklet). For a native output device, see
+/// [`AudioEngine`](crate::AudioEngine), which shares its mixer with a `cpal`
+/// stream but uses the same [`SoundResolver`].
+#[derive(Debug)]
+pub struct SoundDriver {
+    resolver: SoundResolver,
+    mixer: Mixer,
 }
 
 impl SoundDriver {
@@ -59,10 +151,8 @@ impl SoundDriver {
         source: Box<dyn ResourceSource>,
     ) -> Self {
         Self {
+            resolver: SoundResolver::new(registry, source),
             mixer: Mixer::new(output_sample_rate),
-            registry,
-            source,
-            cache: HashMap::new(),
         }
     }
 
@@ -82,7 +172,7 @@ impl SoundDriver {
     /// Number of `.ogg` files decoded and cached so far. Useful for asserting a
     /// live path actually decoded something rather than mixing zeros.
     pub fn decoded_file_count(&self) -> usize {
-        self.cache.len()
+        self.resolver.decoded_file_count()
     }
 
     /// Plays a positioned sound (the `SOUND` packet path).
@@ -101,7 +191,13 @@ impl SoundDriver {
         pitch: f32,
         seed: i64,
     ) -> Result<Option<PlayHandle>, DriverError> {
-        self.resolve_and_play(event_name, category, position, volume, pitch, seed)
+        match self
+            .resolver
+            .resolve_instance(event_name, category, position, volume, pitch, seed)?
+        {
+            Some(instance) => Ok(Some(self.mixer.play(instance))),
+            None => Ok(None),
+        }
     }
 
     /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
@@ -121,58 +217,7 @@ impl SoundDriver {
         pitch: f32,
         seed: i64,
     ) -> Result<Option<PlayHandle>, DriverError> {
-        self.resolve_and_play(event_name, category, position, volume, pitch, seed)
-    }
-
-    fn resolve_and_play(
-        &mut self,
-        event_name: &str,
-        category: ModelCategory,
-        position: Vec3,
-        packet_volume: f32,
-        packet_pitch: f32,
-        seed: i64,
-    ) -> Result<Option<PlayHandle>, DriverError> {
-        // One RNG for the whole resolution chain, seeded with the server's
-        // value. `resolve` calls the closure once per weighted level (including
-        // `type: event` recursion), exactly as vanilla's single `RandomSource`
-        // is threaded through `WeighedSoundEvents.getSound`.
-        let mut rng = JavaRandom::new(seed);
-        let resolved = self
-            .registry
-            .resolve(event_name, &mut |bound| rng.roll(bound))?;
-        let Some(resolved) = resolved else {
-            return Ok(None);
-        };
-
-        let path = resolved.file_path();
-        let pcm = self.decode_cached(&path)?;
-
-        // Vanilla: instanceVolume = packetVolume * entryVolume,
-        //          instancePitch  = packetPitch  * entryPitch.
-        // (AbstractSoundInstance.getVolume/getPitch.)
-        let mut instance = SoundInstance::positional(pcm, map_category(category), position);
-        instance.volume = packet_volume * resolved.volume;
-        instance.pitch = packet_pitch * resolved.pitch;
-        // Client attenuation uses the sounds.json entry distance, NOT the
-        // packet's fixed_range. `Spatialization::range` then applies the
-        // `max(volume, 1)` scaling, matching `SoundEngine` line-for-line.
-        instance.attenuation_distance = resolved.attenuation_distance as f32;
-
-        Ok(Some(self.mixer.play(instance)))
-    }
-
-    fn decode_cached(&mut self, path: &str) -> Result<Arc<PcmBuffer>, DriverError> {
-        if let Some(pcm) = self.cache.get(path) {
-            return Ok(pcm.clone());
-        }
-        let bytes = self
-            .source
-            .read(path)
-            .ok_or_else(|| DriverError::MissingFile(path.to_string()))?;
-        let pcm = Arc::new(decode_vorbis(&bytes)?);
-        self.cache.insert(path.to_string(), pcm.clone());
-        Ok(pcm)
+        self.play_sound(event_name, category, position, volume, pitch, seed)
     }
 }
 

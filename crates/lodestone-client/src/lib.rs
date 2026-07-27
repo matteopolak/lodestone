@@ -95,10 +95,12 @@ pub use handle::{ClientHandle, EventStream, WalkOutcome};
 pub use scoreboard::{BossBar, Objective, ScoreEntry, Scoreboard, Team};
 pub use state::{EntityView, PlayerSnapshot};
 
-// The world read-model hands out owned section snapshots; re-export the section
-// type so consumers can name `Arc<ChunkSection>` without depending on
-// `lodestone-world` directly.
-pub use lodestone_world::ChunkSection;
+// The world read-model hands out owned section and light snapshots; re-export the
+// section and light types so consumers can name `Arc<ChunkSection>` and
+// `SectionLight` without depending on `lodestone-world` directly. `LightData` is
+// re-exported too so a mesher can branch on `SectionLight`'s `sky`/`block` fields
+// (e.g. an above-the-world sky default) rather than only its accessors.
+pub use lodestone_world::{ChunkSection, LightData, SectionLight};
 
 // Re-export the model types a client user needs so they can build a session and
 // use the bot API without depending on `lodestone-model` directly.

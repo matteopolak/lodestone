@@ -44,13 +44,24 @@
 
 mod chunk;
 mod integrated;
+mod mob_spawn;
 mod mobs;
 mod protocol;
 mod server;
 mod spawn;
+mod worldgen_data;
 
 pub use chunk::{ChunkColumn, ChunkSource, WorldgenChunkSource};
 pub use integrated::IntegratedServer;
+pub use mob_spawn::{
+    DespawnOutcome, MobCategory, SpawnCandidate, SpawnCandidateSource, SpawnRng, SpawnState,
+    check_despawn, MAGIC_NUMBER,
+};
 pub use mobs::{ChunkWorld, MobSim, SimMob};
 pub use protocol::{ServerBound, ServerDirective, ServerProtocol};
 pub use server::{ServeSummary, ServerError, serve_connection};
+pub use worldgen_data::overworld_generator;
+
+// Re-exported so a caller (e.g. the shell's local world) can name the generator
+// and its output without depending on `lodestone-worldgen` directly.
+pub use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};

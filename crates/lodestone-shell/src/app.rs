@@ -293,6 +293,10 @@ impl WindowApp {
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
         let camera = self.sim.camera(aspect);
+        // Drive the audio listener from the exact camera we render, so what the
+        // player hears is spatialised to match what they see. No-op when audio
+        // is disabled.
+        self.sim.set_audio_listener(&camera);
         let outline = self.sim.target.map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
         let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
@@ -316,7 +320,8 @@ impl WindowApp {
         // and the survival gauges. Locals are collected up-front so their
         // borrows outlive the frame struct.
         let chat_open = self.ui.is_chat_open();
-        let chat_lines: Vec<&str> = self.sim.recent_chat(if chat_open { 10 } else { 5 });
+        // Pull enough history for the HUD to fade/scroll; it caps and ages them.
+        let chat_lines: Vec<(&str, f32)> = self.sim.recent_chat(if chat_open { 20 } else { 10 });
         let player_rows: Vec<String> = if self.tab_held {
             self.sim.player_rows()
         } else {
