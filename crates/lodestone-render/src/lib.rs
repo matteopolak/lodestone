@@ -95,8 +95,8 @@ pub use mesher::{
 };
 pub use model_pipeline::{GpuModelMesh, ModelPipeline, model_camera_buffer};
 pub use models::{
-    ModelMesh, ModelSectionView, ModelVertex, face_of_direction, is_full_cube, is_packed_cube,
-    mesh_models,
+    FluidMeshes, FluidSectionView, ModelMesh, ModelSectionView, ModelVertex, face_of_direction,
+    is_full_cube, is_packed_cube, mesh_fluids, mesh_models,
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
