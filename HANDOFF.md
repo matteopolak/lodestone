@@ -512,3 +512,130 @@ would have said "looks fine." The replacement boots the real server headlessly a
 `getCollisionShape(...).toAabbs()` for all 32,366 states.
 
 Where minecraft-data is still the practical choice, record why.
+
+---
+
+## Addendum — "Islands": subsystems that are correct but not plugged in
+
+This is the **dominant defect class in this project** and the single most useful thing
+to know when picking it up. In every case below the subsystem is individually built,
+individually tested, and reaches **zero pixels** because nothing calls it. They do not
+show up as failures — the tree is green, the tests pass, and the game runs.
+
+A test suite cannot see an island. Only a **pixel gate** can: assert coverage inside the
+subject's screen rect, plus a negative control (empty state, or an opposite-corner
+reading) that must fail the same assertion. `bulk-models` established the pattern for
+entities and `impl-net` reproduced it for status effects; copy those, don't invent one.
+
+### Island 1 — Lighting (highest value, engine is finished)
+
+The light engine is **exact against real vanilla**, verified cell-for-cell on a live
+26.2 server: sky `0/24576` disagreements, block `0/12288`, `diff_column_light` block
+`0/32768` + sky `0/32768`. Each has a negative control that genuinely fired (`5120`
+suppressed-sky, `298` contaminated-world). This is the best-validated subsystem here.
+
+**It reaches no pixels.** `lodestone-render`'s `build_batch` fills its light grid with
+`UniformLight::pre_light_bridge()` — full-bright — at **3 sites**.
+
+Fixing it is two-sided and **ordering matters**: the producer (`lodestone-client`
+populating `MeshJob`'s light grid from `sections_and_light_at`) must land **before or with**
+the consumer (retiring the 3 bridge sites onto the existing `WorldSectionLight`/`SkyDefault`
+adapter). Retiring the bridge first turns the world black — worse than full-bright.
+
+- **Trap:** full-bright and correct lighting *both* render a visible world, so "it still
+  draws" proves nothing. Assert shadowed interiors are measurably darker than open sky.
+- **Trap:** light section indexing is off-by-one **by design** — light section 0 is the
+  boundary *below* the world, light section `i` covers block section `i-1`, 26 light
+  sections for 24 block sections. `sections_and_light_at` takes an explicit `(n, n+1)`.
+  "Correcting" this into alignment is a regression that looks like a fix.
+- **Trap:** the Nether has no sky light, so `SkyDefault` must not be a blanket 15.
+
+### Island 2 — Vanilla block textures (contradicts an explicit requirement)
+
+The playable shell renders a **procedural colour atlas**, not vanilla textures.
+`lodestone-shell/src/gpu.rs:393`, inside `RenderState::new`, unconditionally calls
+`crate::blocks::build_atlas()` — a generated per-sprite base colour with a deterministic
+dither so surfaces "read as textured". There is no vanilla path, no feature flag and no
+fallback logic at that call site.
+
+Meanwhile `lodestone-assets` carries a real `Atlas` / `AtlasBuilder` / `AtlasDefinition`,
+and **`lodestone-render` already uses it** (`block_resolver.rs`, `texture.rs`, plus
+`tests/model_census.rs` and `tests/live_gate.rs`). Vanilla assets are on disk:
+`.cache/mc/26.2` (412 MB).
+
+So this island is **narrow** — the loader exists, the consumer exists, and the two are
+wired together on the render side. The shell simply never asks for it. Note
+`cargo test -p lodestone-assets --lib` runs **0 tests**; the coverage lives in
+`lodestone-render`'s tests, so don't read the empty result as "untested".
+
+### Island 3 — UI surfaces (partially resolved)
+
+Five surfaces are modelled and folded in `lodestone-game` — tab list, scoreboard,
+container/inventory, boss bar, status effects. Only **status effects** has been proven
+to pixels (`overlay_rasterises_to_pixels`: empty frame `0`, populated widget rect `2160`,
+opposite corner `0`). The rest fold state correctly and draw nothing.
+
+`impl-game` built a `Menus` aggregate routing the 7 container events through the proven
+`ClientMenu::reconcile` seam — **consume it, do not rebuild it**. Two hazards it already
+solved, both of which produce a plausible-looking *wrong* inventory rather than an error:
+
+- Container packets are in **menu order**; `SET_PLAYER_INVENTORY` is **native order**.
+  `ClientMenu::set_player_native` exists with a known-value guard asserting native slot 0
+  lands at menu index **36**, not 0.
+- Container size comes from **server truth** (`content_len - 36`), never a hand-written
+  menu-type→size table.
+- Slot layout differs per menu: window 0 is `0` result / `1..=4` craft / `5..=8` armour /
+  `9..=35` main / `36..=44` hotbar / `45` offhand, while `Generic{n}` is `0..n` container /
+  `n..n+27` main / `n+27..n+36` hotbar — **no armour, no offhand, hotbar not at 36**.
+
+## Addendum — `PlayerLoaded` is encoded but never sent
+
+`ClientAction::PlayerLoaded` exists (`lodestone-model/src/action.rs:290`) and v770 encodes
+it (`adapter.rs:3225`). **Nothing produces it.**
+
+Vanilla's server seeds a ~60-tick (~3 s) `clientLoadedTimeoutTimer` after join **and after
+respawn**, and **silently ignores movement packets until it elapses** unless the client
+zeroes it early (`ServerGamePacketListenerImpl.hasClientLoaded()`). Vanilla sends it
+automatically with no game or UI dependency. We never do — so for the first ~3 s of every
+session the server discards our movement, and any gate measuring movement in that window
+measures nothing and returns a **false green**.
+
+Three live gates work around this by sleeping ~5 s each, with comments asserting the
+capability is absent (`live_physics_bot.rs:45` and `:242`, `live_second_observer.rs:317`,
+`live_session.rs:110`). Those comments were true when written; the variant landed later.
+
+- **Do not** strip the waits wholesale. `live_second_observer` waits on a genuinely
+  different condition — the *observer* client receiving our entity — and collapsing the two
+  yields a gate that passes on latency.
+- The **`minecraft:brand` custom payload** is in the same state: encoded, tested, never sent,
+  where vanilla sends it at join.
+
+## Addendum — staleness is the most common defect here
+
+**Five separate instances surfaced in a single session.** Every one was *true, evidenced
+and correct when written*, then quoted or relied upon after the world changed underneath it:
+
+1. A "~40 of 141 packets handled" metric quoted while ~50 packets landed (real: 91) — this
+   steered an entire fleet of agents at the wrong bottleneck.
+2. `lodestone-render` believing `handle.section_light` didn't exist. It does — this is what
+   keeps the best-verified subsystem off screen (Island 1).
+3. An assumption that a 158-type entity-geometry census existed. No such table exists
+   anywhere; the thing named "census" is the *spawn* census for mob-cap.
+4. A gate docstring asserting "no adapter emits any entity event", written before ~50
+   packets landed.
+5. Three test files asserting `ClientAction::PlayerLoaded` doesn't exist (above).
+
+**Standing rule, and the cheapest safeguard available:** when work is gated on *"X doesn't
+exist yet"*, **re-verify that X still doesn't exist** before routing around it. Staleness
+needs its own check precisely *because* the original claim was honest and correct — nothing
+about it looks wrong on inspection, which is why it survives review.
+
+Corollary: prefer `cargo xtask connectedness` over any hand-derived coverage number. The
+hand-derived version was wrong four times, in four different ways.
+
+## Addendum — model-layer gap: `ItemStack` has no components
+
+`lodestone_model::ItemStack` carries **no components** — no custom name, enchantments,
+durability or max-stack. Drawing stays correct because container reconcile is
+server-authoritative; only *offline click-stacking prediction* is affected. Needs a
+component patch at the model event layer. Documented at the `From<&model::ItemStack>` impl.
