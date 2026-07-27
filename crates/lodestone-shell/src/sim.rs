@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use lodestone_assets::Language;
 use lodestone_client::{ClientAction, OpenMenuSnapshot};
 use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
 use lodestone_game::menu::Menu;
@@ -29,6 +30,11 @@ use crate::overlay::{BossBarView, Sidebar};
 use crate::raycast::{REACH, RayHit, raycast};
 use crate::resources::BlockResources;
 use crate::worldgen;
+
+/// A borrowed translation closure: `key → resolved format string`, the shape
+/// [`lodestone_game::text::resolve`] consumes. Factored out so the projection
+/// helpers and the `Sim` accessors share one name for it.
+type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
 
 /// Fixed physics timestep: 20 ticks per second, like vanilla.
 const TICK_DT: f64 = 1.0 / 20.0;
@@ -84,6 +90,13 @@ pub struct Sim {
     /// two use disjoint block-id spaces and must never be meshed with the wrong
     /// classifier.
     vanilla_atlas: Option<Arc<BlockAtlas>>,
+    /// The vanilla `en_us.json` table for resolving server-authored `translate`
+    /// components (death messages, scoreboard titles, tab-list names, …) into
+    /// words before they reach the HUD. `None` on the demo palette or a pack
+    /// without a language file, in which case components render via their own
+    /// `fallback`/key — never a raw error. Loaded once with the atlas from the
+    /// same pack, so it shares the atlas's ownership and lifetime.
+    language: Option<Arc<Language>>,
     /// Vanilla water state ids, precomputed once from the atlas, for the live
     /// collision view's `is_water` swim hook. Empty on the demo palette.
     water_ids: Arc<HashSet<u32>>,
@@ -296,6 +309,7 @@ impl Sim {
             fly: false,
             pending_removals: Vec::new(),
             vanilla_atlas: resources.vanilla_atlas,
+            language: resources.language,
             water_ids,
             mesh_drops: 0,
             teleport_count: 0,
@@ -335,6 +349,27 @@ impl Sim {
     #[must_use]
     pub fn asset_banner(&self) -> Option<&str> {
         self.asset_banner.as_deref()
+    }
+
+    /// A translation closure over the loaded language table — the exact shape
+    /// [`lodestone_game::text::resolve`] consumes. On the demo palette (no table)
+    /// it resolves nothing, so a component falls back to its own `fallback`/key.
+    /// The table itself stays owned centrally by the `Sim`; only this borrowed
+    /// closure is handed to the pure projection helpers, matching how vanilla
+    /// resolves components at the render boundary.
+    fn translator(&self) -> Translator<'_> {
+        match &self.language {
+            Some(lang) => Box::new(lang.translator()),
+            None => Box::new(|_: &str| None),
+        }
+    }
+
+    /// Lower a server-authored component's `translate` nodes into literals
+    /// against the loaded language table, preserving styling. Used at the read
+    /// boundary for the title/action-bar and at ingest for chat, so raw keys
+    /// like `entity.minecraft.spider` never reach the HUD.
+    fn resolve_text(&self, text: &lodestone_model::Text) -> lodestone_model::Text {
+        lodestone_game::text::resolve(text, self.translator().as_ref())
     }
 
     /// Attach a live connection whose updates are polled each frame.
@@ -410,14 +445,14 @@ impl Sim {
     /// vanilla display order. Empty until the server sends player-list data.
     #[must_use]
     pub fn player_rows(&self) -> Vec<String> {
-        crate::tablist::player_rows(&self.tab_list)
+        crate::tablist::player_rows(&self.tab_list, self.translator().as_ref())
     }
 
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
     /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
     pub fn sidebar(&self) -> Option<Sidebar> {
-        crate::scoreboard::sidebar_from(&self.scoreboard)
+        crate::scoreboard::sidebar_from(&self.scoreboard, self.translator().as_ref())
     }
 
     /// The active boss bars to draw, in render order. Empty off a live server.
@@ -444,8 +479,10 @@ impl Sim {
     pub fn title_overlay(&self) -> Option<(String, Option<String>, f32)> {
         let title = self.title.title()?;
         Some((
-            title.to_legacy_string(),
-            self.title.subtitle().map(|s| s.to_legacy_string()),
+            self.resolve_text(title).to_legacy_string(),
+            self.title
+                .subtitle()
+                .map(|s| self.resolve_text(s).to_legacy_string()),
             self.title.alpha(),
         ))
     }
@@ -455,7 +492,10 @@ impl Sim {
     #[must_use]
     pub fn action_bar_overlay(&self) -> Option<(String, f32)> {
         let text = self.action_bar.text()?;
-        Some((text.to_legacy_string(), self.action_bar.alpha()))
+        Some((
+            self.resolve_text(text).to_legacy_string(),
+            self.action_bar.alpha(),
+        ))
     }
 
     /// The local player's active status effects, for the top-right HUD overlay.
@@ -1106,6 +1146,11 @@ impl Sim {
                     self.teleport_count += 1;
                 }
                 NetUpdate::Chat { text, player } => {
+                    // Resolve translate nodes (death messages, join/leave, …) to
+                    // words once, at arrival, against the language table — so the
+                    // stored scrollback and the log line both read as prose, not
+                    // raw keys like `entity.minecraft.spider`.
+                    let text = self.resolve_text(&text);
                     tracing::info!(target: "chat", "{}", text.to_legacy_string());
                     if player {
                         self.chat_log.push_player(
