@@ -89,7 +89,7 @@ mod spawn;
 mod state;
 
 pub use builder::ClientBuilder;
-pub use config::{KeepAlivePolicy, RespawnPolicy};
+pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};
 pub use scoreboard::{BossBar, Objective, ScoreEntry, Scoreboard, Team};
