@@ -68,7 +68,11 @@ pub mod window;
 pub use anim::{AnimFrame, AnimSample, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
-pub use block_models::{BlockModels, BlockModelsError, StateModel};
+pub use block_models::{
+    BlockModels, BlockModelsError, FluidCell, FluidKind, FluidSprites, StateModel,
+};
+#[doc(no_inline)]
+pub use lodestone_assets::fluid::FluidState;
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry, blocks_json_registry};
 pub use camera::{Camera, Frustum, Intersection, Plane};

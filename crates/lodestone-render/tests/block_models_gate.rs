@@ -195,20 +195,46 @@ fn stained_glass_is_a_translucent_non_occluding_cube() {
 
 #[test]
 #[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
-fn water_bakes_empty_pending_fluid_renderer() {
-    // HONEST GAP (Phase 2 island): fluids have no blockstate *model* — vanilla
-    // renders them with a dedicated fluid renderer, and `lodestone_assets` has a
-    // `bake_fluid` for exactly this. Until that is wired into the mesher, water
-    // bakes to *empty* geometry (invisible), not a translucent surface. This gate
-    // pins that reality so the next person knows precisely where the translucent-
-    // water requirement stops: it is the `bake_fluid` wiring, not this bridge.
+fn water_classifies_as_a_fluid_with_resolvable_sprites() {
+    // Fluids have no blockstate *model* — vanilla renders them with a dedicated
+    // fluid renderer — so `state(id).quads` stays empty. But `BlockModels` now
+    // classifies the state as a fluid and resolves its still/flow sprites out of
+    // the stitched atlas, which is exactly what the mesher feeds `bake_fluid` to
+    // build the see-through surface. This gate pins that the classification and
+    // the atlas sprites are both real (non-degenerate UVs) on the true jar.
+    use lodestone_render::{FluidKind, FluidState};
+
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:water", &[]).expect("water in registry");
+
     let sm = models.state(id);
     assert!(
         sm.quads.is_empty(),
-        "water has no baked blockstate model; see-through water needs the \
-         lodestone_assets::bake_fluid renderer wired into the mesher (Phase 2)"
+        "water has no baked blockstate model; it renders through bake_fluid"
     );
     assert!(!sm.occludes, "empty water geometry does not occlude");
+
+    let fluid = models.fluid(id).expect("water is classified as a fluid");
+    assert_eq!(fluid.kind, FluidKind::Water);
+    assert_eq!(fluid.state, FluidState::source(), "level=0 water is a source");
+
+    // The still/flow sprites resolved to a real, non-empty atlas rect.
+    let sprites = models.fluid_sprites(FluidKind::Water);
+    assert!(
+        sprites.still.max[0] > sprites.still.min[0] && sprites.still.max[1] > sprites.still.min[1],
+        "water_still resolved to a degenerate UV rect: {:?}",
+        sprites.still
+    );
+    assert!(
+        sprites.flow.max[0] > sprites.flow.min[0] && sprites.flow.max[1] > sprites.flow.min[1],
+        "water_flow resolved to a degenerate UV rect: {:?}",
+        sprites.flow
+    );
+
+    // Lava classifies too, on its opaque/full-bright path.
+    let lava_id = find_state(reg.as_ref(), "minecraft:lava", &[]).expect("lava in registry");
+    assert_eq!(
+        models.fluid(lava_id).expect("lava is a fluid").kind,
+        FluidKind::Lava
+    );
 }
