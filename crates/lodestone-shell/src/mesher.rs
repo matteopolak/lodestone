@@ -25,8 +25,13 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
-use lodestone_render::{ChunkSectionView, Mesh, SectionNeighborhood, UniformLight, mesh_simple};
-use lodestone_world::{ChunkPos, ChunkSection, PaletteKind, World};
+use lodestone_render::{
+    ChunkSectionView, Mesh, SectionLight, SectionNeighborhood, SkyDefault, UniformLight,
+    WorldSectionLight, mesh_simple,
+};
+use lodestone_world::{
+    ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
+};
 
 use crate::blocks::{DemoClassifier, id};
 
@@ -62,12 +67,28 @@ pub struct SectionSnapshot {
     /// Which section this is.
     pub key: SectionKey,
     sections: Vec<ChunkSection>,
+    /// Per-neighbour light, indexed identically to `sections`
+    /// (`[dx+1][dy+1][dz+1]`). `None` where the neighbour column or light
+    /// section is absent (edge of world / below the world). Those slots fall
+    /// back to the full-bright bridge in [`mesh_snapshot`]; every present slot
+    /// carries the world's real sky/block light.
+    lights: Vec<Option<SectionLightData>>,
+    /// How to resolve *absent* (`Missing`) sky light, chosen per dimension by the
+    /// producer. The shell's local world is the overworld, so this is
+    /// [`SkyDefault::Full`]; a nether/end driver would pass [`SkyDefault::None`]
+    /// so absent sky stays `0` rather than defaulting up to daylight.
+    sky_default: SkyDefault,
 }
 
 impl SectionSnapshot {
     fn at(&self, dx: i32, dy: i32, dz: i32) -> &ChunkSection {
         let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
         &self.sections[i]
+    }
+
+    fn light_at(&self, dx: i32, dy: i32, dz: i32) -> Option<&SectionLightData> {
+        let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
+        self.lights[i].as_ref()
     }
 }
 
@@ -96,13 +117,15 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
     }
 
     let mut sections = Vec::with_capacity(27);
+    let mut lights = Vec::with_capacity(27);
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
-                let col = world.get(ChunkPos {
+                let pos = ChunkPos {
                     x: key.cx + dx,
                     z: key.cz + dz,
-                });
+                };
+                let col = world.get(pos);
                 let si = key.si as i32 + dy;
                 // `World::get` now hands back an owned `Arc<LoadedChunk>`, so the
                 // section clone must happen while that Arc is still alive inside
@@ -115,11 +138,30 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
                     }
                 });
                 sections.push(section.unwrap_or_else(air_section));
+
+                // Light is LIGHT-section indexed: block section `si` reads light
+                // section `si + 1` (light section 0 is the boundary below the
+                // world). This is an off-by-one *by design*, not a bug — do not
+                // "correct" it. `section_light` returns `None` for an absent
+                // column or an out-of-range light section; those slots keep the
+                // bridge in `mesh_snapshot`.
+                let light = if si + 1 < 0 {
+                    None
+                } else {
+                    world.section_light(pos, (si + 1) as usize)
+                };
+                lights.push(light);
             }
         }
     }
 
-    Some(SectionSnapshot { key, sections })
+    Some(SectionSnapshot {
+        key,
+        sections,
+        lights,
+        // The local world is the overworld: absent sky light is full daylight.
+        sky_default: SkyDefault::Full,
+    })
 }
 
 fn is_all_air(section: &ChunkSection) -> bool {
@@ -137,24 +179,72 @@ fn is_all_air(section: &ChunkSection) -> bool {
     true
 }
 
+/// A section's light source for the mesh pass: either the world's real light
+/// (via [`WorldSectionLight`]) or, for a genuinely-absent neighbour (edge of
+/// world / below world), the full-bright bridge.
+///
+/// The bridge lives on **only** in the absent branch: a present section always
+/// carries real light. Keeping the two in one enum lets every view share a
+/// single concrete `SectionLight` type so the neighbourhood stays monomorphic
+/// (no boxing) while still mixing real and fallback light per slot.
+enum SnapLight<'a> {
+    World(WorldSectionLight<'a>),
+    /// Full-bright fallback for an absent neighbour section only.
+    Bridge(UniformLight),
+}
+
+impl SectionLight for SnapLight<'_> {
+    fn block_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        match self {
+            SnapLight::World(w) => w.block_light(x, y, z),
+            SnapLight::Bridge(b) => b.block_light(x, y, z),
+        }
+    }
+
+    fn sky_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        match self {
+            SnapLight::World(w) => w.sky_light(x, y, z),
+            SnapLight::Bridge(b) => b.sky_light(x, y, z),
+        }
+    }
+}
+
 /// Mesh a snapshot into geometry. Pure and thread-safe: touches only the owned
 /// snapshot and a stateless classifier.
 #[must_use]
 pub fn mesh_snapshot(snapshot: &SectionSnapshot, classifier: &DemoClassifier) -> Mesh {
-    // Full sky light everywhere: the shell has no server light for its local
-    // world, and air must carry light or every face renders black.
-    let light = UniformLight::default();
+    // Real per-section light, replacing the retired full-bright bridge. Each
+    // present neighbour forwards the world's resolved sky/block levels verbatim
+    // (with the dimension's `SkyDefault` applied only to genuinely-absent sky);
+    // an absent neighbour — and *only* an absent neighbour — keeps the bridge, so
+    // air at the edge of the loaded world stays lit rather than rendering black.
+    let mut srcs: Vec<SnapLight<'_>> = Vec::with_capacity(27);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                let src = match snapshot.light_at(dx, dy, dz) {
+                    Some(world_light) => {
+                        SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
+                    }
+                    None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
+                };
+                srcs.push(src);
+            }
+        }
+    }
 
     // Build a view per neighbour section, then assemble the neighbourhood.
-    let mut views: Vec<ChunkSectionView<'_, DemoClassifier, UniformLight>> = Vec::with_capacity(27);
+    let mut views: Vec<ChunkSectionView<'_, DemoClassifier, SnapLight<'_>>> = Vec::with_capacity(27);
+    let mut i = 0usize;
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
                 views.push(ChunkSectionView::new(
                     snapshot.at(dx, dy, dz),
                     classifier,
-                    &light,
+                    &srcs[i],
                 ));
+                i += 1;
             }
         }
     }
@@ -379,6 +469,144 @@ mod tests {
         assert!(
             results.iter().any(|m| m.mesh.quad_count() > 0),
             "at least one section has geometry"
+        );
+    }
+
+    /// A hand-built snapshot: a full stone floor in the centre section with air
+    /// above and around it, so every exposed face samples a neighbouring air
+    /// cell for its light. `sky` is the uniform sky level fed to the whole
+    /// neighbourhood; `lights_present` toggles between the real light field and
+    /// the absent-neighbour bridge (all `None`).
+    fn floor_snapshot(sky: u8, lights_present: bool) -> SectionSnapshot {
+        use lodestone_world::LightData;
+
+        let mut sections = Vec::with_capacity(27);
+        let mut lights = Vec::with_capacity(27);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let mut sec = air_section();
+                    if dx == 0 && dy == 0 && dz == 0 {
+                        for x in 0..16 {
+                            for z in 0..16 {
+                                sec.set_block(x, 0, z, id::STONE);
+                            }
+                        }
+                    }
+                    sections.push(sec);
+                    lights.push(if lights_present {
+                        Some(SectionLightData {
+                            sky: LightData::Uniform(sky),
+                            block: LightData::Uniform(0),
+                        })
+                    } else {
+                        None
+                    });
+                }
+            }
+        }
+        SectionSnapshot {
+            key: SectionKey {
+                cx: 0,
+                cz: 0,
+                si: 1,
+                min_y: 0,
+            },
+            sections,
+            lights,
+            sky_default: SkyDefault::Full,
+        }
+    }
+
+    fn max_vertex_sky(mesh: &Mesh) -> u8 {
+        mesh.vertices
+            .iter()
+            .map(|v| v.unpack().sky_light)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The load-bearing lighting proof: a shadowed neighbourhood (stored sky
+    /// `0`) must mesh **measurably darker** than an open-sky one (sky `15`), and
+    /// the retired full-bright bridge must be **unable to tell them apart** — the
+    /// exact assertion the old `UniformLight::default()` path fails.
+    ///
+    /// "It still draws" proves nothing here: full-bright and correct lighting
+    /// both emit the same geometry. This asserts on the *vertex light bytes*, so
+    /// it fails if the mesher ever silently reverts to a constant light field.
+    #[test]
+    fn shadowed_meshes_darker_than_open_sky_and_the_bridge_cannot_tell() {
+        let open = mesh_snapshot(&floor_snapshot(15, true), &DemoClassifier);
+        let shadow = mesh_snapshot(&floor_snapshot(0, true), &DemoClassifier);
+
+        let open_sky = max_vertex_sky(&open);
+        let shadow_sky = max_vertex_sky(&shadow);
+
+        assert!(open.quad_count() > 0 && shadow.quad_count() > 0, "geometry");
+        assert!(
+            shadow_sky < open_sky,
+            "shadowed sky light ({shadow_sky}) must be darker than open sky ({open_sky}); \
+             a constant/full-bright light field would make these equal"
+        );
+        assert_eq!(open_sky, 255, "open sky should reach full brightness");
+        assert_eq!(shadow_sky, 0, "stored sky 0 must stay dark, not default up");
+
+        // Control: with the absent-neighbour bridge (lights all `None`) the mesher
+        // falls back to full-bright, so the SAME two inputs become
+        // indistinguishable — this is precisely the assertion the pre-light-bridge
+        // path fails, demonstrating the swap is what put real light on screen.
+        let bridge_open = mesh_snapshot(&floor_snapshot(15, false), &DemoClassifier);
+        let bridge_shadow = mesh_snapshot(&floor_snapshot(0, false), &DemoClassifier);
+        assert_eq!(
+            max_vertex_sky(&bridge_open),
+            max_vertex_sky(&bridge_shadow),
+            "the full-bright bridge cannot distinguish shadow from open sky"
+        );
+        assert_eq!(
+            max_vertex_sky(&bridge_shadow),
+            255,
+            "the bridge renders everything full-bright"
+        );
+    }
+
+    /// End-to-end producer check: worldgen now computes real column light, so a
+    /// snapshot pulled from the generated world carries a **non-uniform** sky
+    /// field — a cave/underground cell is darker than an exposed one. Guards
+    /// against a regression where generation reverts to all-`Missing` light,
+    /// which would render the whole world flat full-bright again.
+    #[test]
+    fn generated_world_snapshot_has_real_light_gradient() {
+        let world = crate::worldgen::generate(1);
+        // Walk sections at the origin column from the bottom up; the first that
+        // meshes holds terrain with sky above and rock below — a genuine
+        // gradient across its faces.
+        let mut saw_dark = false;
+        let mut saw_bright = false;
+        for si in 0..crate::worldgen::SECTION_COUNT {
+            let key = SectionKey {
+                cx: 0,
+                cz: 0,
+                si,
+                min_y: crate::worldgen::MIN_Y,
+            };
+            if let Some(snap) = snapshot_section(&world, key) {
+                let mesh = mesh_snapshot(&snap, &DemoClassifier);
+                for v in &mesh.vertices {
+                    let s = v.unpack().sky_light;
+                    if s == 0 {
+                        saw_dark = true;
+                    }
+                    if s > 200 {
+                        saw_bright = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_dark && saw_bright,
+            "generated terrain should mesh both fully-shadowed (0) and sky-lit \
+             (>200) faces; saw_dark={saw_dark} saw_bright={saw_bright} — an \
+             all-Missing (flat full-bright) world would have no dark faces"
         );
     }
 }

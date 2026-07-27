@@ -11,6 +11,7 @@
 //! atlas sprite) is called out in the report as a seam the library still owes.
 
 use lodestone_render::{BlockClassifier, Cell, SpriteId, Surface};
+use lodestone_world::LightProperties;
 
 /// Block-state ids used by [`crate::worldgen`]. These are the shell's own tiny
 /// namespace, unrelated to any real protocol's ids.
@@ -35,6 +36,36 @@ pub mod id {
     pub const BEDROCK: u32 = 8;
     /// Gravel (ocean floor / surface-rule result).
     pub const GRAVEL: u32 = 9;
+}
+
+/// Light opacity/emission for the demo palette, keyed by the [`id`] constants.
+///
+/// This feeds [`lodestone_world::compute_column_light`] at generation time so the
+/// local world carries **real sky-light gradients** — cave and overhang cells go
+/// dark, open sky stays at `15` — instead of the flat full-bright field the mesh
+/// path used to assume. Without it, wiring the light-aware mesher would be
+/// vacuous: every cell would resolve to `sky = 15`, which renders identically to
+/// the old `UniformLight` bridge.
+///
+/// Values mirror vanilla's coarse behaviour for the handful of demo blocks: air
+/// is transparent, water and leaves dampen light by one level (a lake bottom /
+/// forest floor is dimmer, not black), and every other block is a full solid.
+/// The demo palette emits no light.
+#[derive(Debug)]
+pub struct DemoLightProps;
+
+impl LightProperties for DemoLightProps {
+    fn opacity(&self, state: u32) -> u8 {
+        match state {
+            id::AIR => 0,
+            id::WATER | id::LEAVES => 1,
+            _ => 15,
+        }
+    }
+
+    fn emission(&self, _state: u32) -> u8 {
+        0
+    }
 }
 
 /// Sprite (atlas tile) indices. One per distinct texture.
