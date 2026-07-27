@@ -31,7 +31,10 @@
 use crate::collision::{CollisionView, collide};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth;
-use crate::player::{friction_block, mth_equal, restitute_movement_after_collisions};
+use crate::player::{
+    effective_gravity, friction_block, friction_influenced_speed_value, handle_on_climbable,
+    input_vector, mth_equal, restitute_movement_after_collisions,
+};
 use crate::profile::PhysicsProfile;
 
 /// The per-entity movement inputs that are **not** version knowledge: the
@@ -253,4 +256,143 @@ pub fn move_entity(
     motion.velocity = motion
         .velocity
         .multiply_each(block_speed_factor, 1.0, block_speed_factor);
+}
+
+/// Per-entity / per-situation inputs to [`travel_in_air`] that are not part of
+/// the core [`EntityMotion`] — the flags and effects vanilla's `travelInAir`
+/// branches on. A plain falling mob passes `AirTravelContext { yaw, ..default }`;
+/// the player pipeline fills in the sneak- and effect-driven fields.
+///
+/// Everything here is a plain scalar/bool so the seam stays free of any
+/// `lodestone-entity` dependency: the caller resolves effects/attributes and
+/// hands across only numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AirTravelContext {
+    /// Body yaw in degrees, used to rotate the relative input into world space
+    /// (`moveRelative`). Mobs supply their AI-driven yaw; the player its facing.
+    pub yaw: f32,
+    /// The jump key is held / the mob is jumping this tick. Feeds the climbable
+    /// "steady climb-up" branch (`(horizontalCollision || jumping) && onClimbable`).
+    pub jumping: bool,
+    /// Levitation amplitude (`Some(amp)` = effect active). Levitation *replaces*
+    /// gravity with a pull toward `0.05 * (amp + 1)`.
+    pub levitation: Option<u32>,
+    /// Slow Falling reduces descent gravity to `min(gravity, 0.01)`.
+    pub slow_falling: bool,
+    /// Suppress the ladder slide-down (`isSuppressingSlidingDownLadder()`), which
+    /// vanilla gates on `this instanceof Player`; a mob always passes `false`.
+    pub suppress_ladder_slide: bool,
+    /// `isSuppressingBounce()` (a sneaking player) — vetoes slime/bed bounce.
+    pub suppress_bounce: bool,
+    /// `omnidirectionalAirMover()` — a handful of entities drag their vertical
+    /// velocity by the *horizontal* air drag (`0.91`) instead of `0.98`. False
+    /// for players and ordinary mobs.
+    pub omnidirectional_air_mover: bool,
+    /// `shouldDiscardFriction()` — when true vanilla skips the drag multiply
+    /// entirely for this tick. False for players and ordinary mobs.
+    pub discard_friction: bool,
+}
+
+/// `LivingEntity.travelInAir(Vec3)` (LivingEntity.java:2460) — the shared,
+/// entity-agnostic gravity + drag + input-assembly seam that both the player
+/// pipeline and any mob loop route through, so the two cannot grow divergent
+/// copies of vanilla motion.
+///
+/// The caller supplies the *already-transformed* relative move amounts
+/// (`input = (xxa, zza)`, vanilla's `moveRelative` input, produced by the
+/// player's keyboard transform or a mob's AI vector) and `getSpeed()` as
+/// `speed`. The friction-influenced rescale (`getFrictionInfluencedSpeed`),
+/// climbable clamp, the shared [`move_entity`] collision sweep, gravity and drag
+/// all live *inside* the seam so their order — which is observable — is fixed in
+/// one place.
+///
+/// Order (each cited against `LivingEntity.java`):
+/// 1. `blockFriction` from the block below (`getBlockPosBelowThatAffectsMyMovement`
+///    + `FRICTION_MODIFIER`), or `1.0F` when airborne (:2461).
+/// 2. `moveRelative(getFrictionInfluencedSpeed(bf), input)` then the ladder clamp
+///    (`handleOnClimbable`) — both before the move (:2666).
+/// 3. [`move_entity`] (vanilla `move(SELF, deltaMovement)`), then the climbable
+///    "steady climb" override forcing `y = 0.2` (:2673).
+/// 4. gravity **after** the move, levitation replacing it (:2604).
+/// 5. drag **last**: horizontal `blockFriction * 0.91`, vertical `0.98` (both
+///    `float` literals widened to `double` in the multiply) (:2618).
+pub fn travel_in_air(
+    motion: &mut EntityMotion,
+    dims: EntityDimensions,
+    input: (f32, f32),
+    speed: f32,
+    ctx: AirTravelContext,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    let block_friction = if motion.on_ground {
+        let (fx, fy, fz) = friction_block(motion.position);
+        mth::compute_modified_friction(view.friction(fx, fy, fz), profile.friction_modifier)
+    } else {
+        1.0
+    };
+
+    // handleRelativeFrictionAndCalculateMovement
+    let friction_speed =
+        friction_influenced_speed_value(speed, block_friction, motion.on_ground, profile);
+    let accel = input_vector(input.0, input.1, friction_speed, ctx.yaw);
+    motion.velocity = motion.velocity.add(accel);
+
+    // Ladder/vine handling: clamp horizontal + downward speed before the move,
+    // and force a steady climb-up after it if pushing into (or jumping against)
+    // the climbable. `onClimbable` tests the block at the feet block position;
+    // we evaluate it once (pre-move) and reuse it, as the current player path
+    // does, rather than re-querying the post-move position.
+    let climbing = view.is_climbable(
+        mth::floor(motion.position.x),
+        mth::floor(motion.position.y),
+        mth::floor(motion.position.z),
+    );
+    if climbing {
+        motion.velocity = handle_on_climbable(motion.velocity, ctx.suppress_ladder_slide);
+    }
+
+    let move_ctx = MoveContext {
+        slow_falling: ctx.slow_falling,
+        suppress_bounce: ctx.suppress_bounce,
+    };
+    move_entity(motion, dims, view, profile, move_ctx);
+
+    let mut movement = motion.velocity;
+    if (motion.horizontal_collision || ctx.jumping) && climbing {
+        movement = Vec3d::new(movement.x, 0.2, movement.z);
+    }
+
+    // gravity on the post-move Y.
+    //
+    // `travelInAir` chooses one of two mutually-exclusive vertical updates:
+    // Levitation *replaces* gravity with a pull toward `0.05*(amp+1)`; otherwise
+    // it subtracts `getEffectiveGravity()`, which Slow Falling reduces while
+    // descending. `falling` is read from the post-move Y (== `movement.y`).
+    let movement_y = if let Some(amp) = ctx.levitation {
+        movement.y + (0.05 * f64::from(amp + 1) - movement.y) * 0.2
+    } else {
+        let falling = movement.y <= 0.0;
+        movement.y - effective_gravity(f64::from(profile.gravity), falling, ctx.slow_falling)
+    };
+
+    if ctx.discard_friction {
+        // shouldDiscardFriction(): keep the moved velocity, no drag this tick.
+        motion.velocity = Vec3d::new(movement.x, movement_y, movement.z);
+    } else {
+        // drag applied last, horizontal by blockFriction * 0.91, vertical by 0.98
+        // (unless this is an omnidirectional air mover, which drags Y by 0.91 too).
+        let air_drag = mth::compute_modified_friction(profile.air_drag, profile.air_drag_modifier);
+        let friction = block_friction * air_drag;
+        let vertical_friction = if ctx.omnidirectional_air_mover {
+            air_drag
+        } else {
+            mth::compute_modified_friction(profile.vertical_air_drag, profile.air_drag_modifier)
+        };
+        motion.velocity = Vec3d::new(
+            movement.x * f64::from(friction),
+            movement_y * f64::from(vertical_friction),
+            movement.z * f64::from(friction),
+        );
+    }
 }

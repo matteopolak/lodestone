@@ -16,7 +16,9 @@
 //! source, because the server validates the resulting positions.
 
 use crate::collision::CollisionView;
-use crate::entity::{EntityDimensions, EntityMotion, MoveContext, move_entity};
+use crate::entity::{
+    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
+};
 use crate::fluid::apply_fluid_push;
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth::{self};
@@ -531,63 +533,41 @@ pub fn tick_air(
     }
 
     // --- travelInAir ----------------------------------------------------------
-    let block_friction = if state.on_ground {
-        let (fx, fy, fz) = friction_block(state.position);
-        mth::compute_modified_friction(view.friction(fx, fy, fz), profile.friction_modifier)
-    } else {
-        1.0
+    // The gravity + drag + collision core is the entity-agnostic `travel_in_air`
+    // seam (shared with mobs); the player supplies only the transformed input,
+    // `getSpeed()`, and its per-situation flags. Thread the player's motion state
+    // through `EntityMotion` and back so the arithmetic is byte-identical.
+    let mut motion = EntityMotion {
+        position: state.position,
+        velocity: state.velocity,
+        on_ground: state.on_ground,
+        horizontal_collision: state.horizontal_collision,
+        stuck_speed_multiplier: state.stuck_speed_multiplier,
     };
-
-    // handleRelativeFrictionAndCalculateMovement
-    let speed = friction_influenced_speed(profile, state, block_friction);
-    let accel = input_vector(xxa, zza, speed, state.yaw);
-    state.velocity = state.velocity.add(accel);
-
-    // Ladder/vine handling: clamp horizontal + downward speed before the move,
-    // and force a steady climb-up after it if pushing into (or jumping against)
-    // the climbable. `onClimbable` tests the block at the feet block position.
-    let climbing = view.is_climbable(
-        mth::floor(state.position.x),
-        mth::floor(state.position.y),
-        mth::floor(state.position.z),
-    );
-    if climbing {
-        state.velocity = handle_on_climbable(state.velocity, input.sneak);
-    }
-    do_move(state, view, profile, input.sneak);
-    let mut movement = state.velocity;
-    if (state.horizontal_collision || input.jump) && climbing {
-        movement = Vec3d::new(movement.x, 0.2, movement.z);
-    }
-
-    // gravity on the post-move Y.
-    //
-    // `travelInAir` chooses one of two mutually-exclusive vertical updates:
-    // Levitation *replaces* gravity with a pull toward `0.05*(amp+1)`; otherwise
-    // it subtracts `getEffectiveGravity()`, which Slow Falling reduces while
-    // descending. `falling` is read from the post-move Y (== `movement.y`).
-    let movement_y = if let Some(amp) = state.effects.levitation {
-        movement.y + (0.05 * f64::from(amp + 1) - movement.y) * 0.2
-    } else {
-        let falling = movement.y <= 0.0;
-        movement.y
-            - effective_gravity(
-                f64::from(profile.gravity),
-                falling,
-                state.effects.slow_falling,
-            )
+    let ctx = AirTravelContext {
+        yaw: state.yaw,
+        jumping: input.jump,
+        levitation: state.effects.levitation,
+        slow_falling: state.effects.slow_falling,
+        suppress_ladder_slide: input.sneak,
+        suppress_bounce: input.sneak,
+        omnidirectional_air_mover: false,
+        discard_friction: false,
     };
-
-    // drag applied last, horizontal by blockFriction * 0.91, vertical by 0.98
-    let air_drag = mth::compute_modified_friction(profile.air_drag, profile.air_drag_modifier);
-    let friction = block_friction * air_drag;
-    let vertical_friction =
-        mth::compute_modified_friction(profile.vertical_air_drag, profile.air_drag_modifier);
-    state.velocity = Vec3d::new(
-        movement.x * f64::from(friction),
-        movement_y * f64::from(vertical_friction),
-        movement.z * f64::from(friction),
+    travel_in_air(
+        &mut motion,
+        EntityDimensions::PLAYER,
+        (xxa, zza),
+        effective_speed(profile, state),
+        ctx,
+        view,
+        profile,
     );
+    state.position = motion.position;
+    state.velocity = motion.velocity;
+    state.on_ground = motion.on_ground;
+    state.horizontal_collision = motion.horizontal_collision;
+    state.stuck_speed_multiplier = motion.stuck_speed_multiplier;
 }
 
 /// `LivingEntity.handleOnClimbable(Vec3)` — the pre-move clamp applied while on
@@ -599,7 +579,7 @@ pub fn tick_air(
 /// the last ULP — we widen through `f32` exactly like vanilla rather than
 /// writing `0.15_f64`. The sneak-hold (`yd = 0` when descending) applies to
 /// ladders/vines but not scaffolding.
-fn handle_on_climbable(delta: Vec3d, sneaking: bool) -> Vec3d {
+pub(crate) fn handle_on_climbable(delta: Vec3d, sneaking: bool) -> Vec3d {
     let bound = f64::from(0.15f32);
     let xd = mth::clamp_f64(delta.x, -bound, bound);
     let zd = mth::clamp_f64(delta.z, -bound, bound);
@@ -645,7 +625,7 @@ fn is_in_water(state: &PlayerState, view: &dyn CollisionView, profile: &PhysicsP
 /// clamp reachable: it shifts `baseGravity/16` off the `0.005` that makes the
 /// clamp dead at default gravity.
 #[must_use]
-fn effective_gravity(base_gravity: f64, falling: bool, slow_falling: bool) -> f64 {
+pub(crate) fn effective_gravity(base_gravity: f64, falling: bool, slow_falling: bool) -> f64 {
     if falling && slow_falling {
         base_gravity.min(0.01)
     } else {
@@ -1070,13 +1050,37 @@ fn effective_speed(profile: &PhysicsProfile, state: &PlayerState) -> f32 {
     }
 }
 
+/// Player-shaped wrapper over [`friction_influenced_speed_value`] retained for
+/// the speed unit tests, which assert against a `PlayerState`.
+#[cfg(test)]
 fn friction_influenced_speed(
     profile: &PhysicsProfile,
     state: &PlayerState,
     block_friction: f32,
 ) -> f32 {
-    if state.on_ground {
-        let speed = effective_speed(profile, state);
+    friction_influenced_speed_value(
+        effective_speed(profile, state),
+        block_friction,
+        state.on_ground,
+        profile,
+    )
+}
+
+/// `LivingEntity.getFrictionInfluencedSpeed(float)` (LivingEntity.java:2710),
+/// entity-agnostic core. `speed` is the caller's `getSpeed()` — the player's
+/// movement-speed attribute or a mob's AI-supplied speed. On the ground the
+/// `0.21600002F / friction^3` factor rescales it (all in `float`); airborne it
+/// is discarded for `getFlyingSpeed()` (`profile.flying_speed`, `0.02F` for a
+/// non-ridden entity). `speed` therefore only reaches the result on the ground,
+/// exactly as vanilla.
+#[must_use]
+pub(crate) fn friction_influenced_speed_value(
+    speed: f32,
+    block_friction: f32,
+    on_ground: bool,
+    profile: &PhysicsProfile,
+) -> f32 {
+    if on_ground {
         if block_friction > 0.6 {
             let cubed = block_friction * block_friction * block_friction;
             speed * (profile.ground_accel / cubed)
