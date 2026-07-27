@@ -54,3 +54,4 @@ pub mod recipe_json;
 pub mod reconcile;
 pub mod scoreboard;
 pub mod tablist;
+pub mod text;

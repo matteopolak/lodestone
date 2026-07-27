@@ -77,6 +77,18 @@ live-mining = [
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
+# Wires chat/system-message component resolution end to end through the real
+# client against the SURVIVAL oracle: trigger a real death-by-mob over RCON,
+# capture the server's `system_chat` component via the real `ClientEvent` stream,
+# resolve it against the *real* vanilla `en_us.json` (read from the downloaded
+# `client.jar` via `lodestone-assets`, a dev-dep), and assert the wording matches
+# vanilla. The pre-fix raw-key output is captured as the negative control.
+# `#[ignore]`d.
+live-chat = [
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
 
 [dev-dependencies]
 serde_json = { workspace = true }
@@ -91,6 +103,12 @@ lodestone-testsupport = { workspace = true }
 # tests, so it belongs here: dev-deps do not count toward the dependency cycle,
 # so `lodestone-client`/`lodestone-shell` can now depend on this crate cleanly.
 lodestone-client = { workspace = true }
+# Used only by the live chat oracle to load the *real* vanilla `en_us.json` from
+# the downloaded `client.jar` (via `ZipSource` + `Language`), so the expected
+# wording originates from a real asset rather than a table we typed ourselves.
+# A dev-dep, so normal builds of this version-free crate never link the asset
+# layer and isolation stays clean.
+lodestone-assets = { workspace = true }
 # Used only by the live oracle tests to surface the driver's internal tracing
 # (e.g. a fatal "adapter rejected packet" with its packet id) to stderr.
 tracing-subscriber = { workspace = true }

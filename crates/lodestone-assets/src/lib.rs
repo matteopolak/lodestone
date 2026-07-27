@@ -82,6 +82,7 @@ pub mod gui;
 pub mod icon;
 pub mod item;
 pub mod item_model;
+pub mod lang;
 mod location;
 mod manager;
 mod meta;
@@ -110,6 +111,7 @@ pub use error::{
     TintError,
 };
 pub use icon::{DefaultItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
+pub use lang::Language;
 pub use item_model::{
     ItemModel, ItemModelNode, ItemModelOutput, ItemPropertyContext, RangeEntry, SelectCase,
     TintSource,

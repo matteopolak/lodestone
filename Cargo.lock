@@ -1708,6 +1708,7 @@ dependencies = [
 name = "lodestone-game"
 version = "0.1.0"
 dependencies = [
+ "lodestone-assets",
  "lodestone-client",
  "lodestone-core",
  "lodestone-model",
