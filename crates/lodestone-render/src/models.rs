@@ -102,8 +102,13 @@
 //! [`crate::anim`]. That is why the packed path's fixed sprite id survives
 //! animation — the *uniform*, not the mesh or the texture, changes per tick.
 
+use lodestone_assets::fluid::{
+    FaceSet, FluidGeometry, FlowNeighbor, bake_fluid, corner_height, flow_horizontal,
+    neighbor_height,
+};
 use lodestone_assets::{BakedQuad, Direction};
 
+use crate::block_models::{FluidCell, FluidKind, FluidSprites};
 use crate::section::{Face, SECTION_SIZE};
 
 /// A vertex for arbitrary baked-model geometry. Wider than the packed cube
@@ -388,6 +393,157 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], lig
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
+/// The mesher's view of a section for the **fluid** path.
+///
+/// Fluids are not baked per state (their shape depends on neighbours — see
+/// [`lodestone_assets::fluid`]), so this view answers the neighbourhood queries
+/// [`mesh_fluids`] needs: which fluid occupies a (possibly out-of-section) cell,
+/// whether a cell fully occludes an adjacent fluid face, the per-cell light, and
+/// the still/flow sprite rects for each fluid kind. Coordinates are **signed** so
+/// the mesher can reach one cell past a section boundary into a neighbour.
+pub trait FluidSectionView {
+    /// The fluid occupying `(x, y, z)`, or `None` for a non-fluid cell.
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell>;
+    /// Whether the block at `(x, y, z)` fully occludes an adjacent fluid face (a
+    /// solid, opaque full cube culls the fluid face touching it).
+    fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool;
+    /// Packed sky/block light at in-section `(x, y, z)`.
+    fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        let _ = (x, y, z);
+        0xF0
+    }
+    /// The still/flow sprite rects for a fluid kind, into the model atlas.
+    fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites;
+}
+
+/// Water and lava geometry meshed from a section, on their two separate passes:
+/// water is translucent (blended, sorted), lava opaque and full-bright.
+#[derive(Debug, Default, Clone)]
+pub struct FluidMeshes {
+    /// Translucent water surface geometry.
+    pub water: ModelMesh,
+    /// Opaque, full-bright lava geometry.
+    pub lava: ModelMesh,
+}
+
+/// The [`neighbor_height`] of the cell at `(x, y, z)` relative to a fluid of
+/// `kind` being baked: its own height if it is the same fluid (snapped to `1.0`
+/// when that same fluid continues above), `-1.0` if it is a solid block
+/// (excluded from the average) or `0.0` if it is air-like.
+fn neighbor_height_at(view: &dyn FluidSectionView, kind: FluidKind, x: i32, y: i32, z: i32) -> f32 {
+    match view.fluid_at(x, y, z) {
+        Some(f) if f.kind == kind => {
+            let above_same = matches!(view.fluid_at(x, y + 1, z), Some(a) if a.kind == kind);
+            neighbor_height(true, above_same, f.state.own_height(), false)
+        }
+        _ => neighbor_height(false, false, 0.0, view.occludes_at(x, y, z)),
+    }
+}
+
+/// The [`FlowNeighbor`] describing the cell one step `(dx, dz)` from `(x, y, z)`.
+fn flow_neighbor_at(
+    view: &dyn FluidSectionView,
+    kind: FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+    dx: i32,
+    dz: i32,
+) -> FlowNeighbor {
+    let (nx, nz) = (x + dx, z + dz);
+    let own_height = match view.fluid_at(nx, y, nz) {
+        Some(f) if f.kind == kind => f.state.own_height(),
+        _ => 0.0,
+    };
+    let below_own_height = match view.fluid_at(nx, y - 1, nz) {
+        Some(f) if f.kind == kind => f.state.own_height(),
+        _ => 0.0,
+    };
+    FlowNeighbor {
+        own_height,
+        blocks_motion: view.occludes_at(nx, y, nz),
+        below_own_height,
+    }
+}
+
+/// Mesh the fluid cells of a section into water/lava geometry.
+///
+/// For each fluid cell the mesher reconstructs the vanilla `FluidRenderer`
+/// neighbourhood — four averaged corner heights, the flow vector, and the face
+/// set (a face is culled when the neighbour is the same fluid or a solid cube) —
+/// and bakes it via [`bake_fluid`]. Water carries a tint index (the fluid pass
+/// applies the water colour); lava is untinted and emitted **full-bright**
+/// (light `0xFF`) since it is an emitter. Positions are section-local, matching
+/// [`mesh_models`].
+#[must_use]
+pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
+    let mut out = FluidMeshes::default();
+    let n = SECTION_SIZE;
+    for y in 0..n {
+        for z in 0..n {
+            for x in 0..n {
+                let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                let Some(fc) = view.fluid_at(xi, yi, zi) else {
+                    continue;
+                };
+                let kind = fc.kind;
+                let self_h = neighbor_height_at(view, kind, xi, yi, zi);
+                let nh = |dx: i32, dz: i32| neighbor_height_at(view, kind, xi + dx, yi, zi + dz);
+                let corners = [
+                    corner_height(self_h, nh(-1, 0), nh(0, -1), nh(-1, -1)), // NW
+                    corner_height(self_h, nh(1, 0), nh(0, -1), nh(1, -1)),   // NE
+                    corner_height(self_h, nh(1, 0), nh(0, 1), nh(1, 1)),     // SE
+                    corner_height(self_h, nh(-1, 0), nh(0, 1), nh(-1, 1)),   // SW
+                ];
+                let flow = flow_horizontal(
+                    fc.state.own_height(),
+                    flow_neighbor_at(view, kind, xi, yi, zi, 0, -1),
+                    flow_neighbor_at(view, kind, xi, yi, zi, 0, 1),
+                    flow_neighbor_at(view, kind, xi, yi, zi, 1, 0),
+                    flow_neighbor_at(view, kind, xi, yi, zi, -1, 0),
+                );
+
+                let same = |dx: i32, dy: i32, dz: i32| {
+                    matches!(view.fluid_at(xi + dx, yi + dy, zi + dz), Some(f) if f.kind == kind)
+                };
+                let emit = |dx: i32, dy: i32, dz: i32| {
+                    !same(dx, dy, dz) && !view.occludes_at(xi + dx, yi + dy, zi + dz)
+                };
+                let faces = FaceSet {
+                    up: emit(0, 1, 0),
+                    down: emit(0, -1, 0),
+                    north: emit(0, 0, -1),
+                    south: emit(0, 0, 1),
+                    east: emit(1, 0, 0),
+                    west: emit(-1, 0, 0),
+                };
+
+                let tint_index = match kind {
+                    FluidKind::Water => Some(0),
+                    FluidKind::Lava => None,
+                };
+                let sprites = view.fluid_sprites(kind);
+                let geom = FluidGeometry {
+                    corners,
+                    flow,
+                    faces,
+                    tint_index,
+                };
+                let quads = bake_fluid(&geom, sprites.still, sprites.flow);
+
+                let (mesh, light) = match kind {
+                    FluidKind::Water => (&mut out.water, view.light_at(x, y, z)),
+                    FluidKind::Lava => (&mut out.lava, 0xFF),
+                };
+                for quad in &quads {
+                    emit_baked_quad(mesh, quad, [x as f32, y as f32, z as f32], light);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,5 +782,119 @@ mod tests {
         let m = mesh_models(&view);
         // Block is at (8,8,8), so the first corner lands at (8,9,8).
         assert_eq!(m.vertices[0].position, [8.0, 9.0, 8.0]);
+    }
+
+    // --- Fluid meshing ---------------------------------------------------
+
+    use lodestone_assets::fluid::{FluidState, SpriteUv};
+    use std::collections::{HashMap, HashSet};
+
+    /// A synthetic fluid neighbourhood: a map of cell -> fluid and a set of
+    /// occluding (solid) cells. Sprites are unit rects so quad counts and
+    /// positions are the thing under test, not UVs.
+    #[derive(Default)]
+    struct FakeFluidView {
+        fluids: HashMap<(i32, i32, i32), FluidCell>,
+        solids: HashSet<(i32, i32, i32)>,
+    }
+    impl FakeFluidView {
+        fn water(&mut self, x: i32, y: i32, z: i32, state: FluidState) {
+            self.fluids.insert(
+                (x, y, z),
+                FluidCell {
+                    kind: FluidKind::Water,
+                    state,
+                },
+            );
+        }
+        fn solid(&mut self, x: i32, y: i32, z: i32) {
+            self.solids.insert((x, y, z));
+        }
+    }
+    impl FluidSectionView for FakeFluidView {
+        fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
+            self.fluids.get(&(x, y, z)).copied()
+        }
+        fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+            self.solids.contains(&(x, y, z))
+        }
+        fn fluid_sprites(&self, _kind: FluidKind) -> FluidSprites {
+            let unit = SpriteUv {
+                min: [0.0, 0.0],
+                max: [1.0, 1.0],
+            };
+            FluidSprites {
+                still: unit,
+                flow: unit,
+            }
+        }
+    }
+
+    #[test]
+    fn lone_water_source_emits_a_surface_below_the_full_block() {
+        // A single water source with air above and a solid floor below: emits the
+        // top surface + four sides, culls the bottom against the floor.
+        let mut v = FakeFluidView::default();
+        v.water(8, 8, 8, FluidState::source());
+        v.solid(8, 7, 8); // floor below
+        let m = mesh_fluids(&v);
+
+        assert_eq!(m.water.quad_count(), 5, "top + 4 sides, bottom culled by floor");
+        assert!(m.lava.vertices.is_empty(), "no lava");
+
+        // The top surface sits below the full block: a source's corners are
+        // pulled down by the surrounding air, so it is strictly below y+1.
+        let top_y = m
+            .water
+            .vertices
+            .iter()
+            .map(|vx| vx.position[1])
+            .fold(f32::MIN, f32::max);
+        assert!(
+            top_y > 8.0 && top_y < 9.0,
+            "water surface should sit between the block base and a full cube, got {top_y}"
+        );
+    }
+
+    #[test]
+    fn shared_face_between_two_water_cells_is_not_emitted() {
+        // Two adjacent water sources: the face between them is culled, the outer
+        // faces remain. This is the "faces between two water blocks must not be
+        // emitted" requirement.
+        let mut lone = FakeFluidView::default();
+        lone.water(8, 8, 8, FluidState::source());
+        let lone_sides = mesh_fluids(&lone).water.quad_count();
+
+        let mut pair = FakeFluidView::default();
+        pair.water(8, 8, 8, FluidState::source());
+        pair.water(9, 8, 8, FluidState::source()); // east neighbour, same fluid
+        let pair_quads = mesh_fluids(&pair).water.quad_count();
+
+        // Each cell loses its shared (east/west) face: 2 fewer than 2x lone.
+        assert_eq!(
+            pair_quads,
+            lone_sides * 2 - 2,
+            "the shared water-water face on both cells must be culled"
+        );
+    }
+
+    #[test]
+    fn lava_meshes_on_the_opaque_pass_full_bright() {
+        let mut v = FakeFluidView::default();
+        v.fluids.insert(
+            (8, 8, 8),
+            FluidCell {
+                kind: FluidKind::Lava,
+                state: FluidState::source(),
+            },
+        );
+        let m = mesh_fluids(&v);
+        assert!(m.water.vertices.is_empty(), "lava is not water");
+        assert!(m.lava.quad_count() > 0, "lava emits geometry");
+        // Full-bright: every lava vertex carries max sky+block light.
+        assert!(
+            m.lava.vertices.iter().all(|vx| vx.light == 0xFF),
+            "lava must be emitted full-bright"
+        );
     }
 }
