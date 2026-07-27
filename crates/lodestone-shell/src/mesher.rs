@@ -26,8 +26,9 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 
 use lodestone_render::{
-    BlockClassifier, BlockModels, ChunkSectionView, Mesh, ModelMesh, ModelSectionView,
-    SectionLight, SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, mesh_models,
+    BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
+    FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
+    SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, mesh_fluids, mesh_models,
     mesh_simple,
 };
 use lodestone_assets::BakedQuad;
@@ -444,6 +445,69 @@ pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) ->
     mesh_models(&view)
 }
 
+/// The mesher's fluid view over a snapshot: resolves each cell's fluid (if any)
+/// and occlusion out of the paletted sections, and reads the centre section's
+/// light. Fluids need the same signed neighbourhood as the model path (one cell
+/// past a section edge) to cull shared faces and slope corners.
+struct SnapshotFluidView<'a> {
+    snapshot: &'a SectionSnapshot,
+    models: &'a BlockModels,
+    light: SnapLight<'a>,
+}
+
+impl FluidSectionView for SnapshotFluidView<'_> {
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return None;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        self.models.fluid(id)
+    }
+
+    fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return false;
+        }
+        let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+        self.models.occludes(id)
+    }
+
+    fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
+        let sky = SectionLight::sky_light(&self.light, x, y, z);
+        let block = SectionLight::block_light(&self.light, x, y, z);
+        (sky << 4) | block
+    }
+
+    fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites {
+        self.models.fluid_sprites(kind)
+    }
+}
+
+/// Mesh a snapshot's fluid cells into water (translucent) and lava (opaque,
+/// full-bright) geometry. Runs alongside [`mesh_snapshot_models`]; the block path
+/// emits no quads for fluid cells, so the two never double-render.
+#[must_use]
+fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
+    let light = match snapshot.light_at(0, 0, 0) {
+        Some(world_light) => {
+            SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
+        }
+        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
+    };
+    let view = SnapshotFluidView {
+        snapshot,
+        models,
+        light,
+    };
+    mesh_fluids(&view)
+}
+
 /// The geometry a worker produced for one section.
 ///
 /// The demo world meshes to a packed full-cube [`Mesh`]; the live vanilla world
@@ -454,8 +518,15 @@ pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) ->
 pub enum SectionGeometry {
     /// Packed full-cube geometry (demo world).
     Packed(Mesh),
-    /// Wide baked-model geometry (live vanilla world).
-    Model(ModelMesh),
+    /// Wide baked-model geometry (live vanilla world): opaque terrain (blocks +
+    /// lava, drawn on the opaque model pass) plus translucent water (drawn on the
+    /// fluid pass after opaque geometry, so the sea floor shows through).
+    Model {
+        /// Opaque block geometry, with lava merged in.
+        opaque: ModelMesh,
+        /// Translucent water surface geometry.
+        water: ModelMesh,
+    },
 }
 
 impl SectionGeometry {
@@ -464,7 +535,7 @@ impl SectionGeometry {
     pub fn quad_count(&self) -> usize {
         match self {
             SectionGeometry::Packed(m) => m.quad_count(),
-            SectionGeometry::Model(m) => m.quad_count(),
+            SectionGeometry::Model { opaque, water } => opaque.quad_count() + water.quad_count(),
         }
     }
 }
@@ -524,7 +595,16 @@ impl MeshScheduler {
                             // → mesh through the packed full-cube path.
                             let mesh = match classifier.models() {
                                 Some(models) => {
-                                    SectionGeometry::Model(mesh_snapshot_models(&snap, models))
+                                    let mut opaque = mesh_snapshot_models(&snap, models);
+                                    let fluids = mesh_snapshot_fluids(&snap, models);
+                                    // Lava is opaque and full-bright: fold it into
+                                    // the opaque pass. Water is translucent and
+                                    // drawn separately.
+                                    opaque.merge(&fluids.lava);
+                                    SectionGeometry::Model {
+                                        opaque,
+                                        water: fluids.water,
+                                    }
                                 }
                                 None => SectionGeometry::Packed(mesh_snapshot(&snap, &classifier)),
                             };
