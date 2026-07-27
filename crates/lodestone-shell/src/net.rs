@@ -99,10 +99,19 @@ pub enum NetUpdate {
         /// Server-assigned entity id for the local player.
         entity_id: i32,
     },
-    /// A chat/system message, flattened to a legacy `§`-code string so the HUD
-    /// can render colour and formatting. Translation keys are already resolved
-    /// through the model's built-in table by [`lodestone_model::Text`].
-    Chat(String),
+    /// A chat/system message as a version-free [`lodestone_model::Text`]
+    /// component — **not** pre-flattened, so its colour and formatting survive
+    /// for the shell to fold into the canonical [`lodestone_game::chat::ChatFeed`]
+    /// (colour reaches pixels once the adapter preserves it). Translation keys
+    /// are already resolved through the model's built-in table. `player` marks a
+    /// signed/player chat message (fed as a `Player` entry) versus a system or
+    /// game-info message (fed as `System`).
+    Chat {
+        /// The message component.
+        text: lodestone_model::Text,
+        /// Whether this is player chat (vs system/game-info).
+        player: bool,
+    },
     /// A chunk became dirty at this position: the server sent (and the client
     /// applied to its world) chunk data here, so any mesh covering this column
     /// should be rebuilt. Block data is *not* carried — it is queried from the
@@ -123,6 +132,19 @@ pub enum NetUpdate {
     },
     /// The player died.
     Death,
+    /// Player experience changed (`set_experience`): progress toward the next
+    /// level, the level itself, and total accumulated points. The HUD's XP bar
+    /// must draw these real numbers, not a locally-faked value — there is no
+    /// vanilla formula the shell could derive them from that would match the
+    /// server's own (possibly modded) leveling curve.
+    Experience {
+        /// Progress toward the next level, in `0.0..1.0`.
+        progress: f32,
+        /// Current experience level.
+        level: i32,
+        /// Total accumulated experience points.
+        total: i32,
+    },
     /// A positioned sound to play (`SOUND` packet). `name` is the sound event
     /// key's path (namespace stripped, e.g. `"entity.slime.squish"`); `seed` is
     /// the server-rolled value that makes weighted variant selection
@@ -157,12 +179,46 @@ pub enum NetUpdate {
         /// Server RNG seed for variant selection.
         seed: i64,
     },
+    /// A mob effect (potion effect) was applied to or refreshed on an entity
+    /// (`update_mob_effect`). Carries `entity_id` unfiltered — the packet
+    /// applies to any entity, not just the local player — so the sim decides
+    /// whether it is the locally-tracked player before folding it into
+    /// [`lodestone_physics::PlayerState::effects`].
+    EffectApplied {
+        /// Entity the effect applies to.
+        entity_id: i32,
+        /// Canonical effect id, namespace stripped (e.g. `"speed"`), matching
+        /// the [`NetUpdate::Sound`] convention.
+        effect: String,
+        /// Effect amplifier (0 = level I).
+        amplifier: u32,
+        /// Remaining duration in ticks; `-1` means infinite.
+        duration_ticks: i32,
+        /// Whether the effect is ambient (beacon/aura source): the HUD draws it
+        /// fainter.
+        ambient: bool,
+        /// Whether the effect shows a HUD icon at all.
+        show_icon: bool,
+    },
+    /// A mob effect was removed from an entity (`remove_mob_effect`).
+    EffectRemoved {
+        /// Entity the effect was removed from.
+        entity_id: i32,
+        /// Canonical effect id, namespace stripped.
+        effect: String,
+    },
     /// A tab-list delta for the shell-owned [`lodestone_game::tablist::TabList`]
     /// fold.
     TabListEvent(ClientEvent),
     /// A scoreboard delta for the shell-owned
     /// [`lodestone_game::scoreboard::Scoreboard`] fold.
     ScoreboardEvent(ClientEvent),
+    /// A title/subtitle delta for the shell-owned
+    /// [`lodestone_game::player_state::TitleState`] fold.
+    TitleEvent(ClientEvent),
+    /// An action-bar (GameInfo) message for the shell-owned
+    /// [`lodestone_game::player_state::ActionBar`] fold.
+    ActionBar(lodestone_model::Text),
     /// The session ended (clean or with a reason).
     Disconnected(String),
     /// A transport or setup error.
@@ -469,13 +525,31 @@ fn run(
 fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
-        ClientEvent::Chat { text, .. } => NetUpdate::Chat(text.to_legacy_string()),
+        ClientEvent::Chat { text, kind, .. } => match kind {
+            // GameInfo is the action bar (SystemChat overlay), not the chat feed:
+            // route it to the ActionBar overlay so it draws above the hotbar and
+            // fades, instead of piling into the scrollback.
+            lodestone_model::event::ChatKind::GameInfo => NetUpdate::ActionBar(text),
+            _ => NetUpdate::Chat {
+                text,
+                player: matches!(kind, lodestone_model::event::ChatKind::Chat),
+            },
+        },
         ClientEvent::Disconnect { reason } => {
             let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));
             return Err(());
         }
         ClientEvent::HealthChanged { health, food, .. } => NetUpdate::Health { health, food },
         ClientEvent::Death { .. } => NetUpdate::Death,
+        ClientEvent::ExperienceChanged {
+            progress,
+            level,
+            total,
+        } => NetUpdate::Experience {
+            progress,
+            level,
+            total,
+        },
         // Sound events: strip the namespace to the `sounds.json` key path and
         // pass the server's seed through unchanged (client-side variant
         // selection would desync every client). `fixed_range` is intentionally
@@ -513,6 +587,29 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             pitch,
             seed,
         },
+        // Effects apply to any entity on the wire; the amplifier is a
+        // non-negative wire VarInt widened to `i32` by the model, so the
+        // narrowing back to `u32` is defensive only (never observed negative).
+        ClientEvent::MobEffectApplied {
+            entity_id,
+            effect,
+            amplifier,
+            duration_ticks,
+            ambient,
+            show_icon,
+            ..
+        } => NetUpdate::EffectApplied {
+            entity_id,
+            effect: effect.path().to_string(),
+            amplifier: u32::try_from(amplifier).unwrap_or(0),
+            duration_ticks,
+            ambient,
+            show_icon,
+        },
+        ClientEvent::MobEffectRemoved { entity_id, effect } => NetUpdate::EffectRemoved {
+            entity_id,
+            effect: effect.path().to_string(),
+        },
         event @ (ClientEvent::PlayerListUpdate { .. } | ClientEvent::PlayerListRemove { .. }) => {
             NetUpdate::TabListEvent(event)
         }
@@ -521,6 +618,10 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         | ClientEvent::ScoreUpdate { .. }
         | ClientEvent::ScoreReset { .. }
         | ClientEvent::TeamUpdate { .. }) => NetUpdate::ScoreboardEvent(event),
+        event @ (ClientEvent::TitleText { .. }
+        | ClientEvent::SubtitleText { .. }
+        | ClientEvent::TitlesAnimation { .. }
+        | ClientEvent::TitlesCleared { .. }) => NetUpdate::TitleEvent(event),
         // §12.24: the shell treats `ChunkLoaded` as a *dirty-region signal* and
         // ignores any payload — the ruling is that decoded chunks live in a
         // client-owned `World` that consumers query, not in the (bounded,
@@ -579,6 +680,90 @@ mod tests {
         // right away should simply be empty (non-blocking).
         let client = NetClient::connect("127.0.0.1".into(), 1, 776);
         let _ = client.poll();
+    }
+
+    #[test]
+    fn forward_translates_experience_changed() {
+        let (tx, rx) = mpsc::channel();
+        let event = ClientEvent::ExperienceChanged {
+            progress: 0.25,
+            level: 5,
+            total: 55,
+        };
+        forward(&tx, event).expect("forward does not stop the loop");
+        match rx.try_recv().expect("an update was forwarded") {
+            NetUpdate::Experience {
+                progress,
+                level,
+                total,
+            } => {
+                assert_eq!(progress, 0.25);
+                assert_eq!(level, 5);
+                assert_eq!(total, 55);
+            }
+            other => panic!("expected Experience, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_translates_mob_effect_applied_with_stripped_namespace() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        let (tx, rx) = mpsc::channel();
+        let event = ClientEvent::MobEffectApplied {
+            entity_id: 42,
+            effect: ResourceKey::from_str("minecraft:speed").unwrap(),
+            amplifier: 1,
+            duration_ticks: 200,
+            ambient: false,
+            visible: true,
+            show_icon: true,
+            blend: false,
+        };
+        forward(&tx, event).expect("forward does not stop the loop");
+        match rx.try_recv().expect("an update was forwarded") {
+            NetUpdate::EffectApplied {
+                entity_id,
+                effect,
+                amplifier,
+                duration_ticks,
+                ambient,
+                show_icon,
+            } => {
+                assert_eq!(entity_id, 42);
+                // Namespace stripped, matching the `NetUpdate::Sound` convention.
+                assert_eq!(effect, "speed");
+                assert_eq!(amplifier, 1);
+                assert_eq!(duration_ticks, 200, "duration must reach the HUD model");
+                assert!(!ambient);
+                assert!(show_icon);
+            }
+            other => panic!("expected EffectApplied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forward_translates_mob_effect_removed_and_carries_any_entity() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        // Effects are not narrowed to the local player at the wire/forward
+        // layer — a remote mob's effect must still come through so the sim can
+        // decide whether it is "us" downstream.
+        let (tx, rx) = mpsc::channel();
+        let event = ClientEvent::MobEffectRemoved {
+            entity_id: 99,
+            effect: ResourceKey::from_str("minecraft:levitation").unwrap(),
+        };
+        forward(&tx, event).expect("forward does not stop the loop");
+        match rx.try_recv().expect("an update was forwarded") {
+            NetUpdate::EffectRemoved { entity_id, effect } => {
+                assert_eq!(entity_id, 99);
+                assert_eq!(effect, "levitation");
+            }
+            other => panic!("expected EffectRemoved, got {other:?}"),
+        }
     }
 
     #[test]
