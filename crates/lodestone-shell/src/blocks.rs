@@ -10,7 +10,9 @@
 //! drop-in, not a redesign. That missing bridge (real state id → baked model →
 //! atlas sprite) is called out in the report as a seam the library still owes.
 
-use lodestone_render::{BlockClassifier, Cell, SpriteId, Surface};
+use std::sync::Arc;
+
+use lodestone_render::{BlockAtlas, BlockClassifier, Cell, SpriteId, Surface};
 use lodestone_world::LightProperties;
 
 /// Block-state ids used by [`crate::worldgen`]. These are the shell's own tiny
@@ -157,7 +159,7 @@ pub fn block(id: u32) -> Option<&'static Block> {
 /// Crucially, air is a **lit but empty** cell (not [`Cell::EMPTY`]) so that the
 /// faces of neighbouring blocks sample real light and don't render black — the
 /// "air must carry light" hazard the render crate documents.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct DemoClassifier;
 
 impl BlockClassifier for DemoClassifier {
@@ -177,6 +179,54 @@ impl BlockClassifier for DemoClassifier {
                 block_light,
                 sky_light,
             },
+        }
+    }
+}
+
+/// The classifier the shell actually meshes with, selected once per session.
+///
+/// The shell runs in two mutually exclusive block-id worlds and must never mix
+/// them, because they share no id space:
+///
+/// * [`Demo`](ShellClassifier::Demo) — the hand-built 10-id palette
+///   ([`id`]) the local worldgen stand-in emits. Used for the offline dev world
+///   and as the fail-closed fallback when vanilla assets can't be loaded.
+/// * [`Vanilla`](ShellClassifier::Vanilla) — a real [`BlockAtlas`] keyed on the
+///   *vanilla global block-state ids* a live server streams (tens of thousands
+///   of them). Used for the live multiplayer world.
+///
+/// Meshing a live column through [`Demo`](ShellClassifier::Demo) is the exact
+/// island this type closes: `block(id)` returns `None` for every vanilla id
+/// `>= 10`, so the live world would mesh as air. The session picks one variant
+/// and meshes only the world whose ids that variant understands (demo world iff
+/// `Demo`, live world iff `Vanilla`).
+///
+/// [`Vanilla`](ShellClassifier::Vanilla) holds the atlas behind an [`Arc`] so
+/// every mesh worker shares one stitched atlas (a clone is a refcount bump, not
+/// a 32k-state rebuild).
+#[derive(Debug, Clone)]
+pub enum ShellClassifier {
+    /// The offline 10-id demo palette.
+    Demo(DemoClassifier),
+    /// The real vanilla atlas, keyed on global block-state ids.
+    Vanilla(Arc<BlockAtlas>),
+}
+
+impl ShellClassifier {
+    /// Whether this is the vanilla (live-server) classifier. The session meshes
+    /// the live world only under this variant and the demo world only under
+    /// [`Demo`](ShellClassifier::Demo).
+    #[must_use]
+    pub fn is_vanilla(&self) -> bool {
+        matches!(self, ShellClassifier::Vanilla(_))
+    }
+}
+
+impl BlockClassifier for ShellClassifier {
+    fn classify(&self, state_id: u32, block_light: u8, sky_light: u8) -> Cell {
+        match self {
+            ShellClassifier::Demo(d) => d.classify(state_id, block_light, sky_light),
+            ShellClassifier::Vanilla(a) => a.classify(state_id, block_light, sky_light),
         }
     }
 }
