@@ -91,6 +91,10 @@ fn blocks_report_path() -> Option<PathBuf> {
 #[derive(Debug)]
 struct BlocksReport {
     entries: Vec<Option<(Identifier, BTreeMap<String, String>)>>,
+    /// The `default: true` state id per block name, so the gate asserts against
+    /// the state a block reports as canonical (e.g. `grass_block` → `snowy=false`)
+    /// rather than the numerically-lowest one (`snowy=true`, the snow model).
+    defaults: BTreeMap<String, u32>,
 }
 
 impl BlocksReport {
@@ -100,6 +104,7 @@ impl BlocksReport {
         let obj = root.as_object()?;
 
         let mut states: Vec<(u32, Identifier, BTreeMap<String, String>)> = Vec::new();
+        let mut defaults: BTreeMap<String, u32> = BTreeMap::new();
         let mut max_id = 0u32;
         for (name, block) in obj {
             let id: Identifier = name.parse().ok()?;
@@ -116,6 +121,9 @@ impl BlocksReport {
                         }
                     }
                 }
+                if state.get("default").and_then(serde_json::Value::as_bool) == Some(true) {
+                    defaults.insert(name.clone(), sid);
+                }
                 max_id = max_id.max(sid);
                 states.push((sid, id.clone(), props));
             }
@@ -125,10 +133,19 @@ impl BlocksReport {
         for (sid, id, props) in states {
             entries[sid as usize] = Some((id, props));
         }
-        Some(Self { entries })
+        Some(Self { entries, defaults })
     }
 
-    /// The default (first) state id for a block.
+    /// The block's canonical (`default: true`) state id, falling back to the
+    /// first state if the report marks none.
+    fn default_state_of(&self, block: &str) -> Option<u32> {
+        self.defaults
+            .get(block)
+            .copied()
+            .or_else(|| self.first_state_of(block))
+    }
+
+    /// The first (numerically lowest) state id for a block.
     fn first_state_of(&self, block: &str) -> Option<u32> {
         let want: Identifier = block.parse().ok()?;
         self.entries
@@ -143,7 +160,9 @@ impl BlocksReport {
         let want: Identifier = block.parse().ok()?;
         self.entries.iter().enumerate().find_map(|(i, e)| {
             e.as_ref()
-                .filter(|(id, props)| *id == want && props.get(key).map(String::as_str) == Some(value))
+                .filter(|(id, props)| {
+                    *id == want && props.get(key).map(String::as_str) == Some(value)
+                })
                 .map(|_| i as u32)
         })
     }
@@ -207,7 +226,7 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
 
     // --- stone: a full cube, all six faces the same `block/stone` sprite. ----
     let stone = registry
-        .first_state_of("minecraft:stone")
+        .default_state_of("minecraft:stone")
         .expect("stone in registry");
     let stone_cell = atlas.classify(stone, 0, 15);
     assert!(
@@ -233,7 +252,7 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
 
     // --- grass_block: top ≠ bottom, and the top is a *tinted* sprite. --------
     let grass = registry
-        .first_state_of("minecraft:grass_block")
+        .default_state_of("minecraft:grass_block")
         .expect("grass_block in registry");
     let top = sprite_location_for(&atlas, grass, Face::PosY).expect("grass top sprite");
     let bottom = sprite_location_for(&atlas, grass, Face::NegY).expect("grass bottom sprite");
@@ -269,6 +288,31 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
     assert_eq!(log_up.path(), "block/oak_log_top", "oak_log top face");
     assert_eq!(log_down.path(), "block/oak_log_top", "oak_log bottom face");
     assert_eq!(log_side.path(), "block/oak_log", "oak_log side face");
+
+    // --- PROVENANCE: forward name→id (`state_id_of`) agrees with the report's own
+    // independent blocks.json inversion (`default_state_of`/`state_with`), which is
+    // never derived from the atlas under test. This is the seam impl-shell's
+    // generator calls to turn real vanilla state strings into classifier ids.
+    assert_eq!(
+        atlas.state_id_of("minecraft:stone"),
+        Some(stone),
+        "state_id_of(bare name) must match the registry's stone id"
+    );
+    assert_eq!(
+        atlas.state_id_of("minecraft:grass_block[snowy=false]"),
+        Some(grass),
+        "state_id_of(full property string) must match the registry id"
+    );
+    assert_eq!(
+        atlas.state_id_of("minecraft:oak_log[axis=y]"),
+        Some(log),
+        "state_id_of must round-trip a complete property set to the right id"
+    );
+    assert_eq!(
+        atlas.state_id_of("minecraft:most_certainly_not_a_block"),
+        None,
+        "an unknown block must resolve to None, not a plausible-but-wrong id"
+    );
 
     // --- PROVENANCE: atlas pixels at stone's sprite == the real stone.png. ---
     // The expected value is decoded straight from the jar by an independent PNG
@@ -321,9 +365,9 @@ fn real_vanilla_block_models_map_to_correct_sprites() {
 fn real_vanilla_block_textures_reach_pixels() {
     use lodestone_render::block::{camera_buffer, sprite_uv_buffer};
     use lodestone_render::{
-        BlockPipeline, Camera, CameraUniform, ChunkSectionView, DepthBuffer, GpuAtlas, GpuContext,
-        GpuMesh, HeadlessTarget, RenderTarget, SectionNeighborhood, SectionView, UniformLight, Cell,
-        mesh_greedy,
+        BlockPipeline, Camera, CameraUniform, Cell, ChunkSectionView, DepthBuffer, GpuAtlas,
+        GpuContext, GpuMesh, HeadlessTarget, RenderTarget, SectionNeighborhood, SectionView,
+        UniformLight, mesh_greedy,
     };
     use lodestone_world::{ChunkSection, PaletteKind};
 
@@ -335,7 +379,7 @@ fn real_vanilla_block_textures_reach_pixels() {
         .first_state_of("minecraft:air")
         .expect("air in registry");
     let stone = registry
-        .first_state_of("minecraft:stone")
+        .default_state_of("minecraft:stone")
         .expect("stone in registry");
 
     // A solid stone slab inset from the section boundaries so its exposed faces

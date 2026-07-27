@@ -6,10 +6,11 @@
 //!
 //! ```text
 //! live server → lodestone-client session driver → client-owned World
-//!   → ClientHandle::loaded_chunks / sections_at (public query surface) [lodestone-client]
+//!   → ClientHandle::loaded_chunks / sections_and_light_at (public query surface) [lodestone-client]
 //!   → block state id → (name, properties)   [blocks.json registry]
 //!   → blockstate variant/multipart          [lodestone-assets]
 //!   → ResolvedModel → baked quads           [lodestone-assets BlockBaker]
+//!   → real per-section sky/block light       [lodestone-world SectionLight]
 //!   → mesh_models                           [lodestone-render]
 //!   → ModelPipeline draw + pixel readback   [lodestone-render]
 //! ```
@@ -19,25 +20,24 @@
 //! adapter *by protocol number* via [`lodestone_registry::adapter_for_protocol`]
 //! (the one sanctioned place that names a version, behind its own feature).
 //! The client drives login, applies `level_chunk_with_light` to its own `World`,
-//! and this gate reads owned `Arc<ChunkSection>` snapshots back through
-//! [`ClientHandle::sections_at`] — exactly the delivery path a real consumer
-//! uses. That is the difference between proving "the mesher works on a chunk we
-//! hand-decoded" and proving the whole client path.
+//! and this gate reads owned `Arc<ChunkSection>` + [`SectionLight`] snapshots back
+//! through [`ClientHandle::sections_and_light_at`] — exactly the delivery path a
+//! real consumer uses. That is the difference between proving "the mesher works on
+//! a chunk we hand-decoded" and proving the whole client path.
 //!
-//! ## Two seam gaps this exposes (reported upstream, not worked around)
+//! ## Seam gap this still exposes (reported upstream, not worked around)
 //!
-//! 1. **Light is not reachable through the client's public surface.** A
-//!    `ChunkSection` carries block states + biomes only; the column's light lives
-//!    in a separate `ColumnLight` the handle does not expose. So this gate meshes
-//!    the live section **full-bright** (a documented, honest stand-in) rather than
-//!    silently rendering the §7 black-face trap. A `ClientHandle` light accessor
-//!    (e.g. `sections_with_light_at`) is the seam that would let this gate render
-//!    live terrain at true brightness.
-//! 2. **Chunk streaming is bounded.** No version-free chunk-batch ack exists
-//!    (`ClientAction` has no such variant, and neither the adapter nor the driver
-//!    sends one), so the server stops after its initial unacknowledged batches.
-//!    That is enough to gate the render path, but it caps the sample size of the
-//!    measurement tests below.
+//! **Chunk streaming is bounded.** No version-free chunk-batch ack exists
+//! (`ClientAction` has no such variant, and neither the adapter nor the driver
+//! sends one), so the server stops after its initial unacknowledged batches.
+//! That is enough to gate the render path, but it caps the sample size of the
+//! measurement tests below.
+//!
+//! (The former "light is not reachable through the client's public surface" gap
+//! is now **closed**: `ClientHandle::light_at` / `sections_and_light_at` expose
+//! real per-section light, so this gate meshes live terrain at true brightness —
+//! blocks and light pulled in one atomic snapshot — instead of the old
+//! full-bright stand-in.)
 //!
 //! It is gated behind the `live-chunk-gate` feature AND `#[ignore]`, so the
 //! default `cargo test` stays hermetic and headless. Run it with:
@@ -65,7 +65,7 @@ use lodestone_assets::{
     Atlas, AtlasBuilder, BakedQuad, BlockBaker, BlockStates, FirstWeight, ModelResolver,
     ResourceLocation, ResourceManager, TextureBinding, ZipSource,
 };
-use lodestone_client::{ChunkPos, ChunkSection, ClientBuilder};
+use lodestone_client::{ChunkPos, ChunkSection, ClientBuilder, SectionLight};
 use lodestone_model::{
     BlockStateRegistry, Identifier, LoginProfile, ResolvedBlockState, ServerAddress,
 };
@@ -231,7 +231,7 @@ fn live_gate_real_chunk_to_pixels() {
 
     // --- 1. Pull one real terrain section from the live server via the client. ---
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let (pos, section_index, section) = match rt.block_on(collect_terrain_section()) {
+    let (pos, section_index, section, light) = match rt.block_on(collect_terrain_section()) {
         Ok(c) => c,
         Err(e) => panic!(
             "live gate: chunk collection from the {} server failed: {e} — is the \
@@ -294,18 +294,65 @@ fn live_gate_real_chunk_to_pixels() {
         }
     }
 
-    // Face light: SEAM GAP (reported upstream). The client's public surface hands
-    // out block-state sections only — the column's light lives in a `ColumnLight`
-    // that `ClientHandle` does not yet expose (see the crate docs). Rather than
-    // render the §7 black-face trap on unavailable data, we mesh this live section
-    // **full-bright**: every face samples full sky light (15) and zero block light.
-    // This is an honest, documented stand-in, not a silent regression — the pixel
-    // assertions below stay meaningful (non-trivial geometry, non-uniform pixels,
-    // an earthy terrain band distinct from the sky) precisely because they do not
-    // depend on the exact lit brightness. When a `ClientHandle` light accessor
-    // lands, swap this constant for the real per-cell nibble to recover true
-    // brightness.
-    let face_light = vec![15u8 << 4; N * N * N];
+    // Face light from the live column's **real** per-section light, pulled in the
+    // same atomic snapshot as the blocks (one lock epoch — see
+    // `collect_terrain_section`). This retires the former full-bright stand-in now
+    // that `ClientHandle` exposes light (`light_at` / `sections_and_light_at`).
+    //
+    // The model mesher samples light at a block's *own* cell, but a solid block's
+    // own cell is dark (opaque blocks store 0). A visible face is lit by the AIR
+    // cell it opens into, so we resolve each cell to the brightest light among
+    // itself and its in-section neighbours — the vanilla "sample the exposed
+    // neighbour" rule, pre-baked into the per-cell array the mesher reads. We do
+    // **not** default out-of-section sky to 15 (that is the too-bright-nether
+    // trap); only real stored values from in-bounds cells contribute, packed
+    // `sky << 4 | block` exactly as the shader unpacks them.
+    const NEIGHBOURS: [(i32, i32, i32); 6] = [
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    ];
+    let mut face_light = vec![0u8; N * N * N];
+    for y in 0..N {
+        for z in 0..N {
+            for x in 0..N {
+                let mut sky = light.sky_at(x, y, z);
+                let mut blk = light.block_at(x, y, z);
+                for (dx, dy, dz) in NEIGHBOURS {
+                    let (nx, ny, nz) = (x as i32 + dx, y as i32 + dy, z as i32 + dz);
+                    if (0..N as i32).contains(&nx)
+                        && (0..N as i32).contains(&ny)
+                        && (0..N as i32).contains(&nz)
+                    {
+                        let (nx, ny, nz) = (nx as usize, ny as usize, nz as usize);
+                        sky = sky.max(light.sky_at(nx, ny, nz));
+                        blk = blk.max(light.block_at(nx, ny, nz));
+                    }
+                }
+                face_light[idx(x, y, z)] = (sky << 4) | blk;
+            }
+        }
+    }
+
+    // Non-vacuous light: prove we meshed REAL light, not a uniform stand-in. A
+    // live surface section spans sky-exposed cells (sky 15) and buried cells
+    // (sky 0), so the resolved sky light must take more than one distinct value.
+    // A degenerate/uniform world — the exact flaw that made an earlier light gate
+    // vacuous — would collapse this to a single value and fail here, loudly.
+    let distinct_sky: BTreeSet<u8> = face_light.iter().map(|b| b >> 4).collect();
+    eprintln!(
+        "resolved sky-light levels present: {:?}",
+        distinct_sky.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        distinct_sky.len() > 1,
+        "resolved sky light is uniform ({distinct_sky:?}) — real per-cell light was \
+         not sampled, or the sampled section is degenerate; a single-value light \
+         gate is vacuous and must fail rather than pass"
+    );
 
     let view = BakedSection {
         cell,
@@ -530,7 +577,7 @@ fn live_packed_wide_ratio() {
     assert!(!sections.is_empty(), "collected zero populated sections");
     let columns_sampled = sections
         .iter()
-        .map(|(pos, _, _)| (pos.x, pos.z))
+        .map(|(pos, _, _, _)| (pos.x, pos.z))
         .collect::<BTreeSet<_>>()
         .len();
 
@@ -565,7 +612,7 @@ fn live_packed_wide_ratio() {
     let mut inst_empty = 0u64;
     let mut states_seen: BTreeSet<u32> = BTreeSet::new();
 
-    for (_pos, _si, section) in &sections {
+    for (_pos, _si, section, _light) in &sections {
         for y in 0..N {
             for z in 0..N {
                 for x in 0..N {
@@ -633,7 +680,7 @@ fn live_packed_wide_ratio() {
         };
         let count = sections
             .iter()
-            .flat_map(|(_, _, sec)| {
+            .flat_map(|(_, _, sec, _)| {
                 (0..N).flat_map(move |y| {
                     (0..N).flat_map(move |z| (0..N).map(move |x| sec.get_block(x, y, z)))
                 })
@@ -691,7 +738,7 @@ fn live_greedy_merge_factor() {
     assert!(!live.is_empty(), "collected zero populated sections");
     let columns_sampled = live
         .iter()
-        .map(|(pos, _, _)| (pos.x, pos.z))
+        .map(|(pos, _, _, _)| (pos.x, pos.z))
         .collect::<BTreeSet<_>>()
         .len();
 
@@ -754,7 +801,7 @@ fn live_greedy_merge_factor() {
     let mut section_count = 0usize;
     let (mut simple_u, mut greedy_u) = (0usize, 0usize);
 
-    for (_pos, _si, section) in &live {
+    for (_pos, _si, section, _light) in &live {
         section_count += 1;
         let pu = build(section);
         let hu = SectionNeighborhood::centre_only(&pu);
@@ -809,7 +856,7 @@ const MAX_SECTIONS: usize = 32;
 /// and return every populated section as an owned snapshot `(pos, index, arc)`.
 async fn collect_sections(
     min_chunks: usize,
-) -> Result<Vec<(ChunkPos, usize, Arc<ChunkSection>)>, String> {
+) -> Result<Vec<(ChunkPos, usize, Arc<ChunkSection>, SectionLight)>, String> {
     let server = ServerAddress {
         host: "127.0.0.1".into(),
         port: 25565,
@@ -853,14 +900,24 @@ async fn collect_sections(
         return Err("logged in and spawned but the server streamed no chunk columns".to_string());
     }
 
-    let mut out: Vec<(ChunkPos, usize, Arc<ChunkSection>)> = Vec::new();
+    let mut out: Vec<(ChunkPos, usize, Arc<ChunkSection>, SectionLight)> = Vec::new();
     for pos in columns {
-        let requests: Vec<(ChunkPos, usize)> = (0..MAX_SECTIONS).map(|i| (pos, i)).collect();
-        for (index, section) in handle.sections_at(&requests).into_iter().enumerate() {
-            if let Some(section) = section
+        // Blocks and light for each block section in one atomic snapshot: block
+        // section i pairs with light section i+1 (light section 0 is the boundary
+        // below the world). Reading both under a single lock means a LIGHT_UPDATE
+        // or BLOCK_UPDATE landing mid-collect cannot hand us geometry from one tick
+        // and light from another.
+        let requests: Vec<(ChunkPos, usize, usize)> =
+            (0..MAX_SECTIONS).map(|i| (pos, i, i + 1)).collect();
+        for (index, (section, light)) in handle
+            .sections_and_light_at(&requests)
+            .into_iter()
+            .enumerate()
+        {
+            if let (Some(section), Some(light)) = (section, light)
                 && section.non_air_count() > 0
             {
-                out.push((pos, index, section));
+                out.push((pos, index, section, light));
             }
         }
     }
@@ -875,20 +932,22 @@ async fn collect_sections(
 /// Pick one real **surface** terrain section from the live world: the highest
 /// populated section index per column is the topmost terrain (grass on top, air
 /// above), and among those we take the densest so the frame fills with terrain.
-async fn collect_terrain_section() -> Result<(ChunkPos, usize, Arc<ChunkSection>), String> {
+async fn collect_terrain_section()
+-> Result<(ChunkPos, usize, Arc<ChunkSection>, SectionLight), String> {
     let sections = collect_sections(1).await?;
     // Highest populated section per column keyed by (x, z).
-    let mut top: HashMap<(i32, i32), (ChunkPos, usize, Arc<ChunkSection>)> = HashMap::new();
-    for (pos, index, section) in sections {
+    let mut top: HashMap<(i32, i32), (ChunkPos, usize, Arc<ChunkSection>, SectionLight)> =
+        HashMap::new();
+    for (pos, index, section, light) in sections {
         top.entry((pos.x, pos.z))
             .and_modify(|entry| {
                 if index > entry.1 {
-                    *entry = (pos, index, section.clone());
+                    *entry = (pos, index, section.clone(), light.clone());
                 }
             })
-            .or_insert((pos, index, section));
+            .or_insert((pos, index, section, light));
     }
     top.into_values()
-        .max_by_key(|(_, _, section)| section.non_air_count())
+        .max_by_key(|(_, _, section, _)| section.non_air_count())
         .ok_or_else(|| "no populated surface section found".to_string())
 }
