@@ -805,3 +805,39 @@ assumption, not a mechanism. Before building a gate on an expected server *react
 confirm vanilla actually reacts — several of its validation paths **drop silently** rather
 than responding, and a gate waiting for a response that never comes cannot distinguish
 success from failure.
+
+## Addendum — two vacuous gates that were proposed and caught
+
+Both were suggested by the director, sounded specific and testable, and would have produced
+a green suite proving nothing. Both were caught by the implementing agent. They are recorded
+because the *shape* of the mistake recurs.
+
+### 1. "A 1.95-tall zombie fails a gap a 1.8-tall one clears"
+
+Proposed as the behavioural gate for the entity-dimensions census. **It does not bite.** The
+pathfinder quantises to cells via `cell_height = floor(h + 1)`, which is **2 for both** 1.8
+and 1.95 — both fit any 2-high tunnel, so the assertion passes whether or not the census is
+wired at all.
+
+The working gate crosses an **integer cell boundary**: enderman 2.9 → 3 cells is blocked by a
+2-high tunnel, while a deliberately-wrong 1.8 enderman clears it. The landed test is
+`census_height_decides_whether_a_mob_fits_a_two_high_tunnel`, and it was bite-tested by
+perturbing the fold to drop census height (enderman then resolves to 2 cells → FAILED).
+
+**Lesson:** when the system under test **quantises**, a gate must straddle a quantisation
+boundary. Two values that differ continuously but land in the same bucket are indistinguishable
+by construction.
+
+### 2. "Suppress `player_loaded`, move, and observe the server rubber-band us"
+
+Covered in full above. Vanilla **silently drops** movement while `hasClientLoaded()` is false
+rather than correcting it, so the expected reaction never arrives and the gate cannot fail.
+
+**Lesson:** confirm the server actually *reacts* before building a gate on its reaction.
+
+### The general rule
+
+A gate is only worth writing if you can state **what would make it fail**, and then *watch it
+fail*. Every gate that has caught a real bug in this project had a negative control that was
+executed and observed — not merely described. Where a negative control is impractical, say so
+explicitly rather than shipping an unfalsifiable assertion.
