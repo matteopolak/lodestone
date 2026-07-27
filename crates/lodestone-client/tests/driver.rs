@@ -247,6 +247,17 @@ fn teleport_event() -> ClientEvent {
     }
 }
 
+/// A respawn that is not a death — portal travel, a dimension change, or
+/// `/respawn`. The server re-seeds its client-load timer on any of these.
+fn respawned_event() -> ClientEvent {
+    ClientEvent::Respawned {
+        dimension: Identifier::new("minecraft", "the_nether").unwrap(),
+        game_mode: GameMode::Survival,
+        previous_game_mode: None,
+        last_death_location: None,
+    }
+}
+
 fn start(
     adapter: FakeAdapter,
     policy: KeepAlivePolicy,
@@ -586,6 +597,61 @@ async fn player_loaded_fires_once_then_rearms_on_death() {
         peer.read_packet().await.unwrap().unwrap().0,
         PLAYER_LOADED_ID,
         "player_loaded should re-fire on the post-respawn placement teleport"
+    );
+
+    drop(handle);
+}
+
+/// A respawn that is NOT a death — portal travel, a dimension change, `/respawn`
+/// — still re-seeds the server's client-load timer, so the latch must re-arm on
+/// `Respawned`, not only on `Death`. Keying re-arm on `Death` alone would leave
+/// every non-death transition silently re-entering the ignore-movement window.
+#[tokio::test]
+async fn player_loaded_rearms_on_respawn_without_death() {
+    const LOGIN_PKT: i32 = 0x2B;
+    const TP_PKT: i32 = 0x40;
+    const RESPAWN_PKT: i32 = 0x4B;
+    const PLAYER_LOADED_ID: i32 = 0x2A;
+
+    let adapter = FakeAdapter::new()
+        .player_loaded_to(PLAYER_LOADED_ID)
+        .on(
+            ConnectionState::Handshaking,
+            LOGIN_PKT,
+            vec![Directive::Emit(login_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            TP_PKT,
+            vec![Directive::Emit(teleport_event())],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            RESPAWN_PKT,
+            vec![Directive::Emit(respawned_event())],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Automatic);
+
+    // Join: login + first teleport consume the latch (exactly one player_loaded).
+    peer.write_packet(LOGIN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Login
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(
+        peer.read_packet().await.unwrap().unwrap().0,
+        PLAYER_LOADED_ID
+    );
+    let _ = events.recv().await; // TeleportPlayer
+
+    // A portal/dimension respawn (no preceding Death) re-arms the latch, so the
+    // next placement teleport re-sends player_loaded.
+    peer.write_packet(RESPAWN_PKT, &[]).await.unwrap();
+    let _ = events.recv().await; // Respawned
+    peer.write_packet(TP_PKT, &[]).await.unwrap();
+    assert_eq!(
+        peer.read_packet().await.unwrap().unwrap().0,
+        PLAYER_LOADED_ID,
+        "a non-death respawn must re-arm player_loaded"
     );
 
     drop(handle);
