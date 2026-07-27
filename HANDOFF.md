@@ -124,10 +124,51 @@ blocked on drawing, not on understanding. Second, `assets/icon.rs` and `assets/i
 (the 1.21.4+ selector-tree item definitions) are the **sixth island**, and were built to completion
 before anything could consume them.
 
+### Rendering fidelity — audit (2026-07-30)
+
+| effect | state | detail |
+|---|---|---|
+| Animated block textures (flowing lava/water, fire, portal, prismarine, sea lantern) | **built, no producer — seventh island** | `render/anim.rs` is complete and unit-tested: given a frame timeline and a tick it yields two atlas regions plus a blend factor, and the atlas deliberately keeps **every** physical frame resident so no re-upload is needed. Nothing constructs a `SpriteAnimation` — `lib.rs:68` re-exports it and that is the only reference in the tree. All 52 animated sprites render as a **single static frame**. |
+| Waterlogged blocks | **done (rendering)** | `render/block_models.rs:128` classifies any state with `waterlogged=true` as carrying a water source, so kelp, seagrass and waterlogged stairs/slabs mesh with water. Tested (`waterlogged_blocks_carry_a_water_source`). **Placement does not set it** — `lodestone-game`'s placement parks waterlogging along with stair shape and multi-part blocks. |
+| Entity shadows | **does not exist** | Vanilla draws a soft dark oval under every entity, radius scaled by the entity, projected onto the geometry below and faded by height. There is no shadow code of any kind; the only `shadow` matches in the tree are sky-light tests and the font's drop shadow. Mobs currently float visually. |
+| Distance fog | **does not exist** | No fog system at all. |
+| Underwater rendering | **wrong in a specific, measurable way** | See below. |
+
+#### The underwater screenshot, diagnosed
+
+Measured the blue cast down the frame (far at top, near at bottom), as `B − R` per row:
+
+```
+y=0.05  58      y=0.40  49      y=0.80  66
+y=0.20  61      y=0.60  62      y=0.95  59
+```
+
+**Flat.** The tint does not vary with distance, and no pixel anywhere reaches white (channel maxima
+130/173/231). Two conclusions:
+
+1. **Face culling is working.** If interior water↔water faces were being emitted, each additional
+   block of water between eye and target would blend another layer and the cast would deepen with
+   distance. It doesn't — we are getting **exactly one** layer of tint no matter how much water we
+   are looking through. That is the correct culling behaviour and it is worth recording as
+   *verified*, because it was the obvious suspect.
+2. **What's missing is fog, not geometry.** Vanilla does not create the underwater look by stacking
+   translucent quads; it uses **`FogRenderer` with a short, exponential, biome-coloured water fog**
+   and a heavily reduced view distance, so distant terrain fades to solid fog colour and disappears.
+   We render the entire loaded world through one flat multiply, which is why the far terrain is
+   still legible and the whole frame looks washed out rather than submerged.
+
+Also missing and part of the same effect: the full-screen **`textures/misc/underwater.png` overlay**
+vanilla draws when the eye is in water, and the `ambient.underwater.*` sounds (which *are* in the
+generated sound table, just never triggered because nothing tracks eye-in-fluid state).
+
+**There is no eye-in-fluid state anywhere in the client** — no `underwater`/`eye_in_water` concept.
+That single piece of state gates the fog colour, the overlay, the ambient loop, and the swimming
+physics, so it is worth introducing deliberately rather than four times locally.
+
 ### The island pattern — the most expensive recurring failure here
 
 A well-tested library lands, and **nothing calls it**. Every test is green, the HUD counter looks
-plausible, and the screen is wrong. Six confirmed instances:
+plausible, and the screen is wrong. Seven confirmed instances:
 
 | island | built | actually consumed |
 |---|---|---|
@@ -137,6 +178,7 @@ plausible, and the screen is wrong. Six confirmed instances:
 | vanilla font loader | `lodestone-assets::font`, complete since the first commit | nothing — shell drew a 5×7 debug font |
 | entity pose / walk animation | `lodestone-entity::pose` | nothing — renderer draws a rigid lump |
 | item icons / item definitions | `lodestone-assets::{icon,item_model}` | nothing — hotbar cells are empty wells |
+| block texture animation | `render/anim.rs`, unit-tested | nothing — every animated sprite is frozen on frame 0 |
 
 The common cause is that a crate's own test suite is a **closed loop**: it can be entirely green
 while the crate is dead code. The counter-measure that has actually worked is to require that
