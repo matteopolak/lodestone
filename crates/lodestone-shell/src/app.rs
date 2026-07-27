@@ -53,6 +53,23 @@ fn action_for(code: KeyCode) -> Option<Action> {
     })
 }
 
+/// Maps the number-row keys `1`..`9` to a hotbar slot index `0..8`. Returns
+/// `None` for any other key.
+fn hotbar_slot_for(code: KeyCode) -> Option<usize> {
+    Some(match code {
+        KeyCode::Digit1 => 0,
+        KeyCode::Digit2 => 1,
+        KeyCode::Digit3 => 2,
+        KeyCode::Digit4 => 3,
+        KeyCode::Digit5 => 4,
+        KeyCode::Digit6 => 5,
+        KeyCode::Digit7 => 6,
+        KeyCode::Digit8 => 7,
+        KeyCode::Digit9 => 8,
+        _ => return None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Windowed
 // ---------------------------------------------------------------------------
@@ -321,6 +338,7 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.health = health;
         hud_frame.food = food;
+        hud_frame.hotbar = crosshair.then(|| self.sim.selected_slot());
         hud.render(device, queue, frame.view(), &hud_frame, w, h);
 
         if let Some(window) = &self.window {
@@ -445,6 +463,19 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
             }
+            // Scroll cycles the hotbar (down = right, like vanilla) only
+            // during active play; menus and the chat prompt ignore it.
+            WindowEvent::MouseWheel { delta, .. } if self.ui.accepts_gameplay_input() => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if dy > 0.0 {
+                    self.sim.cycle_slot(-1);
+                } else if dy < 0.0 {
+                    self.sim.cycle_slot(1);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
 
@@ -483,6 +514,12 @@ impl ApplicationHandler for WindowApp {
                         self.set_grab(false);
                     } else if code == KeyCode::KeyF && pressed && self.ui.accepts_gameplay_input() {
                         self.sim.toggle_fly();
+                    } else if let Some(slot) = hotbar_slot_for(code)
+                        && pressed
+                        && self.ui.accepts_gameplay_input()
+                    {
+                        // Number keys 1..9 select the hotbar slot directly.
+                        self.sim.select_slot(slot);
                     } else if let Some(action) = action_for(code)
                         && self.ui.accepts_gameplay_input()
                     {

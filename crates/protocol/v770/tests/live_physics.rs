@@ -93,6 +93,15 @@ impl lodestone_world::WorldSink for NullSink {
     fn merge(&mut self, _pos: lodestone_world::ChunkPos, _patch: lodestone_world::ColumnPatch) {}
     fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) {}
     fn set_blocks(&mut self, _sx: i32, _sy: i32, _sz: i32, _blocks: &[(u8, u8, u8, u32)]) {}
+    fn set_block_entity(
+        &mut self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _type_id: u32,
+        _nbt: lodestone_core::Nbt,
+    ) {
+    }
     fn merge_light(
         &mut self,
         _pos: lodestone_world::ChunkPos,

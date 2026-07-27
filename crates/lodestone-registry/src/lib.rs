@@ -70,6 +70,11 @@ const FAMILIES: &[Family] = &[
         label: "v340",
         make: || Box::new(lodestone_v340::adapter()),
     },
+    #[cfg(feature = "v735")]
+    Family {
+        label: "v735",
+        make: || Box::new(lodestone_v735::adapter()),
+    },
 ];
 
 /// Returns a boxed adapter for `protocol`, if a compiled-in family supports it.
@@ -108,7 +113,12 @@ mod tests {
         // With no `vNNN` feature enabled the registry is empty, which is what
         // keeps the default build version-free. Feature-enabled behaviour is
         // covered by the client's live tests, which turn a family on.
-        if cfg!(not(any(feature = "v47", feature = "v770"))) {
+        if cfg!(not(any(
+            feature = "v47",
+            feature = "v770",
+            feature = "v340",
+            feature = "v735"
+        ))) {
             assert!(compiled_families().is_empty());
             assert!(adapter_for_protocol(47).is_none());
             assert!(supported_protocols().is_empty());
@@ -130,6 +140,15 @@ mod tests {
         let adapter = adapter_for_protocol(776).expect("v770 family compiled in");
         assert!(adapter.supports(776));
         assert!(supported_protocols().contains(&776));
+    }
+
+    #[cfg(feature = "v735")]
+    #[test]
+    fn resolves_v735_when_enabled() {
+        let adapter = adapter_for_protocol(754).expect("v735 family compiled in");
+        assert!(adapter.supports(754));
+        assert!(supported_protocols().contains(&754));
+        assert!(compiled_families().contains(&"v735"));
     }
 
     #[test]

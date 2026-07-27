@@ -6,6 +6,16 @@
 //! never from the adapter's own encoder, so a symmetric bug cannot pass.
 //! `move_player_pos_rot` and `swing` layouts are verified against 26.2's
 //! `ServerboundMovePlayerPacket.PosRot` and `ServerboundSwingPacket`.
+//!
+//! The `move` tests here exercise a freshly constructed adapter, i.e. the
+//! very first `Move` a connection ever sends. Vanilla's own send-tracking
+//! state (`LocalPlayer.xLast`/`yLast`/`zLast`/`yRotLast`/`xRotLast`/
+//! `positionReminder`) zero-initializes exactly like a fresh
+//! `V770Adapter::new()`, so the first movement after join is (almost) always
+//! a full `PosRot` — both position and rotation read as maximally "dirty"
+//! against the zeroed baseline. The full move/rot/status-only/nothing
+//! selection rule that governs every *subsequent* tick is covered separately
+//! in `movement_selection.rs`.
 
 use lodestone_core::{Ctx, Decode, Reader};
 use lodestone_model::{ClientAction, ConnectionState, Hand, Rotation, Vec3, VersionAdapter};
@@ -34,6 +44,7 @@ fn move_action(on_ground: bool) -> ClientAction {
             pitch: -45.0,
         },
         on_ground,
+        horizontal_collision: false,
     }
 }
 

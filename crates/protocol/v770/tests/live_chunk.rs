@@ -479,6 +479,26 @@ fn column_is_featureless_above(column: &ChunkColumn) -> bool {
     true
 }
 
+/// Judges [`compute_column_light`] against the light the real server computed
+/// and sent us — an oracle we neither control nor can accidentally satisfy.
+///
+/// Full invocation (both are required):
+///
+/// ```text
+/// cargo test -p lodestone-v770 --features live-chunk --test live_chunk \
+///     -- --ignored --nocapture computed_light_matches_server_oracle_on_flat_world
+/// ```
+///
+/// Without `--features live-chunk` this whole file is `#![cfg]`-compiled to
+/// nothing and the run prints `ok. 0 passed`, which reads exactly like success —
+/// so the feature flag is not optional. Without `--ignored` the test is skipped.
+/// If the server is unreachable the test FAILS (never skips), per §12.52.
+///
+/// The result is reported as a **count** ("0 of N cells differ"), not a boolean:
+/// a nonzero count and its sky/block split tell `impl-world` immediately whether
+/// a regression is the vertical-vs-horizontal attenuation asymmetry or a section
+/// seam. A built-in negative control (all-transparent props) proves the diff is
+/// actually comparing values and not vacuously agreeing.
 #[tokio::test]
 #[ignore = "requires a live Minecraft server on 127.0.0.1:25565"]
 async fn computed_light_matches_server_oracle_on_flat_world() {

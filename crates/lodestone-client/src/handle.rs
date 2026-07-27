@@ -283,9 +283,9 @@ impl ClientHandle {
         self.send_action(ClientAction::SwingArm { hand })
     }
 
-    /// Sends the player's complete movement state for a single tick — absolute
-    /// position, look rotation, and ground contact — as one
-    /// [`ClientAction::Move`].
+    /// Sends the player's complete movement state for a single tick —
+    /// absolute position, look rotation, ground contact, and horizontal
+    /// collision — as one [`ClientAction::Move`].
     ///
     /// This is the **lowest-level movement primitive**, and the one a tick-driven
     /// controller wants: a real client (or `lodestone-shell`) integrates position
@@ -296,20 +296,32 @@ impl ClientHandle {
     /// thin conveniences layered over it for goal-seeking bot usage.
     ///
     /// The client performs **no physics of its own** — gravity, collision and
-    /// input integration are the caller's. The read-model updates
-    /// *optimistically*: the predicted position is written locally before the
-    /// server confirms it, and the server only overrides it via a corrective
-    /// teleport. So a position read back after this call is a local prediction,
-    /// not a server-confirmed location.
+    /// input integration are the caller's. `on_ground` and
+    /// `horizontal_collision` are simulation outputs, not something a version
+    /// adapter derives; pass through whatever your physics step produced. A
+    /// version adapter that sends movement at vanilla's own cadence uses the
+    /// deltas between successive calls (and these two flags) to pick which
+    /// concrete wire packet to emit — that choice never changes what you pass
+    /// here. The read-model updates *optimistically*: the predicted position is
+    /// written locally before the server confirms it, and the server only
+    /// overrides it via a corrective teleport. So a position read back after
+    /// this call is a local prediction, not a server-confirmed location.
     ///
     /// # Errors
     ///
     /// Returns [`BotError::Closed`] if the session has ended.
-    pub fn move_to(&self, pos: Vec3, rotation: Rotation, on_ground: bool) -> Result<(), BotError> {
+    pub fn move_to(
+        &self,
+        pos: Vec3,
+        rotation: Rotation,
+        on_ground: bool,
+        horizontal_collision: bool,
+    ) -> Result<(), BotError> {
         self.send_action(ClientAction::Move {
             pos,
             rotation,
             on_ground,
+            horizontal_collision,
         })?;
         Ok(())
     }
@@ -319,16 +331,25 @@ impl ClientHandle {
     /// read-model updates optimistically (a local prediction, not a server
     /// confirmation).
     ///
+    /// This helper runs no physics of its own, so it always reports
+    /// `horizontal_collision: false` — a hand-scripted goal-seeker never
+    /// detects a collision it didn't simulate. Callers that need faithful
+    /// collision reporting should drive [`move_to`](Self::move_to) directly
+    /// from their own physics step.
+    ///
     /// # Errors
     ///
     /// Returns [`BotError::Closed`] if the session has ended.
     pub fn set_position(&self, pos: Vec3) -> Result<(), BotError> {
         let player = self.state.player();
-        self.move_to(pos, player.rotation, player.on_ground)
+        self.move_to(pos, player.rotation, player.on_ground, false)
     }
 
     /// Turns the player to face `target`, keeping the current position. A
     /// convenience over [`move_to`](Self::move_to).
+    ///
+    /// This helper runs no physics of its own, so it always reports
+    /// `horizontal_collision: false` (see [`set_position`](Self::set_position)).
     ///
     /// # Errors
     ///
@@ -338,13 +359,16 @@ impl ClientHandle {
         let player = self.state.player();
         let pos = player.position.ok_or(BotError::PositionUnknown)?;
         let rotation = look_at_rotation(eye_of(pos), target);
-        self.move_to(pos, rotation, player.on_ground)
+        self.move_to(pos, rotation, player.on_ground, false)
     }
 
     /// Takes a single step of at most `max_distance` blocks toward `target`,
     /// facing it. A goal-seeking convenience over [`move_to`](Self::move_to) that
     /// a caller can drive from its own per-tick loop; [`walk_to`](Self::walk_to)
     /// loops it until arrival.
+    ///
+    /// This helper runs no physics of its own, so it always reports
+    /// `horizontal_collision: false` (see [`set_position`](Self::set_position)).
     ///
     /// # Errors
     ///
@@ -361,7 +385,7 @@ impl ClientHandle {
             pos + delta.normalize().scale(max_distance)
         };
         let rotation = look_at_rotation(eye_of(pos), target);
-        self.move_to(next, rotation, player.on_ground)
+        self.move_to(next, rotation, player.on_ground, false)
     }
 
     /// Walks toward `target`, stepping every tick until the local prediction is

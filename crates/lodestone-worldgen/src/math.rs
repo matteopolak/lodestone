@@ -57,6 +57,13 @@ pub fn lfloor(v: f64) -> i64 {
     v.floor() as i64
 }
 
+/// `Mth.ceil(double)` / `Mth.ceil(float)` = `(int)Math.ceil(v)`. Pass a widened
+/// `f32` (`f as f64`) to match the float overload exactly.
+#[must_use]
+pub fn ceil(v: f64) -> i32 {
+    v.ceil() as i32
+}
+
 /// `Mth.smoothstep(x)` = `x^3 (x (6x - 15) + 10)` (the quintic fade).
 #[must_use]
 pub fn smoothstep(x: f64) -> f64 {

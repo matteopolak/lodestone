@@ -17,11 +17,11 @@ use lodestone_client::{
     Visibility, WaitError,
 };
 use lodestone_model::event::{
-    ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate,
-    EntityMovement, EntityPose, TeleportFlags,
+    ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
+    EntityMetadataUpdate, EntityMovement, EntityPose, EquipmentSlot, TeleportFlags,
 };
 use lodestone_model::text::Text;
-use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier};
+use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier, ItemStack};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ChunkSection, ColumnLight, Heightmaps, LoadedChunk,
@@ -135,6 +135,10 @@ impl lodestone_client::VersionAdapter for FakeAdapter {
                 pos,
                 rotation,
                 on_ground,
+                // This fake adapter mirrors the real ones' wire body byte for
+                // byte; it doesn't need horizontal-collision for the
+                // read-model behaviour under test here.
+                horizontal_collision: _,
             } => {
                 let mut payload = Vec::new();
                 payload.extend_from_slice(&pos.x.to_be_bytes());
@@ -493,6 +497,122 @@ async fn entities_are_tracked_moved_and_removed() {
     drop(handle);
 }
 
+/// Head yaw arrives separately from body rotation (`add_entity`'s initial
+/// value, then independent `rotate_head` updates) and equipment slots replace
+/// by slot key, mirroring how attribute snapshots already replace by id. A
+/// slot that is never reported must stay *absent*, not collapse into a
+/// `None`-item entry — those are different states (no override vs. an
+/// explicit "this slot is empty").
+#[tokio::test]
+async fn entity_head_yaw_and_equipment_are_tracked() {
+    const TRIGGER: i32 = 1;
+    let diamond_sword = dim("diamond_sword");
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![
+                Directive::Emit(ClientEvent::EntitySpawned {
+                    entity_id: 20,
+                    uuid: None,
+                    entity_type: dim("zombie"),
+                    pos: Vec3::new(0.0, 64.0, 0.0),
+                    rotation: Rotation::new(0.0, 0.0),
+                    velocity: None,
+                }),
+                // The initial head yaw a real add_entity would carry.
+                Directive::Emit(ClientEvent::EntityHeadRotation {
+                    entity_id: 20,
+                    head_yaw: 45.0,
+                }),
+                // The mob turns its head further while its body keeps facing
+                // forward — body rotation must stay untouched.
+                Directive::Emit(ClientEvent::EntityHeadRotation {
+                    entity_id: 20,
+                    head_yaw: 90.0,
+                }),
+                Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                    entity_id: 20,
+                    equipment: vec![EntityEquipment {
+                        slot: EquipmentSlot::MainHand,
+                        item: Some(ItemStack {
+                            item: diamond_sword.clone(),
+                            count: 1,
+                        }),
+                    }],
+                }),
+                // A later update replaces MainHand and adds Head; OffHand is
+                // never mentioned and must remain absent.
+                Directive::Emit(ClientEvent::EntityEquipmentUpdated {
+                    entity_id: 20,
+                    equipment: vec![
+                        EntityEquipment {
+                            slot: EquipmentSlot::MainHand,
+                            item: None, // explicitly emptied, not "unknown"
+                        },
+                        EntityEquipment {
+                            slot: EquipmentSlot::Head,
+                            item: Some(ItemStack {
+                                item: dim("iron_helmet"),
+                                count: 1,
+                            }),
+                        },
+                    ],
+                }),
+            ],
+        );
+    let (handle, mut events, mut peer) = start(adapter);
+
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    for _ in 0..6 {
+        events.recv().await.unwrap();
+    }
+
+    let zombie = handle.entity(20).expect("entity 20 present");
+    assert_eq!(zombie.head_yaw, 90.0, "the latest rotate_head wins");
+    assert_eq!(
+        zombie.rotation,
+        Rotation::new(0.0, 0.0),
+        "body rotation is untouched by head_yaw updates"
+    );
+    assert_eq!(
+        zombie.equipment.len(),
+        2,
+        "MainHand replaced in place, Head appended; OffHand never reported"
+    );
+    let main_hand = zombie
+        .equipment
+        .iter()
+        .find(|e| e.slot == EquipmentSlot::MainHand)
+        .expect("MainHand entry present");
+    assert_eq!(
+        main_hand.item, None,
+        "explicitly emptied slot, not defaulted"
+    );
+    let head = zombie
+        .equipment
+        .iter()
+        .find(|e| e.slot == EquipmentSlot::Head)
+        .expect("Head entry present");
+    assert_eq!(
+        head.item,
+        Some(ItemStack {
+            item: dim("iron_helmet"),
+            count: 1,
+        })
+    );
+    assert!(
+        zombie
+            .equipment
+            .iter()
+            .all(|e| e.slot != EquipmentSlot::OffHand),
+        "a slot that was never reported must stay absent, not appear as None"
+    );
+
+    drop(handle);
+}
+
 /// Metadata folds *incrementally* — a later partial update must not clobber
 /// fields an earlier one set — and attribute snapshots replace by id. The live
 /// gate proves the real adapter emits these, but only over a single fully-formed
@@ -721,7 +841,7 @@ async fn move_to_forwards_full_state_to_wire_and_predicts() {
 
     let rotation = Rotation::new(90.0, -30.0);
     handle
-        .move_to(Vec3::new(1.0, 65.0, -2.0), rotation, true)
+        .move_to(Vec3::new(1.0, 65.0, -2.0), rotation, true, false)
         .unwrap();
 
     let (id, payload) = peer.read_packet().await.unwrap().unwrap();

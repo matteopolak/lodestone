@@ -1,4 +1,4 @@
-//! [`VersionAdapter`] implementation driving the protocol 340 join flow.
+//! [`VersionAdapter`] implementation driving the protocol 754 join flow.
 
 use std::sync::{Arc, Mutex};
 
@@ -32,7 +32,7 @@ use crate::packets::window::{ServerboundCloseWindow, ServerboundHeldItemSlot, Se
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 754;
 
-/// Fixed decoding/encoding context for protocol 340.
+/// Fixed decoding/encoding context for protocol 754.
 const CTX: Ctx = Ctx { version: PROTOCOL };
 
 /// Requested next-state value in the handshake for a login connection.
@@ -79,7 +79,7 @@ impl V735Adapter {
     }
 }
 
-/// Returns a protocol 340 version adapter.
+/// Returns a protocol 754 version adapter.
 ///
 /// This free function is the crate's canonical constructor entry point; the
 /// client boxes the returned concrete type as a `dyn VersionAdapter`.
@@ -379,7 +379,7 @@ impl V735Adapter {
                 .map_err(|_| {
                     AdapterError::Decode(format!("object type id {type_id} is not a key"))
                 })?;
-            // 1.12 always includes velocity, but a stationary object still
+            // 1.16 always includes velocity, but a stationary object still
             // reports zero; forward `None` only when all components are zero to
             // match the semantic "no motion" rather than "explicit zero motion".
             let velocity = if body.velocity_x == 0 && body.velocity_y == 0 && body.velocity_z == 0 {
@@ -582,6 +582,10 @@ impl VersionAdapter for V735Adapter {
                 pos,
                 rotation,
                 on_ground,
+                // This protocol's `PositionLook` packet has no
+                // horizontal-collision bit — only `onGround` — so there is
+                // nothing to forward it into.
+                horizontal_collision: _,
             } => {
                 let body = ServerboundPositionLook {
                     x: pos.x,
@@ -610,7 +614,7 @@ impl VersionAdapter for V735Adapter {
             }
 
             // Block breaking rides on `block_dig` statuses 0/1/2. The model's
-            // `sequence` (block-prediction, added 1.19) has no 1.12 equivalent
+            // `sequence` (block-prediction, added 1.19) has no 1.16 equivalent
             // and is dropped deliberately.
             ClientAction::BlockAction {
                 action,
@@ -744,7 +748,7 @@ impl VersionAdapter for V735Adapter {
                 }
             },
 
-            // Player commands ride on `entity_action`. 1.9+ (so 1.12) has the full
+            // Player commands ride on `entity_action`. 1.9+ (so 1.16) has the full
             // action set including stop-riding-jump (6), open-inventory (7), and
             // elytra fall-flying (8) — a divergence from 1.8, which lacks the last
             // two and numbers open-inventory as 6.
@@ -792,7 +796,7 @@ impl VersionAdapter for V735Adapter {
             ClientAction::SetCreativeModeSlot { slot, item } => {
                 if item.is_some() {
                     return Err(AdapterError::Unsupported(
-                        "protocol 340 SetCreativeModeSlot with an item requires a ResourceKey -> \
+                        "protocol 754 SetCreativeModeSlot with an item requires a ResourceKey -> \
                          numeric item-id registry that is not yet available"
                             .to_owned(),
                     ));
@@ -809,19 +813,19 @@ impl VersionAdapter for V735Adapter {
             // Inventory clicks predate the modern `state_id` reconciliation and
             // need the item registry to encode carried/changed stacks.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 340 ContainerClick requires an item registry and transaction id that are \
+                "protocol 754 ContainerClick requires an item registry and transaction id that are \
                  not yet available"
                     .to_owned(),
             )),
 
-            // Genuinely absent in 1.12: there is no player-input packet (added
-            // much later). `Stab` (off-hand attack) has no dedicated 1.12 packet
+            // Genuinely absent in 1.16: there is no player-input packet (added
+            // much later). `Stab` (off-hand attack) has no dedicated 1.16 packet
             // either.
             ClientAction::Stab => Err(AdapterError::Unsupported(
-                "protocol 340 has no dedicated off-hand attack (Stab) packet".to_owned(),
+                "protocol 754 has no dedicated off-hand attack (Stab) packet".to_owned(),
             )),
             ClientAction::SetPlayerInput(_) => Err(AdapterError::Unsupported(
-                "protocol 340 has no player-input packet".to_owned(),
+                "protocol 754 has no player-input packet".to_owned(),
             )),
 
             // Newly modelled actions not yet wired up for this adapter.

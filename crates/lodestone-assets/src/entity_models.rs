@@ -941,6 +941,1911 @@ pub fn endermite_model() -> EntityModelDef {
     }
 }
 
+/// Applies a vanilla `MeshTransformer.scaling(factor)` to a whole model, exactly
+/// as `LayerDefinition.apply` bakes it into the mesh: the root pose is
+/// `scaled(factor).translated(0, 24.016*(1-factor), 0)`, i.e. scale about the
+/// origin then shift so the model's feet stay planted. Used for the size-variant
+/// mobs whose geometry is otherwise identical to a base model.
+fn scaled(mut model: EntityModelDef, factor: f32) -> EntityModelDef {
+    let y_offset = 24.016 * (1.0 - factor);
+    let p = &mut model.root.pose;
+    // PartPose::scaled multiplies both the offset and the scale by the factor;
+    // PartPose::translated then adds the y offset.
+    p.x *= factor;
+    p.y = p.y * factor + y_offset;
+    p.z *= factor;
+    p.scale = [p.scale[0] * factor, p.scale[1] * factor, p.scale[2] * factor];
+    model
+}
+
+/// Husk: the zombie/humanoid mesh baked at `scaling(1.0625)`
+/// (`LayerDefinitions.java`).
+pub fn husk_model() -> EntityModelDef {
+    scaled(zombie_model(), 1.0625)
+}
+
+/// Wither skeleton: the skeleton mesh baked at `scaling(1.2)`.
+pub fn wither_skeleton_model() -> EntityModelDef {
+    scaled(skeleton_model(), 1.2)
+}
+
+/// Cave spider: the spider mesh baked at `scaling(0.7)`.
+pub fn cave_spider_model() -> EntityModelDef {
+    scaled(spider_model(), 0.7)
+}
+
+/// Ghast (`GhastModel.createBodyLayer`): a 16³ body plus nine hanging tentacles
+/// whose lengths come from a seeded `SingleThreadedRandomSource(1660)` (vanilla's
+/// java.util.Random LCG). The whole mesh is baked at `scaling(4.5)`. The model's
+/// UV sheet is 64x32 even though the shipped texture is 128x64 (a 2x texture).
+pub fn ghast_model() -> EntityModelDef {
+    // Vanilla java.util.Random, so the tentacle lengths are byte-identical to the
+    // game rather than eyeballed.
+    struct JavaRng(i64);
+    impl JavaRng {
+        fn new(seed: i64) -> Self {
+            JavaRng((seed ^ 0x5DEECE66D) & ((1i64 << 48) - 1))
+        }
+        fn next(&mut self, bits: u32) -> i32 {
+            self.0 = self.0.wrapping_mul(0x5DEECE66D).wrapping_add(0xB) & ((1i64 << 48) - 1);
+            (self.0 >> (48 - bits)) as i32
+        }
+        fn next_int(&mut self, bound: i32) -> i32 {
+            if bound & -bound == bound {
+                return ((bound as i64).wrapping_mul(self.next(31) as i64) >> 31) as i32;
+            }
+            loop {
+                let bits = self.next(31);
+                let val = bits % bound;
+                if bits - val + (bound - 1) >= 0 {
+                    return val;
+                }
+            }
+        }
+    }
+
+    let mut root = PartDef::new(PartPose::ZERO).with_child(
+        "body",
+        PartDef::new(PartPose::offset(0.0, 17.6, 0.0))
+            .with_cube(cube([-8.0, -8.0, -8.0], [16.0, 16.0, 16.0], [0.0, 0.0])),
+    );
+
+    let mut rng = JavaRng::new(1660);
+    for i in 0..9i32 {
+        // Transcribed verbatim from GhastModel: xo uses (i % 3) and (i / 3 % 2)
+        // with integer division/modulo; yo uses (i / 3).
+        let xo = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25) / 2.0 * 2.0 - 1.0) * 5.0;
+        let yo = ((i / 3) as f32 / 2.0 * 2.0 - 1.0) * 5.0;
+        let len = (rng.next_int(7) + 8) as f32;
+        root = root.with_child(
+            &format!("tentacle{i}"),
+            PartDef::new(PartPose::offset(xo, 24.6, yo))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, len, 2.0], [0.0, 0.0])),
+        );
+    }
+
+    scaled(
+        EntityModelDef {
+            texture_width: 64,
+            texture_height: 32,
+            root,
+        },
+        4.5,
+    )
+}
+
+/// Hoglin (`HoglinModel.createBodyLayer`, also used for zoglin): a boxy body
+/// with a flat mane plane, a tilted head with ears and horns, and four legs.
+/// Sheet 128x64.
+pub fn hoglin_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset_and_rotation(
+        0.0, 2.0, -12.0, 0.87266463, 0.0, 0.0,
+    ))
+    .with_cube(cube([-7.0, -3.0, -19.0], [14.0, 6.0, 19.0], [61.0, 1.0]))
+    .with_child(
+        "right_ear",
+        PartDef::new(PartPose::offset_and_rotation(
+            -6.0,
+            -2.0,
+            -3.0,
+            0.0,
+            0.0,
+            -PI * 2.0 / 9.0,
+        ))
+        .with_cube(cube([-6.0, -1.0, -2.0], [6.0, 1.0, 4.0], [1.0, 1.0])),
+    )
+    .with_child(
+        "left_ear",
+        PartDef::new(PartPose::offset_and_rotation(
+            6.0,
+            -2.0,
+            -3.0,
+            0.0,
+            0.0,
+            PI * 2.0 / 9.0,
+        ))
+        .with_cube(cube([0.0, -1.0, -2.0], [6.0, 1.0, 4.0], [1.0, 6.0])),
+    )
+    .with_child(
+        "right_horn",
+        PartDef::new(PartPose::offset(-7.0, 2.0, -12.0))
+            .with_cube(cube([-1.0, -11.0, -1.0], [2.0, 11.0, 2.0], [10.0, 13.0])),
+    )
+    .with_child(
+        "left_horn",
+        PartDef::new(PartPose::offset(7.0, 2.0, -12.0))
+            .with_cube(cube([-1.0, -11.0, -1.0], [2.0, 11.0, 2.0], [1.0, 13.0])),
+    );
+
+    let body = PartDef::new(PartPose::offset(0.0, 7.0, 0.0))
+        .with_cube(cube([-8.0, -7.0, -13.0], [16.0, 14.0, 26.0], [1.0, 1.0]))
+        .with_child(
+            "mane",
+            PartDef::new(PartPose::offset(0.0, -14.0, -7.0))
+                .with_cube(cube([0.0, 0.0, -9.0], [0.0, 10.0, 19.0], [90.0, 33.0]).grown(0.001)),
+        );
+
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("body", body)
+        .with_child("head", head)
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-4.0, 10.0, -8.5))
+                .with_cube(cube([-3.0, 0.0, -3.0], [6.0, 14.0, 6.0], [66.0, 42.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(4.0, 10.0, -8.5))
+                .with_cube(cube([-3.0, 0.0, -3.0], [6.0, 14.0, 6.0], [41.0, 42.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-5.0, 13.0, 10.0))
+                .with_cube(cube([-2.5, 0.0, -2.5], [5.0, 11.0, 5.0], [21.0, 45.0])),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(5.0, 13.0, 10.0))
+                .with_cube(cube([-2.5, 0.0, -2.5], [5.0, 11.0, 5.0], [0.0, 45.0])),
+        );
+
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// Adult strider (`AdultStriderModel.createBodyLayer`): two tall legs, a cubic
+/// body, and six flat mirrored bristle planes. Sheet 64x128.
+pub fn strider_model() -> EntityModelDef {
+    // Each bristle is a flat (zero-height) plane; the three on the right are
+    // mirrored. (origin, tex, mirrored, pose offset, zRot)
+    let bristles: [([f32; 3], [f32; 2], bool, [f32; 3], f32); 6] = [
+        (
+            [-12.0, 0.0, 0.0],
+            [16.0, 65.0],
+            true,
+            [-8.0, 4.0, -8.0],
+            -1.2217305,
+        ),
+        (
+            [-12.0, 0.0, 0.0],
+            [16.0, 49.0],
+            true,
+            [-8.0, -1.0, -8.0],
+            -1.134464,
+        ),
+        (
+            [-12.0, 0.0, 0.0],
+            [16.0, 33.0],
+            true,
+            [-8.0, -5.0, -8.0],
+            -0.87266463,
+        ),
+        (
+            [0.0, 0.0, 0.0],
+            [16.0, 33.0],
+            false,
+            [8.0, -6.0, -8.0],
+            0.87266463,
+        ),
+        (
+            [0.0, 0.0, 0.0],
+            [16.0, 49.0],
+            false,
+            [8.0, -2.0, -8.0],
+            1.134464,
+        ),
+        (
+            [0.0, 0.0, 0.0],
+            [16.0, 65.0],
+            false,
+            [8.0, 3.0, -8.0],
+            1.2217305,
+        ),
+    ];
+    let names = [
+        "right_bottom_bristle",
+        "right_middle_bristle",
+        "right_top_bristle",
+        "left_top_bristle",
+        "left_middle_bristle",
+        "left_bottom_bristle",
+    ];
+    let mut body = PartDef::new(PartPose::offset(0.0, 1.0, 0.0))
+        .with_cube(cube([-8.0, -6.0, -8.0], [16.0, 14.0, 16.0], [0.0, 0.0]));
+    for (i, (origin, tex, mirror, off, z_rot)) in bristles.iter().enumerate() {
+        let mut c = cube(*origin, [12.0, 0.0, 16.0], *tex);
+        if *mirror {
+            c = c.mirrored();
+        }
+        body = body.with_child(
+            names[i],
+            PartDef::new(PartPose::offset_and_rotation(
+                off[0], off[1], off[2], 0.0, 0.0, *z_rot,
+            ))
+            .with_cube(c),
+        );
+    }
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-4.0, 8.0, 0.0))
+                .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 16.0, 4.0], [0.0, 32.0])),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(4.0, 8.0, 0.0))
+                .with_cube(cube([-2.0, 0.0, -2.0], [4.0, 16.0, 4.0], [0.0, 55.0])),
+        )
+        .with_child("body", body);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// Guardian (`GuardianModel.createBodyLayer`): a five-box head, twelve spikes
+/// placed on a cube's faces at their resting offsets, an eye, and a three-part
+/// tail. Sheet 64x64.
+pub fn guardian_model() -> EntityModelDef {
+    // Per-spike face position (SPIKE_X/Y/Z) and rotation multiples of PI
+    // (SPIKE_*_ROT), transcribed from GuardianModel.
+    const SPIKE_X: [f32; 12] = [
+        0.0, 0.0, 8.0, -8.0, -8.0, 8.0, 8.0, -8.0, 0.0, 0.0, 8.0, -8.0,
+    ];
+    const SPIKE_Y: [f32; 12] = [
+        -8.0, -8.0, -8.0, -8.0, 0.0, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 8.0,
+    ];
+    const SPIKE_Z: [f32; 12] = [
+        8.0, -8.0, 0.0, 0.0, -8.0, -8.0, 8.0, 8.0, 8.0, -8.0, 0.0, 0.0,
+    ];
+    const SPIKE_X_ROT: [f32; 12] = [
+        1.75, 0.25, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 1.25, 0.75, 0.0, 0.0,
+    ];
+    const SPIKE_Y_ROT: [f32; 12] = [
+        0.0, 0.0, 0.0, 0.0, 0.25, 1.75, 1.25, 0.75, 0.0, 0.0, 0.0, 0.0,
+    ];
+    const SPIKE_Z_ROT: [f32; 12] = [
+        0.0, 0.0, 0.25, 1.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.75, 1.25,
+    ];
+
+    let mut head = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-6.0, 10.0, -8.0], [12.0, 12.0, 16.0], [0.0, 0.0]))
+        .with_cube(cube([-8.0, 10.0, -6.0], [2.0, 12.0, 12.0], [0.0, 28.0]))
+        .with_cube(cube([6.0, 10.0, -6.0], [2.0, 12.0, 12.0], [0.0, 28.0]).mirrored())
+        .with_cube(cube([-6.0, 8.0, -6.0], [12.0, 2.0, 12.0], [16.0, 40.0]))
+        .with_cube(cube([-6.0, 22.0, -6.0], [12.0, 2.0, 12.0], [16.0, 40.0]));
+
+    // The resting spike offset baked by vanilla at ageInTicks=0, withdrawal=0:
+    // offset = 1 + cos(i) * 0.01.
+    for i in 0..12usize {
+        let off = 1.0 + (i as f32).cos() * 0.01;
+        let x = SPIKE_X[i] * off;
+        let y = 16.0 + SPIKE_Y[i] * off;
+        let z = SPIKE_Z[i] * off;
+        head = head.with_child(
+            &format!("spike{i}"),
+            PartDef::new(PartPose::offset_and_rotation(
+                x,
+                y,
+                z,
+                PI * SPIKE_X_ROT[i],
+                PI * SPIKE_Y_ROT[i],
+                PI * SPIKE_Z_ROT[i],
+            ))
+            .with_cube(cube([-1.0, -4.5, -1.0], [2.0, 9.0, 2.0], [0.0, 0.0])),
+        );
+    }
+
+    head = head.with_child(
+        "eye",
+        PartDef::new(PartPose::offset(0.0, 0.0, -8.25))
+            .with_cube(cube([-1.0, 15.0, 0.0], [2.0, 2.0, 1.0], [8.0, 0.0])),
+    );
+
+    let tail2 = PartDef::new(PartPose::offset(0.5, 0.5, 6.0))
+        .with_cube(cube([0.0, 14.0, 0.0], [2.0, 2.0, 6.0], [41.0, 32.0]))
+        .with_cube(cube([1.0, 10.5, 3.0], [1.0, 9.0, 9.0], [25.0, 19.0]));
+    let tail1 = PartDef::new(PartPose::offset(-1.5, 0.5, 14.0))
+        .with_cube(cube([0.0, 14.0, 0.0], [3.0, 3.0, 7.0], [0.0, 54.0]))
+        .with_child("tail2", tail2);
+    let tail0 = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-2.0, 14.0, 7.0], [4.0, 4.0, 8.0], [40.0, 0.0]))
+        .with_child("tail1", tail1);
+    head = head.with_child("tail0", tail0);
+
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child("head", head),
+    }
+}
+
+/// Adult piglin mesh (`AdultPiglinModel.createBodyLayer`): the vanilla player
+/// mesh with the body reduced to its base layer and the head replaced by the
+/// piglin head (snout, tusks, floppy ears). Shared by piglin, zombified_piglin
+/// and piglin_brute — only the texture differs.
+pub fn piglin_model() -> EntityModelDef {
+    let mut model = player_model(false);
+    let root = &mut model.root;
+
+    // body: base cube only, jacket overlay removed.
+    if let Some(body) = root.child_mut("body") {
+        body.pose = PartPose::ZERO;
+        body.cubes = vec![cube([-4.0, 0.0, -2.0], [8.0, 12.0, 4.0], [16.0, 16.0])];
+        body.children.clear();
+    }
+
+    // head: piglin snout/tusks, hat overlay removed, floppy ears added.
+    if let Some(head) = root.child_mut("head") {
+        head.pose = PartPose::ZERO;
+        head.cubes = vec![
+            cube([-5.0, -8.0, -4.0], [10.0, 8.0, 8.0], [0.0, 0.0]),
+            cube([-2.0, -4.0, -5.0], [4.0, 4.0, 1.0], [31.0, 1.0]),
+            cube([2.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2.0, 4.0]),
+            cube([-3.0, -2.0, -5.0], [1.0, 2.0, 1.0], [2.0, 0.0]),
+        ];
+        head.children = vec![
+            (
+                "left_ear".to_string(),
+                PartDef::new(PartPose::offset_and_rotation(
+                    4.5,
+                    -6.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    -PI / 6.0,
+                ))
+                .with_cube(cube([0.0, 0.0, -2.0], [1.0, 5.0, 4.0], [51.0, 6.0])),
+            ),
+            (
+                "right_ear".to_string(),
+                PartDef::new(PartPose::offset_and_rotation(
+                    -4.5,
+                    -6.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    PI / 6.0,
+                ))
+                .with_cube(cube([-1.0, 0.0, -2.0], [1.0, 5.0, 4.0], [39.0, 6.0])),
+            ),
+        ];
+    }
+
+    model
+}
+
+// ============================================================================
+// animal/*, npc/*, object/* half (owned by this agent; impl-assets owns the
+// piglin/guardian/witch/villager/golem/vex/phantom/ghast/silverfish/endermite/
+// drowned/strider/warden/wither/ender_dragon lane above). Horse family,
+// cat/wolf/ocelot and parrot are deliberately NOT here yet: they select their
+// texture sheet from entity metadata (colour/marking variant), and
+// `EntityModelEntry.texture` is a single `&'static str` today. That seam is
+// still being renegotiated as this is written, so those models are deferred
+// rather than forcing a second variant mechanism into the registry.
+// ============================================================================
+
+/// `EndCrystalModel.createBodyLayer`: `outer_glass` (8³) with a nested
+/// `inner_glass` (same box, `withScale(0.875)`) and a further-nested `cube`
+/// (`withScale(0.765625)` = `0.875²`, a literal in vanilla, not computed) plus
+/// a separate `base` box. Sheet 64×32.
+pub fn end_crystal_model() -> EntityModelDef {
+    let glass_cube = || cube([-4.0, -4.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]);
+    let mut inner_glass = PartDef::new(PartPose {
+        scale: [0.875, 0.875, 0.875],
+        ..PartPose::ZERO
+    })
+    .with_cube(glass_cube());
+    inner_glass = inner_glass.with_child(
+        "cube",
+        PartDef::new(PartPose {
+            scale: [0.765625, 0.765625, 0.765625],
+            ..PartPose::ZERO
+        })
+        .with_cube(cube([-4.0, -4.0, -4.0], [8.0, 8.0, 8.0], [32.0, 0.0])),
+    );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "outer_glass",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(glass_cube())
+                .with_child("inner_glass", inner_glass),
+        )
+        .with_child(
+            "base",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-6.0, 0.0, -6.0], [12.0, 4.0, 12.0], [0.0, 16.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `ArmorStandModel.createBodyLayer`: starts from `HumanoidModel.createMesh`
+/// but overrides head/body/arms/legs entirely with armor-stand-specific boxes
+/// and adds `right_body_stick`/`left_body_stick`/`shoulder_stick`/`base_plate`.
+/// The inherited `hat` child from the base humanoid mesh survives the
+/// `addOrReplaceChild("head", ...)` merge (vanilla's `PartDefinition` keeps a
+/// replaced node's *children*), but the constructor unconditionally sets
+/// `this.hat.visible = false` and nothing ever re-enables it — so `hat` is
+/// excluded here rather than baked as a permanently-invisible box. Sheet
+/// 64×64.
+pub fn armor_stand_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 1.0, 0.0))
+                .with_cube(cube([-1.0, -7.0, -1.0], [2.0, 7.0, 2.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "body",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-6.0, 0.0, -1.5], [12.0, 3.0, 3.0], [0.0, 26.0])),
+        )
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-5.0, 2.0, 0.0))
+                .with_cube(cube([-2.0, -2.0, -1.0], [2.0, 12.0, 2.0], [24.0, 0.0])),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(5.0, 2.0, 0.0)).with_cube(
+                cube([0.0, -2.0, -1.0], [2.0, 12.0, 2.0], [32.0, 16.0]).mirrored(),
+            ),
+        )
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-1.9, 12.0, 0.0))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 11.0, 2.0], [8.0, 0.0])),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(1.9, 12.0, 0.0)).with_cube(
+                cube([-1.0, 0.0, -1.0], [2.0, 11.0, 2.0], [40.0, 16.0]).mirrored(),
+            ),
+        )
+        .with_child(
+            "right_body_stick",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-3.0, 3.0, -1.0], [2.0, 7.0, 2.0], [16.0, 0.0])),
+        )
+        .with_child(
+            "left_body_stick",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([1.0, 3.0, -1.0], [2.0, 7.0, 2.0], [48.0, 16.0])),
+        )
+        .with_child(
+            "shoulder_stick",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-4.0, 10.0, -1.0], [8.0, 2.0, 2.0], [0.0, 48.0])),
+        )
+        .with_child(
+            "base_plate",
+            PartDef::new(PartPose::offset(0.0, 12.0, 0.0))
+                .with_cube(cube([-6.0, 11.0, -6.0], [12.0, 1.0, 12.0], [0.0, 32.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// The hull + paddles shared by `BoatModel.addCommonParts` (also reused,
+/// structurally, by the chest-boat variant which just appends chest boxes).
+/// Sheet 128×64 for the plain boat.
+fn boat_hull() -> PartDef {
+    PartDef::new(PartPose::ZERO)
+        .with_child(
+            "bottom",
+            PartDef::new(PartPose::offset_and_rotation(0.0, 3.0, 1.0, PI / 2.0, 0.0, 0.0))
+                .with_cube(cube([-14.0, -9.0, -3.0], [28.0, 16.0, 3.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "back",
+            PartDef::new(PartPose::offset_and_rotation(
+                -15.0,
+                4.0,
+                4.0,
+                0.0,
+                PI * 3.0 / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([-13.0, -7.0, -1.0], [18.0, 6.0, 2.0], [0.0, 19.0])),
+        )
+        .with_child(
+            "front",
+            PartDef::new(PartPose::offset_and_rotation(15.0, 4.0, 0.0, 0.0, PI / 2.0, 0.0))
+                .with_cube(cube([-8.0, -7.0, -1.0], [16.0, 6.0, 2.0], [0.0, 27.0])),
+        )
+        .with_child(
+            "right",
+            PartDef::new(PartPose::offset_and_rotation(0.0, 4.0, -9.0, 0.0, PI, 0.0))
+                .with_cube(cube([-14.0, -7.0, -1.0], [28.0, 6.0, 2.0], [0.0, 35.0])),
+        )
+        .with_child(
+            "left",
+            PartDef::new(PartPose::offset(0.0, 4.0, 9.0))
+                .with_cube(cube([-14.0, -7.0, -1.0], [28.0, 6.0, 2.0], [0.0, 43.0])),
+        )
+        .with_child(
+            "left_paddle",
+            PartDef::new(PartPose::offset_and_rotation(3.0, -5.0, 9.0, 0.0, 0.0, PI / 16.0))
+                .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 2.0, 18.0], [62.0, 0.0]))
+                .with_cube(cube([-1.001, -3.0, 8.0], [1.0, 6.0, 7.0], [62.0, 0.0])),
+        )
+        .with_child(
+            "right_paddle",
+            PartDef::new(PartPose::offset_and_rotation(3.0, -5.0, -9.0, 0.0, PI, PI / 16.0))
+                .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 2.0, 18.0], [62.0, 20.0]))
+                .with_cube(cube([0.001, -3.0, 8.0], [1.0, 6.0, 7.0], [62.0, 20.0])),
+        )
+}
+
+/// `BoatModel.createBoatModel`: hull + both paddles, no chest. Sheet 128×64.
+/// (`createWaterPatch`'s 0×0-sheet overlay quad is vanilla's water-clip patch,
+/// not a textured model part, and is intentionally not ported.)
+pub fn boat_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 64,
+        root: boat_hull(),
+    }
+}
+
+/// `BoatModel.createChestBoatModel`: the same hull plus `chest_bottom`/
+/// `chest_lid`/`chest_lock`. Sheet promotes to 128×128 to fit the chest.
+pub fn chest_boat_model() -> EntityModelDef {
+    let root = boat_hull()
+        .with_child(
+            "chest_bottom",
+            PartDef::new(PartPose::offset_and_rotation(
+                -2.0,
+                -5.0,
+                -6.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [12.0, 8.0, 12.0], [0.0, 76.0])),
+        )
+        .with_child(
+            "chest_lid",
+            PartDef::new(PartPose::offset_and_rotation(
+                -2.0,
+                -9.0,
+                -6.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [12.0, 4.0, 12.0], [0.0, 59.0])),
+        )
+        .with_child(
+            "chest_lock",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.0,
+                -6.0,
+                -1.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [2.0, 4.0, 1.0], [0.0, 59.0])),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// The hull + paddles shared by `RaftModel.addCommonParts`. Same part names as
+/// `BoatModel` but a different hull shape (2 boxes, bamboo raft's flatter
+/// profile) and paddle texOffs. The `1.5708F` bottom x-rotation is transcribed
+/// verbatim (vanilla writes the literal, not `Math.PI / 2`).
+fn raft_hull() -> PartDef {
+    PartDef::new(PartPose::ZERO)
+        .with_child(
+            "bottom",
+            PartDef::new(PartPose::offset_and_rotation(0.0, -2.1, 1.0, 1.5708, 0.0, 0.0))
+                .with_cube(cube([-14.0, -11.0, -4.0], [28.0, 20.0, 4.0], [0.0, 0.0]))
+                .with_cube(cube([-14.0, -9.0, -8.0], [28.0, 16.0, 4.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "left_paddle",
+            PartDef::new(PartPose::offset_and_rotation(3.0, -4.0, 9.0, 0.0, 0.0, PI / 16.0))
+                .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 2.0, 18.0], [0.0, 24.0]))
+                .with_cube(cube([-1.001, -3.0, 8.0], [1.0, 6.0, 7.0], [0.0, 24.0])),
+        )
+        .with_child(
+            "right_paddle",
+            PartDef::new(PartPose::offset_and_rotation(3.0, -4.0, -9.0, 0.0, PI, PI / 16.0))
+                .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 2.0, 18.0], [40.0, 24.0]))
+                .with_cube(cube([0.001, -3.0, 8.0], [1.0, 6.0, 7.0], [40.0, 24.0])),
+        )
+}
+
+/// `RaftModel.createRaftModel`: sheet 128×64.
+pub fn raft_model() -> EntityModelDef {
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 64,
+        root: raft_hull(),
+    }
+}
+
+/// `RaftModel.createChestRaftModel`: same hull plus chest boxes at raft-specific
+/// heights. Sheet 128×128.
+pub fn chest_raft_model() -> EntityModelDef {
+    let root = raft_hull()
+        .with_child(
+            "chest_bottom",
+            PartDef::new(PartPose::offset_and_rotation(
+                -2.0,
+                -10.1,
+                -6.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [12.0, 8.0, 12.0], [0.0, 76.0])),
+        )
+        .with_child(
+            "chest_lid",
+            PartDef::new(PartPose::offset_and_rotation(
+                -2.0,
+                -14.1,
+                -6.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [12.0, 4.0, 12.0], [0.0, 59.0])),
+        )
+        .with_child(
+            "chest_lock",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.0,
+                -11.1,
+                -1.0,
+                0.0,
+                -PI / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [2.0, 4.0, 1.0], [0.0, 59.0])),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// `MinecartModel.createBodyLayer`: bottom + 4 walls, flat root. Vanilla's
+/// chest/hopper/tnt/command-block/spawner minecarts all reuse this exact
+/// geometry class (they differ only by a separate block-overlay render layer,
+/// out of scope here), so a single `"minecart"` entry covers them. Sheet
+/// 64×32.
+pub fn minecart_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "bottom",
+            PartDef::new(PartPose::offset_and_rotation(0.0, 4.0, 0.0, PI / 2.0, 0.0, 0.0))
+                .with_cube(cube([-10.0, -8.0, -1.0], [20.0, 16.0, 2.0], [0.0, 10.0])),
+        )
+        .with_child(
+            "front",
+            PartDef::new(PartPose::offset_and_rotation(
+                -9.0,
+                4.0,
+                0.0,
+                0.0,
+                PI * 3.0 / 2.0,
+                0.0,
+            ))
+            .with_cube(cube([-8.0, -9.0, -1.0], [16.0, 8.0, 2.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "back",
+            PartDef::new(PartPose::offset_and_rotation(9.0, 4.0, 0.0, 0.0, PI / 2.0, 0.0))
+                .with_cube(cube([-8.0, -9.0, -1.0], [16.0, 8.0, 2.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "left",
+            PartDef::new(PartPose::offset_and_rotation(0.0, 4.0, -7.0, 0.0, PI, 0.0))
+                .with_cube(cube([-8.0, -9.0, -1.0], [16.0, 8.0, 2.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "right",
+            PartDef::new(PartPose::offset(0.0, 4.0, 7.0))
+                .with_cube(cube([-8.0, -9.0, -1.0], [16.0, 8.0, 2.0], [0.0, 0.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `AdultRabbitModel.createBodyLayer`: body(+tail), head(+ears), and two
+/// pivot-only leg-group nodes (`frontlegs`/`backlegs`/`right_hind_leg`/
+/// `left_hind_leg`) whose only cubes live on the leaf `*_leg`/`*_haunch`
+/// parts. Sheet 64×64.
+pub fn rabbit_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::offset_and_rotation(
+        0.0,
+        23.0,
+        4.0,
+        -0.3927,
+        0.0,
+        0.0,
+    ))
+    .with_cube(cube([-4.0, -6.0, -9.0], [8.0, 6.0, 10.0], [0.0, 0.0]))
+    .with_child(
+        "tail",
+        PartDef::new(PartPose::offset(0.0, -4.9916, 0.0125))
+            .with_cube(cube([-2.0, -3.0084, -1.0125], [4.0, 4.0, 4.0], [20.0, 16.0])),
+    )
+    .with_child(
+        "head",
+        PartDef::new(PartPose::offset_and_rotation(
+            0.0, -5.2929, -8.1213, 0.3927, 0.0, 0.0,
+        ))
+        .with_cube(cube([-2.5, -3.0, -4.0], [5.0, 5.0, 5.0], [0.0, 16.0]))
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset(1.5, -3.7071, -0.8787))
+                .with_cube(cube([-1.0, -4.2929, -0.1213], [2.0, 5.0, 1.0], [32.0, 0.0])),
+        )
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset(-1.5, -3.7071, -0.8787))
+                .with_cube(cube([-1.0, -4.2929, -0.1213], [2.0, 5.0, 1.0], [26.0, 0.0])),
+        ),
+    )
+    .with_child(
+        "frontlegs",
+        PartDef::new(PartPose::offset(0.0, -1.5349, -6.3108))
+            .with_child(
+                "right_front_leg",
+                PartDef::new(PartPose::offset_and_rotation(
+                    -2.0, 1.9239, 0.3827, 0.3927, 0.0, 0.0,
+                ))
+                .with_cube(cube([-0.9, -1.0, -0.9], [2.0, 4.0, 2.0], [36.0, 18.0])),
+            )
+            .with_child(
+                "left_front_leg",
+                PartDef::new(PartPose::offset_and_rotation(
+                    2.0, 1.9239, 0.4827, 0.3927, 0.0, 0.0,
+                ))
+                .with_cube(cube([-1.0, -1.0, -1.0], [2.0, 4.0, 2.0], [44.0, 18.0])),
+            ),
+    );
+    let backlegs = PartDef::new(PartPose::offset(0.0, 23.0, 4.0))
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-3.0, 0.5, 0.0)).with_child(
+                "right_haunch",
+                PartDef::new(PartPose::offset_and_rotation(0.0, -0.5, 0.0, 0.0, 0.3927, 0.0))
+                    .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 1.0, 6.0], [20.0, 24.0])),
+            ),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(3.0, 0.5, 0.0)).with_child(
+                "left_haunch",
+                PartDef::new(PartPose::offset_and_rotation(
+                    0.0, -0.5, 0.0, 0.0, -0.3927, 0.0,
+                ))
+                .with_cube(cube([-1.0, 0.0, -5.0], [2.0, 1.0, 6.0], [36.0, 24.0])),
+            ),
+        );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("body", body)
+        .with_child("backlegs", backlegs);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `AdultFoxModel.createBodyLayer`: head(+ears+nose), body(+tail), and 4 legs.
+/// `leftLeg`/`rightLeg` are each a single vanilla `CubeListBuilder` reused
+/// across the hind and front leg *on the same side* (identical box, distinct
+/// per-side texOffs); the sides are not related by `mirror()` at all. Sheet
+/// 48×32.
+pub fn fox_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(-1.0, 16.5, -3.0))
+        .with_cube(cube([-3.0, -2.0, -5.0], [8.0, 6.0, 6.0], [1.0, 5.0]))
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-3.0, -4.0, -4.0], [2.0, 2.0, 1.0], [8.0, 1.0])),
+        )
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([3.0, -4.0, -4.0], [2.0, 2.0, 1.0], [15.0, 1.0])),
+        )
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-1.0, 2.01, -8.0], [4.0, 2.0, 3.0], [6.0, 18.0])),
+        );
+    let body = PartDef::new(PartPose::offset_and_rotation(
+        0.0,
+        16.0,
+        -6.0,
+        PI / 2.0,
+        0.0,
+        0.0,
+    ))
+    .with_cube(cube([-3.0, 3.999, -3.5], [6.0, 11.0, 6.0], [24.0, 15.0]))
+    .with_child(
+        "tail",
+        PartDef::new(PartPose::offset_and_rotation(
+            -4.0,
+            15.0,
+            -1.0,
+            -0.05235988,
+            0.0,
+            0.0,
+        ))
+        .with_cube(cube([2.0, 0.0, -1.0], [4.0, 9.0, 5.0], [30.0, 0.0])),
+    );
+    let leg_fudge = 0.001;
+    let left_leg = || cube([2.0, 0.5, -1.0], [2.0, 6.0, 2.0], [4.0, 24.0]).grown(leg_fudge);
+    let right_leg = || cube([2.0, 0.5, -1.0], [2.0, 6.0, 2.0], [13.0, 24.0]).grown(leg_fudge);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child("body", body)
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-5.0, 17.5, 7.0)).with_cube(right_leg()),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(-1.0, 17.5, 7.0)).with_cube(left_leg()),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-5.0, 17.5, 0.0)).with_cube(right_leg()),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(-1.0, 17.5, 0.0)).with_cube(left_leg()),
+        );
+    EntityModelDef {
+        texture_width: 48,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `PandaModel.createBodyLayer` (`QuadrupedModel`): head(+nose+2 ears), body,
+/// and 4 legs sharing one vanilla `CubeListBuilder` (no mirroring, identical
+/// box on all four). Sheet 64×64.
+pub fn panda_model() -> EntityModelDef {
+    let leg = || cube([-3.0, 0.0, -3.0], [6.0, 9.0, 6.0], [40.0, 0.0]);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 11.5, -17.0))
+                .with_cube(cube([-6.5, -5.0, -4.0], [13.0, 10.0, 9.0], [0.0, 6.0]))
+                .with_cube(cube([-3.5, 0.0, -6.0], [7.0, 5.0, 2.0], [45.0, 16.0]))
+                .with_cube(cube([3.5, -8.0, -1.0], [5.0, 4.0, 1.0], [52.0, 25.0]))
+                .with_cube(cube([-8.5, -8.0, -1.0], [5.0, 4.0, 1.0], [52.0, 25.0])),
+        )
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                10.0,
+                0.0,
+                PI / 2.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-9.5, -13.0, -6.5], [19.0, 26.0, 13.0], [0.0, 25.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-5.5, 15.0, 9.0)).with_cube(leg()),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(5.5, 15.0, 9.0)).with_cube(leg()),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-5.5, 15.0, -9.0)).with_cube(leg()),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(5.5, 15.0, -9.0)).with_cube(leg()),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `GoatModel.createBodyLayer` (`QuadrupedModel`): head builds 3 boxes on one
+/// `CubeListBuilder` — `right_ear` (no mirror), `left_ear` (`.mirror()`), then
+/// `goatee` — and vanilla's `mirror()` flag is sticky per-builder with no
+/// reset, so `goatee` inherits `mirror=true` too. It's a zero-width box so
+/// this is visually inert, but transcribed faithfully rather than "corrected"
+/// away. Head also carries left_horn/right_horn/nose children (each
+/// independently toggleable via `hasLeftHorn`/`hasRightHorn` at runtime, both
+/// baked here since this registry has no per-part visibility toggle). Sheet
+/// 64×64.
+pub fn goat_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(1.0, 14.0, 0.0))
+        .with_cube(cube([-6.0, -11.0, -10.0], [3.0, 2.0, 1.0], [2.0, 61.0]))
+        .with_cube(cube([2.0, -11.0, -10.0], [3.0, 2.0, 1.0], [2.0, 61.0]).mirrored())
+        .with_cube(cube([-0.5, -3.0, -14.0], [0.0, 7.0, 5.0], [23.0, 52.0]).mirrored())
+        .with_child(
+            "left_horn",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-0.01, -16.0, -10.0], [2.0, 7.0, 2.0], [12.0, 55.0])),
+        )
+        .with_child(
+            "right_horn",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-2.99, -16.0, -10.0], [2.0, 7.0, 2.0], [12.0, 55.0])),
+        )
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0, -8.0, -8.0, 0.9599, 0.0, 0.0,
+            ))
+            .with_cube(cube([-3.0, -4.0, -8.0], [5.0, 7.0, 10.0], [34.0, 46.0])),
+        );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("head", head)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-4.0, -17.0, -7.0], [9.0, 11.0, 16.0], [1.0, 1.0]))
+                .with_cube(cube([-5.0, -18.0, -8.0], [11.0, 14.0, 11.0], [0.0, 28.0])),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(1.0, 14.0, 4.0))
+                .with_cube(cube([0.0, 4.0, 0.0], [3.0, 6.0, 3.0], [36.0, 29.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-3.0, 14.0, 4.0))
+                .with_cube(cube([0.0, 4.0, 0.0], [3.0, 6.0, 3.0], [49.0, 29.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(1.0, 14.0, -6.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [3.0, 10.0, 3.0], [49.0, 2.0])),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-3.0, 14.0, -6.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [3.0, 10.0, 3.0], [35.0, 2.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `AdultBeeModel.createBodyLayer`: `bone` > `body`(stinger, left/right
+/// antenna) plus `bone` > wings/legs. Sheet 64×64.
+pub fn bee_model() -> EntityModelDef {
+    let body = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-3.5, -4.0, -5.0], [7.0, 7.0, 10.0], [0.0, 0.0]))
+        .with_child(
+            "stinger",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([0.0, -1.0, 5.0], [0.0, 1.0, 2.0], [26.0, 7.0])),
+        )
+        .with_child(
+            "left_antenna",
+            PartDef::new(PartPose::offset(0.0, -2.0, -5.0))
+                .with_cube(cube([1.5, -2.0, -3.0], [1.0, 2.0, 3.0], [2.0, 0.0])),
+        )
+        .with_child(
+            "right_antenna",
+            PartDef::new(PartPose::offset(0.0, -2.0, -5.0))
+                .with_cube(cube([-2.5, -2.0, -3.0], [1.0, 2.0, 3.0], [2.0, 3.0])),
+        );
+    let wing_fudge = 0.001;
+    let bone = PartDef::new(PartPose::offset(0.0, 19.0, 0.0))
+        .with_child("body", body)
+        .with_child(
+            "right_wing",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.5, -4.0, -3.0, 0.0, -0.2618, 0.0,
+            ))
+            .with_cube(cube([-9.0, 0.0, 0.0], [9.0, 0.0, 6.0], [0.0, 18.0]).grown(wing_fudge)),
+        )
+        .with_child(
+            "left_wing",
+            PartDef::new(PartPose::offset_and_rotation(
+                1.5, -4.0, -3.0, 0.0, 0.2618, 0.0,
+            ))
+            .with_cube(
+                cube([0.0, 0.0, 0.0], [9.0, 0.0, 6.0], [0.0, 18.0])
+                    .grown(wing_fudge)
+                    .mirrored(),
+            ),
+        )
+        .with_child(
+            "front_legs",
+            PartDef::new(PartPose::offset(1.5, 3.0, -2.0))
+                .with_cube(cube([-5.0, 0.0, 0.0], [7.0, 2.0, 0.0], [26.0, 1.0])),
+        )
+        .with_child(
+            "middle_legs",
+            PartDef::new(PartPose::offset(1.5, 3.0, 0.0))
+                .with_cube(cube([-5.0, 0.0, 0.0], [7.0, 2.0, 0.0], [26.0, 3.0])),
+        )
+        .with_child(
+            "back_legs",
+            PartDef::new(PartPose::offset(1.5, 3.0, 2.0))
+                .with_cube(cube([-5.0, 0.0, 0.0], [7.0, 2.0, 0.0], [26.0, 5.0])),
+        );
+    let root = PartDef::new(PartPose::ZERO).with_child("bone", bone);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `AdultTurtleModel.createBodyLayer`: head, body(shell+belly), egg_belly
+/// (visibility-toggled at runtime by `hasEgg`, baked unconditionally here) and
+/// 4 legs. Sheet 128×64.
+pub fn turtle_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 19.0, -10.0))
+                .with_cube(cube([-3.0, -1.0, -3.0], [6.0, 5.0, 6.0], [3.0, 0.0])),
+        )
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                11.0,
+                -10.0,
+                PI / 2.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-9.5, 3.0, -10.0], [19.0, 20.0, 6.0], [7.0, 37.0]))
+            .with_cube(cube([-5.5, 3.0, -13.0], [11.0, 18.0, 3.0], [31.0, 1.0])),
+        )
+        .with_child(
+            "egg_belly",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                11.0,
+                -10.0,
+                PI / 2.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-4.5, 3.0, -14.0], [9.0, 18.0, 1.0], [70.0, 33.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-3.5, 22.0, 11.0))
+                .with_cube(cube([-2.0, 0.0, 0.0], [4.0, 1.0, 10.0], [1.0, 23.0])),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(3.5, 22.0, 11.0))
+                .with_cube(cube([-2.0, 0.0, 0.0], [4.0, 1.0, 10.0], [1.0, 12.0])),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-5.0, 21.0, -4.0))
+                .with_cube(cube([-13.0, 0.0, -2.0], [13.0, 1.0, 5.0], [27.0, 30.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(5.0, 21.0, -4.0))
+                .with_cube(cube([0.0, 0.0, -2.0], [13.0, 1.0, 5.0], [27.0, 24.0])),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `AdultCamelModel.createBodyMesh`: body(+hump+tail), head (3 stacked boxes:
+/// muzzle/skull/snout + ears), 4 legs. Sheet 128×128.
+pub fn camel_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -3.0, -19.5))
+        .with_cube(cube([-3.5, -7.0, -15.0], [7.0, 8.0, 19.0], [60.0, 24.0]))
+        .with_cube(cube([-3.5, -21.0, -15.0], [7.0, 14.0, 7.0], [21.0, 0.0]))
+        .with_cube(cube([-2.5, -21.0, -21.0], [5.0, 5.0, 6.0], [50.0, 0.0]))
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset(2.5, -21.0, -9.5))
+                .with_cube(cube([-0.5, 0.5, -1.0], [3.0, 1.0, 2.0], [45.0, 0.0])),
+        )
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset(-2.5, -21.0, -9.5))
+                .with_cube(cube([-2.5, 0.5, -1.0], [3.0, 1.0, 2.0], [67.0, 0.0])),
+        );
+    let body = PartDef::new(PartPose::offset(0.0, 4.0, 9.5))
+        .with_cube(cube([-7.5, -12.0, -23.5], [15.0, 12.0, 27.0], [0.0, 25.0]))
+        .with_child(
+            "hump",
+            PartDef::new(PartPose::offset(0.0, -12.0, -10.0))
+                .with_cube(cube([-4.5, -5.0, -5.5], [9.0, 5.0, 11.0], [74.0, 0.0])),
+        )
+        .with_child(
+            "tail",
+            PartDef::new(PartPose::offset(0.0, -9.0, 3.5))
+                .with_cube(cube([-1.5, 0.0, 0.0], [3.0, 14.0, 0.0], [122.0, 0.0])),
+        )
+        .with_child("head", head);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("body", body)
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(4.9, 1.0, 9.5))
+                .with_cube(cube([-2.5, 2.0, -2.5], [5.0, 21.0, 5.0], [58.0, 16.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-4.9, 1.0, 9.5))
+                .with_cube(cube([-2.5, 2.0, -2.5], [5.0, 21.0, 5.0], [94.0, 16.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(4.9, 1.0, -10.5))
+                .with_cube(cube([-2.5, 2.0, -2.5], [5.0, 21.0, 5.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-4.9, 1.0, -10.5))
+                .with_cube(cube([-2.5, 2.0, -2.5], [5.0, 21.0, 5.0], [0.0, 26.0])),
+        );
+    EntityModelDef {
+        texture_width: 128,
+        texture_height: 128,
+        root,
+    }
+}
+
+/// `CodModel.createBodyLayer`: body, head, nose, 2 side fins, tail_fin, and a
+/// `top_fin` at `texOffs(20, -6)` on a `0×1×6` box. The **negative Y offset is
+/// vanilla's own value**, not a transcription slip: `top_fin`'s real
+/// (non-degenerate) faces are the ones spanning the depth×height texel rect
+/// that this offset addresses, and there is no non-wrapping `texOffs` vanilla
+/// could have chosen instead that keeps that rect on-sheet — see the same
+/// wraparound note on `salmon`'s `right_fin`. `every_uv_is_within_the_sheet`
+/// carries a named exception for `"cod"` for exactly this box. Sheet 32×32.
+pub fn cod_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 22.0, 0.0))
+                .with_cube(cube([-1.0, -2.0, 0.0], [2.0, 4.0, 7.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 22.0, 0.0))
+                .with_cube(cube([-1.0, -2.0, -3.0], [2.0, 4.0, 3.0], [11.0, 0.0])),
+        )
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::offset(0.0, 22.0, -3.0))
+                .with_cube(cube([-1.0, -2.0, -1.0], [2.0, 3.0, 1.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "right_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.0,
+                23.0,
+                0.0,
+                0.0,
+                0.0,
+                -PI / 4.0,
+            ))
+            .with_cube(cube([-2.0, 0.0, -1.0], [2.0, 0.0, 2.0], [22.0, 1.0])),
+        )
+        .with_child(
+            "left_fin",
+            PartDef::new(PartPose::offset_and_rotation(1.0, 23.0, 0.0, 0.0, 0.0, PI / 4.0))
+                .with_cube(cube([0.0, 0.0, -1.0], [2.0, 0.0, 2.0], [22.0, 4.0])),
+        )
+        .with_child(
+            "tail_fin",
+            PartDef::new(PartPose::offset(0.0, 22.0, 7.0))
+                .with_cube(cube([0.0, -2.0, 0.0], [0.0, 4.0, 4.0], [22.0, 3.0])),
+        )
+        .with_child(
+            "top_fin",
+            PartDef::new(PartPose::offset(0.0, 20.0, 0.0))
+                .with_cube(cube([0.0, -1.0, -1.0], [0.0, 1.0, 6.0], [20.0, -6.0])),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `SalmonModel.createBodyLayer`: body_front/body_back (each with a fin
+/// child), head, and 2 side fins. `right_fin` is `texOffs(-4, 0)` on a
+/// `2×0×2` box — vanilla relying on `GL_REPEAT` texture wrap for this one
+/// real (non-degenerate, since height is the zero dimension here, not width)
+/// face rect; verified there is no equivalent non-wrapping offset that fits
+/// the required texel span before the sheet boundary. Named exception for
+/// `"salmon"` in `every_uv_is_within_the_sheet`. Sheet 32×32.
+pub fn salmon_model() -> EntityModelDef {
+    let body_front = PartDef::new(PartPose::offset(0.0, 20.0, -7.2))
+        .with_cube(cube([-1.5, -2.5, 0.0], [3.0, 5.0, 8.0], [0.0, 0.0]))
+        .with_child(
+            "top_front_fin",
+            PartDef::new(PartPose::offset(0.0, -4.5, 5.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [0.0, 2.0, 3.0], [2.0, 1.0])),
+        );
+    let body_back = PartDef::new(PartPose::offset(0.0, 20.0, 0.8000002))
+        .with_cube(cube([-1.5, -2.5, 0.0], [3.0, 5.0, 8.0], [0.0, 13.0]))
+        .with_child(
+            "back_fin",
+            PartDef::new(PartPose::offset(0.0, 0.0, 8.0))
+                .with_cube(cube([0.0, -2.5, 0.0], [0.0, 5.0, 6.0], [20.0, 10.0])),
+        )
+        .with_child(
+            "top_back_fin",
+            PartDef::new(PartPose::offset(0.0, -4.5, -1.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [0.0, 2.0, 4.0], [0.0, 2.0])),
+        );
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("body_front", body_front)
+        .with_child("body_back", body_back)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 20.0, -7.2))
+                .with_cube(cube([-1.0, -2.0, -3.0], [2.0, 4.0, 3.0], [22.0, 0.0])),
+        )
+        .with_child(
+            "right_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.5,
+                21.5,
+                -7.2,
+                0.0,
+                0.0,
+                -PI / 4.0,
+            ))
+            .with_cube(cube([-2.0, 0.0, 0.0], [2.0, 0.0, 2.0], [-4.0, 0.0])),
+        )
+        .with_child(
+            "left_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                1.5,
+                21.5,
+                -7.2,
+                0.0,
+                0.0,
+                PI / 4.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [2.0, 0.0, 2.0], [0.0, 0.0])),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `PufferfishBigModel.createBodyLayer`: body plus 3 mirrored fin pairs (blue,
+/// front/back, top/bottom×3). Chosen as the registered pufferfish variant
+/// specifically because — unlike `PufferfishSmallModel` (`back_fin` at
+/// `texOffs(-3, 0)`) — none of its offsets are negative, so it needs no UV
+/// exception. Sheet 32×32.
+pub fn pufferfish_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 22.0, 0.0))
+                .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "right_blue_fin",
+            PartDef::new(PartPose::offset(-4.0, 15.0, -2.0))
+                .with_cube(cube([-2.0, 0.0, -1.0], [2.0, 1.0, 2.0], [24.0, 0.0])),
+        )
+        .with_child(
+            "left_blue_fin",
+            PartDef::new(PartPose::offset(4.0, 15.0, -2.0))
+                .with_cube(cube([0.0, 0.0, -1.0], [2.0, 1.0, 2.0], [24.0, 3.0])),
+        )
+        .with_child(
+            "top_front_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                14.0,
+                -4.0,
+                PI / 4.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-4.0, -1.0, 0.0], [8.0, 1.0, 0.0], [15.0, 17.0])),
+        )
+        .with_child(
+            "top_middle_fin",
+            PartDef::new(PartPose::offset(0.0, 14.0, 0.0))
+                .with_cube(cube([-4.0, -1.0, 0.0], [8.0, 1.0, 1.0], [14.0, 16.0])),
+        )
+        .with_child(
+            "top_back_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                14.0,
+                4.0,
+                -PI / 4.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-4.0, -1.0, 0.0], [8.0, 1.0, 0.0], [23.0, 18.0])),
+        )
+        .with_child(
+            "right_front_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -4.0,
+                22.0,
+                -4.0,
+                0.0,
+                -PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([-1.0, -8.0, 0.0], [1.0, 8.0, 0.0], [5.0, 17.0])),
+        )
+        .with_child(
+            "left_front_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                4.0,
+                22.0,
+                -4.0,
+                0.0,
+                PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, -8.0, 0.0], [1.0, 8.0, 0.0], [1.0, 17.0])),
+        )
+        .with_child(
+            "bottom_front_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                22.0,
+                -4.0,
+                -PI / 4.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-4.0, 0.0, 0.0], [8.0, 1.0, 0.0], [15.0, 20.0])),
+        )
+        .with_child(
+            "bottom_middle_fin",
+            PartDef::new(PartPose::offset(0.0, 22.0, 0.0))
+                .with_cube(cube([-4.0, 0.0, 0.0], [8.0, 1.0, 0.0], [15.0, 20.0])),
+        )
+        .with_child(
+            "bottom_back_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0,
+                22.0,
+                4.0,
+                PI / 4.0,
+                0.0,
+                0.0,
+            ))
+            .with_cube(cube([-4.0, 0.0, 0.0], [8.0, 1.0, 0.0], [15.0, 20.0])),
+        )
+        .with_child(
+            "right_back_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -4.0,
+                22.0,
+                4.0,
+                0.0,
+                PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([-1.0, -8.0, 0.0], [1.0, 8.0, 0.0], [9.0, 17.0])),
+        )
+        .with_child(
+            "left_back_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                4.0,
+                22.0,
+                4.0,
+                0.0,
+                -PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, -8.0, 0.0], [1.0, 8.0, 0.0], [9.0, 17.0])),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `TropicalFishLargeModel.createBodyLayer(CubeDeformation.NONE)` — the plain
+/// (unpatterned) large tropical fish, chosen over `TropicalFishSmallModel`
+/// (which has negative-Y `texOffs` on `tail`/`top_fin`) so this entry needs no
+/// UV exception. Sheet 32×32.
+pub fn tropical_fish_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 19.0, 0.0))
+                .with_cube(cube([-1.0, -3.0, -3.0], [2.0, 6.0, 6.0], [0.0, 20.0])),
+        )
+        .with_child(
+            "tail",
+            PartDef::new(PartPose::offset(0.0, 19.0, 3.0))
+                .with_cube(cube([0.0, -3.0, 0.0], [0.0, 6.0, 5.0], [21.0, 16.0])),
+        )
+        .with_child(
+            "right_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -1.0,
+                20.0,
+                0.0,
+                0.0,
+                PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([-2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [2.0, 16.0])),
+        )
+        .with_child(
+            "left_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                1.0,
+                20.0,
+                0.0,
+                0.0,
+                -PI / 4.0,
+                0.0,
+            ))
+            .with_cube(cube([0.0, 0.0, 0.0], [2.0, 2.0, 0.0], [2.0, 12.0])),
+        )
+        .with_child(
+            "top_fin",
+            PartDef::new(PartPose::offset(0.0, 16.0, -3.0))
+                .with_cube(cube([0.0, -4.0, 0.0], [0.0, 4.0, 6.0], [20.0, 11.0])),
+        )
+        .with_child(
+            "bottom_fin",
+            PartDef::new(PartPose::offset(0.0, 22.0, -3.0))
+                .with_cube(cube([0.0, 0.0, 0.0], [0.0, 4.0, 6.0], [20.0, 21.0])),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `DolphinModel.createBodyLayer`: body(back_fin, mirrored left_fin,
+/// right_fin, tail[tail_fin], head[nose]). Sheet 64×64.
+pub fn dolphin_model() -> EntityModelDef {
+    let tail = PartDef::new(PartPose::offset_and_rotation(
+        0.0,
+        -2.5,
+        11.0,
+        -0.10471976,
+        0.0,
+        0.0,
+    ))
+    .with_cube(cube([-2.0, -2.5, 0.0], [4.0, 5.0, 11.0], [0.0, 19.0]))
+    .with_child(
+        "tail_fin",
+        PartDef::new(PartPose::offset(0.0, 0.0, 9.0))
+            .with_cube(cube([-5.0, -0.5, 0.0], [10.0, 1.0, 6.0], [19.0, 20.0])),
+    );
+    let head = PartDef::new(PartPose::offset(0.0, -4.0, -3.0))
+        .with_cube(cube([-4.0, -3.0, -3.0], [8.0, 7.0, 6.0], [0.0, 0.0]))
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-1.0, 2.0, -7.0], [2.0, 2.0, 4.0], [0.0, 13.0])),
+        );
+    let body = PartDef::new(PartPose::offset(0.0, 22.0, -5.0))
+        .with_cube(cube([-4.0, -7.0, 0.0], [8.0, 7.0, 13.0], [22.0, 0.0]))
+        .with_child(
+            "back_fin",
+            PartDef::new(PartPose::rotation(PI / 3.0, 0.0, 0.0))
+                .with_cube(cube([-0.5, 0.0, 8.0], [1.0, 4.0, 5.0], [51.0, 0.0])),
+        )
+        .with_child(
+            "left_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                2.0,
+                -2.0,
+                4.0,
+                PI / 3.0,
+                0.0,
+                PI * 2.0 / 3.0,
+            ))
+            .with_cube(cube([-0.5, -4.0, 0.0], [1.0, 4.0, 7.0], [48.0, 20.0]).mirrored()),
+        )
+        .with_child(
+            "right_fin",
+            PartDef::new(PartPose::offset_and_rotation(
+                -2.0,
+                -2.0,
+                4.0,
+                PI / 3.0,
+                0.0,
+                -PI * 2.0 / 3.0,
+            ))
+            .with_cube(cube([-0.5, -4.0, 0.0], [1.0, 4.0, 7.0], [48.0, 20.0])),
+        )
+        .with_child("tail", tail)
+        .with_child("head", head);
+    let root = PartDef::new(PartPose::ZERO).with_child("body", body);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `AdultAxolotlModel.createBodyLayer`: body (main + a zero-width ridge box),
+/// head (`grow=0.001` fudge, matching vanilla's flat-cube-z-fighting fix) with
+/// 3 gill children, 4 legs (2 vanilla builders reused across front/hind on
+/// each side, distinct origins — not `mirror()`-flagged), tail. Sheet 64×64.
+pub fn axolotl_model() -> EntityModelDef {
+    let fudge = 0.001;
+    let head = PartDef::new(PartPose::offset(0.0, 0.0, -9.0))
+        .with_cube(cube([-4.0, -3.0, -5.0], [8.0, 5.0, 5.0], [0.0, 1.0]).grown(fudge))
+        .with_child(
+            "top_gills",
+            PartDef::new(PartPose::offset(0.0, -3.0, -1.0))
+                .with_cube(cube([-4.0, -3.0, 0.0], [8.0, 3.0, 0.0], [3.0, 37.0]).grown(fudge)),
+        )
+        .with_child(
+            "left_gills",
+            PartDef::new(PartPose::offset(-4.0, 0.0, -1.0))
+                .with_cube(cube([-3.0, -5.0, 0.0], [3.0, 7.0, 0.0], [0.0, 40.0]).grown(fudge)),
+        )
+        .with_child(
+            "right_gills",
+            PartDef::new(PartPose::offset(4.0, 0.0, -1.0))
+                .with_cube(cube([0.0, -5.0, 0.0], [3.0, 7.0, 0.0], [11.0, 40.0]).grown(fudge)),
+        );
+    let left_leg = || cube([-1.0, 0.0, 0.0], [3.0, 5.0, 0.0], [2.0, 13.0]).grown(fudge);
+    let right_leg = || cube([-2.0, 0.0, 0.0], [3.0, 5.0, 0.0], [2.0, 13.0]).grown(fudge);
+    let body = PartDef::new(PartPose::offset(0.0, 19.5, 5.0))
+        .with_cube(cube([-4.0, -2.0, -9.0], [8.0, 4.0, 10.0], [0.0, 11.0]))
+        .with_cube(cube([0.0, -3.0, -8.0], [0.0, 5.0, 9.0], [2.0, 17.0]))
+        .with_child("head", head)
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-3.5, 1.0, -1.0)).with_cube(right_leg()),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(3.5, 1.0, -1.0)).with_cube(left_leg()),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-3.5, 1.0, -8.0)).with_cube(right_leg()),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(3.5, 1.0, -8.0)).with_cube(left_leg()),
+        )
+        .with_child(
+            "tail",
+            PartDef::new(PartPose::offset(0.0, 0.0, 1.0))
+                .with_cube(cube([0.0, -3.0, 0.0], [0.0, 5.0, 12.0], [2.0, 19.0])),
+        );
+    let root = PartDef::new(PartPose::ZERO).with_child("body", body);
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
+/// `FrogModel.createBodyLayer`: `root` (invisible pivot at y=24) > `body`(+
+/// `head`[+`eyes`> left/right_eye], `croaking_body`, `tongue`, `left_arm`
+/// [+`left_hand`], `right_arm`[+`right_hand`]), and `left_leg`/`right_leg`
+/// (each +foot) as siblings of `body` under the same pivot node. `eyes` and
+/// the `*_leg`/`*_arm` nodes are themselves pivot-only where noted. Sheet
+/// 48×48 (**not** 64×64 — this is a small, easy-to-miss exception).
+pub fn frog_model() -> EntityModelDef {
+    let eyes = PartDef::new(PartPose::offset(-0.5, 0.0, 2.0))
+        .with_child(
+            "right_eye",
+            PartDef::new(PartPose::offset(-1.5, -3.0, -6.5))
+                .with_cube(cube([-1.5, -1.0, -1.5], [3.0, 2.0, 3.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "left_eye",
+            PartDef::new(PartPose::offset(2.5, -3.0, -6.5))
+                .with_cube(cube([-1.5, -1.0, -1.5], [3.0, 2.0, 3.0], [0.0, 5.0])),
+        );
+    let head = PartDef::new(PartPose::offset(0.0, -2.0, -1.0))
+        .with_cube(cube([-3.5, -1.0, -7.0], [7.0, 0.0, 9.0], [23.0, 13.0]))
+        .with_cube(cube([-3.5, -2.0, -7.0], [7.0, 3.0, 9.0], [0.0, 13.0]))
+        .with_child("eyes", eyes);
+    let left_arm = PartDef::new(PartPose::offset(4.0, -1.0, -6.5))
+        .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 3.0], [0.0, 32.0]))
+        .with_child(
+            "left_hand",
+            PartDef::new(PartPose::offset(0.0, 3.0, -1.0))
+                .with_cube(cube([-4.0, 0.01, -4.0], [8.0, 0.0, 8.0], [18.0, 40.0])),
+        );
+    let right_arm = PartDef::new(PartPose::offset(-4.0, -1.0, -6.5))
+        .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 3.0], [0.0, 38.0]))
+        .with_child(
+            "right_hand",
+            PartDef::new(PartPose::offset(0.0, 3.0, 0.0))
+                .with_cube(cube([-4.0, 0.01, -5.0], [8.0, 0.0, 8.0], [2.0, 40.0])),
+        );
+    let body = PartDef::new(PartPose::offset(0.0, -2.0, 4.0))
+        .with_cube(cube([-3.5, -2.0, -8.0], [7.0, 3.0, 9.0], [3.0, 1.0]))
+        .with_cube(cube([-3.5, -1.0, -8.0], [7.0, 0.0, 9.0], [23.0, 22.0]))
+        .with_child("head", head)
+        .with_child(
+            "croaking_body",
+            PartDef::new(PartPose::offset(0.0, -1.0, -5.0)).with_cube(
+                cube([-3.5, -0.1, -2.9], [7.0, 2.0, 3.0], [26.0, 5.0]).grown(-0.1),
+            ),
+        )
+        .with_child(
+            "tongue",
+            PartDef::new(PartPose::offset(0.0, -1.01, 1.0))
+                .with_cube(cube([-2.0, 0.0, -7.1], [4.0, 0.0, 7.0], [17.0, 13.0])),
+        )
+        .with_child("left_arm", left_arm)
+        .with_child("right_arm", right_arm);
+    let model_root = PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+        .with_child("body", body)
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(3.5, -3.0, 4.0))
+                .with_cube(cube([-1.0, 0.0, -2.0], [3.0, 3.0, 4.0], [14.0, 25.0]))
+                .with_child(
+                    "left_foot",
+                    PartDef::new(PartPose::offset(2.0, 3.0, 0.0))
+                        .with_cube(cube([-4.0, 0.01, -4.0], [8.0, 0.0, 8.0], [2.0, 32.0])),
+                ),
+        )
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-3.5, -3.0, 4.0))
+                .with_cube(cube([-2.0, 0.0, -2.0], [3.0, 3.0, 4.0], [0.0, 25.0]))
+                .with_child(
+                    "right_foot",
+                    PartDef::new(PartPose::offset(-2.0, 3.0, 0.0))
+                        .with_cube(cube([-4.0, 0.01, -4.0], [8.0, 0.0, 8.0], [18.0, 32.0])),
+                ),
+        );
+    let root = PartDef::new(PartPose::ZERO).with_child("root", model_root);
+    EntityModelDef {
+        texture_width: 48,
+        texture_height: 48,
+        root,
+    }
+}
+
+/// `TadpoleModel.createBodyLayer`: 2 flat boxes, no hierarchy. Sheet is
+/// **16×16** — the smallest sheet in the whole corpus, easy to fat-finger as
+/// 32×32.
+pub fn tadpole_model() -> EntityModelDef {
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 22.0, -3.0))
+                .with_cube(cube([-1.5, -1.0, 0.0], [3.0, 2.0, 3.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "tail",
+            PartDef::new(PartPose::offset(0.0, 22.0, 0.0))
+                .with_cube(cube([0.0, -1.0, 0.0], [0.0, 2.0, 7.0], [0.0, 0.0])),
+        );
+    EntityModelDef {
+        texture_width: 16,
+        texture_height: 16,
+        root,
+    }
+}
+
+/// `SnifferModel.createBodyLayer`: `bone` > `body`(3 boxes) + 6 legs, `body` >
+/// `head`(2 boxes) > ears/nose/lower_beak. Sheet is **192×192** — by far the
+/// largest sheet in the corpus.
+pub fn sniffer_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, 6.5, -19.48))
+        .with_cube(cube([-6.5, -7.5, -11.5], [13.0, 18.0, 11.0], [8.0, 15.0]))
+        .with_cube(cube([-6.5, 7.5, -11.5], [13.0, 0.0, 11.0], [8.0, 4.0]))
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset(6.51, -7.5, -4.51))
+                .with_cube(cube([0.0, 0.0, -3.0], [1.0, 19.0, 7.0], [2.0, 0.0])),
+        )
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset(-6.51, -7.5, -4.51))
+                .with_cube(cube([-1.0, 0.0, -3.0], [1.0, 19.0, 7.0], [48.0, 0.0])),
+        )
+        .with_child(
+            "nose",
+            PartDef::new(PartPose::offset(0.0, -4.5, -11.5))
+                .with_cube(cube([-6.5, -2.0, -9.0], [13.0, 2.0, 9.0], [10.0, 45.0])),
+        )
+        .with_child(
+            "lower_beak",
+            PartDef::new(PartPose::offset(0.0, 2.5, -12.5))
+                .with_cube(cube([-6.5, -7.0, -8.0], [13.0, 12.0, 9.0], [10.0, 57.0])),
+        );
+    let body = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-12.5, -14.0, -20.0], [25.0, 29.0, 40.0], [62.0, 68.0]))
+        .with_cube(cube([-12.5, -14.0, -20.0], [25.0, 24.0, 40.0], [62.0, 0.0]).grown(0.5))
+        .with_cube(cube([-12.5, 12.0, -20.0], [25.0, 0.0, 40.0], [87.0, 68.0]))
+        .with_child("head", head);
+    let bone = PartDef::new(PartPose::offset(0.0, 5.0, 0.0))
+        .with_child("body", body)
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-7.5, 10.0, -15.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [32.0, 87.0])),
+        )
+        .with_child(
+            "right_mid_leg",
+            PartDef::new(PartPose::offset(-7.5, 10.0, 0.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [32.0, 105.0])),
+        )
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-7.5, 10.0, 15.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [32.0, 123.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(7.5, 10.0, -15.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [0.0, 87.0])),
+        )
+        .with_child(
+            "left_mid_leg",
+            PartDef::new(PartPose::offset(7.5, 10.0, 0.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [0.0, 105.0])),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(7.5, 10.0, 15.0))
+                .with_cube(cube([-3.5, -1.0, -4.0], [7.0, 10.0, 8.0], [0.0, 123.0])),
+        );
+    let root = PartDef::new(PartPose::ZERO).with_child("bone", bone);
+    EntityModelDef {
+        texture_width: 192,
+        texture_height: 192,
+        root,
+    }
+}
+
+/// `AdultArmadilloModel.createBodyLayer`: body(+tail+head[+ears]), 4 legs, and
+/// a separate root-level `cube` (the rolled-up ball form; vanilla toggles its
+/// visibility with the roll animation state, baked unconditionally here since
+/// this registry has no per-part runtime visibility). Sheet 64×64.
+pub fn armadillo_model() -> EntityModelDef {
+    let head = PartDef::new(PartPose::offset(0.0, -2.0, -11.0))
+        .with_child(
+            "head_cube",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0, 0.0, 0.0, -0.3927, 0.0, 0.0,
+            ))
+            .with_cube(cube([-1.5, -1.0, -1.0], [3.0, 5.0, 2.0], [43.0, 15.0])),
+        )
+        .with_child(
+            "right_ear",
+            PartDef::new(PartPose::offset(-1.0, -1.0, 0.0)).with_child(
+                "right_ear_cube",
+                PartDef::new(PartPose::offset_and_rotation(
+                    -0.5, 0.0, -0.6, 0.1886, -0.3864, -0.0718,
+                ))
+                .with_cube(cube([-2.0, -3.0, 0.0], [2.0, 5.0, 0.0], [43.0, 10.0])),
+            ),
+        )
+        .with_child(
+            "left_ear",
+            PartDef::new(PartPose::offset(1.0, -2.0, 0.0)).with_child(
+                "left_ear_cube",
+                PartDef::new(PartPose::offset_and_rotation(
+                    0.5, 1.0, -0.6, 0.1886, 0.3864, 0.0718,
+                ))
+                .with_cube(cube([0.0, -3.0, 0.0], [2.0, 5.0, 0.0], [47.0, 10.0])),
+            ),
+        );
+    let body = PartDef::new(PartPose::offset(0.0, 21.0, 4.0))
+        .with_cube(cube([-4.0, -7.0, -10.0], [8.0, 8.0, 12.0], [0.0, 20.0]).grown(0.3))
+        .with_cube(cube([-4.0, -7.0, -10.0], [8.0, 8.0, 12.0], [0.0, 40.0]))
+        .with_child(
+            "tail",
+            PartDef::new(PartPose::offset_and_rotation(
+                0.0, -3.0, 1.0, 0.5061, 0.0, 0.0,
+            ))
+            .with_cube(cube([-0.5, -0.0865, 0.0933], [1.0, 6.0, 1.0], [44.0, 53.0])),
+        )
+        .with_child("head", head);
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child("body", body)
+        .with_child(
+            "right_hind_leg",
+            PartDef::new(PartPose::offset(-2.0, 21.0, 4.0))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 2.0], [51.0, 31.0])),
+        )
+        .with_child(
+            "left_hind_leg",
+            PartDef::new(PartPose::offset(2.0, 21.0, 4.0))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 2.0], [42.0, 31.0])),
+        )
+        .with_child(
+            "right_front_leg",
+            PartDef::new(PartPose::offset(-2.0, 21.0, -4.0))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 2.0], [51.0, 43.0])),
+        )
+        .with_child(
+            "left_front_leg",
+            PartDef::new(PartPose::offset(2.0, 21.0, -4.0))
+                .with_cube(cube([-1.0, 0.0, -1.0], [2.0, 3.0, 2.0], [42.0, 43.0])),
+        )
+        .with_child(
+            "cube",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-5.0, -10.0, -6.0], [10.0, 10.0, 10.0], [0.0, 0.0])),
+        );
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root,
+    }
+}
+
 fn player_wide() -> EntityModelDef {
     player_model(false)
 }
@@ -1005,11 +2910,13 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         // Tier 2: common overworld/hostile expansion. Texture-only variants reuse
         // an existing builder because vanilla renders them with the same model
-        // class (only the placement scale, applied by the renderer, differs).
+        // class. Where vanilla applies a `MeshTransformer.scaling(..)` to the
+        // layer (baked into the mesh, not the renderer), we wrap the base builder
+        // in `scaled(..)` so the geometry carries the same size.
         EntityModelEntry {
             name: "husk",
             texture: "entity/zombie/husk",
-            build: zombie_model,
+            build: husk_model,
         },
         EntityModelEntry {
             name: "stray",
@@ -1019,12 +2926,12 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         EntityModelEntry {
             name: "wither_skeleton",
             texture: "entity/skeleton/wither_skeleton",
-            build: skeleton_model,
+            build: wither_skeleton_model,
         },
         EntityModelEntry {
             name: "cave_spider",
             texture: "entity/spider/cave_spider",
-            build: spider_model,
+            build: cave_spider_model,
         },
         EntityModelEntry {
             name: "slime",
@@ -1086,6 +2993,179 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             name: "endermite",
             texture: "entity/endermite/endermite",
             build: endermite_model,
+        },
+        EntityModelEntry {
+            name: "piglin",
+            texture: "entity/piglin/piglin",
+            build: piglin_model,
+        },
+        EntityModelEntry {
+            name: "zombified_piglin",
+            texture: "entity/piglin/zombified_piglin",
+            build: piglin_model,
+        },
+        EntityModelEntry {
+            name: "piglin_brute",
+            texture: "entity/piglin/piglin_brute",
+            build: piglin_model,
+        },
+        EntityModelEntry {
+            name: "ghast",
+            texture: "entity/ghast/ghast",
+            build: ghast_model,
+        },
+        EntityModelEntry {
+            name: "hoglin",
+            texture: "entity/hoglin/hoglin",
+            build: hoglin_model,
+        },
+        EntityModelEntry {
+            name: "zoglin",
+            texture: "entity/hoglin/zoglin",
+            build: hoglin_model,
+        },
+        EntityModelEntry {
+            name: "strider",
+            texture: "entity/strider/strider",
+            build: strider_model,
+        },
+        EntityModelEntry {
+            name: "guardian",
+            texture: "entity/guardian/guardian",
+            build: guardian_model,
+        },
+        // --- animal/npc/object half (owned by this agent). Horse family,
+        // cat/wolf/ocelot and parrot are deferred pending the texture-variant
+        // seam (see the module banner above `end_crystal_model`). item_frame
+        // is intentionally absent: vanilla resolves it via a block-model JSON
+        // (`ItemFrameRenderer`/`BlockModelResolver`), not a `ModelPart`
+        // `LayerDefinition`, so it does not fit `CubeDef`'s single-tex_offset
+        // box-unwrap primitive without extending it or routing through the
+        // block-model pipeline instead. ---
+        EntityModelEntry {
+            name: "armor_stand",
+            texture: "entity/armorstand/armorstand",
+            build: armor_stand_model,
+        },
+        EntityModelEntry {
+            name: "boat",
+            texture: "entity/boat/oak",
+            build: boat_model,
+        },
+        EntityModelEntry {
+            name: "chest_boat",
+            texture: "entity/chest_boat/oak",
+            build: chest_boat_model,
+        },
+        EntityModelEntry {
+            name: "raft",
+            texture: "entity/boat/bamboo",
+            build: raft_model,
+        },
+        EntityModelEntry {
+            name: "chest_raft",
+            texture: "entity/chest_boat/bamboo",
+            build: chest_raft_model,
+        },
+        EntityModelEntry {
+            name: "minecart",
+            texture: "entity/minecart/minecart",
+            build: minecart_model,
+        },
+        EntityModelEntry {
+            name: "end_crystal",
+            texture: "entity/end_crystal/end_crystal",
+            build: end_crystal_model,
+        },
+        EntityModelEntry {
+            name: "rabbit",
+            texture: "entity/rabbit/rabbit_brown",
+            build: rabbit_model,
+        },
+        EntityModelEntry {
+            name: "fox",
+            texture: "entity/fox/fox",
+            build: fox_model,
+        },
+        EntityModelEntry {
+            name: "panda",
+            texture: "entity/panda/panda",
+            build: panda_model,
+        },
+        EntityModelEntry {
+            name: "goat",
+            texture: "entity/goat/goat",
+            build: goat_model,
+        },
+        EntityModelEntry {
+            name: "bee",
+            texture: "entity/bee/bee",
+            build: bee_model,
+        },
+        EntityModelEntry {
+            name: "turtle",
+            texture: "entity/turtle/turtle",
+            build: turtle_model,
+        },
+        EntityModelEntry {
+            name: "camel",
+            texture: "entity/camel/camel",
+            build: camel_model,
+        },
+        EntityModelEntry {
+            name: "cod",
+            texture: "entity/fish/cod",
+            build: cod_model,
+        },
+        EntityModelEntry {
+            name: "salmon",
+            texture: "entity/fish/salmon",
+            build: salmon_model,
+        },
+        EntityModelEntry {
+            name: "pufferfish",
+            texture: "entity/fish/pufferfish",
+            build: pufferfish_model,
+        },
+        EntityModelEntry {
+            name: "tropical_fish",
+            // `TropicalFishRenderer` pairs `TropicalFishLargeModel` (this
+            // entry's geometry, chosen to avoid `TropicalFishSmallModel`'s
+            // negative texOffs) with `tropical_b.png`, not `tropical_a.png`
+            // (that's the small model's texture) — confirmed directly against
+            // `TropicalFishRenderer.getTextureLocation`.
+            texture: "entity/fish/tropical_b",
+            build: tropical_fish_model,
+        },
+        EntityModelEntry {
+            name: "dolphin",
+            texture: "entity/dolphin/dolphin",
+            build: dolphin_model,
+        },
+        EntityModelEntry {
+            name: "axolotl",
+            texture: "entity/axolotl/axolotl_lucy",
+            build: axolotl_model,
+        },
+        EntityModelEntry {
+            name: "frog",
+            texture: "entity/frog/frog_temperate",
+            build: frog_model,
+        },
+        EntityModelEntry {
+            name: "tadpole",
+            texture: "entity/tadpole/tadpole",
+            build: tadpole_model,
+        },
+        EntityModelEntry {
+            name: "sniffer",
+            texture: "entity/sniffer/sniffer",
+            build: sniffer_model,
+        },
+        EntityModelEntry {
+            name: "armadillo",
+            texture: "entity/armadillo/armadillo",
+            build: armadillo_model,
         },
     ]
 }

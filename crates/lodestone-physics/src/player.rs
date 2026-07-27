@@ -87,7 +87,31 @@ pub struct PlayerState {
     pub yaw: f32,
     /// Pitch in degrees.
     pub pitch: f32,
-    /// Whether the player is on the ground (collided downward last tick).
+    /// Whether the player is on the ground, i.e. this tick's move collided
+    /// **downward** (`verticalCollisionBelow` in `Entity.move`). This is the flag
+    /// the client **transmits** to the server on every movement packet
+    /// (`ServerboundMovePlayerPacket`'s `onGround`).
+    ///
+    /// It is a *distinct decision* from the collision result the server re-runs
+    /// from our reported position: if the server ever believes we are unsupported
+    /// and not descending in open air, it counts `aboveGroundTickCount` and
+    /// disconnects with `multiplayer.disconnect.flying` at `getMaximumFlyingTicks`
+    /// (80 ticks at default gravity). Because our position is bit-exact, the
+    /// server's own downward collision stays aligned with this flag, so the two
+    /// never diverge — but a driver must transmit *this* value unmodified rather
+    /// than re-deriving one.
+    ///
+    /// Vanilla computes it identically in **every** movement mode (walking,
+    /// swimming, climbing, falling); there is no bespoke "supported" notion for
+    /// swimming or climbing. The **sole override** is `Player.tick`, which forces
+    /// `onGround = false` while a **spectator or passenger** (riding a
+    /// boat/minecart/horse). This engine has no riding state, so a driver that
+    /// adds vehicles must apply that override itself — see the
+    /// `spectator_or_passenger_note` contract test in `tests/on_ground.rs`.
+    ///
+    /// Note: a player starting from rest reports airborne for exactly one settle
+    /// tick, because a tick runs `move()` before applying gravity — matching the
+    /// server's own first-tick computation.
     pub on_ground: bool,
     /// Whether the player collided horizontally last tick.
     pub horizontal_collision: bool,

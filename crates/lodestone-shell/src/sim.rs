@@ -6,6 +6,7 @@
 
 use std::time::Instant;
 
+use lodestone_client::ClientAction;
 use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
 use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
 use lodestone_render::Camera;
@@ -34,6 +35,8 @@ const MAX_WORLD_RADIUS: i32 = 6;
 const FLY_SPEED: f64 = 0.45;
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
+/// Number of hotbar slots (vanilla is a fixed 9).
+const HOTBAR_SLOTS: usize = 9;
 
 /// The whole non-graphical game state.
 #[derive(Debug)]
@@ -84,6 +87,10 @@ pub struct Sim {
     /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
     /// render-rate transforms the entity pass draws. Empty off a live server.
     entity_interp: EntityInterpolator,
+    /// Selected hotbar slot in `0..9`. Owned locally: the selected slot is an
+    /// input the player drives (number keys / scroll), echoed to the server via
+    /// [`ClientAction::SetCarriedItem`]. Defaults to slot 0, matching vanilla.
+    selected_slot: usize,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -164,6 +171,7 @@ impl Sim {
             health: None,
             food: None,
             entity_interp: EntityInterpolator::new(),
+            selected_slot: 0,
         }
     }
 
@@ -247,6 +255,46 @@ impl Sim {
             true
         } else {
             false
+        }
+    }
+
+    /// The currently selected hotbar slot, `0..9`.
+    #[must_use]
+    pub fn selected_slot(&self) -> usize {
+        self.selected_slot
+    }
+
+    /// Select hotbar slot `slot` (`0..9`); out-of-range values are ignored. When
+    /// the selection actually changes, echoes it to the server via
+    /// [`ClientAction::SetCarriedItem`] so the held item stays in sync. No-op
+    /// off a live connection beyond updating the local selection the HUD draws.
+    pub fn select_slot(&mut self, slot: usize) {
+        if slot >= HOTBAR_SLOTS || slot == self.selected_slot {
+            return;
+        }
+        self.selected_slot = slot;
+        self.send_selected_slot();
+    }
+
+    /// Advance the hotbar selection by `delta` slots, wrapping at both ends
+    /// (mouse-wheel behaviour). A positive `delta` moves right, matching vanilla
+    /// scroll-down.
+    pub fn cycle_slot(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        let n = HOTBAR_SLOTS as i32;
+        let next = (self.selected_slot as i32 + delta).rem_euclid(n) as usize;
+        self.select_slot(next);
+    }
+
+    /// Push the current selection to the server. Best-effort: no-op without a
+    /// live connection, and a closed session just drops it.
+    fn send_selected_slot(&self) {
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetCarriedItem {
+                slot: self.selected_slot as i32,
+            });
         }
     }
 
@@ -879,6 +927,53 @@ mod tests {
         // Both fields must land — a one-sided store would leave the other None.
         assert_eq!(sim.health(), Some(14.0));
         assert_eq!(sim.food(), Some(17));
+    }
+
+    #[test]
+    fn hotbar_selection_updates_and_echoes_to_the_server() {
+        use lodestone_client::ClientAction;
+        let (net, actions, _feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+
+        // Vanilla default is slot 0, and selecting it again is a no-op (no
+        // redundant packet).
+        assert_eq!(sim.selected_slot(), 0);
+        sim.select_slot(0);
+
+        // A direct selection moves and echoes exactly one SetCarriedItem.
+        sim.select_slot(3);
+        assert_eq!(sim.selected_slot(), 3);
+
+        // Out-of-range is ignored (no 10th slot), leaving selection and the
+        // wire untouched.
+        sim.select_slot(9);
+        assert_eq!(sim.selected_slot(), 3);
+
+        // Scroll wraps at both ends: +1 from 3 → 4, and from 8 → 0.
+        sim.cycle_slot(1);
+        assert_eq!(sim.selected_slot(), 4);
+        sim.select_slot(8);
+        sim.cycle_slot(1);
+        assert_eq!(sim.selected_slot(), 0, "scroll past the last slot wraps to 0");
+        sim.cycle_slot(-1);
+        assert_eq!(sim.selected_slot(), 8, "scroll before the first slot wraps to 8");
+
+        let sent: Vec<ClientAction> =
+            std::iter::from_fn(|| actions.try_recv().ok()).collect();
+        // Every *change* echoes SetCarriedItem; the no-op select_slot(0) and the
+        // rejected select_slot(9) send nothing, so the wire shows only the moves.
+        assert_eq!(
+            sent,
+            vec![
+                ClientAction::SetCarriedItem { slot: 3 },
+                ClientAction::SetCarriedItem { slot: 4 },
+                ClientAction::SetCarriedItem { slot: 8 },
+                ClientAction::SetCarriedItem { slot: 0 },
+                ClientAction::SetCarriedItem { slot: 8 },
+            ],
+            "only real selection changes reach the outbound action seam"
+        );
     }
 
     #[test]

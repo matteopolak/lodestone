@@ -119,6 +119,21 @@ pub struct ChatCommand {
     pub command: String,
 }
 
+/// Serverbound `chat_ack` packet.
+///
+/// Wire layout: a single VarInt `offset` acknowledging that many additional
+/// pending signed messages. The server decrements its unacknowledged count by
+/// this offset; without it the pending list grows until the 4096-message cap
+/// forces a disconnect, so this is the standalone drain the client sends when it
+/// has seen messages but is not sending chat of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:chat_ack", state = Play, bound = Server)]
+pub struct ChatAck {
+    /// Number of newly-acknowledged pending signed messages.
+    #[mc(varint)]
+    pub offset: i32,
+}
+
 /// Clientbound `set_health` packet.
 ///
 /// Wire layout: big-endian `f32` health, a VarInt food level, and a big-endian

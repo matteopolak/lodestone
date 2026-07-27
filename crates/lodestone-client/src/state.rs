@@ -26,8 +26,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_model::{
-    BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityMetadataUpdate,
-    EntityMovement, EntityPose, GameMode, PlayerListEntry, ResourceKey, Rotation, Vec3,
+    BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityEquipment,
+    EntityMetadataUpdate, EntityMovement, EntityPose, GameMode, PlayerListEntry, ResourceKey,
+    Rotation, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, World};
 use tokio::sync::Notify;
@@ -97,6 +98,13 @@ pub struct EntityView {
     pub position: Vec3,
     /// The entity's last known rotation.
     pub rotation: Rotation,
+    /// The entity's last known head yaw, in degrees.
+    ///
+    /// Vanilla sends this unconditionally at spawn (`add_entity`) and updates
+    /// it independently of body yaw via `rotate_head` — a walking mob's head
+    /// tracks its target while its body keeps facing its movement direction,
+    /// so this is never derived from `rotation.yaw`.
+    pub head_yaw: f32,
     /// The entity's last known velocity, when reported.
     pub velocity: Option<Vec3>,
     /// Whether the entity was last reported on the ground.
@@ -119,6 +127,16 @@ pub struct EntityView {
     /// `update_attributes`. Later snapshots for the same attribute replace
     /// earlier ones.
     pub attributes: Vec<EntityAttributeSnapshot>,
+    /// The entity's equipped items, keyed by slot, as last reported by
+    /// `set_equipment`. Later updates for the same slot replace earlier ones.
+    ///
+    /// A slot **absent** from this list means the server has never sent an
+    /// override for it — the renderer should fall back to that entity type's
+    /// vanilla default (usually nothing) — which is a different state from a
+    /// slot present with `item: None`, an explicit "this slot is empty"
+    /// confirmation from the server. Collapsing the two loses that
+    /// distinction, so do not default a missing slot to `None` in-place.
+    pub equipment: Vec<EntityEquipment>,
 }
 
 /// The mutable scalar state behind the lock. Private; only ever touched under
@@ -471,6 +489,7 @@ impl Inner {
                         entity_type: entity_type.clone(),
                         position: *pos,
                         rotation: *rotation,
+                        head_yaw: rotation.yaw,
                         velocity: *velocity,
                         on_ground: false,
                         flags: None,
@@ -480,6 +499,7 @@ impl Inner {
                         health: None,
                         baby: None,
                         attributes: Vec::new(),
+                        equipment: Vec::new(),
                     },
                 );
             }
@@ -508,6 +528,14 @@ impl Inner {
                     entity.velocity = Some(*velocity);
                 }
             }
+            ClientEvent::EntityHeadRotation {
+                entity_id,
+                head_yaw,
+            } => {
+                if let Some(entity) = self.entities.get_mut(entity_id) {
+                    entity.head_yaw = *head_yaw;
+                }
+            }
             ClientEvent::EntityRemoved { entity_ids } => {
                 for id in entity_ids {
                     self.entities.remove(id);
@@ -534,6 +562,23 @@ impl Inner {
                         {
                             Some(existing) => *existing = snapshot.clone(),
                             None => entity.attributes.push(snapshot.clone()),
+                        }
+                    }
+                }
+            }
+            ClientEvent::EntityEquipmentUpdated {
+                entity_id,
+                equipment,
+            } => {
+                if let Some(entity) = self.entities.get_mut(entity_id) {
+                    for update in equipment {
+                        match entity
+                            .equipment
+                            .iter_mut()
+                            .find(|existing| existing.slot == update.slot)
+                        {
+                            Some(existing) => *existing = update.clone(),
+                            None => entity.equipment.push(update.clone()),
                         }
                     }
                 }

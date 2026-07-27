@@ -185,7 +185,7 @@ pub struct ClientboundPositionLook {
     /// Relative-coordinate bitmask.
     pub flags: i8,
     /// Teleport id the client must echo back in a `teleport_confirm` packet.
-    /// Added in 1.9 (protocol 340 is 1.12.2); absent in 1.8.
+    /// Added in 1.9 (protocol 754 is 1.16.5); absent in 1.8.
     #[mc(varint)]
     pub teleport_id: i32,
 }
@@ -418,7 +418,7 @@ impl Default for ClientSettings {
 /// Serverbound `block_dig` (player digging) — start, cancel, or finish breaking
 /// a block, plus drop / release / swap-hands status codes.
 ///
-/// # 1.12 divergence
+/// # 1.16 divergence
 ///
 /// The wire shape matches 1.8, but 1.9+ added **status 6 = swap item in hands**
 /// (off-hand exists from 1.9), so `SwapItemWithOffhand` maps here rather than

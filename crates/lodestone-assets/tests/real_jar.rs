@@ -783,12 +783,20 @@ fn entity_models_whole_corpus_coverage() {
         let img = Image::decode_png(&bytes)
             .unwrap_or_else(|_| panic!("{}: decode {}", e.name, e.texture));
 
-        // External-authority check: the model's declared sheet must be exactly
-        // the real PNG's dimensions. This catches both under- and over-sizing.
-        assert_eq!(
-            (model.texture_width, model.texture_height),
-            (img.width, img.height),
-            "{}: declared sheet {}x{} != real {} PNG {}x{}",
+        // External-authority check: the real PNG must be a positive-integer
+        // multiple of the model's declared UV resolution, with the same factor on
+        // both axes. Minecraft normalises UVs against the model's declared sheet
+        // and lets the texture ship at any integer multiple of that (e.g. the
+        // ghast model declares 64x32 but ships a 128x64 texture at 2x). This still
+        // catches a wrong path or wrong aspect ratio, without falsely rejecting
+        // hi-res vanilla textures.
+        assert!(
+            model.texture_width > 0
+                && model.texture_height > 0
+                && img.width.is_multiple_of(model.texture_width)
+                && img.height.is_multiple_of(model.texture_height)
+                && img.width / model.texture_width == img.height / model.texture_height,
+            "{}: declared UV sheet {}x{} is not an integer-multiple match for real {} PNG {}x{}",
             e.name,
             model.texture_width,
             model.texture_height,
@@ -800,6 +808,19 @@ fn entity_models_whole_corpus_coverage() {
         let quads = bake_entity(&model);
         assert!(!quads.is_empty(), "{} baked no quads", e.name);
         for q in &quads {
+            // Skip degenerate (zero-area) faces of flat planes: vanilla lays
+            // their collapsed side faces off-sheet and never samples them.
+            let p = &q.positions;
+            let e1 = [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]];
+            let e2 = [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]];
+            let cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            if cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2] < 1e-9 {
+                continue;
+            }
             for uv in q.uvs {
                 let u = uv[0] * img.width as f32;
                 let v = uv[1] * img.height as f32;

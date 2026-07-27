@@ -200,6 +200,12 @@ pub struct HudFrame<'a> {
     pub health: Option<f32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
     pub food: Option<i32>,
+    /// The selected hotbar slot in `0..9`, `Some` while in active play. Drawn as
+    /// a 9-cell bar at the bottom centre with the selected cell highlighted.
+    /// Item icons are deferred (the shell has no item-texture atlas yet), so the
+    /// cells are empty frames for now — the frame and selection are honest, the
+    /// contents are explicitly not modelled.
+    pub hotbar: Option<usize>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -218,6 +224,7 @@ impl<'a> HudFrame<'a> {
             boss_bars: &[],
             health: None,
             food: None,
+            hotbar: None,
         }
     }
 }
@@ -296,14 +303,45 @@ impl HudGeometry {
             b.rect_px(cx - thick * 0.5, cy - arm, thick, arm * 2.0, col);
         }
 
-        // Health / food pip rows, bottom-centre, only on a live survival server.
-        // Each row is 10 pips of 2 units; a pip lights the moment any of its two
-        // units is present (a deliberate simplification — no half-pip art yet).
+        // The hotbar (bottom-centre) and the survival pip rows above it. The
+        // hotbar draws whenever we're in active play; the pips only on a live
+        // survival server that reports health/food.
         let cx = b.w * 0.5;
         let pip = 8.0;
         let gap = 2.0;
         let row_w = 10.0 * (pip + gap);
-        let bars_y = b.h - margin - pip - line_h;
+
+        // Hotbar: a 9-cell bar with the selected cell ringed in white. Item
+        // icons are deferred (no item atlas yet) so the cells are empty wells —
+        // the frame and selection are real, the contents explicitly aren't.
+        let hotbar_top = if let Some(sel) = frame.hotbar {
+            let sel = sel.min(8);
+            let cell = 22.0;
+            let hw = 9.0 * cell;
+            let hx = cx - hw * 0.5;
+            let hy = b.h - margin - cell;
+            b.rect_px(hx - 2.0, hy - 2.0, hw + 4.0, cell + 4.0, [0.0, 0.0, 0.0, 0.55]);
+            for i in 0..9 {
+                let sx = hx + i as f32 * cell;
+                b.rect_px(sx + 1.0, hy + 1.0, cell - 2.0, cell - 2.0, [0.28, 0.28, 0.30, 0.5]);
+            }
+            // A 2px white ring around the selected cell (four edges).
+            let sx = hx + sel as f32 * cell;
+            let bw = 2.0;
+            let col = [0.95, 0.97, 1.0, 0.95];
+            b.rect_px(sx - 1.0, hy - 1.0, cell + 2.0, bw, col);
+            b.rect_px(sx - 1.0, hy + cell + 1.0 - bw, cell + 2.0, bw, col);
+            b.rect_px(sx - 1.0, hy - 1.0, bw, cell + 2.0, col);
+            b.rect_px(sx + cell + 1.0 - bw, hy - 1.0, bw, cell + 2.0, col);
+            hy
+        } else {
+            b.h - margin
+        };
+
+        // Health / food pip rows, sitting just above the hotbar. Each row is 10
+        // pips of 2 units; a pip lights the moment any of its two units is
+        // present (a deliberate simplification — no half-pip art yet).
+        let bars_y = hotbar_top - pip - 4.0;
         if let Some(hp) = frame.health {
             b.pips(
                 hp,
@@ -731,6 +769,43 @@ mod tests {
         assert_ne!(
             empty.verts, full.verts,
             "full vs empty must recolour the pips, not just redraw them"
+        );
+    }
+
+    #[test]
+    fn hotbar_draws_and_selection_moves_the_highlight() {
+        let stats = DebugStats::default();
+        let mut frame = HudFrame::new(&stats);
+        frame.crosshair = false;
+        frame.show_debug = false;
+
+        // No hotbar → no hotbar geometry.
+        frame.hotbar = None;
+        let none = HudGeometry::build(&frame, 640, 480).vertex_count();
+
+        // A hotbar adds a real run of geometry (panel + 9 cells + a 4-edge ring).
+        frame.hotbar = Some(0);
+        let sel0 = HudGeometry::build(&frame, 640, 480);
+        assert!(
+            sel0.vertex_count() > none,
+            "an on-screen hotbar must add geometry, got {} vs {none}",
+            sel0.vertex_count()
+        );
+
+        // Moving the selection keeps the vertex *count* identical (same panel,
+        // 9 cells, 4-edge ring) but must move the ring — so the bytes differ. A
+        // selection that never relocates the highlight would render as a hotbar
+        // that ignores the held slot.
+        frame.hotbar = Some(4);
+        let sel4 = HudGeometry::build(&frame, 640, 480);
+        assert_eq!(
+            sel0.vertex_count(),
+            sel4.vertex_count(),
+            "selecting a different slot must not change the vertex count"
+        );
+        assert_ne!(
+            sel0.verts, sel4.verts,
+            "the selection ring must move to the newly-selected slot"
         );
     }
 

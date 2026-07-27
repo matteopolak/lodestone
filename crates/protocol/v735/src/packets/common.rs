@@ -1,4 +1,4 @@
-//! Packets shared by both directions of the play state for protocol 340.
+//! Packets shared by both directions of the play state for protocol 754.
 
 use lodestone_macros::{Decode, Encode, Packet};
 
@@ -8,8 +8,8 @@ use lodestone_macros::{Decode, Encode, Packet};
 ///
 /// # Architectural note
 ///
-/// 1.8 sent the keep-alive id as a **varint**, but 1.9+ (protocol 340 is
-/// 1.12.2) widened it to a fixed **64-bit** integer. The canonical model
+/// 1.8 sent the keep-alive id as a **varint**, but 1.9+ (protocol 754 is
+/// 1.16.5) widened it to a fixed **64-bit** integer. The canonical model
 /// (`ClientEvent::KeepAlive { id: i64 }` / `ClientAction::KeepAliveResponse {
 /// id: i64 }`) already uses `i64`, so no conversion is required here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]

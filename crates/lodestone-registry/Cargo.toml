@@ -26,6 +26,7 @@ lodestone-model = { workspace = true }
 lodestone-v47 = { workspace = true, optional = true }
 lodestone-v770 = { workspace = true, optional = true }
 lodestone-v340 = { workspace = true, optional = true }
+lodestone-v735 = { workspace = true, optional = true }
 
 [features]
 # One feature per version family. Enabling a feature compiles that family in and
@@ -33,3 +34,4 @@ lodestone-v340 = { workspace = true, optional = true }
 v47 = ["dep:lodestone-v47"]
 v770 = ["dep:lodestone-v770"]
 v340 = ["dep:lodestone-v340"]
+v735 = ["dep:lodestone-v735"]
