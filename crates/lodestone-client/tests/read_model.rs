@@ -538,13 +538,13 @@ async fn light_snapshot_is_served_and_outlives_unload() {
 
     // Light is served even though the block section is all-air (elided): the exact
     // seam the mesher needs, and the one a "gate light on block presence" bug would
-    // break. `section_at` says None for the same section; `light_at` must not.
+    // break. `section_at` says None for the same section; `section_light` must not.
     assert!(
         handle.section_at(pos, 4).is_none(),
         "block section 4 is all air, so section_at elides it"
     );
     let held: lodestone_client::SectionLight = handle
-        .light_at(pos, 5)
+        .section_light(pos, 5)
         .expect("light section 5 present for an air block section");
     assert_eq!(
         held.sky_at(1, 2, 3),
@@ -563,7 +563,7 @@ async fn light_snapshot_is_served_and_outlives_unload() {
     // wrote — block-section index has no name for it, which is why the handle
     // exposes light-section indexing directly.
     let below = handle
-        .light_at(pos, 0)
+        .section_light(pos, 0)
         .expect("boundary light section 0 present");
     assert_eq!(below.sky_at(1, 2, 3), 4);
 
@@ -580,8 +580,8 @@ async fn light_snapshot_is_served_and_outlives_unload() {
     assert!(batch[2].is_none(), "absent chunk is a None slot");
 
     // Out-of-range light section and unloaded chunk are None, never a silent zero.
-    assert!(handle.light_at(pos, 999).is_none());
-    assert!(handle.light_at(ChunkPos::new(9, 9), 5).is_none());
+    assert!(handle.section_light(pos, 999).is_none());
+    assert!(handle.section_light(ChunkPos::new(9, 9), 5).is_none());
 
     // Unload the chunk out from under the holder.
     peer.write_packet(UNLOAD, &[]).await.unwrap();
@@ -589,7 +589,7 @@ async fn light_snapshot_is_served_and_outlives_unload() {
         .wait_for(Duration::from_secs(2), |h| !h.is_chunk_loaded(pos))
         .await
         .expect("chunk should unload");
-    assert!(handle.light_at(pos, 5).is_none());
+    assert!(handle.section_light(pos, 5).is_none());
 
     // The snapshot taken before the unload is a value carrying no borrow into the
     // world: it keeps reading valid light with no lock held and no coupling to
@@ -691,8 +691,8 @@ async fn sections_and_light_read_pairwise_in_one_epoch() {
     );
     assert_eq!(
         batch[0].1.as_ref().unwrap().sky_at(1, 2, 3),
-        handle.light_at(pos, 5).unwrap().sky_at(1, 2, 3),
-        "bulk light matches the singular light_at(5)"
+        handle.section_light(pos, 5).unwrap().sky_at(1, 2, 3),
+        "bulk light matches the singular section_light(5)"
     );
 
     drop(handle);

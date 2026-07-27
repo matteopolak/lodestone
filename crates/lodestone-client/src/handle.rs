@@ -218,7 +218,7 @@ impl ClientHandle {
     /// [`block_at`](ClientHandle::block_at).
     ///
     /// This hands out block-state sections only. Lit meshing also needs the
-    /// column's light, served in parallel by [`light_at`](ClientHandle::light_at)
+    /// column's light, served in parallel by [`section_light`](ClientHandle::section_light)
     /// and [`lights_at`](ClientHandle::lights_at).
     #[must_use]
     pub fn section_at(
@@ -259,16 +259,17 @@ impl ClientHandle {
     ///   sections above and below the build range — positions block-section index
     ///   has no name for. Add one to a block-section index to get its light section.
     /// - **An all-air section still has light.** Where `section_at` returns `None`
-    ///   for an elided (all-air) section, `light_at` returns `Some`: air carries
-    ///   light, and a face meshed against it must sample that light or render black.
+    ///   for an elided (all-air) section, `section_light` returns `Some`: air
+    ///   carries light, and a face meshed against it must sample that light or
+    ///   render black.
     ///
     /// Like the section snapshot, the returned value carries no borrow into the
     /// world and pins no lock: hold it across a whole mesh while streaming
     /// continues. It is a cheap value (each light layer is `Arc`-backed
     /// copy-on-write), so a later relight forks it and leaves your snapshot intact.
     #[must_use]
-    pub fn light_at(&self, pos: ChunkPos, light_section_index: usize) -> Option<SectionLight> {
-        self.state.light_at(pos, light_section_index)
+    pub fn section_light(&self, pos: ChunkPos, light_section_index: usize) -> Option<SectionLight> {
+        self.state.section_light(pos, light_section_index)
     }
 
     /// Returns one owned light snapshot per requested `(chunk, light_section_index)`,
@@ -279,7 +280,7 @@ impl ClientHandle {
     /// A request whose chunk is not loaded (or whose light section is out of range)
     /// yields a `None` slot rather than being omitted, so the result stays aligned
     /// with the input. Note that, unlike `sections_at`, an all-air section is
-    /// `Some` here (see [`light_at`](ClientHandle::light_at)).
+    /// `Some` here (see [`section_light`](ClientHandle::section_light)).
     #[must_use]
     pub fn lights_at(&self, requests: &[(ChunkPos, usize)]) -> Vec<Option<SectionLight>> {
         self.state.lights_at(requests)

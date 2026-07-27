@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
 use lodestone_model::{
     ClientAction, ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress,
     VersionAdapter,
@@ -51,6 +52,15 @@ pub(crate) struct Driver<T: Transport> {
     read_timeout: Option<Duration>,
     profile: LoginProfile,
     server: ServerAddress,
+    /// Vanilla's 20-slot last-seen tracker for signed chat. The driver drives
+    /// its two flush triggers (burst valve + tick) and transmits the resulting
+    /// [`ClientAction::ChatAck`] so the server's pending-message list drains and
+    /// never reaches the 4096 disconnect ceiling. Stateful and session-long,
+    /// which is why it lives here and not in the stateless adapter. Version-free:
+    /// it only advances when the adapter feeds signed chat, and only reaches the
+    /// wire when the adapter encodes a `chat_ack` packet (older versions encode
+    /// `None`).
+    chat_tracker: LastSeenTracker,
 }
 
 impl<T: Transport> Driver<T> {
@@ -82,6 +92,7 @@ impl<T: Transport> Driver<T> {
             read_timeout,
             profile,
             server,
+            chat_tracker: LastSeenTracker::vanilla(),
         }
     }
 
@@ -256,15 +267,48 @@ impl<T: Transport> Driver<T> {
     ///
     /// [`ChunkColumn`]: lodestone_world::ChunkColumn
     async fn emit(&mut self, event: ClientEvent) -> Step {
-        let auto_action = match &event {
-            ClientEvent::KeepAlive { id } if self.keep_alive.is_automatic() => {
-                Some(ClientAction::KeepAliveResponse { id: *id })
-            }
-            ClientEvent::Death { .. } if self.respawn.is_automatic() => Some(ClientAction::Respawn),
-            _ => None,
-        };
+        // Automatic protocol responses the driver injects in reaction to an
+        // event, written in order before the event is surfaced. A single event
+        // can produce more than one: a keep-alive both answers the heartbeat and
+        // is the tick that flushes any pending chat acknowledgement.
+        let mut auto_actions: Vec<ClientAction> = Vec::new();
 
-        if let Some(action) = auto_action {
+        match &event {
+            ClientEvent::KeepAlive { id } => {
+                if self.keep_alive.is_automatic() {
+                    auto_actions.push(ClientAction::KeepAliveResponse { id: *id });
+                }
+                // Tick flush (vanilla's `sendChatAcknowledgement`, called on the
+                // client tick). The driver has no client tick of its own, so the
+                // keep-alive — the server's regular heartbeat — is the tick
+                // surrogate. This is deliberately independent of the keep-alive
+                // *policy*: even a bot suppressing auto keep-alive responses must
+                // still drain the server's pending-chat list.
+                if let Some(offset) = self.chat_tracker.take_acknowledgement() {
+                    auto_actions.push(ClientAction::ChatAck { offset });
+                }
+            }
+            ClientEvent::Death { .. } if self.respawn.is_automatic() => {
+                auto_actions.push(ClientAction::Respawn);
+            }
+            ClientEvent::Chat {
+                ack: Some(info), ..
+            } => {
+                // Burst valve (vanilla's `markMessageAsProcessed`): record the
+                // signed message and, if more than 64 are now pending, flush
+                // immediately rather than waiting for the next tick. A filtered
+                // message (`was_shown == false`) still advances the window and
+                // burns an offset — skipping it would silently desync the offset
+                // from the server's count.
+                let signature = MessageSignature::from(info.signature.as_slice());
+                if let Some(offset) = self.chat_tracker.mark_processed(signature, info.was_shown) {
+                    auto_actions.push(ClientAction::ChatAck { offset });
+                }
+            }
+            _ => {}
+        }
+
+        for action in auto_actions {
             match self.adapter.encode_action(self.state, &action) {
                 Ok(Some((packet_id, payload))) => {
                     if let Err(error) = self.conn.write_packet(packet_id, &payload).await {

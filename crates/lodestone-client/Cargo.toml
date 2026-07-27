@@ -19,6 +19,14 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 
+# The version-free signed-chat acknowledgement algorithm (`chat_ack`: the vanilla
+# 20-slot last-seen tracker). The stateful tracker accumulates across a session,
+# so it must live in the long-lived driver rather than the stateless adapter; this
+# is game-independent protocol bookkeeping, not version knowledge. Default
+# features only, so nothing beyond `lodestone-model` + `uuid` is pulled in and the
+# wasm build stays clean.
+lodestone-game = { workspace = true }
+
 # Version selection is delegated entirely to the registry crate: this crate never
 # names a concrete protocol version for adapter selection. Enabling a live-join
 # feature turns on the matching family *inside the registry* (see `[features]`),

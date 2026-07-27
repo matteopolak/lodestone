@@ -289,7 +289,7 @@ impl SharedState {
     /// that section copy-on-write, leaving the snapshot untouched.
     ///
     /// Note: this hands out block-state sections only. The column's light — which
-    /// lit meshing also needs — is served in parallel by [`light_at`](Self::light_at)
+    /// lit meshing also needs — is served in parallel by [`section_light`](Self::section_light)
     /// and [`lights_at`](Self::lights_at).
     #[must_use]
     pub(crate) fn section_at(
@@ -330,7 +330,7 @@ impl SharedState {
     /// range. Unlike [`section_at`](Self::section_at) an all-air (elided) block
     /// section still yields `Some` light: air carries light a face must sample.
     #[must_use]
-    pub(crate) fn light_at(
+    pub(crate) fn section_light(
         &self,
         pos: ChunkPos,
         light_section_index: usize,

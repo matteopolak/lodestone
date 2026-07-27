@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{
-    ClientAction, ClientBuilder, ClientEvent, ConnectionState, Directive, KeepAlivePolicy,
-    LoginProfile, RespawnPolicy, ServerAddress, SessionOutcome, VersionAdapter,
+    ChatAckInfo, ChatKind, ClientAction, ClientBuilder, ClientEvent, ConnectionState, Directive,
+    KeepAlivePolicy, LoginProfile, RespawnPolicy, ServerAddress, SessionOutcome, VersionAdapter,
 };
-use lodestone_model::{AdapterError, GameMode, Identifier};
+use lodestone_model::{AdapterError, GameMode, Identifier, Text};
 use lodestone_net::{Connection, memory_pair};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -36,6 +36,7 @@ struct FakeAdapter {
 const KEEPALIVE_RESP_ID: i32 = 0x30;
 const CHAT_ID: i32 = 0x06;
 const RESPAWN_RESP_ID: i32 = 0x0C;
+const CHAT_ACK_ID: i32 = 0x07;
 
 fn state_code(state: ConnectionState) -> u8 {
     match state {
@@ -135,6 +136,14 @@ impl VersionAdapter for FakeAdapter {
                 Ok(Some((self.keepalive_resp_id, payload)))
             }
             ClientAction::SendChat { text } => Ok(Some((CHAT_ID, text.clone().into_bytes()))),
+            // The standalone signed-chat acknowledgement. Vanilla's packet is a
+            // single VarInt offset; the fake encodes it as `[state, offset_be]`
+            // so a test can read the offset that actually went on the wire.
+            ClientAction::ChatAck { offset } => {
+                let mut payload = vec![state_code(state)];
+                payload.extend_from_slice(&offset.to_be_bytes());
+                Ok(Some((CHAT_ACK_ID, payload)))
+            }
             // Encodes to a packet only when a test opts in via `respawn_to`;
             // otherwise deliberately unrepresentable, to exercise quiet dropping.
             ClientAction::Respawn => {
@@ -166,6 +175,21 @@ fn send(id: i32, bytes: &[u8]) -> Directive {
         packet_id: id,
         payload: bytes.to_vec(),
     }
+}
+
+/// A `Directive` emitting a signed player-chat event carrying acknowledgement
+/// metadata, so the driver's last-seen tracker advances. `was_shown = false`
+/// models a filtered message, which vanilla still counts toward the window.
+fn signed_chat(signature: Vec<u8>, was_shown: bool) -> Directive {
+    Directive::Emit(ClientEvent::Chat {
+        text: Text::literal("hi"),
+        kind: ChatKind::Chat,
+        ack: Some(ChatAckInfo {
+            signature,
+            global_index: 0,
+            was_shown,
+        }),
+    })
 }
 
 fn start(
@@ -374,6 +398,166 @@ async fn death_manual_does_not_respawn() {
         nothing.is_err(),
         "expected no respawn packet in manual mode"
     );
+
+    drop(handle);
+}
+
+/// Signed-chat acknowledgement, tick trigger. Servers disconnect a client at
+/// 4096 unacknowledged signed messages; draining that list requires actually
+/// transmitting the acknowledgement offset. This proves the *tick* flush
+/// (vanilla's `sendChatAcknowledgement`): pending signed chats are acknowledged
+/// when the next server heartbeat (keep-alive) arrives. It also pins three
+/// semantics that are silent when wrong:
+///   - a **filtered** message (`was_shown = false`) still burns an offset,
+///   - an **unsigned** system chat (`ack = None`) does not, and
+///   - the flush is **independent of keep-alive policy** (Manual here, so the
+///     acknowledgement is the only packet that can appear on the wire).
+#[tokio::test]
+async fn signed_chat_is_acknowledged_on_keep_alive_tick() {
+    const C1: i32 = 0x61;
+    const C2: i32 = 0x62;
+    const C3: i32 = 0x63;
+    const KA: i32 = 0x64;
+
+    let adapter = FakeAdapter::new()
+        .on(
+            ConnectionState::Handshaking,
+            C1,
+            vec![signed_chat(vec![1, 1, 1, 1], true)],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            C2,
+            vec![signed_chat(vec![2, 2, 2, 2], false)],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            C3,
+            vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::literal("[Server] hello"),
+                kind: ChatKind::System,
+                ack: None,
+            })],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            KA,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 7 })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Manual);
+
+    peer.write_packet(C1, &[]).await.unwrap();
+    peer.write_packet(C2, &[]).await.unwrap();
+    peer.write_packet(C3, &[]).await.unwrap();
+
+    // Negative control: below the burst threshold and before any tick, pending
+    // chats produce no acknowledgement. Without this, a test that only saw the
+    // ack after the keep-alive could not tell the tick flush apart from an
+    // eager per-message one.
+    let nothing = tokio::time::timeout(Duration::from_millis(100), peer.read_packet()).await;
+    assert!(nothing.is_err(), "chats alone must not ack before a tick");
+
+    // The keep-alive is the tick surrogate: it flushes the accumulated offset.
+    peer.write_packet(KA, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(
+        id, CHAT_ACK_ID,
+        "a chat acknowledgement must be transmitted"
+    );
+    let offset = i32::from_be_bytes(payload[1..5].try_into().unwrap());
+    assert_eq!(
+        offset, 2,
+        "one shown + one filtered signed chat advance the window; the unsigned \
+         system chat does not"
+    );
+
+    // Every chat and the keep-alive still surface to the user unchanged.
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::Chat { ack: Some(_), .. })
+    ));
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::Chat { ack: Some(_), .. })
+    ));
+    assert!(matches!(
+        events.recv().await,
+        Some(ClientEvent::Chat { ack: None, .. })
+    ));
+    assert_eq!(events.recv().await, Some(ClientEvent::KeepAlive { id: 7 }));
+
+    drop(handle);
+}
+
+/// Signed-chat acknowledgement, burst trigger. Vanilla's `markMessageAsProcessed`
+/// sends a standalone acknowledgement the moment more than 64 messages are
+/// pending, without waiting for a tick — the safety valve for a burst arriving
+/// faster than the heartbeat. This drives 65 distinct-signature chats in a single
+/// packet with *no keep-alive anywhere*, so only the burst valve can flush, then
+/// proves the valve reset the offset (a later single chat acknowledges 1, not 66).
+/// Wiring only the tick trigger would hang this test; wiring only the valve would
+/// hang the previous one — both must be live.
+#[tokio::test]
+async fn chat_ack_burst_valve_fires_without_a_tick() {
+    const BURST: i32 = 0x70;
+    const MORE: i32 = 0x71;
+    const KA: i32 = 0x72;
+
+    // Distinct signatures: the tracker collapses consecutive duplicates, so 65
+    // identical ones would advance the window by 1, not 65.
+    let burst: Vec<Directive> = (0u16..65)
+        .map(|i| signed_chat(i.to_be_bytes().to_vec(), true))
+        .collect();
+
+    let adapter = FakeAdapter::new()
+        .on(ConnectionState::Handshaking, BURST, burst)
+        .on(
+            ConnectionState::Handshaking,
+            MORE,
+            vec![signed_chat(vec![9, 9, 9, 9], true)],
+        )
+        .on(
+            ConnectionState::Handshaking,
+            KA,
+            vec![Directive::Emit(ClientEvent::KeepAlive { id: 1 })],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter, KeepAlivePolicy::Manual);
+
+    peer.write_packet(BURST, &[]).await.unwrap();
+    let (id, payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, CHAT_ACK_ID);
+    let offset = i32::from_be_bytes(payload[1..5].try_into().unwrap());
+    assert_eq!(
+        offset, 65,
+        "the burst valve flushes the whole pending count"
+    );
+
+    // One more signed chat, then a tick: exactly 1 is acknowledged, proving the
+    // valve cleared the offset rather than leaving the 65 to be re-counted.
+    peer.write_packet(MORE, &[]).await.unwrap();
+    peer.write_packet(KA, &[]).await.unwrap();
+    let (id2, payload2) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id2, CHAT_ACK_ID);
+    let offset2 = i32::from_be_bytes(payload2[1..5].try_into().unwrap());
+    assert_eq!(
+        offset2, 1,
+        "offset reset after the valve; only the new chat counts"
+    );
+
+    // Drain the surfaced events (66 chats + 1 keep-alive) so the driver's sends
+    // never wedge on a full channel.
+    let mut chats = 0;
+    let mut keep_alives = 0;
+    for _ in 0..67 {
+        match events.recv().await {
+            Some(ClientEvent::Chat { .. }) => chats += 1,
+            Some(ClientEvent::KeepAlive { .. }) => keep_alives += 1,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    assert_eq!((chats, keep_alives), (66, 1));
 
     drop(handle);
 }
