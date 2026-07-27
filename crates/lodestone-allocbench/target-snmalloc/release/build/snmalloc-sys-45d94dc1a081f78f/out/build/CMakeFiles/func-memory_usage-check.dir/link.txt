@@ -1,1 +1,0 @@
-/opt/homebrew/opt/llvm/bin/clang++  -ffunction-sections -fdata-sections -fPIC --target=arm64-apple-macosx -mmacosx-version-min=26.5 -w -O3 -DNDEBUG -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/func-memory_usage-check.dir/src/test/func/memory_usage/memory_usage.cc.o" -o func-memory_usage-check
