@@ -1260,7 +1260,10 @@ impl Sim {
     /// happened, so a silent "simulating fine, drawing nothing" is visible in
     /// the HUD rather than invisible.
     pub fn extract_particles(&mut self, camera: &Camera) -> ParticleFrame {
-        let partial = (self.accumulator / TICK_DT) as f32;
+        // The same alpha every other interpolated draw uses, rather than a
+        // second computation of it -- two frame alphas that drift apart show up
+        // as particles lagging the terrain by a fraction of a tick.
+        let partial = self.interp_alpha;
         // Light is sampled from the live world when there is one. A `None` here
         // is not darkness: `ParticleEngine::extract` substitutes full sky light,
         // matching how the demo terrain is meshed.
