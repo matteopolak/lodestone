@@ -4,7 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -268,9 +268,6 @@ pub struct Sim {
     /// `fallback`/key — never a raw error. Loaded once with the atlas from the
     /// same pack, so it shares the atlas's ownership and lifetime.
     language: Option<Arc<Language>>,
-    /// Vanilla water state ids, precomputed once from the atlas, for the live
-    /// collision view's `is_water` swim hook. Empty on the demo palette.
-    water_ids: Arc<HashSet<u32>>,
     /// Count of live columns that failed to mesh (guard rejected or all-air
     /// centre on a column the server reports loaded). Surfaced in the debug HUD
     /// next to `live_cols` so this defect class is a one-line diagnosis instead
@@ -448,23 +445,6 @@ impl Sim {
         let render_live = resources.vanilla_atlas.is_some();
         let mut scheduler = MeshScheduler::new(workers, resources.classifier);
 
-        // Vanilla water ids, precomputed once from the atlas for the live
-        // collision view's swim hook. Water never occludes (so it is already a
-        // non-solid collider); this set only drives buoyancy. Built before the
-        // atlas is moved into the struct; empty on the demo palette.
-        let water_ids: Arc<HashSet<u32>> = {
-            let mut set = HashSet::new();
-            if let Some(atlas) = resources.vanilla_atlas.as_deref() {
-                for level in 0..=15 {
-                    if let Some(sid) = atlas.state_id_of(&format!("minecraft:water[level={level}]"))
-                    {
-                        set.insert(sid);
-                    }
-                }
-            }
-            Arc::new(set)
-        };
-
         // Schedule the demo world only when meshing on the demo palette. Under
         // the vanilla atlas the demo world's ids would misclassify, so it is left
         // unmeshed and the live server world is meshed instead (on chunk arrival,
@@ -535,7 +515,6 @@ impl Sim {
             pending_removals: Vec::new(),
             vanilla_atlas: resources.vanilla_atlas,
             language: resources.language,
-            water_ids,
             mesh_drops: 0,
             dirty_columns: BTreeSet::new(),
             teleport_count: 0,
@@ -1081,13 +1060,7 @@ impl Sim {
             }
         }
 
-        Some(LiveCollision::new(
-            sections,
-            min_y,
-            section_count,
-            atlas,
-            Arc::clone(&self.water_ids),
-        ))
+        Some(LiveCollision::new(sections, min_y, section_count, atlas))
     }
 
     /// One free-fly tick: move horizontally relative to yaw, vertically with
@@ -2146,6 +2119,8 @@ fn world_sections(world: &World) -> Vec<((i32, i32), usize)> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::config::{Config, Mode};
 
