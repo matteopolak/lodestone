@@ -108,19 +108,43 @@ fn dispatch(
         .expect("handle packet")
 }
 
-/// Asserts the single directive a world-mutating packet emits is a `ChunkLoaded`
-/// re-mesh signal for the given chunk column.
-fn assert_remesh(directives: &[lodestone_model::Directive], chunk_x: i32, chunk_z: i32) {
+/// Asserts the single directive a world-mutating packet emits is a
+/// `SectionBlocksChanged` dirty-region signal naming the given column and the
+/// given section-relative cells.
+///
+/// This deliberately does *not* accept `ChunkLoaded`. `7725aa3` split the two
+/// signals apart because they are different invalidation units: a column
+/// arrival dirties the column and its 8 horizontal seams, while a block change
+/// dirties one section and only the neighbours the changed cell physically
+/// touches. Conflating them cost ~216 section meshes per redstone tick.
+///
+/// The section-relative coordinates are load-bearing, not decoration — they are
+/// what lets a consumer tell an interior edit from a boundary one, so they are
+/// asserted rather than ignored.
+fn assert_remesh(
+    directives: &[lodestone_model::Directive],
+    chunk_x: i32,
+    chunk_z: i32,
+    blocks: &[[u8; 3]],
+) {
     use lodestone_model::{ClientEvent, Directive};
     match directives {
-        [Directive::Emit(ClientEvent::ChunkLoaded { pos })] => {
+        [Directive::Emit(ClientEvent::SectionBlocksChanged {
+            section,
+            blocks: got,
+        })] => {
             assert_eq!(
-                (pos.x, pos.z),
+                (section.x, section.z),
                 (chunk_x, chunk_z),
                 "block change must dirty its owning column"
             );
+            assert_eq!(
+                got.as_slice(),
+                blocks,
+                "block change must name the section-relative cells it touched"
+            );
         }
-        other => panic!("expected one ChunkLoaded re-mesh directive, got {other:?}"),
+        other => panic!("expected one SectionBlocksChanged re-mesh directive, got {other:?}"),
     }
 }
 
@@ -142,7 +166,7 @@ fn block_update_routes_single_set_block() {
     assert_eq!(sink.set_block, vec![(10, -5, 20, 100)]);
     assert!(sink.set_blocks.is_empty());
     // block (10, -5, 20) lives in chunk column (0, 1).
-    assert_remesh(&directives, 0, 1);
+    assert_remesh(&directives, 0, 1, &[[10, 11, 4]]);
 }
 
 #[test]
@@ -207,7 +231,7 @@ fn section_blocks_update_routes_relative_writes() {
     );
     assert!(sink.set_block.is_empty());
     // section (1, -2, 3) shares its chunk column (1, 3).
-    assert_remesh(&directives, 1, 3);
+    assert_remesh(&directives, 1, 3, &[[1, 2, 3], [15, 0, 15]]);
 }
 
 #[test]
