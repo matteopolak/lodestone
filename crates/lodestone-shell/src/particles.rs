@@ -229,6 +229,125 @@ impl Particles {
         );
     }
 
+    /// Vanilla's `ClientPacketListener.handleParticleEvent` — the general
+    /// `LEVEL_PARTICLES` packet path, as opposed to the `LevelEvent` 2001
+    /// shortcut [`Self::destroy_block`] covers. Spawns `count` particles of
+    /// `kind` (the particle type's namespace-stripped path, e.g. `"flame"`)
+    /// at `pos`.
+    ///
+    /// # `count == 0` is not "spawn nothing"
+    ///
+    /// Confirmed against the 26.2 client sources
+    /// (`ClientPacketListener.handleParticleEvent`,
+    /// `.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`):
+    /// when `count == 0` vanilla spawns exactly **one** particle at the
+    /// *exact* `pos` (no positional jitter), whose velocity is
+    /// `maxSpeed * offset` per axis rather than drawn from noise:
+    ///
+    /// ```text
+    /// if (count == 0) {
+    ///     xa = maxSpeed * xDist; ya = maxSpeed * yDist; za = maxSpeed * zDist;
+    ///     addParticle(particle, x, y, z, xa, ya, za);
+    /// } else {
+    ///     for (i in 0..count) {
+    ///         xVarience = nextGaussian() * xDist; // ditto y, z
+    ///         xa = nextGaussian() * maxSpeed;      // ditto y, z — NOT scaled by offset
+    ///         addParticle(particle, x + xVarience, y + yVarience, z + zVarience, xa, ya, za);
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// So `offset` means two different things depending on `count`: a raw
+    /// velocity direction when `count == 0`, and a per-axis jitter *bound*
+    /// (multiplied by an independent gaussian draw) otherwise — and in the
+    /// `count > 0` branch the velocity draws are unrelated to `offset`
+    /// entirely, only to `max_speed`.
+    ///
+    /// Particle-burst randomness does not need to replay bit-exact against
+    /// vanilla — nothing observes it across the wire, the same call
+    /// `lodestone_particle`'s own `JavaRandom` docs make for the emitters
+    /// below — so the gaussian draws here are an ordinary Box-Muller
+    /// transform over the engine's existing RNG stream rather than a second
+    /// `java.util.Random` reimplementation.
+    ///
+    /// Only particle types this shell has a dedicated emitter for are
+    /// spawned; an unrecognised `kind` is logged and dropped. The shape of a
+    /// burst lives in the per-type emitter ([`lodestone_particle::emit`]),
+    /// and guessing at one here would just be a worse copy of it.
+    pub fn spawn_particles(
+        &mut self,
+        kind: &str,
+        pos: [f64; 3],
+        offset: [f32; 3],
+        max_speed: f32,
+        count: i32,
+    ) {
+        if count == 0 {
+            let vel = [
+                f64::from(max_speed) * f64::from(offset[0]),
+                f64::from(max_speed) * f64::from(offset[1]),
+                f64::from(max_speed) * f64::from(offset[2]),
+            ];
+            self.spawn_one(kind, pos, vel);
+            return;
+        }
+        for _ in 0..count {
+            let jittered = [
+                pos[0] + self.gaussian() * f64::from(offset[0]),
+                pos[1] + self.gaussian() * f64::from(offset[1]),
+                pos[2] + self.gaussian() * f64::from(offset[2]),
+            ];
+            let vel = [
+                self.gaussian() * f64::from(max_speed),
+                self.gaussian() * f64::from(max_speed),
+                self.gaussian() * f64::from(max_speed),
+            ];
+            self.spawn_one(kind, jittered, vel);
+        }
+    }
+
+    /// Dispatches one particle to the emitter matching `kind`. Mirrors
+    /// `Level.addParticle`'s per-type dispatch, narrowed to the sheet
+    /// particles [`lodestone_particle::emit`] implements today.
+    fn spawn_one(&mut self, kind: &str, pos: [f64; 3], vel: [f64; 3]) {
+        let [x, y, z] = pos;
+        let [xa, ya, za] = vel;
+        match kind {
+            "flame" => emit::flame(&mut self.engine, x, y, z, xa, ya, za),
+            "smoke" => emit::smoke(&mut self.engine, x, y, z, xa, ya, za, 1.0),
+            // `LargeSmokeParticle extends SmokeParticle` with `scale = 2.5F`.
+            "large_smoke" => emit::smoke(&mut self.engine, x, y, z, xa, ya, za, 2.5),
+            "crit" => emit::crit(&mut self.engine, x, y, z, xa, ya, za),
+            "splash" => emit::splash(&mut self.engine, x, y, z, xa, ya, za),
+            "bubble" => emit::bubble(&mut self.engine, x, y, z, xa, ya, za),
+            other => tracing::debug!(
+                target: "particles",
+                "no emitter wired for particle type {other:?}; dropped"
+            ),
+        }
+    }
+
+    /// One standard-normal draw (Box-Muller), for the positional/velocity
+    /// jitter [`Self::spawn_particles`] needs. See that method's docs for why
+    /// this does not need to match `java.util.Random.nextGaussian()`
+    /// bit-for-bit.
+    fn gaussian(&mut self) -> f64 {
+        let rng = self.engine.rng();
+        let u1 = rng.next_double().max(1e-12);
+        let u2 = rng.next_double();
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
+
+    /// Test-only seam: installs a `(Sheet, frame) -> UV rect` table directly,
+    /// bypassing `ParticleAtlas`/jar I/O — mirrors the fixture this module's
+    /// own tests use (see `sheet_particle_resolves_with_an_atlas`), exposed so
+    /// `crate::sim`'s tests can assert a live `NetUpdate::Particles` resolves
+    /// without needing the real vanilla jar.
+    #[cfg(test)]
+    pub(crate) fn install_test_sheet_uv(&mut self, table: HashMap<(Sheet, u16), [f32; 4]>) {
+        self.sheet_uv = Arc::new(table);
+    }
+
     /// Advance every live particle one tick against `view`.
     pub fn tick(&mut self, view: &dyn CollisionView) {
         self.engine.tick(view);
@@ -672,6 +791,120 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Installs a `(Sheet, frame) -> UV` table for every sheet
+    /// `spawn_particles` can dispatch to, mirroring
+    /// `sheet_particle_resolves_with_an_atlas`'s single-sheet fixture but wide
+    /// enough to resolve flame, smoke and crit in the same test.
+    fn resolvable() -> Particles {
+        let mut p = Particles::new(None);
+        let rect = [0.0f32, 0.0, 0.0625, 0.0625];
+        p.sheet_uv = Arc::new(HashMap::from([
+            ((Sheet::Flame, 0u16), rect),
+            ((Sheet::Generic, 0u16), rect),
+            ((Sheet::CriticalHit, 0u16), rect),
+        ]));
+        p
+    }
+
+    /// `count > 0` must spawn exactly `count` particles of a resolvable
+    /// sheet-sourced type, and every one of them must draw (`unresolved ==
+    /// 0`) — the hermetic proof that `NetUpdate::Particles`'s payload reaches
+    /// the emitter and comes out the other side as live, drawable particles.
+    #[test]
+    fn spawn_particles_emits_exactly_count_flame_particles_all_resolved() {
+        let mut p = resolvable();
+        p.spawn_particles("flame", [0.5, 65.0, 0.5], [0.1, 0.1, 0.1], 0.02, 7);
+        assert_eq!(
+            p.engine.particles().len(),
+            7,
+            "count must be honoured exactly"
+        );
+
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert_eq!(frame.alive, 7);
+        assert_eq!(frame.unresolved, 0, "flame's sheet is in the table");
+        assert_eq!(frame.drawn, 7);
+    }
+
+    /// Negative control: an unrecognised particle type must not spawn
+    /// anything (dropped, not guessed at), so a caller can tell "no emitter
+    /// wired" apart from "wired but unresolved".
+    #[test]
+    fn spawn_particles_for_an_unknown_type_spawns_nothing() {
+        let mut p = resolvable();
+        p.spawn_particles("totally_not_a_real_particle", [0.0, 64.0, 0.0], [0.0; 3], 0.0, 5);
+        assert!(
+            p.engine.particles().is_empty(),
+            "an unmapped kind must spawn nothing rather than guess at a sheet"
+        );
+    }
+
+    /// Vanilla's `count == 0` special case: exactly **one** particle, at the
+    /// *exact* position (no positional jitter), whose velocity is
+    /// `max_speed * offset` per axis — confirmed against
+    /// `ClientPacketListener.handleParticleEvent` in the 26.2 client sources.
+    /// This is the case an implementation that reads "count" as "how many to
+    /// spawn" gets silently wrong by spawning zero.
+    #[test]
+    fn count_zero_spawns_one_particle_at_the_exact_position_with_offset_as_velocity() {
+        let mut p = resolvable();
+        p.spawn_particles("flame", [1.0, 64.0, -2.0], [0.25, 0.5, -0.25], 4.0, 0);
+        let particles = p.engine.particles();
+        assert_eq!(particles.len(), 1, "count == 0 means exactly one particle");
+        let particle = &particles[0];
+        // `FlameParticle`'s constructor adds its own small (< 0.05 per axis)
+        // positional jitter on top of whatever position it is constructed
+        // at, so "no positional jitter" is checked as "close to `pos`", not
+        // bit-exact — the property under test is that `spawn_particles`
+        // itself never applies the `gaussian() * offset` jitter the `count >
+        // 0` branch uses, not that nothing downstream ever perturbs it.
+        assert!(
+            (particle.x - 1.0).abs() < 0.1
+                && (particle.y - 64.0).abs() < 0.1
+                && (particle.z - -2.0).abs() < 0.1,
+            "count == 0 must not apply spawn_particles's own positional jitter, got ({}, {}, {})",
+            particle.x,
+            particle.y,
+            particle.z
+        );
+        // `FlameParticle`'s constructor almost entirely discards the seeded
+        // scatter component (a `* 0.01` damp) and replaces it with the
+        // requested velocity, so the resulting `xd`/`yd`/`zd` should track
+        // `max_speed * offset` closely rather than the request being ignored.
+        assert!(
+            (particle.xd - 4.0 * 0.25).abs() < 0.05,
+            "xd {} should track max_speed * offset.x = 1.0",
+            particle.xd
+        );
+        assert!(
+            (particle.zd - 4.0 * -0.25).abs() < 0.05,
+            "zd {} should track max_speed * offset.z = -1.0",
+            particle.zd
+        );
+    }
+
+    /// A `count > 0` burst must scatter around `pos`, not stack every
+    /// particle on top of it — the observable difference between "offset
+    /// consumed as jitter" and "offset ignored".
+    #[test]
+    fn count_greater_than_zero_scatters_positions_around_pos() {
+        let mut p = resolvable();
+        p.spawn_particles("flame", [0.0, 64.0, 0.0], [1.0, 1.0, 1.0], 0.0, 64);
+        let particles = p.engine.particles();
+        assert_eq!(particles.len(), 64);
+        let distinct_x = particles
+            .iter()
+            .map(|particle| particle.x.to_bits())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(
+            distinct_x > 1,
+            "a count > 0 burst with a nonzero offset must scatter positions, not clone one point"
+        );
+    }
 
     /// No models loaded (the offline demo world) must report unresolved rather
     /// than pretending the frame was empty — a silently-zero particle count is
