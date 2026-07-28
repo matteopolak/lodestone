@@ -1311,6 +1311,14 @@ impl Sim {
         self.particles.instances()
     }
 
+    /// The number of fixed simulation ticks (20/s) elapsed. Drives animated
+    /// block sprites, whose vanilla frame timing is measured in game ticks; the
+    /// renderer samples each animation at this tick each frame.
+    #[must_use]
+    pub fn tick_count(&self) -> u64 {
+        self.tick_count
+    }
+
     /// The block state id at a world position, or air when the column is not
     /// loaded or the y is outside the build range.
     fn block_at_world(&self, block: [i32; 3]) -> u32 {

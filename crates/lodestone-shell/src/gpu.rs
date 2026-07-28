@@ -11,10 +11,12 @@
 use std::collections::HashMap;
 
 use lodestone_render::{
-    BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, EntityModelSet,
-    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh, ModelPipeline,
+    AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer,
+    EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh,
+    ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
-    model_camera_buffer, plan_entities, upload_instances,
+    model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
+    upload_instances,
     vertex::vram_bytes,
 };
 
@@ -276,7 +278,39 @@ struct ModelRenderer {
     /// up per tinted quad so grass, foliage and every other source get their own
     /// colour instead of one hardcoded green.
     palette_bind_group: wgpu::BindGroup,
+    /// The animated block sprites' timelines paired with each slot's normalised
+    /// frame height, cloned from the block models so the per-slot animation
+    /// uniform can be rebuilt from the current game tick each frame via
+    /// [`RenderState::update_animation`]. Ordered by slot id (entry `i` is slot
+    /// `i + 1`); empty when the pack has no animated block sprites.
+    animations: Vec<(SpriteAnimation, f32)>,
+    /// The per-slot animation uniform buffer (one [`AnimSlotUniform`] per slot,
+    /// slot 0 static). Rewritten each frame from the game tick; both shaders
+    /// sample it to offset an animated quad's V into its current frame.
+    anim_buffer: wgpu::Buffer,
+    /// The animation bind group for the opaque model pipeline (its group 3).
+    anim_bind_group: wgpu::BindGroup,
+    /// The animation bind group for the fluid pipeline (its group 2). Wraps the
+    /// same [`Self::anim_buffer`]; only the group index differs.
+    water_anim_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
+}
+
+/// Build the per-slot animation uniform array for game `tick` from the snapshot
+/// of animated sprite timelines. Index 0 is the static sentinel; index `s`
+/// (`1..=len`) is slot `s`, its sampled region resolved into a V offset by the
+/// slot's normalised frame height. Always yields at least the sentinel, so the
+/// uniform buffer is never zero-sized.
+fn anim_slots_at(animations: &[(SpriteAnimation, f32)], tick: u64) -> Vec<AnimSlotUniform> {
+    let mut slots = Vec::with_capacity(animations.len() + 1);
+    slots.push(AnimSlotUniform::static_slot());
+    for (animation, frame_v) in animations {
+        slots.push(AnimSlotUniform::from_sample(
+            animation.sample(tick),
+            *frame_v,
+        ));
+    }
+    slots
 }
 
 /// GPU resources for the entity pass: the instanced pipeline, one uploaded mesh
@@ -558,12 +592,30 @@ impl RenderState {
             let palette_buffer =
                 lodestone_render::model_palette_buffer(device, models.tint_palette());
             let palette_bind_group = pipeline.palette_bind_group(device, &palette_buffer);
+            // Snapshot the animated sprites' timelines (slot order) so the
+            // per-slot uniform can be rebuilt from the live game tick each frame.
+            let animations: Vec<(SpriteAnimation, f32)> = models
+                .sprite_animations()
+                .iter()
+                .cloned()
+                .zip(models.anim_frame_v().iter().copied())
+                .collect();
+            // Build the uniform (slot 0 static) at tick 0; rewritten each frame.
+            // Two bind groups wrap the one buffer because the pipelines number
+            // the animation group differently (model = 3, fluid = 2).
+            let anim_buffer = model_anim_buffer(device, &anim_slots_at(&animations, 0));
+            let anim_bind_group = pipeline.anim_bind_group(device, &anim_buffer);
+            let water_anim_bind_group = water_pipeline.anim_bind_group(device, &anim_buffer);
             ModelRenderer {
                 pipeline,
                 water_pipeline,
                 atlas,
                 atlas_bind_group,
                 palette_bind_group,
+                animations,
+                anim_buffer,
+                anim_bind_group,
+                water_anim_bind_group,
                 sections: HashMap::new(),
             }
         });
@@ -738,6 +790,21 @@ impl RenderState {
     /// Render every section into `view` using `camera`. Writes all section
     /// camera uniforms first, then draws. If `outline` names a block, a
     /// wireframe box is drawn around it after the terrain.
+    /// Rewrite the animated-block uniform for the current game `tick`.
+    ///
+    /// Call once per frame *before* [`render`](Self::render) with the live game
+    /// tick (`Sim::tick_count`). Each animated sprite slot is sampled at `tick`
+    /// via the existing `anim.rs` timing and its resolved V offset uploaded, so
+    /// the model/fluid shaders draw the correct frame. A no-op when there is no
+    /// live-vanilla model pass (the offline demo path). Skipping it leaves every
+    /// sprite on frame 0 — the pre-wiring behaviour — rather than erroring.
+    pub fn update_animation(&self, queue: &wgpu::Queue, tick: u64) {
+        if let Some(model) = &self.model {
+            let slots = anim_slots_at(&model.animations, tick);
+            update_model_anim_buffer(queue, &model.anim_buffer, &slots);
+        }
+    }
+
     pub fn render(
         &self,
         device: &wgpu::Device,
@@ -763,12 +830,7 @@ impl RenderState {
             for section in model.sections.values() {
                 let uniform = CameraUniform {
                     view_proj,
-                    section_origin: [
-                        section.origin[0],
-                        section.origin[1],
-                        section.origin[2],
-                        0.0,
-                    ],
+                    section_origin: [section.origin[0], section.origin[1], section.origin[2], 0.0],
                 };
                 queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
             }
@@ -832,6 +894,7 @@ impl RenderState {
                 pass.set_pipeline(&model.pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                pass.set_bind_group(3, &model.anim_bind_group, &[]);
                 for section in model.sections.values() {
                     let Some(mesh) = section.mesh.as_ref() else {
                         continue;
@@ -851,6 +914,7 @@ impl RenderState {
                 // pipeline). Same camera + atlas bind groups as the opaque pass.
                 pass.set_pipeline(&model.water_pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
                 for section in model.sections.values() {
                     let Some(water) = section.water.as_ref() else {
                         continue;
@@ -896,7 +960,8 @@ impl RenderState {
             // depth write off, so it must read a depth buffer that already holds
             // every opaque surface, or fragments behind a wall would show
             // through. The outline is drawn after it, as vanilla does.
-            self.particles.draw(&mut pass, &self.particle_atlas_bind_group);
+            self.particles
+                .draw(&mut pass, &self.particle_atlas_bind_group);
             stats.particles_drawn = self.particles.count();
 
             if outline.is_some() {
@@ -1621,8 +1686,8 @@ mod tests {
             head_yaw: 0.0,
             pitch: 0.0,
             scale: 1.0,
-                             anim: lodestone_render::AnimInput::REST,
-                         }];
+            anim: lodestone_render::AnimInput::REST,
+        }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the
         // model's single flat placeholder tint. Brightness scaling (lighting)
@@ -1650,7 +1715,11 @@ mod tests {
                     off += 1;
                 }
             }
-            let frac = if mob == 0 { 0.0 } else { off as f64 / mob as f64 };
+            let frac = if mob == 0 {
+                0.0
+            } else {
+                off as f64 / mob as f64
+            };
             (mob, frac)
         };
 
