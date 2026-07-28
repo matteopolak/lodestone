@@ -164,8 +164,31 @@ impl CraftingGrid {
         }
     }
 
-    fn get(&self, x: usize, y: usize) -> Option<&Identifier> {
+    /// Grid width in cells.
+    #[must_use]
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Grid height in cells.
+    #[must_use]
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// The item in cell `(x, y)`, or `None` if it is empty or out of bounds.
+    #[must_use]
+    pub fn get(&self, x: usize, y: usize) -> Option<&Identifier> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
         self.cells[y * self.width + x].as_ref()
+    }
+
+    /// Whether every cell is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cells.iter().all(Option::is_none)
     }
 
     /// The non-empty items in the grid, order unspecified.
@@ -434,5 +457,105 @@ impl Recipe {
             Recipe::Shapeless(r) if r.matches(grid, tags) => Some(&r.result),
             _ => None,
         }
+    }
+
+    /// Whether this recipe can ever match a [`CraftingGrid`] — i.e. whether it
+    /// is one of the two grid-crafting kinds.
+    #[must_use]
+    pub fn is_grid_recipe(&self) -> bool {
+        matches!(self, Recipe::Shaped(_) | Recipe::Shapeless(_))
+    }
+}
+
+/// A loaded recipe corpus: every recipe, keyed by its data id, plus the item
+/// tags its ingredients reference.
+///
+/// This is the aggregate that turns [`Recipe`] from a lone data type into
+/// something a client can query. Build it with [`RecipeBook::insert`], or —
+/// behind the `json` feature — load a whole vanilla datapack tree with
+/// [`crate::recipe_json::load_data_root`].
+///
+/// ## Ordering
+///
+/// [`match_grid`](Self::match_grid) returns the **first** matching recipe in
+/// id order. Vanilla's `RecipeManager` iterates an unordered map, so it relies
+/// on the corpus containing no two grid recipes that match the same grid; the
+/// sorted order here just makes our answer deterministic when a datapack
+/// violates that.
+///
+/// ## What this is *not*
+///
+/// It is not the source of truth for an open crafting menu's result slot. A
+/// vanilla server computes that itself (`CraftingMenu.slotsChanged` sends a
+/// `container_set_slot` for slot 0), and this client honours the server the
+/// same way. Use this book for the recipe-book UI, ghost recipes, and
+/// latency-hiding prediction — never to overwrite a server-sent result slot.
+#[derive(Debug, Default, Clone)]
+pub struct RecipeBook {
+    /// Sorted by id so matching is deterministic.
+    recipes: Vec<(Identifier, Recipe)>,
+    tags: TagResolver,
+}
+
+impl RecipeBook {
+    /// An empty book with no tags.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// An empty book that resolves ingredients against `tags`.
+    #[must_use]
+    pub fn with_tags(tags: TagResolver) -> Self {
+        Self {
+            recipes: Vec::new(),
+            tags,
+        }
+    }
+
+    /// The tag resolver ingredients are matched against.
+    #[must_use]
+    pub fn tags(&self) -> &TagResolver {
+        &self.tags
+    }
+
+    /// Adds or replaces a recipe, keeping the corpus id-sorted.
+    pub fn insert(&mut self, id: Identifier, recipe: Recipe) {
+        match self.recipes.binary_search_by(|(k, _)| k.cmp(&id)) {
+            Ok(at) => self.recipes[at] = (id, recipe),
+            Err(at) => self.recipes.insert(at, (id, recipe)),
+        }
+    }
+
+    /// Number of recipes loaded.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.recipes.len()
+    }
+
+    /// Whether the book holds no recipes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.recipes.is_empty()
+    }
+
+    /// Iterates every `(id, recipe)` pair in id order.
+    pub fn iter(&self) -> impl Iterator<Item = (&Identifier, &Recipe)> {
+        self.recipes.iter().map(|(k, v)| (k, v))
+    }
+
+    /// The first grid recipe matching `grid`, with its id and result.
+    #[must_use]
+    pub fn match_grid_entry(&self, grid: &CraftingGrid) -> Option<(&Identifier, &ItemStack)> {
+        self.recipes
+            .iter()
+            .find_map(|(id, r)| r.match_grid(grid, &self.tags).map(|res| (id, res)))
+    }
+
+    /// The result of the first grid recipe matching `grid`, or `None` if the
+    /// grid crafts nothing.
+    #[must_use]
+    pub fn match_grid(&self, grid: &CraftingGrid) -> Option<&ItemStack> {
+        self.match_grid_entry(grid).map(|(_, result)| result)
     }
 }

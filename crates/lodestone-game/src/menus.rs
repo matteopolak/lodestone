@@ -33,6 +33,7 @@ use lodestone_model::{ClientEvent, ItemStack as ModelItemStack, Text, ids::Resou
 use crate::{
     item::ItemStack,
     menu::Menu,
+    recipe::{CraftingGrid, RecipeBook},
     reconcile::{ClientMenu, ServerUpdate},
 };
 
@@ -276,15 +277,59 @@ impl Menus {
                     (None, None)
                 }
             };
+            let menu = build_menu(menu_type.as_ref(), container_size);
             self.opened = Some(OpenMenu {
                 window_id,
                 menu_type,
                 title,
-                menu: ClientMenu::new(Menu::generic(container_size)),
+                menu: ClientMenu::new(menu),
                 data: Vec::new(),
             });
         }
         &mut self.opened.as_mut().expect("just set").menu
+    }
+
+    /// The active menu's crafting grid contents, if it has a crafting grid.
+    ///
+    /// This is the player's 2×2 on the inventory screen and the 3×3 in an open
+    /// crafting table.
+    #[must_use]
+    pub fn crafting_grid(&self) -> Option<CraftingGrid> {
+        self.active().crafting_grid()
+    }
+
+    /// The result `book` says the active menu's crafting grid would produce.
+    ///
+    /// **This is a prediction, not the truth.** A vanilla server computes the
+    /// result itself and pushes it as a `container_set_slot` for the result
+    /// slot, which [`apply`](Self::apply) already reconciles into the menu; read
+    /// the result slot for what the player is actually holding a claim to. Use
+    /// this for a ghost/preview, for showing a result before the round-trip
+    /// lands, or when there is no server at all.
+    #[must_use]
+    pub fn predicted_craft_result(&self, book: &RecipeBook) -> Option<ItemStack> {
+        let grid = self.crafting_grid()?;
+        if grid.is_empty() {
+            return None;
+        }
+        book.match_grid(&grid).cloned()
+    }
+}
+
+/// Chooses the [`Menu`] layout for an opened window.
+///
+/// The **size** always comes from the server's own content length; `menu_type`
+/// only selects the slot *kinds*. A crafting table advertises
+/// `minecraft:crafting`, whose `CraftingMenu` is `1 + 3*3 = 10` container slots;
+/// if the server disagrees about the size we fall back to a generic container
+/// rather than build a menu whose slot count contradicts the packet.
+fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
+    let is_crafting =
+        menu_type.is_some_and(|key| key.namespace() == "minecraft" && key.path() == "crafting");
+    if is_crafting && container_size == 10 {
+        Menu::crafting(3, 3)
+    } else {
+        Menu::generic(container_size)
     }
 }
 

@@ -29,6 +29,7 @@
 use crate::{
     container::{Container, EquipmentSlot, Slot, SlotKind},
     item::ItemStack,
+    recipe::CraftingGrid,
 };
 
 /// Which menu layout a [`Menu`] uses, selecting the quick-move regions.
@@ -42,6 +43,41 @@ pub enum MenuKind {
         /// Number of container slots preceding the player inventory.
         container_size: usize,
     },
+}
+
+/// Where a menu's crafting grid and result live, in **menu-slot** indices.
+///
+/// Both of vanilla's grid menus put the result first and the grid immediately
+/// after it (`InventoryMenu`: result 0, 2×2 grid 1..=4; `CraftingMenu`: result
+/// 0, 3×3 grid 1..=9), so one descriptor covers both. It is carried on the
+/// [`Menu`] rather than encoded in [`MenuKind`] deliberately: a crafting table's
+/// *quick-move regions* are the generic-container ones, only its slot **kinds**
+/// differ, and those already live on [`Slot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CraftLayout {
+    /// Menu index of the take-only result slot.
+    pub result_slot: usize,
+    /// Menu index of the grid's top-left cell; the grid occupies
+    /// `first_input..first_input + width * height` in row-major order.
+    pub first_input: usize,
+    /// Grid width in cells.
+    pub width: usize,
+    /// Grid height in cells.
+    pub height: usize,
+}
+
+impl CraftLayout {
+    /// Number of input cells.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.width * self.height
+    }
+
+    /// Whether `menu_index` is one of the grid's input cells.
+    #[must_use]
+    pub fn is_input(&self, menu_index: usize) -> bool {
+        menu_index >= self.first_input && menu_index < self.first_input + self.cell_count()
+    }
 }
 
 /// Native size of the player inventory container (hotbar+main+armour+offhand).
@@ -61,6 +97,8 @@ pub struct Menu {
     /// Index into `containers` of the player inventory, for native swap
     /// addressing.
     player_container: usize,
+    /// Where the crafting grid and result sit, for menus that have one.
+    craft: Option<CraftLayout>,
     /// Server-synchronised state id; bumped on every predicted mutation.
     state_id: u32,
     /// Drag (quick-craft) accumulator state; see [`crate::click`].
@@ -109,6 +147,64 @@ impl Menu {
             slots,
             carried: None,
             player_container: 0,
+            craft: Some(CraftLayout {
+                result_slot: 0,
+                first_input: 1,
+                width: 2,
+                height: 2,
+            }),
+            state_id: 0,
+            quick_craft_status: 0,
+            quick_craft_type: 0,
+            quick_craft_slots: Vec::new(),
+        }
+    }
+
+    /// Builds a crafting-table menu: a take-only result slot, a `width × height`
+    /// input grid, then the player's main storage and hotbar.
+    ///
+    /// Vanilla's `CraftingMenu` is `0` result, `1..=9` grid, `10..=36` main,
+    /// `37..=45` hotbar — **positionally identical** to
+    /// [`generic`](Self::generic) with a container size of `1 + width * height`,
+    /// which is why the [`MenuKind`] stays `Generic`: the size a
+    /// `container_set_content` implies (`items.len() - 36`) and the quick-move
+    /// regions are the same. What differs is the slot *kinds*, and getting those
+    /// wrong is not cosmetic — with a plain `Normal` slot at index 0 a
+    /// shift-click from the player inventory happily deposits into the **result
+    /// slot**, and the server then contradicts every prediction that follows.
+    #[must_use]
+    pub fn crafting(width: usize, height: usize) -> Self {
+        let cells = width * height;
+        let container_size = cells + 1;
+        // container 0: result; container 1: grid; container 2: player inventory.
+        let containers = vec![
+            Container::new(1),
+            Container::new(cells),
+            Container::new(PLAYER_NATIVE_SIZE),
+        ];
+        let mut slots = Vec::with_capacity(container_size + 36);
+        slots.push(Slot::of(0, 0, SlotKind::Output));
+        for i in 0..cells {
+            slots.push(Slot::of(1, i, SlotKind::CraftingInput));
+        }
+        for native in 9..36 {
+            slots.push(Slot::normal(2, native)); // main storage
+        }
+        for native in 0..9 {
+            slots.push(Slot::normal(2, native)); // hotbar
+        }
+        Self {
+            kind: MenuKind::Generic { container_size },
+            containers,
+            slots,
+            carried: None,
+            player_container: 2,
+            craft: Some(CraftLayout {
+                result_slot: 0,
+                first_input: 1,
+                width,
+                height,
+            }),
             state_id: 0,
             quick_craft_status: 0,
             quick_craft_type: 0,
@@ -140,6 +236,7 @@ impl Menu {
             slots,
             carried: None,
             player_container: 1,
+            craft: None,
             state_id: 0,
             quick_craft_status: 0,
             quick_craft_type: 0,
@@ -157,6 +254,33 @@ impl Menu {
     #[must_use]
     pub fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Where this menu's crafting grid and result slot live, if it has one.
+    ///
+    /// The player inventory screen reports a 2×2 grid at menu slot 1 with its
+    /// result at 0; a crafting table reports 3×3. A chest reports `None`.
+    #[must_use]
+    pub fn craft_layout(&self) -> Option<CraftLayout> {
+        self.craft
+    }
+
+    /// Snapshots the crafting grid's contents as a [`CraftingGrid`] ready to
+    /// match against a [`RecipeBook`](crate::recipe::RecipeBook).
+    ///
+    /// Returns `None` for menus with no crafting grid. Item **components** are
+    /// dropped: the matching model is id-based, matching vanilla's data-driven
+    /// ingredients, which are also id/tag based.
+    #[must_use]
+    pub fn crafting_grid(&self) -> Option<CraftingGrid> {
+        let layout = self.craft?;
+        let cells = (0..layout.cell_count())
+            .map(|i| {
+                self.slot_item(layout.first_input + i)
+                    .map(|s| s.item().clone())
+            })
+            .collect();
+        Some(CraftingGrid::new(layout.width, layout.height, cells))
     }
 
     /// Returns the current state id.
@@ -360,9 +484,12 @@ impl Menu {
         let original = self.slot_item_cloned(menu_index)?;
         let template = original.clone();
         let mut stack = original;
-        let moved = match self.kind {
-            MenuKind::Player => self.quick_move_player(menu_index, &mut stack),
-            MenuKind::Generic { container_size } => {
+        let moved = match (self.kind, self.craft) {
+            (MenuKind::Player, _) => self.quick_move_player(menu_index, &mut stack),
+            (MenuKind::Generic { container_size }, Some(layout)) => {
+                self.quick_move_crafting(menu_index, container_size, layout, &mut stack)
+            }
+            (MenuKind::Generic { container_size }, None) => {
                 self.quick_move_generic(menu_index, container_size, &mut stack)
             }
         };
@@ -391,6 +518,44 @@ impl Menu {
         } else {
             // player inventory -> container
             self.move_item_stack_to(stack, 0, container_size, false)
+        }
+    }
+
+    /// Quick-move for a crafting-table menu, mirroring vanilla `CraftingMenu`:
+    ///
+    /// * result slot → player inventory, **filling from the back**;
+    /// * grid cell → player inventory, forwards;
+    /// * player inventory → the **grid** (`first_input..`), never the result.
+    ///
+    /// Note the last case: the destination is the grid range, not the whole
+    /// container range. Routing it through [`quick_move_generic`] would aim at
+    /// `0..container_size`, which includes the result slot — harmless only
+    /// because `Slot::may_place` rejects an [`Output`](SlotKind::Output) slot,
+    /// and silently wrong the moment that slot kind is lost.
+    fn quick_move_crafting(
+        &mut self,
+        menu_index: usize,
+        container_size: usize,
+        layout: CraftLayout,
+        stack: &mut ItemStack,
+    ) -> bool {
+        let total = self.slot_count();
+        if menu_index == layout.result_slot {
+            self.move_item_stack_to(stack, container_size, total, true)
+        } else if layout.is_input(menu_index) {
+            self.move_item_stack_to(stack, container_size, total, false)
+        } else {
+            let grid_end = layout.first_input + layout.cell_count();
+            if self.move_item_stack_to(stack, layout.first_input, grid_end, false) {
+                return true;
+            }
+            // Grid full: fall back to the main-storage ↔ hotbar hop vanilla does.
+            let hotbar_start = total.saturating_sub(9);
+            if menu_index < hotbar_start {
+                self.move_item_stack_to(stack, hotbar_start, total, false)
+            } else {
+                self.move_item_stack_to(stack, container_size, hotbar_start, false)
+            }
         }
     }
 
