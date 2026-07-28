@@ -43,7 +43,15 @@ use lodestone_render::entity_pipeline::{EntityPipeline, GpuEntityModel, upload_i
 
 const W: u32 = 256;
 const H: u32 = 256;
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// **sRGB, matching the real swapchain (`Bgra8UnormSrgb`) — and so must the
+/// sheet below.** The entity shader multiplies its shade into the texel in
+/// *gamma* space (as vanilla does, and as the model shader already did), so what
+/// a face's shade does to the final byte is only correct when the sampled texel
+/// is linear-light and the target re-encodes on write. Measured on a plain
+/// `Unorm` target the same mob renders far darker than the player ever sees it,
+/// and a fixed brightness threshold calibrated there quietly stops finding the
+/// mob at all.
+const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// A sky-blue clear colour, distinct from any pig texel, so "background" is
 /// unambiguous in the readback.
@@ -104,7 +112,7 @@ fn test_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureVie
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -212,7 +220,7 @@ fn entity_gate_pig_to_pixels() {
             if range.index_count == 0 {
                 continue;
             }
-            if let Some(buf) = upload_instances(device, mats) {
+            if let Some(buf) = upload_instances(device, mats, &batch.lights) {
                 instance_buffers.push((
                     mats.len() as u32,
                     range.index_start..range.index_start + range.index_count,
@@ -314,9 +322,18 @@ fn entity_gate_pig_to_pixels() {
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     let data = readback.slice(..).get_mapped_range().expect("mapped range");
 
-    // A texel is "mob" if it is clearly not the sky clear (blue-dominant). The
-    // pig sheet is magenta (high R, high B, low G), the sky is (102,153,242).
-    let is_mob = |r: u8, g: u8, _b: u8| -> bool { r > 150 && g < 120 };
+    // A texel is "mob" if it is clearly not the sky clear. The pig sheet is
+    // magenta (high R, low G, high B); the sky clear is blue (high G).
+    //
+    // Keyed on the **green** channel, not a brightness floor on red. Green is
+    // what actually separates the two populations here (mob ~20, sky ~200) and
+    // is untouched by how dark a face's shade is, whereas an `r > 150` floor is
+    // a disguised brightness threshold: it silently reclassifies shaded faces as
+    // background whenever the shading model or the target's transfer changes,
+    // and the gate then reports a mob that "covers too little to be real"
+    // instead of a colour-space problem. The `r > 40` term only rules out a
+    // black frame.
+    let is_mob = |r: u8, g: u8, _b: u8| -> bool { g < 120 && r > 40 };
 
     let mut mob_px = 0u32;
     let mut corner_mob = 0u32;

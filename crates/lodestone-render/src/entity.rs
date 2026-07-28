@@ -54,10 +54,18 @@ use crate::models::ModelVertex;
 /// `translate(0, -1.501, 0)`), in blocks.
 pub const MODEL_FEET_OFFSET: f32 = 1.501;
 
-/// Full-bright sky light packed into a [`ModelVertex::light`] byte (sky in the
-/// high nibble). Entities are lit full-bright until per-entity lightmap sampling
-/// is wired, which keeps the connected path honest rather than rendering black.
-const ENTITY_LIGHT: u8 = 15 << 4;
+/// Packed sky/block light meaning "full sky, no block light" (sky in the high
+/// nibble), the value an entity carries when the caller has no world to sample.
+///
+/// This is a **fallback, not the normal path**. Vanilla samples the lightmap
+/// once per entity at its block position
+/// (`LivingEntityRenderer` → `Level::getLightColor`), which is why light is one
+/// byte per *instance* ([`EntityInstance::light`]) and not per vertex: a mob is
+/// uniformly lit by the block it stands in. A caller that has a world supplies
+/// the real byte via [`EntityInstance::with_light`] or
+/// [`EntitySpawn::light`]; one that does not (the offline demo, a mesh-only
+/// test) gets this and renders as it always did.
+pub const ENTITY_FULLBRIGHT: u8 = 15 << 4;
 
 /// Look up the ported entity model for a canonical entity-type path (the
 /// `path()` of an entity type key, e.g. `"pig"` from `minecraft:pig`).
@@ -275,7 +283,14 @@ impl EntityMesh {
                         position: p,
                         uv: quad.uvs[i],
                         ao: 1.0,
-                        light: ENTITY_LIGHT,
+                        // The entity shader does **not** read this byte: entity
+                        // light is per *instance* (one lightmap sample per mob,
+                        // as vanilla does), so it arrives on the instance
+                        // buffer, not here. The field is filled anyway because
+                        // the vertex layout is shared with terrain, and a
+                        // full-bright value keeps a mis-wired reader honest
+                        // rather than rendering every mob black.
+                        light: ENTITY_FULLBRIGHT,
                         tint: 255,
                         anim: 0,
                         _pad: 0,
@@ -373,6 +388,12 @@ pub struct EntityInstance {
     pub aabb_min: Vec3,
     /// World-space AABB maximum.
     pub aabb_max: Vec3,
+    /// Packed sky/block light (`sky << 4 | block`, `0..=15` each) sampled once
+    /// at this entity's block position, exactly as vanilla samples it — one
+    /// value for the whole mob, not per vertex. Defaults to
+    /// [`ENTITY_FULLBRIGHT`]; set the real world value with
+    /// [`with_light`](Self::with_light).
+    pub light: u8,
 }
 
 impl EntityInstance {
@@ -402,7 +423,20 @@ impl EntityInstance {
             part_transforms,
             aabb_min,
             aabb_max,
+            light: ENTITY_FULLBRIGHT,
         }
+    }
+
+    /// Set this instance's packed sky/block light (`sky << 4 | block`).
+    ///
+    /// Builder-style rather than a seventh argument to [`new`](Self::new)
+    /// because the great majority of call sites (mesh tests, the offline demo)
+    /// have no world to sample and want the [`ENTITY_FULLBRIGHT`] default; only
+    /// a caller wired to a real light source has anything to pass.
+    #[must_use]
+    pub fn with_light(mut self, light: u8) -> Self {
+        self.light = light;
+        self
     }
 }
 
@@ -433,6 +467,12 @@ pub struct EntitySpawn<'a> {
     /// Per-part animation drive: head tracking, walk phase, attack swing, age.
     /// Pass [`AnimInput::REST`] for a static pose.
     pub anim: AnimInput,
+    /// Packed sky/block light (`sky << 4 | block`) at this entity's block
+    /// position — the caller's one job on the lighting side, because only the
+    /// caller has a world to sample. Pass [`ENTITY_FULLBRIGHT`] when there is
+    /// no world (the offline demo); passing it *because it is convenient*
+    /// against a live server is the "mobs are super bright" defect.
+    pub light: u8,
 }
 
 /// corners and takes their component-wise min/max. Correct for the entity flip
@@ -557,7 +597,10 @@ impl EntityModelSet {
     {
         let instances: Vec<EntityInstance> = spawns
             .into_iter()
-            .filter_map(|s| self.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim))
+            .filter_map(|s| {
+                self.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim)
+                    .map(|i| i.with_light(s.light))
+            })
             .collect();
         plan_entities(&instances, frustum)
     }
@@ -597,6 +640,12 @@ pub struct EntityBatch {
     /// `i`. Outer length equals the mesh's part count; every inner vector has
     /// one entry per visible instance, in the same order as `transforms`.
     pub parts: Vec<Vec<Mat4>>,
+    /// One packed sky/block light byte per visible instance, in the same order
+    /// as `transforms` — widened to `u32` because that is what the instance
+    /// vertex attribute carries. The *same* slice is uploaded alongside every
+    /// part's matrices: a mob's light is per entity, so each of its parts reads
+    /// the identical value.
+    pub lights: Vec<u32>,
 }
 
 /// The visible entity draws for one frame, grouped by model type, plus the
@@ -642,6 +691,7 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
         match batches.iter_mut().find(|b| b.model == inst.model) {
             Some(batch) => {
                 batch.transforms.push(inst.transform);
+                batch.lights.push(u32::from(inst.light));
                 for (slot, m) in batch.parts.iter_mut().zip(&inst.part_transforms) {
                     slot.push(*m);
                 }
@@ -650,6 +700,7 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
                 model: inst.model,
                 transforms: vec![inst.transform],
                 parts: inst.part_transforms.iter().map(|m| vec![*m]).collect(),
+                lights: vec![u32::from(inst.light)],
             }),
         }
     }
@@ -1049,6 +1100,9 @@ mod tests {
         // A mix mirroring a live scene: two drawable pigs, one drawable cow, a
         // modelless type that must be dropped (not culled), and one pig behind
         // the camera to force a real cull.
+        // The two visible pigs carry *different* light so the batch's `lights`
+        // can be checked to stay in step with its `transforms`: a batch that
+        // merged or reordered them would still have the right length.
         let spawns = [
             EntitySpawn {
                 type_path: "pig",
@@ -1056,6 +1110,7 @@ mod tests {
                 body_yaw_deg: 0.0,
                 scale: 1.0,
                 anim: AnimInput::REST,
+                light: ENTITY_FULLBRIGHT,
             },
             EntitySpawn {
                 type_path: "cow",
@@ -1063,6 +1118,7 @@ mod tests {
                 body_yaw_deg: 0.0,
                 scale: 1.0,
                 anim: AnimInput::REST,
+                light: 0x0A, // block light 10, no sky: a torch-lit cow indoors
             },
             EntitySpawn {
                 type_path: "experience_orb", // no model — dropped, not counted
@@ -1070,6 +1126,7 @@ mod tests {
                 body_yaw_deg: 0.0,
                 scale: 1.0,
                 anim: AnimInput::REST,
+                light: ENTITY_FULLBRIGHT,
             },
             EntitySpawn {
                 type_path: "pig",
@@ -1077,6 +1134,7 @@ mod tests {
                 body_yaw_deg: 0.0,
                 scale: 1.0,
                 anim: AnimInput::REST,
+                light: 0x00, // pitch dark
             },
             EntitySpawn {
                 type_path: "pig",
@@ -1084,6 +1142,7 @@ mod tests {
                 body_yaw_deg: 0.0,
                 scale: 1.0,
                 anim: AnimInput::REST,
+                light: ENTITY_FULLBRIGHT,
             },
         ];
 
@@ -1099,10 +1158,31 @@ mod tests {
         assert_eq!(pig_batch.transforms.len(), 2, "two visible pigs batch");
         assert!(frame.batches.iter().any(|b| b.model == "cow"));
 
+        // Light must ride through `plan` per instance and stay index-aligned
+        // with `transforms` — the culled pig drops out of both, so the surviving
+        // pair is the lit one then the dark one, in spawn order.
+        assert_eq!(
+            pig_batch.lights,
+            vec![u32::from(ENTITY_FULLBRIGHT), 0x00],
+            "per-entity light must survive resolve + cull in transform order"
+        );
+        let cow_batch = frame.batches.iter().find(|b| b.model == "cow").unwrap();
+        assert_eq!(cow_batch.lights, vec![0x0A]);
+        for batch in &frame.batches {
+            assert_eq!(
+                batch.lights.len(),
+                batch.transforms.len(),
+                "one light per instance, or the instance buffer would misalign"
+            );
+        }
+
         // The one-call seam is exactly manual resolve + plan_entities: same frame.
         let manual: Vec<EntityInstance> = spawns
             .iter()
-            .filter_map(|s| set.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim))
+            .filter_map(|s| {
+                set.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim)
+                    .map(|i| i.with_light(s.light))
+            })
             .collect();
         let manual_frame = plan_entities(&manual, &frustum);
         assert_eq!(frame.batches, manual_frame.batches);

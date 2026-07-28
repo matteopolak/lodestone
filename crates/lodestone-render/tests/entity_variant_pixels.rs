@@ -249,7 +249,7 @@ fn render_mob(gpu: &Gpu, mesh: &EntityMesh, img: &Image) -> Vec<u8> {
             if range.index_count == 0 {
                 continue;
             }
-            if let Some(buf) = upload_instances(device, mats) {
+            if let Some(buf) = upload_instances(device, mats, &batch.lights) {
                 per_part.push((
                     mats.len() as u32,
                     range.index_start..range.index_start + range.index_count,
