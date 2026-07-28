@@ -19,10 +19,10 @@ same mistakes being made again.
 > **Start here if you are picking this up cold:**
 > [**Addendum — final play-test round**](#addendum--final-play-test-round-what-landed-what-is-left)
 > at the end of this file is the current front line. It lists what landed in the last block of work
-> and the **six open defects**, each with a source-level diagnosis rather than a guess:
+> and the **five open defects**, each with a source-level diagnosis rather than a guess:
 > block breaking (crack blend + missing hardness table), mob equipment, washed-out colours, entity
-> shadows, the stranded entity events, and underwater fog. Everything between here and there is
-> *descoped* work, which is a different thing from *open* work.
+> shadows, and the stranded entity events. Everything between here and there is *descoped* work,
+> which is a different thing from *open* work.
 
 ---
 
@@ -1356,6 +1356,7 @@ committed; five are open and each has a diagnosis rather than a guess.
 | `dc10e49` `cbf93cb` `d26cf14` | progressive mining crack, following each block's **baked model** (slabs, stairs, cross-plants) rather than a synthetic cube | live screenshot: crack on the target block's real face, neighbours clean |
 | `ffcc763` `2970a64` | distance fog — the thing that hides the render-distance edge | `fog_gate` with its **negative control observed firing**; live shot of the treeline dissolving |
 | `b49f8eb` `95a0ee8` | fog sized to the configured render distance, sky colour given one home | live at `--rd 4`; 4 tests incl. fog-inside-far-plane |
+| `69f66c2` | submerged water/lava fog, driven from the physics fluid state | reads the bit-exact producer, not a local bool |
 | — | animated block textures (lava, fire, portals) | `animated_block_pixels` gate |
 
 ### A portability bug worth not reintroducing (from the fog work)
@@ -1604,7 +1605,7 @@ fields nothing reads — connectedness theatre that improves the metric and chan
 
 ---
 
-## Open 6 — Underwater: fog exists, the submerged flag never reaches it
+## Open 6 — Underwater — **CLOSED** (`69f66c2`), except the per-biome fog colour
 
 Measured, not eyeballed: on the user's underwater screenshot the blue cast down the frame as
 `B − R` is **58 / 61 / 49 / 62 / 66 / 59**, far to near. Flat, and no pixel anywhere reaches white
@@ -1618,24 +1619,28 @@ layer of tint however much water we look through. **Fluid face culling is correc
 What is missing is fog, not geometry. Vanilla does not build the submerged look out of stacked
 translucent quads; `FogRenderer` uses a short, exponential, biome-coloured water fog plus a
 heavily reduced view distance, so distant terrain fades to solid fog colour and vanishes. We now
-have distance fog, so what is left is:
+have distance fog, so what was left was the water fog itself plus vanilla's full-screen
+`textures/misc/underwater.png` overlay.
 
-1. the water fog colour and the reduced view distance,
-2. vanilla's full-screen `textures/misc/underwater.png` overlay.
+**This closed the way it should have.** `Sim` now recomputes
+`lodestone_physics::compute_fluid_state` once per physics tick, against *the same collision view
+movement collided against*, and `Sim::fog_settings()` selects on it: short near-eye water fog when
+submerged, near-opaque lava fog in lava, render-distance sky fog otherwise. `app.rs` reconciles
+against the applied fog and re-uploads only on a sky↔water↔lava crossing.
 
-**The blocker is one piece of state, and it is half-built.** `FluidState::under_water()` exists in
-`lodestone-physics` and is tested; `RenderState::set_fog` exists and is now called with the render
-distance on both render paths. Nothing computes the player's eye-in-fluid state per frame and
-passes it in. `sim::fog_for_render_distance` / `Sim::fog_settings()` is the seam.
+The important part is what it did **not** do: it reads the bit-exact physics producer instead of
+inventing a local submerged boolean. That flag also gates the `underwater.png` overlay, the
+`ambient.underwater.*` sounds (in the generated sound table, still never triggered) and swimming
+physics — four consumers that would each have picked their own answer for eyes-exactly-at-the-
+surface, and only one would have matched vanilla. **Anything else that needs "am I submerged"
+should read the same producer.**
 
-That same flag gates four things: the fog colour, the overlay, the `ambient.underwater.*` sounds
-(already in the generated sound table and never triggered), and swimming physics. **Introduce it
-once in the version-free layer.** If four consumers each invent a local bool, they will disagree
-about the boundary case — eyes exactly at the water surface — and only one of them will match
-vanilla.
+Two deliberate gaps remain, both recorded rather than faked:
 
-The `underwater.png` overlay was deliberately *not* drawn yet, to avoid creating another
-producer-with-no-consumer island while the flag is missing. Draw it when the flag lands.
+* **Per-biome water fog colour.** Uses the default ocean colour; the biome colour is not reachable
+  from the shell yet.
+* **The `underwater.png` full-screen overlay** is still not drawn. It can be now — the flag it was
+  waiting on exists.
 
 ---
 
