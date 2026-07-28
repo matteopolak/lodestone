@@ -15,6 +15,8 @@ use lodestone_render::{
     EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh,
     ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
+    crack_pipeline::{CrackPipeline, GpuCrackMesh},
+    crack_resolver::CrackResolver,
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
     upload_instances,
     vertex::vram_bytes,
@@ -23,6 +25,19 @@ use lodestone_render::{
 use crate::entities::EntityDraw;
 use crate::mesher::{SectionGeometry, SectionKey};
 use crate::particles::{ParticleInstance, ParticleRenderer};
+
+/// The block currently being mined, for the progressive crack overlay: its world
+/// position, vanilla state id (to resolve the block's real model geometry) and
+/// destruction stage `0..=9`. Passed to [`RenderState::render_with_crack`].
+#[derive(Debug, Clone, Copy)]
+pub struct CrackTarget {
+    /// World block position of the target.
+    pub block: [i32; 3],
+    /// Vanilla state id, used to resolve the block's baked quads.
+    pub state_id: u32,
+    /// Destruction stage `0..=9`; selects the `destroy_stage_N` sprite.
+    pub stage: u8,
+}
 
 /// The 12 edges of a unit cube as pairs of corner indices (line list).
 const CUBE_EDGES: [(usize, usize); 12] = [
@@ -293,6 +308,24 @@ struct ModelRenderer {
     /// The animation bind group for the fluid pipeline (its group 2). Wraps the
     /// same [`Self::anim_buffer`]; only the group index differs.
     water_anim_bind_group: wgpu::BindGroup,
+    /// The mining-crack overlay pipeline (alpha-blended, depth-test only, pulled
+    /// toward the camera by a negative depth bias so the `destroy_stage` texels
+    /// win the depth test against the coplanar block face without z-fighting).
+    crack_pipeline: CrackPipeline,
+    /// Per-state baked quads + the ten `destroy_stage` rects, captured from the
+    /// block models so the target block's crack mesh can be built at draw time
+    /// after `BlockModels` itself is dropped. Follows the block's real geometry
+    /// (slabs, stairs, crosses), never a synthetic full cube.
+    crack_resolver: CrackResolver,
+    /// The crack pass's atlas bind group. The crack pipeline has its own bind
+    /// group layout, so it needs its own bind group over the same stitched
+    /// model atlas the opaque pass uses.
+    crack_atlas_bind_group: wgpu::BindGroup,
+    /// The crack pass's camera buffer + bind group. Crack meshes carry
+    /// world-space positions (section origin zero), rewritten with the current
+    /// `view_proj` each frame like the section uniforms.
+    crack_cam_buffer: wgpu::Buffer,
+    crack_cam_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
 }
 
@@ -606,6 +639,21 @@ impl RenderState {
             let anim_buffer = model_anim_buffer(device, &anim_slots_at(&animations, 0));
             let anim_bind_group = pipeline.anim_bind_group(device, &anim_buffer);
             let water_anim_bind_group = water_pipeline.anim_bind_group(device, &anim_buffer);
+            // Mining-crack overlay: capture the per-state quads + stage rects now,
+            // while `models` is still borrowable, and build the pass's own atlas
+            // and camera bind groups (its layouts differ from the model pass's).
+            let crack_pipeline = CrackPipeline::new(device, color_format);
+            let crack_resolver = CrackResolver::from_models(models);
+            let crack_atlas_bind_group = crack_pipeline.atlas_bind_group(device, &atlas);
+            let crack_cam_buffer = model_camera_buffer(
+                device,
+                CameraUniform {
+                    view_proj: [[0.0; 4]; 4],
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+            );
+            let crack_cam_bind_group =
+                crack_pipeline.camera_bind_group(device, &crack_cam_buffer);
             ModelRenderer {
                 pipeline,
                 water_pipeline,
@@ -616,6 +664,11 @@ impl RenderState {
                 anim_buffer,
                 anim_bind_group,
                 water_anim_bind_group,
+                crack_pipeline,
+                crack_resolver,
+                crack_atlas_bind_group,
+                crack_cam_buffer,
+                crack_cam_bind_group,
                 sections: HashMap::new(),
             }
         });
@@ -814,6 +867,36 @@ impl RenderState {
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
     ) -> RenderStats {
+        self.render_inner(device, queue, view, camera, outline, entities, None)
+    }
+
+    /// Like [`render`](Self::render), but also draws the progressive mining-crack
+    /// overlay on the target block. The crack follows the block's real model
+    /// geometry (slabs/stairs/crosses), not a synthetic cube.
+    pub fn render_with_crack(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        camera: &Camera,
+        outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
+        crack: CrackTarget,
+    ) -> RenderStats {
+        self.render_inner(device, queue, view, camera, outline, entities, Some(crack))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_inner(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        camera: &Camera,
+        outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
+        crack: Option<CrackTarget>,
+    ) -> RenderStats {
         let view_proj = camera.view_projection().to_cols_array_2d();
 
         // Rewrite each section's uniform with the current view-projection.
@@ -847,6 +930,34 @@ impl RenderState {
         // be written first too.
         let mut stats = RenderStats::default();
         let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
+
+        // Build the mining-crack overlay mesh before the pass (buffers can't be
+        // created mid-pass). It follows the target block's real model geometry;
+        // an air or unknown state, an out-of-range stage, or a block whose model
+        // has no faces yields `None` and nothing is drawn. The crack camera uses
+        // world-space positions (section origin zero), so rewrite its uniform
+        // with the current view-projection.
+        let crack_mesh = crack.and_then(|target| {
+            let model = self.model.as_ref()?;
+            let origin = [
+                target.block[0] as f32,
+                target.block[1] as f32,
+                target.block[2] as f32,
+            ];
+            let mesh = model
+                .crack_resolver
+                .mesh_for(target.state_id, target.stage, origin)?;
+            let gpu = GpuCrackMesh::upload(device, &mesh)?;
+            queue.write_buffer(
+                &model.crack_cam_buffer,
+                0,
+                bytemuck::bytes_of(&CameraUniform {
+                    view_proj,
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                }),
+            );
+            Some(gpu)
+        });
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
@@ -906,6 +1017,22 @@ impl RenderState {
                     stats.sections_drawn += 1;
                     stats.draw_calls += 1;
                     stats.total_quads += section.quad_count;
+                }
+
+                // Mining-crack overlay on the target block, drawn after the
+                // opaque terrain it sits on (so the block face is already in the
+                // depth buffer) and before translucent water. The pipeline's
+                // negative depth bias pulls the crack toward the camera so its
+                // `destroy_stage` texels win the depth test against the coplanar
+                // face without z-fighting; alpha-blended, depth-write off.
+                if let Some(crack) = &crack_mesh {
+                    pass.set_pipeline(&model.crack_pipeline.pipeline);
+                    pass.set_bind_group(0, &model.crack_cam_bind_group, &[]);
+                    pass.set_bind_group(1, &model.crack_atlas_bind_group, &[]);
+                    pass.set_vertex_buffer(0, crack.vertices.slice(..));
+                    pass.set_index_buffer(crack.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..crack.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
                 }
 
                 // Translucent water, drawn after all opaque model terrain so the
