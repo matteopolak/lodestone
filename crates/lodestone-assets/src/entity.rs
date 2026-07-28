@@ -489,19 +489,35 @@ pub struct EntityQuad {
 }
 
 /// A 3×3 linear map plus a translation, used to accumulate the part hierarchy.
-#[derive(Debug, Clone, Copy)]
-struct Affine {
-    m: [[f32; 3]; 3],
-    t: [f32; 3],
+///
+/// Public so an animating renderer can rebuild a part's transform chain itself
+/// from [`BakedPart`]s without reimplementing vanilla's `rotationZYX` order —
+/// a second implementation of that would be free to drift from this one, and
+/// nothing would notice until a limb bent the wrong way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affine {
+    /// Row-major 3×3 linear part.
+    pub m: [[f32; 3]; 3],
+    /// Translation, in blocks.
+    pub t: [f32; 3],
 }
 
 impl Affine {
-    const IDENTITY: Affine = Affine {
+    /// The identity transform.
+    pub const IDENTITY: Affine = Affine {
         m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         t: [0.0, 0.0, 0.0],
     };
 
-    fn apply(&self, p: [f32; 3]) -> [f32; 3] {
+    /// The local transform for a part pose: `translate(pivot/16) ∘ rotZYX ∘ scale`,
+    /// matching `ModelPart.translateAndRotate`.
+    #[must_use]
+    pub fn of_pose(pose: &PartPose) -> Affine {
+        part_transform(pose)
+    }
+
+    /// Maps a point.
+    pub fn apply(&self, p: [f32; 3]) -> [f32; 3] {
         [
             self.m[0][0] * p[0] + self.m[0][1] * p[1] + self.m[0][2] * p[2] + self.t[0],
             self.m[1][0] * p[0] + self.m[1][1] * p[1] + self.m[1][2] * p[2] + self.t[1],
@@ -519,7 +535,8 @@ impl Affine {
     }
 
     /// `self ∘ other` (apply `other` first).
-    fn compose(&self, other: &Affine) -> Affine {
+    #[must_use]
+    pub fn compose(&self, other: &Affine) -> Affine {
         let mut m = [[0.0f32; 3]; 3];
         for (i, row) in m.iter_mut().enumerate() {
             for (j, cell) in row.iter_mut().enumerate() {
@@ -567,6 +584,75 @@ fn mat_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
         }
     }
     m
+}
+
+/// One part of a model baked on its own, for renderers that pose parts
+/// independently (walk cycles, head tracking).
+///
+/// Unlike [`bake_entity`], the quads here are in the part's **own** frame with
+/// *no* transform applied — not even the part's own pose. The renderer is
+/// expected to rebuild the transform chain itself each frame from [`rest`]
+/// (adjusted by whatever animation it applies) and [`parent`], which is exactly
+/// what vanilla's `ModelPart.render` does. Baking the rest pose in would freeze
+/// the very joints an animator needs to move.
+///
+/// [`rest`]: BakedPart::rest
+/// [`parent`]: BakedPart::parent
+#[derive(Debug, Clone, PartialEq)]
+pub struct BakedPart {
+    /// The part's name as declared by its parent (`""` for the root).
+    pub name: String,
+    /// Index of this part's parent in the flat list, or `None` for the root.
+    /// Always less than this part's own index (the list is in pre-order), so a
+    /// single forward pass can accumulate parent transforms.
+    pub parent: Option<usize>,
+    /// The authored (unanimated) pose. An animator copies this, adjusts it, and
+    /// composes the chain.
+    pub rest: PartPose,
+    /// This part's own boxes, in part-local space with no transform applied.
+    pub quads: Vec<EntityQuad>,
+}
+
+/// Bakes an entity model into one [`BakedPart`] per node, in pre-order.
+///
+/// The union of every part's quads *after* applying its transform chain equals
+/// [`bake_entity`]'s output exactly; the difference is only that the chain is
+/// left for the caller to apply, so it can be animated.
+pub fn bake_entity_parts(model: &EntityModelDef) -> Vec<BakedPart> {
+    let mut out = Vec::new();
+    collect_parts(
+        "",
+        &model.root,
+        None,
+        model.texture_width as f32,
+        model.texture_height as f32,
+        &mut out,
+    );
+    out
+}
+
+fn collect_parts(
+    name: &str,
+    part: &PartDef,
+    parent: Option<usize>,
+    tw: f32,
+    th: f32,
+    out: &mut Vec<BakedPart>,
+) {
+    let mut quads = Vec::new();
+    for cube in &part.cubes {
+        bake_cube(cube, &Affine::IDENTITY, tw, th, &mut quads);
+    }
+    let index = out.len();
+    out.push(BakedPart {
+        name: name.to_string(),
+        parent,
+        rest: part.pose,
+        quads,
+    });
+    for (child_name, child) in &part.children {
+        collect_parts(child_name, child, Some(index), tw, th, out);
+    }
 }
 
 /// Bakes an entity model into posed, UV-mapped quads.
