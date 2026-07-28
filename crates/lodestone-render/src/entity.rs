@@ -47,7 +47,7 @@ use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 
 use crate::camera::Frustum;
-use crate::entity_anim::{AnimInput, Skeleton};
+use crate::entity_anim::{AnimInput, HumanoidArms, Skeleton};
 use crate::models::ModelVertex;
 
 /// The vanilla feet-to-model lift (`LivingEntityRenderer`'s
@@ -65,74 +65,118 @@ const ENTITY_LIGHT: u8 = 15 << 4;
 /// Returns the matching [`EntityModelEntry`] from the version-free
 /// [`entity_models`] corpus, or `None` if we have no model for that type yet —
 /// in which case the renderer skips the entity rather than substituting a wrong
-/// mesh. A handful of close variants (`cave_spider`, zombie sub-types) map onto
-/// the base model they share geometry with.
+/// mesh.
 #[must_use]
 pub fn model_for_type(type_path: &str) -> Option<EntityModelEntry> {
     let name = canonical_model_name(type_path)?;
     entity_models().into_iter().find(|e| e.name == name)
 }
 
+/// The corpus entry names, cached so the per-entity, per-frame
+/// [`canonical_model_name`] lookup does not rebuild the whole `entity_models()`
+/// vector. The corpus is a compile-time constant set, so caching it can never go
+/// stale.
+fn corpus_names() -> &'static [&'static str] {
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| entity_models().into_iter().map(|e| e.name).collect())
+}
+
 /// Maps an entity-type path to the `name` of the [`entity_models`] entry that
-/// renders it. Kept separate from the corpus scan so the aliasing is unit
-/// testable and obvious.
+/// renders it.
+///
+/// **The corpus is the source of truth**: a type path that names a corpus entry
+/// resolves to *that* entry, and only the handful of types whose registry path
+/// differs from the model name are listed here. The inverse — an explicit table
+/// enumerating every drawable type — is what shipped the "a drowned renders as
+/// an ordinary zombie" defect: `drowned` was aliased onto `zombie` back when the
+/// corpus had no drowned mesh, and the alias outlived the mesh's arrival by the
+/// whole tier-3 port. Deriving identity from the corpus means a newly ported mob
+/// is drawable the moment its mesh lands, and a wrong-mesh substitution has to be
+/// *written down* rather than left behind.
+///
+/// The aliases that remain are genuine "vanilla renders this type with another
+/// mob's model class" cases, not placeholders.
 fn canonical_model_name(type_path: &str) -> Option<&'static str> {
-    Some(match type_path {
-        "player" => "player_wide",
-        "zombie" | "husk" | "drowned" | "zombie_villager" => "zombie",
-        "skeleton" | "stray" | "bogged" | "wither_skeleton" => "skeleton",
-        "creeper" => "creeper",
-        "spider" | "cave_spider" => "spider",
-        "pig" => "pig",
-        "cow" | "mooshroom" => "cow",
-        "sheep" => "sheep",
-        "chicken" => "chicken",
-        _ => return None,
-    })
+    match type_path {
+        // `PlayerRenderer` picks a skin model; wide/`steve` is the default.
+        "player" => return Some("player_wide"),
+        // `BoggedModel` (a skeleton with mushrooms) is not ported yet; the plain
+        // skeleton is the closest ported mesh. Unlike the drowned alias this is
+        // deliberate and outlives no mesh — remove it when `bogged` is ported.
+        "bogged" => return Some("skeleton"),
+        _ => {}
+    }
+    corpus_names().iter().copied().find(|n| *n == type_path)
+}
+
+/// Which humanoid arm rig a model animates with — the render-crate side of
+/// vanilla's `AbstractZombieModel` overriding `HumanoidModel`'s arm swing.
+///
+/// [`AnimFamily`](crate::entity_anim::AnimFamily) is classified *structurally*
+/// from part names, on purpose (see that module's docs). A zombie's skeleton is
+/// part-for-part identical to a player's, so no structural rule can separate
+/// them: the distinction is which Java class vanilla instantiates. That fact is
+/// a name mapping, so it lives here next to [`canonical_model_name`] — the
+/// module that already owns "which vanilla class draws this mob" — rather than
+/// being smuggled into the structural classifier.
+#[must_use]
+pub fn humanoid_arms_for(model_name: &str) -> HumanoidArms {
+    match model_name {
+        // `ZombieModel`, `DrownedModel` and `ZombieVillagerModel` all call
+        // `AnimationUtils.animateZombieArms` after `super.setupAnim`.
+        "zombie" | "husk" | "drowned" | "zombie_villager" => HumanoidArms::Zombie,
+        _ => HumanoidArms::Swinging,
+    }
+}
+
+/// The in-jar sheet path for a corpus texture reference (`"entity/zombie/zombie"`
+/// → `"assets/minecraft/textures/entity/zombie/zombie.png"`).
+fn sheet_path(reference: &str) -> &'static str {
+    Box::leak(format!("assets/minecraft/textures/{reference}.png").into_boxed_str())
 }
 
 /// The in-jar texture path(s) for a model, in priority order — the first that
 /// the resource pack actually contains wins. Version-free: these are vanilla
-/// resource-pack paths keyed by the same model name [`canonical_model_name`]
-/// produces, not protocol data, so they live beside the model aliasing rather
-/// than in a version crate.
+/// resource-pack paths keyed by the model name [`canonical_model_name`]
+/// produces, not protocol data.
 ///
-/// Two wrinkles this list absorbs so the caller never version-branches:
+/// Biome/variant-correct selection (a cold pig, a black horse) is a refinement:
+/// this returns each entry's canonical sheet, which is the `_temperate` skin for
+/// the mobs 26.2 split by climate. Returns an empty slice for a model with no
+/// known sheet, so the caller falls back to a placeholder rather than failing.
 ///
-/// * 26.2 split several farm mobs into **temperature variants** — a plains pig
-///   is `pig_temperate.png`, not `pig.png` — while older packs ship the single
-///   `pig.png`. Listing the variant first and the legacy sheet second resolves
-///   both without the render crate learning a version. Biome/variant-correct
-///   selection (cold/warm) is a refinement; `temperate` is the plains default
-///   the live oracle spawns into.
-/// * The player uses the wide `steve.png` default skin (real skins arrive over
-///   the session, a separate seam).
-///
-/// Returns an empty slice for a model with no known sheet, so the caller falls
-/// back to a placeholder rather than failing.
+/// **Derived from the corpus, not hand-listed.** Each entry already carries its
+/// own [`EntityTexture`](lodestone_assets::entity::EntityTexture); a second
+/// hand-written table here can only ever drift out of step with it, and did:
+/// `drowned` had `entity/zombie/drowned` in the corpus while this table knew
+/// only nine models. The per-model paths are interned once (the corpus is a
+/// fixed compile-time set of ~90 entries) so the `&'static` signature holds.
 #[must_use]
 pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
-    match model_name {
-        "player_wide" => &["assets/minecraft/textures/entity/player/wide/steve.png"],
-        "zombie" => &["assets/minecraft/textures/entity/zombie/zombie.png"],
-        "skeleton" => &["assets/minecraft/textures/entity/skeleton/skeleton.png"],
-        "creeper" => &["assets/minecraft/textures/entity/creeper/creeper.png"],
-        "spider" => &["assets/minecraft/textures/entity/spider/spider.png"],
-        "pig" => &[
-            "assets/minecraft/textures/entity/pig/pig_temperate.png",
-            "assets/minecraft/textures/entity/pig/pig.png",
-        ],
-        "cow" => &[
-            "assets/minecraft/textures/entity/cow/cow_temperate.png",
-            "assets/minecraft/textures/entity/cow/cow.png",
-        ],
-        "sheep" => &["assets/minecraft/textures/entity/sheep/sheep.png"],
-        "chicken" => &[
-            "assets/minecraft/textures/entity/chicken/chicken_temperate.png",
-            "assets/minecraft/textures/entity/chicken/chicken.png",
-        ],
-        _ => &[],
-    }
+    static SHEETS: std::sync::OnceLock<Vec<(&'static str, &'static [&'static str])>> =
+        std::sync::OnceLock::new();
+    let sheets = SHEETS.get_or_init(|| {
+        entity_models()
+            .into_iter()
+            .map(|entry| {
+                let reference = entry.texture.default_path();
+                let mut paths = vec![sheet_path(reference)];
+                // 26.2 split several farm mobs into `_temperate`/`_cold`/`_warm`
+                // and removed the bare sheet; older packs ship only the bare one.
+                // Listing the legacy name second resolves both without this crate
+                // learning a version.
+                if let Some(legacy) = reference.strip_suffix("_temperate") {
+                    paths.push(sheet_path(legacy));
+                }
+                let paths: &'static [&'static str] = Box::leak(paths.into_boxed_slice());
+                (entry.name, paths)
+            })
+            .collect()
+    });
+    sheets
+        .iter()
+        .find(|(n, _)| *n == model_name)
+        .map_or(&[], |(_, paths)| *paths)
 }
 
 /// A CPU entity mesh in the shared wide [`ModelVertex`] format, plus the model's
@@ -188,8 +232,23 @@ impl EntityMesh {
     /// mirror flag.
     #[must_use]
     pub fn from_model(def: &EntityModelDef) -> Self {
+        Self::from_named_model("", def)
+    }
+
+    /// Bake a model definition into a renderable mesh, applying the arm rig
+    /// [`humanoid_arms_for`] assigns to `model_name`.
+    ///
+    /// The name has to be known *here* rather than at pose time because a zombie
+    /// rig moves the arms in its **resting** pose, and the mesh's local AABB is
+    /// taken from that resting pose. Choosing the rig later would leave every
+    /// zombie with a culling box drawn around a mob standing to attention while
+    /// the drawn one has its arms out in front — the classic "correct until it
+    /// clips at the screen edge" bug.
+    #[must_use]
+    pub fn from_named_model(model_name: &str, def: &EntityModelDef) -> Self {
         let baked = bake_entity_parts(def);
-        let skeleton = Skeleton::from_parts(&baked);
+        let skeleton =
+            Skeleton::from_parts(&baked).with_humanoid_arms(humanoid_arms_for(model_name));
         let rest = skeleton.rest_pose();
 
         let mut vertices = Vec::new();
@@ -417,7 +476,12 @@ impl EntityModelSet {
     pub fn load() -> Self {
         let models = entity_models()
             .into_iter()
-            .map(|entry| (entry.name, EntityMesh::from_model(&(entry.build)())))
+            .map(|entry| {
+                (
+                    entry.name,
+                    EntityMesh::from_named_model(entry.name, &(entry.build)()),
+                )
+            })
             .collect();
         Self { models }
     }
@@ -611,62 +675,106 @@ mod tests {
         assert_eq!(model_for_type("skeleton").unwrap().name, "skeleton");
         assert_eq!(model_for_type("creeper").unwrap().name, "creeper");
         assert_eq!(model_for_type("spider").unwrap().name, "spider");
+        // The two surviving aliases: a type path that is not a corpus name.
         assert_eq!(model_for_type("player").unwrap().name, "player_wide");
-        // Variants reuse a shared model.
-        assert_eq!(model_for_type("cave_spider").unwrap().name, "spider");
-        assert_eq!(model_for_type("husk").unwrap().name, "zombie");
-        assert_eq!(model_for_type("mooshroom").unwrap().name, "cow");
+        assert_eq!(model_for_type("bogged").unwrap().name, "skeleton");
+    }
+
+    /// The reported defect: a drowned rendered as an ordinary zombie. Its mesh
+    /// and its sheet both exist in the corpus; a stale alias in this module was
+    /// routing it to the zombie's. Every mob here is one that alias table used
+    /// to swallow, so each assertion is a distinct wrong-mesh substitution.
+    #[test]
+    fn mob_variants_resolve_to_their_own_model_not_a_base_mob() {
+        for (ty, wrong) in [
+            ("drowned", "zombie"),
+            ("husk", "zombie"),
+            ("zombie_villager", "zombie"),
+            ("stray", "skeleton"),
+            ("wither_skeleton", "skeleton"),
+            ("cave_spider", "spider"),
+            ("mooshroom", "cow"),
+        ] {
+            let model = model_for_type(ty).unwrap_or_else(|| panic!("{ty} has a corpus model"));
+            assert_eq!(
+                model.name, ty,
+                "{ty} resolved to {} — a variant is being drawn as its base mob",
+                model.name
+            );
+            assert_ne!(model.name, wrong);
+            // ...and it must not merely resolve: the *sheet* has to differ too,
+            // or the mob is still a zombie with a zombie skin under a new name.
+            assert_ne!(
+                entity_texture_candidates(ty),
+                entity_texture_candidates(wrong),
+                "{ty} shares {wrong}'s texture candidates"
+            );
+        }
     }
 
     #[test]
     fn unknown_entity_type_has_no_model() {
-        assert!(model_for_type("ender_dragon").is_none());
-        assert!(model_for_type("armor_stand").is_none());
+        // Types the corpus genuinely has no mesh for — the renderer skips them
+        // rather than substituting something mob-shaped.
+        assert!(model_for_type("arrow").is_none());
+        assert!(model_for_type("experience_orb").is_none());
+        assert!(model_for_type("tnt").is_none());
         assert!(model_for_type("").is_none());
     }
 
     #[test]
     fn every_drawable_model_has_a_texture_candidate() {
-        // The corpus bakes far more models than the render path can resolve
-        // (`canonical_model_name` maps only a representative set). What must hold
-        // is that every model an entity type actually resolves *to* has a texture
-        // candidate, or that mob draws untextured. Drive this off the type→model
-        // mapping so it tracks the drawable set, not the whole baked corpus.
-        let drawable_types = [
-            "player",
-            "zombie",
-            "husk",
-            "drowned",
-            "skeleton",
-            "stray",
-            "creeper",
-            "spider",
-            "cave_spider",
-            "pig",
-            "cow",
-            "mooshroom",
-            "sheep",
-            "chicken",
-        ];
-        for ty in drawable_types {
-            let model = model_for_type(ty)
-                .unwrap_or_else(|| panic!("type {ty:?} should resolve to a model"));
-            let candidates = entity_texture_candidates(model.name);
+        // Now that the drawable set *is* the corpus, sweep the whole corpus:
+        // every baked model gets uploaded with a sheet by the shell, so a model
+        // with no candidate is a mob that draws as a flat placeholder colour.
+        let mut checked = 0;
+        for entry in entity_models() {
+            let candidates = entity_texture_candidates(entry.name);
             assert!(
                 !candidates.is_empty(),
-                "drawable type {ty:?} (model {:?}) has no texture candidate",
-                model.name
+                "model {:?} has no texture candidate",
+                entry.name
             );
             for path in candidates {
                 assert!(
                     path.starts_with("assets/minecraft/textures/entity/") && path.ends_with(".png"),
                     "candidate {path:?} for {:?} is not an entity sheet path",
-                    model.name
+                    entry.name
                 );
             }
+            checked += 1;
         }
-        // A type with no model resolves to nothing rather than a wrong sheet.
-        assert!(entity_texture_candidates("ender_dragon").is_empty());
+        assert!(checked > 60, "only {checked} models swept");
+        // The temperature-variant mobs keep their pre-26.2 sheet as a fallback,
+        // so one binary works against both pack layouts.
+        assert_eq!(
+            entity_texture_candidates("pig"),
+            [
+                "assets/minecraft/textures/entity/pig/pig_temperate.png",
+                "assets/minecraft/textures/entity/pig/pig.png",
+            ]
+        );
+        // A name that is not a model resolves to nothing rather than a wrong sheet.
+        assert!(entity_texture_candidates("arrow").is_empty());
+    }
+
+    /// The other half of the drowned defect: even with its own mesh, a drowned
+    /// wearing `zombie.png` still reads as an ordinary zombie. The path is
+    /// derived from the corpus entry, so this pins the derivation, not a table.
+    #[test]
+    fn variant_mobs_point_at_their_own_sheet() {
+        assert_eq!(
+            entity_texture_candidates("drowned"),
+            ["assets/minecraft/textures/entity/zombie/drowned.png"]
+        );
+        assert_eq!(
+            entity_texture_candidates("husk"),
+            ["assets/minecraft/textures/entity/zombie/husk.png"]
+        );
+        assert_eq!(
+            entity_texture_candidates("stray"),
+            ["assets/minecraft/textures/entity/skeleton/stray.png"]
+        );
     }
 
     #[test]
@@ -753,6 +861,54 @@ mod tests {
         // Feet stay near the ground for both; the head of the scaled mob is lower.
         assert!(baby.y < full.y, "scaled-down mob's head must be lower");
         assert!(baby.y > feet.y, "scaled mob still stands above its feet");
+    }
+
+    /// A zombie's resting arms stick out ~0.75 blocks in front of it, so its
+    /// culling box has to be drawn around the mob *as posed*, not around a mob
+    /// standing to attention. `EntityMesh::from_named_model` gets that by
+    /// choosing the arm rig before taking the local bounds; if it did not, the
+    /// error would be invisible until a zombie clipped out at the screen edge.
+    #[test]
+    fn a_zombies_local_bounds_include_its_outstretched_arms() {
+        let plain = EntityMesh::from_model(&lodestone_assets::entity_models::zombie_model());
+        let zombie = EntityMesh::from_named_model(
+            "zombie",
+            &lodestone_assets::entity_models::zombie_model(),
+        );
+        assert_eq!(
+            humanoid_arms_for("zombie"),
+            crate::entity_anim::HumanoidArms::Zombie
+        );
+        // Model -Z is the mob's facing, so the arms extend the *minimum* Z.
+        // The arm cube ends 10 texels (0.625 blocks) down from its pivot, so at
+        // -80° it reaches ~0.63 blocks forward against an arms-down torso whose
+        // frontmost point is the 0.28-block hat overlay.
+        assert!(
+            zombie.local_min.z < plain.local_min.z - 0.3,
+            "the zombie's bounds reach {} forward against an arms-down {} — the rig was not \
+             applied before the AABB was taken",
+            zombie.local_min.z,
+            plain.local_min.z
+        );
+
+        // And the bound must actually hold for every posed vertex.
+        let feet = Vec3::new(5.0, 70.0, 5.0);
+        let inst = EntityInstance::new("zombie", &zombie, feet, 37.0, 1.0, &AnimInput::REST);
+        for (part, range) in zombie.parts.iter().enumerate() {
+            let m = inst.part_transforms[part];
+            let lo = range.vertex_start as usize;
+            let hi = lo + range.vertex_count as usize;
+            for v in &zombie.vertices[lo..hi] {
+                let w = m.transform_point3(Vec3::from(v.position));
+                assert!(
+                    w.cmpge(inst.aabb_min - Vec3::splat(1e-2)).all()
+                        && w.cmple(inst.aabb_max + Vec3::splat(1e-2)).all(),
+                    "vertex {w:?} escaped AABB [{:?}, {:?}]",
+                    inst.aabb_min,
+                    inst.aabb_max,
+                );
+            }
+        }
     }
 
     #[test]
@@ -875,11 +1031,11 @@ mod tests {
             set.resolve("cave_spider", feet, 0.0, 1.0, &AnimInput::REST)
                 .unwrap()
                 .model,
-            "spider"
+            "cave_spider"
         );
         // Unknown type resolves to nothing (renderer skips it).
         assert!(
-            set.resolve("ender_dragon", feet, 0.0, 1.0, &AnimInput::REST)
+            set.resolve("experience_orb", feet, 0.0, 1.0, &AnimInput::REST)
                 .is_none()
         );
         // The resolved instance's model is present in the set for upload.
@@ -909,7 +1065,7 @@ mod tests {
                 anim: AnimInput::REST,
             },
             EntitySpawn {
-                type_path: "ender_dragon", // no model yet — dropped, not counted
+                type_path: "experience_orb", // no model — dropped, not counted
                 feet: Vec3::new(0.0, 63.0, 14.0),
                 body_yaw_deg: 0.0,
                 scale: 1.0,
