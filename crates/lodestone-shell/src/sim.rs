@@ -79,6 +79,25 @@ const HOTBAR_SLOTS: usize = 9;
 /// while keeping a load burst off a single frame.
 const DIRTY_COLUMN_BUDGET: usize = 4;
 
+/// Distance fog for a render distance of `render_distance` chunks.
+///
+/// Fog is what hides the render-distance edge — without it the loaded world
+/// ends in a hard wall of geometry against the sky. It therefore has to track
+/// the *configured* distance rather than a fixed default, or raising
+/// `--render-distance` would fog out the very chunks it just loaded, making a
+/// larger view look worse than a smaller one.
+///
+/// Free-standing so the relationship is testable without generating a world:
+/// [`Sim::new`] at render distance 32 builds thousands of sections, which is a
+/// minute of work to check a multiplication.
+pub(crate) fn fog_for_render_distance(render_distance: u32) -> lodestone_render::fog::FogSettings {
+    lodestone_render::fog::FogSettings::for_view_distance(
+        crate::gpu::SKY_COLOR,
+        render_distance as f32 * 16.0,
+        crate::gpu::FOG_START_FRACTION,
+    )
+}
+
 /// Which section meshes a set of changed cells invalidates.
 ///
 /// A section's geometry is a function of its whole 3×3×3 neighbourhood (face
@@ -1083,6 +1102,15 @@ impl Sim {
         self.target = raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z));
     }
 
+    /// Distance fog sized to this session's configured render distance.
+    ///
+    /// This is where the eye-in-fluid state will select a short, biome-coloured
+    /// water fog once the shell threads `FluidState::under_water()` through.
+    #[must_use]
+    pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
+        fog_for_render_distance(self.config.render_distance)
+    }
+
     /// The progressive-mining crack to draw on the targeted block this frame, or
     /// `None` when no dig is in progress.
     ///
@@ -2050,6 +2078,61 @@ mod tests {
             render_distance: 2,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn fog_reaches_full_at_the_configured_render_distance() {
+        // Fog is what hides the render-distance edge, so its end must track the
+        // *configured* distance. A fixed default would fog out the outer chunks
+        // of a larger view, making `--render-distance 16` look worse than 8.
+        for rd in [2u32, 8, 16, 32] {
+            let fog = fog_for_render_distance(rd);
+            assert_eq!(
+                fog.end,
+                rd as f32 * 16.0,
+                "fog should reach full at the render distance for rd={rd}"
+            );
+            assert!(
+                fog.start < fog.end,
+                "fog range must be non-degenerate, else fog silently disables"
+            );
+        }
+    }
+
+    #[test]
+    fn fog_stays_well_inside_the_camera_far_plane() {
+        // If fog completed at or beyond the far plane, geometry would clip
+        // against a still-visible background instead of dissolving into it.
+        for rd in [2u32, 8, 16, 32] {
+            let far = lodestone_render::Camera::far_for_render_distance(rd, 0);
+            assert!(
+                fog_for_render_distance(rd).end < far,
+                "fog end must precede the far plane for rd={rd}"
+            );
+        }
+    }
+
+    #[test]
+    fn fog_fades_into_the_same_colour_the_frame_clears_to() {
+        // Terrain fades into the sky. If these two drifted apart, the horizon
+        // would show a band of haze in a colour the sky never is.
+        assert_eq!(fog_for_render_distance(8).color, crate::gpu::SKY_COLOR);
+    }
+
+    #[test]
+    fn sim_fog_follows_its_own_config_not_a_default() {
+        // Proves the delegation, so the cheap tests above actually cover what
+        // the renderer is handed.
+        let sim = Sim::new(test_config());
+        assert_eq!(
+            sim.fog_settings(),
+            fog_for_render_distance(sim.config.render_distance)
+        );
+        assert_ne!(
+            sim.fog_settings(),
+            fog_for_render_distance(8),
+            "test config is not the default distance, so these must differ"
+        );
     }
 
     #[test]

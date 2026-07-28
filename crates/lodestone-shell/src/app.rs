@@ -44,13 +44,16 @@ pub fn run(config: Config) -> anyhow::Result<()> {
 
 /// Sky distance fog sized to the shell's real render distance, so terrain
 /// dissolves into the sky exactly where chunks stop loading rather than at the
-/// render crate's default 8-chunk fallback. The colour matches the sky clear so
-/// the fade is seamless; fog starts at 75% of the view distance and reaches full
-/// opacity at the edge. Driven once at render bring-up (render distance is fixed
-/// for the session); underwater fog is a separate concern owned by the render
-/// crate's eye-in-fluid path.
+/// render crate's default 8-chunk fallback. Driven once at render bring-up on
+/// both the windowed and headless paths (render distance is fixed for the
+/// session).
+///
+/// Delegates to [`crate::sim::fog_for_render_distance`] so the colour and the
+/// fade band have one definition shared with the frame clear — a second copy of
+/// the sky colour here is how the horizon ends up banding in a colour the sky
+/// never is.
 fn sky_fog(render_distance: u32) -> FogSettings {
-    FogSettings::for_view_distance([0.53, 0.71, 0.92], render_distance as f32 * 16.0, 0.75)
+    crate::sim::fog_for_render_distance(render_distance)
 }
 
 /// Map a physical key to a movement [`Action`].
