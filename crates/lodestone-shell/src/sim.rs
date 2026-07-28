@@ -304,8 +304,9 @@ pub struct Sim {
     asset_banner: Option<String>,
     /// Vanilla particle simulation. Fed by block breaks — offline via
     /// [`break_block`](Self::break_block), live via the server's
-    /// `PARTICLES_DESTROY_BLOCK` level event — and drained once per frame into
-    /// GPU instances.
+    /// `PARTICLES_DESTROY_BLOCK` level event — and by the server's general
+    /// `LEVEL_PARTICLES` packet ([`NetUpdate::Particles`]) — and drained once
+    /// per frame into GPU instances.
     particles: Particles,
     /// Coarse lifecycle of the live connection, driven by [`NetUpdate`]s. The
     /// app maps this onto the menu state machine (Connecting → ready on
@@ -1907,6 +1908,38 @@ impl Sim {
                     self.particles
                         .destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
                 }
+                NetUpdate::Particles {
+                    kind,
+                    long_distance,
+                    pos,
+                    offset,
+                    max_speed,
+                    count,
+                } => {
+                    // `ClientLevel.doAddParticle`'s render cutoff: a particle
+                    // farther than 32 blocks (`1024.0` == `32.0` squared) from
+                    // the viewer is dropped unless the packet set the
+                    // override-limiter flag (`long_distance` here). Vanilla
+                    // measures from the render camera; the player's feet
+                    // position is close enough for a cutoff whose only
+                    // visible effect is "does this puff bother rendering,"
+                    // and it is what the rest of the shell's render-adjacent
+                    // logic already keys off.
+                    let dx = pos.x - self.player.position.x;
+                    let dy = pos.y - self.player.position.y;
+                    let dz = pos.z - self.player.position.z;
+                    let within_cutoff =
+                        long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
+                    if within_cutoff {
+                        self.particles.spawn_particles(
+                            &kind,
+                            [pos.x, pos.y, pos.z],
+                            [offset.x, offset.y, offset.z],
+                            max_speed,
+                            count,
+                        );
+                    }
+                }
                 NetUpdate::Health { health, food } => {
                     // Record the vitals for the HUD. Death is a separate event
                     // ([`NetUpdate::Death`], which the library always emits on the
@@ -2387,6 +2420,123 @@ mod tests {
         assert!(
             sim.active_effects().is_empty(),
             "a remote entity's effect must not reach the local HUD overlay either"
+        );
+    }
+
+    /// Hermetic proof that `NetUpdate::Particles` actually reaches the
+    /// emitter: idle, `stats`/the HUD counter would also read
+    /// `particles=0/0+0unres`, which cannot distinguish "the route works but
+    /// nothing has fired" from "the route is missing" (`grep -rn
+    /// "ClientEvent::Particles" crates/lodestone-shell/src/` returned zero
+    /// hits before this change). So this feeds a live event and asserts the
+    /// *caused* output, not the idle baseline.
+    #[test]
+    fn net_particles_reaches_the_emitter_and_resolves() {
+        use crate::net::NetUpdate;
+        use lodestone_client::Vec3;
+        use lodestone_particle::Sheet;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net();
+
+        // A headless `Sim` has no vanilla jar, so `flame`'s sheet has no atlas
+        // UVs by default — install the same kind of fixture table
+        // `particles.rs`'s own hermetic tests use, so `unresolved == 0` is
+        // actually reachable without fetching `client.jar`.
+        let rect = [0.0f32, 0.0, 0.0625, 0.0625];
+        sim.particles
+            .install_test_sheet_uv(HashMap::from([((Sheet::Flame, 0u16), rect)]));
+
+        // Keep the particle origin within vanilla's 32-block render cutoff of
+        // wherever `Sim::new` spawned the player.
+        let origin = sim.player.position;
+        feed.send(NetUpdate::Particles {
+            kind: "flame".into(),
+            long_distance: false,
+            pos: Vec3::new(origin.x, origin.y, origin.z),
+            offset: Vec3f::new(0.1, 0.1, 0.1),
+            max_speed: 0.02,
+            count: 9,
+        })
+        .unwrap();
+        sim.poll_net();
+
+        assert_eq!(
+            sim.particles.engine_mut().particles().len(),
+            9,
+            "count must be honoured exactly once the event reaches the emitter"
+        );
+        let cam = sim.camera(1.0);
+        let frame = sim
+            .particles
+            .extract(&cam, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT));
+        assert_eq!(frame.alive, 9);
+        assert_eq!(
+            frame.unresolved, 0,
+            "flame is a sheet-sourced type with an installed atlas entry"
+        );
+        assert_eq!(frame.drawn, 9);
+    }
+
+    /// Vanilla's render cutoff (`ClientLevel.doAddParticle`): a particle
+    /// farther than 32 blocks from the viewer is dropped unless the packet
+    /// sets `long_distance`. Two events at the same far-away position, one
+    /// with the flag and one without, must differ in whether anything
+    /// spawns — proving the cutoff is actually wired to the flag rather than
+    /// always on or always off.
+    #[test]
+    fn long_distance_flag_gates_the_far_away_cutoff() {
+        use crate::net::NetUpdate;
+        use lodestone_client::Vec3;
+        use lodestone_particle::Sheet;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net();
+        sim.particles.install_test_sheet_uv(HashMap::from([(
+            (Sheet::Flame, 0u16),
+            [0.0f32, 0.0, 0.0625, 0.0625],
+        )]));
+
+        // Comfortably past the 32-block (sqrt(1024)) cutoff on every axis.
+        let origin = sim.player.position;
+        let far = Vec3::new(origin.x + 1000.0, origin.y, origin.z);
+
+        feed.send(NetUpdate::Particles {
+            kind: "flame".into(),
+            long_distance: false,
+            pos: far,
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            max_speed: 0.0,
+            count: 3,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert_eq!(
+            sim.particles.engine_mut().particles().len(),
+            0,
+            "a far-away burst without long_distance must be dropped, not spawned off-screen"
+        );
+
+        feed.send(NetUpdate::Particles {
+            kind: "flame".into(),
+            long_distance: true,
+            pos: far,
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            max_speed: 0.0,
+            count: 3,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert_eq!(
+            sim.particles.engine_mut().particles().len(),
+            3,
+            "the same burst with long_distance set must bypass the cutoff"
         );
     }
 

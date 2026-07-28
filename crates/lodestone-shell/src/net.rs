@@ -103,6 +103,7 @@ use lodestone_client::{
     ServerAddress, Vec3, WorldDimensions,
 };
 use lodestone_game::menu::Menu;
+use lodestone_model::Vec3f;
 use lodestone_model::event::SoundCategory;
 
 pub use lodestone_testsupport::unique_username;
@@ -176,6 +177,34 @@ pub enum NetUpdate {
         pos: lodestone_model::BlockPos,
         /// The block state id the cell held before breaking.
         state: u32,
+    },
+    /// The server asked for a burst of particles at a world position
+    /// (`LEVEL_PARTICLES`) — vanilla's general particle-effect packet, as
+    /// opposed to the `LevelEvent` 2001 shortcut [`Self::BlockDestroyed`]
+    /// covers for the one case that has its own code path. `kind` is the
+    /// particle type's namespace-stripped path (e.g. `"flame"`), matching the
+    /// [`NetUpdate::Sound`] convention. See
+    /// [`crate::particles::Particles::spawn_particles`] for what
+    /// `offset`/`max_speed`/`count` actually mean — vanilla overloads
+    /// `count == 0` to mean something other than "spawn nothing".
+    Particles {
+        /// Particle type, namespace stripped (e.g. `"flame"`, `"smoke"`).
+        kind: String,
+        /// Whether the particle renders past vanilla's 32-block distance
+        /// cutoff (`ClientLevel.doAddParticle`'s `overrideLimiter`, `1024.0`
+        /// being `32.0` squared).
+        long_distance: bool,
+        /// World-space origin.
+        pos: Vec3,
+        /// Randomized per-axis offset bound when `count > 0`, or a raw
+        /// velocity direction when `count == 0` — see
+        /// `Particles::spawn_particles`.
+        offset: Vec3f,
+        /// Speed parameter; scales initial velocity.
+        max_speed: f32,
+        /// Number of particles to spawn. `0` is vanilla's special case for
+        /// exactly one particle with a non-randomized velocity.
+        count: i32,
     },
     /// Player health/food changed.
     Health {
@@ -674,6 +703,25 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             // be an out-of-range id that the model lookup rejects anyway.
             state: data as u32,
         },
+        // The general particle-effect packet. `long_distance` is named after
+        // what the field actually controls downstream (see
+        // `ClientLevel.doAddParticle`'s distance cutoff) rather than the
+        // wire/model field name `override_limiter` it is decoded from.
+        ClientEvent::Particles {
+            particle,
+            long_distance,
+            pos,
+            offset,
+            max_speed,
+            count,
+        } => NetUpdate::Particles {
+            kind: particle.path().to_string(),
+            long_distance,
+            pos,
+            offset,
+            max_speed,
+            count,
+        },
         ClientEvent::Disconnect { reason } => {
             let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));
             return Err(());
@@ -900,6 +948,46 @@ mod tests {
                 assert!(show_icon);
             }
             other => panic!("expected EffectApplied, got {other:?}"),
+        }
+    }
+
+    /// The gap this whole feature closed: before this arm existed,
+    /// `ClientEvent::Particles` fell into `forward`'s catch-all `_ => return
+    /// Ok(())` and never reached `NetUpdate` at all. Pins both the namespace
+    /// stripping (matching `NetUpdate::Sound`/`EffectApplied`) and the
+    /// `override_limiter` → `long_distance` rename.
+    #[test]
+    fn forward_translates_particles_with_stripped_namespace() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        let (tx, rx) = mpsc::channel();
+        let event = ClientEvent::Particles {
+            particle: ResourceKey::from_str("minecraft:flame").unwrap(),
+            long_distance: true,
+            pos: Vec3::new(1.0, 2.0, 3.0),
+            offset: Vec3f::new(0.1, 0.2, 0.3),
+            max_speed: 0.5,
+            count: 12,
+        };
+        forward(&tx, event).expect("forward does not stop the loop");
+        match rx.try_recv().expect("an update was forwarded") {
+            NetUpdate::Particles {
+                kind,
+                long_distance,
+                pos,
+                offset,
+                max_speed,
+                count,
+            } => {
+                assert_eq!(kind, "flame", "namespace must be stripped, matching Sound");
+                assert!(long_distance);
+                assert_eq!(pos, Vec3::new(1.0, 2.0, 3.0));
+                assert_eq!(offset, Vec3f::new(0.1, 0.2, 0.3));
+                assert_eq!(max_speed, 0.5);
+                assert_eq!(count, 12);
+            }
+            other => panic!("expected Particles, got {other:?}"),
         }
     }
 
