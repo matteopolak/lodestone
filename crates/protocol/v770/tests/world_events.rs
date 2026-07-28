@@ -387,13 +387,26 @@ fn level_event_rejects_trailing_bytes() {
 
 // ---- block_event ------------------------------------------------------
 
+/// `block_event`'s trailing VarInt is a `registry(BLOCK)` id — registration
+/// order, `air` is 0 — and `minecraft:note_block` is **109** there.
+///
+/// # This test used to encode 640 and still pass
+///
+/// 640 is note_block's index in the *alphabetical* `blocks.json` key order, and
+/// `block_type_name` used to index that alphabetical table with a registry id.
+/// The test and the decoder shared the mistake, so the pair round-tripped
+/// perfectly while every real `block_event` on the wire named the wrong block: a
+/// server's note block (109) decoded as `minecraft:blue_glazed_terracotta`, and
+/// this test's 640 decodes as `minecraft:acacia_fence`. Neither id is a free
+/// choice — 109 is fixed by `generated/reports/registries.json`, outside this
+/// crate.
 #[test]
 fn block_event_emits_pos_params_and_block_name() {
     let adapter = V770Adapter::new();
     let mut payload = pack_block_pos(3, 10, -4).to_be_bytes().to_vec();
     payload.push(0); // note-block instrument byte
     payload.push(6); // note pitch byte
-    payload.extend_from_slice(&var_i32(640)); // minecraft:note_block
+    payload.extend_from_slice(&var_i32(109)); // minecraft:note_block, registry id
     let directives = handle(&adapter, play::clientbound::BLOCK_EVENT, &payload);
     assert_eq!(
         directives,
@@ -403,6 +416,31 @@ fn block_event_emits_pos_params_and_block_name() {
             b1: 6,
             block: "minecraft:note_block".parse().unwrap(),
         })]
+    );
+}
+
+/// The negative control for the test above: the alphabetical index must *not*
+/// resolve to the block it names in that ordering. Without this, reverting
+/// `block_type_name` to index the name-sorted table would make the assertion
+/// above fail — but only for as long as someone remembers which of the two ids
+/// is the wire's. Pinning both directions makes the id spaces impossible to
+/// re-conflate silently.
+#[test]
+fn block_event_does_not_read_the_alphabetical_block_index() {
+    let adapter = V770Adapter::new();
+    let mut payload = pack_block_pos(0, 0, 0).to_be_bytes().to_vec();
+    payload.push(0);
+    payload.push(0);
+    payload.extend_from_slice(&var_i32(640)); // note_block's *alphabetical* index
+    let directives = handle(&adapter, play::clientbound::BLOCK_EVENT, &payload);
+    let [Directive::Emit(ClientEvent::BlockEvent { block, .. })] = directives.as_slice() else {
+        panic!("expected a single block event, got {directives:?}");
+    };
+    assert_eq!(
+        block.to_string(),
+        "minecraft:acacia_fence",
+        "registry id 640 is acacia_fence; reading it as note_block means the \
+         alphabetical block-name table is being indexed with a registry id again"
     );
 }
 

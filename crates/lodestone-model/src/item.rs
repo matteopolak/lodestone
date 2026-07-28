@@ -49,10 +49,155 @@ pub struct ItemComponents {
     pub damage: Option<u32>,
     /// Enchantments applied to the stack, in wire order.
     pub enchantments: Vec<ItemEnchantment>,
+    /// What this stack's component *patch* said about `minecraft:tool`.
+    ///
+    /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
+    /// vanilla pickaxe carries no `minecraft:tool` on the wire at all.
+    pub tool: ToolPatch,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
     pub has_unmodeled: bool,
+}
+
+/// What a stack's `DataComponentPatch` said about `minecraft:tool`.
+///
+/// # This is a *patch*, not the effective component
+///
+/// A clientbound stack carries only the **delta** from the item's built-in
+/// prototype component map, and vanilla puts a tool's `minecraft:tool` in that
+/// prototype (`ToolMaterial.applyToolProperties`). So an ordinary diamond
+/// pickaxe arrives with an *empty* patch and this field is
+/// [`Inherited`](Self::Inherited) — the mining speed still has to come from
+/// somewhere, and that somewhere is version data the protocol crate owns.
+///
+/// Read this only through a version adapter's mining seam
+/// (`VersionAdapter::tool_mining`), which folds the prototype and this patch
+/// together the way `ItemStack.get(DataComponents.TOOL)` does. Treating
+/// `Inherited` as "no tool" is the trap: it makes every real pickaxe mine at
+/// bare-hand speed.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ToolPatch {
+    /// The patch neither set nor removed `minecraft:tool`; the item's built-in
+    /// prototype tool component (if any) applies unchanged. This is the case
+    /// for every ordinary vanilla tool.
+    #[default]
+    Inherited,
+    /// The patch set an explicit `minecraft:tool`, replacing the prototype
+    /// wholesale (`/give …[minecraft:tool={…}]`, datapack-authored items).
+    Set(ItemTool),
+    /// The patch removed `minecraft:tool` (`/give …[!minecraft:tool]`), so the
+    /// stack mines like a bare hand regardless of what item it is.
+    ///
+    /// Removals are the tail of the patch, so this is only observable when the
+    /// patch decoded to completion — an unmodeled component
+    /// ([`ItemComponents::has_unmodeled`]) stops decoding before the removal
+    /// list and leaves this as [`Inherited`](Self::Inherited).
+    Removed,
+}
+
+/// A decoded `minecraft:tool` data component (26.2
+/// `net.minecraft.world.item.component.Tool`).
+///
+/// The mining speed for a block state is the first rule whose block set matches
+/// **and** carries a speed, else [`default_mining_speed`](Self::default_mining_speed);
+/// correctness-for-drops is the first rule whose block set matches **and**
+/// carries a `correct_for_drops`, else `false`. Rule order is therefore
+/// load-bearing and is preserved exactly as it arrived.
+///
+/// Evaluating a rule needs to know which blocks are in a tag, which is
+/// version/session data — so the evaluation itself lives behind
+/// `VersionAdapter::tool_mining`, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemTool {
+    /// Match rules, in wire order. First match wins.
+    pub rules: Vec<ToolRule>,
+    /// Raw IEEE-754 bits of `Tool.defaultMiningSpeed` (vanilla default `1.0`).
+    /// See [`ItemTool::default_mining_speed`] for why this is stored as bits.
+    default_mining_speed_bits: u32,
+    /// `Tool.damagePerBlock`: durability spent per block broken.
+    pub damage_per_block: u32,
+    /// `Tool.canDestroyBlocksInCreative`. Creative-mode policy only; it does not
+    /// enter the break-time formula.
+    pub can_destroy_blocks_in_creative: bool,
+}
+
+impl ItemTool {
+    /// Builds a tool component from its decoded fields.
+    #[must_use]
+    pub fn new(
+        rules: Vec<ToolRule>,
+        default_mining_speed: f32,
+        damage_per_block: u32,
+        can_destroy_blocks_in_creative: bool,
+    ) -> Self {
+        Self {
+            rules,
+            default_mining_speed_bits: default_mining_speed.to_bits(),
+            damage_per_block,
+            can_destroy_blocks_in_creative,
+        }
+    }
+
+    /// `Tool.defaultMiningSpeed`: the speed used when no rule matches.
+    ///
+    /// Stored as raw bits so [`ItemComponents`] — and therefore [`ItemStack`],
+    /// which the client compares for equality in inventory reconciliation and
+    /// equipment diffing — keeps its `Eq` impl. `f32` is not `Eq`; the bits are,
+    /// and comparing them is *stricter* than comparing floats, which is the
+    /// right default for "did the server send us the same stack?".
+    #[must_use]
+    pub fn default_mining_speed(&self) -> f32 {
+        f32::from_bits(self.default_mining_speed_bits)
+    }
+}
+
+/// One `Tool.Rule`: a block set, an optional speed override, and an optional
+/// correct-for-drops verdict. Either optional field may be absent — a rule that
+/// only denies drops carries no speed, and a rule that only overrides speed
+/// carries no verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolRule {
+    /// The blocks this rule applies to.
+    pub blocks: ToolBlocks,
+    /// Raw IEEE-754 bits of the optional speed (see
+    /// [`ItemTool::default_mining_speed`] for why bits).
+    speed_bits: Option<u32>,
+    /// Whether a match makes this tool correct for the block's drops. `None`
+    /// means the rule is silent and later rules decide.
+    pub correct_for_drops: Option<bool>,
+}
+
+impl ToolRule {
+    /// Builds a rule from its decoded fields.
+    #[must_use]
+    pub fn new(blocks: ToolBlocks, speed: Option<f32>, correct_for_drops: Option<bool>) -> Self {
+        Self {
+            blocks,
+            speed_bits: speed.map(f32::to_bits),
+            correct_for_drops,
+        }
+    }
+
+    /// The rule's mining-speed override, if it has one.
+    #[must_use]
+    pub fn speed(&self) -> Option<f32> {
+        self.speed_bits.map(f32::from_bits)
+    }
+}
+
+/// The block set a [`ToolRule`] matches against (26.2 `HolderSet<Block>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolBlocks {
+    /// A block tag, for example `minecraft:mineable/pickaxe`. Written on the
+    /// wire without the leading `#`.
+    Tag(ResourceKey),
+    /// An explicit list of blocks, as **network `minecraft:block` registry
+    /// ids**. Like [`ItemEnchantment::id`], these are version-scoped numbers
+    /// that only the protocol crate that decoded them can resolve; they are
+    /// deliberately not lifted to names here, because doing so would need the
+    /// version's block registry and this type is version-free.
+    Blocks(Vec<i32>),
 }
 
 /// A single enchantment entry on an item stack.

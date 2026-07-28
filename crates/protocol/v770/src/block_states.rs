@@ -44,6 +44,7 @@ use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 
 use crate::generated_block_states as table;
 
+pub use crate::generated_block_registry::BLOCK_COUNT;
 pub use table::STATE_COUNT;
 
 /// The interned block identifier for `id` (for example `minecraft:oak_stairs`),
@@ -61,15 +62,31 @@ pub fn block_name(id: u32) -> Option<&'static str> {
 ///
 /// This is the *block-type* registry (one id per block, 1,196 entries in
 /// 26.2), distinct from the block-*state* ids [`block_name`] indexes: packets
-/// such as
-/// `block_event` carry a `Holder<Block>` (one id per block type) rather than a
-/// palette state id. `BLOCK_NAMES` is indexed identically for both purposes —
-/// this simply skips the state→block indirection [`block_name`] goes through.
+/// such as `block_event` carry a `Holder<Block>` (one id per block type) rather
+/// than a palette state id, and so does a `minecraft:tool` rule's explicit block
+/// set.
+///
+/// # The two id spaces are not the same order
+///
+/// This used to index [`BLOCK_NAMES`](crate::generated_block_states) directly,
+/// on the assumption that a registry id and a block-name index are
+/// interchangeable. They are not. `BLOCK_NAMES` comes from `blocks.json`, a
+/// name-keyed JSON object, so it is **alphabetical**; the registry is in
+/// **registration** order. `minecraft:air` is registry id 0 but alphabetical
+/// index 19, and `minecraft:stone` is registry id 1 but alphabetical index 975 —
+/// so every id resolved to an unrelated block, quietly. The reconciliation now
+/// goes through the generated registry-order table.
+///
+/// [`block_name`] was never affected: its state→block index and `BLOCK_NAMES`
+/// are built from the same alphabetical ordering by the same generator, so that
+/// path is self-consistent.
 ///
 /// Zero-heap: returns a `&'static str` straight from rodata. O(1).
 #[must_use]
 pub fn block_type_name(id: u32) -> Option<&'static str> {
-    table::BLOCK_NAMES.get(id as usize).copied()
+    crate::generated_block_registry::BLOCK_REGISTRY_NAMES
+        .get(id as usize)
+        .copied()
 }
 
 /// The property values for `id` as a sorted slice of `(name, value)` pairs, or

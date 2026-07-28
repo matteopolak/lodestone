@@ -89,6 +89,18 @@ live-physics = []
 # default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
 live-item = []
 
+# Enables the live `minecraft:tool` gate (`live_tool_component`): joins the real
+# survival 26.2 server (game :25565, RCON :25566) and captures the raw
+# `container_set_slot` bytes the *server* authored for (a) a plain
+# `/item replace … diamond_pickaxe` and (b) one carrying an explicit
+# `minecraft:tool`. Those bytes are checked in under `tests/fixtures/` and
+# replayed by the hermetic `item_components` sibling, so the tool decoder is
+# never validated against bytes our own encoder produced. Capture (a) is the
+# load-bearing one: it is what proves a vanilla pickaxe sends an **empty** patch,
+# and therefore that the wire decode alone cannot make a pickaxe dig faster. Off
+# by default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+live-tool = []
+
 # Enables the live item-entity gate (`live_item_entity_metadata`): joins the
 # real survival 26.2 server (game :25565, RCON :25566), `/summon`s a dropped
 # item, and captures the raw `set_entity_data` payload the *server* authored for

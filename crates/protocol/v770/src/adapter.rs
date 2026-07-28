@@ -14,13 +14,13 @@ use lodestone_model::{
     EntityBaseDimensions,
     EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents,
-    ItemEnchantment, ItemStack, LoginProfile,
+    ItemEnchantment, ItemStack, ItemTool, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     RecipeBookType,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, SoundCategory,
-    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
-    VersionAdapter, Visibility, WorldSink,
+    TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, ToolBlocks, ToolMining,
+    ToolPatch, ToolRule, Vec3, Vec3f, VersionAdapter, Visibility, WorldSink,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
@@ -761,6 +761,9 @@ fn read_component_patch(
             Some("minecraft:enchantments") => {
                 components.enchantments = read_enchantments(reader)?;
             }
+            Some("minecraft:tool") => {
+                components.tool = ToolPatch::Set(read_tool(reader)?);
+            }
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
@@ -781,12 +784,109 @@ fn read_component_patch(
 
     for _ in 0..removed {
         // Removed components carry only their type id (no payload) and clear a
-        // component to its item default. None of the modeled fields default to a
-        // meaningful value here, so consuming the id is enough.
-        reader.var_i32().map_err(dec_err)?;
+        // component back to *nothing* — not to the item's prototype value. That
+        // distinction only matters for a component whose prototype value we
+        // actually use, which today is `minecraft:tool`: `/give …[!minecraft:tool]`
+        // makes a pickaxe mine like a fist, and treating the removal as "no
+        // opinion" would leave it at 8x. Every other modeled field defaults to
+        // "absent" anyway, so consuming the id is enough for those.
+        let type_id = reader.var_i32().map_err(dec_err)?;
+        if component_type_name(type_id) == Some("minecraft:tool") {
+            components.tool = ToolPatch::Removed;
+        }
     }
 
     Ok((components, true))
+}
+
+/// Decodes a `minecraft:tool` component (26.2 `Tool.STREAM_CODEC`).
+///
+/// Wire shape, in order: a VarInt-counted list of rules, then the default mining
+/// speed as an f32, the damage-per-block as a VarInt, and the
+/// can-destroy-in-creative flag as a bool. Each rule is a `HolderSet<Block>`,
+/// then an optional f32 speed and an optional bool correct-for-drops (both
+/// `ByteBufCodecs::optional`, so a present-flag byte then the value).
+///
+/// Note this component is *rarely* on the wire: a stack carries only the delta
+/// from its item's prototype component map, and vanilla puts a pickaxe's
+/// `minecraft:tool` in that prototype. It appears for `/give …[minecraft:tool={…}]`
+/// and datapack-authored items. The prototype half lives in [`crate::tool`];
+/// both feed the same evaluator.
+fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("invalid tool rule count {count}")))?;
+    let mut rules = Vec::with_capacity(count.min(64));
+    for _ in 0..count {
+        let blocks = read_block_holder_set(reader)?;
+        let speed = if reader.bool().map_err(dec_err)? {
+            Some(reader.f32().map_err(dec_err)?)
+        } else {
+            None
+        };
+        let correct_for_drops = if reader.bool().map_err(dec_err)? {
+            Some(reader.bool().map_err(dec_err)?)
+        } else {
+            None
+        };
+        rules.push(ToolRule::new(blocks, speed, correct_for_drops));
+    }
+    let default_mining_speed = reader.f32().map_err(dec_err)?;
+    let damage_per_block = reader.var_i32().map_err(dec_err)?;
+    let damage_per_block = u32::try_from(damage_per_block).map_err(|_| {
+        AdapterError::Decode(format!("negative tool damage_per_block {damage_per_block}"))
+    })?;
+    let can_destroy_blocks_in_creative = reader.bool().map_err(dec_err)?;
+    Ok(ItemTool::new(
+        rules,
+        default_mining_speed,
+        damage_per_block,
+        can_destroy_blocks_in_creative,
+    ))
+}
+
+/// Decodes a `HolderSet<Block>` (26.2 `ByteBufCodecs.holderSet(Registries.BLOCK)`).
+///
+/// A single VarInt discriminates: `0` means a named tag follows as an
+/// identifier string; any `n > 0` means `n - 1` direct holders follow, each a
+/// **bare** `minecraft:block` registry id.
+///
+/// # The direct holders are *not* `id + 1`
+///
+/// There are two holder codecs in 26.2 and they differ by exactly one:
+/// `ByteBufCodecs.holder(key, directCodec)` reserves `0` for an inline element
+/// definition and so writes `id + 1`, while `ByteBufCodecs.holderRegistry(key)`
+/// — which is what `holderSet` uses internally — delegates to the private
+/// `registry(key, Registry::asHolderIdMap)` and writes the id **as-is**. Only
+/// the outer set-size discriminator is offset by one.
+///
+/// This was originally implemented as `id + 1` by reading the *first* codec and
+/// assuming the second matched. The hermetic test agreed, because it encoded the
+/// same way; the live capture in `tests/live_tool_component.rs` did not — the
+/// real server wrote `minecraft:stone` (registry id 1) as `01` and
+/// `minecraft:obsidian` (193) as `c1 01`, and we decoded them as 0 and 192.
+fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterError> {
+    let discriminator = reader.var_i32().map_err(dec_err)?;
+    if discriminator == 0 {
+        // Vanilla's `Identifier.STREAM_CODEC` is an unbounded UTF-8 string, so
+        // the limit here is the shared 32,767-char ceiling the rest of this
+        // adapter uses, not a tighter guess that could reject a valid tag.
+        let tag = reader.string(32767).map_err(dec_err)?;
+        return Ok(ToolBlocks::Tag(parse_key(&tag, "block tag")?));
+    }
+    let count = usize::try_from(discriminator - 1)
+        .map_err(|_| AdapterError::Decode(format!("invalid block set size {discriminator}")))?;
+    let mut blocks = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let raw = reader.var_i32().map_err(dec_err)?;
+        if raw < 0 {
+            return Err(AdapterError::Decode(format!(
+                "negative block registry id {raw} in a tool rule"
+            )));
+        }
+        blocks.push(raw);
+    }
+    Ok(ToolBlocks::Blocks(blocks))
 }
 
 /// Decodes an `ItemEnchantments` component: a VarInt-counted map of
@@ -3905,5 +4005,15 @@ impl VersionAdapter for V770Adapter {
             hardness: entry.hardness,
             requires_correct_tool: entry.requires_correct_tool,
         })
+    }
+
+    fn tool_mining(&self, held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
+        // The `minecraft:tool` census — item prototypes, block tag membership,
+        // and the block-state→block-registry map — is version data homed in this
+        // crate; the registry seam reaches it through here so a version-free
+        // consumer never names v770. The returned `correct_tool` is already
+        // `Player.hasCorrectToolForDrops`, block requirement folded in, so the
+        // caller has nothing left to invert.
+        crate::tool::mining(held, state_id)
     }
 }
