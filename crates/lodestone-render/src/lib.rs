@@ -66,7 +66,7 @@ pub mod world;
 #[cfg(feature = "window")]
 pub mod window;
 
-pub use anim::{AnimFrame, AnimSample, AnimUniform, SpriteAnimation};
+pub use anim::{AnimFrame, AnimSample, AnimSlotUniform, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_models::{
