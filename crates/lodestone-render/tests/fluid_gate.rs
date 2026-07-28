@@ -67,7 +67,8 @@ fn water_quad() -> ModelMesh {
         ao: 1.0,
         light: 0xFF,
         tint: 0,
-        _pad: [0, 0],
+        anim: 0,
+        _pad: 0,
     };
     ModelMesh {
         // CCW from the front; the fluid pass disables culling anyway.
@@ -89,7 +90,14 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
     let queue = &gpu.queue;
 
     let pipeline = ModelPipeline::for_fluid(device, FORMAT);
-    let atlas = GpuAtlas::from_rgba(device, queue, 4, 4, &[255, 255, 255, water_alpha].repeat(16), &[]);
+    let atlas = GpuAtlas::from_rgba(
+        device,
+        queue,
+        4,
+        4,
+        &[255, 255, 255, water_alpha].repeat(16),
+        &[],
+    );
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas);
 
     let cam_buffer = model_camera_buffer(
@@ -226,7 +234,9 @@ fn sea_floor_is_visible_through_translucent_water() {
     let (or, og, ob) = render_center(&gpu, 255);
 
     println!("translucent water over red floor: rgb=({tr},{tg},{tb})");
-    println!("opaque control  water over red floor: rgb=({or},{og},{ob})  <-- floor contributes no red");
+    println!(
+        "opaque control  water over red floor: rgb=({or},{og},{ob})  <-- floor contributes no red"
+    );
 
     // See-through proof is the *delta*: opaque water shows only its own colour
     // (its red channel `or` is the water tint's red, with zero floor). Translucent
