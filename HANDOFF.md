@@ -1530,10 +1530,30 @@ under the crosshair instead of the constant. Three things fall out for free: unb
 show no crack at all, `destroy_stage()` advances at per-block rates, and the pulsing stops
 because the stage progression finally matches the real break time.
 
-**Sequencing warning.** `LIVE_DIG_HARDNESS` is *load-bearing for the verified break timing* — it
-is what keeps the early-`STOP` delayed-destroy trick working. Do not tune it to fix the crack
-cadence; the two must be replaced together in one change, or you trade a cosmetic bug for a
-functional one. `impl-shell` hit exactly this and correctly declined to perturb it.
+**~~Sequencing warning.~~ RESOLVED — and this warning was ultimately disproved by measurement.**
+It used to say `LIVE_DIG_HARDNESS` was *load-bearing for the verified break timing*, because it
+kept the early-`STOP` delayed-destroy trick working, and that replacing it risked trading a
+cosmetic bug for a functional one. The caution was right to hold while unmeasured; the claim
+itself was false.
+
+Both legs were driven back-to-back on **one connection and one block**, so this is not a
+cross-run comparison:
+
+| leg | STOP tick | STOP at | air at | stop→air gap |
+|---|---|---|---|---|
+| fixed `0.05` | 5 | 0.262 s | 7.448 s | **7.186 s** |
+| real hardness 1.5 | 151 | 7.913 s | 8.015 s | **0.103 s** |
+
+Player-visible break time is **unchanged at ~8 s**. What changed is the mechanism, exactly as
+predicted: at tick 5 `f1 ≈ 0.04` is under the server's `0.7` gate, so it latched
+`hasDelayedDestroy` and finished 7.19 s later on its own timer; at tick 151 `f1 ≈ 1.01` clears the
+gate and the server destroys on the packet itself, 103 ms behind. **Delayed-destroy still covers
+the other direction**, so neither running ahead nor behind can fail to break.
+
+The real trap was elsewhere and is now pinned as a failing-if-reintroduced assertion:
+`BreakInputs.correct_tool` is `Player.hasCorrectToolForDrops`, **not** the table's
+`requires_correct_tool` — bare-handed they are inverses, and feeding the raw field gives stone 45
+ticks instead of 151.
 
 **Do not "correct" the existing 151-tick bare-hand stone result to 150.** It is f32 accumulation
 and it is server-confirmed (see the mining addendum above).

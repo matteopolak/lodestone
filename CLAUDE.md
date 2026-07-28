@@ -43,9 +43,14 @@ Oracles (not part of repo state — recreate them):
 ## Repo hazards
 
 - **Single shared checkout, no per-agent worktrees.** Multiple agents edit concurrently.
-  **Never `git add -A`. Never `git reset --hard`, `git checkout .`, or `git stash`.** Stage explicit
-  paths (`git add <path>`) or hunks. A blanket stage has clobbered in-flight work three times and
-  destroyed a `lib.rs` edit once.
+  **Never `git add -A`. Never `git reset --hard`, `git checkout .`, or `git stash`.** A blanket
+  stage has clobbered in-flight work three times and destroyed a `lib.rs` edit once.
+- **Stage explicit *file* paths, never a directory.** `git add docs/` is the same mistake as
+  `git add -A`, just narrower — it sweeps up whatever else happens to be in there. This bit me
+  personally: `53850ce` swept another agent's then-unfinished `docs/block-break-timing.md` into a
+  render commit. Nothing was lost, but the commit contains 169 lines its author never wrote, and a
+  reviewer reading that diff would be misled about what the change was. `git add <file>` or
+  `git add -p`, always.
 - **This machine is shared with an unrelated project.** Docker holds images and volumes belonging to
   other work (`mht-*`, postgres, valkey, seaweedfs). **Never run `docker system prune`,
   `docker volume prune`, or `docker builder prune`.** Name every target explicitly; note Docker's

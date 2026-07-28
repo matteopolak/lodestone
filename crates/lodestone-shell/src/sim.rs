@@ -55,26 +55,63 @@ const MAX_WORLD_RADIUS: i32 = 6;
 const FLY_SPEED: f64 = 0.45;
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
-/// The hardness fed to the live [`Mining`] predictor. The shell has **no**
-/// version-free per-block hardness seam (see the report), so it cannot time the
-/// client `STOP_DESTROY` at the block's true completion tick the way vanilla
-/// does. It exploits the server's *delayed-destroy* rule instead: a `START`
-/// followed by a `STOP` sent while the server's own progress is still below its
-/// ~0.7 threshold makes the server latch the dig and finish it on its own timer
-/// at the correct, block-accurate vanilla time — no client hardness required.
-///
-/// A held block is **never** broken by `START` alone; without a `STOP` the
-/// server only animates cracks and the block never breaks (measured against the
-/// live oracle). So the hardness must be small enough that the predictor emits a
-/// `STOP` a few ticks into a hold, but large enough that a quick tap (which the
-/// player releases — sending `ABORT` — before the `STOP`) leaves the block
-/// intact, matching vanilla. `0.05` yields a `STOP` after ~5 ticks (~250 ms),
-/// comfortably below the server's 0.7 gate for every bare-hand block, so the
-/// server's delayed-destroy always drives the real timing. Blocks needing a
-/// tool (obsidian) are out of this path's scope.
-const LIVE_DIG_HARDNESS: f32 = 0.05;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
+
+/// The live [`Mining`] predictor's [`BreakInputs`] for one dig tick, built from
+/// the version's block-state hardness census plus the player's own state.
+///
+/// Free-standing and pure so the two traps folded into it are testable without a
+/// server, a GPU, or a generated world — both are wrong in the direction of
+/// *breaking too fast*, which is exactly the defect this path already shipped
+/// once.
+///
+/// # Trap 1: `correct_tool` is **not** `requires_correct_tool`
+///
+/// [`BlockHardness::requires_correct_tool`] is `BlockState.requiresCorrectToolForDrops`
+/// — a property of the *block* ("does this drop nothing unless mined with a
+/// suitable tool?"). [`BreakInputs::correct_tool`] is
+/// `Player.hasCorrectToolForDrops` — a property of the *held item vs. the block*
+/// — and it selects vanilla's `30` (correct) vs `100` (wrong) speed divider.
+/// Bare-handed the two are opposites: an empty hand is the correct tool for
+/// exactly those blocks that demand none, so `correct_tool == !requires_correct_tool`.
+///
+/// Passing the field straight across looks like faithful data wiring and makes
+/// stone break in **45 ticks instead of 151** (3.4× too fast) while dirt goes
+/// the other way (51 instead of 15). See the warning on [`BlockHardness`].
+///
+/// # Trap 2: `submerged` is `eye_in_water`, not `under_water()`
+///
+/// Vanilla's `getDestroySpeed` gates the 5×-slower underwater factor on
+/// `isEyeInFluid(WATER)` **alone**. [`FluidState::under_water`] is
+/// `eye_in_water && in_water()` — the predicate the *fog* wants, and vanilla's
+/// `isUnderWater()`. The two agree in nearly every real pose but are not the
+/// same function, so the mining path reads the raw `eye_in_water` flag.
+///
+/// # Bare hands only
+///
+/// Tool speed, mining efficiency, haste and fatigue are left at
+/// [`BreakInputs::default`]. `minecraft:tool` is not among the modeled item
+/// components (only `custom_name`, `damage`, `enchantments`), so there is no
+/// source for a held tool's per-block mining speed — a guess here would be the
+/// same class of invention this function exists to remove. Digging therefore
+/// always times as an empty hand, even with a pickaxe selected.
+fn bare_hand_break_inputs(
+    entry: lodestone_model::BlockHardness,
+    is_air: bool,
+    on_ground: bool,
+    submerged: bool,
+) -> BreakInputs {
+    BreakInputs {
+        hardness: entry.hardness,
+        is_air,
+        // See "Trap 1" above — this negation is load-bearing.
+        correct_tool: !entry.requires_correct_tool,
+        on_ground,
+        submerged,
+        ..BreakInputs::default()
+    }
+}
 
 /// How many stale-boundary columns to re-mesh per frame. Chunk arrivals already
 /// mesh their own column immediately, so this only paces the *seam* repair; at
@@ -404,6 +441,22 @@ pub struct Sim {
     /// ambient sounds and swim pose). The shell never invents its own submerged
     /// boolean — those consumers share this one source of truth.
     fluid_state: FluidState,
+    /// The version adapter for [`Config::protocol`], held solely as the shell's
+    /// route to per-block-state data — today [`VersionAdapter::block_hardness`],
+    /// which the live mining predictor needs to time a break.
+    ///
+    /// Resolved through [`lodestone_registry::adapter_for_protocol`] so the shell
+    /// still names no version crate; a direct dependency on one would mint a
+    /// second, divergent version-data seam beside the registry. `None` when no
+    /// family for that protocol is compiled in (the default build — the `live`
+    /// feature is what compiles one), in which case the shell reports "unknown
+    /// hardness" and refuses to dig rather than guessing a number.
+    ///
+    /// Deliberately a *second* adapter instance rather than a borrow of the one
+    /// [`crate::net`] hands the client driver: that one is moved into the driver
+    /// and lives on its own thread. Adapters are stateless value types, so a
+    /// second one costs a `Box` and answers identically.
+    version_data: Option<Box<dyn lodestone_model::VersionAdapter>>,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -497,6 +550,13 @@ impl Sim {
         }
         .with_particle_atlas(resources.particle_atlas.as_deref());
 
+        // Per-block-state data (hardness, for the mining predictor) comes from
+        // whichever version family the registry has compiled in for the
+        // configured protocol. Resolved once here rather than per dig tick: the
+        // lookup itself is a table index, but minting a boxed adapter 20× a
+        // second to perform it would not be.
+        let version_data = lodestone_registry::adapter_for_protocol(config.protocol);
+
         Self {
             config,
             world,
@@ -552,6 +612,7 @@ impl Sim {
             attacking: false,
             last_player_input: None,
             fluid_state: FluidState::NONE,
+            version_data,
         }
     }
 
@@ -1182,11 +1243,14 @@ impl Sim {
     /// never drives the predictor), so `mining.destroy_stage()` is `-1` off a
     /// server and this returns `None` there regardless.
     ///
-    /// Note: because the shell has no per-block hardness seam, the predictor is
-    /// fed a small fixed hardness (`LIVE_DIG_HARDNESS`) that races local progress
-    /// ahead of the server's real destroy timer, so the crack currently
-    /// *pulses* through the stages rather than filling smoothly over the true
-    /// break time. A real hardness seam would make it track vanilla exactly.
+    /// The stage advances at the block's *own* rate: the predictor is fed the
+    /// version's real per-state hardness (see
+    /// [`drive_mining`](Self::drive_mining)), so the ten stages fill smoothly
+    /// over the true break time and obsidian visibly crawls where dirt flickers
+    /// past. An unbreakable block (`hardness == -1.0`, bedrock/barrier) has
+    /// `progress_per_tick() == 0.0`, so progress never leaves `0.0`,
+    /// `destroy_stage()` stays `-1` and this returns `None` — no crack is drawn
+    /// at all, matching vanilla.
     #[must_use]
     pub fn crack_target(&self) -> Option<crate::gpu::CrackTarget> {
         let stage = self.mining.destroy_stage();
@@ -1316,6 +1380,26 @@ impl Sim {
         }
     }
 
+    /// The version's break-time census for a live block-state id, or `None` when
+    /// the shell cannot answer honestly.
+    ///
+    /// `None` has two causes and they are deliberately not distinguished by the
+    /// caller, because the correct response to both is the same — refuse to dig:
+    ///
+    /// * no version family compiled in for [`Config::protocol`] (the default,
+    ///   version-free build; the `live` feature compiles one), so
+    ///   [`Self::version_data`] is `None`;
+    /// * a state id outside the version's census — a modded or corrupt id. The
+    ///   v770 table covers all 32,366 real states, so on a vanilla server this
+    ///   does not happen.
+    ///
+    /// Guessing a hardness here is precisely how block breaking got too fast the
+    /// first time, so the seam's "reports unknown, never a guessed number"
+    /// contract is carried through to the consumer rather than papered over.
+    fn resolve_block_hardness(&self, state_id: u32) -> Option<lodestone_model::BlockHardness> {
+        self.version_data.as_ref()?.block_hardness(state_id)
+    }
+
     /// Advance the live block interactions one tick: the held-attack dig and the
     /// edge-triggered sneak-input resend. Called once per physics tick from
     /// [`step`](Self::step) while connected, so the dig accumulates at the same
@@ -1326,11 +1410,35 @@ impl Sim {
     }
 
     /// Drive the live mining predictor one tick from the held attack button and
-    /// the current target. Holding the button keeps the dig active; the predictor
-    /// emits a `START` on first press and an early `STOP` a few ticks later,
-    /// which latches the server's *delayed-destroy* timer so the block breaks at
-    /// the correct vanilla time without the shell knowing the block's hardness
-    /// (see [`LIVE_DIG_HARDNESS`] and the report).
+    /// the current target. Holding the button keeps the dig active: the predictor
+    /// emits a `START` on first press, accumulates `getDestroyProgress` every
+    /// tick thereafter, and emits the `STOP_DESTROY` on the tick its own progress
+    /// reaches `1.0` — the same tick vanilla's client would, because it is fed
+    /// the same per-block hardness vanilla reads off the `BlockState`.
+    ///
+    /// The hardness comes from [`VersionAdapter::block_hardness`] keyed on the
+    /// *live* state id (`NetClient::block_at`), so it is real version data rather
+    /// than a shell-side guess. A state the version cannot resolve (or a build
+    /// with no family compiled in) aborts the dig instead of substituting a
+    /// number — see [`resolve_block_hardness`](Self::resolve_block_hardness).
+    ///
+    /// # The `STOP` lands past the server's own gate
+    ///
+    /// This path used to feed one small fake hardness for every block, which made
+    /// the predictor emit its `STOP` after ~5 ticks; the server then latched
+    /// `hasDelayedDestroy` and finished the block on its own timer. That produced
+    /// correct *break* times by accident but a crack overlay that pulsed through
+    /// all ten stages in a quarter second regardless of the block — the visible
+    /// "breaking is too fast" defect.
+    ///
+    /// With real hardness the `STOP` instead lands at the true completion tick,
+    /// which is *later*, and the server takes its immediate branch: on `STOP` it
+    /// breaks when `getDestroyProgress * (ticksSpentDestroying + 1) >= 0.7`, and
+    /// for bare-hand stone that product is ≈`1.01` (`0.00667 × 151`) by the time
+    /// the `STOP` arrives — clear of the `0.7` gate. Delayed-destroy
+    /// remains the safety net in the other direction (a `STOP` arriving early
+    /// still finishes on the server's timer), so both regimes break the block —
+    /// this one just does it the way vanilla does.
     fn drive_mining(&mut self) {
         let target = if self.attacking && !self.dead {
             self.target
@@ -1349,13 +1457,28 @@ impl Sim {
         };
         let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
-        let is_air = self.net.as_ref().and_then(|n| n.block_at(pos)) == Some(id::AIR);
-        let inputs = BreakInputs {
-            hardness: LIVE_DIG_HARDNESS,
-            is_air,
-            on_ground: self.player.on_ground,
-            ..BreakInputs::default()
+        let state_id = self.net.as_ref().and_then(|n| n.block_at(pos));
+        let Some(entry) = state_id.and_then(|id| self.resolve_block_hardness(id)) else {
+            // Unknown state (or no version family compiled in): the shell has no
+            // honest break time for this block, so it aborts rather than digging
+            // at a made-up rate. `stop()` is idempotent — it emits one `ABORT`
+            // for a live dig and nothing on subsequent ticks.
+            let actions = self.mining.stop();
+            if let Some(net) = &self.net {
+                for action in actions {
+                    net.send_action(action);
+                }
+            }
+            return;
         };
+        let inputs = bare_hand_break_inputs(
+            entry,
+            state_id == Some(id::AIR),
+            self.player.on_ground,
+            // `eye_in_water`, not `under_water()` — see "Trap 2" on
+            // `bare_hand_break_inputs`.
+            self.fluid_state.eye_in_water,
+        );
         // `continue_` delegates to `start` when no dig is live yet, so this one
         // entry point covers first-press, hold, and retarget uniformly.
         let actions = self.mining.continue_(pos, face, &inputs, None);
@@ -2269,6 +2392,546 @@ mod tests {
             sim.fog_settings().end < water.end,
             "lava blinds faster than water"
         );
+    }
+
+    /// Real census entries as the version's table reports them (v770's
+    /// `hardness.rs`, dumped from a headless 26.2 server). Spelled out here so
+    /// the shell's unit tests assert against real numbers while still naming no
+    /// version crate; the `live`-gated test below proves these are the values
+    /// that actually arrive through the registry seam.
+    mod census {
+        use lodestone_model::BlockHardness;
+
+        pub const STONE: BlockHardness = BlockHardness {
+            hardness: 1.5,
+            requires_correct_tool: true,
+        };
+        pub const DIRT: BlockHardness = BlockHardness {
+            hardness: 0.5,
+            requires_correct_tool: false,
+        };
+        pub const OBSIDIAN: BlockHardness = BlockHardness {
+            hardness: 50.0,
+            requires_correct_tool: true,
+        };
+        pub const BEDROCK: BlockHardness = BlockHardness {
+            hardness: -1.0,
+            requires_correct_tool: false,
+        };
+    }
+
+    /// Bare-hand inputs on flat, dry ground — the pose every timing figure below
+    /// is quoted at.
+    fn dry_ground(entry: lodestone_model::BlockHardness) -> BreakInputs {
+        bare_hand_break_inputs(entry, false, true, false)
+    }
+
+    #[test]
+    fn bare_hand_correct_tool_is_the_negation_of_the_blocks_requirement() {
+        // The defect this whole path exists to fix, pinned as a number. Feeding
+        // `requires_correct_tool` straight into `correct_tool` is the naive
+        // wiring: it reads like faithful data and flips stone from the 100
+        // divider to the 30, breaking it 3.4x too fast — i.e. it reintroduces
+        // "block breaking is too fast" while looking correct.
+        let naive_stone = BreakInputs {
+            hardness: census::STONE.hardness,
+            correct_tool: census::STONE.requires_correct_tool,
+            ..BreakInputs::default()
+        };
+        assert_eq!(
+            naive_stone.ticks_to_break(),
+            Some(45),
+            "sanity: the naive wiring really is the fast one"
+        );
+        assert_eq!(
+            dry_ground(census::STONE).ticks_to_break(),
+            Some(151),
+            "bare-hand stone must take 151 ticks (~8.0s), server-confirmed over RCON; \
+             45 here means `correct_tool` was fed `requires_correct_tool` unnegated"
+        );
+
+        // Dirt moves the *other* way, so a test that only looked at stone could
+        // be satisfied by a blanket `correct_tool: false`.
+        assert_eq!(
+            dry_ground(census::DIRT).ticks_to_break(),
+            Some(15),
+            "bare-hand dirt is the correct tool for its own drops: 30 divider"
+        );
+        let naive_dirt = BreakInputs {
+            hardness: census::DIRT.hardness,
+            correct_tool: census::DIRT.requires_correct_tool,
+            ..BreakInputs::default()
+        };
+        assert_eq!(naive_dirt.ticks_to_break(), Some(51));
+    }
+
+    #[test]
+    fn submerged_reads_eye_in_water_not_the_fogs_under_water() {
+        // Vanilla's `getDestroySpeed` gates the 5x underwater penalty on
+        // `isEyeInFluid(WATER)` alone; `FluidState::under_water()` additionally
+        // requires `in_water()` and is what the *fog* selects on. The two
+        // disagree exactly here — an eye in water whose box is not — so reading
+        // the fog's predicate would silently drop the penalty in that pose.
+        let eye_only = FluidState {
+            eye_in_water: true,
+            ..FluidState::NONE
+        };
+        assert!(eye_only.eye_in_water);
+        assert!(
+            !eye_only.under_water(),
+            "the two predicates must actually differ here, or this proves nothing"
+        );
+
+        let dry = dry_ground(census::STONE);
+        let wet = bare_hand_break_inputs(census::STONE, false, true, eye_only.eye_in_water);
+        // Compare the *rate*, not the tick count: `ticks_to_break` replays
+        // vanilla's f32 accumulate-and-compare loop, so a 5x slower rate lands
+        // near — not exactly on — 5x the ticks (the same rounding that makes
+        // bare-hand stone 151 rather than the textbook 150).
+        assert_eq!(
+            wet.dig_speed(),
+            dry.dig_speed() * 0.2,
+            "submerged mining is 5x slower (the 0.2 submerged_mining_speed factor)"
+        );
+        assert!(
+            wet.ticks_to_break().unwrap() > dry.ticks_to_break().unwrap() * 4,
+            "and it shows up in the break time"
+        );
+    }
+
+    #[test]
+    fn off_ground_mining_is_five_times_slower() {
+        // `on_ground` was already wired before the hardness seam; keep it pinned
+        // so a rewrite of the input builder cannot quietly drop it.
+        let grounded = dry_ground(census::STONE);
+        let airborne = bare_hand_break_inputs(census::STONE, false, false, false);
+        assert_eq!(airborne.dig_speed(), grounded.dig_speed() / 5.0);
+        assert!(
+            airborne.ticks_to_break().unwrap() > grounded.ticks_to_break().unwrap() * 4,
+            "off-ground mining must be materially slower"
+        );
+    }
+
+    #[test]
+    fn tool_inputs_stay_at_bare_hand_defaults() {
+        // `minecraft:tool` is not a modeled item component, so there is no source
+        // for a held tool's per-block speed. This pins that the shell leaves
+        // those inputs alone rather than inventing one; when the component lands,
+        // this test is the reminder of what to revisit.
+        let inputs = dry_ground(census::STONE);
+        assert_eq!(inputs.tool_speed, 1.0);
+        assert_eq!(inputs.mining_efficiency, 0.0);
+        assert_eq!(inputs.haste_amplifier, None);
+        assert_eq!(inputs.mining_fatigue, None);
+        assert_eq!(inputs.block_break_speed, 1.0);
+    }
+
+    /// Replay a held dig for `ticks` and report the crack stage the shell would
+    /// draw, mirroring `crack_target`'s read of `Mining::destroy_stage`.
+    fn stage_after(entry: lodestone_model::BlockHardness, ticks: u32) -> i32 {
+        let pos = BlockPos::new(0, 64, 0);
+        let inputs = dry_ground(entry);
+        let mut machine = Mining::new();
+        machine.start(pos, BlockFace::Up, &inputs, None);
+        for _ in 0..ticks {
+            machine.continue_(pos, BlockFace::Up, &inputs, None);
+        }
+        machine.destroy_stage()
+    }
+
+    #[test]
+    fn unbreakable_blocks_draw_no_crack_at_all() {
+        // `hardness == -1.0` makes `progress_per_tick` return 0.0, so progress
+        // never leaves 0.0 and `destroy_stage()` stays -1 — which is what
+        // `crack_target` turns into `None`. Under the old fixed hardness bedrock
+        // cracked like anything else.
+        assert_eq!(dry_ground(census::BEDROCK).progress_per_tick(), 0.0);
+        assert_eq!(dry_ground(census::BEDROCK).ticks_to_break(), None);
+        for ticks in [0u32, 1, 10, 200] {
+            assert_eq!(
+                stage_after(census::BEDROCK, ticks),
+                -1,
+                "bedrock must never show a crack stage (t={ticks})"
+            );
+        }
+    }
+
+    #[test]
+    fn crack_stages_advance_at_per_block_rates() {
+        // The visible half of the defect: under one fixed hardness every block
+        // pulsed through all ten stages at the same speed. Obsidian is 100x
+        // stone's hardness and must crawl where dirt races.
+        let t = 8;
+        let dirt = stage_after(census::DIRT, t);
+        let stone = stage_after(census::STONE, t);
+        let obsidian = stage_after(census::OBSIDIAN, t);
+        assert!(
+            dirt > stone && stone >= obsidian,
+            "stages must order dirt > stone >= obsidian at t={t}, got {dirt}/{stone}/{obsidian}"
+        );
+        assert!(dirt >= 5, "dirt is half-broken in 8 ticks, got stage {dirt}");
+        assert_eq!(
+            obsidian, 0,
+            "obsidian (5000 ticks) must still be on stage 0 after 8 ticks"
+        );
+        // ... and it really does eventually crack, so `0` above is slowness and
+        // not an unbreakable-style dead stop.
+        assert!(stage_after(census::OBSIDIAN, 600) > 0);
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume() {
+        // Closes the loop: everything above asserts against hand-written census
+        // constants, which would keep passing if `Sim` resolved no adapter at all
+        // or the seam regressed to the trait's `None` default. This asserts the
+        // shell's *own* lookup, for the protocol its config names.
+        let sim = Sim::new(test_config());
+        assert!(
+            sim.version_data.is_some(),
+            "the `live` feature must compile a family in for protocol {}",
+            sim.config.protocol
+        );
+
+        // Air is state 0 in every version's block-state registry, so it is the
+        // one id the shell can name without naming a version.
+        let air = sim
+            .resolve_block_hardness(id::AIR)
+            .expect("air must resolve through the seam");
+        assert_eq!(air.hardness, 0.0);
+
+        // Find the census entries the unit tests above assume, by value rather
+        // than by id (ids renumber every data bump).
+        let entries: Vec<_> = (0..40_000)
+            .filter_map(|id| sim.resolve_block_hardness(id))
+            .collect();
+        assert!(
+            entries.len() > 30_000,
+            "expected a full state census, got {} entries",
+            entries.len()
+        );
+        for expected in [
+            census::STONE,
+            census::DIRT,
+            census::OBSIDIAN,
+            census::BEDROCK,
+        ] {
+            assert!(
+                entries.contains(&expected),
+                "{expected:?} is not in the version's census — the hand-written \
+                 constants in `census` have drifted from the real table"
+            );
+        }
+
+        // An id past the census reports unknown rather than a guess, which is
+        // what makes `drive_mining` refuse to dig instead of inventing a rate.
+        assert_eq!(sim.resolve_block_hardness(u32::MAX), None);
+    }
+
+    /// Live break-timing gate for the shell's own mining inputs, against the
+    /// survival oracle (`lodestone-survival`, game :25565, RCON :25566).
+    ///
+    /// The hermetic tests above prove the *arithmetic*. What they cannot prove is
+    /// the thing that made retiring the old fixed hardness risky: feeding a real
+    /// hardness moves the client's `STOP_DESTROY` from ~5 ticks to the block's
+    /// true completion tick, which is a change in **protocol interaction**, not
+    /// just in a number. The server has two branches on `STOP` and this change
+    /// swaps which one runs, so it has to be measured rather than reasoned about.
+    ///
+    /// Both regimes are driven back-to-back on the same connection and the same
+    /// block, so the comparison is not across two runs of a shared server:
+    ///
+    /// * **before** — the retired `LIVE_DIG_HARDNESS` (`0.05` for every block).
+    ///   `STOP` lands at ~5 ticks, `getDestroyProgress * (ticks + 1)` is ≈`0.04`,
+    ///   under the server's `0.7` gate, so the server sets `hasDelayedDestroy`
+    ///   and finishes on its own timer: the block becomes air **seconds after**
+    ///   the `STOP`.
+    /// * **after** — the shell's real inputs. `STOP` lands at tick 151, the
+    ///   product is ≈`1.05`, over the gate, so the server takes the immediate
+    ///   `destroyAndAck` branch: air lands **right behind** the `STOP`.
+    ///
+    /// The `stop → air` gap is therefore the discriminator between the branches,
+    /// and the `start → air` total is the regression guard on player-visible
+    /// break time (which must *not* move).
+    ///
+    /// ```text
+    /// cargo test -p lodestone-shell --features live --lib \
+    ///     sim::tests::live_bare_hand_stone -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "live")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the lodestone-survival server on 127.0.0.1:25565 (RCON :25566)"]
+    async fn live_bare_hand_stone_timing_survives_the_real_hardness_seam() {
+        use std::time::Duration;
+
+        use lodestone_client::{ClientBuilder, ClientHandle, LoginProfile, ServerAddress};
+        use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
+
+        /// The hardness this path used to feed for *every* block, kept only here
+        /// as the "before" leg of the measurement. It is not reachable from
+        /// production code any more, and must not become so again.
+        const RETIRED_FIXED_HARDNESS: f32 = 0.05;
+
+        /// One dig, driven tick-by-tick through the real [`Mining`] machine with
+        /// every emitted action lowered onto the wire. Returns
+        /// `(stop_tick, start_to_stop, start_to_air)`, with air read from the
+        /// *server* over RCON — never from our own optimistic prediction.
+        async fn dig(
+            handle: &ClientHandle,
+            rcon: &mut Rcon,
+            pos: BlockPos,
+            inputs: &BreakInputs,
+            max_ticks: u32,
+        ) -> Option<(u32, Duration, Duration)> {
+            let mut machine = Mining::new();
+            let face = BlockFace::West;
+            let t0 = Instant::now();
+            for action in machine.start(pos, face, inputs, None) {
+                let _ = handle.send_action(action);
+            }
+            let mut stop_at = None;
+            let mut ticks = 0u32;
+            while machine.is_destroying() && ticks < max_ticks {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                ticks += 1;
+                for action in machine.continue_(pos, face, inputs, None) {
+                    if matches!(
+                        action,
+                        ClientAction::BlockAction {
+                            action: lodestone_model::BlockActionKind::StopDestroy,
+                            ..
+                        }
+                    ) {
+                        stop_at = Some((ticks, t0.elapsed()));
+                    }
+                    let _ = handle.send_action(action);
+                }
+            }
+            let (stop_tick, to_stop) = stop_at?;
+            // Poll server truth. `execute if block` reports "Test passed" only on
+            // a match, so this never mistakes an error string for a break.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let resp = rcon
+                    .cmd(&format!(
+                        "execute if block {} {} {} minecraft:air",
+                        pos.x, pos.y, pos.z
+                    ))
+                    .await;
+                if resp.contains("Test passed") {
+                    return Some((stop_tick, to_stop, t0.elapsed()));
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+
+        async fn place(rcon: &mut Rcon, pos: BlockPos, block: &str) -> bool {
+            rcon.cmd(&format!("setblock {} {} {} {block}", pos.x, pos.y, pos.z))
+                .await;
+            rcon.cmd(&format!(
+                "execute if block {} {} {} {block}",
+                pos.x, pos.y, pos.z
+            ))
+            .await
+            .contains("Test passed")
+        }
+
+        let user = unique_username();
+        let protocol = test_config().protocol;
+        let adapter = lodestone_registry::adapter_for_protocol(protocol)
+            .expect("the `live` feature compiles a family in for the configured protocol");
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "127.0.0.1".into(),
+                port: 25565,
+            },
+            LoginProfile {
+                username: user.clone(),
+                uuid: uuid::Uuid::new_v4(),
+            },
+            adapter,
+        )
+        .connect()
+        .await
+        .expect("connect to lodestone-survival on 127.0.0.1:25565");
+        // Drain the event stream so the driver's bounded channel never blocks.
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+
+        assert!(
+            poll_until(Duration::from_secs(30), Duration::from_millis(100), || async {
+                handle
+                    .players()
+                    .into_iter()
+                    .find(|p| p.name.as_deref() == Some(user.as_str()))
+            })
+            .await
+            .is_some(),
+            "player {user} never reached Play on the oracle"
+        );
+
+        let mut rcon = Rcon::connect(("127.0.0.1", 25566), "lodestone")
+            .await
+            .expect("connect RCON on 127.0.0.1:25566");
+        // Survival is required (creative insta-breaks everything, making the
+        // timing vacuous); op clears spawn protection; the effects keep a stray
+        // mob, fall or hunger from killing the player mid-dig, which would
+        // teleport the entity and strand every later command.
+        let _ = rcon.cmd(&format!("op {user}")).await;
+        let _ = rcon.cmd(&format!("gamemode survival {user}")).await;
+        for eff in [
+            "minecraft:resistance 999999 255 true",
+            "minecraft:regeneration 999999 9 true",
+            "minecraft:fire_resistance 999999 0 true",
+            "minecraft:saturation 999999 9 true",
+        ] {
+            let _ = rcon.cmd(&format!("effect give {user} {eff}")).await;
+        }
+
+        let p = poll_until(Duration::from_secs(15), Duration::from_millis(200), || async {
+            handle.position()
+        })
+        .await
+        .expect("client never reported a position");
+        // Two blocks east at feet level: clear of the player box, inside reach,
+        // and never the floor being stood on.
+        let target = BlockPos::new(p.x.floor() as i32 + 2, p.y.floor() as i32, p.z.floor() as i32);
+        let gate = BlockPos::new(target.x, target.y, target.z + 2);
+        for q in [target, gate] {
+            for dy in 0..=1 {
+                let _ = rcon
+                    .cmd(&format!("setblock {} {} {} minecraft:air", q.x, q.y + dy, q.z))
+                    .await;
+            }
+        }
+
+        // Clear the server's `hasClientLoaded()` gate, which drops every
+        // `player_action` for ~60 ticks after join. A hardness-0 block breaks on
+        // START alone, so retrying it until it vanishes both proves the
+        // instant-break branch and tells us the gate is open — without it the
+        // first timed dig silently measures the gate instead of the block.
+        let gate_deadline = Instant::now() + Duration::from_secs(30);
+        let mut gate_cleared = false;
+        while Instant::now() < gate_deadline {
+            assert!(place(&mut rcon, gate, "minecraft:slime_block").await);
+            let mut m = Mining::new();
+            let inputs = bare_hand_break_inputs(
+                lodestone_model::BlockHardness {
+                    hardness: 0.0,
+                    requires_correct_tool: false,
+                },
+                false,
+                true,
+                false,
+            );
+            assert!(inputs.progress_per_tick() >= 1.0, "hardness 0 is instant");
+            for action in m.start(gate, BlockFace::Up, &inputs, None) {
+                let _ = handle.send_action(action);
+            }
+            assert!(!m.is_destroying(), "an instant break retains no live dig");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if rcon
+                .cmd(&format!(
+                    "execute if block {} {} {} minecraft:air",
+                    gate.x, gate.y, gate.z
+                ))
+                .await
+                .contains("Test passed")
+            {
+                gate_cleared = true;
+                break;
+            }
+        }
+        assert!(gate_cleared, "the server's client-loaded gate never opened");
+        println!("load gate clear");
+
+        // --- BEFORE: the retired fixed hardness ---
+        assert!(place(&mut rcon, target, "minecraft:stone").await);
+        let before = dig(
+            &handle,
+            &mut rcon,
+            target,
+            &BreakInputs {
+                hardness: RETIRED_FIXED_HARDNESS,
+                on_ground: true,
+                ..BreakInputs::default()
+            },
+            400,
+        )
+        .await
+        .expect("the retired-constant dig never reached air");
+        println!(
+            "BEFORE (fixed {RETIRED_FIXED_HARDNESS}): STOP at tick {} ({:?}), air at {:?} \
+             — stop→air gap {:?}",
+            before.0,
+            before.1,
+            before.2,
+            before.2 - before.1
+        );
+
+        // --- AFTER: the shell's own inputs, from the real census entry ---
+        assert!(place(&mut rcon, target, "minecraft:stone").await);
+        let stone = bare_hand_break_inputs(census::STONE, false, true, false);
+        assert_eq!(stone.ticks_to_break(), Some(151));
+        let after = dig(&handle, &mut rcon, target, &stone, 400)
+            .await
+            .expect("the real-hardness dig never reached air");
+        println!(
+            "AFTER  (census stone): STOP at tick {} ({:?}), air at {:?} — stop→air gap {:?}",
+            after.0,
+            after.1,
+            after.2,
+            after.2 - after.1
+        );
+
+        // 1. The predictor now stops at the block's true completion tick.
+        assert_eq!(
+            after.0, 151,
+            "the real-hardness dig must emit its STOP on tick 151, not earlier"
+        );
+        assert!(
+            before.0 < 20,
+            "sanity: the retired constant really did stop early (tick {})",
+            before.0
+        );
+
+        // 2. Player-visible break time is unchanged — the regression guard. Both
+        //    legs land near ~8s; the driving loop sleeps 50ms per tick so real
+        //    scheduling jitter accumulates over 151 ticks, hence the window.
+        for (label, total) in [("before", before.2), ("after", after.2)] {
+            assert!(
+                total > Duration::from_millis(6_500) && total < Duration::from_millis(12_000),
+                "{label}: bare-hand stone must still take ~8s, got {total:?}"
+            );
+        }
+
+        // 3. The branch really did swap: the retired constant left the server to
+        //    finish the block seconds after the STOP (delayed-destroy), while the
+        //    real hardness has the STOP itself destroy it (immediate).
+        assert!(
+            before.2 - before.1 > Duration::from_secs(3),
+            "before: the server should have finished on its own timer well after the \
+             early STOP, got a {:?} gap",
+            before.2 - before.1
+        );
+        assert!(
+            after.2 - after.1 < Duration::from_secs(2),
+            "after: the STOP should destroy the block immediately (progress*(ticks+1) \
+             ≈ 1.01 clears the 0.7 gate), got a {:?} gap",
+            after.2 - after.1
+        );
+
+        // Best-effort cleanup on the shared oracle.
+        for q in [target, gate] {
+            let _ = rcon
+                .cmd(&format!("setblock {} {} {} minecraft:air", q.x, q.y, q.z))
+                .await;
+        }
+        let _ = rcon.cmd(&format!("effect clear {user}")).await;
+        let _ = rcon.cmd(&format!("deop {user}")).await;
+        drain.abort();
     }
 
     #[test]
