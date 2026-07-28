@@ -81,6 +81,11 @@ pub struct BakedQuad {
     /// The atlas layer the sprite lives on (always `0` for the single-atlas
     /// layout; present so a texture-array switch is not an API break).
     pub layer: u32,
+    /// The animation slot of the sprite this quad samples, or `0` when the
+    /// sprite is static. Copied from [`AtlasSprite::anim_slot`]; the renderer
+    /// uses it to look up a per-frame V offset so the baked (frame-0) UVs
+    /// advance without any mesh or atlas mutation. See [`AnimTable`].
+    pub anim: u8,
 }
 
 /// A baked model: every quad from every element, ready for the mesher.
@@ -357,6 +362,7 @@ fn bake_face(
         tint_index: face.tintindex,
         shade: element.shade.unwrap_or(true),
         layer: sprite.layer,
+        anim: sprite.anim_slot,
     })
 }
 

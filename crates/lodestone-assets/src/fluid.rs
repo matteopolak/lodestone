@@ -279,6 +279,11 @@ pub struct SpriteUv {
     pub min: [f32; 2],
     /// Bottom-right UV.
     pub max: [f32; 2],
+    /// The animation slot of the sprite this rect belongs to, or `0` when the
+    /// sprite is static. Carried through to each fluid [`BakedQuad`] so flowing
+    /// water and lava advance frames like any other animated sprite. See
+    /// [`AtlasSprite::anim_slot`](crate::atlas::AtlasSprite::anim_slot).
+    pub anim: u8,
 }
 
 impl SpriteUv {
@@ -377,7 +382,13 @@ pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<
                 still.at(1.0, 0.0),
             ]
         };
-        quads.push(fluid_quad(positions, uvs, Direction::Up, geom.tint_index));
+        quads.push(fluid_quad(
+            positions,
+            uvs,
+            Direction::Up,
+            geom.tint_index,
+            if flowing { flow.anim } else { still.anim },
+        ));
     }
 
     if geom.faces.down {
@@ -396,6 +407,7 @@ pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<
             ],
             Direction::Down,
             geom.tint_index,
+            still.anim,
         ));
     }
 
@@ -455,6 +467,7 @@ pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<
             ],
             dir,
             geom.tint_index,
+            flow.anim,
         ));
     }
 
@@ -466,6 +479,7 @@ fn fluid_quad(
     uvs: [[f32; 2]; 4],
     direction: Direction,
     tint_index: Option<i32>,
+    anim: u8,
 ) -> BakedQuad {
     BakedQuad {
         positions,
@@ -475,6 +489,7 @@ fn fluid_quad(
         tint_index,
         shade: false,
         layer: 0,
+        anim,
     }
 }
 
