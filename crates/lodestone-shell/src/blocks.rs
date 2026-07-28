@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use lodestone_render::{BlockAtlas, BlockClassifier, BlockModels, Cell, SpriteId, Surface};
+use lodestone_render::{
+    BlockAtlas, BlockClassifier, BlockModels, Cell, FluidKind, SpriteId, Surface,
+};
 use lodestone_world::LightProperties;
 
 /// Block-state ids used by [`crate::worldgen`]. These are the shell's own tiny
@@ -239,6 +241,59 @@ impl BlockClassifier for ShellClassifier {
         match self {
             ShellClassifier::Demo(d) => d.classify(state_id, block_light, sky_light),
             ShellClassifier::Vanilla(a) => a.classify(state_id, block_light, sky_light),
+        }
+    }
+}
+
+/// The fluid a **vanilla** block state exposes, or `None`.
+///
+/// This is the shell's *single* answer to "does this state carry a fluid", and it
+/// is deliberately a thin delegation rather than a rule of its own: the rule lives
+/// once, in [`BlockModels::fluid`], which the mesher already meshes water from.
+/// That one classifier knows the three cases a block-id match cannot:
+///
+/// * `minecraft:water` / `minecraft:lava` and their `level` property;
+/// * **any** state with `waterlogged=true` (stairs, slabs, fences, trapdoors…);
+/// * the five classes whose `getFluidState` hardcodes a water source with no
+///   blockstate property at all (kelp, kelp plant, seagrass, tall seagrass,
+///   bubble column) — structurally invisible to a property-driven classifier.
+///
+/// Physics reads this through [`crate::collision::LiveCollision`], so the swim
+/// path, the submerged fog, the underwater overlay and the ambient sounds are all
+/// gated by the *same* boolean the water surface is drawn from. Four consumers,
+/// one answer — a second local copy of the waterlogged rule is exactly the drift
+/// this exists to prevent.
+///
+/// Returns `None` when the atlas carries no baked models (never true for a live
+/// session: [`crate::resources::BlockResources::try_vanilla`] always attaches them
+/// before the atlas escapes).
+#[must_use]
+pub fn vanilla_fluid(atlas: &BlockAtlas, state_id: u32) -> Option<FluidKind> {
+    atlas.models()?.fluid(state_id).map(|cell| cell.kind)
+}
+
+/// The fluid a **demo-palette** state exposes, or `None`.
+///
+/// The demo palette's counterpart to [`vanilla_fluid`]. It is a one-line table
+/// rather than a delegation because the palette is a nine-block fixture in its own
+/// id space with no models, no waterlogging and no lava — there is no vanilla rule
+/// to share, only this fixture's own fact, and it belongs next to the [`id`]
+/// constants it reads.
+#[must_use]
+pub fn demo_fluid(state_id: u32) -> Option<FluidKind> {
+    (state_id == id::WATER).then_some(FluidKind::Water)
+}
+
+impl ShellClassifier {
+    /// The fluid a state exposes, in whichever id space this session picked.
+    ///
+    /// Dispatches to [`vanilla_fluid`] or [`demo_fluid`]; see [`vanilla_fluid`]
+    /// for why this is the only place the question is answered.
+    #[must_use]
+    pub fn fluid(&self, state_id: u32) -> Option<FluidKind> {
+        match self {
+            ShellClassifier::Demo(_) => demo_fluid(state_id),
+            ShellClassifier::Vanilla(a) => vanilla_fluid(a, state_id),
         }
     }
 }
