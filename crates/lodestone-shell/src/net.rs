@@ -147,6 +147,20 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
+    /// The server reported a block being destroyed at `pos`, carrying the state
+    /// id it had **before** breaking.
+    ///
+    /// This is vanilla's `LevelEvent.PARTICLES_DESTROY_BLOCK` (2001), whose
+    /// payload is a block state id (`Block.stateById(data)` in
+    /// `LevelEventHandler`). It is the authoritative signal that a block broke:
+    /// the client cannot derive it from `BLOCK_UPDATE`, because by the time that
+    /// arrives the cell is already air and the texture the debris needs is gone.
+    BlockDestroyed {
+        /// Block position that broke.
+        pos: lodestone_model::BlockPos,
+        /// The block state id the cell held before breaking.
+        state: u32,
+    },
     /// Player health/food changed.
     Health {
         /// Current health in `0..=20`.
@@ -629,6 +643,20 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
                 text,
                 player: matches!(kind, lodestone_model::event::ChatKind::Chat),
             },
+        },
+        // 2001 is the only level event the shell acts on today; the rest are
+        // decoded and dropped here rather than in the adapter, so adding a
+        // consumer later is a new arm and not a new packet.
+        ClientEvent::LevelEvent {
+            event: 2001,
+            pos,
+            data,
+            ..
+        } => NetUpdate::BlockDestroyed {
+            pos,
+            // Vanilla reads this as an unsigned state id; a negative here would
+            // be an out-of-range id that the model lookup rejects anyway.
+            state: data as u32,
         },
         ClientEvent::Disconnect { reason } => {
             let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));

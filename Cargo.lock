@@ -1856,6 +1856,7 @@ dependencies = [
  "lodestone-controller",
  "lodestone-game",
  "lodestone-model",
+ "lodestone-particle",
  "lodestone-physics",
  "lodestone-registry",
  "lodestone-render",

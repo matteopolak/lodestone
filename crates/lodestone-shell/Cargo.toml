@@ -29,6 +29,10 @@ lodestone-world = { workspace = true }
 lodestone-registry = { workspace = true }
 lodestone-render = { path = "../lodestone-render", features = ["window"] }
 lodestone-physics = { path = "../lodestone-physics" }
+# Vanilla particle simulation (block-break debris, hit fragments). The shell
+# owns the join between a particle's block state and its atlas sprite, because
+# only it holds both the engine and the baked model set.
+lodestone-particle = { workspace = true }
 # The wasm-safe controller core, shared with the browser client so movement has
 # one implementation. The shell adds only the winit key/mouse mapping on top.
 lodestone-controller = { path = "../lodestone-controller" }

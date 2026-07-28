@@ -20,6 +20,7 @@ use lodestone_render::{
 
 use crate::entities::EntityDraw;
 use crate::mesher::{SectionGeometry, SectionKey};
+use crate::particles::{ParticleInstance, ParticleRenderer};
 
 /// The 12 edges of a unit cube as pairs of corner indices (line list).
 const CUBE_EDGES: [(usize, usize); 12] = [
@@ -225,6 +226,8 @@ pub struct RenderStats {
     pub entities_drawn: usize,
     /// Entity instances frustum-culled this frame.
     pub entities_culled: usize,
+    /// Particle billboards drawn this frame.
+    pub particles_drawn: usize,
 }
 
 #[derive(Debug)]
@@ -495,6 +498,10 @@ pub struct RenderState {
     model: Option<ModelRenderer>,
     outline: OutlineRenderer,
     entities: EntityRenderer,
+    /// Block-break debris. Bound to whichever atlas the terrain draws from, so a
+    /// fragment is textured from the same pixels as the block it came off.
+    particles: ParticleRenderer,
+    particle_atlas_bind_group: wgpu::BindGroup,
     clear: wgpu::Color,
 }
 
@@ -561,6 +568,15 @@ impl RenderState {
             }
         });
 
+        // Particles sample the same atlas the terrain does. The two atlases are
+        // disjoint UV spaces (the packed cube atlas vs the complete baked-model
+        // atlas), so binding the wrong one throws correctly-shaped debris in
+        // some other block's colours.
+        let particles = ParticleRenderer::new(device, color_format);
+        let particle_atlas = model.as_ref().map_or(&atlas, |m| &m.atlas);
+        let particle_atlas_bind_group =
+            particles.atlas_bind_group(device, &particle_atlas.view, &particle_atlas.sampler);
+
         Self {
             pipeline,
             atlas,
@@ -571,6 +587,8 @@ impl RenderState {
             model,
             outline,
             entities,
+            particles,
+            particle_atlas_bind_group,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: 0.53,
@@ -579,6 +597,19 @@ impl RenderState {
                 a: 1.0,
             },
         }
+    }
+
+    /// Upload this frame's particle instances. Must run before
+    /// [`render`](Self::render), which only records the draw — a render pass
+    /// cannot create buffers.
+    pub fn prepare_particles(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        instances: &[ParticleInstance],
+        camera: &Camera,
+    ) {
+        self.particles.prepare(device, queue, instances, camera);
     }
 
     /// Recreate the depth buffer to match a resized target.
@@ -854,6 +885,13 @@ impl RenderState {
                     stats.draw_calls += 1;
                 }
             }
+
+            // Debris last among the world geometry: it is alpha-blended with
+            // depth write off, so it must read a depth buffer that already holds
+            // every opaque surface, or fragments behind a wall would show
+            // through. The outline is drawn after it, as vanilla does.
+            self.particles.draw(&mut pass, &self.particle_atlas_bind_group);
+            stats.particles_drawn = self.particles.count();
 
             if outline.is_some() {
                 self.outline.draw(&mut pass);

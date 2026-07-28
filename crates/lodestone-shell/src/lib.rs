@@ -39,6 +39,7 @@ pub mod menu;
 pub mod mesher;
 pub mod net;
 pub mod overlay;
+pub mod particles;
 pub mod raycast;
 pub mod resources;
 pub mod scoreboard;

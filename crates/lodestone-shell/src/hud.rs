@@ -76,6 +76,15 @@ pub struct DebugStats {
     /// Entity instances drawn this frame (post-frustum-cull). `0` while
     /// disconnected or when no mobs are in view.
     pub entities_drawn: usize,
+    /// Live particles in the simulation this frame.
+    pub particles_alive: usize,
+    /// Particle billboards actually submitted to the GPU.
+    pub particles_drawn: usize,
+    /// Live particles whose sprite could not be resolved, so they were not
+    /// drawn. Reported rather than dropped silently: a zero draw count against
+    /// a non-zero alive count is exactly the "renders nothing, reports fine"
+    /// state this counter exists to make visible.
+    pub particles_unresolved: usize,
     /// A short connection/status line ("local world", "connecting…", …).
     pub status: String,
 }
@@ -135,6 +144,10 @@ impl DebugStats {
                 self.live_columns, self.mesh_drops, self.entities_drawn
             ),
             format!(
+                "PARTICLES {}/{} UNRESOLVED {}",
+                self.particles_drawn, self.particles_alive, self.particles_unresolved
+            ),
+            format!(
                 "MESH VRAM {} KB WORLD {} KB RSS {} MB",
                 self.vram_bytes / 1024,
                 self.world_bytes / 1024,
@@ -148,7 +161,7 @@ impl DebugStats {
     #[must_use]
     pub fn one_line(&self) -> String {
         format!(
-            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} sections={} quads={} vram={}KB world={}KB rss={}MB {}",
+            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} particles={}/{}+{}unres sections={} quads={} vram={}KB world={}KB rss={}MB {}",
             self.position[0],
             self.position[1],
             self.position[2],
@@ -165,6 +178,9 @@ impl DebugStats {
             self.live_columns,
             self.mesh_drops,
             self.entities_drawn,
+            self.particles_drawn,
+            self.particles_alive,
+            self.particles_unresolved,
             self.section_count,
             self.quads,
             self.vram_bytes / 1024,

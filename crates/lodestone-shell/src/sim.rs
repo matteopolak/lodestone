@@ -32,6 +32,7 @@ use crate::hud::{DebugStats, process_rss_bytes};
 use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section, snapshot_section_live};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
+use crate::particles::{ParticleFrame, ParticleInstance, Particles};
 use crate::raycast::{REACH, RayHit, raycast};
 use crate::resources::BlockResources;
 use crate::worldgen;
@@ -194,6 +195,11 @@ pub struct Sim {
     /// Debug-overlay line set when vanilla assets failed to load and the session
     /// fell back to the demo palette.
     asset_banner: Option<String>,
+    /// Vanilla particle simulation. Fed by block breaks — offline via
+    /// [`break_block`](Self::break_block), live via the server's
+    /// `PARTICLES_DESTROY_BLOCK` level event — and drained once per frame into
+    /// GPU instances.
+    particles: Particles,
     /// Coarse lifecycle of the live connection, driven by [`NetUpdate`]s. The
     /// app maps this onto the menu state machine (Connecting → ready on
     /// [`SessionPhase::Connected`], → failed on [`SessionPhase::Ended`]).
@@ -375,6 +381,17 @@ impl Sim {
         };
         stats.chunk_count = world.len();
 
+        // The particle sprite table is indexed by whatever id the emitter will
+        // be handed, so it must be built from the *same* palette the world uses.
+        // With the vanilla atlas that is a baked-model state id; on the demo
+        // world it is the shell's own small block table. Binding the wrong one
+        // does not fail — it draws correctly-shaped debris in some other block's
+        // colours, which reads as an art bug rather than a wiring bug.
+        let particles = match resources.vanilla_atlas.as_ref() {
+            Some(atlas) => Particles::new(atlas.models()),
+            None => Particles::with_demo_palette(&crate::blocks::build_atlas().uv_table),
+        };
+
         Self {
             config,
             world,
@@ -406,6 +423,7 @@ impl Sim {
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
+            particles,
             phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
             tab_list: lodestone_game::tablist::TabList::new(),
@@ -768,6 +786,7 @@ impl Sim {
             }
             self.tick_count += 1;
             self.accumulator -= TICK_DT;
+            self.tick_particles();
             // Age the HUD status effects at the same fixed 20 Hz the server ticks
             // them, so displayed timers count down in step with the world.
             self.hud_effects.tick(1);
@@ -1002,7 +1021,17 @@ impl Sim {
     /// next chunk update.
     pub fn break_block(&mut self) -> bool {
         let Some(hit) = self.target else { return false };
+        // Read the state *before* clearing the cell: the debris takes its
+        // texture from the block that broke, and after `set_block_world` the
+        // cell is air and that information is gone.
+        let broken = self.block_at_world(hit.block);
         if self.set_block_world(hit.block, id::AIR) {
+            // Full-cube shape: vanilla derives the fragment grid from the
+            // block's outline shape, which the shell does not carry, so debris
+            // from a slab or fence fills the whole cell rather than hugging the
+            // model.
+            self.particles
+                .destroy_block(hit.block, broken, [1.0; 3]);
             self.remesh_around(hit.block);
             self.target = None;
             true
@@ -1207,6 +1236,98 @@ impl Sim {
             && bb.min_y < y0 + 1.0
             && bb.max_z > z0
             && bb.min_z < z0 + 1.0
+    }
+
+    /// Advance the particle simulation one 20 Hz tick.
+    ///
+    /// Particles collide against the same view the player does, so debris rests
+    /// on the terrain it fell onto rather than sinking through it. On the live
+    /// path the column may not have streamed in; vanilla ticks particles
+    /// regardless, so an absent view falls back to the offline world rather than
+    /// freezing them.
+    fn tick_particles(&mut self) {
+        if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
+            if let Some(view) = self.live_collision() {
+                self.particles.tick(&view);
+                return;
+            }
+        }
+        let view = WorldCollision::new(&self.world);
+        self.particles.tick(&view);
+    }
+
+    /// Rebuild this frame's particle instances for `camera` and report what
+    /// happened, so a silent "simulating fine, drawing nothing" is visible in
+    /// the HUD rather than invisible.
+    pub fn extract_particles(&mut self, camera: &Camera) -> ParticleFrame {
+        let partial = (self.accumulator / TICK_DT) as f32;
+        // Light is sampled from the live world when there is one. A `None` here
+        // is not darkness: `ParticleEngine::extract` substitutes full sky light,
+        // matching how the demo terrain is meshed.
+        let light: Box<dyn Fn(i32, i32, i32) -> Option<u32>> = match self.net.as_ref() {
+            Some(net) => {
+                let dims = net.world_dimensions();
+                Box::new(move |x, y, z| {
+                    let dims = dims?;
+                    let section = (y - dims.min_y).div_euclid(16);
+                    if section < 0 || section >= dims.section_count() as i32 {
+                        return None;
+                    }
+                    // `sections_and_light_at` takes `lodestone_client::ChunkPos`,
+                    // which is a *different type* from the `lodestone_world`
+                    // one imported at the top of this file (see mesher.rs:224).
+                    let pos = lodestone_client::ChunkPos {
+                        x: x.div_euclid(16),
+                        z: z.div_euclid(16),
+                    };
+                    // Light section `i` covers block section `i-1`, so a caller
+                    // for block section `n` asks for light section `n+1`. This
+                    // offset is deliberate, not a bug to "align".
+                    let got =
+                        net.sections_and_light_at(&[(pos, section as usize, section as usize + 1)]);
+                    let (_, light) = got.into_iter().next()?;
+                    let light = light?;
+                    let ly = (y - dims.min_y).rem_euclid(16) as usize;
+                    let lx = x.rem_euclid(16) as usize;
+                    let lz = z.rem_euclid(16) as usize;
+                    // Vanilla's `LightTexture.pack`: block light at bit 4, sky
+                    // light at bit 20. The particle shader reproduces the
+                    // terrain term `0.2 + 0.8 * max(sky, block)` from these.
+                    Some(u32::from(light.block_at(lx, ly, lz)) << 4
+                        | u32::from(light.sky_at(lx, ly, lz)) << 20)
+                })
+            }
+            None => Box::new(|_, _, _| None),
+        };
+        self.particles.extract(camera, partial, &light)
+    }
+
+    /// This frame's particle instances, ready for upload.
+    #[must_use]
+    pub fn particle_instances(&self) -> &[ParticleInstance] {
+        self.particles.instances()
+    }
+
+    /// The block state id at a world position, or air when the column is not
+    /// loaded or the y is outside the build range.
+    fn block_at_world(&self, block: [i32; 3]) -> u32 {
+        let pos = ChunkPos {
+            x: block[0].div_euclid(16),
+            z: block[2].div_euclid(16),
+        };
+        let Some(chunk) = self.world.get(pos) else {
+            return id::AIR;
+        };
+        let col = &chunk.column;
+        if block[1] < col.min_y() || block[1] >= col.max_y() {
+            return id::AIR;
+        }
+        lodestone_world::BlockVolume::block(
+            col,
+            block[0].rem_euclid(16) as usize,
+            block[1],
+            block[2].rem_euclid(16) as usize,
+        )
     }
 
     fn set_block_world(&mut self, block: [i32; 3], value: u32) -> bool {
@@ -1450,6 +1571,22 @@ impl Sim {
                     } else {
                         self.chat_log.push_system(text, self.clock_secs);
                     }
+                }
+                NetUpdate::BlockDestroyed { pos, state } => {
+                    // The live counterpart of the offline `break_block` emit.
+                    // It is driven by the server rather than by our own click
+                    // because the server is authoritative about *whether* the
+                    // block broke and *what* it was — a predicted break that the
+                    // server rejects would otherwise throw debris off a block
+                    // still standing there.
+                    //
+                    // Shape is a full cube for the same reason as the offline
+                    // path: vanilla derives the fragment grid from the block's
+                    // outline shape, which the shell does not carry. Debris from
+                    // a slab or a fence therefore fills the whole cell rather
+                    // than hugging the model.
+                    self.particles
+                        .destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
                 }
                 NetUpdate::Health { health, food } => {
                     // Record the vitals for the HUD. Death is a separate event

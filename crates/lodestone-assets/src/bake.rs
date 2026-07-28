@@ -88,6 +88,16 @@ pub struct BakedQuad {
 pub struct BakedModel {
     /// The baked quads, in element order then [`DIRECTIONS`] order.
     pub quads: Vec<BakedQuad>,
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of the model's `#particle`
+    /// texture — vanilla's `BakedModel.particleIcon()`, the sprite that break
+    /// and landing particles sample.
+    ///
+    /// This is **not** derivable from the quads: `grass_block` declares
+    /// `"particle": "block/dirt"` while none of its faces use dirt, so a
+    /// renderer that guessed from the first face would throw grass-coloured
+    /// fragments where vanilla throws dirt. `None` when the model declares no
+    /// `particle` variable or it resolves to no atlas sprite.
+    pub particle_uv: Option<[f32; 4]>,
 }
 
 impl BakedModel {
@@ -930,6 +940,7 @@ impl<'a> BlockBaker<'a> {
         })?;
 
         let mut quads = Vec::new();
+        let mut particle_uv = None;
         for group in states.applicable_models(properties) {
             if group.is_empty() {
                 continue;
@@ -944,10 +955,27 @@ impl<'a> BlockBaker<'a> {
                         location: model_ref.model.to_string(),
                         source: e,
                     })?;
+            // Vanilla takes the particle icon from the *first* model it bakes
+            // for a state (multipart blocks contribute several); keep the first
+            // that resolves so a fence post's particle isn't overwritten by a
+            // side piece's.
+            if particle_uv.is_none() {
+                particle_uv = resolved
+                    .resolve_texture("particle")
+                    .and_then(|loc| self.atlas.sprite(loc))
+                    .map(|sprite| {
+                        // Frame 0 of an animated sprite, matching how a face
+                        // bakes: the full sprite rect would span every frame.
+                        let (min, max) = sprite
+                            .frame_uv(0, self.atlas.width, self.atlas.height)
+                            .unwrap_or((sprite.uv_min, sprite.uv_max));
+                        [min[0], min[1], max[0], max[1]]
+                    });
+            }
             let transform = ModelTransform::from_model_ref(model_ref);
             quads.extend(bake_model(&resolved, self.atlas, transform)?);
         }
-        Ok(BakedModel { quads })
+        Ok(BakedModel { quads, particle_uv })
     }
 
     /// Bakes a block from a numeric block state id via a [`BlockStateRegistry`].
