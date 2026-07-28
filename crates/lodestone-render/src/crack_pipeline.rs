@@ -16,9 +16,22 @@
 //! This pipeline draws with a **negative depth bias** (polygon offset) so the
 //! crack wins the depth test against the face it sits on, `LessEqual` depth
 //! compare so it is allowed to be coplanar, and **no depth write** so it never
-//! occludes anything drawn later. It alpha-blends, since a `destroy_stage`
-//! sprite is dark cracks over transparent pixels — only the cracked texels
-//! darken the surface.
+//! occludes anything drawn later.
+//!
+//! # Blend: doubled multiply, not alpha
+//!
+//! Vanilla's `pipeline/crumbling` (`RenderPipelines.CRUMBLING` in
+//! `net.minecraft.client.renderer`) blends colour as
+//! `src_factor = DST_COLOR, dst_factor = SRC_COLOR, op = Add` — i.e.
+//! `out = dst*src + src*dst = 2 * src * dst`, a doubled multiply that can only
+//! ever darken the surface underneath, never lighten it. Alpha blending (the
+//! obvious first guess, since a `destroy_stage` sprite reads like "dark
+//! cracks over transparent pixels") instead *adds* the sprite's light grey
+//! anti-aliased edge texels on top of the block, which is why that approach
+//! reads as "too white" in a play-test. Alpha channel is `src=One, dst=Zero`
+//! (vanilla ignores destination alpha for this pass; we do too, since the
+//! crack pass never writes back into a colour target that anything downstream
+//! reads alpha from).
 
 use wgpu::util::DeviceExt;
 
@@ -154,7 +167,23 @@ impl CrackPipeline {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // Doubled multiply, ported from vanilla's `pipeline/crumbling`
+                    // (`RenderPipelines.CRUMBLING`): colour = dst*src + src*dst =
+                    // 2*src*dst, which only ever darkens. Plain `ALPHA_BLENDING`
+                    // *adds* the sprite's light texels on top of the block instead
+                    // of multiplying them in — that's the "too white" defect.
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Dst,
+                            dst_factor: wgpu::BlendFactor::Src,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -176,8 +205,22 @@ impl CrackPipeline {
                 stencil: wgpu::StencilState::default(),
                 // Polygon offset: pull the crack toward the camera so it wins the
                 // depth test against the coplanar block face instead of z-fighting.
+                // Ported from vanilla's `pipeline/crumbling`, whose
+                // `DepthStencilState(GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F)`
+                // is `(depthTest, writeDepth, depthBiasScaleFactor,
+                // depthBiasConstant)` — scale factor *then* constant, verified
+                // against `VulkanRenderPipeline.java` where
+                // `depthBiasConstantFactor` reads `.depthBiasConstant()` and
+                // `depthBiasSlopeFactor` reads `.depthBiasScaleFactor()`. So
+                // vanilla's actual bias is slope=1.0, constant=10.0 (easy to get
+                // backwards from the constructor call alone). Vanilla is
+                // reversed-Z (GREATER_THAN_OR_EQUAL, higher = nearer), so a
+                // positive bias there pulls toward the camera; this project's
+                // depth is standard `[0,1]` (LessEqual, lower = nearer, see
+                // `camera.rs` and `DESIGN.md` §7), so "toward the camera" is the
+                // sign-flipped bias: constant=-10, slope=-1.0.
                 bias: wgpu::DepthBiasState {
-                    constant: -1,
+                    constant: -10,
                     slope_scale: -1.0,
                     clamp: 0.0,
                 },
@@ -264,9 +307,22 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // The destroy-stage sprite is dark cracks over transparent pixels; alpha
-    // blending lets only the cracked texels darken the block surface.
-    return textureSample(atlas_tex, atlas_smp, in.uv);
+    let color = textureSample(atlas_tex, atlas_smp, in.uv);
+    // Ported from vanilla's rendertype_crumbling.fsh: if (color.a < 0.1) discard;
+    // This is load-bearing, not cosmetic. The pipeline's doubled-multiply blend
+    // uses Dst/Src colour factors, which do not read alpha at all -- every
+    // fragment that isn't discarded multiplies the surface regardless of its
+    // own alpha. The real destroy_stage_N.png sprites are grayscale+alpha:
+    // non-crack texels are white (255) at alpha ~1/255, actual crack marks are
+    // dark grays (measured: 61 and 155) at alpha 255 (verified against
+    // destroy_stage_0.png). Without this discard, the majority-white area of
+    // every sprite would multiply the block by 2 times 1.0 times dst, doubling
+    // brightness instead of leaving it untouched -- a much worse defect than
+    // the too-white alpha-blend defect this pass replaces.
+    if color.a < 0.1 {
+        discard;
+    }
+    return color;
 }
 ";
 

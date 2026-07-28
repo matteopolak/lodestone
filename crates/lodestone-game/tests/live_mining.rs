@@ -42,11 +42,26 @@
 //!   packet_id=20 [container_set_slot]
 //! ```
 //!
-//! That is an impl-v770 item-decode gap (any equipped tool crashes the client),
-//! not a mining bug. The *tool-speed* half of the break formula is therefore
-//! proven hermetically in `mining.rs` (diamond pickaxe = 6 ticks vs bare hand =
-//! 151 ticks on stone); the live gate proves the half needing no component-bearing
-//! item — a real bare-handed break lands, and time depends on the target.
+//! **STALE as of the `ItemStack` components work — corrected 2026-07-28.** The
+//! decode is now **fail-open, not fatal**: `read_component_patch` decodes the
+//! modeled components, and on the first unmodeled one sets `has_unmodeled`,
+//! warns, and returns `complete == false`, dropping the rest of that packet
+//! rather than tearing down the connection ("the packet is dropped past this
+//! point, not fatal", `v770/src/adapter.rs`). **Equipping a tool no longer
+//! crashes the session.**
+//!
+//! This note misled an agent on 2026-07-28 into reporting tool speed as
+//! hard-blocked. What *is* still missing is narrower: `minecraft:tool` is not
+//! among the modeled components (only `custom_name`, `damage`, `enchantments`),
+//! so `BreakInputs::tool_speed` has no source yet. That is a modeling gap, not
+//! an outage.
+//!
+//! The *tool-speed* half of the break formula is therefore proven hermetically
+//! in `mining.rs` (diamond pickaxe = 6 ticks vs bare hand = 151 ticks on stone);
+//! the live gate proves the half needing no component-bearing item — a real
+//! bare-handed break lands, and time depends on the target. **Note the
+//! provenance: the 151-tick figure is server-confirmed over RCON; the 6-tick
+//! diamond figure is hermetic only.**
 //!
 //! ## Two server facts this test is built around (26.2 `ServerPlayerGameMode`)
 //!
