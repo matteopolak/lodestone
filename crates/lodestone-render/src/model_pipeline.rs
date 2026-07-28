@@ -355,6 +355,24 @@ struct Palette {
 @group(1) @binding(1) var atlas_smp: sampler;
 @group(2) @binding(0) var<uniform> palette: Palette;
 
+// sRGB transfer functions (component-wise). The atlas is an _srgb texture, so
+// `textureSample` returns linear-light texels; the tint palette holds straight
+// sRGB bytes. Multiplying a linear texel by an sRGB tint and then re-encoding on
+// the sRGB surface gamma-compresses the tint's green/red ratio (grass 1.30 ->
+// ~1.13, measurably greyer than vanilla). Vanilla applies the biome tint in
+// gamma space, so we convert the texel to sRGB, tint there, then convert back.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -394,9 +412,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     // Per-quad tint: the palette slot resolves grass/foliage/etc. to their real
-    // default colour; the untinted slot (255) is white, leaving the texel as-is.
-    let tint_col = palette.colors[in.tint_idx].rgb;
-    return vec4<f32>(tex.rgb * tint_col * in.shade, tex.a);
+    // default colour; the untinted slot (255) leaves the texel untouched. The
+    // tint is applied in gamma space (see the transfer functions above) so its
+    // green/red ratio survives the sRGB surface encode and matches vanilla.
+    var rgb = tex.rgb;
+    if (in.tint_idx != 255u) {
+        let tint_col = palette.colors[in.tint_idx].rgb;
+        rgb = srgb_to_linear(linear_to_srgb(rgb) * tint_col);
+    }
+    return vec4<f32>(rgb * in.shade, tex.a);
 }
 ";
 
