@@ -43,6 +43,7 @@ pub mod caps;
 pub mod device;
 pub mod driver;
 pub mod entity;
+pub mod entity_anim;
 pub mod entity_pipeline;
 pub mod frame;
 pub mod gui_atlas;
@@ -69,7 +70,8 @@ pub use anim::{AnimFrame, AnimSample, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_models::{
-    BlockModels, BlockModelsError, FluidCell, FluidKind, FluidSprites, StateModel,
+    BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
+    StateModel,
 };
 #[doc(no_inline)]
 pub use lodestone_assets::fluid::FluidState;
