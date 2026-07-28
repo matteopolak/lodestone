@@ -196,16 +196,68 @@ distance — it cannot put a water surface in front of it.
   where it is not; check that list before relying on additive behaviour.
   `animate_zombie_arms` is the exception that **assigns**, faithfully.
 
-* **A mob looks too bright or too dark.** Check the three factors in that order,
+* **A mob looks too bright or too dark.** Check the four factors in that order,
   because they are independent: the sheet's texture *format* (`_srgb`?), the
-  shader's `light_term`, and where the multiply sits relative to the transfer
-  curve. Measure on an **sRGB** target — a `Rgba8Unorm` target hides the
-  colour-space half entirely, and a brightness threshold calibrated on one is
-  meaningless on the other.
+  shader's `light_term`, **the sky-darken factor** (below), and where the multiply
+  sits relative to the transfer curve. Measure on an **sRGB** target — a
+  `Rgba8Unorm` target hides the colour-space half entirely, and a brightness
+  threshold calibrated on one is meaningless on the other.
 * **Wiring real world light.** `RenderState::set_entity_light_source` takes
   `Fn(Vec3) -> Option<u8>` returning packed `sky << 4 | block` at a mob's feet.
   Until something installs one, every mob is `ENTITY_FULLBRIGHT`. The equivalent
   world lookup already exists for particles in `Sim::extract_particles`.
+
+### Sky light does not change at night — a fix that shipped and did nothing
+
+`53850ce` made entities sample world light and `52f109f` installed the sampler.
+Both were correct. **The player still reported full-bright mobs at night**, and
+every candidate cause that involved sampling or shader plumbing was wrong.
+
+**A server's sky-light array is time-invariant.** It records how much sky *reaches*
+a block, not how bright the sky currently is. Measured live against a vanilla 26.2
+oracle at one sky-lit position, with the server's own clock as the control
+(`crates/lodestone-shell/tests/live_entity_light_time_of_day.rs`):
+
+```text
+noon     clock= 6000  packed=0xF0  sky=15 block=0  light_term=1.000
+midnight clock=18000  packed=0xF0  sky=15 block=0  light_term=1.000
+```
+
+Identical byte, identical `light_term`. No sampling fix could ever have worked.
+Vanilla darkens **client-side only**, in `LightTexture.updateLightTexture`, by
+scaling the *sky* half of the lightmap by `Level.getSkyDarken(partialTick)`.
+`lodestone_render::entity::sky_darken_for_time_of_day` is that curve
+(`1.0` at noon, `0.24` at midnight, including `LightTexture`'s `* 0.95 + 0.05`
+lift), and the entity shader applies it as
+`light_term = 0.2 + 0.8 * max(sky * sky_darken, block)`.
+
+Three gotchas, each of which produces a plausible-looking wrong build:
+
+* **Only the sky half is scaled.** Scaling the whole `light_term` passes a
+  naive day/night ratio gate and turns every torch-lit interior black at sunset.
+  `entity_night_pixels::a_torch_lit_mob_is_identical_at_midnight_and_noon` pins it.
+* **`0.0` means "not wired", not "pitch dark".** The factor rides the group-0
+  uniform's one spare lane (`FogUniform::end_enabled.z`) so `EntityCameraUniform`
+  stays byte-identical to `ModelCameraUniform` — the model shader is at wgpu's
+  4-bind-group floor, so growing the uniform is not free. Every existing caller
+  builds its fog from `FogUniform::new`/`disabled`, which zero that lane, so a
+  literal reading would pin every mob everywhere at the `0.2` floor. Vanilla's
+  range is `[0.24, 1.0]`, so `0.0` is safe as the sentinel and reads as noon.
+* **The WGSL lives in a Rust `r"…"` raw string.** A double quote anywhere in a
+  shader comment terminates it, and the resulting errors point at the comment
+  text as if it were code. Use backticks in shader comments.
+
+**Terrain has no sky-darken term.** `model_pipeline.rs` and the fluid shader still
+render at permanent noon, so at night mobs are now correctly darker than the
+blocks around them. The same factor needs plumbing there; the uniform lane already
+carries it and the model shader simply does not read `.z` yet.
+
+* **Wiring the world clock.** `RenderState::set_sky_darken_source` takes
+  `Fn() -> Option<f32>`, polled once per frame, and is installed once at connect
+  time next to `set_entity_light_source`. Note `NetClient` has **no** `world_time`
+  method — the clock is reached through `net.shared_handle()`, whose
+  `ClientHandle::world_time()` returns `(world_age, time_of_day)`. Until something
+  installs a source, mobs render at permanent noon.
 
 ## Configuration
 

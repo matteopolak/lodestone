@@ -29,16 +29,32 @@ Session task lists do not survive a restart. **This file is the backlog of recor
 
 ## Known-broken, player-observed
 
-- **Mobs render full-bright, even at night.** `53850ce`/`52f109f` were supposed to fix
-  this and did not. The sampler was verified; the *frame* never was, which is exactly
-  how it shipped. Candidates: the `OnceLock` handle resolving after a cached `None`;
-  the shader reading instance location 8 wrongly; light written once at spawn and never
-  refreshed; mobs outside the lookup's section range.
-- **Nothing darkens for night.** The server's sky-light array is `15` at midnight too;
-  vanilla darkens via `LightTexture` from `level.getSkyDarken()`. `NetClient::world_time()`
-  exists and has **zero consumers**. All three shaders consume the raw sky nibble.
-- **Nether/End render full-bright.** `shell/mesher.rs` hardcodes `SkyDefault::Full` on
-  the live path, with a comment describing a nether branch that does not exist.
+- **Nothing darkens for night — and this was the *whole* reason mobs looked full-bright.**
+  Diagnosed live: at `clock=6000` and `clock=18000` the sampled byte is identically
+  `0xF0` and `light_term` is `1.000` both times. **The server's sky-light array records
+  how much sky *reaches* a block, not how bright the sky is**, so no sampling or plumbing
+  fix could ever have darkened a mob at night. The entity sampler (`53850ce`/`52f109f`)
+  was fine all along; `entity_light_pixels` already proved the shader reads location 8
+  (ratio 0.203).
+
+  `sky_darken_for_time_of_day` now ports `getSkyDarken` + `LightTexture`'s `*0.95+0.05`
+  lift — 1.0 at noon, 0.24 at midnight, applied to the **sky half only** so torchlit
+  interiors do not black out. Entity side pixel-verified 88.4 → 34.6, ratio 0.391 vs a
+  predicted 0.392.
+
+  **Two things remain, and they must land together.** `set_sky_darken_source` has zero
+  production callers (needs ~4 lines in `app.rs`, via `net.shared_handle()` →
+  `ClientHandle::world_time()` — note `world_time` is **not** on `NetClient`). And
+  `model_pipeline.rs` plus the fluid shader still render at permanent noon, so wiring
+  only entities makes mobs *darker than the blocks around them* at night — a new bug,
+  not a partial fix.
+- **~~Nether/End render full-bright.~~ Fixed** — `shell/mesher.rs` now reads the
+  connected dimension off the shared handle's player snapshot and passes
+  `SkyDefault::None` outside the overworld. **But it matches on the dimension
+  *name*** (`minecraft:overworld`), where vanilla reads `hasSkyLight` off the
+  **dimension type**. So a datapack dimension that does have sky light would be
+  meshed dark. Correct for vanilla's three dimensions; worth replacing with the real
+  `hasSkyLight` flag if the client ever models the dimension-type registry.
 - **A pickaxe makes nothing faster.** `minecraft:tool` is unmodeled, so `tool_speed`
   stays at bare-hand defaults and obsidian is ~4m10s of unbroken holding.
 - **Flat sprite items draw nothing as drops.** `collect_item_model_parts` keeps only

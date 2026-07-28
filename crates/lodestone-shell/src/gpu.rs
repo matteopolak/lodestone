@@ -664,6 +664,43 @@ impl std::fmt::Debug for EntityLightSource {
     }
 }
 
+/// Where this frame's **sky darkening** comes from: the factor the sky half of
+/// the lightmap is scaled by, `1.0` at noon down to `0.24` at midnight.
+///
+/// Separate from [`EntityLightSource`] because it is a property of the *world
+/// clock*, not of a position — one value per frame, not one per mob — and
+/// because the server never sends it. A server's sky-light array is
+/// time-invariant, so without this term a sky-lit mob is full-bright all night
+/// no matter how correctly its light byte was sampled. Measured live: packed
+/// `0xF0` and `light_term` `1.000` at both noon and midnight.
+///
+/// Unset — the offline demo, a headless test — is `1.0`, i.e. permanent noon and
+/// exactly the behaviour before this existed.
+#[derive(Default)]
+pub struct SkyDarkenSource(Option<Box<dyn Fn() -> Option<f32> + Send + Sync>>);
+
+impl SkyDarkenSource {
+    /// This frame's factor, or `1.0` when there is no source or the world clock
+    /// is not known yet (pre-login). Clamped into vanilla's `[0.24, 1.0]`: a
+    /// source that hands back garbage should look like a wrong time of day, not
+    /// like a black or blown-out frame.
+    #[must_use]
+    fn value(&self) -> f32 {
+        self.0
+            .as_ref()
+            .and_then(|f| f())
+            .map_or(1.0, |v| v.clamp(0.24, 1.0))
+    }
+}
+
+impl std::fmt::Debug for SkyDarkenSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SkyDarkenSource")
+            .field(&if self.0.is_some() { "set" } else { "noon" })
+            .finish()
+    }
+}
+
 /// Owns all GPU resources needed to render the world.
 #[derive(Debug)]
 pub struct RenderState {
@@ -691,6 +728,9 @@ pub struct RenderState {
     /// How each mob's world light is sampled. Full-bright until the shell wires
     /// a real world in via [`RenderState::set_entity_light_source`].
     entity_light: EntityLightSource,
+    /// How bright the sky is *right now*. Permanent noon until the shell wires a
+    /// world clock in via [`RenderState::set_sky_darken_source`].
+    sky_darken: SkyDarkenSource,
 }
 
 impl RenderState {
@@ -837,6 +877,9 @@ impl RenderState {
             // Full-bright until the shell installs a world sampler; see
             // `set_entity_light_source`.
             entity_light: EntityLightSource::default(),
+            // Permanent noon until the shell installs a world clock; see
+            // `set_sky_darken_source`.
+            sky_darken: SkyDarkenSource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -862,8 +905,14 @@ impl RenderState {
 
     /// Install the world light sampler mobs are lit by (see
     /// [`EntityLightSource`]). Call once, after a world exists; without it every
-    /// mob renders [`ENTITY_FULLBRIGHT`] and out-shines the terrain it stands on
-    /// at night.
+    /// mob renders [`ENTITY_FULLBRIGHT`] and out-shines the terrain it stands
+    /// in — a mob in a cave or a shadow stays bright.
+    ///
+    /// **This alone does not fix night.** An earlier version of this doc claimed
+    /// it did. The server's sky-light array is time-invariant, so a mob standing
+    /// under open sky samples `0xF0` at midnight exactly as at noon; darkening
+    /// with the clock is [`set_sky_darken_source`](Self::set_sky_darken_source)'s
+    /// job and nothing this sampler returns can substitute for it.
     ///
     /// `f` receives an entity's **feet** position and returns its packed
     /// `sky << 4 | block` light, or `None` outside loaded chunks. The equivalent
@@ -873,6 +922,56 @@ impl RenderState {
         f: impl Fn(Vec3) -> Option<u8> + Send + Sync + 'static,
     ) {
         self.entity_light = EntityLightSource(Some(Box::new(f)));
+    }
+
+    /// Install the world clock mobs are darkened by at night (see
+    /// [`SkyDarkenSource`]). Install once, at connect time, next to
+    /// [`set_entity_light_source`](Self::set_entity_light_source) — `f` is polled
+    /// once per frame and may return `None` until the world clock is known, so
+    /// there is nothing to wait for.
+    ///
+    /// `f` returns the factor the **sky** half of the lightmap is scaled by.
+    /// Build it from the server's `time_of_day` with
+    /// [`sky_darken_for_time_of_day`], which is vanilla's curve:
+    ///
+    /// ```no_run
+    /// # use std::sync::{Arc, OnceLock};
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, net: &lodestone::net::NetClient) {
+    /// use lodestone_render::entity::sky_darken_for_time_of_day;
+    ///
+    /// let clock = net.shared_handle();
+    /// render.set_sky_darken_source(move || {
+    ///     clock
+    ///         .get()
+    ///         .map(|h| sky_darken_for_time_of_day(h.world_time().1))
+    /// });
+    /// # }
+    /// ```
+    ///
+    /// Without this, mobs render at permanent noon: the reported
+    /// "mobs are still super bright, even at night".
+    /// This frame's fog uniform with the sky-darken factor folded into its spare
+    /// lane, so **terrain and mobs read the same clock**. Wiring one without the
+    /// other is worse than wiring neither: at midnight it makes mobs darker than
+    /// the blocks they stand on, which reads as a mob-rendering bug rather than a
+    /// missing feature.
+    fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
+        let mut fog = FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]);
+        fog.end_enabled[2] = self.sky_darken.value();
+        fog
+    }
+
+    pub fn set_sky_darken_source(&mut self, f: impl Fn() -> Option<f32> + Send + Sync + 'static) {
+        self.sky_darken = SkyDarkenSource(Some(Box::new(f)));
+    }
+
+    /// This frame's sky-darken factor, as the entity pass will use it. Exposed so
+    /// the shell can surface it on the debug overlay: a wrong *value* and a
+    /// missing *wiring* look identical on screen, and only one of them is a bug
+    /// in this file.
+    #[must_use]
+    pub fn sky_darken(&self) -> f32 {
+        self.sky_darken.value()
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -1134,7 +1233,7 @@ impl RenderState {
         // camera buffer, keeping the model shader within four bind groups.
         if let Some(model) = &self.model {
             let eye = camera.position;
-            let fog = FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]);
+            let fog = self.fog_with_clock(eye);
             for section in model.sections.values() {
                 let uniform = ModelCameraUniform {
                     camera: CameraUniform {
@@ -1441,7 +1540,7 @@ impl RenderState {
                     view_proj: camera.view_projection().to_cols_array_2d(),
                     section_origin: [0.0, 0.0, 0.0, 0.0],
                 },
-                fog: FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]),
+                fog: self.fog_with_clock(eye),
             }),
         );
         Some(mesh)
@@ -1464,21 +1563,30 @@ impl RenderState {
         }
 
         // Rewrite the entity group-0 uniform: view-projection (world position
-        // lives per-instance, so the section origin stays zero) **and this
-        // frame's fog**, from the same `self.fog` the terrain sections get. Both
-        // passes therefore fade on one curve; a mob under water or at the render
-        // edge dissolves with the blocks around it instead of punching through.
+        // lives per-instance, so the section origin stays zero), **this frame's
+        // fog** from the same `self.fog` the terrain sections get, and **this
+        // frame's sky darkening**. Both passes therefore fade on one curve; a mob
+        // under water or at the render edge dissolves with the blocks around it
+        // instead of punching through.
+        //
+        // Sky darkening rides the fog block's one spare lane, and is rewritten
+        // every frame rather than at install time, because the world clock moves:
+        // a value captured once would freeze the mob at whatever time of day it
+        // happened to spawn.
         let eye = camera.position;
         queue.write_buffer(
             &self.entities.cam_buffer,
             0,
-            bytemuck::bytes_of(&EntityCameraUniform {
-                camera: CameraUniform {
-                    view_proj: camera.view_projection().to_cols_array_2d(),
-                    section_origin: [0.0, 0.0, 0.0, 0.0],
-                },
-                fog: FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]),
-            }),
+            bytemuck::bytes_of(
+                &EntityCameraUniform {
+                    camera: CameraUniform {
+                        view_proj: camera.view_projection().to_cols_array_2d(),
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    },
+                    fog: self.fog_with_clock(eye),
+                }
+                .with_sky_darken(self.sky_darken.value()),
+            ),
         );
 
         let instances: Vec<_> = entities

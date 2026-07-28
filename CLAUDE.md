@@ -156,6 +156,11 @@ transform cannot produce. Ask *where*, not *what*.
 - **Vanilla is not colour-managed.** Tint *and* shade multiply in **gamma** space
   (`srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`). Doing it in linear pulls every shade
   factor toward 1.0 and washes the image out.
+- **Never put a double quote inside a WGSL shader — not even in a comment.** The shaders live in
+  Rust `r"…"` raw strings, so a `"` terminates the string early and rustc then parses the rest of
+  your *prose* as code: `error: prefix 'yet' is unknown`, pointing at English. The errors look
+  nothing like the cause. Use backticks in shader comments. This has now bitten twice, the second
+  time immediately after being warned about it.
 
 ## Live-server hazards
 

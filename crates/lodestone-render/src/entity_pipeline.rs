@@ -429,8 +429,73 @@ impl EntityPipeline {
 pub struct EntityCameraUniform {
     /// View-projection (and an unused zero section origin).
     pub camera: CameraUniform,
-    /// Distance fog for this frame (eye position, colour, start/end).
+    /// Distance fog for this frame (eye position, colour, start/end) — plus,
+    /// in its one spare lane, this frame's sky darkening. See
+    /// [`with_sky_darken`](Self::with_sky_darken).
     pub fog: crate::fog::FogUniform,
+}
+
+/// Which lane of `FogUniform::end_enabled` carries the sky-darken factor.
+/// `end_enabled` is documented as `x = end`, `y = enabled`, `zw` unused; this is
+/// the `z`.
+const SKY_DARKEN_LANE: usize = 2;
+
+impl EntityCameraUniform {
+    /// Set this frame's **sky darkening**: the factor vanilla's `LightTexture`
+    /// scales the *sky* half of the lightmap by, `1.0` at noon down to `0.24` at
+    /// midnight. See [`sky_darken`](Self::sky_darken) for the read side.
+    ///
+    /// # Why this term has to exist at all
+    ///
+    /// A server's sky-light array is time-**invariant**: it encodes how much sky
+    /// reaches a block, not how bright the sky currently is. Measured live
+    /// against a vanilla 26.2 oracle at one position, with the server clock as
+    /// the control:
+    ///
+    /// ```text
+    /// noon     clock= 6000  packed=0xF0  sky=15 block=0  light_term=1.000
+    /// midnight clock=18000  packed=0xF0  sky=15 block=0  light_term=1.000
+    /// ```
+    ///
+    /// So sampling world light correctly — which `52f109f` did — cannot darken a
+    /// mob at night, because the sampled byte is the same byte. Vanilla darkens
+    /// purely client-side, in `LightTexture.updateLightTexture`, by scaling the
+    /// sky contribution by `Level.getSkyDarken(partialTick) * 0.95 + 0.05`.
+    /// `crate::entity::sky_darken_for_time_of_day` is that curve.
+    ///
+    /// # Why a spare fog lane and not a new field
+    ///
+    /// [`EntityCameraUniform`] is byte-identical to
+    /// [`ModelCameraUniform`](crate::model_pipeline::ModelCameraUniform) on
+    /// purpose, and the model shader is at wgpu's 4-bind-group floor, so neither
+    /// growing the struct nor adding a bind group is free. `end_enabled.zw` were
+    /// already unused and the model shader does not read them, so terrain is
+    /// unaffected until it opts in.
+    ///
+    /// # Why `0.0` reads as full daylight
+    ///
+    /// Every path that builds this uniform derives its fog from
+    /// [`FogUniform::new`](crate::fog::FogUniform::new) or
+    /// [`FogUniform::disabled`](crate::fog::FogUniform::disabled), both of which
+    /// zero the lane. Taking `0.0` literally would render every mob in every
+    /// existing caller at the `0.2` floor — a silent, global regression of
+    /// exactly the shape [`ENTITY_FULLBRIGHT`](crate::entity::ENTITY_FULLBRIGHT)
+    /// exists to prevent. Vanilla's factor is floored at `0.24`, so `0.0` is
+    /// never a legitimate value and is safe as the "not wired yet" sentinel: the
+    /// shader reads it as `1.0`, i.e. today's behaviour.
+    #[must_use]
+    pub const fn with_sky_darken(mut self, sky_darken: f32) -> Self {
+        self.fog.end_enabled[SKY_DARKEN_LANE] = sky_darken;
+        self
+    }
+
+    /// This frame's sky-darken factor as the shader will interpret it: the raw
+    /// lane, or `1.0` when the lane is the unset `0.0` sentinel.
+    #[must_use]
+    pub fn sky_darken(&self) -> f32 {
+        let raw = self.fog.end_enabled[SKY_DARKEN_LANE];
+        if raw <= 0.0 { 1.0 } else { raw }
+    }
 }
 
 /// Create the entity pass's group-0 uniform buffer from a full
@@ -453,7 +518,8 @@ const ENTITY_WGSL: &str = r"
 // same layout the model/fluid shaders use, so entities and terrain fog
 // identically. `fog_eye.xyz` is the camera world position; `fog_color_start.rgb`
 // is the fog colour and `.w` where fog begins; `fog_end_enabled.x` is where fog
-// is full and `.y` is 0/1.
+// is full and `.y` is 0/1. `fog_end_enabled.z` is this frame's sky darkening —
+// see `sky_darken()` below and `EntityCameraUniform::with_sky_darken`.
 struct Camera {
     view_proj: mat4x4<f32>,
     section_origin: vec4<f32>,
@@ -475,6 +541,24 @@ fn fog_amount(dist: f32) -> f32 {
         return 0.0;
     }
     return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+}
+
+// This frame's sky darkening: the factor vanilla's `LightTexture` scales the
+// *sky* half of the lightmap by, 1.0 at noon down to 0.24 at midnight.
+//
+// This term is why `mobs sample world light` was not enough to darken them at
+// night. The server's sky-light array does not change with the clock — measured
+// live at one position, with the server clock as the control, the packed byte is
+// 0xF0 and `light_term` is 1.000 at both noon *and* midnight. Vanilla darkens
+// client-side only, in `LightTexture.updateLightTexture`.
+//
+// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
+// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
+// literally would pin every mob at the 0.2 floor everywhere. Vanilla's real
+// range is [0.24, 1.0], so 0.0 is never a legitimate value.
+fn sky_darken() -> f32 {
+    let raw = camera.fog_end_enabled.z;
+    return select(raw, 1.0, raw <= 0.0);
 }
 
 // sRGB transfer functions, as in the model shader: vanilla is not colour
@@ -516,7 +600,11 @@ fn vs_main(
     // Byte-for-byte the model shader's light term, including the 0.2 floor that
     // keeps unlit surfaces dim rather than pure black. Any drift between the two
     // shows up as mobs that do not belong to the scene they stand in.
-    let sky = f32((light >> 4u) & 15u) / 15.0;
+    // Only the *sky* half is darkened. A torch-lit mob is as bright at midnight
+    // as at noon, which is vanilla's behaviour: `LightTexture` scales the sky
+    // contribution by `skyDarken` and leaves the block contribution alone. Get
+    // this wrong and every lit interior goes dark at sunset.
+    let sky = f32((light >> 4u) & 15u) / 15.0 * sky_darken();
     let block = f32(light & 15u) / 15.0;
     var out: VsOut;
     out.clip = camera.view_proj * world;
@@ -597,6 +685,40 @@ mod tests {
             EntityInstanceRaw::from_mat4(m).light,
             u32::from(crate::entity::ENTITY_FULLBRIGHT)
         );
+    }
+
+    /// The sky-darken lane must round-trip, must read as full daylight when
+    /// unset, and must not disturb any fog field — it rides a *spare* lane
+    /// precisely so entities and terrain keep fogging on identical numbers.
+    #[test]
+    fn sky_darken_rides_a_spare_fog_lane_without_touching_fog() {
+        let fog = crate::fog::FogUniform::new(
+            &crate::fog::FogSettings::for_view_distance([0.1, 0.2, 0.3], 128.0, 0.5),
+            [1.0, 2.0, 3.0],
+        );
+        let base = EntityCameraUniform {
+            camera: CameraUniform {
+                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                section_origin: [0.0; 4],
+            },
+            fog,
+        };
+        // Unset is the 0.0 sentinel, which reads as full daylight — not as the
+        // 0.2 floor, which would black out every existing caller's mobs.
+        assert_eq!(base.fog.end_enabled[SKY_DARKEN_LANE], 0.0);
+        assert_eq!(base.sky_darken(), 1.0);
+
+        let dark = base.with_sky_darken(0.24);
+        assert!((dark.sky_darken() - 0.24).abs() < 1e-6);
+        // Everything else is byte-identical: same eye, same colour+start, same
+        // end and enabled flag.
+        assert_eq!(dark.fog.eye, base.fog.eye);
+        assert_eq!(dark.fog.color_start, base.fog.color_start);
+        assert_eq!(dark.fog.end_enabled[0], base.fog.end_enabled[0]);
+        assert_eq!(dark.fog.end_enabled[1], base.fog.end_enabled[1]);
+        assert_eq!(dark.camera.view_proj, base.camera.view_proj);
+        // And the struct did not grow, so it still matches the model pipeline.
+        assert_eq!(core::mem::size_of::<EntityCameraUniform>(), 128);
     }
 
     #[test]

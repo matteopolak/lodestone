@@ -496,6 +496,21 @@ struct Camera {
     fog_end_enabled: vec4<f32>,
 };
 
+// The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
+// night. Rides `fog_end_enabled.z`, the same spare lane the entity pass uses, so
+// terrain and mobs cannot disagree about what time it is.
+//
+// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
+// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
+// literally would pin all terrain at the 0.2 floor. Vanilla's real range is
+// [0.24, 1.0], so 0.0 is never legitimate.
+//
+// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
+fn sky_darken() -> f32 {
+    let raw = camera.fog_end_enabled.z;
+    return select(raw, 1.0, raw <= 0.0);
+}
+
 // The default (plains) tint palette. A quad's tint byte indexes this; slot 255
 // is white (untinted). Replaces the single hardcoded green so grass, foliage and
 // every other tinted source render their own colour.
@@ -576,7 +591,7 @@ fn vs_main(
 
     let world = position + camera.section_origin.xyz;
     // Lift a dark floor so unlit faces read dim rather than pure black.
-    let light_term = 0.2 + 0.8 * max(sky, block);
+    let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
@@ -643,6 +658,21 @@ struct Camera {
     fog_end_enabled: vec4<f32>,
 };
 
+// The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
+// night. Rides `fog_end_enabled.z`, the same spare lane the entity pass uses, so
+// terrain and mobs cannot disagree about what time it is.
+//
+// `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
+// builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
+// literally would pin all terrain at the 0.2 floor. Vanilla's real range is
+// [0.24, 1.0], so 0.0 is never legitimate.
+//
+// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
+fn sky_darken() -> f32 {
+    let raw = camera.fog_end_enabled.z;
+    return select(raw, 1.0, raw <= 0.0);
+}
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
@@ -706,7 +736,7 @@ fn vs_main(
     let tint_idx = packed.y;
 
     let world = position + camera.section_origin.xyz;
-    let light_term = 0.2 + 0.8 * max(sky, block);
+    let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
