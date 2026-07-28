@@ -100,8 +100,11 @@ pub struct GpuEntityModel {
     pub vertices: wgpu::Buffer,
     /// `u32` index buffer.
     pub indices: wgpu::Buffer,
-    /// Number of indices to draw.
+    /// Number of indices to draw (all parts).
     pub index_count: u32,
+    /// One index sub-range per skeleton part, in mesh part order. Drawing part
+    /// `p` instanced over that part's matrices is what animates a limb.
+    pub parts: Vec<crate::entity::PartRange>,
 }
 
 impl GpuEntityModel {
@@ -125,6 +128,7 @@ impl GpuEntityModel {
             vertices,
             indices,
             index_count: mesh.indices.len() as u32,
+            parts: mesh.parts.clone(),
         })
     }
 }

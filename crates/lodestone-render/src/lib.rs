@@ -40,6 +40,7 @@ pub mod block_resolver;
 pub mod blocks_json;
 pub mod camera;
 pub mod caps;
+pub mod crack;
 pub mod device;
 pub mod driver;
 pub mod entity;
@@ -73,8 +74,6 @@ pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
     StateModel,
 };
-#[doc(no_inline)]
-pub use lodestone_assets::fluid::FluidState;
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry, blocks_json_registry};
 pub use camera::{Camera, Frustum, Intersection, Plane};
@@ -83,14 +82,17 @@ pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
     EntityBatch, EntityCullStats, EntityFrame, EntityInstance, EntityMesh, EntityModelSet,
-    EntitySpawn, MODEL_FEET_OFFSET, entity_model_matrix, entity_texture_candidates, model_for_type,
-    plan_entities,
+    EntitySpawn, MODEL_FEET_OFFSET, PartRange, entity_model_matrix, entity_texture_candidates,
+    model_for_type, plan_entities,
 };
+pub use entity_anim::{AnimFamily, AnimInput, Skeleton};
 pub use entity_pipeline::{EntityInstanceRaw, EntityPipeline, GpuEntityModel, upload_instances};
 #[cfg(not(target_arch = "wasm32"))]
 pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
 pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
+#[doc(no_inline)]
+pub use lodestone_assets::fluid::FluidState;
 pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simple};
 pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,

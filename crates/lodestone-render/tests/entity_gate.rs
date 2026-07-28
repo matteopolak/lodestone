@@ -38,6 +38,7 @@ use lodestone_render::GpuCapabilities;
 use lodestone_render::block::DepthBuffer;
 use lodestone_render::camera::Camera;
 use lodestone_render::entity::{EntityModelSet, plan_entities};
+use lodestone_render::entity_anim::AnimInput;
 use lodestone_render::entity_pipeline::{EntityPipeline, GpuEntityModel, upload_instances};
 
 const W: u32 = 256;
@@ -165,13 +166,19 @@ fn entity_gate_pig_to_pixels() {
 
     let models = EntityModelSet::load();
     let pig = models
-        .resolve("pig", pig_feet, 0.0, 1.0)
+        .resolve("pig", pig_feet, 0.0, 1.0, &AnimInput::REST)
         .expect("pig has a baked model");
 
     // A second pig placed behind the camera (along -Z, further than the eye) so
     // frustum culling has something real to remove — the anti-vacuity guard.
     let behind = models
-        .resolve("pig", Vec3::new(0.0, 0.0, -12.0), 0.0, 1.0)
+        .resolve(
+            "pig",
+            Vec3::new(0.0, 0.0, -12.0),
+            0.0,
+            1.0,
+            &AnimInput::REST,
+        )
         .expect("pig has a baked model");
 
     let instances = [pig, behind];
@@ -194,13 +201,24 @@ fn entity_gate_pig_to_pixels() {
     let gpu_pig = GpuEntityModel::upload(device, pig_mesh).expect("pig mesh is non-empty");
 
     // Pre-build each batch's instance buffer so they outlive the render pass.
-    let mut instance_buffers: Vec<(u32, wgpu::Buffer)> = Vec::new();
+    // One buffer per part: the mesh's vertices are part-local, so each part is
+    // drawn over its own matrices.
+    let mut instance_buffers: Vec<(u32, std::ops::Range<u32>, wgpu::Buffer)> = Vec::new();
     for batch in &frame.batches {
         if batch.model != "pig" {
             continue;
         }
-        if let Some(buf) = upload_instances(device, &batch.transforms) {
-            instance_buffers.push((batch.transforms.len() as u32, buf));
+        for (range, mats) in gpu_pig.parts.iter().zip(&batch.parts) {
+            if range.index_count == 0 {
+                continue;
+            }
+            if let Some(buf) = upload_instances(device, mats) {
+                instance_buffers.push((
+                    mats.len() as u32,
+                    range.index_start..range.index_start + range.index_count,
+                    buf,
+                ));
+            }
         }
     }
 
@@ -221,7 +239,7 @@ fn entity_gate_pig_to_pixels() {
     let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
     let depth = DepthBuffer::new(device, W, H);
 
-    let mut drawn_instances = 0u32;
+    let drawn_instances: u32;
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
@@ -252,13 +270,13 @@ fn entity_gate_pig_to_pixels() {
         pass.set_bind_group(0, &cam_bg, &[]);
         pass.set_bind_group(1, &tex_bg, &[]);
 
-        for (count, inst_buf) in &instance_buffers {
+        for (count, range, inst_buf) in &instance_buffers {
             pass.set_vertex_buffer(0, gpu_pig.vertices.slice(..));
             pass.set_vertex_buffer(1, inst_buf.slice(..));
             pass.set_index_buffer(gpu_pig.indices.slice(..), wgpu::IndexFormat::Uint32);
-            drawn_instances += *count;
-            pass.draw_indexed(0..gpu_pig.index_count, 0, 0..*count);
+            pass.draw_indexed(range.clone(), 0, 0..*count);
         }
+        drawn_instances = frame.instance_count() as u32;
     }
 
     // --- read back --------------------------------------------------------

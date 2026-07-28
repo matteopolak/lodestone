@@ -691,10 +691,7 @@ fn uv_centroid(quad: &BakedQuad) -> [f32; 2] {
 /// Find the sprite whose UV rect contains `uv`.
 fn sprite_for_uv(sprites: &[SpriteRect], uv: [f32; 2]) -> Option<&SpriteRect> {
     sprites.iter().find(|s| {
-        uv[0] >= s.uv_min[0]
-            && uv[0] <= s.uv_max[0]
-            && uv[1] >= s.uv_min[1]
-            && uv[1] <= s.uv_max[1]
+        uv[0] >= s.uv_min[0] && uv[0] <= s.uv_max[0] && uv[1] >= s.uv_min[1] && uv[1] <= s.uv_max[1]
     })
 }
 

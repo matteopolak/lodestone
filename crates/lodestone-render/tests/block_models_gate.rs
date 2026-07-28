@@ -140,18 +140,11 @@ fn model_quad_count_if_cube(models: &BlockModels, id: u32) -> Option<usize> {
 #[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
 fn oak_slab_bottom_is_half_height() {
     let (models, _mgr, reg) = build_models();
-    let id = find_state(
-        reg.as_ref(),
-        "minecraft:oak_slab",
-        &[("type", "bottom")],
-    )
-    .expect("oak_slab[type=bottom] in registry");
+    let id = find_state(reg.as_ref(), "minecraft:oak_slab", &[("type", "bottom")])
+        .expect("oak_slab[type=bottom] in registry");
     let sm = models.state(id);
     assert!(!sm.quads.is_empty(), "a slab must render geometry");
-    assert!(
-        !is_full_cube(&sm.quads),
-        "a bottom slab is not a full cube"
-    );
+    assert!(!is_full_cube(&sm.quads), "a bottom slab is not a full cube");
     // Every vertex sits in the lower half of the block (y <= 0.5 + eps): a
     // stepped/half profile, not a full cube.
     let max_y = sm
@@ -216,7 +209,11 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
 
     let fluid = models.fluid(id).expect("water is classified as a fluid");
     assert_eq!(fluid.kind, FluidKind::Water);
-    assert_eq!(fluid.state, FluidState::source(), "level=0 water is a source");
+    assert_eq!(
+        fluid.state,
+        FluidState::source(),
+        "level=0 water is a source"
+    );
 
     // The still/flow sprites resolved to a real, non-empty atlas rect.
     let sprites = models.fluid_sprites(FluidKind::Water);
