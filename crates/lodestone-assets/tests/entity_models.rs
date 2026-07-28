@@ -9,7 +9,9 @@
 //! `real_jar.rs` so a wrong sheet size cannot pass.
 
 use lodestone_assets::Direction;
-use lodestone_assets::entity::{CubeDef, EntityModelDef, PartDef, PartPose, bake_entity};
+use lodestone_assets::entity::{
+    Affine, CubeDef, EntityModelDef, PartDef, PartPose, bake_entity, bake_entity_parts,
+};
 use lodestone_assets::entity_models::entity_models;
 
 /// Bakes a single zero-size box whose corner sits at model texel `local`,
@@ -510,4 +512,71 @@ fn variant_textures_resolve_distinctly() {
             );
         }
     }
+}
+
+/// Composes a [`BakedPart`] list's transform chain and asserts the result is
+/// bit-identical to `bake_entity`.
+///
+/// This is the load-bearing test for per-part baking: an animating renderer
+/// poses parts independently, so `bake_entity_parts` has to be a *factoring* of
+/// `bake_entity` rather than a second, subtly different traversal. Comparing
+/// against the shipped whole-model bake — the function already validated
+/// against the real texture sheets — means the expected values do not come from
+/// the code under test.
+#[test]
+fn part_bake_recomposes_to_the_whole_model_bake() {
+    let mut checked = 0usize;
+    for entry in entity_models() {
+        let def = (entry.build)();
+        let whole = bake_entity(&def);
+        let parts = bake_entity_parts(&def);
+
+        // Accumulate each part's chain, then re-apply it to its local quads.
+        let mut chains: Vec<Affine> = Vec::with_capacity(parts.len());
+        let mut recomposed = Vec::with_capacity(whole.len());
+        for part in &parts {
+            let parent = part.parent.map_or(Affine::IDENTITY, |i| chains[i]);
+            let world = parent.compose(&Affine::of_pose(&part.rest));
+            chains.push(world);
+            for quad in &part.quads {
+                let mut q = quad.clone();
+                for p in &mut q.positions {
+                    *p = world.apply(*p);
+                }
+                recomposed.push(q);
+            }
+        }
+
+        assert_eq!(
+            recomposed.len(),
+            whole.len(),
+            "{}: per-part bake produced {} quads, whole-model bake {}",
+            entry.name,
+            recomposed.len(),
+            whole.len()
+        );
+        for (i, (got, want)) in recomposed.iter().zip(whole.iter()).enumerate() {
+            assert_eq!(
+                got.uvs, want.uvs,
+                "{}: quad {i} UVs differ between per-part and whole bake",
+                entry.name
+            );
+            for (c, (g, w)) in got.positions.iter().zip(want.positions.iter()).enumerate() {
+                for axis in 0..3 {
+                    assert!(
+                        (g[axis] - w[axis]).abs() <= 1.0e-6,
+                        "{}: quad {i} corner {c} axis {axis}: per-part {} != whole {}",
+                        entry.name,
+                        g[axis],
+                        w[axis]
+                    );
+                }
+            }
+        }
+        checked += whole.len();
+    }
+    assert!(
+        checked > 5_000,
+        "only {checked} quads compared — the corpus loop did not run (vacuous)"
+    );
 }
