@@ -58,6 +58,7 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
+use lodestone_assets::ResourceLocation;
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
@@ -114,13 +115,34 @@ pub struct EntitySnapshot {
     pub scale: f32,
 }
 
+/// The entity-type path a **dropped item** reports (`minecraft:item`).
+///
+/// It has no [`entity_models`](lodestone_render::EntityModelSet) entry and never
+/// will: an item entity is not a cuboid part rig, it is an *item model* drawn in
+/// the world. `EntityModelSet::resolve` therefore skips it, which is why a drop
+/// reaches [`EntityDraw`] but no pixels — the renderer picks these out by type
+/// path and draws them through the model pipeline instead.
+pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityDraw {
+    /// The server-assigned entity id. Carried through to the draw because a
+    /// dropped item's bob/spin phase is derived from it
+    /// ([`item_bob_offset`](lodestone_render::entity::item_bob_offset)) — vanilla rolls
+    /// that phase from a client RNG we cannot observe, so a stable hash of the
+    /// id stands in for it.
+    pub id: i32,
     /// The entity type's canonical path (e.g. `"pig"`).
     pub type_path: String,
+    /// For a dropped item ([`ITEM_ENTITY_TYPE_PATH`]), which item's model to
+    /// draw. `None` for every other entity type, and also for an item entity
+    /// whose stack has not been reported — see
+    /// [`EntityInterpolator::set_item_stack`] for why that is currently every
+    /// one of them.
+    pub item: Option<ResourceLocation>,
     /// Interpolated feet position in world space.
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
@@ -230,6 +252,10 @@ pub struct EntityInterpolator {
     tracks: HashMap<i32, Track>,
     /// Seconds accumulated toward the next 20 Hz animation tick.
     tick_accum: f32,
+    /// Which item each dropped-item entity is carrying, keyed by entity id.
+    /// Pruned alongside [`Self::tracks`], so a despawned drop leaves nothing
+    /// behind.
+    item_stacks: HashMap<i32, ResourceLocation>,
 }
 
 impl EntityInterpolator {
@@ -237,6 +263,36 @@ impl EntityInterpolator {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record which item a dropped-item entity is carrying, so its
+    /// [`EntityDraw`] can name a model to draw.
+    ///
+    /// # Why this is a setter and not a field on [`EntitySnapshot`]
+    ///
+    /// Because nothing upstream decodes it yet. A dropped item's stack rides
+    /// entity metadata index 8 under the `ITEM_STACK` serializer, and the 26.2
+    /// adapter **rejects** that serializer outright
+    /// (`packets/metadata.rs`: `SER_ITEM_STACK … => return Err(...)`, commented
+    /// "complex, self-describing payloads mobs never emit" — true of mobs,
+    /// false of item entities, which emit exactly this). A failed metadata
+    /// decode raises no event, so `EntityMetadataUpdate` has no item field,
+    /// `EntityView` has no item field, and `entity_snapshot` has nothing to
+    /// lower. Every link in that chain is outside this change.
+    ///
+    /// Until it lands, this is the seam: whoever teaches the adapter to decode
+    /// the stack calls this with the result and dropped items become visible
+    /// with no further render work. An item entity with no entry here draws
+    /// nothing, which is also what vanilla does with an empty stack
+    /// (`ItemEntityRenderer.submit` returns early on `state.item.isEmpty()`).
+    pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {
+        self.item_stacks.insert(entity_id, item);
+    }
+
+    /// The item recorded for `entity_id`, if any.
+    #[must_use]
+    pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {
+        self.item_stacks.get(&entity_id)
     }
 
     /// Advance every track by `dt` seconds, then fold in this frame's snapshots.
@@ -332,9 +388,11 @@ impl EntityInterpolator {
             }
         }
 
-        // Drop tracks for entities no longer reported.
+        // Drop tracks for entities no longer reported — and the item stacks
+        // recorded against them, or a long session leaks one entry per drop.
         let seen: std::collections::HashSet<i32> = snapshots.iter().map(|s| s.id).collect();
         self.tracks.retain(|id, _| seen.contains(id));
+        self.item_stacks.retain(|id, _| seen.contains(id));
     }
 
     /// The interpolated draw list for this frame. Order is unspecified (grouped
@@ -342,9 +400,13 @@ impl EntityInterpolator {
     #[must_use]
     pub fn draws(&self) -> Vec<EntityDraw> {
         self.tracks
-            .values()
-            .map(|t| EntityDraw {
+            .iter()
+            .map(|(id, t)| EntityDraw {
+                id: *id,
                 type_path: t.type_path.clone(),
+                item: (t.type_path == ITEM_ENTITY_TYPE_PATH)
+                    .then(|| self.item_stacks.get(id).cloned())
+                    .flatten(),
                 feet: t.render_pos(),
                 yaw: t.render_yaw(),
                 head_yaw: t.render_head_yaw(),
@@ -641,5 +703,108 @@ mod tests {
         interp.update(std::slice::from_ref(&s), INTERP_WINDOW / 2.0);
         let p = interp.draws()[0].pitch;
         assert!(p.abs() < 1.0, "half the window from -30 to 30 is ~0, was {p}");
+    }
+
+    // ---- dropped items ---------------------------------------------------
+
+    fn item_snap(id: i32, feet: Vec3) -> EntitySnapshot {
+        EntitySnapshot {
+            id,
+            type_path: ITEM_ENTITY_TYPE_PATH.into(),
+            feet,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+        }
+    }
+
+    fn stone() -> ResourceLocation {
+        "minecraft:stone".parse().expect("valid item id")
+    }
+
+    #[test]
+    fn an_item_entity_without_a_reported_stack_names_no_model() {
+        // The current live state, asserted rather than assumed: the entity is
+        // tracked and interpolated like any other, but nothing knows what it is,
+        // so the renderer draws nothing — vanilla's own empty-stack behaviour.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        let draws = interp.draws();
+        assert_eq!(draws.len(), 1, "an item entity must still be tracked");
+        assert_eq!(draws[0].type_path, ITEM_ENTITY_TYPE_PATH);
+        assert_eq!(draws[0].item, None);
+        assert_eq!(draws[0].id, 9);
+    }
+
+    #[test]
+    fn a_reported_stack_reaches_the_draw() {
+        let mut interp = EntityInterpolator::new();
+        interp.set_item_stack(9, stone());
+        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        assert_eq!(interp.draws()[0].item, Some(stone()));
+    }
+
+    #[test]
+    fn a_stack_is_only_attached_to_the_entity_it_was_reported_for() {
+        // The failure this rules out: keying the lookup on anything but the
+        // entity id (position, insertion order) makes every drop in a pile show
+        // the first one's model.
+        let mut interp = EntityInterpolator::new();
+        interp.set_item_stack(9, stone());
+        interp.update(
+            &[item_snap(9, Vec3::ZERO), item_snap(10, Vec3::X)],
+            0.016,
+        );
+        let draws = interp.draws();
+        let with = draws.iter().filter(|d| d.item.is_some()).count();
+        assert_eq!(with, 1, "only entity 9 was told what it is carrying");
+        assert_eq!(
+            draws.iter().find(|d| d.id == 9).unwrap().item,
+            Some(stone())
+        );
+        assert_eq!(draws.iter().find(|d| d.id == 10).unwrap().item, None);
+    }
+
+    #[test]
+    fn a_non_item_entity_never_carries_a_stack() {
+        // A stale entry for a recycled id must not turn a pig into a stone.
+        // Servers reuse entity ids freely, so the type-path guard is what stops
+        // one drop's identity leaking onto the mob that inherits its id.
+        let mut interp = EntityInterpolator::new();
+        interp.set_item_stack(1, stone());
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.016);
+        assert_eq!(interp.draws()[0].item, None);
+    }
+
+    #[test]
+    fn a_despawned_drop_takes_its_stack_with_it() {
+        // Item entities are the highest-churn entity there is (every broken
+        // block makes one, every one despawns after five minutes), so a stack
+        // table that only grows is a real leak, not a theoretical one.
+        let mut interp = EntityInterpolator::new();
+        interp.set_item_stack(9, stone());
+        interp.update(&[item_snap(9, Vec3::ZERO)], 0.016);
+        assert!(interp.item_stack(9).is_some());
+        interp.update(&[], 0.016);
+        assert!(
+            interp.item_stack(9).is_none(),
+            "the stack must be pruned with the track it belonged to"
+        );
+    }
+
+    #[test]
+    fn a_drop_interpolates_and_ages_like_any_other_entity() {
+        // The bob and spin are driven by `anim.age_ticks`, so an item whose age
+        // never advanced would hang motionless in the air.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap(9, Vec3::ZERO)], 0.0);
+        let first = interp.draws()[0].anim.age_ticks;
+        interp.update(&[item_snap(9, Vec3::ZERO)], 0.5);
+        let later = interp.draws()[0].anim.age_ticks;
+        assert!(
+            later > first + 9.0,
+            "half a second must advance the age by ~10 ticks; {first} -> {later}"
+        );
     }
 }

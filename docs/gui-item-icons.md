@@ -1,9 +1,12 @@
-# Hotbar item icons (the draw half)
+# GUI item icons (the draw half)
 
 ## What it is
 
-The **draw half** of putting an item in a hotbar slot: the HUD code that turns a
-resolved item icon into pixels. Two kinds of icon reach two different pipelines:
+The **draw half** of putting an item in a GUI slot: the shell code that turns a
+resolved item icon into pixels. It serves **both** screens that have slots — the
+hotbar (`hud.rs`) and the container / inventory / crafting screen
+(`container.rs`) — from one shared module, `hud/item_icon.rs`. Two kinds of icon
+reach two different pipelines:
 
 * a **flat sprite** (`item/generated`, the majority) — one textured quad off the
   stitched [`ItemAtlas`], on the HUD's own sprite pipeline;
@@ -16,28 +19,44 @@ touching the pose, the winding, or the baking. This doc is only about the shell
 side: which stream a part goes to, which passes run in which order, and what is
 shared with the terrain renderer.
 
-Everything here is in `crates/lodestone-shell/src/hud.rs`, plus four accessors in
-`crates/lodestone-shell/src/gpu.rs` and the wiring in
+Everything here is in `crates/lodestone-shell/src/hud/item_icon.rs`, with the two
+consumers in `hud.rs` and `container.rs`, four accessors in
+`crates/lodestone-shell/src/gpu.rs`, and the hotbar's wiring in
 `crates/lodestone-shell/src/app.rs`.
+
+### Why it is shared rather than copied
+
+A second copy of the pipelines is not a style problem, it is a second ~30 MB
+atlas upload and a second tint palette that can silently drift green from the
+world's. `IconRenderer` owns the flat item-sprite pipeline and the 3-D
+item-model pass; `HudRenderer` and `ContainerRenderer` each hold one and delegate
+their `attach_items` / `attach_item_models` to it.
 
 ## How it works
 
 ### The chain
 
 ```
-Sim::player_menu  ->  HudFrame::hotbar_items: &[Option<HotbarSlot>]
-  hud::draw_hotbar_items          (cell layout: 16 px icon, 22 px / 40 px pitch)
-    Builder::item_icon(slot, x, y, size)
-      ItemAtlas::icon(item).parts
-        IconPart::Sprite  -> Builder::item_sprite -> HudGeometry::item_verts
-        IconPart::Model   -> Builder::item_model
-                               BlockModels::item(item)      (baked quads + pose)
-                               gui_item_pose(rect, transform)
-                               mesh_item_quads(quads, pose, gui_light)
-                               -> HudGeometry::model_verts  (CPU-posed ModelVertex)
-        IconPart::Special -> nothing (code-driven renderers we do not have)
-  HudRenderer::render_with_item_models  ->  three render passes  ->  pixels
+Sim::player_menu -> HudFrame::hotbar_items      Menus::active -> ContainerFrame
+  hud::draw_hotbar_items                          container::slot_layout
+   (16 px icon, 22 px / 40 px pitch)               (16 px cell, 18 px pitch)
+        \                                              /
+         `------------>  item_icon::draw_item_icon  <--'
+                           ItemAtlas::icon(item).parts
+                             IconPart::Sprite  -> IconSink::sprite (item atlas)
+                             IconPart::Model   -> BlockModels::item(item)
+                                                  gui_item_pose(rect, transform)
+                                                  mesh_item_quads(..., gui_light)
+                                                  -> IconSink::model (posed verts)
+                             IconPart::Special -> nothing
+                           count + durability   -> IconSink::colour
+        ,----------------------------------------------.
+  HudRenderer::render_with_item_models    ContainerRenderer::render_with_icons
+        `-------------> IconRenderer (upload / draw) -> pixels
 ```
+
+`ItemIcon` (re-exported as `hud::HotbarSlot`) is the per-slot draw record both
+screens build: item id, count, damage/max_damage, enchanted.
 
 The item atlas decides *what kind* of icon an item has; `BlockModels` supplies
 the geometry. Both resolve item definitions through `GuiItemContext`, so they
@@ -46,15 +65,15 @@ icon has an `IconPart::Model`.
 
 ### Why the pose is applied on the CPU
 
-`Builder::item_model` pre-multiplies `gui_item_pose` into every vertex before it
+`item_icon::push_item_model` pre-multiplies `gui_item_pose` into every vertex before it
 reaches the buffer, so the whole hotbar is **one vertex buffer and one draw**.
 The GUI path has to emit vertices anyway; transforming them costs nothing over
 uploading them untransformed, and the alternative (one per-slot model matrix)
 would mean a uniform rebind and a draw call per occupied slot.
 
 Indices are expanded into a flat triangle list (six vertices per quad) because
-the HUD's other two streams are non-indexed. The expansion preserves winding,
-which is load-bearing.
+the other two streams are non-indexed. The expansion preserves winding, which is
+load-bearing.
 
 ### The three passes, and why they are three
 
@@ -65,6 +84,23 @@ which is load-bearing.
 | `hud-pass` | colour (`Load`) | hotbar frame, vitals, flat item sprites |
 | `hud-item-model-pass` | colour (`Load`) + **depth (`Clear(1.0)`)** | the 3-D mini-blocks |
 | `hud-colour-pass` | colour (`Load`) | text, stack counts, durability bars |
+
+`ContainerRenderer::render_with_icons` mirrors it, with one wrinkle: its *chrome*
+(panel, wells, title) and its *overlay* (stack counts, durability bars) are both
+on the same colour stream, and the icons go **between** them. So the colour
+stream is emitted in two runs — all the wells first, then everything that sits on
+an icon — and `ContainerGeometry::chrome_vertex_count` records the split, which
+the renderer draws as two ranges of one buffer:
+
+| pass | attachment | contents |
+| --- | --- | --- |
+| `container-pass` | colour (`Load`) | panel, title, slot wells (`0..chrome`) |
+| `container-item-model-pass` | colour (`Load`) + **depth (`Clear(1.0)`)** | the 3-D mini-blocks |
+| `container-item-pass` | colour (`Load`) | flat sprites, then `chrome..n` (counts, bars) |
+
+If you add anything to the container's colour stream, put it in the loop that
+matches its layer, not wherever is convenient — a stack count emitted in the
+wells loop ends up *underneath* the sprite it counts.
 
 The middle pass exists *because of the depth attachment*: a render pass's
 attachments are fixed for its lifetime, and only the item models need depth.
@@ -106,7 +142,7 @@ the floor — a real regression this repo has already shipped once, caught only 
 a hermetic gate. That is why the GUI camera and its *disabled* fog block share
 group 0 as a single `ModelCameraUniform` rather than fog getting its own group.
 
-### Gotcha 2 — `render` vs `render_with_item_models`
+### Gotcha 2 — plain `render` vs the icon-aware entry point
 
 `HudRenderer::render` is the old six-argument entry point and is kept because
 `src/tablist.rs` and `tests/live_tab_scoreboard_pixels.rs` call it and have
@@ -115,21 +151,28 @@ depth: None`, which degrades to flat sprites only. New callers that want block
 icons must use `render_with_item_models` and pass **both**; either being `None`
 silently skips the model geometry (it is not even built — see `want_models`).
 
+`ContainerRenderer` has the same split for the same reason:
+`ContainerRenderer::render` keeps the old six-argument shape (and the
+colour-swatch fallback), `render_with_icons` takes `depth` and `models`.
+
 ### Gotcha 3 — geometry is passed per frame, not captured at attach
 
 Unlike `CrackResolver::from_models`, which snapshots per-state quads at setup,
-this path takes `Option<&BlockModels>` on every `render_with_item_models` call.
-That is not a style choice: `BlockModels` exposes item geometry **only by key
-lookup** (`item(&ResourceLocation)`), with no way to enumerate its item ids from
-outside `lodestone-render`, so a snapshot cannot be taken. Nine hash lookups per
-frame is cheaper than cloning ~750 items' quads anyway. If an
-`items()` iterator is ever added to `BlockModels`, capturing at attach time
-becomes possible and would shorten `render_with_item_models`' signature.
+this path takes `Option<&BlockModels>` on every render call. Historically that
+was forced: `BlockModels` exposed item geometry **only** by key lookup
+(`item(&ResourceLocation)`), and block *states* are enumerable only because their
+ids are a dense `0..n`, which item `ResourceLocation`s are not.
+
+`BlockModels::items()` now exists and yields `(&ResourceLocation,
+&ItemGeometry)`, so an attach-time snapshot *is* possible — `gpu.rs`'s dropped-item
+renderer takes one. This path deliberately still does not: a handful of hash
+lookups for the visible slots per frame is cheaper than cloning ~750 items'
+quads, and the borrow keeps the icons in lock-step with a reloaded pack.
 
 ### Gotcha 4 — the pixel count is a band, and it cannot see an inside-out cube
 
-`tests/hotbar_block_item_pixels.rs` asserts the lit-pixel count inside one cell
-lands within ±15% of **172.5 of 256** — the analytic silhouette area of the
+`tests/hotbar_block_item_pixels.rs` and `tests/container_item_pixels.rs` assert
+the lit-pixel count inside one cell lands within ±15% of **172.5 of 256** — the analytic silhouette area of the
 vanilla `[30, 225, 0] / 0.625` pose in a 16 px cell (measured: **176**). Do not
 loosen that to "greater than zero"; it is what rules out a half-drawn or
 mis-scaled icon.
@@ -170,35 +213,31 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 
 ## Known gaps
 
-* **Container and inventory screens still draw the old placeholder** — a
-  hash-derived colour swatch plus a one-letter abbreviation
-  (`container.rs::item_color` / `item_label`). `ContainerRenderer` has its own
-  builder and its own colour-only pipeline, so giving it real icons means either
-  duplicating ~350 lines of `hud.rs` or (better) extracting the sprite pass and
-  the item-model pass out of `HudRenderer` into a `pub(crate)` shared
-  `ItemIconPass` that both renderers own. Note that `container.rs::slot_layout`
-  already handles the `MenuKind` slot-order difference correctly (`Player` has
-  armour and an offhand and its hotbar is at 36; `Generic{n}` has neither and its
-  hotbar is at `n + 27`) — it passes the real `menu_index` through, so there is
-  no constant offset to get wrong.
+* **The container screen is not wired in `app.rs` yet.** `ContainerRenderer` can
+  draw icons — `attach_items`, `attach_item_models`, `render_with_icons` all
+  exist and are proved by `tests/container_item_pixels.rs` — but `app.rs` still
+  calls the plain `ContainerRenderer::new` + `render`, so the live inventory keeps
+  the colour-swatch fallback. See [`container-screen.md`](container-screen.md)
+  for the exact four-line change.
 * **Tint on flat sprites is still deferred** — leather armour, potions and spawn
   eggs draw untinted white. 3-D items *are* tinted, through the shared palette.
-* **The enchantment glint is not drawn** (`HotbarSlot::enchanted` is carried but
+* **The enchantment glint is not drawn** (`ItemIcon::enchanted` is carried but
   unused).
 * **The 16 beds bake incompletely** (head only) — see
   [`item-gui-geometry.md`](item-gui-geometry.md); the cause is in
   `lodestone-assets`, not here.
+* **The item atlas is uploaded twice** once both screens attach — it is small
+  (one 2-D sprite sheet) next to the block atlas, which is *not* duplicated, but
+  a single shared upload would be the tidier end state.
 
 ## Files and tests
 
 | path | role |
 | --- | --- |
-| `crates/lodestone-shell/src/hud.rs` | `Builder::item_icon` / `item_model`, `ItemModelHud`, `attach_item_models`, the three passes |
+| `crates/lodestone-shell/src/hud/item_icon.rs` | `ItemIcon`, `draw_item_icon`, `ColourStream`, `IconRenderer` (both pipelines, upload, draws) |
+| `crates/lodestone-shell/src/hud.rs` | the hotbar consumer: cell layout, `Builder::item_icon`, the three passes |
+| `crates/lodestone-shell/src/container.rs` | the container consumer: slot layout, chrome/overlay split, `render_with_icons` |
 | `crates/lodestone-shell/src/gpu.rs` | the four borrowed-resource accessors on `RenderState` |
-| `crates/lodestone-shell/src/app.rs` | attach at startup, pass models + depth per frame |
-| `crates/lodestone-shell/tests/hotbar_block_item_pixels.rs` | the pixel gate (GPU + `client.jar`, `#[ignore]`d) |
-
-```
-cargo test -p lodestone-shell --lib
-cargo test -p lodestone-shell --test hotbar_block_item_pixels -- --ignored --nocapture
-```
+| `crates/lodestone-shell/src/app.rs` | attach at startup, pass models + depth per frame (**hotbar only** so far) |
+| `crates/lodestone-shell/tests/hotbar_block_item_pixels.rs` | hotbar pixel gate (GPU + `client.jar`, `#[ignore]`d) — 176 / 0 / 0 |
+| `crates/lodestone-shell/tests/container_item_pixels.rs` | container pixel gate (same) — 176 block / 120 sprite / 0 empty / 0 control |

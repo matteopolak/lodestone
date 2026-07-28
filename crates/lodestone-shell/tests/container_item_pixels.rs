@@ -1,0 +1,377 @@
+//! Pixel gate: **container and inventory slots must draw real item icons.**
+//!
+//! The sibling of `hotbar_block_item_pixels.rs`, and for the same reason. That
+//! gate proved the hotbar's nine cells reach pixels; the inventory screen kept
+//! drawing a hash-derived colour swatch and a single letter, so a player could
+//! see nine items and not the other thirty-seven — including, once crafting
+//! landed, the grid and the result slot. `container_screen.rs` stayed green
+//! throughout: it measures *coverage inside the widget rect*, which a swatch
+//! provides just as well as an icon does. Coverage cannot tell a picture of a
+//! diamond from a coloured square.
+//!
+//! This one drives the real [`ContainerRenderer`] through the same calls the
+//! shell makes:
+//!
+//! ```text
+//! Menu::slot_item -> ItemAtlas::icon -> IconPart::{Sprite,Model}
+//!   -> ContainerRenderer's icon passes -> pixels
+//! ```
+//!
+//! # What "lit" means here, and why it is a difference
+//!
+//! Unlike a hotbar cell over a black backdrop, a container slot is *never*
+//! blank: the panel and the slot well are chrome this screen always draws. So
+//! every measurement below is a **difference against a chrome-only baseline** —
+//! the identical menu with the identical wiring and no items in it. A pixel
+//! counts as lit when the populated render differs from that baseline, which is
+//! exactly "the icon put something here".
+//!
+//! # The numbers
+//!
+//! Container cells are 16 px, the same as the hotbar's procedural layout, so a
+//! **block** item's isometric silhouette is the same analytic figure:
+//!
+//! ```text
+//! A = 172.5 px^2 in a 16x16 = 256 px cell (bbox 14.14 x 15.73)
+//! ```
+//!
+//! derived in `docs/item-gui-geometry.md` and in the hotbar gate's module docs.
+//! The band is tight enough that a half-drawn cube (~86) or a mis-scaled one
+//! fails. The winding check (top band brighter than the bottom band, because the
+//! visible set is `{Up, East, North}` at `face_shade {1.0, 0.6, 0.8}` and the
+//! inside-out set is `{Down, West, South}` at `{0.5, 0.6, 0.8}`) is asserted too,
+//! since silhouette area alone cannot see an inside-out cube.
+//!
+//! A **flat sprite** item is measured separately and loosely: its coverage is
+//! whatever its texture's opaque texels happen to be, so the assertion is that
+//! it covers most of the cell rather than a specific count.
+//!
+//! # Controls
+//!
+//! * **an empty slot** must differ from the baseline by exactly **0** px, so the
+//!   counts above are localised to their own slot rather than a screen-wide leak;
+//! * **`attach_item_models` never called**, everything else identical: the block
+//!   slot must read exactly **0**. That is the executed proof that the new icon
+//!   pass is what puts those pixels there. It is a real control on this screen —
+//!   without it the block slot previously drew a swatch, which is *not* zero, so
+//!   this also pins that the fallback no longer fires once an atlas is attached.
+//!
+//! Fail-closed like its siblings: a missing GPU or a missing `client.jar` is a
+//! failure, never a skip.
+//!
+//! ```text
+//! cargo test -p lodestone-shell --test container_item_pixels -- --ignored --nocapture
+//! ```
+
+use lodestone::container::{ContainerFrame, ContainerGeometry, ContainerRenderer, slot_layout};
+use lodestone::gpu::RenderState;
+use lodestone::resources::{BlockResources, load_item_atlas};
+use lodestone_assets::ResourceLocation;
+use lodestone_game::{item::ItemStack, menu::Menu};
+use lodestone_model::Identifier;
+use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
+
+const W: u32 = 640;
+const H: u32 = 480;
+
+/// A full opaque cube whose faces are all one sprite, so the silhouette is
+/// exactly the analytic figure with no cutout texels to argue about.
+const BLOCK_ITEM: &str = "minecraft:stone";
+/// A flat `item/generated` icon, to exercise the other stream.
+const SPRITE_ITEM: &str = "minecraft:diamond";
+
+/// Player-menu slot indices under test. 36 is the first hotbar slot on the
+/// inventory screen, 37 the second, 38 the third — real `menu_index` values, not
+/// offsets: `slot_layout` carries the index through, so nothing here has to know
+/// where the hotbar starts.
+const BLOCK_SLOT: usize = 36;
+const SPRITE_SLOT: usize = 37;
+const EMPTY_SLOT: usize = 38;
+
+/// The analytic silhouette area of the vanilla block pose in a 16 px cell.
+const EXPECTED_LIT: f32 = 172.5;
+
+fn id(path: &str) -> Identifier {
+    path.parse().expect("valid item id")
+}
+
+/// The `(x, y, 16, 16)` screen rect of a menu slot: the widget's own origin plus
+/// the slot's local offset, both straight from the module under test.
+fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize) -> [u32; 4] {
+    let widget = ContainerGeometry::build(frame, W, H)
+        .widget_rect
+        .expect("a populated frame has a widget rect");
+    let layout = slot_layout(menu);
+    let slot = layout
+        .slots
+        .iter()
+        .find(|s| s.menu_index == menu_index)
+        .expect("menu index must be laid out");
+    [
+        (widget.x + slot.x) as u32,
+        (widget.y + slot.y) as u32,
+        slot.w as u32,
+        slot.h as u32,
+    ]
+}
+
+fn clear_view(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("gate-clear"),
+    });
+    {
+        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("gate-clear-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    }
+    queue.submit(std::iter::once(encoder.finish()));
+}
+
+/// Pixels inside `rect` where `shot` differs from the chrome-only `base`.
+fn diff_in(shot: &[u8], base: &[u8], rect: [u32; 4]) -> usize {
+    let [rx, ry, rw, rh] = rect;
+    let mut n = 0usize;
+    for y in ry..ry + rh {
+        for x in rx..rx + rw {
+            let i = ((y * W + x) * 4) as usize;
+            let d = (i32::from(shot[i]) - i32::from(base[i])).abs()
+                + (i32::from(shot[i + 1]) - i32::from(base[i + 1])).abs()
+                + (i32::from(shot[i + 2]) - i32::from(base[i + 2])).abs();
+            if d > 12 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Max colour channel at `(x, y)` — "how lit is this pixel".
+fn brightness(pixels: &[u8], x: u32, y: u32) -> u32 {
+    let i = ((y * W + x) * 4) as usize;
+    u32::from(pixels[i].max(pixels[i + 1]).max(pixels[i + 2]))
+}
+
+/// Mean brightness over `rows` of `rect`, counting only pixels the icon changed.
+/// Comparing the horizontal face (top of the hexagon) against the vertical ones
+/// (bottom) is what tells `Up` from `Down`, and therefore a correctly wound cube
+/// from an inside-out one.
+fn band_mean(
+    shot: &[u8],
+    base: &[u8],
+    rect: [u32; 4],
+    rows: std::ops::Range<u32>,
+) -> Option<f32> {
+    let [rx, ry, rw, _] = rect;
+    let (mut sum, mut n) = (0u32, 0u32);
+    for dy in rows {
+        for x in rx..rx + rw {
+            let y = ry + dy;
+            let i = ((y * W + x) * 4) as usize;
+            let d = (i32::from(shot[i]) - i32::from(base[i])).abs()
+                + (i32::from(shot[i + 1]) - i32::from(base[i + 1])).abs()
+                + (i32::from(shot[i + 2]) - i32::from(base[i + 2])).abs();
+            if d > 12 {
+                sum += brightness(shot, x, y);
+                n += 1;
+            }
+        }
+    }
+    (n > 0).then(|| sum as f32 / n as f32)
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn container_slots_draw_real_item_icons() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    // sRGB, like the live surface: the model shader's tint/shade round-trip is
+    // written for an sRGB target.
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    let models: &BlockModels = atlas
+        .models()
+        .expect("the vanilla load must attach baked block models");
+    let block: ResourceLocation = BLOCK_ITEM.parse().expect("valid item id");
+    assert!(
+        models.item(&block).is_some(),
+        "{BLOCK_ITEM} must have baked 3-D inventory geometry; without it this gate \
+         would be measuring the absence of an item rather than the absence of a draw"
+    );
+    let item_atlas =
+        load_item_atlas().expect("the item atlas must build from the same client.jar");
+    for want in [BLOCK_ITEM, SPRITE_ITEM] {
+        let loc: ResourceLocation = want.parse().expect("valid item id");
+        assert!(
+            item_atlas.icon(&loc).is_some(),
+            "{want} must resolve to an icon; the screen reaches both icon kinds \
+             through the atlas's cached IconPart"
+        );
+    }
+
+    // Two menus with identical layout: one populated, one empty. The empty one
+    // is the chrome baseline every count below is measured against.
+    let empty_menu = Menu::player();
+    let mut menu = Menu::player();
+    menu.set_slot_item(BLOCK_SLOT, Some(ItemStack::new(id(BLOCK_ITEM), 1)));
+    menu.set_slot_item(SPRITE_SLOT, Some(ItemStack::new(id(SPRITE_ITEM), 1)));
+
+    let frame = ContainerFrame::new(Some(&menu), "Inventory");
+    let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
+
+    let block_rect = slot_rect(&menu, &frame, BLOCK_SLOT);
+    let sprite_rect = slot_rect(&menu, &frame, SPRITE_SLOT);
+    let empty_rect = slot_rect(&menu, &frame, EMPTY_SLOT);
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    // The world renderer is here for its *resources*, not its terrain: the icon
+    // pass borrows its block atlas, tint palette, animation slots and depth
+    // buffer. Nothing is uploaded twice.
+    let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+
+    let mut shoot = |r: &mut ContainerRenderer, f: &ContainerFrame<'_>| -> Vec<u8> {
+        let acquired = target.acquire().expect("headless acquire");
+        clear_view(device, queue, acquired.view());
+        r.render_with_icons(
+            device,
+            queue,
+            acquired.view(),
+            Some(render.depth_view()),
+            f,
+            Some(models),
+            W,
+            H,
+        );
+        target.read_texels(device, queue)
+    };
+
+    // Subject: the full wiring — flat atlas plus the 3-D item-model pass.
+    let mut lit = ContainerRenderer::new(device, format);
+    lit.attach_items(device, queue, format, item_atlas.clone());
+    lit.attach_item_models(
+        device,
+        format,
+        render
+            .model_atlas_view()
+            .expect("the vanilla path must expose a model atlas"),
+        render
+            .model_atlas_sampler()
+            .expect("the vanilla path must expose a model atlas sampler"),
+        render
+            .model_palette_buffer()
+            .expect("the vanilla path must expose a tint palette"),
+        render
+            .model_anim_buffer()
+            .expect("the vanilla path must expose animation slots"),
+    );
+    let chrome = shoot(&mut lit, &base_frame);
+    let subject = shoot(&mut lit, &frame);
+
+    // Control: identical in every respect except that the item-model pass was
+    // never attached, so a block item's geometry has nowhere to draw.
+    let mut dark = ContainerRenderer::new(device, format);
+    dark.attach_items(device, queue, format, item_atlas.clone());
+    let control = shoot(&mut dark, &frame);
+
+    let block_lit = diff_in(&subject, &chrome, block_rect);
+    let sprite_lit = diff_in(&subject, &chrome, sprite_rect);
+    let empty_lit = diff_in(&subject, &chrome, empty_rect);
+    let control_block = diff_in(&control, &chrome, block_rect);
+    let control_sprite = diff_in(&control, &chrome, sprite_rect);
+    // Rows 1..5 of the 16 px cell are entirely the horizontal face (the top of
+    // the isometric hexagon); rows 11..15 are entirely side faces.
+    let top_mean = band_mean(&subject, &chrome, block_rect, 1..5)
+        .expect("the block icon must light its top rows");
+    let side_mean = band_mean(&subject, &chrome, block_rect, 11..15)
+        .expect("the block icon must light its bottom rows");
+
+    eprintln!("=== container item-icon pixel gate ===");
+    eprintln!("block slot  {BLOCK_SLOT} rect = {block_rect:?} ({BLOCK_ITEM})");
+    eprintln!("sprite slot {SPRITE_SLOT} rect = {sprite_rect:?} ({SPRITE_ITEM})");
+    eprintln!("empty slot  {EMPTY_SLOT} rect = {empty_rect:?}");
+    eprintln!("expected block silhouette = {EXPECTED_LIT:.1} px of 256");
+    eprintln!("lit, block slot           = {block_lit}");
+    eprintln!("lit, sprite slot          = {sprite_lit}");
+    eprintln!("lit, empty slot           = {empty_lit}");
+    eprintln!("lit, block slot (no item-model pass attached) = {control_block}");
+    eprintln!("lit, sprite slot (control, atlas still attached) = {control_sprite}");
+    eprintln!("top-band mean    = {top_mean:.1} (Up face, face_shade 1.0)");
+    eprintln!("bottom-band mean = {side_mean:.1} (side faces, 0.6/0.8)");
+    eprintln!("ratio            = {:.2}", top_mean / side_mean);
+
+    let low = (EXPECTED_LIT * 0.85) as usize;
+    let high = (EXPECTED_LIT * 1.15) as usize;
+    assert!(
+        (low..=high).contains(&block_lit),
+        "a block item's container icon must cover ~{EXPECTED_LIT:.0} of the 256 px \
+         cell (the 14.14x15.73 silhouette of the vanilla [30,225,0]/0.625 pose); got \
+         {block_lit}. Far below means faces are missing or the pass never drew; far \
+         above means the pose, the ortho, or the slot rect is wrong."
+    );
+
+    assert!(
+        top_mean > side_mean * 1.15,
+        "the top of the icon must be the full-shade Up face, not the half-shade \
+         Down face: top={top_mean:.1} side={side_mean:.1}. A ratio at or below 1 \
+         means the winding flipped and you are seeing the inside of the cube"
+    );
+
+    assert!(
+        sprite_lit > 100,
+        "a flat-sprite item must cover most of its 256 px cell; got {sprite_lit}. \
+         This is the other icon stream, and it shares no code with the block path \
+         beyond the sink it writes into"
+    );
+
+    assert_eq!(
+        empty_lit, 0,
+        "an empty container slot must be pixel-identical to the chrome baseline; \
+         {empty_lit} changed pixels there means a draw is not localised to its slot \
+         and the counts above are not measuring what they claim"
+    );
+
+    // The executed negative control: with the icon pass detached, the block slot
+    // must be indistinguishable from an empty one. This also pins that the
+    // atlas-less colour-swatch fallback does *not* fire once an atlas is
+    // attached — a swatch would show up here as ~100 changed pixels.
+    assert_eq!(
+        control_block, 0,
+        "without attach_item_models the same frame must draw nothing in the block \
+         slot; {control_block} changed pixels means something else is painting there \
+         and the positive assertion is not evidence for the icon pass"
+    );
+
+    // ...while the flat stream, which that control leaves attached, still draws.
+    // Without this the control above would also pass if `attach_items` were
+    // silently broken, and the whole gate would be measuring nothing.
+    assert!(
+        control_sprite > 100,
+        "the control keeps the item atlas attached, so its sprite slot must still \
+         draw ({control_sprite} px); if it does not, the control is dark for the \
+         wrong reason"
+    );
+}

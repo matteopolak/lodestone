@@ -769,6 +769,23 @@ impl BlockModels {
         self.items.len()
     }
 
+    /// Every item with baked 3-D inventory geometry, as `(id, geometry)` pairs.
+    ///
+    /// The counterpart to [`item`](Self::item) for consumers that need to take a
+    /// **snapshot** rather than answer one lookup. Block *states* are enumerable
+    /// through [`state_count`](Self::state_count) because their ids are a dense
+    /// `0..n` (which is how [`CrackResolver::from_models`](crate::CrackResolver)
+    /// captures them); item ids are [`ResourceLocation`]s with no such index
+    /// space, so without this a consumer outside this crate has no way to learn
+    /// *which* items have geometry and is forced to thread a `&BlockModels`
+    /// through every frame instead.
+    ///
+    /// Order is the backing `HashMap`'s and therefore arbitrary and unstable —
+    /// sort by id if you need determinism.
+    pub fn items(&self) -> impl Iterator<Item = (&ResourceLocation, &ItemGeometry)> {
+        self.items.iter()
+    }
+
     /// Item models that failed to bake, named (`"<item> (<model>): <error>"`).
     ///
     /// Empty for a complete vanilla pack except where a texture is genuinely

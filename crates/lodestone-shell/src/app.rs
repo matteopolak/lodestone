@@ -549,7 +549,11 @@ impl ApplicationHandler for WindowApp {
         }
         // Attach the flat item-sprite atlas so hotbar/container slots draw real
         // item icons; jar-less runs leave this `None` and slots stay empty wells.
-        if let Some(items) = crate::resources::load_item_atlas() {
+        // Loaded once and shared: the container screen needs the same atlas, and
+        // `ItemAtlas` is behind an `Arc` precisely so the second consumer is a
+        // refcount bump rather than a second stitch of the whole item corpus.
+        let item_atlas = crate::resources::load_item_atlas();
+        if let Some(items) = item_atlas.clone() {
             hud.attach_items(gpu.device(), gpu.queue(), format, items);
         }
         // Attach the 3-D block-item pass, which borrows the world renderer's own
@@ -573,7 +577,31 @@ impl ApplicationHandler for WindowApp {
             );
         }
         let effects = EffectsRenderer::new(gpu.device(), format);
-        let container = ContainerRenderer::new(gpu.device(), format);
+
+        // The container screen draws real item icons through the *same* shared
+        // pass the hotbar uses (`hud::item_icon`), so both must be attached or
+        // slots fall back to hash-derived colour swatches. Without this the
+        // capability is complete, gated and reaches zero pixels — the island
+        // pattern this project has hit eleven times.
+        let mut container = ContainerRenderer::new(gpu.device(), format);
+        if let Some(items) = item_atlas {
+            container.attach_items(gpu.device(), gpu.queue(), format, items);
+        }
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            container.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
+        }
 
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {
