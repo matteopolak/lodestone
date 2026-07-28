@@ -312,8 +312,14 @@ impl Skeleton {
         if self.family != AnimFamily::Static
             && let Some(h) = s.head
         {
-            poses[h].y_rot = input.head_yaw_deg * DEG;
-            poses[h].x_rot = input.head_pitch_deg * DEG;
+            // Added to the authored pose rather than assigned. Vanilla assigns
+            // (`head.xRot = headPitch * DEG`), which is identical here for every
+            // model that authors a zero head rotation -- but hoglin's head is
+            // authored at 0.87 rad and vanilla *restores* exactly that in
+            // `animateHeadbutt`, and the ender dragon likewise carries an
+            // authored head rotation. Assigning would level both heads.
+            poses[h].y_rot += input.head_yaw_deg * DEG;
+            poses[h].x_rot += input.head_pitch_deg * DEG;
         }
 
         match self.family {
@@ -459,21 +465,28 @@ fn bob(poses: &mut [PartPose], slot: Option<usize>, age: f32, scale: f32) {
     }
 }
 
+// Vanilla's `setupAnim` *assigns* limb rotations (`rightHindLeg.xRot = ...`)
+// onto a part whose authored rotation it knows to be zero. Adding is identical
+// wherever that holds -- `models_that_author_a_driven_limb_rotation` pins the
+// corpus so the exception set cannot grow unnoticed -- and it stops a model
+// with an authored limb pose (the ender dragon, whose legs sit at ~1.2 rad and
+// which vanilla animates with a bespoke flight rig we do not model) from being
+// flattened into a walking quadruped's rest pose.
 fn set_x_rot(poses: &mut [PartPose], slot: Option<usize>, v: f32) {
     if let Some(i) = slot {
-        poses[i].x_rot = v;
+        poses[i].x_rot += v;
     }
 }
 
 fn set_y_rot(poses: &mut [PartPose], slot: Option<usize>, v: f32) {
     if let Some(i) = slot {
-        poses[i].y_rot = v;
+        poses[i].y_rot += v;
     }
 }
 
 fn set_z_rot(poses: &mut [PartPose], slot: Option<usize>, v: f32) {
     if let Some(i) = slot {
-        poses[i].z_rot = v;
+        poses[i].z_rot += v;
     }
 }
 
@@ -517,6 +530,108 @@ mod tests {
 
     /// The composed rest chain must reproduce the geometry `bake_entity`
     /// produces, or animation is posing a different model than the one drawn.
+    #[test]
+    fn posing_at_rest_keeps_every_joint_where_the_rest_pose_put_it() {
+        // The mesh's local AABB is computed from `rest_pose`, so a joint that
+        // moves at `AnimInput::REST` gives every instance a culling box that
+        // describes a mob in a different place from the one drawn.
+        //
+        // Compared per joint, in the joint's own local frame -- otherwise a
+        // legitimately rotated parent shows up as a translated child and the
+        // assertion says nothing about where the rotation came from.
+        for entry in entity_models() {
+            let parts = bake_entity_parts(&(entry.build)());
+            let skel = Skeleton::from_parts(&parts);
+            let posed = skel.pose(&AnimInput::REST);
+            let rest = skel.rest_pose();
+            let local = |m: &[Mat4], i: usize| match parts[i].parent {
+                Some(p) => m[p].inverse() * m[i],
+                None => m[i],
+            };
+            for i in 0..parts.len() {
+                let p = local(&posed, i);
+                let r = local(&rest, i);
+                let dt = (p.col(3) - r.col(3)).length();
+                assert!(
+                    dt < 1e-4,
+                    "{}: joint {i} ({}) translated by {dt} at REST; its AABB would be wrong",
+                    entry.name,
+                    parts[i].name
+                );
+                for c in 0..3 {
+                    let d = (p.col(c) - r.col(c)).length();
+                    assert!(
+                        d < 0.15,
+                        "{}: joint {i} ({}) basis {c} rotated by {d} at REST -- larger than \
+                         vanilla's 0.1 rad idle arm sway, so REST is not a resting pose",
+                        entry.name,
+                        parts[i].name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn models_that_author_a_driven_limb_rotation() {
+        // `set_*_rot` adds rather than assigns (see its comment), which matches
+        // vanilla exactly for every model whose driven limbs are authored at
+        // zero rotation -- the overwhelming majority. This pins the set for
+        // which that is *not* true, so the divergence stays explicit and a new
+        // port cannot widen it unnoticed.
+        //
+        // For these, adding preserves the authored pose at rest (which is what
+        // the culling AABB depends on) but diverges from vanilla's assignment
+        // *while the limb is moving*. Spiders are not a divergence at all --
+        // `SpiderModel.setupAnim` adds to the authored splay, which is why the
+        // Spider arm uses `add_*` deliberately. The rest are approximations
+        // pending a per-model `setupAnim` port, and are recorded in HANDOFF.md.
+        let driven = [
+            "right_leg",
+            "left_leg",
+            "right_arm",
+            "left_arm",
+            "arms",
+            "right_hind_leg",
+            "left_hind_leg",
+            "right_front_leg",
+            "left_front_leg",
+            "right_wing",
+            "left_wing",
+        ];
+        let mut found: Vec<&str> = Vec::new();
+        for entry in entity_models() {
+            let parts = bake_entity_parts(&(entry.build)());
+            if parts.iter().any(|p| {
+                driven.contains(&p.name.as_str())
+                    && (p.rest.x_rot != 0.0 || p.rest.y_rot != 0.0 || p.rest.z_rot != 0.0)
+            }) {
+                found.push(entry.name);
+            }
+        }
+        assert_eq!(
+            found,
+            [
+                "spider",
+                "cave_spider",
+                "snow_golem",
+                "ender_dragon",
+                "witch",
+                "villager",
+                "rabbit",
+                "bee",
+                "parrot",
+                "pillager",
+                "vindicator",
+                "evoker",
+                "illusioner",
+                "wandering_trader",
+            ],
+            "the set of models whose driven limbs carry an authored rotation changed; \
+             each one animates differently from vanilla under additive `set_*_rot`"
+        );
+    }
+
     #[test]
     fn rest_pose_matches_the_whole_model_bake() {
         let models = entity_models();
