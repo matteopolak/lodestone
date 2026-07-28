@@ -17,7 +17,10 @@ use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
 use lodestone_model::{BlockFace, PlayerInput, Vec3f};
-use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
+use lodestone_physics::{
+    CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
+    compute_fluid_state, tick,
+};
 use lodestone_render::{BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
 
@@ -96,6 +99,26 @@ pub(crate) fn fog_for_render_distance(render_distance: u32) -> lodestone_render:
         render_distance as f32 * 16.0,
         crate::gpu::FOG_START_FRACTION,
     )
+}
+
+/// Short, near-eye distance fog for an eye submerged in water.
+///
+/// Vanilla water vision is only a few chunks, so the far edge is capped short
+/// (and never past where chunks actually stop) and the ramp starts at the eye
+/// (`start_fraction` 0) so terrain dissolves close rather than at the sky edge.
+/// The colour is the default ocean underwater fog — the per-biome water fog
+/// colour is not yet reachable from the shell, so this is the documented
+/// fallback rather than a biome-correct tint.
+fn water_fog(render_distance: u32) -> lodestone_render::fog::FogSettings {
+    let far = 32.0_f32.min(render_distance as f32 * 16.0);
+    lodestone_render::fog::FogSettings::for_view_distance([0.05, 0.19, 0.44], far, 0.0)
+}
+
+/// Near-opaque, few-block distance fog for an eye submerged in lava: submerging
+/// in lava blinds fast in vanilla, so the range is very short and the colour a
+/// hot orange.
+fn lava_fog() -> lodestone_render::fog::FogSettings {
+    lodestone_render::fog::FogSettings::for_view_distance([0.6, 0.1, 0.0], 3.0, 0.0)
 }
 
 /// Which section meshes a set of changed cells invalidates.
@@ -376,6 +399,13 @@ pub struct Sim {
     /// never from our local movement flags, so a placement against an
     /// interactable block only suppresses the interaction if this was sent.
     last_player_input: Option<PlayerInput>,
+    /// The local player's water/lava submersion this tick, from the bit-exact
+    /// physics producer (`EntityFluidInteraction.update`). Recomputed once per
+    /// physics tick against the very view movement collided against, and read by
+    /// the shell to drive submerged fog (and, later, the underwater overlay,
+    /// ambient sounds and swim pose). The shell never invents its own submerged
+    /// boolean — those consumers share this one source of truth.
+    fluid_state: FluidState,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -534,6 +564,7 @@ impl Sim {
             placement: Placement::new(),
             attacking: false,
             last_player_input: None,
+            fluid_state: FluidState::NONE,
         }
     }
 
@@ -960,10 +991,19 @@ impl Sim {
         // server's corrective teleports.
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             match self.live_collision() {
-                Some(view) => tick(&mut self.player, intent, &view, &self.profile),
+                Some(view) => {
+                    tick(&mut self.player, intent, &view, &self.profile);
+                    // Same view movement collided against, so the submerged
+                    // summary is consistent with where the tick left the player.
+                    self.fluid_state = self.player_fluid_state(&view);
+                }
                 None => {
                     self.player.velocity = Vec3d::ZERO;
                     self.player.on_ground = true;
+                    // The player's column has not streamed in — we know nothing
+                    // about the fluid around them, so report "dry" rather than
+                    // stranding a stale submerged fog from before the reload.
+                    self.fluid_state = FluidState::NONE;
                 }
             }
             return;
@@ -971,6 +1011,29 @@ impl Sim {
 
         let view = WorldCollision::new(&self.world);
         tick(&mut self.player, intent, &view, &self.profile);
+        self.fluid_state = self.player_fluid_state(&view);
+    }
+
+    /// Vanilla `EntityFluidInteraction.update` for the local player against
+    /// `view`: the per-tick summary of how the box and eye sit in water and
+    /// lava, computed by the bit-exact physics producer from the player's box,
+    /// feet position and pose eye height.
+    fn player_fluid_state(&self, view: &dyn CollisionView) -> FluidState {
+        compute_fluid_state(
+            self.player.bounding_box(&self.profile),
+            self.player.position,
+            self.player.eye_height,
+            view,
+        )
+    }
+
+    /// The local player's water/lava submersion this tick, for the shell's
+    /// submerged-fog decision (and, later, the underwater overlay, ambient
+    /// sounds and swim pose). Version-free and bit-exact — the shell reads this
+    /// shared truth rather than deriving its own boolean.
+    #[must_use]
+    pub fn fluid_state(&self) -> FluidState {
+        self.fluid_state
     }
 
     /// Build a [`LiveCollision`] snapshot of the server terrain around the
@@ -1058,6 +1121,10 @@ impl Sim {
         }
         self.player.velocity = Vec3d::ZERO;
         self.player.on_ground = false;
+        // Free-fly is a shell-side debug camera, not a physics pose, so it never
+        // drives submerged fog — noclipping through an ocean should not tint the
+        // whole view. Real submersion resumes the moment physics-walk does.
+        self.fluid_state = FluidState::NONE;
     }
 
     /// Convenience wrapper using the wall clock since the last call.
@@ -1102,13 +1169,23 @@ impl Sim {
         self.target = raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z));
     }
 
-    /// Distance fog sized to this session's configured render distance.
+    /// Distance fog for this frame: sized to the configured render distance
+    /// normally, and swapped for a short, dense water/lava fog while the
+    /// player's eye is submerged.
     ///
-    /// This is where the eye-in-fluid state will select a short, biome-coloured
-    /// water fog once the shell threads `FluidState::under_water()` through.
+    /// Selected from the bit-exact eye-in-fluid state (`FluidState`) the physics
+    /// producer computes each tick, so the fog matches vanilla's submerged view
+    /// rather than a locally-guessed boolean. Lava is checked before water,
+    /// matching vanilla's lava-first submersion order.
     #[must_use]
     pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
-        fog_for_render_distance(self.config.render_distance)
+        if self.fluid_state.under_lava() {
+            lava_fog()
+        } else if self.fluid_state.under_water() {
+            water_fog(self.config.render_distance)
+        } else {
+            fog_for_render_distance(self.config.render_distance)
+        }
     }
 
     /// The progressive-mining crack to draw on the targeted block this frame, or
@@ -2132,6 +2209,50 @@ mod tests {
             sim.fog_settings(),
             fog_for_render_distance(8),
             "test config is not the default distance, so these must differ"
+        );
+    }
+
+    #[test]
+    fn a_submerged_eye_selects_short_dense_fog_over_the_sky_fog() {
+        // The whole point of threading the fluid state through: while the eye is
+        // under water the fog must become the short, dense water fog, not the
+        // render-distance sky fog that would leave the seabed sharp to the
+        // horizon (the pre-change bug, confirmed on pixels). Guards the
+        // *selection*; the colour/vanilla-likeness is a pixel concern.
+        let mut sim = Sim::new(test_config());
+        let rd = sim.config.render_distance;
+        let sky = fog_for_render_distance(rd);
+
+        // Dry: the render-distance sky fog.
+        assert_eq!(sim.fog_settings(), sky, "a dry eye keeps the sky fog");
+
+        // Eye in water: shorter than, and a different colour from, the sky fog.
+        sim.fluid_state = FluidState {
+            water_height: 1.0,
+            eye_in_water: true,
+            ..FluidState::NONE
+        };
+        assert!(sim.fluid_state.under_water());
+        let water = sim.fog_settings();
+        assert_ne!(water, sky, "a submerged eye must not keep the sky fog");
+        assert!(water.end <= sky.end, "water fog cannot reach past the sky edge");
+        assert_eq!(water.start, 0.0, "water fog ramps from the eye");
+        assert!(
+            water.start < sky.start,
+            "water fog is denser (starts nearer) than the sky fog"
+        );
+
+        // Eye in lava wins over water and is shorter still.
+        sim.fluid_state = FluidState {
+            water_height: 1.0,
+            eye_in_water: true,
+            lava_height: 1.0,
+            eye_in_lava: true,
+        };
+        assert!(sim.fluid_state.under_lava());
+        assert!(
+            sim.fog_settings().end < water.end,
+            "lava blinds faster than water"
         );
     }
 

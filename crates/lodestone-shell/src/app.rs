@@ -156,11 +156,19 @@ struct WindowApp {
     chat_input: ChatInput,
     fps_ema: f32,
     last_log: Instant,
+    /// The fog settings last uploaded to the renderer, so submerged fog is
+    /// re-uploaded only when it actually changes (the player crossing a
+    /// water/lava surface) rather than every frame. Seeded to the sky fog set at
+    /// render bring-up so the first frame above water is a no-op.
+    applied_fog: Option<FogSettings>,
 }
 
 impl WindowApp {
     fn new(config: Config) -> Self {
         let sim = Sim::new(config.clone());
+        // Matches the sky fog set at render bring-up, so the fog reconciliation's
+        // first above-water frame is a no-op rather than a redundant upload.
+        let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
         Self {
             config,
             sim,
@@ -178,6 +186,7 @@ impl WindowApp {
             chat_input: ChatInput::new(),
             fps_ema: 0.0,
             last_log: Instant::now(),
+            applied_fog,
         }
     }
 
@@ -324,6 +333,15 @@ impl WindowApp {
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
         let camera = self.sim.camera(aspect);
+        // Reconcile fog with the player's bit-exact fluid state each frame,
+        // re-uploading only when it changes (crossing a water/lava surface) so a
+        // submerged eye dissolves terrain into short water/lava fog and the
+        // surface restores the render-distance sky fog.
+        let desired_fog = self.sim.fog_settings();
+        if self.applied_fog != Some(desired_fog) {
+            render.set_fog(desired_fog);
+            self.applied_fog = Some(desired_fog);
+        }
         // Drive the audio listener from the exact camera we render, so what the
         // player hears is spatialised to match what they see. No-op when audio
         // is disabled.
