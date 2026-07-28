@@ -321,7 +321,22 @@ impl WindowApp {
         let particle_frame = self.sim.extract_particles(&camera);
         render.prepare_particles(device, queue, self.sim.particle_instances(), &camera);
         render.update_animation(queue, self.sim.tick_count());
-        let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
+        // Route the progressive-mining crack overlay when a dig is in flight,
+        // otherwise take the plain path (avoids building the crack buffer while
+        // idle). `crack_target()` reads the live mining state, so it is `None`
+        // off a server and on the demo path.
+        let stats = match self.sim.crack_target() {
+            Some(crack) => render.render_with_crack(
+                device,
+                queue,
+                frame.view(),
+                &camera,
+                outline,
+                &entity_draws,
+                crack,
+            ),
+            None => render.render(device, queue, frame.view(), &camera, outline, &entity_draws),
+        };
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;

@@ -1083,6 +1083,44 @@ impl Sim {
         self.target = raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z));
     }
 
+    /// The progressive-mining crack to draw on the targeted block this frame, or
+    /// `None` when no dig is in progress.
+    ///
+    /// The stage is the client predictor's own `getDestroyStage` (`0..=9`); the
+    /// block state id must be in the *same* id space the model atlas was built
+    /// from, so on a live server it is read from the client-owned world
+    /// (`NetClient::block_at`) — not [`block_at_world`](Self::block_at_world),
+    /// which reads the offline demo world and would return air on a live join,
+    /// leaving the resolver with no faces and drawing no crack. Progressive
+    /// mining only runs on the live path (demo attack is a one-shot break that
+    /// never drives the predictor), so `mining.destroy_stage()` is `-1` off a
+    /// server and this returns `None` there regardless.
+    ///
+    /// Note: because the shell has no per-block hardness seam, the predictor is
+    /// fed a small fixed hardness (`LIVE_DIG_HARDNESS`) that races local progress
+    /// ahead of the server's real destroy timer, so the crack currently
+    /// *pulses* through the stages rather than filling smoothly over the true
+    /// break time. A real hardness seam would make it track vanilla exactly.
+    #[must_use]
+    pub fn crack_target(&self) -> Option<crate::gpu::CrackTarget> {
+        let stage = self.mining.destroy_stage();
+        if stage < 0 {
+            return None;
+        }
+        let block = self.target?.block;
+        let state_id = if self.is_live() {
+            let pos = BlockPos::new(block[0], block[1], block[2]);
+            self.net.as_ref()?.block_at(pos)?
+        } else {
+            self.block_at_world(block)
+        };
+        Some(crate::gpu::CrackTarget {
+            block,
+            state_id,
+            stage: (stage as u8).min(9),
+        })
+    }
+
     /// Break the currently targeted block (set it to air) and remesh. Returns
     /// whether a block was broken.
     ///
