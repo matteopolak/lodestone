@@ -13,10 +13,11 @@ use std::collections::HashMap;
 use lodestone_render::{
     AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer,
     EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh,
-    ModelPipeline, SpriteAnimation,
+    ModelCameraUniform, ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
+    fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
     upload_instances,
     vertex::vram_bytes,
@@ -570,6 +571,11 @@ pub struct RenderState {
     particles: ParticleRenderer,
     particle_atlas_bind_group: wgpu::BindGroup,
     clear: wgpu::Color,
+    /// Linear distance fog fading the outermost loaded chunks into the sky (or,
+    /// later, a biome water colour when submerged). Defaults to a sky-coloured
+    /// fog sized for the default render distance; drive it from the real render
+    /// distance / eye-in-fluid state via [`RenderState::set_fog`].
+    fog: FogSettings,
 }
 
 impl RenderState {
@@ -701,7 +707,20 @@ impl RenderState {
                 b: 0.92,
                 a: 1.0,
             },
+            // Fog fades into that same sky colour. Sized for the default 8-chunk
+            // render distance; the shell overrides it from its real render
+            // distance (and underwater state) via `set_fog`.
+            fog: FogSettings::for_view_distance([0.53, 0.71, 0.92], 8.0 * 16.0, 0.75),
         }
+    }
+
+    /// Replace the distance-fog settings (colour + range). The shell drives this
+    /// from its configured render distance and the eye-in-fluid state: a
+    /// sky-coloured fog sized to the render distance normally, a short
+    /// biome-coloured water fog when submerged. Pass [`FogSettings::disabled`]
+    /// to turn fog off.
+    pub fn set_fog(&mut self, fog: FogSettings) {
+        self.fog = fog;
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -908,12 +927,25 @@ impl RenderState {
             queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
         }
 
-        // Same for the model sections (live vanilla path).
+        // Same for the model sections (live vanilla path). Fog is folded into
+        // the group-0 uniform: the eye position (for per-fragment view
+        // distance) and this frame's fog settings travel with each section's
+        // camera buffer, keeping the model shader within four bind groups.
         if let Some(model) = &self.model {
+            let eye = camera.position;
+            let fog = FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]);
             for section in model.sections.values() {
-                let uniform = CameraUniform {
-                    view_proj,
-                    section_origin: [section.origin[0], section.origin[1], section.origin[2], 0.0],
+                let uniform = ModelCameraUniform {
+                    camera: CameraUniform {
+                        view_proj,
+                        section_origin: [
+                            section.origin[0],
+                            section.origin[1],
+                            section.origin[2],
+                            0.0,
+                        ],
+                    },
+                    fog,
                 };
                 queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
             }

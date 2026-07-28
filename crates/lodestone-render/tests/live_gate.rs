@@ -72,7 +72,7 @@ use lodestone_model::{
 use lodestone_render::{
     Camera, CameraUniform, DepthBuffer, GpuAtlas, GpuContext, GpuModelMesh, HeadlessTarget,
     ModelMesh, ModelPipeline, ModelSectionView, RenderTarget, SECTION_SIZE, is_full_cube,
-    is_packed_cube, mesh_models, model_camera_buffer,
+    is_packed_cube, mesh_models, model_anim_buffer, model_camera_buffer, model_palette_buffer,
 };
 use uuid::Uuid;
 
@@ -424,6 +424,13 @@ fn live_gate_real_chunk_to_pixels() {
     let pipeline = ModelPipeline::new(device, format);
     let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &gpu_atlas);
+    // The model shader also carries the tint palette (group 2) and animation
+    // slots (group 3). This gate checks geometry, not tint, so an all-white
+    // palette (untinted) and an empty slot table (all static) are sufficient.
+    let palette_buffer = model_palette_buffer(device, &[[1.0, 1.0, 1.0, 1.0]; 256]);
+    let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
+    let anim_buffer = model_anim_buffer(device, &[]);
+    let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
     let depth = DepthBuffer::new(device, w, h);
 
     let frame = target.acquire().unwrap();
@@ -462,6 +469,8 @@ fn live_gate_real_chunk_to_pixels() {
         pass.set_pipeline(&pipeline.pipeline);
         pass.set_bind_group(0, &cam_bg, &[]);
         pass.set_bind_group(1, &atlas_bg, &[]);
+        pass.set_bind_group(2, &palette_bg, &[]);
+        pass.set_bind_group(3, &anim_bg, &[]);
         pass.set_vertex_buffer(0, gpu_mesh.vertices.slice(..));
         pass.set_index_buffer(gpu_mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..gpu_mesh.index_count, 0, 0..1);

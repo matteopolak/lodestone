@@ -1,26 +1,25 @@
-//! Offscreen gate for translucent water: **the sea floor must be visible
-//! through the water surface**.
+//! Offscreen gate for distance fog: **a fragment beyond the fog range must be
+//! pulled to the fog colour**, and one with fog disabled must not.
 //!
-//! The scene is deliberately minimal so the assertion is unambiguous: clear the
-//! framebuffer to a solid **red** "sea floor", then draw a full-frame water quad
-//! through the real [`ModelPipeline::for_fluid`] pass (alpha blending, no depth
-//! writes, no cutout discard). If water is genuinely translucent, the red floor
-//! survives in the blended result.
+//! The scene is deliberately trivial so the assertion is unambiguous. An
+//! identity camera draws a full-frame white quad at clip `z = 0`, but the fog
+//! uniform places the *eye* 1000 units behind it, so every fragment sits ~1000
+//! units away — well past the fog `end` of 500. With fog enabled the lit white
+//! fragment is fully replaced by the fog colour (pure green here); with fog
+//! disabled (a degenerate range) the same fragment stays white.
 //!
 //! The **negative control** is executed in the same test and observed failing:
-//! the identical draw with an *opaque* water texture (alpha `255`) instead of a
-//! translucent one (alpha `180`, water's real value) hides the floor entirely —
-//! the red channel collapses to ~0. That delta is the whole point: a gate that
-//! only ever saw the pass case would not catch a regression back to opaque water
-//! (the exact bug this fixes, where water rendered as nothing or as a solid
-//! blob). Printing both makes the failure of the control visible in the log.
+//! the identical draw with [`FogUniform::disabled`] leaves the fragment white,
+//! so the green channel is the only one high and red/blue collapse. A gate that
+//! only saw the enabled case would not catch fog silently doing nothing.
 //!
 //! `#[ignore]`d because it needs a real GPU adapter; run explicitly:
-//! `cargo test -p lodestone-render --test fluid_gate -- --ignored --nocapture`.
+//! `cargo test -p lodestone-render --test fog_gate -- --ignored --nocapture`.
 
 use lodestone_render::{
     CameraUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
-    model_anim_buffer, model_camera_buffer,
+    fog::{FogSettings, FogUniform},
+    model_anim_buffer, model_camera_buffer_with_fog, model_palette_buffer,
 };
 
 const W: u32 = 64;
@@ -47,7 +46,7 @@ fn setup() -> Option<Gpu> {
             .ok()?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("fluid_gate device"),
+                label: Some("fog_gate device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
@@ -58,20 +57,19 @@ fn setup() -> Option<Gpu> {
     })
 }
 
-/// A full-frame water quad in clip space (identity camera): tinted (`tint = 0`)
-/// so the fluid shader applies the water colour, full-bright, unoccluded.
-fn water_quad() -> ModelMesh {
+/// A full-frame opaque quad in clip space (identity camera), untinted
+/// (`tint = 255`) and full-bright so its lit colour is the plain white texture.
+fn white_quad() -> ModelMesh {
     let v = |x: f32, y: f32, u: f32, w: f32| ModelVertex {
-        position: [x, y, 0.5],
+        position: [x, y, 0.0],
         uv: [u, w],
         ao: 1.0,
         light: 0xFF,
-        tint: 0,
+        tint: 255,
         anim: 0,
         _pad: 0,
     };
     ModelMesh {
-        // CCW from the front; the fluid pass disables culling anyway.
         vertices: vec![
             v(-1.0, -1.0, 0.0, 1.0),
             v(1.0, -1.0, 1.0, 1.0),
@@ -82,40 +80,34 @@ fn water_quad() -> ModelMesh {
     }
 }
 
-/// Render the water quad over a red floor and read back the centre pixel.
-/// `water_alpha` is the alpha of the (otherwise white) water texture: `180` is
-/// water's real translucency, `255` is the opaque negative control.
-fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
+/// Render the white quad through the opaque model pipeline with the given fog
+/// uniform and read back the centre pixel.
+fn render_center(gpu: &Gpu, fog: FogUniform) -> (u8, u8, u8) {
     let device = &gpu.device;
     let queue = &gpu.queue;
 
-    let pipeline = ModelPipeline::for_fluid(device, FORMAT);
-    let atlas = GpuAtlas::from_rgba(
-        device,
-        queue,
-        4,
-        4,
-        &[255, 255, 255, water_alpha].repeat(16),
-        &[],
-    );
+    let pipeline = ModelPipeline::new(device, FORMAT);
+    let atlas = GpuAtlas::from_rgba(device, queue, 4, 4, &[255, 255, 255, 255].repeat(16), &[]);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas);
 
-    let cam_buffer = model_camera_buffer(
+    let cam_buffer = model_camera_buffer_with_fog(
         device,
         CameraUniform {
             view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
             section_origin: [0.0, 0.0, 0.0, 0.0],
         },
+        fog,
     );
     let cam_bg = pipeline.camera_bind_group(device, &cam_buffer);
-    // The fluid shader carries the shared animation group (group 2); bind an
-    // empty (all-static) slot table so no quad animates.
+    let palette_buffer = model_palette_buffer(device, &[[1.0, 1.0, 1.0, 1.0]; 256]);
+    let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
     let anim_buffer = model_anim_buffer(device, &[]);
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
-    let mesh = GpuModelMesh::upload(device, &water_quad()).expect("non-empty water mesh");
+
+    let mesh = GpuModelMesh::upload(device, &white_quad()).expect("non-empty quad");
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("floor+water target"),
+        label: Some("fog target"),
         size: wgpu::Extent3d {
             width: W,
             height: H,
@@ -148,19 +140,13 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("fluid gate"),
+            label: Some("fog gate"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &color_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // The "sea floor": a solid red already in the framebuffer.
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 1.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    }),
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -179,7 +165,8 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
         pass.set_pipeline(&pipeline.pipeline);
         pass.set_bind_group(0, &cam_bg, &[]);
         pass.set_bind_group(1, &atlas_bg, &[]);
-        pass.set_bind_group(2, &anim_bg, &[]);
+        pass.set_bind_group(2, &palette_bg, &[]);
+        pass.set_bind_group(3, &anim_bg, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -188,8 +175,8 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
     let padded = (W * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
-        size: u64::from(padded) * u64::from(H),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        size: (padded * H) as u64,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     enc.copy_texture_to_buffer(
@@ -214,49 +201,54 @@ fn render_center(gpu: &Gpu, water_alpha: u8) -> (u8, u8, u8) {
         },
     );
     queue.submit(std::iter::once(enc.finish()));
-    readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    let data = readback.slice(..).get_mapped_range().expect("mapped range");
 
-    let (cx, cy) = (W / 2, H / 2);
-    let i = (cy * padded + cx * 4) as usize;
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let data = slice.get_mapped_range().expect("mapped range");
+    let row = (H / 2) as usize;
+    let col = (W / 2) as usize;
+    let i = row * padded as usize + col * 4;
     (data[i], data[i + 1], data[i + 2])
 }
 
 #[test]
-#[ignore = "requires a GPU adapter; run explicitly to watch the negative control fail"]
-fn sea_floor_is_visible_through_translucent_water() {
+#[ignore = "requires a GPU adapter"]
+fn distant_fragment_is_pulled_to_the_fog_colour() {
     let Some(gpu) = setup() else {
-        panic!(
-            "fluid_gate: no GPU adapter. This test is #[ignore]d, so running it is an explicit \
-             request for a real GPU frame — a headless CI box has none and should not run it."
-        );
+        panic!("no GPU adapter for fog_gate");
     };
 
-    // Water's real texture alpha (180/255 ≈ 0.71): translucent.
-    let (tr, tg, tb) = render_center(&gpu, 180);
-    // Negative control: identical draw, opaque water texture (alpha 255).
-    let (or, og, ob) = render_center(&gpu, 255);
+    // Eye 1000 units behind the quad; fog full past 500 → the fragment is beyond
+    // end, so it should read as the fog colour (pure green).
+    let settings = FogSettings {
+        color: [0.0, 1.0, 0.0],
+        start: 100.0,
+        end: 500.0,
+    };
+    let fog_on = FogUniform::new(&settings, [0.0, 0.0, -1000.0]);
+    let (r_on, g_on, b_on) = render_center(&gpu, fog_on);
 
-    println!("translucent water over red floor: rgb=({tr},{tg},{tb})");
-    println!(
-        "opaque control  water over red floor: rgb=({or},{og},{ob})  <-- floor contributes no red"
-    );
+    // Negative control: fog disabled leaves the white quad white.
+    let (r_off, g_off, b_off) = render_center(&gpu, FogUniform::disabled());
 
-    // See-through proof is the *delta*: opaque water shows only its own colour
-    // (its red channel `or` is the water tint's red, with zero floor). Translucent
-    // water lets the red sea floor add on top, so its red `tr` is measurably
-    // higher. If alpha blending regressed to opaque, `tr` would collapse to `or`
-    // and this assertion would fail — which is exactly what makes the gate real.
+    println!("fog on : ({r_on}, {g_on}, {b_on})");
+    println!("fog off: ({r_off}, {g_off}, {b_off})");
+
+    // Enabled: fogged fragment is green-dominant (fog colour), red/blue low.
     assert!(
-        tr > or + 30,
-        "the red sea floor must show through translucent water: translucent r={tr} \
-         should exceed opaque-control r={or} by a clear margin"
+        g_on > 200 && r_on < 60 && b_on < 60,
+        "distant fragment should read as the green fog colour, got ({r_on}, {g_on}, {b_on})"
     );
-    // Sanity: the water tint itself is present (a blue-dominant surface), so we
-    // are blending water, not drawing nothing.
+    // Disabled (control): the same fragment stays white — all channels high.
     assert!(
-        tb > tr && tb > 40,
-        "water surface should be blue-dominant, got rgb=({tr},{tg},{tb})"
+        r_off > 200 && g_off > 200 && b_off > 200,
+        "with fog disabled the fragment should stay white, got ({r_off}, {g_off}, {b_off})"
+    );
+    // The delta that proves fog did something: red collapses from white to near
+    // zero once fog is on.
+    assert!(
+        r_off as i32 - r_on as i32 > 150,
+        "fog must measurably change the fragment (r {r_off} -> {r_on})"
     );
 }
