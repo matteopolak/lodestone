@@ -316,6 +316,10 @@ impl WindowApp {
         self.sim.set_audio_listener(&camera);
         let outline = self.sim.target.map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
+        // Extraction lives in `Sim` because resolving each particle's light
+        // needs the world; doing it here would hand out two borrows of `Sim`.
+        let particle_frame = self.sim.extract_particles(&camera);
+        render.prepare_particles(device, queue, self.sim.particle_instances(), &camera);
         let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
 
         // Fold GPU counters + timing into the debug overlay.
@@ -330,6 +334,9 @@ impl WindowApp {
         self.sim.stats.quads = stats.total_quads;
         self.sim.stats.vram_bytes = stats.vram_bytes;
         self.sim.stats.entities_drawn = stats.entities_drawn;
+        self.sim.stats.particles_alive = particle_frame.alive;
+        self.sim.stats.particles_drawn = stats.particles_drawn;
+        self.sim.stats.particles_unresolved = particle_frame.unresolved;
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
 
@@ -730,6 +737,8 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
         .acquire()
         .map_err(|e: TargetError| anyhow::anyhow!("headless acquire failed: {e}"))?;
     let entity_draws = sim.entity_draws();
+    let _ = sim.extract_particles(&camera);
+    render.prepare_particles(device, queue, sim.particle_instances(), &camera);
     let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
     let pixels = target.read_texels(device, queue);
     let frame_ms = start.elapsed().as_secs_f64() * 1000.0;

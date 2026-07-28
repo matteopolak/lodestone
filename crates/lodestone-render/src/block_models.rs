@@ -242,6 +242,11 @@ pub struct StateModel {
     /// The render pass this block's geometry belongs to, derived from its sprite
     /// alpha (the most transparent layer across its faces).
     pub layer: RenderLayer,
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of the model's `#particle`
+    /// sprite — what break/hit particles sample. See
+    /// [`BakedModel::particle_uv`](lodestone_assets::bake::BakedModel::particle_uv)
+    /// for why this cannot be derived from `quads`.
+    pub particle_uv: Option<[f32; 4]>,
 }
 
 impl StateModel {
@@ -252,6 +257,7 @@ impl StateModel {
             quads: Vec::new(),
             occludes: false,
             layer: RenderLayer::Solid,
+            particle_uv: None,
         }
     }
 }
@@ -324,6 +330,7 @@ impl BlockModels {
             let resolved = registry.resolve(id);
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
                 Ok(model) if !model.quads.is_empty() => {
+                    let particle_uv = model.particle_uv;
                     let mut quads = model.quads;
                     // Rewrite each tinted quad's raw model tint index into a
                     // palette index for its resolved source colour. `None` (an
@@ -344,6 +351,7 @@ impl BlockModels {
                         quads,
                         occludes,
                         layer,
+                        particle_uv,
                     }
                 }
                 _ => StateModel::empty(),
@@ -404,6 +412,14 @@ impl BlockModels {
     #[must_use]
     pub fn occludes(&self, state_id: u32) -> bool {
         self.state(state_id).occludes
+    }
+
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of a state's `#particle` sprite —
+    /// the texture break and hit particles sample. `None` for air, unknown
+    /// states, and models that declare no `particle` variable.
+    #[must_use]
+    pub fn particle_uv(&self, state_id: u32) -> Option<[f32; 4]> {
+        self.state(state_id).particle_uv
     }
 
     /// The render layer of a state's geometry.
