@@ -28,13 +28,16 @@
 //! `container_set_content` (`items.len() - PLAYER_INVENTORY_PORTION`) rather than
 //! a hand-written menu-type→size table, so the size originates outside our code.
 
-use lodestone_model::{ClientEvent, ItemStack as ModelItemStack, Text, ids::ResourceKey};
+use lodestone_model::{
+    ClientAction, ClientEvent, ItemStack as ModelItemStack, Text, ids::ResourceKey,
+};
 
 use crate::{
+    click::{Click, PlayerCtx},
     item::ItemStack,
     menu::Menu,
     recipe::{CraftingGrid, RecipeBook},
-    reconcile::{ClientMenu, ServerUpdate},
+    reconcile::{ClickIntent, ClientMenu, ServerUpdate},
 };
 
 /// The player-inventory portion (main + hotbar) appended to every non-player
@@ -287,6 +290,47 @@ impl Menus {
             });
         }
         &mut self.opened.as_mut().expect("just set").menu
+    }
+
+    /// Predicts `click` on the **active** menu and returns the window id it must
+    /// be addressed to together with the intent to transmit.
+    ///
+    /// This is the serverbound half of the session, and the counterpart to
+    /// [`apply`](Self::apply): the UI turns a mouse event into a [`Click`], this
+    /// applies it optimistically so the screen responds immediately, and the
+    /// returned [`ClickIntent`] — lowered by
+    /// [`ClickIntent::to_action`] — is what goes on the wire. Whatever the
+    /// server thinks of it comes back through `apply` and overwrites the
+    /// prediction.
+    ///
+    /// The window id is the **active menu's**, and that is the whole reason this
+    /// returns it rather than leaving the caller to guess: while a container is
+    /// open, *every* slot on screen belongs to that container's window —
+    /// including the 27 + 9 player-inventory rows drawn underneath it. Sending a
+    /// click on those rows to window `0` addresses a completely different slot
+    /// list.
+    ///
+    /// Nothing here matches a recipe. A click into a crafting grid is an
+    /// ordinary slot move; the result slot is filled by the server's
+    /// `container_set_slot`, which [`apply`](Self::apply) already reconciles.
+    pub fn click(&mut self, click: Click, ctx: PlayerCtx) -> (i32, ClickIntent) {
+        match &mut self.opened {
+            Some(open) => {
+                let window_id = open.window_id;
+                (window_id, open.menu.predict(click, ctx))
+            }
+            None => (0, self.player.predict(click, ctx)),
+        }
+    }
+
+    /// The [`ClientAction`] for a predicted click on the active menu: [`click`]
+    /// followed by [`ClickIntent::to_action`], which is the whole serverbound
+    /// path in one call for a UI that needs nothing else from the intent.
+    ///
+    /// [`click`]: Self::click
+    pub fn click_action(&mut self, click: Click, ctx: PlayerCtx) -> ClientAction {
+        let (window_id, intent) = self.click(click, ctx);
+        intent.to_action(window_id)
     }
 
     /// The active menu's crafting grid contents, if it has a crafting grid.

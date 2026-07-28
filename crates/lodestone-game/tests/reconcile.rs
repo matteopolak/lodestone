@@ -81,6 +81,50 @@ fn set_slot_correction_targets_one_slot() {
     assert_eq!(client.menu().state_id(), 5);
 }
 
+/// A predicted click must stamp **the server's** state id, never the locally
+/// bumped one.
+///
+/// Vanilla's client sends `containerMenu.getStateId()` and never increments it
+/// (`MultiPlayerGameMode.handleContainerInput`); only the server writes that
+/// field. Our [`Menu::do_click`](lodestone_game::menu::Menu) *does* bump, because
+/// it doubles as the server-side model, so reading the id back off the predicted
+/// menu yields `server + 1` — which
+/// `ServerGamePacketListenerImpl.handleContainerClick` reads as **stale** and
+/// answers with `broadcastFullState()`. Every click would then be a 46-slot
+/// resync that discards the prediction, and the reconcile seam could never
+/// observe agreement.
+#[test]
+fn a_predicted_click_stamps_the_servers_state_id_not_the_bumped_one() {
+    let mut menu = Menu::generic(27);
+    menu.set_carried(Some(stack("minecraft:stone", 8)));
+    let mut client = ClientMenu::new(menu);
+    // The server speaks first, as it always does (container_set_content on open).
+    client.reconcile(ServerUpdate::SetContent {
+        state_id: 17,
+        items: vec![None; 63],
+        carried: Some(stack("minecraft:stone", 8)),
+    });
+
+    let intent = client.predict(Click::left(0), PlayerCtx::survival());
+    assert_eq!(
+        intent.state_id, 17,
+        "the click must carry the server's id; 18 means we sent the bumped one \
+         and the server will full-resync"
+    );
+    // The local menu did bump (it models the server's own incrementStateId), so
+    // reading the id off the menu is exactly the mistake this guards.
+    assert_eq!(
+        client.menu().state_id(),
+        18,
+        "the predicted menu still bumps, which is why the intent must not read it"
+    );
+
+    // Two clicks with no server reply in between both carry the same id, as
+    // vanilla's do — the id is the server's, not a local sequence number.
+    let second = client.predict(Click::left(1), PlayerCtx::survival());
+    assert_eq!(second.state_id, 17);
+}
+
 #[test]
 fn state_id_aligns_to_server_after_reconcile() {
     let mut menu = Menu::generic(27);
