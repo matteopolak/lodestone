@@ -29,9 +29,12 @@
 //! * [`placement`] — block placement / item use: the interaction-vs-placement
 //!   ordering, target resolution, geometry-derived block state, and its own
 //!   predict-then-reconcile seam.
-//! * [`recipe`] — shaped/shapeless/… recipes, tag resolution, and grid
-//!   matching. JSON loading of Mojang data lives in [`recipe_json`] behind the
-//!   `json` feature.
+//! * [`recipe`] — shaped/shapeless/… recipes, tag resolution, grid matching,
+//!   and the [`RecipeBook`](recipe::RecipeBook) corpus aggregate. Loading
+//!   Mojang's datapack JSON lives in [`recipe_json`] behind the `json` feature.
+//!   Note the division of labour: an open crafting menu's **result slot is the
+//!   server's**, pushed as a `container_set_slot` and reconciled like any other
+//!   slot; the book is for the recipe UI, ghosts, and prediction.
 //! * [`scoreboard`] — objectives, scores, display slots, and teams.
 //! * [`tablist`] — player info / tab list.
 //! * [`player_state`] — HUD vitals, experience, game mode, difficulty, respawn,

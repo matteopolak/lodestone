@@ -6,12 +6,15 @@
 //! load — it tolerates unknown keys and reports only genuinely unparseable
 //! recipes.
 
+use std::path::{Path, PathBuf};
+
 use lodestone_model::Identifier;
 use serde_json::Value;
 
 use crate::item::ItemStack;
 use crate::recipe::{
-    CookingKind, CookingRecipe, Ingredient, Recipe, ShapedRecipe, ShapelessRecipe, TagEntry,
+    CookingKind, CookingRecipe, Ingredient, Recipe, RecipeBook, ShapedRecipe, ShapelessRecipe,
+    TagEntry, TagResolver,
 };
 
 /// An error loading a recipe from JSON.
@@ -23,6 +26,8 @@ pub enum LoadError {
     BadField(&'static str),
     /// An identifier failed to parse.
     BadIdentifier(String),
+    /// The bytes were not valid JSON at all.
+    Json(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -31,6 +36,7 @@ impl std::fmt::Display for LoadError {
             LoadError::MissingType => write!(f, "recipe has no `type`"),
             LoadError::BadField(field) => write!(f, "bad or missing field `{field}`"),
             LoadError::BadIdentifier(s) => write!(f, "invalid identifier `{s}`"),
+            LoadError::Json(e) => write!(f, "malformed JSON: {e}"),
         }
     }
 }
@@ -237,5 +243,185 @@ pub fn parse_tag(v: &Value) -> Result<Vec<TagEntry>, LoadError> {
             out.push(TagEntry::Item(ident(s)?));
         }
     }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Corpus loading
+// ---------------------------------------------------------------------------
+
+/// Accumulates a whole recipe corpus from arbitrarily-sourced JSON documents.
+///
+/// The builder is deliberately **source-agnostic**: it takes `(Identifier,
+/// &str)` pairs and knows nothing about files, jars or the network.
+/// [`load_data_root`] layers a filesystem walk on top; a zip-backed source (the
+/// same `client.jar` [`lodestone_assets`](https://docs.rs) already reads for
+/// models and lang) can feed the same two methods without this crate growing a
+/// zip dependency.
+///
+/// Tags must be registered before matching, not before insertion — the builder
+/// collects both and wires them together in [`finish`](Self::finish).
+///
+/// A malformed document does **not** abort the load. It is recorded in
+/// [`failures`](Self::failures) and the rest of the corpus still loads, so one
+/// unknown recipe type from a future version cannot leave a client with no
+/// recipes at all.
+#[derive(Debug, Default)]
+pub struct CorpusBuilder {
+    recipes: Vec<(Identifier, Recipe)>,
+    tags: Vec<(Identifier, Vec<TagEntry>)>,
+    failures: Vec<(String, LoadError)>,
+}
+
+impl CorpusBuilder {
+    /// An empty builder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Parses and stages one recipe document. Errors are recorded, not returned.
+    pub fn push_recipe(&mut self, id: Identifier, json: &str) {
+        match parse_json(json).and_then(|v| parse_recipe(&v)) {
+            Ok(recipe) => self.recipes.push((id, recipe)),
+            Err(e) => self.failures.push((id.to_string(), e)),
+        }
+    }
+
+    /// Parses and stages one item-tag document. Errors are recorded, not
+    /// returned.
+    pub fn push_tag(&mut self, id: Identifier, json: &str) {
+        match parse_json(json).and_then(|v| parse_tag(&v)) {
+            Ok(entries) => self.tags.push((id, entries)),
+            Err(e) => self.failures.push((id.to_string(), e)),
+        }
+    }
+
+    /// Documents that failed to parse, as `(id, error)`.
+    #[must_use]
+    pub fn failures(&self) -> &[(String, LoadError)] {
+        &self.failures
+    }
+
+    /// Number of recipes staged so far.
+    #[must_use]
+    pub fn recipe_count(&self) -> usize {
+        self.recipes.len()
+    }
+
+    /// Number of item tags staged so far.
+    #[must_use]
+    pub fn tag_count(&self) -> usize {
+        self.tags.len()
+    }
+
+    /// Builds the [`RecipeBook`], consuming the builder.
+    #[must_use]
+    pub fn finish(self) -> RecipeBook {
+        let mut resolver = TagResolver::new();
+        for (id, entries) in self.tags {
+            resolver.insert(id, entries);
+        }
+        let mut book = RecipeBook::with_tags(resolver);
+        for (id, recipe) in self.recipes {
+            book.insert(id, recipe);
+        }
+        book
+    }
+}
+
+fn parse_json(text: &str) -> Result<Value, LoadError> {
+    serde_json::from_str(text).map_err(|e| LoadError::Json(e.to_string()))
+}
+
+/// Loads every recipe and item tag under a vanilla **datapack `data/` root**.
+///
+/// `root` is the directory that contains one subdirectory per namespace, i.e.
+/// the `data/` inside `client.jar`:
+///
+/// ```text
+/// data/minecraft/recipe/**/*.json
+/// data/minecraft/tags/item/**/*.json
+/// ```
+///
+/// Recursion matters: 26.2 nests item tags one level deep
+/// (`tags/item/enchantable/weapon.json` resolves to
+/// `minecraft:enchantable/weapon`), so a flat `read_dir` silently drops 33 of
+/// the 224 tags. The id is the path relative to `recipe/` or `tags/item/` with
+/// the `.json` suffix removed, so subdirectories become part of the path — the
+/// same rule vanilla's `FileToIdConverter` uses.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`](std::io::Error) only if `root` itself cannot be
+/// read. Individual unreadable or malformed documents are recorded in the
+/// returned builder's [`failures`](CorpusBuilder::failures).
+pub fn load_data_root(root: &Path) -> std::io::Result<CorpusBuilder> {
+    let mut builder = CorpusBuilder::new();
+    for namespace in read_dir_sorted(root)? {
+        let Some(ns) = namespace.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !namespace.is_dir() {
+            continue;
+        }
+        load_tree(&mut builder, ns, &namespace.join("tags").join("item"), true);
+        load_tree(&mut builder, ns, &namespace.join("recipe"), false);
+    }
+    Ok(builder)
+}
+
+/// Walks `base` recursively, feeding every `.json` file to the builder with an
+/// id derived from its path relative to `base`.
+fn load_tree(builder: &mut CorpusBuilder, namespace: &str, base: &Path, is_tag: bool) {
+    let mut stack = vec![base.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = read_dir_sorted(&dir) else {
+            continue;
+        };
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    for path in files {
+        let Ok(rel) = path.strip_prefix(base) else {
+            continue;
+        };
+        // `/` is a legal identifier path character, and is the separator vanilla
+        // itself uses, so nested files keep their subdirectory in the id.
+        let mut id_path = rel.with_extension("").to_string_lossy().into_owned();
+        if std::path::MAIN_SEPARATOR != '/' {
+            id_path = id_path.replace(std::path::MAIN_SEPARATOR, "/");
+        }
+        let Ok(id) = Identifier::new(namespace, id_path) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            builder.failures.push((
+                id.to_string(),
+                LoadError::Json("file could not be read".to_string()),
+            ));
+            continue;
+        };
+        if is_tag {
+            builder.push_tag(id, &text);
+        } else {
+            builder.push_recipe(id, &text);
+        }
+    }
+}
+
+fn read_dir_sorted(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    out.sort();
     Ok(out)
 }
