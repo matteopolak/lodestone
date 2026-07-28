@@ -1,7 +1,7 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{action::ClientAction, event::ClientEvent, text::Text};
+use crate::{action::ClientAction, event::ClientEvent, item::ItemStack, text::Text};
 
 /// Packet direction relative to an endpoint, re-exported from `lodestone-core`
 /// so adapter id tables can use the same direction type as packet metadata.
@@ -335,6 +335,34 @@ pub struct BlockHardness {
     pub requires_correct_tool: bool,
 }
 
+/// The held item's contribution to the break-time formula for one block state:
+/// the two fields that `lodestone-game`'s `BreakInputs` needs and that
+/// [`BlockHardness`] deliberately does *not* provide.
+///
+/// This is the [`VersionAdapter::tool_mining`] seam's return type. It exists so
+/// that the caller never has to derive `correct_tool` itself — see the field
+/// docs, and the warning on [`BlockHardness`] for what deriving it wrong costs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToolMining {
+    /// `ItemStack.getDestroySpeed(state)` → `BreakInputs::tool_speed`. `1.0`
+    /// bare-handed, and `1.0` for a tool whose rules do not match this block.
+    pub speed: f32,
+    /// `Player.hasCorrectToolForDrops(state)` → `BreakInputs::correct_tool`,
+    /// which selects vanilla's `30` vs `100` divider.
+    ///
+    /// **Already folded, do not re-derive.** This is
+    /// `!state.requiresCorrectToolForDrops() || item.isCorrectToolForDrops(state)`,
+    /// i.e. it *includes* the bare-hand inversion of
+    /// [`BlockHardness::requires_correct_tool`]. Assign it straight into
+    /// `BreakInputs::correct_tool`; combining it with `requires_correct_tool`
+    /// again re-introduces the 3.4x-too-fast bug that field warns about.
+    pub correct_tool: bool,
+    /// `Tool.damagePerBlock`: durability the held item spends per block broken.
+    /// `0` when the held item has no tool component (a bare hand, or a
+    /// non-tool), matching vanilla's "no `minecraft:tool`, no durability cost".
+    pub damage_per_block: u32,
+}
+
 /// Adapter implemented by protocol crates to lift packets into this canonical
 /// model and lower canonical actions back into packets.
 ///
@@ -494,6 +522,39 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// `BreakInputs.correct_tool` makes stone break 3.4x too fast.
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
         let _ = state_id;
+        None
+    }
+
+    /// Resolves the held item's break-time contribution for a block state —
+    /// vanilla `ItemStack.getDestroySpeed` and `Player.hasCorrectToolForDrops`
+    /// — from the stack and the **block-state id**, if this version knows the
+    /// state.
+    ///
+    /// `held` is the item in the main hand; `None` (or a stack with no tool
+    /// component) is the bare hand.
+    ///
+    /// # Why this cannot be computed by the caller
+    ///
+    /// The `minecraft:tool` component is only *sometimes* on the wire. A
+    /// clientbound stack carries a `DataComponentPatch` — the delta from the
+    /// item's built-in prototype — and vanilla puts a pickaxe's
+    /// `minecraft:tool` in that prototype, so an ordinary pickaxe arrives with
+    /// an empty patch and [`ItemComponents::tool`] is
+    /// [`ToolPatch::Inherited`](crate::ToolPatch::Inherited). The prototype is
+    /// version data. Even when a tool *is* on the wire, its rules name blocks by
+    /// tag or by version-scoped registry id, and block-state ids are renumbered
+    /// every version. All three are version-owned, so this is the sanctioned
+    /// route for a version-free consumer to ask "how fast does this item mine
+    /// this block, and does it drop?" — exactly as [`block_hardness`] is for
+    /// hardness. A direct dependency on a version crate would mint a second,
+    /// divergent version-data seam beside this one.
+    ///
+    /// [`block_hardness`]: VersionAdapter::block_hardness
+    ///
+    /// The default returns `None`: a version that has not homed a tool census
+    /// reports "unknown", never a guessed speed.
+    fn tool_mining(&self, held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
+        let _ = (held, state_id);
         None
     }
 }

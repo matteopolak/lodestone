@@ -54,6 +54,19 @@ pub(crate) mod generated_attribute_types;
 #[path = "generated/hardness.rs"]
 pub(crate) mod generated_hardness;
 
+/// Generated `minecraft:block` registry-order tables (raw rodata statics):
+/// registry id → name, and block-state id → registry id. Two id spaces the wire
+/// uses interchangeably that are *not* the same order — see the module docs.
+/// Consumed by [`block_states`] and [`tool`].
+#[path = "generated/block_registry.rs"]
+pub(crate) mod generated_block_registry;
+
+/// Generated `minecraft:tool` census (raw rodata statics): block tag membership
+/// and every item's built-in tool component. Use the [`tool`] module for the
+/// evaluation API; this holds only the arrays.
+#[path = "generated/tools.rs"]
+pub(crate) mod generated_tools;
+
 /// Generated sound-event id→(name, fixed range) table (raw rodata statics). Use
 /// the [`sound_events`] module for the lookup API; this holds only the array.
 #[path = "generated/sound_events.rs"]
@@ -102,6 +115,7 @@ pub mod particle_types;
 pub mod path_types;
 pub mod server_protocol;
 pub mod sound_events;
+pub mod tool;
 
 pub use adapter::{PROTOCOL, V770Adapter, adapter};
 pub use server_protocol::V770ServerProtocol;
