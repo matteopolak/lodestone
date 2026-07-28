@@ -966,6 +966,18 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
         pitch: view.rotation.pitch,
         scale,
         item,
+        // The client-owned read-model already decodes `add_entity`'s and
+        // `set_entity_motion`'s velocity into `EntityView::velocity` (see
+        // `lodestone_client::state`'s `EntityMoved`/`EntityVelocity` arms) —
+        // it was simply never read past that point. `EntityInterpolator`
+        // (`entities.rs`) is the consumer: a dropped item needs this to arc
+        // under gravity instead of easing between the ~1/s position
+        // corrections vanilla's `ItemEntity` actually sends. See that
+        // module's docs for why.
+        velocity: view.velocity.map(|v| {
+            glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32)
+        }),
+        on_ground: view.on_ground,
     }
 }
 
@@ -1137,6 +1149,63 @@ mod tests {
         assert_eq!(actions.try_recv().unwrap(), a);
         assert_eq!(actions.try_recv().unwrap(), b);
         assert!(actions.try_recv().is_err());
+    }
+
+    /// Builds a minimal [`EntityView`] for [`entity_snapshot`] tests — only
+    /// the fields that function actually reads need real values, the rest are
+    /// "never reported".
+    fn bare_entity_view(velocity: Option<Vec3>, on_ground: bool) -> EntityView {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        EntityView {
+            entity_id: 9,
+            uuid: None,
+            entity_type: ResourceKey::from_str("minecraft:item").unwrap(),
+            position: Vec3::new(1.0, 64.0, 2.0),
+            rotation: Rotation::new(0.0, 0.0),
+            head_yaw: 0.0,
+            velocity,
+            on_ground,
+            flags: None,
+            custom_name: None,
+            custom_name_visible: None,
+            pose: None,
+            health: None,
+            baby: None,
+            variant: None,
+            attributes: Vec::new(),
+            equipment: Vec::new(),
+            item: None,
+        }
+    }
+
+    /// The gap this fix closed: `SET_ENTITY_MOTION`/`add_entity` already
+    /// decoded into `EntityView::velocity` (see
+    /// `lodestone_client::state`'s fold), and `EntityView::on_ground` has
+    /// always been tracked — but `entity_snapshot` dropped both on the floor
+    /// before they ever reached `EntitySnapshot`, so `EntityInterpolator` had
+    /// no way to know a dropped item's velocity even though the wire data was
+    /// sitting right there. Before this change neither field existed on
+    /// `EntitySnapshot` at all.
+    #[test]
+    fn entity_snapshot_carries_velocity_and_on_ground_through() {
+        let view = bare_entity_view(Some(Vec3::new(0.08, 0.2, 0.0)), false);
+        let snap = entity_snapshot(view);
+        assert_eq!(
+            snap.velocity,
+            Some(glam::Vec3::new(0.08, 0.2, 0.0)),
+            "the decoded velocity must survive the EntityView -> EntitySnapshot boundary"
+        );
+        assert!(!snap.on_ground);
+
+        let grounded = bare_entity_view(None, true);
+        let snap = entity_snapshot(grounded);
+        assert_eq!(
+            snap.velocity, None,
+            "a never-reported velocity must stay None, not collapse to zero"
+        );
+        assert!(snap.on_ground);
     }
 
     /// The hermetic half of the entity-light contract: before login, the
