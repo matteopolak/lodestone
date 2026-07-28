@@ -16,6 +16,14 @@ log** is the highest-value part: ~20 entries recording beliefs that were confide
 empirically false, and how each was caught. This file is self-contained, but §12 is what stops the
 same mistakes being made again.
 
+> **Start here if you are picking this up cold:**
+> [**Addendum — final play-test round**](#addendum--final-play-test-round-what-landed-what-is-left)
+> at the end of this file is the current front line. It lists what landed in the last block of work
+> and the **five open defects**, each with a source-level diagnosis rather than a guess:
+> block breaking (crack blend + missing hardness table), mob equipment, washed-out colours, entity
+> shadows, and the stranded entity events. Everything between here and there is *descoped* work,
+> which is a different thing from *open* work.
+
 ---
 
 ## Where the client actually is (last verified 2026-07-30)
