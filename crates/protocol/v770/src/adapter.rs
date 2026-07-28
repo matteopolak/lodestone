@@ -2314,7 +2314,15 @@ impl V770Adapter {
             let state = u32::try_from(state)
                 .map_err(|_| AdapterError::Decode(format!("negative block state id {state}")))?;
             world.set_block(pos.x, pos.y, pos.z, state);
-            return Ok(Vec::new());
+            // A server-authoritative single-block change dirties the owning
+            // column. `ChunkLoaded` doubles as "re-read/re-mesh the region at
+            // pos" (its own docs), and without it a break/place the *server*
+            // sends is applied to the world but never drawn until some other
+            // event happens to dirty the column — the silent desync behind
+            // "the chunk only renders properly when I break something".
+            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded {
+                pos: ChunkPos::new(pos.x >> 4, pos.z >> 4),
+            })]);
         }
         if packet_id == play::clientbound::SECTION_BLOCKS_UPDATE {
             // Many block changes within one section: a packed `SectionPos` long,
@@ -2345,7 +2353,16 @@ impl V770Adapter {
             }
             reader.ensure_empty().map_err(dec_err)?;
             world.set_blocks(section_x, section_y, section_z, &blocks);
-            return Ok(Vec::new());
+            // Dirty the owning column so a server-authoritative multi-block
+            // change (e.g. a falling tree, a piston, another player's edits) is
+            // re-meshed rather than silently applied-but-invisible. An empty
+            // change set touched nothing, so it needs no re-mesh.
+            if blocks.is_empty() {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded {
+                pos: ChunkPos::new(section_x, section_z),
+            })]);
         }
         if packet_id == play::clientbound::BLOCK_ENTITY_DATA {
             // A packed BlockPos long, a `registry(BLOCK_ENTITY_TYPE)` VarInt, then

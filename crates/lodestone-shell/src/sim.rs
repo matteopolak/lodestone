@@ -9,9 +9,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use lodestone_assets::Language;
-use lodestone_client::{ClientAction, OpenMenuSnapshot};
+use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
 use lodestone_game::menu::Menu;
+use lodestone_game::mining::{BreakInputs, Mining};
+use lodestone_game::placement::{
+    OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
+};
+use lodestone_model::{BlockFace, PlayerInput, Vec3f};
 use lodestone_physics::{MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
 use lodestone_render::{BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
@@ -46,8 +51,77 @@ const MAX_WORLD_RADIUS: i32 = 6;
 const FLY_SPEED: f64 = 0.45;
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
+/// The hardness fed to the live [`Mining`] predictor. The shell has **no**
+/// version-free per-block hardness seam (see the report), so it cannot time the
+/// client `STOP_DESTROY` at the block's true completion tick the way vanilla
+/// does. It exploits the server's *delayed-destroy* rule instead: a `START`
+/// followed by a `STOP` sent while the server's own progress is still below its
+/// ~0.7 threshold makes the server latch the dig and finish it on its own timer
+/// at the correct, block-accurate vanilla time — no client hardness required.
+///
+/// A held block is **never** broken by `START` alone; without a `STOP` the
+/// server only animates cracks and the block never breaks (measured against the
+/// live oracle). So the hardness must be small enough that the predictor emits a
+/// `STOP` a few ticks into a hold, but large enough that a quick tap (which the
+/// player releases — sending `ABORT` — before the `STOP`) leaves the block
+/// intact, matching vanilla. `0.05` yields a `STOP` after ~5 ticks (~250 ms),
+/// comfortably below the server's 0.7 gate for every bare-hand block, so the
+/// server's delayed-destroy always drives the real timing. Blocks needing a
+/// tool (obsidian) are out of this path's scope.
+const LIVE_DIG_HARDNESS: f32 = 0.05;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
+
+/// A trivial [`PlacementWorld`] for the live path. The shell cannot classify
+/// blocks (no version-free replaceable/interactable seam is exposed by
+/// `lodestone-model`; see the report), and it does not need to: the server is
+/// authoritative and re-runs the place-vs-interact decision itself, while
+/// [`Placement::use_on`] returns the `use_item_on` action to send in every
+/// branch. The shell sends that action unconditionally and lets the server
+/// decide, so the local classification never changes what goes on the wire.
+struct ServerAuthoritativeWorld;
+
+impl PlacementWorld for ServerAuthoritativeWorld {
+    fn is_replaceable(&self, _pos: BlockPos) -> bool {
+        false
+    }
+
+    fn is_interactable(&self, _pos: BlockPos) -> bool {
+        false
+    }
+}
+
+/// Map a raycast hit's outward face normal to the [`BlockFace`] that was struck.
+fn face_from_normal(normal: [i32; 3]) -> BlockFace {
+    match normal {
+        [0, 1, 0] => BlockFace::Up,
+        [0, -1, 0] => BlockFace::Down,
+        [0, 0, 1] => BlockFace::South,
+        [0, 0, -1] => BlockFace::North,
+        [1, 0, 0] => BlockFace::East,
+        // The raycast only ever yields a unit axis normal; treat any residue as
+        // the remaining west face rather than panicking on malformed input.
+        _ => BlockFace::West,
+    }
+}
+
+/// The block-local hit position at the centre of the struck face, in the `0..1`
+/// coordinates `use_item_on` expects. The shell's raycast reports only the block
+/// and its face normal, not the exact sub-block hit point; the face centre is
+/// exact for full-cube placement and the server re-derives fine detail anyway.
+fn face_center_cursor(normal: [i32; 3]) -> Vec3f {
+    // On the struck face's normal axis the hit sits on the block boundary (1.0
+    // for a positive normal, 0.0 for a negative one); the two in-plane axes sit
+    // at the face centre.
+    let coord = |c: i32| -> f32 {
+        match c.signum() {
+            1 => 1.0,
+            -1 => 0.0,
+            _ => 0.5,
+        }
+    };
+    Vec3f::new(coord(normal[0]), coord(normal[1]), coord(normal[2]))
+}
 
 /// The whole non-graphical game state.
 #[derive(Debug)]
@@ -192,6 +266,23 @@ pub struct Sim {
     /// distinguish "this is us" (e.g. mob effects) are not the local player's
     /// and are ignored rather than misattributed.
     local_entity_id: Option<i32>,
+    /// The block-mining predictor (`START`/`STOP`/`ABORT` + swing), driven each
+    /// tick while the attack button is held on a live server. Idle on the demo
+    /// world, which edits blocks directly. Owns its own prediction-sequence
+    /// counter.
+    mining: Mining,
+    /// The block-placement predictor. Lowers a right-click into the server's
+    /// `use_item_on` action on the live path; idle on the demo world.
+    placement: Placement,
+    /// Whether the attack (left) button is currently held. Drives the live
+    /// hold-to-mine loop; a demo-world break is a one-shot on press instead.
+    attacking: bool,
+    /// The last [`PlayerInput`] sent to the server, so we only resend on change
+    /// (vanilla's player-input packet is edge-triggered). Critically, this is
+    /// how the server learns we are sneaking — it derives shift from the wire,
+    /// never from our local movement flags, so a placement against an
+    /// interactable block only suppresses the interaction if this was sent.
+    last_player_input: Option<PlayerInput>,
 }
 
 /// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
@@ -333,6 +424,10 @@ impl Sim {
             selected_slot: 0,
             audio: ShellAudio::from_env(),
             local_entity_id: None,
+            mining: Mining::new(),
+            placement: Placement::new(),
+            attacking: false,
+            last_player_input: None,
         }
     }
 
@@ -694,6 +789,13 @@ impl Sim {
             {
                 net.send_action(move_action(&self.player));
             }
+            // Drive live block interactions at the same fixed 20 Hz: the held
+            // dig accumulates in step with the server's destroy timer, and the
+            // sneak/sprint input is resent on change. Demo sessions have no net,
+            // so this is a cheap no-op there.
+            if self.phase == SessionPhase::Connected && self.is_live() {
+                self.drive_interaction();
+            }
         }
         self.interp_alpha = (self.accumulator / TICK_DT) as f32;
         self.frame_count += 1;
@@ -857,6 +959,13 @@ impl Sim {
         dt
     }
 
+    /// Whether this session is rendering a live server world (as opposed to the
+    /// offline demo). The stitched vanilla atlas plus a live connection is the
+    /// single discriminant used everywhere the live and demo paths diverge.
+    fn is_live(&self) -> bool {
+        self.vanilla_atlas.is_some() && self.net.is_some()
+    }
+
     /// Recompute the targeted block by casting the view ray from the (already
     /// interpolated) camera. Call once per frame before rendering the outline.
     pub fn update_target(&mut self, aspect: f32) {
@@ -868,12 +977,29 @@ impl Sim {
         ];
         let fwd = cam.forward();
         let dir = [f64::from(fwd.x), f64::from(fwd.y), f64::from(fwd.z)];
+        // Live: raycast the server's terrain (client-owned world), not the demo
+        // world, or dig/place would target phantom offline blocks. The 3×3
+        // column snapshot spans ±16 blocks — far more than REACH (4.5) — so a
+        // face at the edge of reach is always covered. A `None` snapshot means
+        // the player's own column has not streamed in; nothing is targetable.
+        if self.is_live() {
+            self.target = self
+                .live_collision()
+                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z)));
+            return;
+        }
         let view = WorldCollision::new(&self.world);
         self.target = raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z));
     }
 
     /// Break the currently targeted block (set it to air) and remesh. Returns
     /// whether a block was broken.
+    ///
+    /// This is the **demo-world** direct edit: it mutates the shell's offline
+    /// world in place. On a live server the shell must instead route the dig
+    /// through the server (see [`begin_attack`](Self::begin_attack)), or the
+    /// break would be local-only and the server would restore the block on the
+    /// next chunk update.
     pub fn break_block(&mut self) -> bool {
         let Some(hit) = self.target else { return false };
         if self.set_block_world(hit.block, id::AIR) {
@@ -885,8 +1011,171 @@ impl Sim {
         }
     }
 
-    /// Place [`PLACE_BLOCK`] against the targeted face, if the cell is empty and
-    /// doesn't intersect the player. Returns whether a block was placed.
+    /// Begin an attack (attack button pressed). On a live server this arms the
+    /// hold-to-mine loop that [`drive_interaction`](Self::drive_interaction)
+    /// advances each tick; on the demo world it is a one-shot direct break, so
+    /// the offline editing path is preserved.
+    pub fn begin_attack(&mut self) {
+        if self.is_live() {
+            self.attacking = true;
+        } else {
+            self.break_block();
+        }
+    }
+
+    /// End an attack (attack button released). Aborts a live dig in progress so
+    /// the server stops mining; a no-op on the demo world.
+    pub fn end_attack(&mut self) {
+        if !self.is_live() {
+            return;
+        }
+        self.attacking = false;
+        let actions = self.mining.stop();
+        if let Some(net) = &self.net {
+            for action in actions {
+                net.send_action(action);
+            }
+        }
+    }
+
+    /// Use the held item on the targeted block (use button pressed). On a live
+    /// server this lowers the click into the server's `use_item_on` action
+    /// through the placement predictor; on the demo world it places directly.
+    pub fn use_item(&mut self) {
+        if self.is_live() {
+            self.use_item_live();
+        } else {
+            self.place_block();
+        }
+    }
+
+    /// Lower a live right-click into the server's `use_item_on` action.
+    ///
+    /// The shell does not carry the held item or classify blocks — the server
+    /// is authoritative: it places whatever is in the selected hotbar slot and
+    /// re-runs the interact-vs-place decision itself. [`Placement::use_on`]
+    /// returns the action to send in *every* branch, so the shell sends it
+    /// unconditionally (with a proper prediction sequence) and lets the server
+    /// decide, exactly as vanilla does. Because the server owns the sneak state
+    /// derived from the wire, the crouch input must have been sent (see
+    /// [`send_player_input`](Self::send_player_input)) for a sneak-placement
+    /// against a chest/door to suppress the interaction.
+    fn use_item_live(&mut self) {
+        if self.dead {
+            return;
+        }
+        let Some(hit) = self.target else { return };
+        let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
+        let face = face_from_normal(hit.normal);
+        let cursor = face_center_cursor(hit.normal);
+        let sneaking = movement_intent(&self.input).sneak;
+        let ctx = UseOnContext {
+            hand: Hand::Main,
+            clicked,
+            face,
+            cursor,
+            inside_block: false,
+            rotation: Rotation::new(self.player.yaw, self.player.pitch),
+            sneaking,
+            has_item_in_hand: true,
+            placing: None,
+            orientation: OrientationKind::Fixed,
+        };
+        let (UseOnDecision::Interact { action }
+        | UseOnDecision::Place { action, .. }
+        | UseOnDecision::Nothing { action }) =
+            self.placement.use_on(&ctx, &ServerAuthoritativeWorld);
+        if let Some(net) = &self.net {
+            net.send_action(action);
+            net.send_action(ClientAction::SwingArm { hand: Hand::Main });
+        }
+    }
+
+    /// Advance the live block interactions one tick: the held-attack dig and the
+    /// edge-triggered sneak-input resend. Called once per physics tick from
+    /// [`step`](Self::step) while connected, so the dig accumulates at the same
+    /// 20 Hz the server ticks its own destroy timer.
+    fn drive_interaction(&mut self) {
+        self.send_player_input();
+        self.drive_mining();
+    }
+
+    /// Drive the live mining predictor one tick from the held attack button and
+    /// the current target. Holding the button keeps the dig active; the predictor
+    /// emits a `START` on first press and an early `STOP` a few ticks later,
+    /// which latches the server's *delayed-destroy* timer so the block breaks at
+    /// the correct vanilla time without the shell knowing the block's hardness
+    /// (see [`LIVE_DIG_HARDNESS`] and the report).
+    fn drive_mining(&mut self) {
+        let target = if self.attacking && !self.dead {
+            self.target
+        } else {
+            None
+        };
+        let Some(hit) = target else {
+            // Not attacking (or no target / dead): abort any live dig.
+            let actions = self.mining.stop();
+            if let Some(net) = &self.net {
+                for action in actions {
+                    net.send_action(action);
+                }
+            }
+            return;
+        };
+        let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
+        let face = face_from_normal(hit.normal);
+        let is_air = self.net.as_ref().and_then(|n| n.block_at(pos)) == Some(id::AIR);
+        let inputs = BreakInputs {
+            hardness: LIVE_DIG_HARDNESS,
+            is_air,
+            on_ground: self.player.on_ground,
+            ..BreakInputs::default()
+        };
+        // `continue_` delegates to `start` when no dig is live yet, so this one
+        // entry point covers first-press, hold, and retarget uniformly.
+        let actions = self.mining.continue_(pos, face, &inputs, None);
+        if let Some(net) = &self.net {
+            for action in actions {
+                net.send_action(action);
+            }
+        }
+    }
+
+    /// Resend the current [`PlayerInput`] to the server when it changes.
+    ///
+    /// Vanilla's player-input packet is edge-triggered and is the *only* way the
+    /// server learns we are sneaking/sprinting — it never infers shift from our
+    /// movement packet. Without this a sneak-placement is treated as an
+    /// interaction server-side (re-opening the chest you meant to place
+    /// against), so the shell must put the crouch state on the wire.
+    fn send_player_input(&mut self) {
+        let intent = if self.dead {
+            MovementInput::NONE
+        } else {
+            movement_intent(&self.input)
+        };
+        let next = PlayerInput {
+            forward: intent.forward > 0.0,
+            backward: intent.forward < 0.0,
+            left: intent.strafe > 0.0,
+            right: intent.strafe < 0.0,
+            jump: intent.jump,
+            shift: intent.sneak,
+            sprint: intent.sprint,
+        };
+        if self.last_player_input == Some(next) {
+            return;
+        }
+        self.last_player_input = Some(next);
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::SetPlayerInput(next));
+        }
+    }
+
+    /// Place [`PLACE_BLOCK`] against the targeted face on the **demo world**, if
+    /// the cell is empty and doesn't intersect the player. Returns whether a
+    /// block was placed. The live path uses [`use_item`](Self::use_item) instead
+    /// so the server actually hears the placement.
     pub fn place_block(&mut self) -> bool {
         let Some(hit) = self.target else { return false };
         let pos = hit.place_position();

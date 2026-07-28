@@ -97,14 +97,31 @@ fn var_i64(value: i64) -> Vec<u8> {
     out
 }
 
-fn dispatch(sink: &mut RecordingSink, adapter: &V770Adapter, id: i32, payload: &[u8]) {
-    let directives = adapter
+fn dispatch(
+    sink: &mut RecordingSink,
+    adapter: &V770Adapter,
+    id: i32,
+    payload: &[u8],
+) -> Vec<lodestone_model::Directive> {
+    adapter
         .handle_packet(sink, ConnectionState::Play, id, payload)
-        .expect("handle packet");
-    assert!(
-        directives.is_empty(),
-        "world-mutating packets emit no directives, got {directives:?}"
-    );
+        .expect("handle packet")
+}
+
+/// Asserts the single directive a world-mutating packet emits is a `ChunkLoaded`
+/// re-mesh signal for the given chunk column.
+fn assert_remesh(directives: &[lodestone_model::Directive], chunk_x: i32, chunk_z: i32) {
+    use lodestone_model::{ClientEvent, Directive};
+    match directives {
+        [Directive::Emit(ClientEvent::ChunkLoaded { pos })] => {
+            assert_eq!(
+                (pos.x, pos.z),
+                (chunk_x, chunk_z),
+                "block change must dirty its owning column"
+            );
+        }
+        other => panic!("expected one ChunkLoaded re-mesh directive, got {other:?}"),
+    }
 }
 
 // ---- block_update ---------------------------------------------------------
@@ -116,7 +133,7 @@ fn block_update_routes_single_set_block() {
     let mut payload = pack_block_pos(10, -5, 20).to_be_bytes().to_vec();
     payload.extend_from_slice(&var_i32(100)); // block state id 100
 
-    dispatch(
+    let directives = dispatch(
         &mut sink,
         &adapter,
         play::clientbound::BLOCK_UPDATE,
@@ -124,6 +141,8 @@ fn block_update_routes_single_set_block() {
     );
     assert_eq!(sink.set_block, vec![(10, -5, 20, 100)]);
     assert!(sink.set_blocks.is_empty());
+    // block (10, -5, 20) lives in chunk column (0, 1).
+    assert_remesh(&directives, 0, 1);
 }
 
 #[test]
@@ -176,7 +195,7 @@ fn section_blocks_update_routes_relative_writes() {
     // (relX=15, relY=0, relZ=15) -> local = 15<<8 | 15<<4 | 0 = 4080, state 1.
     payload.extend_from_slice(&var_i64((1i64 << 12) | 4080));
 
-    dispatch(
+    let directives = dispatch(
         &mut sink,
         &adapter,
         play::clientbound::SECTION_BLOCKS_UPDATE,
@@ -187,6 +206,8 @@ fn section_blocks_update_routes_relative_writes() {
         vec![(1, -2, 3, vec![(1, 2, 3, 100), (15, 0, 15, 1)])]
     );
     assert!(sink.set_block.is_empty());
+    // section (1, -2, 3) shares its chunk column (1, 3).
+    assert_remesh(&directives, 1, 3);
 }
 
 #[test]
@@ -196,13 +217,18 @@ fn section_blocks_update_empty_change_set_is_a_noop_write() {
     let mut payload = pack_section_pos(0, 0, 0).to_be_bytes().to_vec();
     payload.extend_from_slice(&var_i32(0)); // zero changes
 
-    dispatch(
+    let directives = dispatch(
         &mut sink,
         &adapter,
         play::clientbound::SECTION_BLOCKS_UPDATE,
         &payload,
     );
     assert_eq!(sink.set_blocks, vec![(0, 0, 0, vec![])]);
+    // An empty change set touched nothing, so it must not force a re-mesh.
+    assert!(
+        directives.is_empty(),
+        "empty section update emits no re-mesh, got {directives:?}"
+    );
 }
 
 #[test]
@@ -260,7 +286,7 @@ fn block_entity_data_routes_set_block_entity() {
     payload.extend_from_slice(&var_i32(1)); // block entity type id 1 (unresolved raw id; carried opaque)
     payload.extend_from_slice(&empty_compound());
 
-    dispatch(
+    let directives = dispatch(
         &mut sink,
         &adapter,
         play::clientbound::BLOCK_ENTITY_DATA,
@@ -272,6 +298,11 @@ fn block_entity_data_routes_set_block_entity() {
     );
     assert!(sink.set_block.is_empty());
     assert!(sink.set_blocks.is_empty());
+    // Block-entity data is not block geometry, so it drives no cube re-mesh.
+    assert!(
+        directives.is_empty(),
+        "block_entity_data emits no re-mesh, got {directives:?}"
+    );
 }
 
 #[test]
