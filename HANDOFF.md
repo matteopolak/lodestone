@@ -19,10 +19,10 @@ same mistakes being made again.
 > **Start here if you are picking this up cold:**
 > [**Addendum — final play-test round**](#addendum--final-play-test-round-what-landed-what-is-left)
 > at the end of this file is the current front line. It lists what landed in the last block of work
-> and the **five open defects**, each with a source-level diagnosis rather than a guess:
+> and the **six open defects**, each with a source-level diagnosis rather than a guess:
 > block breaking (crack blend + missing hardness table), mob equipment, washed-out colours, entity
-> shadows, and the stranded entity events. Everything between here and there is *descoped* work,
-> which is a different thing from *open* work.
+> shadows, the stranded entity events, and underwater fog. Everything between here and there is
+> *descoped* work, which is a different thing from *open* work.
 
 ---
 
@@ -1353,6 +1353,22 @@ committed; five are open and each has a diagnosis rather than a guess.
 | --- | --- | --- |
 | `0cc9534` | kelp/seagrass carry water; chunk-border water seams heal | jar-derived 5-class list; falsified the old test first |
 | `7725aa3` | block updates dirty at **section** granularity, not whole columns | 4 unit tests incl. the stale-face case and a 4096→27 bound |
+| `dc10e49` `cbf93cb` `d26cf14` | progressive mining crack, following each block's **baked model** (slabs, stairs, cross-plants) rather than a synthetic cube | live screenshot: crack on the target block's real face, neighbours clean |
+| `ffcc763` `2970a64` | distance fog — the thing that hides the render-distance edge | `fog_gate` with its **negative control observed firing**; live shot of the treeline dissolving |
+| `b49f8eb` `95a0ee8` | fog sized to the configured render distance, sky colour given one home | live at `--rd 4`; 4 tests incl. fog-inside-far-plane |
+| — | animated block textures (lava, fire, portals) | `animated_block_pixels` gate |
+
+### A portability bug worth not reintroducing (from the fog work)
+
+The first fog wiring gave the model shader a **5th bind group**. It ran on this M5 — which
+reports `max_bind_groups` of 8 — and failed the hermetic GPU gate, because wgpu's *default* limit
+is **4** and the model shader already spends four on camera/atlas/palette/anim. A 5-group shader
+compiles and then fails validation on any 4-group adapter, so this would have been a startup
+crash for other people and never for us. It was caught by trusting the gate over the machine.
+
+The fix folded fog into the **group-0 camera uniform** (`ModelCameraUniform = CameraUniform +
+FogUniform`), which also left every `camera_bind_group` caller's signature unchanged. **Adding a
+bind group to the model shader is not free — check the limit, not the adapter.**
 
 ### Why the fluid fixes are worth re-reading before touching the mesher
 
@@ -1585,6 +1601,41 @@ and none reach a consumer.
 tint, animation frame, particles or leash geometry, so folding them now produces write-only store
 fields nothing reads — connectedness theatre that improves the metric and changes no pixel. Widen
 `EntityDraw` first (which Open 2 needs anyway), then fold.
+
+---
+
+## Open 6 — Underwater: fog exists, the submerged flag never reaches it
+
+Measured, not eyeballed: on the user's underwater screenshot the blue cast down the frame as
+`B − R` is **58 / 61 / 49 / 62 / 66 / 59**, far to near. Flat, and no pixel anywhere reaches white
+(channel maxima 130/173/231).
+
+**That flatness clears the obvious suspect and is worth recording as verified.** If interior
+water↔water faces were being emitted, every extra block of water between eye and target would
+blend another layer and the cast would deepen with distance. It does not — we get exactly one
+layer of tint however much water we look through. **Fluid face culling is correct.**
+
+What is missing is fog, not geometry. Vanilla does not build the submerged look out of stacked
+translucent quads; `FogRenderer` uses a short, exponential, biome-coloured water fog plus a
+heavily reduced view distance, so distant terrain fades to solid fog colour and vanishes. We now
+have distance fog, so what is left is:
+
+1. the water fog colour and the reduced view distance,
+2. vanilla's full-screen `textures/misc/underwater.png` overlay.
+
+**The blocker is one piece of state, and it is half-built.** `FluidState::under_water()` exists in
+`lodestone-physics` and is tested; `RenderState::set_fog` exists and is now called with the render
+distance on both render paths. Nothing computes the player's eye-in-fluid state per frame and
+passes it in. `sim::fog_for_render_distance` / `Sim::fog_settings()` is the seam.
+
+That same flag gates four things: the fog colour, the overlay, the `ambient.underwater.*` sounds
+(already in the generated sound table and never triggered), and swimming physics. **Introduce it
+once in the version-free layer.** If four consumers each invent a local bool, they will disagree
+about the boundary case — eyes exactly at the water surface — and only one of them will match
+vanilla.
+
+The `underwater.png` overlay was deliberately *not* drawn yet, to avoid creating another
+producer-with-no-consumer island while the flag is missing. Draw it when the flag lands.
 
 ---
 
