@@ -64,6 +64,49 @@ zombie's part hierarchy is identical to a player's. `HumanoidArms` carries that:
 zombie's resting arms stick ~0.63 blocks out in front and the culling box has to
 bound the mob as drawn.
 
+### Creeper swell (a scale, not a pose)
+
+`Skeleton::pose_swelling(input, swell)` folds a creeper's pre-detonation growth
+into the part matrices. It is deliberately **not** part of `setup_anim`: in 26.2
+the effect lives in `CreeperRenderer.scale`, a `PoseStack` op wrapped around the
+whole model, and `CreeperModel.setupAnim` does only head tracking and the
+ordinary quadruped leg swing. `creeper_swell_scale` transcribes it:
+
+```text
+wobble = 1 + sin(swell * 100) * swell * 0.01
+s      = (1 + clamp(swell,0,1)^4 * 0.4) * wobble   // x and z
+hs     = (1 + clamp(swell,0,1)^4 * 0.1) / wobble   // y
+```
+
+Two things are easy to lose. The dominant term is the **quartic growth** (up to
++40% wide, +10% tall), not the `sin` — that is a ±1% shudder layered on top, and
+a port that keeps only the sine produces a barely-visible jitter and no swell.
+And the axes are *reciprocal* in `wobble`: the creeper squashes as it widens.
+
+The scale is composed as `T(+1.501) ∘ S ∘ T(-1.501)` above the root part, because
+vanilla applies it **before** the `translate(0, -1.501, 0)` ground lift, so the
+lift scales too and the creeper grows *upward out of the floor*. Scaling about
+the model origin instead — the obvious implementation — sinks the feet ~0.16
+blocks at full swell. `swollen_creeper_keeps_its_feet_on_the_ground` pins it.
+
+**Not yet wired, and nothing sets `swell` above zero.** The chain stops in the
+protocol layer: `Creeper.DATA_SWELL_DIR` is metadata index 16 (a `VarInt`, `-1`
+or `1`), `v770`'s `read_entity_metadata` decodes that serializer correctly but
+drops the value at its "decoded for alignment, not surfaced" arm because
+`EntityMetadataUpdate` has no field for it. Reaching a live creeper needs, in
+order: a field on `EntityMetadataUpdate`; a class-guarded arm in
+`packets/metadata.rs` (index 16 collides with `IDX_BABY`, so it needs a
+`MetadataClass::Creeper` guard, and index 17's powered flag collides likewise);
+`apply_metadata` in `state.rs`; a per-entity `swell` counter on `entities.rs`'s
+`Track`, since `getSwelling` is a *client-side integral* of the synced direction
+(`swell += swellDir` each tick, divided by 28) and not a synced value; and a
+`swell` field on `AnimInput` to carry it the last hop.
+
+One known gap once it is wired: `EntityMesh::local_min`/`local_max` come from
+`rest_pose()`, so a swelling creeper is drawn up to 41% wider than its own
+culling box and will clip at the frame edge. `MAX_SWELL_SCALE` is exported for
+whoever widens the creeper's local bounds.
+
 ### Walk cycle
 
 `entities.rs` samples the **drawn** (interpolated) position once per 20 Hz tick
@@ -180,6 +223,12 @@ nothing consumes them.
 * `tests/entity_gate.rs` — a pig reaches pixels at all.
 * `tests/entity_anim_pixels.rs` — changing `AnimInput` changes the leg band, with
   a rest-vs-rest control at exactly 0.
+* `tests/creeper_swell_pixels.rs` — a fully-primed creeper covers 1.70x the
+  pixels of a calm one (band 1.25–2.00; the unfixed build reads exactly 1.00),
+  with a same-input control at swell 0 differing by 0 px. Measures silhouette
+  **area**, not "pixels differ", because a scale anchored at the wrong origin
+  also moves pixels; a companion assertion holds the soles within 8 px (the
+  wrong anchor moves them 15).
 * `tests/entity_variant_pixels.rs` — a drowned renders as a drowned (resolved
   through `EntityModelSet::resolve`, so the alias table is inside the gate), and
   a zombie's arms are out in front. Each uses the **pre-fix build as its own
