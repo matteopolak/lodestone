@@ -90,16 +90,22 @@ fn item_geometry_covers_every_model_item() {
         eprintln!("  - {m}");
     }
 
+    // Two populations now: ~752 items whose icon is a real 3-D model, plus the
+    // flat `builtin/generated` majority, extruded into vanilla's thin slab by
+    // `ItemModelGenerator`. See `tests/sprite_drop_pixels.rs` for why the second
+    // group has to exist at all — without it every tool, ingot, gem and food drew
+    // zero pixels when dropped.
     assert!(
-        models.item_count() > 700,
-        "expected ~752 items with 3-D geometry, got {}",
+        models.item_count() > 1400,
+        "expected the model items (~752) plus the extruded sprite items to cover most of 26.2's \
+         1,537 items, got {}",
         models.item_count()
     );
-    // Every recorded entry must be the known composite-bed note, not a bake
+    // Every recorded entry must be a known, named note rather than a bake
     // failure: with item textures seeded, nothing should fail to bake.
     for m in models.item_bake_misses() {
         assert!(
-            m.contains("composite icon"),
+            m.contains("composite icon") || m.contains("none of which stitched"),
             "unexpected item bake failure: {m}"
         );
     }

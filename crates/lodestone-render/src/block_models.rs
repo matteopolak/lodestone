@@ -69,9 +69,9 @@ use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::tint::vanilla_tint_kind;
 use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
-    BlockStates, DisplayTransform, FirstWeight, GuiItemContext, GuiLight, IconPart,
-    ItemIconBuilder, ModelResolver, ModelTransform, ResourceLocation, ResourceManager,
-    TextureBinding, bake_model_with,
+    BlockStates, Direction, DisplayTransform, Element, Face, FirstWeight, GuiItemContext, GuiLight,
+    IconPart, ItemIconBuilder, ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
+    ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
 };
 use lodestone_model::{BlockStateRegistry, Identifier};
 
@@ -365,15 +365,30 @@ struct ItemModelPart {
     gui_light: GuiLight,
 }
 
+/// One item's [`IconPart::Sprite`]: the flat `builtin/generated` layer stack that
+/// [`extruded_sprite_geometry`] turns into vanilla's thin extruded slab.
+///
+/// Discovered in the same pass as [`ItemModelPart`], and for the same reason —
+/// the layer sprites live under `textures/item/`, which no *blockstate* reaches,
+/// so they have to be seeded into the atlas before it is stitched.
+#[derive(Debug, Clone)]
+struct ItemSpritePart {
+    item: ResourceLocation,
+    layers: Vec<SpriteLayer>,
+}
+
 /// Resolve every item definition in the pack stack and keep the ones whose GUI
-/// icon is a 3-D model.
+/// icon is a 3-D model or a flat sprite stack.
 ///
 /// Resolution uses [`GuiItemContext`], not the default context: a handful of
 /// items (`spyglass`, `trident`, the spears, the bundles) branch on
 /// `minecraft:display_context` and would otherwise resolve to their *in-hand*
-/// model. Items that fail to resolve, or that draw as a flat sprite or a
-/// code-driven special renderer, are simply absent — they are not this path's
-/// business.
+/// model. Items that fail to resolve, or that draw through a code-driven special
+/// renderer, are simply absent — they are not this path's business.
+///
+/// An item contributes to **at most one** of the two lists, model first. A
+/// `composite` icon mixing a model part and a sprite part would otherwise bake
+/// two disjoint geometries under one id, and `BlockModels::items` is keyed by id.
 ///
 /// A `composite` icon can hold several model parts; only the **first** is kept,
 /// and the item is named in [`BlockModels::item_bake_misses`]. In vanilla 26.2
@@ -385,9 +400,12 @@ struct ItemModelPart {
 /// would stack the foot *inside* the head and z-fight, which is strictly worse
 /// than drawing the head alone. Keeping the first part and recording the item is
 /// the honest option until the parser carries the per-part transform.
-fn collect_item_model_parts(manager: &ResourceManager) -> (Vec<ItemModelPart>, Vec<String>) {
+fn collect_item_model_parts(
+    manager: &ResourceManager,
+) -> (Vec<ItemModelPart>, Vec<ItemSpritePart>, Vec<String>) {
     let builder = ItemIconBuilder::new(manager);
     let mut parts = Vec::new();
+    let mut sprites = Vec::new();
     let mut notes = Vec::new();
     for id in item_ids(manager) {
         let Ok(icon) = builder.icon_with(&id, &GuiItemContext) else {
@@ -416,9 +434,339 @@ fn collect_item_model_parts(manager: &ResourceManager) -> (Vec<ItemModelPart>, V
                 ));
             }
             parts.push(first);
+            continue;
+        }
+        // No model part: the flat `builtin/generated` path. Every layer of the
+        // *first* sprite part is kept — vanilla's `ItemModelGenerator.bake` walks
+        // `layer0..layer4` and concatenates each layer's extrusion into one quad
+        // collection, so a two-layer item (a dyed leather boot, an enchanted book
+        // glint base) is two stacked slabs, not one.
+        if let Some(IconPart::Sprite { layers }) =
+            icon.parts.iter().find(|p| matches!(p, IconPart::Sprite { .. }))
+        {
+            sprites.push(ItemSpritePart {
+                item: id.clone(),
+                layers: layers.clone(),
+            });
         }
     }
-    (parts, notes)
+    (parts, sprites, notes)
+}
+
+// ---------------------------------------------------------------------------
+// Flat sprite items: vanilla's `ItemModelGenerator`
+// ---------------------------------------------------------------------------
+//
+// A `builtin/generated` item model carries **no elements**. Vanilla synthesises
+// them in `net.minecraft.client.resources.model.cuboid.ItemModelGenerator`
+// (26.2), and the numbers below are that class read directly rather than
+// approximated:
+//
+// * `MIN_Z = 7.5`, `MAX_Z = 8.5` — a 1/16-block-thick slab straddling the block
+//   centre, which is why a dropped sword is a *slab* and not a zero-area quad
+//   that vanishes edge-on.
+// * a `SOUTH` face with UVs `(0, 0, 16, 16)` and a `NORTH` face with UVs
+//   `(16, 0, 0, 16)` — the `u` flip is what keeps the back of the sprite from
+//   reading mirrored.
+// * side geometry walked from the sprite's **alpha outline**, one quad per
+//   boundary texel, inset by `UV_SHRINK = 0.1` texel so an edge quad samples the
+//   opaque interior rather than the transparent texel next door.
+// * `guiLight() == FRONT`.
+
+/// Vanilla `ItemModelGenerator.MIN_Z`: the slab's near face, in model units.
+const SPRITE_MIN_Z: f32 = 7.5;
+/// Vanilla `ItemModelGenerator.MAX_Z`: the slab's far face, in model units.
+const SPRITE_MAX_Z: f32 = 8.5;
+/// Vanilla `ItemModelGenerator.UV_SHRINK`: the per-edge UV inset, in **sprite
+/// texels** (not model units — it is applied before the `xScale`/`yScale`).
+const SPRITE_UV_SHRINK: f32 = 0.1;
+/// Vanilla `ItemModelGenerator.SOUTH_FACE_UVS`.
+const SPRITE_SOUTH_UVS: [f32; 4] = [0.0, 0.0, 16.0, 16.0];
+/// Vanilla `ItemModelGenerator.NORTH_FACE_UVS` — note the reversed `u`.
+const SPRITE_NORTH_UVS: [f32; 4] = [16.0, 0.0, 0.0, 16.0];
+/// The texture variable the synthesised elements reference.
+const SPRITE_TEXTURE_VAR: &str = "layer";
+
+/// Vanilla `ItemModelGenerator.SideDirection`: which way an outline texel's edge
+/// quad faces, and which neighbour texel's transparency creates it.
+///
+/// The `Direction` mapping is **deliberately counter-intuitive and is vanilla's**:
+/// `LEFT` maps to `EAST` and `RIGHT` to `WEST`. Do not "fix" it — the enum's
+/// `direction` is used for two different things (the neighbour step in
+/// `checkTransition`, and the facing handed to the face bakery), and the bakery
+/// recomputes the true facing from the vertices anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SideDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl SideDirection {
+    const ALL: [Self; 4] = [Self::Up, Self::Down, Self::Left, Self::Right];
+
+    /// Vanilla `SideDirection.direction`.
+    fn direction(self) -> Direction {
+        match self {
+            Self::Up => Direction::Up,
+            Self::Down => Direction::Down,
+            Self::Left => Direction::East,
+            Self::Right => Direction::West,
+        }
+    }
+
+    /// Vanilla `SideDirection.isHorizontal` — which controls whether the edge
+    /// quad's `v` range runs up or down, not whether the quad itself is
+    /// horizontal.
+    fn is_horizontal(self) -> bool {
+        matches!(self, Self::Up | Self::Down)
+    }
+
+    /// The `(step_x, step_y)` of [`Self::direction`] in *image* space, which
+    /// `checkTransition` **subtracts** to find the neighbour texel.
+    fn step(self) -> (i32, i32) {
+        match self {
+            // Direction::Up  = (0, 1, 0) -> neighbour is (x, y - 1), the texel above.
+            Self::Up => (0, 1),
+            // Direction::Down = (0, -1, 0) -> neighbour is (x, y + 1), below.
+            Self::Down => (0, -1),
+            // Direction::East = (1, 0, 0) -> neighbour is (x - 1, y), to the left.
+            Self::Left => (1, 0),
+            // Direction::West = (-1, 0, 0) -> neighbour is (x + 1, y), to the right.
+            Self::Right => (-1, 0),
+        }
+    }
+}
+
+/// Whether texel `(x, y)` of physical frame `frame` is fully transparent, reading
+/// the sprite's pixels back out of the **stitched atlas**.
+///
+/// Vanilla's `SpriteContents.isTransparent` is `ARGB.alpha(pixel) == 0` — strictly
+/// zero, not a cutout threshold — and out-of-bounds counts as transparent, which
+/// is what closes the outline at the sprite border.
+fn sprite_texel_transparent(atlas: &Atlas, sprite: &AtlasSprite, frame: u32, x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 || x >= sprite.width as i32 || y >= sprite.frame_height as i32 {
+        return true;
+    }
+    let Some([fx, fy, _, _]) = sprite.frame_pixel_rect(frame) else {
+        return true;
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let (px, py) = (fx + x as u32, fy + y as u32);
+    let i = ((py * atlas.width + px) * 4) as usize;
+    atlas.rgba.get(i + 3).copied().unwrap_or(0) == 0
+}
+
+/// Vanilla `ItemModelGenerator.getSideFaces`: every `(facing, x, y)` at which an
+/// opaque texel borders a transparent one.
+///
+/// Vanilla collects these into a `HashSet` and therefore emits them in an
+/// unspecified order. A [`BTreeSet`] is used instead so a given pack stack bakes
+/// a byte-identical item set, which the rest of this module already guarantees.
+/// The quads are opaque and mutually non-overlapping, so order is not observable.
+///
+/// Vanilla unions the outline over `getUniqueFrames()` — the frames the animation
+/// metadata actually plays. We union over every *physical* frame in the strip,
+/// which is a superset: a frame present in the PNG but never played can only add
+/// an edge quad, never remove one. Almost every item sprite is static anyway.
+fn sprite_side_faces(atlas: &Atlas, sprite: &AtlasSprite) -> BTreeSet<(SideDirection, u32, u32)> {
+    let mut faces = BTreeSet::new();
+    for frame in 0..sprite.frame_count {
+        for y in 0..sprite.frame_height {
+            for x in 0..sprite.width {
+                #[allow(clippy::cast_possible_wrap)]
+                let (ix, iy) = (x as i32, y as i32);
+                if sprite_texel_transparent(atlas, sprite, frame, ix, iy) {
+                    continue;
+                }
+                for facing in SideDirection::ALL {
+                    let (sx, sy) = facing.step();
+                    if sprite_texel_transparent(atlas, sprite, frame, ix - sx, iy - sy) {
+                        faces.insert((facing, x, y));
+                    }
+                }
+            }
+        }
+    }
+    faces
+}
+
+/// A [`Face`] referencing the synthesised layer texture, with explicit UVs.
+fn sprite_face(uv: [f32; 4]) -> Face {
+    Face {
+        uv: Some(uv),
+        texture: format!("#{SPRITE_TEXTURE_VAR}"),
+        // An item slab has no neighbours to be culled by. Vanilla uses
+        // `addUnculledFace` for every one of these.
+        cullface: None,
+        rotation: 0,
+        tintindex: None,
+    }
+}
+
+/// A single-face [`Element`] with vanilla's `shade: true`.
+fn sprite_element(from: [f32; 3], to: [f32; 3], faces: HashMap<Direction, Face>) -> Element {
+    Element {
+        from,
+        to,
+        rotation: None,
+        faces,
+        // Vanilla passes `shade = true` in `ItemLayerKey.compute`. It is inert for
+        // the GUI and drop paths (both pose with `GuiLight::Front`, which flattens
+        // the per-face constants) but is the honest value to record.
+        shade: Some(true),
+        light_emission: None,
+        name: None,
+    }
+}
+
+/// Vanilla `ItemModelGenerator.bakeExtrudedSprite` + `bakeSideFaces`: the
+/// synthesised elements for **one** sprite layer.
+fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
+    let mut elements = Vec::new();
+
+    // The front and back of the slab. One element with two faces rather than
+    // vanilla's two `bakeQuad` calls; `bake_model_with` emits one quad per face,
+    // so the output is the same pair.
+    let mut faces = HashMap::new();
+    faces.insert(Direction::South, sprite_face(SPRITE_SOUTH_UVS));
+    faces.insert(Direction::North, sprite_face(SPRITE_NORTH_UVS));
+    elements.push(sprite_element(
+        [0.0, 0.0, SPRITE_MIN_Z],
+        [16.0, 16.0, SPRITE_MAX_Z],
+        faces,
+    ));
+
+    // The edges. `x_scale`/`y_scale` map the sprite's own resolution onto the
+    // 0..16 model grid, so a 32x32 pack texture extrudes at the same physical
+    // size as a 16x16 one. Note `frame_height`, not `height`: vanilla's
+    // `SpriteContents.height()` is one *frame*, and using the whole animation
+    // strip would squash every edge quad toward the sprite's bottom.
+    if sprite.width == 0 || sprite.frame_height == 0 {
+        return elements;
+    }
+    let x_scale = 16.0 / sprite.width as f32;
+    let y_scale = 16.0 / sprite.frame_height as f32;
+
+    for (facing, tx, ty) in sprite_side_faces(atlas, sprite) {
+        let (x, y) = (tx as f32, ty as f32);
+        let u0 = x + SPRITE_UV_SHRINK;
+        let u1 = x + 1.0 - SPRITE_UV_SHRINK;
+        let (v0, v1) = if facing.is_horizontal() {
+            (y + SPRITE_UV_SHRINK, y + 1.0 - SPRITE_UV_SHRINK)
+        } else {
+            (y + 1.0 - SPRITE_UV_SHRINK, y + SPRITE_UV_SHRINK)
+        };
+
+        let (mut start_x, mut start_y, mut end_x, mut end_y) = (x, y, x, y);
+        match facing {
+            SideDirection::Up => end_x += 1.0,
+            SideDirection::Down => {
+                end_x += 1.0;
+                start_y += 1.0;
+                end_y += 1.0;
+            }
+            SideDirection::Left => end_y += 1.0,
+            SideDirection::Right => {
+                start_x += 1.0;
+                end_x += 1.0;
+                end_y += 1.0;
+            }
+        }
+        start_x *= x_scale;
+        end_x *= x_scale;
+        start_y *= y_scale;
+        end_y *= y_scale;
+        // Image `y` grows downward, model `y` upward.
+        start_y = 16.0 - start_y;
+        end_y = 16.0 - end_y;
+
+        // Verbatim from vanilla, including the cases where `from > to` on one
+        // axis (`Left`/`Right` always, because the flip above reverses the pair).
+        // That is not a bug to normalise away: `bake_face` derives the true facing
+        // from the resulting vertices and re-winds, exactly as
+        // `FaceBakery.bakeQuad` does, so the reversed box is what produces the
+        // correct outward normal. Clamping to min/max here would invert every
+        // vertical edge quad.
+        let (from, to) = match facing {
+            SideDirection::Up => (
+                [start_x, start_y, SPRITE_MIN_Z],
+                [end_x, start_y, SPRITE_MAX_Z],
+            ),
+            SideDirection::Down => {
+                ([start_x, end_y, SPRITE_MIN_Z], [end_x, end_y, SPRITE_MAX_Z])
+            }
+            SideDirection::Left => (
+                [start_x, start_y, SPRITE_MIN_Z],
+                [start_x, end_y, SPRITE_MAX_Z],
+            ),
+            SideDirection::Right => {
+                ([end_x, start_y, SPRITE_MIN_Z], [end_x, end_y, SPRITE_MAX_Z])
+            }
+        };
+
+        let mut faces = HashMap::new();
+        faces.insert(
+            facing.direction(),
+            sprite_face([u0 * x_scale, v0 * y_scale, u1 * x_scale, v1 * y_scale]),
+        );
+        elements.push(sprite_element(from, to, faces));
+    }
+
+    elements
+}
+
+/// Bake the extruded slab for a whole layer stack into quads against `atlas`.
+///
+/// Returns `None` when no layer resolves to an atlas sprite, which is the same
+/// "renders nothing" outcome vanilla's `QuadCollection.EMPTY` produces.
+///
+/// # Tint
+///
+/// Every quad comes out **untinted**, and that is a deliberate narrowing rather
+/// than an oversight. Vanilla stamps `tintIndex = layerIndex` on these quads and
+/// resolves the colour from the item's own `TintSource` list (leather dye, potion
+/// colour, spawn-egg shell, map marker). A `BakedQuad::tint_index` here indexes
+/// `BlockModels::tint_palette` — the *block* tint palette — so writing a layer
+/// index into it would look up an unrelated grass or foliage green. Untinted
+/// white is correct for the overwhelming majority of items and wrong only in the
+/// dyed minority, whereas the alternative is wrong loudly and everywhere.
+fn extruded_sprite_geometry(atlas: &Atlas, layers: &[SpriteLayer]) -> Option<Vec<BakedQuad>> {
+    let mut quads = Vec::new();
+    for layer in layers {
+        let Some(sprite) = atlas.sprite(&layer.sprite) else {
+            continue;
+        };
+        let mut textures = HashMap::new();
+        textures.insert(
+            SPRITE_TEXTURE_VAR.to_string(),
+            TextureBinding::Resolved(layer.sprite.clone()),
+        );
+        // A synthesised `ResolvedModel` so the real, vanilla-derived face bakery
+        // does the work: winding, `calculate_facing`, the UV-index mapping and the
+        // animation slot all come out identical to a hand-written model JSON's.
+        // Rolling vertices by hand here is precisely how a subtly inside-out
+        // sprite would ship.
+        let model = ResolvedModel {
+            textures,
+            elements: sprite_layer_elements(atlas, sprite),
+            ambient_occlusion: false,
+            gui_light: GuiLight::Front,
+            display: HashMap::new(),
+            texture_size: [sprite.width, sprite.frame_height],
+            builtin: None,
+        };
+        let baked = bake_model_with(
+            &model,
+            atlas,
+            ModelTransform::default(),
+            &BakeOptions::default(),
+        )
+        .ok()?;
+        quads.extend(baked);
+    }
+    (!quads.is_empty()).then_some(quads)
 }
 
 /// Discovers item ids by scanning for `assets/<ns>/items/<path>.json`, mirroring
@@ -510,8 +858,8 @@ impl BlockModels {
         // Item models are discovered before the atlas is stitched so their
         // textures can be seeded into it (see `build_complete_atlas`), and
         // reused after it to bake, so the item definitions are resolved once.
-        let (item_parts, mut item_bake_misses) = collect_item_model_parts(manager);
-        let atlas = build_complete_atlas(manager, &resolver, &item_parts)?;
+        let (item_parts, sprite_parts, mut item_bake_misses) = collect_item_model_parts(manager);
+        let atlas = build_complete_atlas(manager, &resolver, &item_parts, &sprite_parts)?;
 
         // Precompute each atlas sprite's render layer once; a baked quad's layer
         // is the layer of the sprite its UVs land in.
@@ -622,6 +970,39 @@ impl BlockModels {
                     quads,
                     transform: part.transform,
                     gui_light: part.gui_light,
+                },
+            );
+        }
+
+        // Flat sprite items, extruded into vanilla's thin slab. These are the
+        // *majority* of items — every tool, ingot, gem and food — and before this
+        // existed each of them reached zero pixels on the dropped-item pass, which
+        // skips any item with no baked geometry.
+        for part in &sprite_parts {
+            let Some(quads) = extruded_sprite_geometry(&atlas, &part.layers) else {
+                item_bake_misses.push(format!(
+                    "{}: sprite icon has {} layer(s), none of which stitched into the atlas",
+                    part.item,
+                    part.layers.len()
+                ));
+                continue;
+            };
+            items.insert(
+                part.item.clone(),
+                ItemGeometry {
+                    quads,
+                    // `item/generated` declares no `display.gui`, so vanilla poses a
+                    // flat item with `ItemTransform.NO_TRANSFORM`: the identity. The
+                    // 0..16 slab then maps exactly onto the 16 px slot, which is why
+                    // a flat inventory icon fills its cell edge to edge while a
+                    // block item (scale 0.625) does not.
+                    transform: DisplayTransform::default(),
+                    // Vanilla `ItemModelGenerator.guiLight() == FRONT`, matching
+                    // `item/generated`'s own `"gui_light": "front"`. This is also
+                    // what routes the drop pass to `GENERATED_ITEM_GROUND`
+                    // (translation [0, 2, 0], scale 0.5) instead of the block
+                    // items' `[0, 3, 0]` / 0.25 — see `ground_transform_for`.
+                    gui_light: GuiLight::Front,
                 },
             );
         }
@@ -906,6 +1287,7 @@ fn build_complete_atlas(
     manager: &ResourceManager,
     resolver: &ModelResolver,
     item_parts: &[ItemModelPart],
+    sprite_parts: &[ItemSpritePart],
 ) -> Result<Atlas, AtlasError> {
     let mut textures: BTreeSet<ResourceLocation> = BTreeSet::new();
     for path in manager.list("assets/minecraft/blockstates/") {
@@ -934,6 +1316,16 @@ fn build_complete_atlas(
                     textures.insert(loc.clone());
                 }
             }
+        }
+    }
+    // Flat sprite items: their `layerN` textures live under `textures/item/` and
+    // are reached by no blockstate and no *model*'s texture map either (a
+    // `builtin/generated` model's variables resolve, but nothing above resolved it
+    // as a model). Without this, `extruded_sprite_geometry` finds no sprite and
+    // every tool, ingot, gem and food renders nothing.
+    for part in sprite_parts {
+        for layer in &part.layers {
+            textures.insert(layer.sprite.clone());
         }
     }
 

@@ -258,7 +258,35 @@ impl ModelPipeline {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(!translucent),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // Vanilla's terrain pipelines all inherit
+                // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
+                // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
+                // `GENERIC_BLOCKS_SNIPPET.withDepthStencilState(DEFAULT)`), and
+                // under reversed-Z that comparison *includes* equality. Our depth
+                // is `[0, 1]` DirectX-style, so the faithful port is `LessEqual`,
+                // not `Less`.
+                //
+                // This is not cosmetic. A model may place two elements at exactly
+                // the same coordinates and rely on the later one winning:
+                // `grass_block.json` puts `#overlay` on top of `#side` at the same
+                // `[0,0,0]..[16,16,16]` box, so a strict `Less` rejects every
+                // overlay quad and a grass block's sides lose their tinted fringe.
+                // Measured: `grass_block` bakes 10 quads, 4 of which are tinted
+                // overlays coplanar with the base cube's sides.
+                //
+                // The translucent variant keeps `Less` deliberately, because we
+                // diverge from vanilla on the *other* field: vanilla's
+                // `TRANSLUCENT_TERRAIN` writes depth and we do not
+                // (`depth_write_enabled: !translucent`). `LessEqual` without a
+                // depth write lets two coplanar translucent quads both blend,
+                // double-darkening a water surface — an artefact vanilla's depth
+                // write suppresses. Restore `LessEqual` here if translucent depth
+                // writes are ever restored too.
+                depth_compare: Some(if translucent {
+                    wgpu::CompareFunction::Less
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
