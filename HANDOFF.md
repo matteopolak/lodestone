@@ -660,9 +660,9 @@ how much each changes the screen per unit of work, which is not the order of dif
 7. **Item entities (drops) and pickup.** `entity/item_entity.rs` has the full lifecycle (age,
    despawn, pickup delay, merge sentinel `32767`) and nothing renders it; there is no
    `TakeItemEntity` consumer for the fly-to-player animation.
-8. **Crack overlay.** `mining.rs:263 destroy_stage()` returns vanilla's 0–9 exactly, for our own
-   dig *and* for other players' (`mining.rs:420 BlockDestructionOverlays`). Both are computed
-   every tick and neither is drawn.
+8. ~~**Crack overlay.**~~ **Drawn** (`gpu.rs:312`), but **wrong in two ways** — see the
+   "block breaking" addendum at the end of this file. The blend function is wrong (too white)
+   and there is no hardness table, so obsidian and bedrock crack like dirt.
 9. **Particle sheet atlas.** Smoke, flame, crits and splashes resolve to `None` because no
    stitched `particles.png` atlas exists. They are counted into `ParticleFrame::unresolved`
    rather than dropped, so the gap is observable rather than silent.
@@ -1330,3 +1330,279 @@ textbook 150**, because `1/1.5/100` in f32 sums to slightly under 1.0 after 150 
 on stone is 6 ticks. Both server-confirmed over RCON (bare-hand stone measured at 7.99 s).
 
 Do not "correct" 151 to 150.
+
+---
+
+# Addendum — final play-test round (what landed, what is left)
+
+This is the last block of work in the session. It is written to be read on its own: each item
+says what was **measured**, where the code is, and what remains. Three items were fixed and
+committed; five are open and each has a diagnosis rather than a guess.
+
+## Landed this round
+
+| commit | what | evidence |
+| --- | --- | --- |
+| `0cc9534` | kelp/seagrass carry water; chunk-border water seams heal | jar-derived 5-class list; falsified the old test first |
+| `7725aa3` | block updates dirty at **section** granularity, not whole columns | 4 unit tests incl. the stale-face case and a 4096→27 bound |
+
+### Why the fluid fixes are worth re-reading before touching the mesher
+
+**The mesher and the snapshot view were correct in both cases. Do not rewrite them.**
+
+* **Kelp/seagrass** had no air pocket bug in the fluid mesher. Vanilla gives these blocks water
+  through a hardcoded `getFluidState` override, **not** a `waterlogged` blockstate property, so a
+  property-driven classifier is structurally unable to see it. Exactly five classes do this in
+  26.2 — `KelpBlock`, `KelpPlantBlock`, `SeagrassBlock`, `TallSeagrassBlock`, `BubbleColumnBlock`
+  — extracted with:
+
+  ```python
+  re.finditer(r'(?:protected|public) FluidState getFluidState\(.*?\)\s*\{(.*?)\n   \}', src, re.S)
+  # keep bodies containing 'Fluids.WATER' and not containing 'WATERLOGGED'
+  ```
+
+  over `.cache/mc/26.2/src/net/minecraft/world/level/block/**/*.java`. An earlier `awk` attempt
+  found nothing because the method is `protected` and its closing brace is indented three spaces.
+
+* **The chunk-border "water wall"** was staleness, not geometry. `mesh_fluids` consults signed
+  neighbour coords and `snapshot_section_live` requests all 27 slots — both correct. The defect
+  was that a column meshed while its neighbour was absent baked its seam against air, and nothing
+  ever re-meshed it, so spiral loading left a **one-sided** wall at every border. Two visual
+  consequences of one missing fluid neighbour: the side face is emitted with the *flow* texture,
+  and `neighbor_height_at` returns 0.0 so the corner heights collapse into a ledge.
+
+### The section-granularity ruling (read before adding another dirty signal)
+
+`ClientEvent::ChunkLoaded` had been doing two jobs — "a column arrived" and "a block changed".
+They are different invalidation units:
+
+* a column arrival dirties the column **and its 8 horizontal seams**;
+* a block change dirties one section **and only the neighbours the changed cell physically
+  touches**.
+
+Conflating them costs ~216 section meshes per redstone tick. Gating the seam heal to first
+arrival fixes the cost and reintroduces a real defect: a server-side break at local `x=15` never
+re-meshes the neighbouring column, so **mining at a chunk border leaves a stale face**.
+
+`ClientEvent::SectionBlocksChanged { section, blocks }` now carries block updates. It is a
+*dirty-region* signal — it names where changed and carries **no block data**, because world state
+must stay queryable from the client's `World` rather than reconstructible from a bounded,
+backpressuring channel. The section-relative coords are what let the consumer tell an interior
+edit from a boundary one. The filter is extracted as the pure `dirty_sections_for_blocks` in
+`crates/lodestone-shell/src/sim.rs` so it tests without a GPU.
+
+---
+
+## Open 1 — Block breaking: the crack is too white and every block cracks
+
+Two independent defects, both confirmed at source. They present as one symptom.
+
+**What already works, so nobody rebuilds it:** the crack overlay is drawn (`dc10e49`, `cbf93cb`,
+`d26cf14`) and it is *geometrically* correct — `CrackResolver` consumes the target state's **baked
+model quads**, so the crack follows slabs, stairs and cross-plants rather than a synthetic cube,
+and it draws on that block only. It is fed from the live client-owned world (`net.block_at`), not
+the demo world. Verified on pixels against a live server.
+
+Three things are wrong, and two of them share one root cause.
+
+### 1a. The overlay blend function is wrong
+
+Ours is alpha-blended (`crates/lodestone-shell/src/gpu.rs:312`). Vanilla's `destroy_stage_0..9`
+are drawn on a dedicated pipeline whose blend is **a doubled multiply**, not alpha
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java:434`):
+
+```java
+public static final RenderPipeline CRUMBLING = register(
+   RenderPipeline.builder(GLOBALS_SNIPPET)
+      .withLocation("pipeline/crumbling")
+      .withColorTargetState(new ColorTargetState(new BlendFunction(
+          BlendFactor.DST_COLOR, BlendFactor.SRC_COLOR,   // colour: src·dst + dst·src
+          BlendFactor.ONE,       BlendFactor.ZERO)))      // alpha
+      .withDepthStencilState(new DepthStencilState(
+          CompareOp.GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F))
+      .build());
+```
+
+So the crack **multiplies darkness into the block underneath**. Alpha-blending the same texture
+instead *adds* its light texels, which is precisely the "too white" the play-test saw.
+
+Three things to port, not one:
+
+* **Blend**: `src_factor = Dst`, `dst_factor = Src` on colour; `One`/`Zero` on alpha.
+* **Depth write off**, depth compare pass-equal-or-nearer. Note vanilla is reversed-Z
+  (`GREATER_THAN_OR_EQUAL`); we use `[0,1]` DirectX-style depth (§7 of `DESIGN.md`), so ours is
+  `LessEqual`.
+* **Depth bias `constant 1.0, slope 10.0`.** This is what stops the overlay z-fighting with the
+  block face. Omitting it produces shimmer that reads as a mesher bug.
+
+### 1b. There is no per-block hardness, so obsidian and bedrock crack like dirt
+
+**This one root cause produces two separate visible symptoms**: every block cracks at the same
+rate including ones that will never break, *and* the crack **pulses through stages instead of
+filling smoothly** (found independently by `impl-shell` while gating the overlay on pixels).
+`lodestone-game::mining` is **complete and vanilla-exact** — hardness, dig speed, the 30/100
+correct-tool divider, `destroy_stage()` returning 0–9, and `hardness == -1.0` meaning unbreakable.
+It is wired into the shell (`sim.rs:347`). What it is fed is not:
+
+```rust
+// crates/lodestone-shell/src/sim.rs
+const LIVE_DIG_HARDNESS: f32 = 0.05;   // one constant, every block
+```
+
+The **break timing is correct anyway**, and the reason is worth understanding before "fixing" it:
+the shell exploits the server's delayed-destroy rule (a `START` followed by an early `STOP` makes
+the server latch the dig and finish it on its own block-accurate timer). So blocks break at the
+right moment without the client knowing any hardness.
+
+The **crack animation** is what is wrong: it runs on the fake 0.05, so it advances at one rate for
+everything, and it advances for blocks that will never break. Punching bedrock draws a full
+crack sequence and then nothing happens.
+
+**The fix is a data table, not logic.** `crates/protocol/v770/src/generated/` already holds
+`collision_shapes.rs`, so the extraction pattern is proven: dump from the real server jar
+(`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();` then walk every one of the 32,366
+block states), **not** from minecraft-data, which lags and is incomplete for 26.x (§12.10 in
+`DESIGN.md` measured it at 92.29% for collision shapes).
+
+Per state you need `destroySpeed` (`-1.0` for bedrock and other unbreakables) and the
+correct-tool predicate. Then feed `BreakInputs { hardness, correct_tool, .. }` from the block
+under the crosshair instead of the constant. Three things fall out for free: unbreakable blocks
+show no crack at all, `destroy_stage()` advances at per-block rates, and the pulsing stops
+because the stage progression finally matches the real break time.
+
+**Sequencing warning.** `LIVE_DIG_HARDNESS` is *load-bearing for the verified break timing* — it
+is what keeps the early-`STOP` delayed-destroy trick working. Do not tune it to fix the crack
+cadence; the two must be replaced together in one change, or you trade a cosmetic bug for a
+functional one. `impl-shell` hit exactly this and correctly declined to perturb it.
+
+**Do not "correct" the existing 151-tick bare-hand stone result to 150.** It is f32 accumulation
+and it is server-confirmed (see the mining addendum above).
+
+---
+
+## Open 2 — Mobs do not hold anything (island #8)
+
+The chain is **fully plumbed and stops one hop short of the screen**:
+
+```
+SET_EQUIPMENT (v770/src/adapter.rs:1996)
+  → ClientEvent::EntityEquipmentUpdated (lodestone-model/src/event.rs:833)
+  → EntityView.equipment (lodestone-client/src/state.rs:161, slot-replacing fold at :733)
+  → nothing
+```
+
+`grep -rn "equipment" crates/lodestone-render/src crates/lodestone-shell/src` returns **zero
+hits**. This is the island pattern in its usual form: the state is live and correct, and no
+consumer exists.
+
+What is missing is the draw:
+
+* `EntityDraw` carries only `type / feet / yaw / scale` — there is no channel for held or worn
+  items. Widening it is the first step, and it is the same blocker `impl-entity` cited when it
+  *correctly refused* to fold the other stranded entity events (see "Open 5" below).
+* Held items need the item model's `display.thirdperson_righthand` transform composed with the
+  mob model's arm part pose. Armour needs the humanoid armour layer models.
+* This shares its prerequisite with §7.1 items 1, 2 and 6 — **all four are blocked on the same
+  missing item-model render pass.** Doing that pass once unblocks hotbar icons, container slots,
+  the first-person hand, and mob equipment. It is the highest-leverage remaining render work.
+
+---
+
+## Open 3 — Colours look washed out (diagnosed, not yet confirmed at pixels)
+
+**Leading hypothesis, with source evidence on both sides of the mismatch.**
+
+The terrain shader writes **linear** colour and its own comments say so, explicitly assuming the
+swapchain performs the sRGB encode (`crates/lodestone-render/src/model_pipeline.rs:539-556`):
+
+> *"The atlas is an `_srgb` texture, so `textureSample` returns linear-light texels … re-encoding
+> on the sRGB surface …"*
+
+The atlas is indeed `Rgba8UnormSrgb` (`texture.rs:444`), so sampling returns linear — that half is
+right. But the surface is configured from wgpu's default:
+
+```rust
+// crates/lodestone-render/src/target.rs — SurfaceTarget::new
+let config = surface.get_default_config(adapter, width, height)?;
+```
+
+and `get_default_config` takes `*caps.formats.first()?` (`wgpu-30.0.0/src/api/surface.rs:92`),
+while wgpu-hal's Metal backend lists **`Bgra8Unorm` first**, ahead of `Bgra8UnormSrgb`
+(`wgpu-hal-30.0.0/src/metal/adapter.rs:434`). So on this machine the shader's stated assumption is
+false: nothing performs the encode.
+
+**Confirm before fixing** — this is a hypothesis about the running configuration, and the
+project's own rule is that a check disagreeing with an observation is the suspect:
+
+1. Log `target.format()` at startup. One line, and it settles the question.
+2. If it is non-sRGB, prefer an sRGB format:
+   `caps.formats.iter().copied().find(wgpu::TextureFormat::is_srgb).unwrap_or(caps.formats[0])`,
+   *or* apply `linear_to_srgb` at the end of every fragment shader. Do exactly one of the two —
+   doing both double-encodes and washes the image out in the other direction.
+3. **Measure by location, never by average.** Averaging previously merged two spatially distinct
+   tint populations into a number describing neither (§12.99 in `DESIGN.md`). Cluster pixels by
+   where they are, then compare.
+
+Secondary suspect if the format turns out to be sRGB already: the tint palette path at
+`model_pipeline.rs:616` does `srgb_to_linear(linear_to_srgb(rgb) * tint_col)`, which is correct as
+written but is the only other place a transfer function is applied by hand.
+
+**Note the two full-bright light bridges are not the cause here.** `lodestone-render`'s own mesher
+still uses `UniformLight::pre_light_bridge`, but the *shell* path meshes with real server light via
+`sections_and_light_at`, and its `shadowed_meshes_darker_than_open_sky` test proves the bridge
+cannot pass. The shell is what the player runs.
+
+---
+
+## Open 4 — Entity shadows still do not exist
+
+Unchanged from §7.1 item 5, restated because it was asked for directly. `grep -rn "shadow"` over
+`lodestone-render/src` and `lodestone-shell/src` finds only a comment at `gpu.rs:1882` and the
+*lighting* tests in `mesher.rs` — nothing renders a drop shadow, and nobody is assigned to it.
+
+Vanilla's is a soft dark oval projected onto the geometry beneath the entity, radius scaled by
+entity size and alpha faded by height above the ground, drawn per receiving block face (so it
+follows stairs and slabs rather than floating flat). Without it mobs read as hovering, which is
+what the play-test reported.
+
+---
+
+## Open 5 — Stranded entity events, and why they should stay stranded for now
+
+`EntityAnimation`, `EntityDamaged` / `EntityHurtAnimation`, `MobEffectApplied` / `Removed`,
+`EntityStatus`, `EntityPassengersChanged`, `EntityLeashed` and `EntitySound` all decode and emit,
+and none reach a consumer.
+
+**This is deliberate and should not be "fixed" by folding them.** `EntityDraw` has no channel for
+tint, animation frame, particles or leash geometry, so folding them now produces write-only store
+fields nothing reads — connectedness theatre that improves the metric and changes no pixel. Widen
+`EntityDraw` first (which Open 2 needs anyway), then fold.
+
+---
+
+## The one process rule that found all of this
+
+Every defect in this addendum was found by **looking at pixels**, and none by a test. The tests
+were green throughout, and honestly so — a crate's own suite is a closed loop and structurally
+cannot observe that nothing ships its output.
+
+The counter-measure that works is not more tests: **nothing is done until something on screen
+changes.** In practice that means assigning work end-to-end (one owner from data through to draw)
+rather than by crate, and asking each owner the one question that has now found nine islands:
+*what actually consumes you?* — treating "nothing" as a defect report rather than a status update.
+
+Two build-time traps that will otherwise cost an hour each:
+
+* **`--features live` is mandatory for multiplayer and fails silently without it.** The client
+  still starts, renders the demo world, and reports a plausible `chunks=169` while whispering
+  `no version family compiled in for protocol 776` into the log.
+* **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate
+  name.
+* **Never `git add -A` in this repo.** It is a single shared checkout with no per-agent worktrees,
+  so a blanket stage sweeps whatever anyone else has mid-edit into your commit. This clobbered
+  in-flight render work three times and destroyed a `lib.rs` edit once. Stage explicit paths
+  (`git add <path>`) or hunks (`git add -p`), always.
+* **`cargo build --workspace` is not a health check** — it skips test targets, so a crate whose
+  lib compiles and whose lib-test does not reports green. Use `cargo check --workspace
+  --all-targets`, and treat any count gathered while another agent is mid-edit as a sample rather
+  than a measurement.
