@@ -51,6 +51,7 @@ pub mod entity_pipeline;
 pub mod fog;
 pub mod frame;
 pub mod gui_atlas;
+pub mod item_render;
 pub mod mesh;
 pub mod mesher;
 pub mod model_pipeline;
@@ -75,7 +76,7 @@ pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
-    StateModel,
+    ItemGeometry, StateModel,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
 pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry, blocks_json_registry};
@@ -94,6 +95,10 @@ pub use entity_pipeline::{EntityInstanceRaw, EntityPipeline, GpuEntityModel, upl
 pub use frame::SystemClock;
 pub use frame::{FrameOutcome, FramePacer, FrameTiming, Renderer, TimeSource};
 pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
+pub use item_render::{
+    GUI_DEPTH_HALF_RANGE, SCALE_LIMIT, TRANSLATION_LIMIT, UNITS_PER_BLOCK, display_matrix,
+    gui_item_pose, gui_ortho,
+};
 #[doc(no_inline)]
 pub use lodestone_assets::fluid::FluidState;
 pub use mesh::{Mesh, MeshStats, face_winding_is_outward, mesh_greedy, mesh_simple};
@@ -106,8 +111,8 @@ pub use model_pipeline::{
     model_camera_buffer_with_fog, model_palette_buffer, update_model_anim_buffer,
 };
 pub use models::{
-    FluidMeshes, FluidSectionView, ModelMesh, ModelSectionView, ModelVertex, face_of_direction,
-    is_full_cube, is_packed_cube, mesh_fluids, mesh_models,
+    FluidMeshes, FluidSectionView, GUI_ITEM_LIGHT, ModelMesh, ModelSectionView, ModelVertex,
+    face_of_direction, is_full_cube, is_packed_cube, mesh_fluids, mesh_item_quads, mesh_models,
 };
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};

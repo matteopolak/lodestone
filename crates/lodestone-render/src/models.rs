@@ -102,11 +102,12 @@
 //! [`crate::anim`]. That is why the packed path's fixed sprite id survives
 //! animation — the *uniform*, not the mesh or the texture, changes per tick.
 
+use glam::{Mat4, Vec3};
 use lodestone_assets::fluid::{
     FaceSet, FlowNeighbor, FluidGeometry, bake_fluid, corner_height, flow_horizontal,
     neighbor_height,
 };
-use lodestone_assets::{BakedQuad, Direction};
+use lodestone_assets::{BakedQuad, Direction, GuiLight};
 
 use crate::block_models::{FluidCell, FluidKind, FluidSprites};
 use crate::section::{Face, SECTION_SIZE};
@@ -410,11 +411,15 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
     mesh
 }
 
-fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], light: u8) {
-    let base = mesh.vertices.len() as u32;
-    // Directional shading, matching vanilla's constant per-face factors so a
-    // shaded quad reads correctly even before smooth lighting is applied.
-    let shade = if quad.shade {
+/// Directional shading, matching vanilla's constant per-face factors so a shaded
+/// quad reads correctly even before smooth lighting is applied. A quad with
+/// `shade: false` (fluids, full-bright faces) is unshaded.
+///
+/// Shared with the GUI item path ([`mesh_item_quads`]), whose `gui_light: side`
+/// items — 734 of the 753 model items in 26.2 — are lit by exactly these
+/// constants.
+fn face_shade(quad: &BakedQuad) -> f32 {
+    if quad.shade {
         match quad.direction {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
@@ -423,7 +428,12 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], lig
         }
     } else {
         1.0
-    };
+    }
+}
+
+fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], light: u8) {
+    let base = mesh.vertices.len() as u32;
+    let shade = face_shade(quad);
     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
     for i in 0..4 {
         let p = quad.positions[i];
@@ -440,6 +450,60 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], lig
     // Two triangles, matching the packed path's winding.
     mesh.indices
         .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// The packed light byte a GUI item vertex carries: sky `15`, block `0`. The
+/// model shader's `0.2 + 0.8 * max(sky, block)` then evaluates to exactly `1.0`,
+/// so a GUI item is full-bright regardless of where the player is standing —
+/// which is what an inventory slot is.
+pub const GUI_ITEM_LIGHT: u8 = 0xF0;
+
+/// Mesh one item's baked geometry into a GUI-ready [`ModelMesh`], posed by
+/// `pose` (build it with [`gui_item_pose`](crate::gui_item_pose)).
+///
+/// Deliberately **not** [`mesh_models`] with a one-block view, because three of
+/// that function's rules are wrong for an inventory slot:
+///
+/// * **`cullface` is ignored.** A slot has no neighbours, so a quad culled
+///   against "the block to the north" would vanish for no reason. Every quad is
+///   emitted; the pipeline's back-face culling is what removes the far faces.
+/// * **Positions are transformed, not offset.** `pose` carries the model's
+///   `display.gui` transform and the slot placement, so the emitted positions
+///   are already in GUI pixel space and only need
+///   [`gui_ortho`](crate::gui_ortho) to reach clip space.
+/// * **Light is fixed** at [`GUI_ITEM_LIGHT`].
+///
+/// `gui_light` rides in the per-vertex `ao` slot, which the shader multiplies
+/// into the light term: [`GuiLight::Side`] keeps the per-face directional
+/// constants (so the isometric cube reads as three differently-lit faces), while
+/// [`GuiLight::Front`] flattens every face to `1.0` — vanilla's flat, front-lit
+/// mode for models that are really a sprite standing up.
+#[must_use]
+pub fn mesh_item_quads(quads: &[BakedQuad], pose: Mat4, gui_light: GuiLight) -> ModelMesh {
+    let mut mesh = ModelMesh::default();
+    for quad in quads {
+        let base = mesh.vertices.len() as u32;
+        let shade = match gui_light {
+            GuiLight::Side => face_shade(quad),
+            GuiLight::Front => 1.0,
+        };
+        let tint = quad.tint_index.map_or(255u8, |t| t as u8);
+        for i in 0..4 {
+            let p = pose.transform_point3(Vec3::from(quad.positions[i]));
+            mesh.vertices.push(ModelVertex {
+                position: p.into(),
+                uv: quad.uvs[i],
+                ao: shade,
+                light: GUI_ITEM_LIGHT,
+                tint,
+                anim: quad.anim,
+                _pad: 0,
+            });
+        }
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    mesh
 }
 
 /// The mesher's view of a section for the **fluid** path.
@@ -831,6 +895,86 @@ mod tests {
         let m = mesh_models(&view);
         // Block is at (8,8,8), so the first corner lands at (8,9,8).
         assert_eq!(m.vertices[0].position, [8.0, 9.0, 8.0]);
+    }
+
+    // --- GUI item meshing ------------------------------------------------
+
+    #[test]
+    fn item_quads_ignore_cullface() {
+        // A GUI slot has no neighbours, so a `cullface` must not remove a quad —
+        // the pipeline's back-face culling is what hides the far faces. Meshing
+        // a full cube (every face culled by its own neighbour) through the world
+        // path with occluding neighbours would drop faces; here all six survive.
+        let cube = full_cube();
+        let m = mesh_item_quads(&cube, Mat4::IDENTITY, GuiLight::Side);
+        assert_eq!(m.quad_count(), 6);
+        assert_eq!(m.vertices.len(), 24);
+    }
+
+    #[test]
+    fn item_vertices_are_full_bright() {
+        let m = mesh_item_quads(&full_cube(), Mat4::IDENTITY, GuiLight::Side);
+        assert!(m.vertices.iter().all(|v| v.light == GUI_ITEM_LIGHT));
+        // The shader computes 0.2 + 0.8 * max(sky, block); sky 15 makes that 1.0.
+        let sky = f32::from(GUI_ITEM_LIGHT >> 4) / 15.0;
+        let block = f32::from(GUI_ITEM_LIGHT & 0xF) / 15.0;
+        assert!((0.2 + 0.8 * sky.max(block) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn side_lighting_keeps_the_per_face_constants_and_front_flattens_them() {
+        let cube = full_cube();
+        let side = mesh_item_quads(&cube, Mat4::IDENTITY, GuiLight::Side);
+        // `full_cube` is ordered Down, Up, North, South, East, West; the shade
+        // constants are the same ones `mesh_models` applies.
+        let ao = |i: usize| side.vertices[i * 4].ao;
+        assert!((ao(0) - 0.5).abs() < 1e-6, "down");
+        assert!((ao(1) - 1.0).abs() < 1e-6, "up");
+        assert!((ao(2) - 0.8).abs() < 1e-6, "north");
+        assert!((ao(3) - 0.8).abs() < 1e-6, "south");
+        assert!((ao(4) - 0.6).abs() < 1e-6, "east");
+        assert!((ao(5) - 0.6).abs() < 1e-6, "west");
+
+        // `gui_light: front` is flat: every face reads 1.0.
+        let front = mesh_item_quads(&cube, Mat4::IDENTITY, GuiLight::Front);
+        assert!(front.vertices.iter().all(|v| (v.ao - 1.0).abs() < 1e-6));
+    }
+
+    #[test]
+    fn the_pose_is_applied_to_positions() {
+        let mut q = cube_face(Direction::Up, None);
+        q.positions = [
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let pose =
+            Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)) * Mat4::from_scale(Vec3::splat(2.0));
+        let m = mesh_item_quads(std::slice::from_ref(&q), pose, GuiLight::Side);
+        assert_eq!(m.vertices[0].position, [10.0, 2.0, 0.0]);
+        assert_eq!(m.vertices[2].position, [12.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn item_quads_carry_their_palette_tint_and_animation_slot() {
+        let mut q = cube_face(Direction::Up, None);
+        q.tint_index = Some(7);
+        q.anim = 3;
+        let m = mesh_item_quads(std::slice::from_ref(&q), Mat4::IDENTITY, GuiLight::Side);
+        assert!(m.vertices.iter().all(|v| v.tint == 7 && v.anim == 3));
+
+        // An untinted quad falls back to the reserved white palette slot.
+        let plain = cube_face(Direction::Up, None);
+        let m = mesh_item_quads(std::slice::from_ref(&plain), Mat4::IDENTITY, GuiLight::Side);
+        assert!(m.vertices.iter().all(|v| v.tint == 255));
+    }
+
+    #[test]
+    fn item_triangles_keep_the_quad_winding() {
+        let m = mesh_item_quads(&full_cube(), Mat4::IDENTITY, GuiLight::Side);
+        assert_eq!(m.indices[..6], [0, 1, 2, 0, 2, 3]);
+        assert_eq!(m.indices[6..12], [4, 5, 6, 4, 6, 7]);
     }
 
     // --- Fluid meshing ---------------------------------------------------

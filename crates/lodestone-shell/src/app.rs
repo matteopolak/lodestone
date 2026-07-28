@@ -470,7 +470,20 @@ impl WindowApp {
         hud_frame.xp = self.sim.xp();
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
-        hud.render(device, queue, frame.view(), &hud_frame, w, h);
+        // The 3-D block-item icons need the baked model set (for geometry) and a
+        // depth attachment (so the near faces of the mini-block win over the far
+        // ones). Both are `None` on the demo path, which degrades to flat sprites.
+        let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
+        hud.render_with_item_models(
+            device,
+            queue,
+            frame.view(),
+            Some(render.depth_view()),
+            &hud_frame,
+            item_models,
+            w,
+            h,
+        );
         // Status-effect overlay, composited over the HUD in its own Load pass.
         if let Some(effects) = self.effects.as_mut() {
             effects.render(device, queue, frame.view(), self.sim.active_effects(), w, h);
@@ -538,6 +551,26 @@ impl ApplicationHandler for WindowApp {
         // item icons; jar-less runs leave this `None` and slots stay empty wells.
         if let Some(items) = crate::resources::load_item_atlas() {
             hud.attach_items(gpu.device(), gpu.queue(), format, items);
+        }
+        // Attach the 3-D block-item pass, which borrows the world renderer's own
+        // block atlas, tint palette and animation slots rather than uploading a
+        // second copy of any of them. Present only on the live vanilla path (the
+        // demo world bakes no models), where block items would otherwise draw an
+        // empty well.
+        if let (Some(atlas_view), Some(atlas_sampler), Some(palette), Some(anim)) = (
+            render.model_atlas_view(),
+            render.model_atlas_sampler(),
+            render.model_palette_buffer(),
+            render.model_anim_buffer(),
+        ) {
+            hud.attach_item_models(
+                gpu.device(),
+                format,
+                atlas_view,
+                atlas_sampler,
+                palette,
+                anim,
+            );
         }
         let effects = EffectsRenderer::new(gpu.device(), format);
         let container = ContainerRenderer::new(gpu.device(), format);
@@ -798,7 +831,14 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     // Coverage: fraction of pixels that clearly aren't the sky clear colour.
-    let sky = [135i32, 181, 235];
+    //
+    // This target is *not* an sRGB-format texture, so these bytes are the
+    // shader's linear output scaled straight to 0..255 with no gamma encode
+    // (unlike the swapchain, which is sRGB and would encode them). That's
+    // `SKY_COLOR * 255` rounded, not the on-screen sky colour — read
+    // `gpu::SKY_COLOR`'s doc comment before touching this to keep the two in
+    // sync.
+    let sky = [62i32, 118, 211];
     let mut terrain_px = 0usize;
     for px in pixels.chunks_exact(4) {
         let d = (i32::from(px[0]) - sky[0]).abs()
