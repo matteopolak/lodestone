@@ -12,16 +12,20 @@ use std::collections::HashMap;
 
 use lodestone_render::{
     AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer,
-    EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, Mesh,
-    ModelCameraUniform, ModelPipeline, SpriteAnimation,
+    ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas,
+    GpuEntityModel, GpuMesh, GpuModelMesh, Mesh, ModelCameraUniform, ModelPipeline,
+    SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
+    entity_camera_buffer,
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
     upload_instances,
     vertex::vram_bytes,
 };
+
+use glam::Vec3;
 
 use crate::entities::EntityDraw;
 use crate::mesher::{SectionGeometry, SectionKey};
@@ -426,12 +430,18 @@ impl EntityRenderer {
             textures.insert(name, bg);
         }
 
-        // A persistent camera uniform, rewritten every frame before the pass.
-        let cam_buffer = camera_buffer(
+        // A persistent group-0 uniform, rewritten every frame before the pass.
+        // Sized for camera **plus fog**: the entity shader reads both out of one
+        // binding, so a buffer sized for the camera alone would leave the fog
+        // block reading past the end.
+        let cam_buffer = entity_camera_buffer(
             device,
-            CameraUniform {
-                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                section_origin: [0.0, 0.0, 0.0, 0.0],
+            EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
             },
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
@@ -492,7 +502,12 @@ fn entity_texture_from_image(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        // **`_srgb`, like the block atlas.** A vanilla PNG holds gamma-encoded
+        // bytes; binding it as plain `Unorm` hands the shader 0.50 where the
+        // linear value is 0.21, and an sRGB swapchain then encodes it a second
+        // time. Measured at +48% on every mob pixel — enough on its own to make
+        // a mob brighter than the brightest sunlit block face.
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -539,7 +554,12 @@ fn synthetic_entity_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        // **`_srgb`, like the block atlas.** A vanilla PNG holds gamma-encoded
+        // bytes; binding it as plain `Unorm` hands the shader 0.50 where the
+        // linear value is 0.21, and an sRGB swapchain then encodes it a second
+        // time. Measured at +48% on every mob pixel — enough on its own to make
+        // a mob brighter than the brightest sunlit block face.
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -580,6 +600,44 @@ fn model_tint(name: &str) -> [u8; 3] {
     [chan(0), chan(8), chan(16)]
 }
 
+/// Samples the world's packed sky/block light (`sky << 4 | block`) at an
+/// entity's feet, so a mob is lit by the block it stands in exactly as vanilla
+/// lights it (`LivingEntityRenderer` → `Level::getLightColor`, one sample per
+/// entity).
+///
+/// Only the shell's `Sim` owns a world to sample, and `RenderState` is handed
+/// pre-interpolated `EntityDraw`s with no light on them, so this is the seam
+/// between the two. Unset — the offline demo, a headless test — every mob is
+/// [`ENTITY_FULLBRIGHT`], which is the behaviour before entity lighting existed.
+///
+/// The `Fn` is boxed rather than a `fn` pointer because a real sampler has to
+/// capture the client handle; the manual [`Debug`] keeps `RenderState`'s derive
+/// working.
+#[derive(Default)]
+pub struct EntityLightSource(Option<Box<dyn Fn(Vec3) -> Option<u8> + Send + Sync>>);
+
+impl EntityLightSource {
+    /// Packed light at `feet`, or [`ENTITY_FULLBRIGHT`] when there is no sampler
+    /// or the position is outside loaded chunks. A `None` here is deliberately
+    /// **not** darkness: an unloaded neighbour should not black out a mob, the
+    /// same call the particle path makes (`Sim::extract_particles`).
+    #[must_use]
+    fn sample(&self, feet: Vec3) -> u8 {
+        self.0
+            .as_ref()
+            .and_then(|f| f(feet))
+            .unwrap_or(ENTITY_FULLBRIGHT)
+    }
+}
+
+impl std::fmt::Debug for EntityLightSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EntityLightSource")
+            .field(&if self.0.is_some() { "set" } else { "full-bright" })
+            .finish()
+    }
+}
+
 /// Owns all GPU resources needed to render the world.
 #[derive(Debug)]
 pub struct RenderState {
@@ -604,6 +662,9 @@ pub struct RenderState {
     /// fog sized for the default render distance; drive it from the real render
     /// distance / eye-in-fluid state via [`RenderState::set_fog`].
     fog: FogSettings,
+    /// How each mob's world light is sampled. Full-bright until the shell wires
+    /// a real world in via [`RenderState::set_entity_light_source`].
+    entity_light: EntityLightSource,
 }
 
 impl RenderState {
@@ -729,6 +790,9 @@ impl RenderState {
             entities,
             particles,
             particle_atlas_bind_group,
+            // Full-bright until the shell installs a world sampler; see
+            // `set_entity_light_source`.
+            entity_light: EntityLightSource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -750,6 +814,21 @@ impl RenderState {
     /// to turn fog off.
     pub fn set_fog(&mut self, fog: FogSettings) {
         self.fog = fog;
+    }
+
+    /// Install the world light sampler mobs are lit by (see
+    /// [`EntityLightSource`]). Call once, after a world exists; without it every
+    /// mob renders [`ENTITY_FULLBRIGHT`] and out-shines the terrain it stands on
+    /// at night.
+    ///
+    /// `f` receives an entity's **feet** position and returns its packed
+    /// `sky << 4 | block` light, or `None` outside loaded chunks. The equivalent
+    /// world lookup already exists for particles in `Sim::extract_particles`.
+    pub fn set_entity_light_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Option<u8> + Send + Sync + 'static,
+    ) {
+        self.entity_light = EntityLightSource(Some(Box::new(f)));
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -1128,7 +1207,49 @@ impl RenderState {
                     stats.draw_calls += 1;
                     stats.total_quads += section.quad_count;
                 }
+            }
 
+            // Entities share the terrain depth buffer (depth test + write on, so
+            // a mob behind a wall is correctly occluded and vice versa), drawn
+            // after opaque terrain in the same pass so no second clear touches
+            // depth.
+            //
+            // **Before the translucent water below, as vanilla orders it**
+            // (`SOLID`/`CUTOUT`, entities, destroy progress, `TRANSLUCENT`).
+            // Water is alpha-blended with depth *write* off, so it leaves no
+            // depth behind it: a submerged mob drawn afterwards passes the depth
+            // test against the sea floor and overwrites the water surface
+            // opaquely, so it appears painted on top of the water however deep
+            // it is. Drawing entities first puts the mob in the depth buffer,
+            // and the water surface then blends over it. Fogging the entity
+            // shader is a separate fix and does not achieve this on its own:
+            // fog tints a mob by distance, it does not put water in front of it.
+            if !entity_batches.is_empty() {
+                pass.set_pipeline(&self.entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                for batch in &entity_batches {
+                    let Some(model) = self.entities.gpu_models.get(batch.model) else {
+                        continue;
+                    };
+                    let Some(texture) = self.entities.textures.get(batch.model) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
+            if let Some(model) = &self.model {
                 // Mining-crack overlay on the target block, drawn after the
                 // opaque terrain it sits on (so the block face is already in the
                 // depth buffer) and before translucent water. The pipeline's
@@ -1162,34 +1283,6 @@ impl RenderState {
                     pass.draw_indexed(0..water.index_count, 0, 0..1);
                     stats.draw_calls += 1;
                     stats.total_quads += section.water_quad_count;
-                }
-            }
-
-            // Entities share the terrain depth buffer (depth test + write on, so
-            // a mob behind a wall is correctly occluded and vice versa), drawn
-            // after terrain in the same pass so no second clear touches depth.
-            if !entity_batches.is_empty() {
-                pass.set_pipeline(&self.entities.pipeline.pipeline);
-                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
-                for batch in &entity_batches {
-                    let Some(model) = self.entities.gpu_models.get(batch.model) else {
-                        continue;
-                    };
-                    let Some(texture) = self.entities.textures.get(batch.model) else {
-                        continue;
-                    };
-                    pass.set_bind_group(1, texture, &[]);
-                    pass.set_vertex_buffer(0, model.vertices.slice(..));
-                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
-                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
-                            continue;
-                        };
-                        pass.set_vertex_buffer(1, buffer.slice(..));
-                        let end = range.index_start + range.index_count;
-                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
-                        stats.draw_calls += 1;
-                    }
                 }
             }
 
@@ -1227,14 +1320,21 @@ impl RenderState {
             return Vec::new();
         }
 
-        // Rewrite the entity camera uniform (world position lives per-instance,
-        // so the section origin stays zero).
+        // Rewrite the entity group-0 uniform: view-projection (world position
+        // lives per-instance, so the section origin stays zero) **and this
+        // frame's fog**, from the same `self.fog` the terrain sections get. Both
+        // passes therefore fade on one curve; a mob under water or at the render
+        // edge dissolves with the blocks around it instead of punching through.
+        let eye = camera.position;
         queue.write_buffer(
             &self.entities.cam_buffer,
             0,
-            bytemuck::bytes_of(&CameraUniform {
-                view_proj: camera.view_projection().to_cols_array_2d(),
-                section_origin: [0.0, 0.0, 0.0, 0.0],
+            bytemuck::bytes_of(&EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: camera.view_projection().to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]),
             }),
         );
 
@@ -1244,6 +1344,7 @@ impl RenderState {
                 self.entities
                     .models
                     .resolve(&e.type_path, e.feet, e.yaw, e.scale, &e.anim)
+                    .map(|i| i.with_light(self.entity_light.sample(e.feet)))
             })
             .collect();
 
@@ -1260,10 +1361,12 @@ impl RenderState {
             .iter()
             .map(|batch| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
+                // Every part uploads the *same* light slice: a mob's lightmap
+                // sample is per entity, so its head and its leg share one value.
                 let parts = batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances(device, p))
+                    .map(|p| upload_instances(device, p, &batch.lights))
                     .collect();
                 EntityDrawBatch {
                     model: batch.model,
@@ -1289,6 +1392,32 @@ struct EntityDrawBatch {
 mod tests {
     use super::*;
     use lodestone_render::{HeadlessTarget, RenderTarget};
+
+    /// The bytes the sky clear actually lands on in these tests' readbacks.
+    ///
+    /// Every headless test here uses an **`Rgba8Unorm`** target, so no gamma
+    /// encode happens on write and the readback is [`SKY_COLOR`] (which is
+    /// linear) scaled straight to bytes — *not* the `#87B5EB` the player sees on
+    /// the sRGB swapchain.
+    ///
+    /// Derived rather than hardcoded because it was hardcoded twice and both
+    /// copies went stale: when `SKY_COLOR` was corrected from a mislabelled sRGB
+    /// triple to its true linear value, one of the three copies was updated and
+    /// two were not. Those two tests then classified *every* pixel in the frame
+    /// as "mob" — including the corners, which contain no mob — so their
+    /// silhouette assertions were measuring the whole frame.
+    #[must_use]
+    fn sky_clear_bytes() -> [u8; 3] {
+        SKY_COLOR.map(|c| (c * 255.0).round() as u8)
+    }
+
+    /// The sky reference must stay a plausible blue in the readback's own space;
+    /// a value that drifted to the *displayed* colour would blow the "is this
+    /// pixel sky?" test open, which is exactly how the two gates below broke.
+    #[test]
+    fn sky_reference_tracks_the_clear_colour() {
+        assert_eq!(sky_clear_bytes(), [62, 118, 211]);
+    }
 
     /// Headless GPU test: generate a world, mesh + upload every section, render
     /// one frame, and read pixels back to prove terrain (not just sky) drew.
@@ -1365,11 +1494,9 @@ mod tests {
         let pixels = target.read_texels(device, queue);
         let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Sky clear colour ≈ SKY_COLOR * 255 (this target is Rgba8Unorm, not
-        // sRGB, so the readback is the shader's linear output with no gamma
-        // encode — not the on-screen colour). Count pixels that clearly
-        // differ: terrain sprites are green/brown/grey, far from sky blue.
-        let sky = [62u8, 118, 211];
+        // Count pixels that clearly differ from the sky clear: terrain sprites
+        // are green/brown/grey, far from sky blue.
+        let sky = sky_clear_bytes();
         let mut terrain_px = 0usize;
         for px in pixels.chunks_exact(4) {
             let d = (i32::from(px[0]) - i32::from(sky[0])).abs()
@@ -1816,7 +1943,7 @@ mod tests {
         // The synthetic pig texture is a solid tint; count pixels that clearly
         // differ from the sky clear colour, and confirm they cluster in the
         // centre (where the pig is) rather than smeared across the frame.
-        let sky = [135u8, 181, 235];
+        let sky = sky_clear_bytes();
         let is_mob = |px: &[u8]| -> bool {
             let d = (i32::from(px[0]) - i32::from(sky[0])).abs()
                 + (i32::from(px[1]) - i32::from(sky[1])).abs()
@@ -1933,7 +2060,7 @@ mod tests {
         // leaves the direction unchanged, so under the placeholder this is ~0; a
         // real multi-hue sheet pushes it up.
         let off_hue_fraction = |pixels: &[u8]| -> (usize, f64) {
-            let sky = [135f32, 181.0, 235.0];
+            let sky = sky_clear_bytes().map(f32::from);
             let tint = model_tint("zombie");
             let tv = glam::Vec3::new(tint[0] as f32, tint[1] as f32, tint[2] as f32).normalize();
             let mut mob = 0usize;

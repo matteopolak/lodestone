@@ -47,7 +47,15 @@ use lodestone_render::entity_pipeline::{EntityPipeline, GpuEntityModel, upload_i
 
 const W: u32 = 256;
 const H: u32 = 256;
-const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// **sRGB, matching the real swapchain (`Bgra8UnormSrgb`) — and so must the
+/// sheet below.** The entity shader multiplies its shade into the texel in
+/// *gamma* space (as vanilla does, and as the model shader already did), so what
+/// a face's shade does to the final byte is only correct when the sampled texel
+/// is linear-light and the target re-encodes on write. Measured on a plain
+/// `Unorm` target the same mob renders far darker than the player ever sees it,
+/// and a fixed brightness threshold calibrated there quietly stops finding the
+/// mob at all.
+const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Turn the mob broadside to the camera. Limbs swing about the model's **X**
 /// axis, so side-on the swing is horizontal screen motion; head-on it would be
@@ -107,7 +115,7 @@ fn test_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureVie
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -191,7 +199,7 @@ fn render_pig(gpu: &Gpu, models: &EntityModelSet, anim: &AnimInput) -> Vec<u8> {
             if range.index_count == 0 {
                 continue;
             }
-            if let Some(buf) = upload_instances(device, mats) {
+            if let Some(buf) = upload_instances(device, mats, &batch.lights) {
                 per_part.push((
                     mats.len() as u32,
                     range.index_start..range.index_start + range.index_count,
@@ -316,7 +324,10 @@ fn render_pig(gpu: &Gpu, models: &EntityModelSet, anim: &AnimInput) -> Vec<u8> {
 /// sparse scattering of the brightest faces and nothing else. Same threshold as
 /// [`entity_gate`](./entity_gate.rs).
 fn is_mob(frame: &[u8], i: usize) -> bool {
-    frame[i] > 150 && frame[i + 1] < 120
+    // Green separates the magenta mob (~20) from the blue sky clear (~200) and
+    // is independent of how dark a face's shade is; see `entity_gate`'s note on
+    // why a red-brightness floor is the wrong discriminator here.
+    frame[i + 1] < 120 && frame[i] > 40
 }
 
 /// Count pixels that differ between two frames within a horizontal band of rows.
