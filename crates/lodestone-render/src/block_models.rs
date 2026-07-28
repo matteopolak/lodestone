@@ -180,12 +180,38 @@ fn fluid_state_from_level(level: u8) -> FluidState {
     }
 }
 
+/// Blocks whose `getFluidState` returns a water **source unconditionally**, with
+/// no `waterlogged` property to key off.
+///
+/// Extracted from the decompiled 26.2 server by scanning every
+/// `getFluidState` override under `net/minecraft/world/level/block/` whose body
+/// returns `Fluids.WATER` without consulting `WATERLOGGED`. That scan yields
+/// exactly these five classes and no others:
+///
+/// * `KelpBlock` / `KelpPlantBlock` → `Fluids.WATER.getSource(false)`
+/// * `SeagrassBlock` / `TallSeagrassBlock` → `Fluids.WATER.getSource(false)`
+/// * `BubbleColumnBlock` → `Fluids.WATER.getSource(false)`
+///
+/// A name list in a version-free crate is only acceptable because it is derived
+/// from the jar rather than guessed, and because the alternative — inferring
+/// "is underwater" from the model — is not expressible: these states look
+/// identical to a land plant.
+const UNCONDITIONAL_WATER_BLOCKS: [&str; 5] = [
+    "kelp",
+    "kelp_plant",
+    "seagrass",
+    "tall_seagrass",
+    "bubble_column",
+];
+
 /// Classify a block state into the fluid it exposes, if any.
 ///
 /// `minecraft:water`/`minecraft:lava` carry the fluid directly (via their `level`
-/// property); any other block with `waterlogged=true` (kelp, seagrass, stairs,
-/// slabs…) carries a water **source**. Everything else is `None`. Pure over the
-/// resolved block path + properties, so it is unit-tested without a jar.
+/// property); any other block with `waterlogged=true` (stairs, slabs, fences…)
+/// carries a water **source**, as do the handful of blocks that hardcode a water
+/// `getFluidState` with no such property ([`UNCONDITIONAL_WATER_BLOCKS`]).
+/// Everything else is `None`. Pure over the resolved block path + properties, so
+/// it is unit-tested without a jar.
 fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<FluidCell> {
     let level = || {
         props
@@ -202,10 +228,14 @@ fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<
             kind: FluidKind::Lava,
             state: fluid_state_from_level(level()),
         }),
-        _ if props.get("waterlogged").is_some_and(|v| v == "true") => Some(FluidCell {
-            kind: FluidKind::Water,
-            state: FluidState::source(),
-        }),
+        _ if UNCONDITIONAL_WATER_BLOCKS.contains(&block_path)
+            || props.get("waterlogged").is_some_and(|v| v == "true") =>
+        {
+            Some(FluidCell {
+                kind: FluidKind::Water,
+                state: FluidState::source(),
+            })
+        }
         _ => None,
     }
 }
@@ -871,13 +901,42 @@ mod tests {
 
     #[test]
     fn waterlogged_blocks_carry_a_water_source() {
-        let kelp = classify_fluid("kelp", &props(&[("waterlogged", "true")]))
+        let stairs = classify_fluid("oak_stairs", &props(&[("waterlogged", "true")]))
             .expect("a waterlogged block carries water");
-        assert_eq!(kelp.kind, FluidKind::Water);
-        assert_eq!(kelp.state, FluidState::source());
+        assert_eq!(stairs.kind, FluidKind::Water);
+        assert_eq!(stairs.state, FluidState::source());
 
         // A non-waterlogged, non-fluid block exposes no fluid.
         assert!(classify_fluid("stone", &props(&[])).is_none());
         assert!(classify_fluid("oak_stairs", &props(&[("waterlogged", "false")])).is_none());
+    }
+
+    #[test]
+    fn underwater_plants_carry_water_without_a_waterlogged_property() {
+        // Kelp, seagrass and bubble columns have **no** `waterlogged` property:
+        // vanilla hardcodes `getFluidState -> Fluids.WATER.getSource(false)` in
+        // `KelpBlock`/`KelpPlantBlock`/`SeagrassBlock`/`TallSeagrassBlock`/
+        // `BubbleColumnBlock`. Classifying them off `waterlogged` alone leaves an
+        // air pocket around every plant in the ocean.
+        for (path, p) in [
+            ("kelp", vec![("age", "4")]),
+            ("kelp_plant", vec![]),
+            ("seagrass", vec![]),
+            ("tall_seagrass", vec![("half", "lower")]),
+            ("tall_seagrass", vec![("half", "upper")]),
+            ("bubble_column", vec![("drag", "true")]),
+        ] {
+            let cell = classify_fluid(path, &props(&p))
+                .unwrap_or_else(|| panic!("{path} must expose a water source"));
+            assert_eq!(cell.kind, FluidKind::Water, "{path}");
+            assert_eq!(cell.state, FluidState::source(), "{path}");
+        }
+
+        // The control: a land plant with the same shape (no `waterlogged`, a
+        // cross model, an `age`/`half` property) must stay dry, so the rule
+        // cannot pass by classifying every plant as water.
+        assert!(classify_fluid("wheat", &props(&[("age", "4")])).is_none());
+        assert!(classify_fluid("tall_grass", &props(&[("half", "lower")])).is_none());
+        assert!(classify_fluid("sugar_cane", &props(&[("age", "4")])).is_none());
     }
 }

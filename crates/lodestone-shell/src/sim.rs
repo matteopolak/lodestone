@@ -4,7 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -72,6 +72,12 @@ const PLACE_BLOCK: u32 = id::STONE;
 const LIVE_DIG_HARDNESS: f32 = 0.05;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
+
+/// How many stale-boundary columns to re-mesh per frame. Chunk arrivals already
+/// mesh their own column immediately, so this only paces the *seam* repair; at
+/// 60 fps it heals ~240 columns/second, which outruns any vanilla chunk stream
+/// while keeping a load burst off a single frame.
+const DIRTY_COLUMN_BUDGET: usize = 4;
 
 /// A trivial [`PlacementWorld`] for the live path. The shell cannot classify
 /// blocks (no version-free replaceable/interactable seam is exposed by
@@ -180,6 +186,26 @@ pub struct Sim {
     /// next to `live_cols` so this defect class is a one-line diagnosis instead
     /// of a play-test archaeology session. Should stay `0` in a healthy session.
     mesh_drops: u64,
+    /// Loaded columns whose *boundary* geometry is stale because a horizontal
+    /// neighbour arrived after they were meshed. Drained on a small per-frame
+    /// budget by [`Sim::drain_dirty_columns`].
+    ///
+    /// A section's mesh depends on its whole 3×3×3 neighbourhood (face culling,
+    /// AO, and — most visibly — fluid corner heights and flow faces), so loading
+    /// column P invalidates the boundary of P's eight horizontal neighbours too.
+    /// Meshing only P leaves every already-meshed neighbour believing there is
+    /// air across the seam: water grows a falling "wall" at each chunk border and
+    /// cross-chunk AO stays wrong. Re-meshing the eight neighbours *eagerly* on
+    /// every arrival would be 9× the work, so they are coalesced into this set —
+    /// during a spiral load the same column is named by several arrivals and is
+    /// re-meshed once.
+    dirty_columns: BTreeSet<(i32, i32)>,
+    /// Columns whose horizontal neighbours have already been queued for a seam
+    /// re-mesh. `ChunkLoaded` doubles as the *block-update* dirty signal (the
+    /// adapter emits it for `BLOCK_UPDATE`/`SECTION_BLOCKS_UPDATE`), and only the
+    /// first — genuine arrival — invalidates a neighbour's seam. Without this,
+    /// every redstone tick on a busy server would re-mesh nine columns.
+    seam_healed: HashSet<(i32, i32)>,
     /// Count of server `TeleportPlayer` corrections adopted since start. At rest
     /// on settled ground this stays flat; a burst *during* a jump is the
     /// signature of the server rejecting the ascent and snapping the camera down
@@ -420,6 +446,8 @@ impl Sim {
             language: resources.language,
             water_ids,
             mesh_drops: 0,
+            dirty_columns: BTreeSet::new(),
+            seam_healed: HashSet::new(),
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
@@ -820,6 +848,9 @@ impl Sim {
         self.frame_count += 1;
 
         self.poll_net();
+        // Heal chunk seams whose neighbourhood changed since they were meshed.
+        // Budgeted so a load burst spreads over frames rather than stalling one.
+        self.drain_dirty_columns(DIRTY_COLUMN_BUDGET);
         self.update_entities(dt as f32);
         self.refresh_stats();
     }
@@ -1405,6 +1436,67 @@ impl Sim {
         }
     }
 
+    /// Handle a chunk-arrival signal for `(cx, cz)`: mesh that column now, and
+    /// queue its **loaded horizontal neighbours** for a boundary re-mesh.
+    ///
+    /// A section's geometry is a function of its whole 3×3×3 neighbourhood, so a
+    /// column that was meshed while `(cx, cz)` was still absent baked its seam
+    /// against air. Left alone that is permanent, and it is exactly what a
+    /// play-test sees: **water grows a falling "wall" at every chunk border**
+    /// (the neighbour cell reads as no-fluid, so the side face is emitted and the
+    /// corner heights collapse), plus wrong cross-chunk AO and stray culled
+    /// faces. The tell that it is a staleness bug and not a mesher bug is that
+    /// breaking any block in the column fixes it — [`Sim::remesh_around`] already
+    /// re-meshes neighbours.
+    ///
+    /// The centre column meshes immediately (load responsiveness); the eight
+    /// neighbours are coalesced into [`Sim::dirty_columns`] and drained on a
+    /// budget, so a spiral load re-meshes each column a small constant number of
+    /// times instead of nine.
+    fn on_column_arrived(&mut self, cx: i32, cz: i32) {
+        self.mark_column_dirty(cx, cz);
+        // Only a genuine first arrival invalidates the neighbours' seams; later
+        // signals for the same column are block updates, which the column's own
+        // re-mesh already covers.
+        if !self.seam_healed.insert((cx, cz)) {
+            return;
+        }
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let (nx, nz) = (cx + dx, cz + dz);
+                if self.column_is_loaded(nx, nz) {
+                    self.dirty_columns.insert((nx, nz));
+                }
+            }
+        }
+    }
+
+    /// Whether `(cx, cz)` is present in whichever world this session meshes.
+    /// Queueing an absent column would mesh nothing and log a drop; it will be
+    /// queued for real by its own arrival.
+    fn column_is_loaded(&self, cx: i32, cz: i32) -> bool {
+        if self.vanilla_atlas.is_some() {
+            return self.net.as_ref().is_some_and(|net| {
+                net.is_chunk_loaded(lodestone_client::ChunkPos { x: cx, z: cz })
+            });
+        }
+        self.world.get(ChunkPos { x: cx, z: cz }).is_some()
+    }
+
+    /// Re-mesh up to `budget` columns whose boundary went stale. Called once per
+    /// frame; the budget bounds the cost of a chunk-load burst.
+    fn drain_dirty_columns(&mut self, budget: usize) {
+        for _ in 0..budget {
+            let Some((cx, cz)) = self.dirty_columns.pop_first() else {
+                return;
+            };
+            self.mark_column_dirty(cx, cz);
+        }
+    }
+
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
     /// column at `(cx, cz)` changed, so re-mesh every section it holds.
     ///
@@ -1517,7 +1609,7 @@ impl Sim {
                     // `World`, which we read via `NetClient::sections_and_light_at`
                     // (+ `world_dimensions` for geometry). `mark_column_dirty`
                     // meshes live columns through the vanilla classifier.
-                    self.mark_column_dirty(x, z);
+                    self.on_column_arrived(x, z);
                 }
                 NetUpdate::Teleport {
                     pos,
@@ -2472,6 +2564,70 @@ mod tests {
         assert!(
             sim.pending_meshes() > 0,
             "the loaded column was re-scheduled"
+        );
+    }
+
+    #[test]
+    fn chunk_arrival_also_remeshes_its_loaded_neighbours() {
+        // A section's geometry depends on its whole 3×3×3 neighbourhood, so a
+        // column meshed before its neighbour loaded baked its seam against air —
+        // which is what puts a falling water "wall" at every chunk border. The
+        // arrival signal must therefore dirty the eight loaded neighbours too.
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        let (pos, _) = sim.world.iter().next().expect("local world has a column");
+        // Pick a column with at least one loaded horizontal neighbour.
+        let (cx, cz) = (pos.x, pos.z);
+        let neighbours: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
+            .filter(|&(dx, dz)| (dx, dz) != (0, 0))
+            .map(|(dx, dz)| (cx + dx, cz + dz))
+            .filter(|&(nx, nz)| sim.column_is_loaded(nx, nz))
+            .collect();
+        assert!(
+            !neighbours.is_empty(),
+            "fixture must have a loaded neighbour, else this asserts nothing"
+        );
+
+        sim.on_column_arrived(cx, cz);
+        sim.drain_dirty_columns(neighbours.len());
+        let meshed: HashSet<(i32, i32)> = sim
+            .drain_all_meshes()
+            .into_iter()
+            .map(|m| (m.key.cx, m.key.cz))
+            .chain(sim.drain_removals().into_iter().map(|k| (k.cx, k.cz)))
+            .collect();
+
+        assert!(meshed.contains(&(cx, cz)), "the arriving column was meshed");
+        for n in &neighbours {
+            assert!(
+                meshed.contains(n),
+                "loaded neighbour {n:?} was not re-meshed — its seam stays baked \
+                 against air (the chunk-border water wall)"
+            );
+        }
+
+        // `ChunkLoaded` is also the block-update dirty signal, so a second signal
+        // for the same column must re-mesh only that column: nine columns per
+        // redstone tick would be a real cost on a busy server.
+        sim.on_column_arrived(cx, cz);
+        assert!(
+            sim.dirty_columns.is_empty(),
+            "a repeat signal must not re-queue already-healed neighbours"
+        );
+    }
+
+    #[test]
+    fn neighbour_remesh_skips_columns_that_are_not_loaded() {
+        // The control for the test above: queueing absent columns would mesh
+        // nothing, log a drop, and let "every arrival dirties 8 neighbours" pass
+        // without any of them being real.
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        sim.on_column_arrived(9999, 9999);
+        assert!(
+            sim.dirty_columns.is_empty(),
+            "no neighbour of an out-of-world column is loaded, so none is queued"
         );
     }
 
