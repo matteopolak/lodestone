@@ -1,0 +1,861 @@
+//! The menu's *brain*: selection, the add/edit form, and what a keypress means
+//! on each screen.
+//!
+//! ## What it is
+//!
+//! [`super::UiState`] models which screen is showing; this models everything
+//! else the menu needs to be usable — which row is highlighted, what is typed
+//! into the edit form, and which of those keys means "connect to this server".
+//! It returns a [`MenuAction`] describing the one thing the app must then do
+//! (start a session, quit, re-ping a row), so `app.rs` contains no menu logic
+//! beyond translating winit keys and acting on the returned verb.
+//!
+//! ## Why it does not touch winit
+//!
+//! Input arrives as [`MenuKey`], a tiny abstract key set. That is what makes the
+//! whole menu — every navigation edge, every text-entry rule, add/edit/delete
+//! and persistence — unit-testable with no window, no GPU and no server. The
+//! winit mapping is four lines in `app.rs` and is the only untested part.
+//!
+//! ## How to change it
+//!
+//! Adding a screen means a variant in [`super::Screen`], an arm in
+//! [`MenuNav::key`], and rows in [`super::render`]. Adding an *action* means a
+//! [`MenuAction`] variant — deliberately an enum rather than a callback so the
+//! exhaustive `match` in `app.rs` fails to compile when a new one is added,
+//! rather than silently doing nothing (this repo's dominant defect).
+//!
+//! Persistence is written **eagerly**, on every mutation, rather than on exit:
+//! the shell has no guaranteed clean-shutdown hook (a GPU crash or a `SIGKILL`
+//! skips `Drop`), and a server list that survives only a graceful quit is one
+//! that silently loses the entry the player just added.
+
+use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
+use super::{Screen, SessionKind, UiState};
+
+/// Longest accepted address string in the edit form, in characters. A hostname
+/// is capped at 253 by DNS; the extra room is for `:port`.
+pub const MAX_ADDRESS_CHARS: usize = 260;
+
+/// The abstract keys the menu understands. `app.rs` maps winit's `KeyCode` and
+/// text onto these; nothing here knows what a scancode is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuKey {
+    /// Move the highlight up one row (wraps).
+    Up,
+    /// Move the highlight down one row (wraps).
+    Down,
+    /// Activate the highlighted row / save the form.
+    Enter,
+    /// Back out one level. Handled by [`UiState::on_escape`].
+    Escape,
+    /// Move between fields in the edit form.
+    Tab,
+    /// Delete the character before the cursor (edit form only).
+    Backspace,
+    /// Delete the highlighted server (list only).
+    Delete,
+    /// A printable character: a command on the list, text in the form.
+    Char(char),
+}
+
+/// The one thing the app must do as a result of a keypress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MenuAction {
+    /// Nothing to do; the menu handled it internally.
+    None,
+    /// Enter the singleplayer world.
+    Singleplayer,
+    /// Connect to this server (the app opens the session and shows Connecting).
+    Connect(ServerEntry),
+    /// Shut the game down cleanly.
+    Quit,
+    /// The list changed or a re-ping was asked for: the app should refresh
+    /// statuses. Carries the entry to (re-)probe, or `None` for "all of them".
+    Reprobe(Option<ServerEntry>),
+    /// A row was removed; drop its cached status. Carried separately from
+    /// [`MenuAction::Reprobe`] so the app does not start a probe for an address
+    /// that is no longer in the list.
+    Forget(ServerEntry),
+}
+
+/// Which field of the add/edit form has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormField {
+    /// The display label.
+    Name,
+    /// `host` or `host:port`.
+    Address,
+}
+
+/// The add/edit form's contents.
+///
+/// The address is held as the **single string the user typed** and split into
+/// host/port only on save. Splitting per keystroke would make `mc.example.com:2`
+/// unrepresentable halfway through typing `:25565`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditForm {
+    /// Display label being typed.
+    pub name: String,
+    /// Address being typed, `host` or `host:port`.
+    pub address: String,
+    /// Which field has focus.
+    pub field: FormField,
+    /// Index being edited, or `None` when adding a new entry.
+    pub editing: Option<usize>,
+}
+
+impl Default for FormField {
+    fn default() -> Self {
+        Self::Name
+    }
+}
+
+impl EditForm {
+    /// A blank form for a new entry.
+    #[must_use]
+    pub fn adding() -> Self {
+        Self::default()
+    }
+
+    /// A form pre-filled from `entry`, editing the row at `index`.
+    #[must_use]
+    pub fn editing(index: usize, entry: &ServerEntry) -> Self {
+        Self {
+            name: entry.name.clone(),
+            address: entry.address_label(),
+            field: FormField::Name,
+            editing: Some(index),
+        }
+    }
+
+    /// Whether the form can be saved. The label may be blank (it falls back to
+    /// the host); the address may not.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        !self.address.trim().is_empty()
+    }
+
+    /// The entry this form would save.
+    #[must_use]
+    pub fn to_entry(&self) -> ServerEntry {
+        let (host, port) = ServerEntry::split_host_port(&self.address);
+        let name = if self.name.trim().is_empty() {
+            host.clone()
+        } else {
+            self.name.clone()
+        };
+        ServerEntry::new(name, host, port)
+    }
+
+    fn active_mut(&mut self) -> (&mut String, usize) {
+        match self.field {
+            FormField::Name => (&mut self.name, MAX_NAME_CHARS),
+            FormField::Address => (&mut self.address, MAX_ADDRESS_CHARS),
+        }
+    }
+
+    /// Appends a printable character to the focused field, respecting its cap.
+    /// Control characters and `§` are refused — `§` because it is the legacy
+    /// formatting-code introducer and has no business in a hostname or a label.
+    pub fn push(&mut self, ch: char) {
+        if ch.is_control() || ch == '\u{a7}' {
+            return;
+        }
+        let (buf, cap) = self.active_mut();
+        if buf.chars().count() < cap {
+            buf.push(ch);
+        }
+    }
+
+    /// Removes the last character of the focused field.
+    pub fn backspace(&mut self) {
+        let (buf, _) = self.active_mut();
+        buf.pop();
+    }
+
+    /// Moves focus to the other field.
+    pub fn next_field(&mut self) {
+        self.field = match self.field {
+            FormField::Name => FormField::Address,
+            FormField::Address => FormField::Name,
+        };
+    }
+}
+
+/// The main menu's buttons, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainButton {
+    /// Enter the local world.
+    Singleplayer,
+    /// Open the server list.
+    Multiplayer,
+    /// Quit the game.
+    Quit,
+}
+
+/// Every main-menu button, in display order.
+pub const MAIN_BUTTONS: [MainButton; 3] = [
+    MainButton::Singleplayer,
+    MainButton::Multiplayer,
+    MainButton::Quit,
+];
+
+impl MainButton {
+    /// The label drawn on the button.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            MainButton::Singleplayer => "SINGLEPLAYER",
+            MainButton::Multiplayer => "MULTIPLAYER",
+            MainButton::Quit => "QUIT GAME",
+        }
+    }
+}
+
+/// Selection state and the saved server list.
+#[derive(Debug, Clone)]
+pub struct MenuNav {
+    main: usize,
+    server: usize,
+    form: EditForm,
+    list: ServerList,
+    /// Where the list is persisted. Held rather than recomputed so a test can
+    /// point one at a temporary file.
+    path: std::path::PathBuf,
+    /// The last save error, surfaced on the list screen. A silent write failure
+    /// is how a player loses an entry and never learns why.
+    save_error: Option<String>,
+}
+
+impl Default for MenuNav {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MenuNav {
+    /// Loads the saved server list from its real location.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_path(servers_path())
+    }
+
+    /// Loads the server list from `path`. Missing or corrupt is an empty list.
+    #[must_use]
+    pub fn with_path(path: std::path::PathBuf) -> Self {
+        Self {
+            main: 0,
+            server: 0,
+            form: EditForm::adding(),
+            list: ServerList::load_from(&path),
+            path,
+            save_error: None,
+        }
+    }
+
+    /// The saved servers.
+    #[must_use]
+    pub fn list(&self) -> &ServerList {
+        &self.list
+    }
+
+    /// The highlighted main-menu button.
+    #[must_use]
+    pub fn main_button(&self) -> MainButton {
+        MAIN_BUTTONS[self.main.min(MAIN_BUTTONS.len() - 1)]
+    }
+
+    /// Index of the highlighted main-menu button.
+    #[must_use]
+    pub fn main_index(&self) -> usize {
+        self.main
+    }
+
+    /// Index of the highlighted server row.
+    #[must_use]
+    pub fn server_index(&self) -> usize {
+        self.server
+    }
+
+    /// The add/edit form.
+    #[must_use]
+    pub fn form(&self) -> &EditForm {
+        &self.form
+    }
+
+    /// The last persistence failure, if any.
+    #[must_use]
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
+    }
+
+    /// Moves the highlight to row `row` of the current screen, as a mouse hover
+    /// would. Out-of-range rows are ignored rather than clamped: the caller
+    /// hit-tests against the rendered rects, so "no row here" must not silently
+    /// move the selection to a different one.
+    pub fn hover(&mut self, ui: &UiState, row: usize) {
+        match ui.screen() {
+            Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
+            Screen::ServerList if row < self.list.len() => self.server = row,
+            Screen::ServerEdit => {
+                self.form.field = match row {
+                    0 => FormField::Name,
+                    1 => FormField::Address,
+                    _ => self.form.field,
+                };
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles one key for the current screen, mutating `ui` for navigation and
+    /// returning the action the app must perform.
+    pub fn key(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match ui.screen() {
+            Screen::MainMenu => self.key_main(ui, key),
+            Screen::ServerList => self.key_list(ui, key),
+            Screen::ServerEdit => self.key_edit(ui, key),
+            // The error screen has exactly one affordance — go back — reachable
+            // with Escape or by activating its single row.
+            Screen::Error if matches!(key, MenuKey::Escape | MenuKey::Enter) => {
+                ui.dismiss_error();
+                MenuAction::None
+            }
+            // Escape is the only menu key that means anything on the world and
+            // loading screens, and `UiState` already owns it.
+            _ => {
+                if key == MenuKey::Escape {
+                    ui.on_escape();
+                    if ui.quit_requested() {
+                        return MenuAction::Quit;
+                    }
+                }
+                MenuAction::None
+            }
+        }
+    }
+
+    fn key_main(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.main = wrap_prev(self.main, MAIN_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.main = wrap_next(self.main, MAIN_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Enter => match self.main_button() {
+                MainButton::Singleplayer => MenuAction::Singleplayer,
+                MainButton::Multiplayer => {
+                    ui.open_server_list();
+                    self.clamp_server();
+                    MenuAction::Reprobe(None)
+                }
+                MainButton::Quit => {
+                    ui.request_quit();
+                    MenuAction::Quit
+                }
+            },
+            MenuKey::Escape => {
+                ui.on_escape();
+                MenuAction::Quit
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    fn key_list(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.server = wrap_prev(self.server, self.list.len());
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.server = wrap_next(self.server, self.list.len());
+                MenuAction::None
+            }
+            MenuKey::Enter => match self.list.get(self.server) {
+                Some(entry) => {
+                    let entry = entry.clone();
+                    ui.begin(SessionKind::Multiplayer);
+                    MenuAction::Connect(entry)
+                }
+                // An empty list must not silently swallow Enter; open the add
+                // form, which is the only useful thing to do here.
+                None => {
+                    self.form = EditForm::adding();
+                    ui.open_server_edit();
+                    MenuAction::None
+                }
+            },
+            MenuKey::Delete => self.delete_selected(),
+            MenuKey::Escape => {
+                ui.on_escape();
+                MenuAction::None
+            }
+            MenuKey::Char(c) => match c.to_ascii_lowercase() {
+                'a' => {
+                    self.form = EditForm::adding();
+                    ui.open_server_edit();
+                    MenuAction::None
+                }
+                'e' => match self.list.get(self.server) {
+                    Some(entry) => {
+                        self.form = EditForm::editing(self.server, entry);
+                        ui.open_server_edit();
+                        MenuAction::None
+                    }
+                    None => MenuAction::None,
+                },
+                'd' => self.delete_selected(),
+                'r' => MenuAction::Reprobe(self.list.get(self.server).cloned()),
+                _ => MenuAction::None,
+            },
+            _ => MenuAction::None,
+        }
+    }
+
+    fn key_edit(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Escape => {
+                // Cancel: the form is discarded, the list is untouched.
+                ui.close_server_edit();
+                MenuAction::None
+            }
+            MenuKey::Tab | MenuKey::Up | MenuKey::Down => {
+                self.form.next_field();
+                MenuAction::None
+            }
+            MenuKey::Backspace => {
+                self.form.backspace();
+                MenuAction::None
+            }
+            MenuKey::Char(c) => {
+                self.form.push(c);
+                MenuAction::None
+            }
+            MenuKey::Enter => {
+                if !self.form.is_valid() {
+                    // Refuse rather than saving a row that cannot be dialed.
+                    return MenuAction::None;
+                }
+                let entry = self.form.to_entry();
+                let previous = self
+                    .form
+                    .editing
+                    .and_then(|i| self.list.get(i))
+                    .cloned();
+                match self.form.editing {
+                    Some(i) => {
+                        self.list.update(i, entry.clone());
+                    }
+                    None => {
+                        if let Some(i) = self.list.add(entry.clone()) {
+                            self.server = i;
+                        }
+                    }
+                }
+                self.persist();
+                ui.close_server_edit();
+                self.clamp_server();
+                // An edit that changed the address orphans the old row's cached
+                // status; the app forgets it, then probes the new address.
+                if let Some(old) = previous.filter(|p| p.host != entry.host || p.port != entry.port)
+                {
+                    return MenuAction::Forget(old);
+                }
+                MenuAction::Reprobe(Some(entry))
+            }
+            MenuKey::Delete => MenuAction::None,
+        }
+    }
+
+    fn delete_selected(&mut self) -> MenuAction {
+        match self.list.remove(self.server) {
+            Some(gone) => {
+                self.persist();
+                self.clamp_server();
+                MenuAction::Forget(gone)
+            }
+            None => MenuAction::None,
+        }
+    }
+
+    /// Keeps the highlight inside the list after an add or a delete.
+    fn clamp_server(&mut self) {
+        if self.server >= self.list.len() {
+            self.server = self.list.len().saturating_sub(1);
+        }
+    }
+
+    /// Writes the list to disk, recording (not swallowing) any failure.
+    fn persist(&mut self) {
+        self.save_error = match self.list.save_to(&self.path) {
+            Ok(()) => None,
+            Err(e) => Some(format!("could not save {}: {e}", self.path.display())),
+        };
+    }
+}
+
+fn wrap_next(i: usize, len: usize) -> usize {
+    if len == 0 { 0 } else { (i + 1) % len }
+}
+
+fn wrap_prev(i: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else if i == 0 {
+        len - 1
+    } else {
+        i - 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A nav whose list persists to a unique temporary file, so tests exercise
+    /// the *real* save path without touching the developer's server list.
+    fn nav(tag: &str) -> (MenuNav, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "lodestone-nav-{}-{tag}/servers.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        (MenuNav::with_path(path.clone()), path)
+    }
+
+    fn type_str(nav: &mut MenuNav, ui: &mut UiState, s: &str) {
+        for c in s.chars() {
+            nav.key(ui, MenuKey::Char(c));
+        }
+    }
+
+    #[test]
+    fn main_menu_selection_wraps_both_ways() {
+        let (mut nav, _) = nav("wrap");
+        let mut ui = UiState::new();
+        assert_eq!(nav.main_button(), MainButton::Singleplayer);
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Quit, "up from the top wraps");
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Singleplayer);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Multiplayer);
+    }
+
+    #[test]
+    fn the_main_menu_buttons_do_what_they_say() {
+        let (mut nav, _) = nav("buttons");
+        let mut ui = UiState::new();
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer);
+        assert_eq!(ui.screen(), Screen::MainMenu, "the app drives the world");
+
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Reprobe(None));
+        assert_eq!(ui.screen(), Screen::ServerList);
+
+        ui.on_escape();
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Quit);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Quit);
+        assert!(ui.quit_requested());
+    }
+
+    #[test]
+    fn add_edit_delete_round_trips_through_a_real_file() {
+        // The end-to-end persistence path, driven only by keys — the same calls
+        // the window makes.
+        let (mut nav, path) = nav("crud");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+
+        // Add: 'a', type a name, Tab, type an address, Enter.
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        type_str(&mut nav, &mut ui, "Home");
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "mc.example.com:25566");
+        let action = nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::ServerList, "saving returns to the list");
+        assert_eq!(nav.list().len(), 1);
+        assert_eq!(nav.list().get(0).unwrap().name, "Home");
+        assert_eq!(nav.list().get(0).unwrap().host, "mc.example.com");
+        assert_eq!(nav.list().get(0).unwrap().port, Some(25566));
+        assert!(
+            matches!(action, MenuAction::Reprobe(Some(_))),
+            "a saved entry should be probed: {action:?}"
+        );
+        assert_eq!(nav.save_error(), None, "the save must have succeeded");
+
+        // It is on disk *now*, not at exit: a fresh nav sees it.
+        assert_eq!(MenuNav::with_path(path.clone()).list().len(), 1);
+
+        // Edit: 'e', clear the name, retype, Enter.
+        nav.key(&mut ui, MenuKey::Char('e'));
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert_eq!(nav.form().name, "Home", "the form pre-fills");
+        assert_eq!(nav.form().address, "mc.example.com:25566");
+        for _ in 0..8 {
+            nav.key(&mut ui, MenuKey::Backspace);
+        }
+        type_str(&mut nav, &mut ui, "Away");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.list().get(0).unwrap().name, "Away");
+        assert_eq!(MenuNav::with_path(path.clone()).list().get(0).unwrap().name, "Away");
+
+        // Delete.
+        let action = nav.key(&mut ui, MenuKey::Delete);
+        assert!(matches!(action, MenuAction::Forget(_)), "{action:?}");
+        assert!(nav.list().is_empty());
+        assert!(MenuNav::with_path(path.clone()).list().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn cancelling_the_form_leaves_the_list_untouched() {
+        // The bug this guards: Escape from the edit form saving anyway.
+        let (mut nav, _) = nav("cancel");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        type_str(&mut nav, &mut ui, "ghost");
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "nowhere.example");
+        nav.key(&mut ui, MenuKey::Escape);
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert!(nav.list().is_empty(), "a cancelled form must save nothing");
+    }
+
+    #[test]
+    fn an_addressless_form_refuses_to_save() {
+        let (mut nav, _) = nav("empty");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        type_str(&mut nav, &mut ui, "just a label");
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(
+            ui.screen(),
+            Screen::ServerEdit,
+            "an invalid form must stay open rather than silently dropping input"
+        );
+        assert!(nav.list().is_empty());
+    }
+
+    #[test]
+    fn a_nameless_entry_falls_back_to_its_host() {
+        let (mut nav, _) = nav("noname");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "bare.example");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.list().get(0).unwrap().name, "bare.example");
+    }
+
+    #[test]
+    fn typing_in_the_list_is_a_command_and_typing_in_the_form_is_text() {
+        // 'a' must add a server from the list and type an 'a' in the form. Get
+        // this backwards and the list is unusable or the form cannot spell
+        // "australia.example.com".
+        let (mut nav, _) = nav("modal");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "aaa.example");
+        assert_eq!(nav.form().address, "aaa.example");
+        assert_eq!(ui.screen(), Screen::ServerEdit, "text must not navigate");
+    }
+
+    #[test]
+    fn enter_on_a_row_connects_and_shows_the_loading_screen() {
+        let (mut nav, _) = nav("connect");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "play.example");
+        nav.key(&mut ui, MenuKey::Enter);
+
+        match nav.key(&mut ui, MenuKey::Enter) {
+            MenuAction::Connect(e) => {
+                assert_eq!(e.host, "play.example");
+                assert_eq!(e.effective_port(), super::super::servers::DEFAULT_PORT);
+            }
+            other => panic!("expected Connect, got {other:?}"),
+        }
+        assert!(ui.is_connecting(), "the app must show a loading screen");
+        assert!(!ui.wants_cursor_grab());
+    }
+
+    #[test]
+    fn enter_on_an_empty_list_opens_the_add_form_instead_of_doing_nothing() {
+        let (mut nav, _) = nav("emptyenter");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+    }
+
+    #[test]
+    fn navigation_on_an_empty_list_cannot_panic_or_point_off_the_end() {
+        let (mut nav, _) = nav("emptynav");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        for _ in 0..5 {
+            nav.key(&mut ui, MenuKey::Up);
+            nav.key(&mut ui, MenuKey::Down);
+        }
+        assert_eq!(nav.server_index(), 0);
+        assert_eq!(nav.key(&mut ui, MenuKey::Delete), MenuAction::None);
+        assert_eq!(nav.key(&mut ui, MenuKey::Char('e')), MenuAction::None);
+    }
+
+    #[test]
+    fn deleting_the_last_row_moves_the_highlight_back_onto_the_list() {
+        // The bug this guards: an index left one past the end, which the
+        // renderer would then read as a missing row (or panic on `[]`).
+        let (mut nav, path) = nav("clamp");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        for host in ["a.example", "b.example", "c.example"] {
+            nav.key(&mut ui, MenuKey::Char('a'));
+            nav.key(&mut ui, MenuKey::Tab);
+            type_str(&mut nav, &mut ui, host);
+            nav.key(&mut ui, MenuKey::Enter);
+        }
+        assert_eq!(nav.list().len(), 3);
+        assert_eq!(nav.server_index(), 2, "adding highlights the new row");
+
+        nav.key(&mut ui, MenuKey::Delete);
+        assert_eq!(nav.server_index(), 1);
+        assert!(nav.list().get(nav.server_index()).is_some());
+        nav.key(&mut ui, MenuKey::Delete);
+        nav.key(&mut ui, MenuKey::Delete);
+        assert_eq!(nav.server_index(), 0);
+        assert!(nav.list().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn changing_a_rows_address_forgets_the_old_cached_status() {
+        // Otherwise the row keeps showing the MOTD of the server it used to be.
+        let (mut nav, _) = nav("readdress");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "old.example");
+        nav.key(&mut ui, MenuKey::Enter);
+
+        nav.key(&mut ui, MenuKey::Char('e'));
+        nav.key(&mut ui, MenuKey::Tab);
+        for _ in 0..40 {
+            nav.key(&mut ui, MenuKey::Backspace);
+        }
+        type_str(&mut nav, &mut ui, "new.example");
+        match nav.key(&mut ui, MenuKey::Enter) {
+            MenuAction::Forget(old) => assert_eq!(old.host, "old.example"),
+            other => panic!("expected Forget(old), got {other:?}"),
+        }
+
+        // Renaming *without* changing the address keeps the cached status.
+        nav.key(&mut ui, MenuKey::Char('e'));
+        type_str(&mut nav, &mut ui, "!");
+        match nav.key(&mut ui, MenuKey::Enter) {
+            MenuAction::Reprobe(Some(e)) => assert_eq!(e.host, "new.example"),
+            other => panic!("a rename should re-probe, not forget: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn r_refreshes_the_highlighted_row() {
+        let (mut nav, _) = nav("refresh");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "r.example");
+        nav.key(&mut ui, MenuKey::Enter);
+        match nav.key(&mut ui, MenuKey::Char('r')) {
+            MenuAction::Reprobe(Some(e)) => assert_eq!(e.host, "r.example"),
+            other => panic!("expected a single-row reprobe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_fields_reject_control_characters_and_respect_their_caps() {
+        let mut form = EditForm::adding();
+        form.push('\n');
+        form.push('\u{a7}');
+        form.push('\t');
+        assert!(form.name.is_empty(), "control chars must not enter a field");
+
+        for _ in 0..1000 {
+            form.push('x');
+        }
+        assert_eq!(form.name.chars().count(), MAX_NAME_CHARS);
+        form.next_field();
+        for _ in 0..1000 {
+            form.push('y');
+        }
+        assert_eq!(form.address.chars().count(), MAX_ADDRESS_CHARS);
+    }
+
+    #[test]
+    fn a_save_failure_is_reported_rather_than_swallowed() {
+        // A player who adds a server and sees it vanish deserves the reason.
+        // `/dev/null/...` cannot be a directory on any Unix.
+        let mut nav = MenuNav::with_path(std::path::PathBuf::from("/dev/null/nope/servers.json"));
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        nav.key(&mut ui, MenuKey::Tab);
+        type_str(&mut nav, &mut ui, "x.example");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.list().len(), 1, "the in-memory list still updates");
+        let err = nav.save_error().expect("a failed write must be reported");
+        assert!(err.contains("servers.json"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn escape_from_the_edit_form_never_quits_the_game() {
+        // Escape must unwind one level at a time all the way out.
+        let (mut nav, _) = nav("unwind");
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert!(!ui.quit_requested());
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(!ui.quit_requested());
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::Quit);
+        assert!(ui.quit_requested());
+    }
+
+    #[test]
+    fn menu_keys_do_nothing_on_the_world_screens() {
+        // A stray key from the menu mapping must never mutate the world's state.
+        let (mut nav, _) = nav("world");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        for key in [
+            MenuKey::Up,
+            MenuKey::Down,
+            MenuKey::Enter,
+            MenuKey::Delete,
+            MenuKey::Char('d'),
+        ] {
+            assert_eq!(nav.key(&mut ui, key), MenuAction::None, "{key:?}");
+            assert!(ui.is_playing(), "{key:?} left the world");
+        }
+    }
+}

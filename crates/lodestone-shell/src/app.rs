@@ -24,7 +24,10 @@ use crate::container::{ContainerFrame, ContainerRenderer};
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
-use crate::menu::UiState;
+use crate::menu::nav::{MenuAction, MenuKey, MenuNav};
+use crate::menu::render::MenuRenderer;
+use crate::menu::status::StatusCache;
+use crate::menu::{SessionKind, UiState};
 use crate::net::NetClient;
 use crate::sim::Sim;
 use lodestone_assets::ResourceLocation;
@@ -88,6 +91,191 @@ fn hotbar_slot_for(code: KeyCode) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Frame pacing
+// ---------------------------------------------------------------------------
+
+/// Vanilla's cap on how many 20 Hz client ticks a single update may run.
+///
+/// Read from the decompiled 26.2 client, not guessed:
+/// `.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java:262` declares
+/// `private static final int MAX_TICKS_PER_UPDATE = 10;` and `:1176` applies it
+/// as `for (int i = 0; i < Math.min(10, ticksToDo); i++)`. Note *where* the cap
+/// lives: `DeltaTracker.Timer::advanceGameTime` returns the full uncapped tick
+/// count and keeps the sub-tick residual, and `runTick` then simply **runs at
+/// most ten of them and drops the rest**. Missed real time is discarded, never
+/// replayed — which is the whole point.
+pub(crate) const MAX_TICKS_PER_UPDATE: u32 = 10;
+
+/// Length of one client tick in seconds (20 Hz), matching `sim`'s `TICK_DT`.
+pub(crate) const TICK_SECS: f64 = 1.0 / 20.0;
+
+/// The most real time one update may hand the simulation, in seconds.
+///
+/// `10 × 0.05 = 0.5`. Anything beyond this is dropped rather than replayed, so
+/// alt-tabbing away for a minute costs ten ticks of catch-up, not 1200.
+pub(crate) const MAX_CATCHUP_SECS: f64 = MAX_TICKS_PER_UPDATE as f64 * TICK_SECS;
+
+/// Presentation rate while the window is visible but **unfocused**. The
+/// simulation keeps running at the full 20 Hz either way; only presentation is
+/// throttled.
+pub(crate) const UNFOCUSED_FPS: u32 = 30;
+
+/// [`UNFOCUSED_FPS`] as the interval between presented frames.
+pub(crate) const UNFOCUSED_FRAME_INTERVAL: Duration =
+    Duration::from_nanos(1_000_000_000 / UNFOCUSED_FPS as u64);
+
+/// How long the event loop sleeps between iterations while unfocused. Kept
+/// comfortably shorter than [`TICK_SECS`] so the tick loop is never the thing
+/// being paced — if this ever exceeded 50 ms the sim would fall behind the
+/// server even though we are "still ticking".
+pub(crate) const BACKGROUND_POLL: Duration = Duration::from_millis(8);
+
+/// What one iteration of the event loop should do.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct FrameStep {
+    /// Real seconds to advance the simulation by, already clamped to
+    /// [`MAX_CATCHUP_SECS`].
+    pub dt: f64,
+    /// Whether to acquire a swapchain image and draw. When `false` the sim still
+    /// steps — we skip *presenting*, never ticking.
+    pub render: bool,
+}
+
+/// Owns the frame clock and decides, per iteration, how far to advance the sim
+/// and whether to draw.
+///
+/// ## Why this lives here and not in `sim`
+///
+/// `Sim::step` already clamps its own accumulator, but the *policy* — how much
+/// catch-up is acceptable, and whether an unfocused window should present —
+/// belongs to the driver, alongside the winit focus/occlusion events that inform
+/// it. Keeping the clock here also means the sim is advanced by an explicit,
+/// injectable `dt`, so this is testable against a real `Sim` with a synthetic
+/// clock and no window.
+///
+/// ## The bug this exists to fix
+///
+/// Presentation used to gate simulation: `redraw` stepped the sim and then
+/// acquired a swapchain image in the same call, with the GPU-readiness guard
+/// *before* the step. A backgrounded or occluded window makes `acquire()` slow
+/// (macOS stops vending drawables to an occluded `CAMetalLayer` and the call
+/// stalls until it times out), so the loop's iteration rate collapsed — and with
+/// it the tick rate, since ticks only advanced when a frame did. Skipping
+/// presentation instead of skipping the tick is what keeps keep-alives and
+/// movement packets flowing while tabbed out; a client the server considers
+/// stalled stops receiving chunks entirely.
+///
+/// ## Why the unfocused frame schedule is absolute, not "elapsed since the last
+/// frame"
+///
+/// This was measured, not reasoned about. The obvious gate —
+/// `now - last_render >= interval`, then `last_render = now` — **loses frames**,
+/// because it can only fire on a loop iteration and each iteration pushes the
+/// next deadline out by however far it overshot. At a 120 Hz loop with a 30 fps
+/// target there are only four chances per interval, and the accumulated
+/// overshoot cost 4 of every 30 frames: a one-second unfocused run presented
+/// **26** frames, not 30. A 30 fps limiter that silently delivers 26 is the
+/// quiet kind of wrong.
+///
+/// So the deadline is absolute: `next_render` advances by exactly one interval
+/// from *itself*, never from `now`, and phase error cannot accumulate. The one
+/// exception is a stall longer than an interval, where the schedule is re-based
+/// onto `now` — otherwise coming back from a two-minute alt-tab would present a
+/// burst of catch-up frames, which is the same mistake as replaying catch-up
+/// ticks.
+#[derive(Debug)]
+pub(crate) struct FramePacer {
+    last_step: Instant,
+    /// The absolute time the next unfocused frame is due. Advanced by whole
+    /// intervals so the presented rate does not drift below the target.
+    next_render: Instant,
+    focused: bool,
+    occluded: bool,
+}
+
+impl FramePacer {
+    /// A pacer whose clock starts at `now`, focused and visible.
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            last_step: now,
+            next_render: now + UNFOCUSED_FRAME_INTERVAL,
+            focused: true,
+            occluded: false,
+        }
+    }
+
+    /// Record a focus change. Does **not** touch the step clock: the elapsed
+    /// time since the last step is real time the sim still owes, and it is
+    /// clamped on the next `begin_frame` like any other stall.
+    pub(crate) fn set_focused(&mut self, focused: bool) {
+        self.focused = focused;
+    }
+
+    /// Record an occlusion change (window fully covered / minimised).
+    pub(crate) fn set_occluded(&mut self, occluded: bool) {
+        self.occluded = occluded;
+    }
+
+    /// Whether the window currently has focus. Test-only: the app never asks,
+    /// because focus must not gate anything except presentation — which
+    /// [`Self::begin_frame`] already decides.
+    #[cfg(test)]
+    pub(crate) fn focused(&self) -> bool {
+        self.focused
+    }
+
+    /// Advance the frame clock to `now` and decide what this iteration does.
+    ///
+    /// The returned `dt` is the real elapsed time **clamped** to
+    /// [`MAX_CATCHUP_SECS`]; the excess is dropped, exactly as vanilla drops
+    /// ticks past `MAX_TICKS_PER_UPDATE`.
+    pub(crate) fn begin_frame(&mut self, now: Instant) -> FrameStep {
+        let dt = now.saturating_duration_since(self.last_step).as_secs_f64();
+        self.last_step = now;
+
+        let render = if self.occluded {
+            // Nothing is on screen to update, and acquiring a drawable is what
+            // stalls. Drop presentation entirely and keep ticking.
+            false
+        } else if self.focused {
+            // Vsync (or the compositor) paces us; do not second-guess it.
+            self.next_render = now + UNFOCUSED_FRAME_INTERVAL;
+            true
+        } else {
+            now >= self.next_render
+        };
+        if render && !self.focused {
+            // Advance the deadline from itself, not from `now`, so overshoot
+            // does not accumulate into a lower delivered frame rate. Re-base
+            // only when we are more than a whole interval late, which means a
+            // real stall rather than ordinary jitter — replaying the backlog as
+            // a burst of frames would be the presentation-side version of the
+            // catch-up-tick bug.
+            self.next_render += UNFOCUSED_FRAME_INTERVAL;
+            if self.next_render <= now {
+                self.next_render = now + UNFOCUSED_FRAME_INTERVAL;
+            }
+        }
+
+        FrameStep {
+            dt: dt.min(MAX_CATCHUP_SECS),
+            render,
+        }
+    }
+
+    /// How the event loop should wait after this iteration: spin while focused
+    /// (vsync paces us), otherwise sleep briefly so a backgrounded window stops
+    /// burning a core while still ticking well above 20 Hz.
+    pub(crate) fn control_flow(&self, now: Instant) -> ControlFlow {
+        if self.focused && !self.occluded {
+            ControlFlow::Poll
+        } else {
+            ControlFlow::WaitUntil(now + BACKGROUND_POLL)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Windowed
 // ---------------------------------------------------------------------------
 
@@ -133,6 +321,21 @@ pub(crate) fn launch_singleplayer() -> Result<NetClient, LaunchError> {
     Err(LaunchError::NoServerProtocol)
 }
 
+/// Whether argv asked for a connection, i.e. whether to bypass the main menu.
+///
+/// True for `--live`, or for a `--host`/`--port` that differs from the default.
+///
+/// **Known wart.** `--host 127.0.0.1` — spelling out the default — is
+/// indistinguishable here from passing nothing, so it lands on the menu. The
+/// clean fix is one `Option`-shaped field in [`Config`] recording whether the
+/// flag was seen; `config.rs` is outside this change's file scope, so the
+/// comparison against `Config::default()` stands in for it. Nothing depends on
+/// the distinction today: `--live` is the flag every script and gate uses.
+fn requested_a_connection(config: &Config) -> bool {
+    let defaults = Config::default();
+    config.connect_in_window || config.host != defaults.host || config.port != defaults.port
+}
+
 struct WindowApp {
     config: Config,
     sim: Sim,
@@ -146,8 +349,27 @@ struct WindowApp {
     effects: Option<EffectsRenderer>,
     container: Option<ContainerRenderer>,
     grabbed: bool,
+    /// Frame clock: clamps catch-up and throttles presentation when the window
+    /// is unfocused or occluded. The sim ticks regardless.
+    pacer: FramePacer,
     /// Playing ↔ paused screen state; owns cursor-grab intent and shutdown.
     ui: UiState,
+    /// Menu selection, the add/edit form, and the saved server list.
+    nav: MenuNav,
+    /// Per-server status pings for the multiplayer list. Probes run on their own
+    /// threads; `pump()` moves results into slots once per frame.
+    statuses: StatusCache,
+    /// Self-contained menu pipeline (own shader, own buffer, clears the frame).
+    /// `None` until GPU bring-up.
+    menu: Option<MenuRenderer>,
+    /// Decoded favicon mosaics, so a server's PNG is inflated once rather than
+    /// once per frame.
+    favicons: crate::menu::render::FaviconCache,
+    /// Last cursor position in physical pixels, for menu hit-testing. Physical
+    /// because that is the space `SurfaceTarget::size` and the menu layout use;
+    /// mixing in logical coordinates puts the hit rects at half scale on a
+    /// Retina display.
+    cursor: (f32, f32),
     /// F3 debug overlay visibility (starts on — it's the instrument, §S4).
     show_debug: bool,
     /// Whether Tab is currently held (shows the player-list overlay).
@@ -180,7 +402,13 @@ impl WindowApp {
             effects: None,
             container: None,
             grabbed: false,
+            pacer: FramePacer::new(Instant::now()),
             ui: UiState::new(),
+            nav: MenuNav::new(),
+            statuses: StatusCache::new(),
+            menu: None,
+            favicons: crate::menu::render::FaviconCache::new(),
+            cursor: (0.0, 0.0),
             show_debug: true,
             tab_held: false,
             chat_input: ChatInput::new(),
@@ -253,6 +481,152 @@ impl WindowApp {
         }
     }
 
+    /// Open a live connection to `host:port` and show the loading screen.
+    ///
+    /// Factored out of `resumed` because the menu's Join button needs the exact
+    /// same sequence, including the entity light sampler — which must be
+    /// installed at connect time, not after login (see the long note at the
+    /// `resumed` call site for why).
+    fn connect_to(&mut self, host: String, port: u16) {
+        let net = NetClient::connect(host, port, self.config.protocol);
+        if let Some(render) = self.render.as_mut() {
+            let handle = net.shared_handle();
+            render.set_entity_light_source(move |feet| {
+                crate::net::entity_light_at(
+                    &handle,
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                )
+            });
+        }
+        self.sim.attach_net(net);
+    }
+
+    /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
+    /// has no use for it.
+    fn menu_key_for(event: &winit::event::KeyEvent) -> Option<MenuKey> {
+        if let PhysicalKey::Code(code) = event.physical_key {
+            match code {
+                KeyCode::ArrowUp => return Some(MenuKey::Up),
+                KeyCode::ArrowDown => return Some(MenuKey::Down),
+                KeyCode::Enter | KeyCode::NumpadEnter => return Some(MenuKey::Enter),
+                KeyCode::Escape => return Some(MenuKey::Escape),
+                KeyCode::Tab => return Some(MenuKey::Tab),
+                KeyCode::Backspace => return Some(MenuKey::Backspace),
+                KeyCode::Delete => return Some(MenuKey::Delete),
+                _ => {}
+            }
+        }
+        // Anything else is text. `KeyEvent::text` is already the composed
+        // character, so this is the path that makes non-US layouts type
+        // correctly into the address field.
+        event
+            .text
+            .as_ref()
+            .and_then(|t| t.chars().next())
+            .filter(|c| !c.is_control())
+            .map(MenuKey::Char)
+    }
+
+    /// Feed one menu key through the navigator and act on what it asks for.
+    fn handle_menu_key(&mut self, key: MenuKey) {
+        let action = self.nav.key(&mut self.ui, key);
+        self.apply_menu_action(action);
+    }
+
+    /// Perform the one side effect a [`MenuAction`] names. Exhaustive on purpose:
+    /// a new variant must fail to compile here rather than silently do nothing.
+    fn apply_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::None => {}
+            MenuAction::Singleplayer => {
+                // The local worldgen world. `Sim` already generated it at
+                // construction, so this is immediate.
+                self.ui.enter_dev_world();
+                self.set_grab(true);
+            }
+            MenuAction::Connect(entry) => {
+                self.connect_to(entry.host.clone(), entry.effective_port());
+            }
+            MenuAction::Quit => {}
+            MenuAction::Reprobe(Some(entry)) => self.statuses.refresh_one(&entry),
+            MenuAction::Reprobe(None) => {
+                self.statuses.refresh(self.nav.list().entries());
+            }
+            MenuAction::Forget(entry) => {
+                self.statuses.forget(&entry);
+                // A delete or re-address changes the row set; probe whatever is
+                // now in the list (idempotent, so this costs nothing per frame).
+                self.statuses.refresh(self.nav.list().entries());
+            }
+        }
+    }
+
+    /// Route a mouse position (physical pixels) to a menu row, if it is over one.
+    fn menu_row_at(&mut self, x: f32, y: f32) -> Option<usize> {
+        let frame = crate::menu::render::frame_for(
+            &self.ui,
+            &self.nav,
+            &self.statuses,
+            &mut self.favicons,
+        )?;
+        let (w, h) = self.target.as_ref().map(RenderTarget::size)?;
+        (0..frame.rows.len()).find(|&i| {
+            crate::menu::render::row_rect(&frame.rows, i, w as f32, h as f32)
+                .is_some_and(|(rx, ry, rw, rh)| {
+                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+                })
+        })
+    }
+
+    /// Draw one menu screen. Returns `false` when the current screen is not a
+    /// menu, so the caller falls through to the world path.
+    fn draw_menu(&mut self) -> bool {
+        // Land any finished status pings before building the frame, or a row
+        // shows "PINGING" for one frame longer than it needs to.
+        self.statuses.pump();
+        // `frame_for` is the authority on which screens this renderer owns — it
+        // covers the three menu screens *and* the error screen. Asking it,
+        // rather than re-deriving the set here, is what keeps the two from
+        // drifting apart into a screen that is drawn twice or not at all.
+        let Some(frame) = crate::menu::render::frame_for(
+            &self.ui,
+            &self.nav,
+            &self.statuses,
+            &mut self.favicons,
+        ) else {
+            return false;
+        };
+        let (Some(gpu), Some(target), Some(menu)) = (
+            self.gpu.as_ref(),
+            self.target.as_mut(),
+            self.menu.as_mut(),
+        ) else {
+            // GPU not up yet; still report the screen as handled so the world
+            // path does not run for a menu.
+            return true;
+        };
+        let (w, h) = target.size();
+        let device = gpu.device();
+        let queue = gpu.queue();
+        let surface = match target.acquire() {
+            Ok(f) => f,
+            Err(e) => {
+                if e.needs_reconfigure() {
+                    target.reconfigure(device);
+                }
+                return true;
+            }
+        };
+        menu.render(device, queue, surface.view(), &frame, w, h);
+        if let Some(window) = &self.window {
+            window.pre_present_notify();
+        }
+        surface.present(queue);
+        true
+    }
+
     /// Route one key press to the open chat prompt. Enter sends the line through
     /// the client's chat/command seam, Escape cancels, Backspace edits, and any
     /// printable text is appended (control chars and `§` are filtered by
@@ -293,6 +667,29 @@ impl WindowApp {
             self.set_grab(false);
         }
 
+        // Pace the frame and tick **before** the GPU-readiness guard. Simulation
+        // must never be conditional on a swapchain image: keep-alives and the
+        // per-tick movement packet ride this loop, and a client the server
+        // considers stalled is sent no chunks at all. `step.dt` is already
+        // clamped to vanilla's ten-tick catch-up budget, so a long stall is
+        // dropped rather than replayed in a burst.
+        let frame_start = Instant::now();
+        let step = self.pacer.begin_frame(frame_start);
+        let dt = step.dt;
+        self.sim.step(dt);
+        if !step.render {
+            // Unfocused (throttled to ~30 fps) or occluded: skip presenting
+            // only. `acquire()` is the call that stalls on a backgrounded
+            // window, so it is precisely what must not run here.
+            return;
+        }
+
+        // A menu screen owns the whole frame — its pass clears, so there is no
+        // world render behind it and none of the HUD state below is built.
+        if self.draw_menu() {
+            return;
+        }
+
         let (Some(gpu), Some(target), Some(render), Some(hud), Some(container_renderer)) = (
             self.gpu.as_ref(),
             self.target.as_mut(),
@@ -304,9 +701,6 @@ impl WindowApp {
         };
         let device = gpu.device();
         let queue = gpu.queue();
-
-        let frame_start = Instant::now();
-        let dt = self.sim.step_realtime();
 
         // Upload any freshly-meshed sections, and drop sections emptied by edits.
         for meshed in self.sim.drain_meshes() {
@@ -608,13 +1002,16 @@ impl ApplicationHandler for WindowApp {
             render.upload_section(gpu.device(), meshed.key, &meshed.mesh);
         }
 
-        // Choose the session per config. Multiplayer opens a live connection and
-        // shows a loading (Connecting) screen until login; otherwise we drop
-        // straight into the local dev world (the worldgen stand-in — *not* the
-        // integrated server, which isn't wired yet). Singleplayer is staged: see
-        // `WindowApp::begin_singleplayer`.
-        if self.config.connect_in_window {
-            self.ui.begin(crate::menu::SessionKind::Multiplayer);
+        let menu = MenuRenderer::new(gpu.device(), format);
+
+        // Choose the session per config. A connection target on the command line
+        // dials it immediately (and shows a loading screen until login);
+        // otherwise the window opens on the **main menu**, which is now the GUI
+        // entry point. Singleplayer from the menu enters the local worldgen world
+        // — *not* the integrated server, which isn't wired yet (see
+        // `WindowApp::begin_singleplayer`).
+        if requested_a_connection(&self.config) {
+            self.ui.begin(SessionKind::Multiplayer);
             let net = NetClient::connect(
                 self.config.host.clone(),
                 self.config.port,
@@ -642,9 +1039,9 @@ impl ApplicationHandler for WindowApp {
                 )
             });
             self.sim.attach_net(net);
-        } else {
-            self.ui.enter_dev_world();
         }
+        // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
+        // already put us on. Nothing else to do.
 
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -653,7 +1050,8 @@ impl ApplicationHandler for WindowApp {
         self.hud = Some(hud);
         self.effects = Some(effects);
         self.container = Some(container);
-        // Grab only if the chosen screen wants it (dev world yes; loading no).
+        self.menu = Some(menu);
+        // Grab only if the chosen screen wants it (menus and loading: no).
         self.set_grab(self.ui.wants_cursor_grab());
     }
 
@@ -677,9 +1075,46 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::Focused(false) => {
                 // Losing focus pauses (and releases the pointer) so we don't
-                // keep grabbing the mouse of a backgrounded window.
+                // keep grabbing the mouse of a backgrounded window. The *world*
+                // is not paused by this: `Screen::Paused` is local UI state and
+                // the sim keeps ticking (see `FramePacer`), which is what keeps
+                // keep-alives and movement flowing to the server.
                 self.ui.pause();
                 self.set_grab(false);
+                self.pacer.set_focused(false);
+            }
+            WindowEvent::Focused(true) => {
+                // Presentation resumes at full rate. The pointer is *not*
+                // re-grabbed here — the player clicks to resume, as before.
+                self.pacer.set_focused(true);
+            }
+            WindowEvent::Occluded(occluded) => {
+                // Fully covered or minimised: there is nothing on screen to
+                // update and acquiring a drawable is what stalls, so drop
+                // presentation entirely while continuing to tick.
+                self.pacer.set_occluded(occluded);
+            }
+            // Hovering a menu row highlights it, so the mouse and the keyboard
+            // drive one selection rather than two.
+            WindowEvent::CursorMoved { position, .. }
+                if crate::menu::render::owns_frame(self.ui.screen()) =>
+            {
+                self.cursor = (position.x as f32, position.y as f32);
+                if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                    self.nav.hover(&self.ui, row);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. }
+                if crate::menu::render::owns_frame(self.ui.screen()) =>
+            {
+                if state == ElementState::Pressed && button == MouseButton::Left {
+                    // Only a click *on a row* activates: clicking the backdrop
+                    // must not confirm whatever happens to be highlighted.
+                    if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
+                        self.nav.hover(&self.ui, row);
+                        self.handle_menu_key(MenuKey::Enter);
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.ui.is_paused() {
@@ -722,8 +1157,20 @@ impl ApplicationHandler for WindowApp {
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
 
-                // While the chat prompt is open it captures every key.
-                if self.ui.is_chat_open() {
+                // A menu screen captures every key: the edit form needs the
+                // whole keyboard, and no gameplay binding may fire behind it.
+                if crate::menu::render::owns_frame(self.ui.screen()) {
+                    if pressed {
+                        if let Some(key) = Self::menu_key_for(&event) {
+                            self.handle_menu_key(key);
+                            // Entering the world grabs; leaving it releases.
+                            let want = self.ui.wants_cursor_grab();
+                            if want != self.grabbed {
+                                self.set_grab(want);
+                            }
+                        }
+                    }
+                } else if self.ui.is_chat_open() {
                     if pressed {
                         self.handle_chat_key(&event);
                     }
@@ -811,10 +1258,14 @@ impl ApplicationHandler for WindowApp {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+        // Spin while focused (vsync paces the loop); otherwise sleep in short
+        // `BACKGROUND_POLL` slices so a backgrounded window stops burning a core
+        // yet still wakes far more often than the 20 Hz tick needs.
+        event_loop.set_control_flow(self.pacer.control_flow(Instant::now()));
     }
 }
 
@@ -968,6 +1419,290 @@ fn run_connect(config: Config) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A cheap sim: headless mode with the smallest render distance that still
+    /// generates real terrain, so physics ticks do real collision work.
+    fn pacing_sim() -> Sim {
+        Sim::new(Config {
+            mode: Mode::Headless,
+            render_distance: 2,
+            ..Config::default()
+        })
+    }
+
+    /// Ticks a real `Sim` executes when advanced by `dt` in one call.
+    fn ticks_for(sim: &mut Sim, dt: f64) -> u64 {
+        let before = sim.tick_count();
+        sim.step(dt);
+        sim.tick_count() - before
+    }
+
+    #[test]
+    fn vanillas_cap_is_ten_ticks_of_real_time() {
+        // Guards the constant against a silent edit. 10 ticks × 50 ms = 500 ms;
+        // read from Minecraft.java:262 / :1176 (see `MAX_TICKS_PER_UPDATE`).
+        assert_eq!(MAX_TICKS_PER_UPDATE, 10);
+        assert!((MAX_CATCHUP_SECS - 0.5).abs() < 1e-12, "{MAX_CATCHUP_SECS}");
+    }
+
+    #[test]
+    fn a_long_stall_is_clamped_not_replayed() {
+        // The reported bug: tab out for a minute, tab back in, and the client
+        // tries to run every tick it missed. Sixty seconds is 1200 ticks.
+        let stall = Duration::from_secs(60);
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        let step = pacer.begin_frame(t0 + stall);
+
+        assert!(
+            (step.dt - MAX_CATCHUP_SECS).abs() < 1e-12,
+            "a {stall:?} stall must be clamped to {MAX_CATCHUP_SECS}s, got {}",
+            step.dt
+        );
+
+        // Drive a *real* sim with it and count the ticks that actually run.
+        let mut sim = pacing_sim();
+        let clamped = ticks_for(&mut sim, step.dt);
+        assert!(
+            clamped <= u64::from(MAX_TICKS_PER_UPDATE),
+            "catch-up must never exceed vanilla's cap, got {clamped}"
+        );
+
+        // Measured: **5**, not 10. `Sim::step` applies its own, tighter
+        // `dt.clamp(0.0, 0.25)` (sim.rs:938) to the accumulator *before* the
+        // tick loop, so the shell's effective catch-up budget is half vanilla's
+        // 500 ms. That inner clamp predates this pacer (it is in the initial
+        // commit) and lives in a file this change does not own, so the number is
+        // pinned here rather than corrected: if anyone loosens or removes it,
+        // this fails and the two caps get reconciled deliberately.
+        assert_eq!(
+            clamped, 5,
+            "sim.rs's inner 0.25 s clamp is expected to bind before app.rs's \
+             {MAX_CATCHUP_SECS} s one; if this changed, reconcile the two caps"
+        );
+
+        // -- negative control ------------------------------------------------
+        // Prove the detector fires: the same real `Sim`, driven the
+        // *proportional* way the bug describes (one tick's worth of dt at a
+        // time until the stall is consumed), executes the full 1200 ticks. If
+        // `tick_count` could not observe a burst, this would not move either.
+        let mut control = pacing_sim();
+        let mut unclamped = 0u64;
+        for _ in 0..(stall.as_secs_f64() / TICK_SECS) as u32 {
+            unclamped += ticks_for(&mut control, TICK_SECS);
+        }
+        assert_eq!(unclamped, 1200, "control must replay every missed tick");
+        assert!(
+            unclamped > clamped * 100,
+            "clamp must be a large reduction: {clamped} vs {unclamped}"
+        );
+    }
+
+    #[test]
+    fn a_normal_frame_is_untouched_by_the_clamp() {
+        // The clamp must be invisible at playable frame rates, or it would be
+        // silently dropping game time during ordinary play (which is exactly
+        // what a too-tight cap does: at 4 fps a 0.25 s cap discards 75% of it).
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        let frame = Duration::from_micros(16_667); // 60 fps
+        let step = pacer.begin_frame(t0 + frame);
+        assert!(
+            (step.dt - frame.as_secs_f64()).abs() < 1e-9,
+            "60 fps frame was altered: {}",
+            step.dt
+        );
+
+        // And a 4 fps frame — the rate an occluded window degrades to — must
+        // still deliver all 250 ms, i.e. five whole ticks, not be truncated.
+        let mut pacer = FramePacer::new(t0);
+        let step = pacer.begin_frame(t0 + Duration::from_millis(250));
+        let mut sim = pacing_sim();
+        assert_eq!(ticks_for(&mut sim, step.dt), 5);
+    }
+
+    #[test]
+    fn an_unfocused_window_keeps_ticking_and_presents_at_thirty_fps() {
+        // The whole point: presentation throttles, simulation does not.
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        pacer.set_focused(false);
+
+        let mut sim = pacing_sim();
+        let mut rendered = 0u32;
+        let mut ticks = 0u64;
+        // One simulated second at a 120 Hz loop rate.
+        for i in 1..=120u32 {
+            let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0));
+            if step.render {
+                rendered += 1;
+            }
+            ticks += ticks_for(&mut sim, step.dt);
+        }
+
+        // 19 or 20: one simulated second at 20 Hz, modulo where the fixed-step
+        // residual happens to land (1/120 is not exact in binary, so the last
+        // tick can fall just past the second boundary).
+        assert!(
+            (19..=20).contains(&ticks),
+            "unfocused must still tick at ~20 Hz, got {ticks}"
+        );
+        assert!(
+            (30..=31).contains(&rendered),
+            "unfocused presentation should be ~30 fps, got {rendered}"
+        );
+        assert!(
+            u64::from(rendered) > ticks,
+            "sanity: 30 fps presentation must still outpace 20 Hz ticking"
+        );
+    }
+
+    /// Counts frames a naive "elapsed since the last presented frame" gate would
+    /// deliver over `iters` iterations of a `loop_hz` loop. This is verbatim the
+    /// implementation [`FramePacer`] used to have — including the `as_secs_f64()`
+    /// comparison against a `1.0 / 30.0` target, which is part of why it drifted:
+    /// a `Duration` is whole nanoseconds, so an interval that lands on
+    /// 33 333 333 ns is *always* a hair short of 1/30 s and the very iteration
+    /// that should have presented never does.
+    fn naive_gate_frames(loop_hz: u32, iters: u32) -> u32 {
+        let target_secs = 1.0 / f64::from(UNFOCUSED_FPS);
+        let t0 = Instant::now();
+        let mut last_render = t0;
+        let mut n = 0;
+        for i in 1..=iters {
+            let now = t0 + Duration::from_secs_f64(f64::from(i) / f64::from(loop_hz));
+            if now.saturating_duration_since(last_render).as_secs_f64() >= target_secs {
+                last_render = now;
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Same span, driven through the real pacer while unfocused.
+    fn paced_frames(loop_hz: u32, iters: u32) -> u32 {
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        pacer.set_focused(false);
+        let mut n = 0;
+        for i in 1..=iters {
+            let now = t0 + Duration::from_secs_f64(f64::from(i) / f64::from(loop_hz));
+            if pacer.begin_frame(now).render {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn the_unfocused_frame_schedule_does_not_drift_below_its_target() {
+        // The bug, and the negative control for the fix. A 30 fps limiter that
+        // quietly delivers 26 fps is the whole reason the deadline is absolute:
+        // the naive gate can only fire on a loop iteration, and each firing
+        // pushes the next deadline out by however far it overshot.
+        //
+        // Measured, one simulated second each:
+        //   loop     naive   paced   target
+        //   120 Hz     26      30      30
+        //    75 Hz     25      30      30
+        //    77 Hz     26      30      30
+        for loop_hz in [120u32, 75, 77, 144, 240] {
+            let naive = naive_gate_frames(loop_hz, loop_hz);
+            let paced = paced_frames(loop_hz, loop_hz);
+            assert!(
+                (UNFOCUSED_FPS..=UNFOCUSED_FPS + 1).contains(&paced),
+                "at {loop_hz} Hz the absolute schedule delivered {paced}, \
+                 wanted {UNFOCUSED_FPS}"
+            );
+            // The control must be observed *failing* the same assertion, or this
+            // test proves only that some number came out of some function.
+            assert!(
+                naive < UNFOCUSED_FPS,
+                "control did not fire at {loop_hz} Hz: the naive gate delivered \
+                 {naive}, so this test is not measuring the drift it exists for"
+            );
+        }
+        // Exact pre-fix number at the loop rate the sibling test uses, pinned so
+        // a future refactor that reintroduces drift is unambiguous.
+        assert_eq!(naive_gate_frames(120, 120), 26);
+    }
+
+    #[test]
+    fn coming_back_from_a_stall_resumes_the_rate_rather_than_replaying_a_backlog() {
+        // The presentation-side twin of the catch-up-tick bug: a schedule that
+        // advanced by whole intervals *unconditionally* would owe 3600 frames
+        // after a two-minute stall and present them as fast as the loop spins.
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        pacer.set_focused(false);
+        // Two minutes with no iterations at all, then a tight 120 Hz loop for
+        // half a second.
+        let resume = t0 + Duration::from_secs(120);
+        assert!(pacer.begin_frame(resume).render, "the first frame back draws");
+
+        let mut after = 0;
+        for i in 1..=60u32 {
+            if pacer
+                .begin_frame(resume + Duration::from_secs_f64(f64::from(i) / 120.0))
+                .render
+            {
+                after += 1;
+            }
+        }
+        // Half a second at 30 fps is 15 frames. The backlog would be ~3600.
+        assert!(
+            (14..=16).contains(&after),
+            "expected the steady ~30 fps rate after resuming, got {after} frames \
+             in 0.5 s — a replayed backlog looks like ~60 (loop-rate-bound)"
+        );
+    }
+
+    #[test]
+    fn an_occluded_window_skips_presenting_entirely_but_still_ticks() {
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        pacer.set_occluded(true);
+
+        let mut sim = pacing_sim();
+        let mut ticks = 0u64;
+        for i in 1..=120u32 {
+            let step = pacer.begin_frame(t0 + Duration::from_secs_f64(f64::from(i) / 120.0));
+            assert!(!step.render, "occluded windows must not acquire a drawable");
+            ticks += ticks_for(&mut sim, step.dt);
+        }
+        assert!(
+            (19..=20).contains(&ticks),
+            "occluded must still tick at ~20 Hz, got {ticks}"
+        );
+
+        // Control: the identical loop with occlusion cleared *does* render, so
+        // the assertion above is testing occlusion and not a dead pacer.
+        pacer.set_occluded(false);
+        let step = pacer.begin_frame(t0 + Duration::from_secs(2));
+        assert!(step.render, "clearing occlusion must restore presentation");
+    }
+
+    #[test]
+    fn focus_selects_the_control_flow_without_ever_stopping_the_loop() {
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        assert!(matches!(pacer.control_flow(t0), ControlFlow::Poll));
+        assert!(pacer.focused());
+
+        pacer.set_focused(false);
+        match pacer.control_flow(t0) {
+            ControlFlow::WaitUntil(at) => {
+                let slice = at.saturating_duration_since(t0);
+                assert!(
+                    slice < Duration::from_secs_f64(TICK_SECS),
+                    "background poll {slice:?} must wake faster than one 50 ms tick, \
+                     or the sim falls behind the server while merely unfocused"
+                );
+            }
+            other => panic!("unfocused must sleep, not spin or wait forever: {other:?}"),
+        }
+        assert!(!pacer.focused());
+    }
 
     #[test]
     fn staged_singleplayer_launch_fails_loudly_with_a_fix_hint() {

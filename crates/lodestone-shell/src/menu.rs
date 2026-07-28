@@ -1,12 +1,20 @@
-//! The shell's screen / session **state machine** — structure only.
+//! The shell's screen / session **state machine**, and the menu built on it.
 //!
-//! There is deliberately no text or widget rendering here: `impl-assets` owns
-//! fonts and the GUI has no glyph source yet. What *is* independent of drawing
-//! text — and is the actual hard part — is the lifecycle: choosing a session,
-//! establishing it, playing, pausing, and every way it can fail. A menu that can
-//! only succeed is the same class of defect as a test that can only pass, so the
-//! failure edges (connection refused, server-start failure, disconnect mid-game,
-//! quit while still loading) are modelled and tested first-class here.
+//! This file is structure only — which screen is showing and every legal edge
+//! between them. The rest of the menu lives in the submodules:
+//!
+//! | module | what it owns |
+//! |---|---|
+//! | [`nav`] | selection, the add/edit form, what a keypress means |
+//! | [`render`] | layout + a self-contained GPU pipeline |
+//! | [`servers`] | the saved server list and its on-disk JSON |
+//! | [`status`] | background status pings and their cache |
+//!
+//! The lifecycle is the actual hard part: choosing a session, establishing it,
+//! playing, pausing, and every way it can fail. A menu that can only succeed is
+//! the same class of defect as a test that can only pass, so the failure edges
+//! (connection refused, server-start failure, disconnect mid-game, quit while
+//! still loading) are modelled and tested first-class here.
 //!
 //! This owns cursor-grab intent, whether gameplay input is consumed, and the
 //! clean-shutdown latch; [`crate::app`] maps those queries onto winit and drives
@@ -24,6 +32,11 @@
 //! [`Screen::Error`] rather than silently doing nothing (see
 //! [`crate::app`]'s staged launcher).
 
+pub mod nav;
+pub mod render;
+pub mod servers;
+pub mod status;
+
 /// What the player chose to start from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
@@ -39,6 +52,12 @@ pub enum SessionKind {
 pub enum Screen {
     /// Title screen: choose Singleplayer / Multiplayer / Quit.
     MainMenu,
+    /// The multiplayer server list: pick a saved server, or add/edit/delete one.
+    /// Reached from [`Screen::MainMenu`]; Escape returns there.
+    ServerList,
+    /// The add/edit form for one server entry. Reached from
+    /// [`Screen::ServerList`]; Escape returns there **without** saving.
+    ServerEdit,
     /// A session is being established — integrated-server startup and/or the
     /// connect handshake. Nothing is playable yet; the pointer is free so the
     /// user can still cancel (quit) while it loads.
@@ -139,6 +158,28 @@ impl UiState {
         self.screen == Screen::Connecting
     }
 
+    /// Whether the multiplayer server list is showing.
+    #[must_use]
+    pub fn is_server_list(&self) -> bool {
+        self.screen == Screen::ServerList
+    }
+
+    /// Whether the add/edit form is showing.
+    #[must_use]
+    pub fn is_server_edit(&self) -> bool {
+        self.screen == Screen::ServerEdit
+    }
+
+    /// Whether the shell is on any pre-session menu screen, i.e. no world is
+    /// loaded and the menu renderer owns the frame.
+    #[must_use]
+    pub fn is_menu(&self) -> bool {
+        matches!(
+            self.screen,
+            Screen::MainMenu | Screen::ServerList | Screen::ServerEdit
+        )
+    }
+
     /// The pointer should be grabbed **exactly** when playing. The app calls
     /// `set_grab(ui.wants_cursor_grab())` after every transition rather than
     /// tracking grab separately.
@@ -217,6 +258,37 @@ impl UiState {
         }
     }
 
+    // -- menu navigation --------------------------------------------------
+
+    /// Open the multiplayer server list. Only from the title screen, so a stray
+    /// call cannot pull the player out of a world.
+    pub fn open_server_list(&mut self) {
+        if self.screen == Screen::MainMenu {
+            self.screen = Screen::ServerList;
+        }
+    }
+
+    /// Back to the title screen from the server list.
+    pub fn close_server_list(&mut self) {
+        if self.screen == Screen::ServerList {
+            self.screen = Screen::MainMenu;
+        }
+    }
+
+    /// Open the add/edit form. Only from the server list.
+    pub fn open_server_edit(&mut self) {
+        if self.screen == Screen::ServerList {
+            self.screen = Screen::ServerEdit;
+        }
+    }
+
+    /// Leave the add/edit form, whether the entry was saved or cancelled.
+    pub fn close_server_edit(&mut self) {
+        if self.screen == Screen::ServerEdit {
+            self.screen = Screen::ServerList;
+        }
+    }
+
     // -- input-driven transitions ----------------------------------------
 
     /// Open the chat box over the world. Only from [`Screen::Playing`]; opening
@@ -254,14 +326,21 @@ impl UiState {
     /// - Playing → Paused, Paused → Playing
     /// - Chat → Playing (cancel the line)
     /// - Error → back to the menu (dismiss)
+    /// - ServerEdit → ServerList (cancel the edit)
+    /// - ServerList → MainMenu
     /// - MainMenu → request a clean quit (Escape on the title exits)
     /// - Connecting → no-op (can't pause mid-connect; the app offers quit-to-cancel)
+    ///
+    /// Note the menu screens unwind **one level at a time**: Escape from the
+    /// edit form must not skip past the list and quit the game.
     pub fn on_escape(&mut self) {
         match self.screen {
             Screen::Playing => self.screen = Screen::Paused,
             Screen::Paused => self.screen = Screen::Playing,
             Screen::Chat | Screen::Container => self.screen = Screen::Playing,
             Screen::Error => self.dismiss_error(),
+            Screen::ServerEdit => self.screen = Screen::ServerList,
+            Screen::ServerList => self.screen = Screen::MainMenu,
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
         }
@@ -492,6 +571,95 @@ mod tests {
         ui.pause();
         assert_eq!(ui.screen(), Screen::Paused);
         assert!(!ui.accepts_gameplay_input());
+    }
+
+    #[test]
+    fn multiplayer_drills_down_to_the_list_and_the_edit_form() {
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert!(ui.is_server_list() && ui.is_menu());
+
+        ui.open_server_edit();
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert!(ui.is_server_edit() && ui.is_menu());
+
+        ui.close_server_edit();
+        assert_eq!(ui.screen(), Screen::ServerList);
+        ui.close_server_list();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn escape_unwinds_the_menu_one_level_at_a_time() {
+        // The bug this guards: Escape from the edit form falling through to
+        // MainMenu's "quit the game" arm and exiting mid-edit.
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        ui.open_server_edit();
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::ServerList);
+        assert!(!ui.quit_requested(), "must not quit from the edit form");
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(!ui.quit_requested(), "must not quit from the list");
+
+        ui.on_escape();
+        assert!(ui.quit_requested(), "only the title screen quits");
+    }
+
+    #[test]
+    fn menu_screens_never_grab_the_cursor_or_take_gameplay_input() {
+        for screen in [Screen::MainMenu, Screen::ServerList, Screen::ServerEdit] {
+            let mut ui = UiState::new();
+            match screen {
+                Screen::ServerList => ui.open_server_list(),
+                Screen::ServerEdit => {
+                    ui.open_server_list();
+                    ui.open_server_edit();
+                }
+                _ => {}
+            }
+            assert_eq!(ui.screen(), screen);
+            assert!(!ui.wants_cursor_grab(), "{screen:?} must not grab");
+            assert!(!ui.accepts_gameplay_input(), "{screen:?} must not take input");
+            assert!(ui.is_menu(), "{screen:?} should count as a menu screen");
+        }
+        // And the world screens must not be mistaken for menus, or the menu
+        // renderer would paint over live gameplay.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        assert!(!ui.is_menu());
+    }
+
+    #[test]
+    fn the_list_only_opens_from_the_title_screen() {
+        // A stray call must never pull the player out of a world.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.open_server_list();
+        assert_eq!(ui.screen(), Screen::Playing);
+
+        ui.pause();
+        ui.open_server_list();
+        assert_eq!(ui.screen(), Screen::Paused);
+
+        // Nor may the edit form open from anywhere but the list.
+        let mut ui = UiState::new();
+        ui.open_server_edit();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn singleplayer_from_the_menu_enters_the_offline_world() {
+        // The menu's Singleplayer button drives the existing worldgen path,
+        // not the staged integrated-server launcher (which only errors).
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        assert_eq!(ui.screen(), Screen::Playing);
+        assert!(ui.wants_cursor_grab());
     }
 
     #[test]
