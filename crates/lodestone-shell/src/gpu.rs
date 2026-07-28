@@ -32,7 +32,16 @@ use crate::particles::{ParticleInstance, ParticleRenderer};
 /// Shared deliberately: this is both what the frame clears to *and* what
 /// distance fog fades terrain into. If the two drifted apart the horizon would
 /// show a band of haze in a colour the sky never is, so they read one constant.
-pub const SKY_COLOR: [f32; 3] = [0.53, 0.71, 0.92];
+///
+/// This is `srgb_to_linear([0.53, 0.71, 0.92])` — `#87B5EB`, the intended
+/// sky-blue hex, divided by 255 and then actually linearised. The constant
+/// used to hold that `#87B5EB / 255` triple directly, labelled linear when it
+/// was really sRGB; every consumer (this clear colour, and the fog colour in
+/// `sim::fog_for_render_distance`) treats it as linear and gets gamma-encoded
+/// again on the way to the screen, so the mislabelled value washed the sky out
+/// (it displayed as `(192, 219, 246)`, saturation 0.22, instead of the intended
+/// `(135, 181, 235)`).
+pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 
 /// Fraction of the view distance at which fog begins.
 ///
@@ -308,6 +317,11 @@ struct ModelRenderer {
     /// up per tinted quad so grass, foliage and every other source get their own
     /// colour instead of one hardcoded green.
     palette_bind_group: wgpu::BindGroup,
+    /// The buffer behind [`Self::palette_bind_group`], kept so other consumers of
+    /// the model shader — the HUD's 3-D item pass — can build their **own** bind
+    /// group over the *same* palette rather than uploading a second copy. A
+    /// hotbar icon and the world block it depicts then cannot drift apart.
+    palette_buffer: wgpu::Buffer,
     /// The animated block sprites' timelines paired with each slot's normalised
     /// frame height, cloned from the block models so the per-slot animation
     /// uniform can be rebuilt from the current game tick each frame via
@@ -680,6 +694,7 @@ impl RenderState {
                 atlas,
                 atlas_bind_group,
                 palette_bind_group,
+                palette_buffer,
                 animations,
                 anim_buffer,
                 anim_bind_group,
@@ -860,6 +875,55 @@ impl RenderState {
     #[must_use]
     pub fn section_count(&self) -> usize {
         self.sections.len() + self.model.as_ref().map_or(0, |m| m.sections.len())
+    }
+
+    /// The stitched **model** atlas's texture view — the atlas whose UVs every
+    /// [`BakedQuad`](lodestone_assets::BakedQuad) indexes, terrain and 3-D item
+    /// icons alike. `None` on the demo path, which has no baked models.
+    ///
+    /// Lent out (rather than re-uploaded) so a second consumer of the model
+    /// shader — the HUD's 3-D item pass — samples the *same* GPU texture. `wgpu`
+    /// resources are `Arc`-backed and a bind group keeps its own strong
+    /// reference, so a caller may build a bind group from this borrow and outlive
+    /// it. Uploading a second copy of the block atlas for the hotbar would cost
+    /// tens of megabytes to draw nine 16 px icons.
+    #[must_use]
+    pub fn model_atlas_view(&self) -> Option<&wgpu::TextureView> {
+        self.model.as_ref().map(|m| &m.atlas.view)
+    }
+
+    /// The model atlas's sampler, paired with [`Self::model_atlas_view`].
+    #[must_use]
+    pub fn model_atlas_sampler(&self) -> Option<&wgpu::Sampler> {
+        self.model.as_ref().map(|m| &m.atlas.sampler)
+    }
+
+    /// The tint-palette uniform buffer the model shader reads at group 2. Shared
+    /// so a hotbar icon's tinted faces (grass block, leaves) resolve through the
+    /// same palette slots as the world block.
+    #[must_use]
+    pub fn model_palette_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.model.as_ref().map(|m| &m.palette_buffer)
+    }
+
+    /// The per-slot animation uniform buffer the model shader reads at group 3,
+    /// rewritten every frame by [`update_animation`](Self::update_animation).
+    ///
+    /// Sharing it is what makes an animated **item** icon (magma block, sea
+    /// lantern, prismarine) advance in lock-step with the same block in the
+    /// world, for free: one buffer, one per-frame write, two readers.
+    #[must_use]
+    pub fn model_anim_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.model.as_ref().map(|m| &m.anim_buffer)
+    }
+
+    /// The depth attachment sized to the current target. Lent to the HUD's 3-D
+    /// item pass, which needs a depth buffer for the near faces of an isometric
+    /// mini-block to win over the far ones. That pass **clears** it, so it does
+    /// not disturb the world depth already consumed earlier in the frame.
+    #[must_use]
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth.view
     }
 
     /// Total merged quads currently resident on the GPU.
@@ -1301,9 +1365,11 @@ mod tests {
         let pixels = target.read_texels(device, queue);
         let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-        // Sky clear colour ≈ (135,181,235). Count pixels that clearly differ:
-        // terrain sprites are green/brown/grey, far from sky blue.
-        let sky = [135u8, 181, 235];
+        // Sky clear colour ≈ SKY_COLOR * 255 (this target is Rgba8Unorm, not
+        // sRGB, so the readback is the shader's linear output with no gamma
+        // encode — not the on-screen colour). Count pixels that clearly
+        // differ: terrain sprites are green/brown/grey, far from sky blue.
+        let sky = [62u8, 118, 211];
         let mut terrain_px = 0usize;
         for px in pixels.chunks_exact(4) {
             let d = (i32::from(px[0]) - i32::from(sky[0])).abs()

@@ -22,7 +22,11 @@ pub use font::glyph_rows;
 
 use std::sync::Arc;
 
-use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
+use lodestone_render::{
+    BlockModels, CameraUniform, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelCameraUniform,
+    ModelPipeline, ModelVertex, RenderLayer, gui_item_pose, gui_ortho, mesh_item_quads,
+    model_camera_buffer,
+};
 
 use lodestone_assets::{IconPart, ItemAtlas, ResourceLocation};
 
@@ -322,6 +326,17 @@ pub struct HudGeometry {
     /// from the separate [`ItemAtlas`] texture. Empty unless an item atlas and
     /// [`HudFrame::hotbar_items`] were both supplied.
     pub item_verts: Vec<f32>,
+    /// The 3-D **block-item** icons: baked model geometry already posed into GUI
+    /// pixel space on the CPU, in the wide [`ModelVertex`] format the shared
+    /// [`ModelPipeline`] consumes. Non-indexed (six vertices per quad, expanded
+    /// from the mesh's indices) to match the other two streams' `draw(0..n)`.
+    ///
+    /// Pre-multiplying the pose here is what collapses the whole hotbar to **one
+    /// buffer and one draw**: the GUI path has to emit vertices anyway, so
+    /// transforming them costs nothing over uploading them untransformed and
+    /// paying a per-slot uniform + draw call. Empty unless a [`BlockModels`] was
+    /// supplied and at least one slot holds an item with 3-D geometry.
+    pub model_verts: Vec<ModelVertex>,
 }
 
 impl HudGeometry {
@@ -343,12 +358,18 @@ impl HudGeometry {
         self.item_verts.len() / SPRITE_FLOATS_PER_VERTEX
     }
 
+    /// Number of 3-D item-model vertices (three per triangle, six per quad).
+    #[must_use]
+    pub fn model_vertex_count(&self) -> usize {
+        self.model_verts.len()
+    }
+
     /// Build the whole HUD for `width`×`height` pixels from a [`HudFrame`],
     /// drawing the survival vitals (hotbar, XP, hearts, hunger) as procedural
     /// quads. This is the jar-less / headless path.
     #[must_use]
     pub fn build(frame: &HudFrame, width: u32, height: u32) -> Self {
-        Self::build_inner(frame, width, height, None, None)
+        Self::build_inner(frame, width, height, None, None, None)
     }
 
     /// Like [`build`](Self::build), but draws the survival vitals from the real
@@ -357,7 +378,7 @@ impl HudGeometry {
     /// crosshair, …) is identical and still emitted to the colour stream.
     #[must_use]
     pub fn build_with_gui(frame: &HudFrame, width: u32, height: u32, gui: &GuiAtlas) -> Self {
-        Self::build_inner(frame, width, height, Some(gui), None)
+        Self::build_inner(frame, width, height, Some(gui), None, None)
     }
 
     fn build_inner(
@@ -366,8 +387,15 @@ impl HudGeometry {
         height: u32,
         gui: Option<&GuiAtlas>,
         items: Option<&ItemAtlas>,
+        models: Option<&BlockModels>,
     ) -> Self {
-        let mut b = Builder::new(width.max(1) as f32, height.max(1) as f32, gui, items);
+        let mut b = Builder::new(
+            width.max(1) as f32,
+            height.max(1) as f32,
+            gui,
+            items,
+            models,
+        );
 
         let scale = 2.0;
         let margin = 6.0;
@@ -671,6 +699,7 @@ impl HudGeometry {
             verts: b.verts,
             sprite_verts: b.sprite_verts,
             item_verts: b.item_verts,
+            model_verts: b.model_verts,
         }
     }
 }
@@ -875,42 +904,76 @@ struct Builder<'a> {
     verts: Vec<f32>,
     sprite_verts: Vec<f32>,
     item_verts: Vec<f32>,
+    model_verts: Vec<ModelVertex>,
     gui: Option<&'a GuiAtlas>,
     items: Option<&'a ItemAtlas>,
+    /// The baked model set, for items whose inventory icon is a 3-D mini-block
+    /// rather than a flat sprite. `None` on jar-less / demo runs, where those
+    /// slots stay empty wells exactly as before.
+    models: Option<&'a BlockModels>,
 }
 
 impl<'a> Builder<'a> {
-    fn new(w: f32, h: f32, gui: Option<&'a GuiAtlas>, items: Option<&'a ItemAtlas>) -> Self {
+    fn new(
+        w: f32,
+        h: f32,
+        gui: Option<&'a GuiAtlas>,
+        items: Option<&'a ItemAtlas>,
+        models: Option<&'a BlockModels>,
+    ) -> Self {
         Self {
             w,
             h,
             verts: Vec::new(),
             sprite_verts: Vec::new(),
             item_verts: Vec::new(),
+            model_verts: Vec::new(),
             gui,
             items,
+            models,
         }
     }
 
     /// Draw one item slot's icon into the `size`×`size` rect at `(x, y)`: the
-    /// flat sprite stack from the item atlas, its durability bar, and its stack
-    /// count. Block/model and special items have no flat sprite in the item
-    /// atlas (the isometric 3-D GUI pose is deferred), so they draw no icon
-    /// rather than a wrong or missing-texture square — but their count and
-    /// durability still draw, keeping the well honest.
+    /// icon itself, its durability bar, and its stack count.
+    ///
+    /// Two kinds of icon reach two different streams, decided by the resolved
+    /// [`IconPart`] the item atlas cached:
+    ///
+    /// * [`IconPart::Sprite`] — the flat `item/generated` majority, one textured
+    ///   quad per layer off the item atlas;
+    /// * [`IconPart::Model`] — a **block** item, drawn as vanilla's isometric
+    ///   mini-block from geometry baked against the block atlas
+    ///   ([`BlockModels::item`]).
+    ///
+    /// [`IconPart::Special`] (chests, shulkers, shields, banners) is still a
+    /// code-driven renderer we do not have, and deliberately draws nothing rather
+    /// than a wrong or missing-texture square — but its count and durability
+    /// still draw, keeping the well honest.
     fn item_icon(&mut self, slot: &HotbarSlot, x: f32, y: f32, size: f32) {
         let scale = size / 16.0;
         if let Some(atlas) = self.items
             && let Some(icon) = atlas.icon(&slot.item)
         {
             for part in &icon.parts {
-                if let IconPart::Sprite { layers } = part {
-                    for layer in layers {
-                        // Tint resolution (leather/potion/spawn-egg dyes, foliage)
-                        // is deferred; untinted white is correct for the vast
-                        // majority of items.
-                        self.item_sprite(&layer.sprite, x, y, size, size, [1.0, 1.0, 1.0, 1.0]);
+                match part {
+                    IconPart::Sprite { layers } => {
+                        for layer in layers {
+                            // Tint resolution (leather/potion/spawn-egg dyes,
+                            // foliage) is deferred; untinted white is correct for
+                            // the vast majority of items.
+                            self.item_sprite(&layer.sprite, x, y, size, size, [
+                                1.0, 1.0, 1.0, 1.0,
+                            ]);
+                        }
                     }
+                    // The part's own `model`/`transform`/`gui_light` are *not*
+                    // used here: `BlockModels::build` resolved and baked exactly
+                    // this part (through the same `GuiItemContext`) and stored the
+                    // transform alongside the quads, so the item id is the whole
+                    // key. Going back to the part would risk the two disagreeing.
+                    IconPart::Model { .. } => self.item_model(&slot.item, x, y, size),
+                    IconPart::Special { .. } => {}
                 }
             }
         }
@@ -958,6 +1021,38 @@ impl<'a> Builder<'a> {
                 uv_max: spr.uv_max,
             };
             self.push_item_quad(q, c);
+        }
+    }
+
+    /// Emit the 3-D isometric mini-block for a **block** item into the
+    /// `size`×`size` pixel rect at `(x, y)`.
+    ///
+    /// The geometry was baked once at asset-load time against the *block* atlas
+    /// and interned through the *block* tint palette, so nothing is resolved
+    /// here: the pose is `gui_item_pose` over the stored `display.gui` transform,
+    /// and [`mesh_item_quads`] applies it, fixes the light full-bright, and puts
+    /// `gui_light` in the `ao` slot. The result is already in **GUI pixel space**
+    /// (x right, y down, z toward the viewer) — the pass's `view_proj` is
+    /// [`gui_ortho`], which finishes the job.
+    ///
+    /// Indices are expanded into a flat triangle list because the HUD's other two
+    /// streams are non-indexed; the expansion preserves the mesh's winding, which
+    /// is load-bearing (see `docs/item-gui-geometry.md`: the visible faces are the
+    /// ones back-face culling keeps, and they must also be the nearest under the
+    /// depth test). A no-op when no model set is attached or the item has no
+    /// baked geometry, so jar-less runs keep the old empty well.
+    fn item_model(&mut self, item: &ResourceLocation, x: f32, y: f32, size: f32) {
+        let Some(models) = self.models else {
+            return;
+        };
+        let Some(geometry) = models.item(item) else {
+            return;
+        };
+        let pose = gui_item_pose([x, y, size, size], &geometry.transform);
+        let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
+        self.model_verts.reserve(mesh.indices.len());
+        for &i in &mesh.indices {
+            self.model_verts.push(mesh.vertices[i as usize]);
         }
     }
 
@@ -1127,6 +1222,7 @@ pub struct HudRenderer {
     capacity_floats: usize,
     gui: Option<GuiHud>,
     items: Option<ItemHud>,
+    item_models: Option<ItemModelHud>,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -1158,6 +1254,45 @@ struct ItemHud {
     bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
+}
+
+/// The GPU resources for drawing **3-D block items** in GUI slots. Present only
+/// once [`HudRenderer::attach_item_models`] has run.
+///
+/// Unlike [`GuiHud`] and [`ItemHud`] this owns no texture: it reuses the world's
+/// [`ModelPipeline`] and binds the *same* block atlas, tint palette and animation
+/// slots the terrain pass does. Four bind groups is exactly what the model shader
+/// declares — camera (0), atlas (1), palette (2), animation (3) — and `wgpu`'s
+/// portable `max_bind_groups` floor is **4**, so there is no room for a fifth.
+/// That is why the GUI camera and its (disabled) fog share group 0 as a single
+/// [`ModelCameraUniform`], and why nothing here introduces a new group: a
+/// five-group variant validates on an adapter that reports 8 and fails on the
+/// floor, which is a bug no local screenshot can find.
+///
+/// The three sharings are each load-bearing rather than merely tidy:
+///
+/// * **atlas** — a block item's faces *are* block textures; a second upload would
+///   cost tens of megabytes to draw nine 16 px icons;
+/// * **palette** — a grass block's hotbar icon and the world block resolve to the
+///   same slot, so they cannot drift to different greens;
+/// * **animation slots** — magma, sea lantern and prismarine icons advance in
+///   lock-step with the world, for free, off the one per-frame uniform write.
+#[derive(Debug)]
+struct ItemModelHud {
+    pipeline: ModelPipeline,
+    /// Group 0: the GUI orthographic `view_proj` with a zero section origin and
+    /// fog disabled. Rewritten each frame because it depends on the target size.
+    camera_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    /// Group 1: the shared block atlas (view + sampler borrowed at attach time;
+    /// the bind group holds its own strong reference).
+    atlas_bind_group: wgpu::BindGroup,
+    /// Group 2: the shared tint palette.
+    palette_bind_group: wgpu::BindGroup,
+    /// Group 3: the shared per-slot animation uniforms.
+    anim_bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    capacity_bytes: usize,
 }
 
 impl HudRenderer {
@@ -1231,6 +1366,7 @@ impl HudRenderer {
             capacity_floats,
             gui: None,
             items: None,
+            item_models: None,
         }
     }
 
@@ -1477,7 +1613,92 @@ impl HudRenderer {
         });
     }
 
+    /// Attach the GPU side of the **3-D block-item** icon pass, so hotbar and
+    /// container slots holding a block draw vanilla's isometric mini-block
+    /// instead of an empty well.
+    ///
+    /// Every resource is *borrowed from the world renderer* rather than created:
+    /// `atlas_view`/`atlas_sampler` are the stitched block atlas
+    /// ([`RenderState::model_atlas_view`](crate::gpu::RenderState::model_atlas_view)),
+    /// `palette` its tint palette, `anim` its per-slot animation uniforms. See
+    /// [`ItemModelHud`] for why each of those sharings matters. `wgpu` resources
+    /// are `Arc`-backed and a bind group keeps its own strong reference, so the
+    /// borrows need not outlive this call.
+    ///
+    /// The **CPU** geometry is not captured here: it is passed per frame to
+    /// [`render_with_item_models`](Self::render_with_item_models), because
+    /// [`BlockModels`] exposes item geometry only by key lookup (there is no way
+    /// to enumerate its item ids from outside the render crate), and a per-slot
+    /// lookup of the nine visible stacks is cheaper than cloning ~750 items'
+    /// quads anyway.
+    ///
+    /// Without this call the icons simply do not draw — the jar-less / demo
+    /// behaviour, and the negative control the pixel gate exercises.
+    pub fn attach_item_models(
+        &mut self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        atlas_view: &wgpu::TextureView,
+        atlas_sampler: &wgpu::Sampler,
+        palette: &wgpu::Buffer,
+        anim: &wgpu::Buffer,
+    ) {
+        // `Solid` (not `Translucent`): depth writes on, back-face culling on with
+        // `FrontFace::Ccw`. Both are required — culling is what removes the three
+        // far faces of the cube, and the depth test is what stops the near ones
+        // being overdrawn by them. The shader's cutout discard also drops
+        // near-transparent texels, so a cross-shaped model does not paint a box.
+        let pipeline = ModelPipeline::for_layer(device, color_format, RenderLayer::Solid);
+        // A placeholder view_proj; `render` rewrites it from the live target size
+        // before every draw. `model_camera_buffer` sizes the buffer for the
+        // camera **and** the folded fog block, and writes fog disabled.
+        let camera_buffer = model_camera_buffer(device, CameraUniform {
+            view_proj: [[0.0; 4]; 4],
+            section_origin: [0.0; 4],
+        });
+        let camera_bind_group = pipeline.camera_bind_group(device, &camera_buffer);
+        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-item-model-atlas-bg"),
+            layout: &pipeline.atlas_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(atlas_sampler),
+                },
+            ],
+        });
+        let palette_bind_group = pipeline.palette_bind_group(device, palette);
+        let anim_bind_group = pipeline.anim_bind_group(device, anim);
+        let capacity_bytes = 16 * 1024;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hud-item-model-verts"),
+            size: capacity_bytes as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.item_models = Some(ItemModelHud {
+            pipeline,
+            camera_buffer,
+            camera_bind_group,
+            atlas_bind_group,
+            palette_bind_group,
+            anim_bind_group,
+            buffer,
+            capacity_bytes,
+        });
+    }
+
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
+    ///
+    /// Convenience wrapper over [`render_with_item_models`](Self::render_with_item_models)
+    /// with no model set and no depth attachment, i.e. flat item sprites only —
+    /// block items keep their empty wells. Kept as the plain entry point so the
+    /// existing headless HUD gates (which have neither a baked model set nor a
+    /// depth buffer) call it unchanged.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1487,19 +1708,66 @@ impl HudRenderer {
         width: u32,
         height: u32,
     ) {
+        self.render_with_item_models(device, queue, view, None, frame, None, width, height);
+    }
+
+    /// Draw the HUD, including the **3-D block-item** icons.
+    ///
+    /// `models` supplies the baked item geometry (`None` falls back to flat
+    /// sprites only), and `depth` is a depth attachment matching the target size
+    /// — normally
+    /// [`RenderState::depth_view`](crate::gpu::RenderState::depth_view). Both are
+    /// needed for a mini-block to draw; either being `None` degrades to the
+    /// previous behaviour rather than erroring.
+    ///
+    /// # Pass structure
+    ///
+    /// Three passes, in this order, all loading the existing colour:
+    ///
+    /// 1. **sprites** (no depth) — hotbar frame, vitals, flat item icons;
+    /// 2. **item models** (depth, **cleared**) — the isometric mini-blocks;
+    /// 3. **colour** (no depth) — text, stack counts, durability bars.
+    ///
+    /// The middle pass needs its own depth attachment and therefore its own pass.
+    /// It *clears* depth rather than loading it: the world's depth is still
+    /// resident from the terrain pass and would occlude a GUI item sitting at
+    /// clip depth ~0.5. Nothing later in the frame reads depth, so clearing it
+    /// here is free. Keeping it strictly between 1 and 3 is what leaves stack
+    /// counts and durability bars on top of the icon rather than buried in it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_item_models(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        frame: &HudFrame,
+        models: Option<&BlockModels>,
+        width: u32,
+        height: u32,
+    ) {
         // With the GUI atlas attached, the vitals come back as textured sprite
         // verts; otherwise the whole HUD is the procedural colour stream. The
         // item atlas, when attached, feeds the separate item-sprite stream.
         let gui_atlas = self.gui.as_ref().map(|g| Arc::clone(&g.atlas));
         let item_atlas = self.items.as_ref().map(|i| Arc::clone(&i.atlas));
+        // Only ask for model geometry when there is somewhere to draw it: no
+        // attached pass or no depth attachment means the vertices could not be
+        // rendered, and building them would be pure waste.
+        let want_models = self.item_models.is_some() && depth.is_some();
         let geo = HudGeometry::build_inner(
             frame,
             width,
             height,
             gui_atlas.as_deref(),
             item_atlas.as_deref(),
+            models.filter(|_| want_models),
         );
-        if geo.verts.is_empty() && geo.sprite_verts.is_empty() && geo.item_verts.is_empty() {
+        if geo.verts.is_empty()
+            && geo.sprite_verts.is_empty()
+            && geo.item_verts.is_empty()
+            && geo.model_verts.is_empty()
+        {
             return;
         }
 
@@ -1548,30 +1816,56 @@ impl HudRenderer {
             }
             queue.write_buffer(&it.buffer, 0, bytemuck::cast_slice(&geo.item_verts));
         }
+
+        // Grow + upload the 3-D item-model stream, and rewrite its GUI camera for
+        // the current target size. `gui_ortho` is the whole projection: the
+        // vertices are already posed into GUI pixel space, the section origin is
+        // zero (they are not section-local), and fog is disabled (an inventory
+        // slot is not in the world).
+        if !geo.model_verts.is_empty()
+            && let Some(im) = self.item_models.as_mut()
+        {
+            let bytes = std::mem::size_of_val(geo.model_verts.as_slice());
+            if bytes > im.capacity_bytes {
+                im.capacity_bytes = bytes.next_power_of_two();
+                im.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("hud-item-model-verts"),
+                    size: im.capacity_bytes as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&im.buffer, 0, bytemuck::cast_slice(&geo.model_verts));
+            queue.write_buffer(
+                &im.camera_buffer,
+                0,
+                bytemuck::bytes_of(&ModelCameraUniform {
+                    camera: CameraUniform {
+                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
+                        section_origin: [0.0; 4],
+                    },
+                    fog: lodestone_render::fog::FogUniform::disabled(),
+                }),
+            );
+        }
+
         let colour_count = geo.vertex_count() as u32;
         let sprite_count = geo.sprite_vertex_count() as u32;
         let item_count = geo.item_vertex_count() as u32;
+        let model_count = geo.model_vertex_count() as u32;
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("hud") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &[Some(hud_colour_attachment(view))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            // GUI sprites (hotbar frame, vitals) first, then item icons over the
-            // frame, then the colour stream (text, counts) on top of everything.
+            // GUI sprites (hotbar frame, vitals) first, then flat item icons over
+            // the frame.
             if let Some(g) = &self.gui
                 && sprite_count > 0
             {
@@ -1588,13 +1882,70 @@ impl HudRenderer {
                 pass.set_vertex_buffer(0, it.buffer.slice(..));
                 pass.draw(0..item_count, 0..1);
             }
-            if colour_count > 0 {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_vertex_buffer(0, self.buffer.slice(..));
-                pass.draw(0..colour_count, 0..1);
-            }
+        }
+
+        // The 3-D block items, in their own pass because they are the only part
+        // of the HUD that needs a depth buffer. One draw for the whole hotbar.
+        if let (Some(im), Some(depth_view)) = (&self.item_models, depth)
+            && model_count > 0
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-item-model-pass"),
+                color_attachments: &[Some(hud_colour_attachment(view))],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    // Cleared, not loaded: the world's depth is still in there and
+                    // would swallow a GUI item at clip depth ~0.5.
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&im.pipeline.pipeline);
+            pass.set_bind_group(0, &im.camera_bind_group, &[]);
+            pass.set_bind_group(1, &im.atlas_bind_group, &[]);
+            pass.set_bind_group(2, &im.palette_bind_group, &[]);
+            pass.set_bind_group(3, &im.anim_bind_group, &[]);
+            pass.set_vertex_buffer(0, im.buffer.slice(..));
+            pass.draw(0..model_count, 0..1);
+        }
+
+        // The colour stream (text, stack counts) last, so it lands on top of both
+        // kinds of icon.
+        if colour_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud-colour-pass"),
+                color_attachments: &[Some(hud_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.buffer.slice(..));
+            pass.draw(0..colour_count, 0..1);
         }
         queue.submit(std::iter::once(encoder.finish()));
+    }
+}
+
+/// The colour attachment every HUD pass uses: load what the world already drew,
+/// store what we add. A free function rather than a closure because each pass
+/// needs the borrow of `view` to end with its own `RenderPassDescriptor`.
+fn hud_colour_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+    wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Load,
+            store: wgpu::StoreOp::Store,
+        },
     }
 }
 

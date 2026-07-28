@@ -38,16 +38,42 @@
 //! [`translucency`](crate::translucency) documents), taking the *most
 //! transparent* layer across a block's sprites so a block with one translucent
 //! face lands on the translucent pass.
+//!
+//! # Why item geometry lives here too
+//!
+//! `BlockModels` also owns [`ItemGeometry`] for every item whose inventory icon
+//! is a 3-D model ([`IconPart::Model`] — 752 of 26.2's 1,537 items). The name is
+//! a stretch; the honest framing is **"everything baked against this atlas"**,
+//! and it is worth the stretch:
+//!
+//! * A block item's faces are block textures. Baking them here reuses the *same*
+//!   stitched [`Atlas`] the terrain path already uploads — no second atlas, no
+//!   second GPU upload, no duplicated 16 MB of sprites.
+//! * A tinted item (grass block, oak leaves) must resolve to the *same* palette
+//!   slot as the block, or the hotbar icon and the world block would render
+//!   different greens. Sharing one [`TintPalette`] makes that automatic rather
+//!   than a thing to keep in sync.
+//! * The output is byte-compatible [`ModelVertex`](crate::ModelVertex) geometry,
+//!   so the GUI item pass is the **existing** [`ModelPipeline`](crate::ModelPipeline)
+//!   with its existing four bind groups, a different `view_proj`, and nothing
+//!   else new.
+//!
+//! Baking needs a live [`ResourceManager`] (for [`ModelResolver`]), which nothing
+//! downstream keeps, so it has to happen at asset-load time — i.e. inside
+//! [`BlockModels::build`], which already owns one. See
+//! [`item_render`](crate::item_render) for the pose half of the path.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::tint::vanilla_tint_kind;
 use lodestone_assets::{
-    AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker, BlockStates,
-    FirstWeight, ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
+    AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
+    BlockStates, DisplayTransform, FirstWeight, GuiItemContext, GuiLight, IconPart,
+    ItemIconBuilder, ModelResolver, ModelTransform, ResourceLocation, ResourceManager,
+    TextureBinding, bake_model_with,
 };
-use lodestone_model::BlockStateRegistry;
+use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::anim::{AnimFrame, AnimSlotUniform, SpriteAnimation};
 use crate::block_resolver::DefaultTints;
@@ -306,6 +332,120 @@ impl StateModel {
     }
 }
 
+/// One item's baked inventory geometry: the 3-D mini-block a hotbar/inventory
+/// slot draws for it.
+///
+/// The quads' UVs index [`BlockModels::atlas`] and their `tint_index` values
+/// index [`BlockModels::tint_palette`], exactly like a block state's — that
+/// sharing is the whole point (see the [module docs](self)). What is *not*
+/// baked in is the pose: `transform` is a render-time matrix
+/// ([`display_matrix`](crate::display_matrix)), because vanilla applies it on
+/// the pose stack and because the same geometry is reused for the in-hand and
+/// dropped forms under different slots' transforms.
+#[derive(Debug, Clone)]
+pub struct ItemGeometry {
+    /// The baked quads, with absolute atlas UVs and palette tint indices.
+    pub quads: Vec<BakedQuad>,
+    /// The model's `display.gui` transform (the isometric pose), verbatim from
+    /// the JSON — the `/16` and vanilla's clamps are applied by
+    /// [`display_matrix`](crate::display_matrix), not here.
+    pub transform: DisplayTransform,
+    /// The GUI lighting mode: [`GuiLight::Side`] keeps the per-face directional
+    /// constants, [`GuiLight::Front`] flattens them.
+    pub gui_light: GuiLight,
+}
+
+/// One item's [`IconPart::Model`], discovered *before* the atlas is stitched so
+/// the textures it reaches can be seeded into it.
+#[derive(Debug, Clone)]
+struct ItemModelPart {
+    item: ResourceLocation,
+    model: ResourceLocation,
+    transform: DisplayTransform,
+    gui_light: GuiLight,
+}
+
+/// Resolve every item definition in the pack stack and keep the ones whose GUI
+/// icon is a 3-D model.
+///
+/// Resolution uses [`GuiItemContext`], not the default context: a handful of
+/// items (`spyglass`, `trident`, the spears, the bundles) branch on
+/// `minecraft:display_context` and would otherwise resolve to their *in-hand*
+/// model. Items that fail to resolve, or that draw as a flat sprite or a
+/// code-driven special renderer, are simply absent — they are not this path's
+/// business.
+///
+/// A `composite` icon can hold several model parts; only the **first** is kept,
+/// and the item is named in [`BlockModels::item_bake_misses`]. In vanilla 26.2
+/// that is the 16 beds and nothing else: `items/<colour>_bed.json` composites
+/// `block/<colour>_bed_head` with `block/<colour>_bed_foot` plus a per-part
+/// `transformation` (`translation [0, 0, 1]`) that positions the foot behind the
+/// head. `lodestone_assets`'s [`IconPart::Model`] does not carry that
+/// transformation — `item_model.rs` never parses it — so concatenating the parts
+/// would stack the foot *inside* the head and z-fight, which is strictly worse
+/// than drawing the head alone. Keeping the first part and recording the item is
+/// the honest option until the parser carries the per-part transform.
+fn collect_item_model_parts(manager: &ResourceManager) -> (Vec<ItemModelPart>, Vec<String>) {
+    let builder = ItemIconBuilder::new(manager);
+    let mut parts = Vec::new();
+    let mut notes = Vec::new();
+    for id in item_ids(manager) {
+        let Ok(icon) = builder.icon_with(&id, &GuiItemContext) else {
+            continue;
+        };
+        let mut models = icon.parts.iter().filter_map(|p| match p {
+            IconPart::Model {
+                model,
+                transform,
+                gui_light,
+            } => Some(ItemModelPart {
+                item: id.clone(),
+                model: model.clone(),
+                transform: *transform,
+                gui_light: *gui_light,
+            }),
+            _ => None,
+        });
+        if let Some(first) = models.next() {
+            let extra = models.count();
+            if extra > 0 {
+                notes.push(format!(
+                    "{id}: composite icon has {} model parts, but IconPart::Model carries no \
+                     per-part transformation; only the first is baked",
+                    extra + 1
+                ));
+            }
+            parts.push(first);
+        }
+    }
+    (parts, notes)
+}
+
+/// Discovers item ids by scanning for `assets/<ns>/items/<path>.json`, mirroring
+/// `lodestone_assets::item_atlas`'s private scan. Sorted and deduplicated so a
+/// given pack stack bakes a byte-identical item set.
+fn item_ids(manager: &ResourceManager) -> Vec<ResourceLocation> {
+    let mut ids = BTreeSet::new();
+    for path in manager.list("assets/") {
+        let Some(rest) = path.strip_prefix("assets/") else {
+            continue;
+        };
+        let Some((namespace, tail)) = rest.split_once('/') else {
+            continue;
+        };
+        let Some(item_path) = tail
+            .strip_prefix("items/")
+            .and_then(|p| p.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if let Ok(loc) = ResourceLocation::parse(&format!("{namespace}:{item_path}")) {
+            ids.insert(loc);
+        }
+    }
+    ids.into_iter().collect()
+}
+
 /// Every vanilla block state's baked geometry plus the complete atlas its UVs
 /// index. See the [module docs](self).
 #[derive(Debug)]
@@ -335,6 +475,15 @@ pub struct BlockModels {
     /// crack-overlay sprite, indexed by stage `0..CRACK_STAGE_COUNT`. The
     /// mining crack pass re-draws a block's model geometry sampling these.
     crack_stages: [[f32; 4]; CRACK_STAGE_COUNT],
+    /// Baked inventory geometry for every item whose icon is a 3-D model, keyed
+    /// by item id (`minecraft:stone`). See the [module docs](self) for why it
+    /// lives on a type called `BlockModels`.
+    items: HashMap<ResourceLocation, ItemGeometry>,
+    /// Item models that did **not** bake, named. Recorded rather than fatal, for
+    /// the same reason `ItemAtlasReport::missing_special_bases` is: a texture a
+    /// vanilla blockstate never reaches (or that a resource pack drops) is an
+    /// expected absence, not a reason to refuse to render the world.
+    item_bake_misses: Vec<String>,
 }
 
 impl BlockModels {
@@ -358,7 +507,11 @@ impl BlockModels {
         registry: &dyn BlockStateRegistry,
     ) -> Result<Self, BlockModelsError> {
         let resolver = ModelResolver::new(manager);
-        let atlas = build_complete_atlas(manager, &resolver)?;
+        // Item models are discovered before the atlas is stitched so their
+        // textures can be seeded into it (see `build_complete_atlas`), and
+        // reused after it to bake, so the item definitions are resolved once.
+        let (item_parts, mut item_bake_misses) = collect_item_model_parts(manager);
+        let atlas = build_complete_atlas(manager, &resolver, &item_parts)?;
 
         // Precompute each atlas sprite's render layer once; a baked quad's layer
         // is the layer of the sprite its UVs land in.
@@ -419,6 +572,60 @@ impl BlockModels {
             fluids.push(fluid);
         }
 
+        // Item geometry, baked against the same atlas and interning through the
+        // same `palette` as the state loop above — the two facts that let the
+        // GUI item pass reuse the terrain pipeline wholesale. It runs after the
+        // states (rather than inside that loop) only because items are keyed by
+        // id, not by state id; everything it shares is what matters.
+        let mut items = HashMap::with_capacity(item_parts.len());
+        for part in &item_parts {
+            let resolved = match resolver.resolve(&part.model) {
+                Ok(r) => r,
+                Err(e) => {
+                    item_bake_misses.push(format!("{} ({}): {e}", part.item, part.model));
+                    continue;
+                }
+            };
+            // `ModelTransform::default()`: that transform is the *blockstate*
+            // placement rotation, and an item has no blockstate. The item's pose
+            // is `part.transform`, applied at draw time by `item_render`.
+            let mut quads = match bake_model_with(
+                &resolved,
+                &atlas,
+                ModelTransform::default(),
+                &BakeOptions::default(),
+            ) {
+                Ok(q) => q,
+                Err(e) => {
+                    item_bake_misses.push(format!("{} ({}): {e}", part.item, part.model));
+                    continue;
+                }
+            };
+            // Rewrite raw model tint indices into palette indices, as the state
+            // loop does. An item has no `registry.resolve(state_id)`, so the
+            // block identity comes from the item id (item `minecraft:grass_block`
+            // → block `minecraft:grass_block`) and the properties are empty —
+            // an inventory icon is always the default state.
+            if let Ok(block) = part.item.to_string().parse::<Identifier>() {
+                let no_props = BTreeMap::new();
+                for quad in &mut quads {
+                    if let Some(raw) = quad.tint_index {
+                        let kind = vanilla_tint_kind(&block, raw, &no_props);
+                        quad.tint_index =
+                            tints.color(kind).map(|rgb| i32::from(palette.intern(rgb)));
+                    }
+                }
+            }
+            items.insert(
+                part.item.clone(),
+                ItemGeometry {
+                    quads,
+                    transform: part.transform,
+                    gui_light: part.gui_light,
+                },
+            );
+        }
+
         let water_sprites = resolve_fluid_sprites(&atlas, FluidKind::Water);
         let lava_sprites = resolve_fluid_sprites(&atlas, FluidKind::Lava);
         let crack_stages = std::array::from_fn(|stage| {
@@ -458,6 +665,8 @@ impl BlockModels {
             animations,
             anim_frame_v,
             crack_stages,
+            items,
+            item_bake_misses,
         })
     }
 
@@ -535,6 +744,40 @@ impl BlockModels {
     #[must_use]
     pub fn quads(&self, state_id: u32) -> &[BakedQuad] {
         &self.state(state_id).quads
+    }
+
+    /// The baked inventory geometry of an item (`minecraft:stone`), or `None`
+    /// for an item whose icon is a flat sprite, a special renderer, or nothing.
+    #[must_use]
+    pub fn item(&self, item: &ResourceLocation) -> Option<&ItemGeometry> {
+        self.items.get(item)
+    }
+
+    /// The baked quads of an item's 3-D inventory icon (empty when it has none).
+    /// Pose them with [`gui_item_pose`](crate::gui_item_pose) and mesh them with
+    /// [`mesh_item_quads`](crate::mesh_item_quads); their UVs index
+    /// [`atlas`](Self::atlas) and their tints [`tint_palette`](Self::tint_palette),
+    /// exactly like [`quads`](Self::quads).
+    #[must_use]
+    pub fn item_quads(&self, item: &ResourceLocation) -> &[BakedQuad] {
+        self.items.get(item).map_or(&[], |g| &g.quads)
+    }
+
+    /// The number of items with baked 3-D inventory geometry.
+    #[must_use]
+    pub fn item_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Item models that failed to bake, named (`"<item> (<model>): <error>"`).
+    ///
+    /// Empty for a complete vanilla pack except where a texture is genuinely
+    /// unreachable from any blockstate. Recorded rather than fatal: a resource
+    /// pack that drops a texture should degrade one hotbar icon, not refuse to
+    /// build the world's geometry.
+    #[must_use]
+    pub fn item_bake_misses(&self) -> &[String] {
+        &self.item_bake_misses
     }
 
     /// Whether a state fully occludes its neighbours (a full opaque cube).
@@ -634,9 +877,18 @@ struct SpriteRect {
 /// This walks `assets/<ns>/blockstates/`, resolves each referenced model and
 /// collects its resolved texture bindings — the same coverage `model_census`
 /// proves bakes every state without a missing sprite.
+///
+/// It additionally seeds every texture reachable from an **item** model
+/// (`item_parts`), mirroring the explicit fluid and crack-stage seeding below.
+/// Blockstate coverage already reaches 751 of 26.2's 753 item models, so this is
+/// a small top-up rather than a second corpus — but the leftovers are real:
+/// `structure_block`'s blockstate names four *mode-specific* models, so the
+/// plain `block/structure_block` texture its item model uses is reachable from
+/// no blockstate at all.
 fn build_complete_atlas(
     manager: &ResourceManager,
     resolver: &ModelResolver,
+    item_parts: &[ItemModelPart],
 ) -> Result<Atlas, AtlasError> {
     let mut textures: BTreeSet<ResourceLocation> = BTreeSet::new();
     for path in manager.list("assets/minecraft/blockstates/") {
@@ -652,6 +904,17 @@ fn build_complete_atlas(
                     if let TextureBinding::Resolved(loc) = binding {
                         textures.insert(loc.clone());
                     }
+                }
+            }
+        }
+    }
+    // Item models: the GUI item pass bakes against this same atlas, so anything
+    // an item model samples has to be in it.
+    for part in item_parts {
+        if let Ok(model) = resolver.resolve(&part.model) {
+            for binding in model.textures.values() {
+                if let TextureBinding::Resolved(loc) = binding {
+                    textures.insert(loc.clone());
                 }
             }
         }
