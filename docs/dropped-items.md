@@ -18,9 +18,9 @@ Two pieces live in different crates:
 ## How it works
 
 ```text
-add_entity (type "item")
-  → ClientHandle::entities()      → EntityView
-  → NetClient::entity_snapshots() → EntitySnapshot { type_path: "item", .. }
+add_entity (type "item")  +  set_entity_data (index 8, ITEM_STACK)
+  → ClientHandle::entities()      → EntityView { entity_type, item, .. }
+  → NetClient::entity_snapshots() → EntitySnapshot { type_path: "item", item, .. }
   → EntityInterpolator            → EntityDraw { id, type_path, item, feet, anim }
   → RenderState::prepare_item_drops
       BlockModels::item_quads  +  entity::dropped_item_mesh
@@ -71,26 +71,32 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
 
 ## How to change it
 
-- **The item's identity is the open gap.** `EntityDraw::item` is `None` for every
-  live drop today, so `prepare_item_drops` meshes nothing and the screen is
-  empty. A dropped item's stack rides entity metadata index 8 under the
-  `ITEM_STACK` serializer, and `protocol/v770/src/packets/metadata.rs` rejects
-  that serializer outright:
+- **The item's identity is wired end to end.** It rides entity metadata index 8
+  under the `ITEM_STACK` serializer (see
+  [Entity metadata: the item field](./entity-metadata-item.md)) and is folded at
+  three places: `apply_metadata` in `lodestone-client/src/state.rs`,
+  `entity_snapshot` in `lodestone-shell/src/net.rs`, and
+  `EntityInterpolator::update` in `lodestone-shell/src/entities.rs`.
 
-  ```rust
-  // Genuinely complex, self-describing payloads mobs never emit. Rejected
-  // rather than guessed at.
-  SER_ITEM_STACK | SER_PARTICLE | SER_PARTICLES | SER_RESOLVABLE_PROFILE => {
-      return Err(unknown_serializer(serializer));
-  }
-  ```
+  Each of those carries a **nested** `Option`: outer is "has the field ever been
+  reported", inner is "is a stack set". Collapsing it at any layer is the bug to
+  avoid, and it is not hypothetical — a drop emits index 8 exactly once, at
+  spawn, and sends item-free metadata thereafter, so a layer that reads "field
+  absent" as "stack empty" makes every drop revert to a placeholder one tick
+  after appearing. Only `EntityInterpolator` flattens, because at the draw both
+  `None`s mean "draw nothing".
 
-  The comment is true of mobs and false of item entities, which emit exactly
-  this. A rejected decode raises **no event**, so the id is absent from
-  `EntityMetadataUpdate`, `EntityView` and `EntitySnapshot` alike. Closing it is
-  four edits — decode the serializer, add the field to `EntityMetadataUpdate`,
-  carry it on `EntityView`, and call `EntityInterpolator::set_item_stack` from
-  the shell's event loop. Nothing in the render path changes.
+  `set_item_stack` remains public: `update` calls it from the snapshot, and it
+  is still the direct seam for a caller that learns an identity another way.
+
+- **`EntitySnapshot::item` is a `ResourceLocation`, not an `ItemStack`.**
+  `EntitySnapshot` deliberately depends on neither `lodestone-client` nor
+  `lodestone-model` — that is what makes `entities.rs` testable with no server
+  and no GPU — so `net::entity_snapshot` is the single place that knows both
+  types and converts. `count` and `components` are dropped there; see the two
+  bullets below for what that costs. Widening `EntitySnapshot` with a plain
+  `u32` count needs no model dependency and is the intended way to restore the
+  visible half.
 
 - **`display.ground` is not reachable** from a baked `ItemGeometry`.
   `lodestone-assets`' `icon.rs` keeps only the `gui` slot
@@ -103,15 +109,26 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
   Posing a drop with the *gui* transform instead is the tempting shortcut and is
   visibly wrong in two ways at once: 30°/225° of tilt, and 2.5× the size.
 
-- **Flat sprite items** (`gui_light: front`) have no baked geometry at all in
-  `BlockModels` — only 3-D model items do — so a dropped stick or diamond
-  currently draws nothing even with a known stack. Vanilla extrudes the sprite
+- **Flat sprite items are the remaining hole, and it is a big one.**
+  `collect_item_model_parts` keeps only `IconPart::Model` parts, so an
+  `item/generated` icon (`gui_light: front`) never enters `BlockModels::items()`
+  and a dropped stick, diamond or apple draws **nothing even though its identity
+  decodes correctly**. That is the majority of items. Vanilla extrudes the sprite
   into a thin slab and fans a stack of them along `z`
   (`FLAT_ITEM_DEPTH_THRESHOLD`); that extrusion is not baked anywhere yet.
+  `live_dropped_item.rs` asserts this explicitly (`minecraft:diamond` →
+  `item == Some(minecraft:diamond)`, `item_drops_drawn == 0`) so it cannot be
+  mistaken for the metadata chain failing.
 
-- **Stack count** is not carried either, so a drop always renders one copy where
-  vanilla renders up to five with a seeded jitter
-  (`ItemEntityRenderer.submitMultipleFromCount`).
+- **Stack count is dropped at the `EntitySnapshot` boundary**, so a drop always
+  renders one copy where vanilla renders up to five with a seeded jitter
+  (`ItemEntityRenderer.getRenderedAmount`: 1 copy at count ≤ 1, then 2, 3, 4, 5
+  as the count passes 1, 16, 32 and 48). The count *is* decoded — it reaches
+  `EntityView::item` as a real `ItemStack` — and is discarded in
+  `net::entity_snapshot`. Data components (dye colour, trim, custom model data)
+  are discarded at the same point; unlike the count they change how an item looks
+  rather than how many of it there are, and nothing in the item pipeline reads
+  them.
 
 - **Pickup animation.** `TakeItemEntity` *does* decode — into
   `ClientEvent::ItemPickup`, folded by `lodestone-game`'s `PickupFeed` — but
@@ -144,6 +161,12 @@ None. Every number is a vanilla constant in `lodestone-render/src/entity.rs`:
   is checked both ways: two phases must move the centroid, the same phase twice
   must differ by exactly 0 pixels.
 - `lodestone-shell/tests/live_dropped_item.rs` — `/summon item` on the live
-  oracle, then asserts the entity arrives as a tracked `EntityDraw` with type
-  path `item` **and** with `item: None` (the metadata gap, pinned), before
-  supplying the stack by hand and rendering it.
+  oracle, nothing faked. Asserts the entity arrives as a tracked `EntityDraw`
+  with type path `item` **and** `item == Some(minecraft:diamond_block)` decoded
+  off the wire, renders it against a control built from the same entity with its
+  identity removed (2383 lit px vs 0, opposite corner 0), then repeats the summon
+  with `minecraft:diamond` to pin the sprite-item gap above.
+
+  The negative control for the decode is the fold arm itself: deleting the
+  `metadata.item` arm in `apply_metadata` makes the same summon arrive as
+  `drop.item = None`, and this test fail. That was run, not assumed.

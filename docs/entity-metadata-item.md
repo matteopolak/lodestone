@@ -128,10 +128,22 @@ fixture to make a test pass.
 - `lodestone-testsupport` — `RconClient` (whole RCON frame in one `write_all`;
   vanilla does exactly one `read()` per request) and `unique_username`.
 
-## What still consumes nothing
+## What consumes it
 
-The event now carries the item. Nothing downstream stores it yet: `EntityView`
-(`crates/lodestone-client/src/state.rs`) has no item field and `apply_metadata`
-there does not fold one, so `EntitySnapshot` and the shell's
-`EntityInterpolator::set_item_stack` still have nothing to receive. See
-[Dropped items](./dropped-items.md) for the render half.
+The whole chain is connected:
+
+```
+EntityMetadataUpdate.item          (this doc)
+  → EntityView::item               lodestone-client/src/state.rs (apply_metadata)
+  → EntitySnapshot::item           lodestone-shell/src/net.rs    (entity_snapshot)
+  → EntityInterpolator::set_item_stack
+  → EntityDraw::item               → RenderState::prepare_item_drops
+```
+
+The nesting survives as far as `EntitySnapshot` and is flattened only at the
+interpolator, where the two `None`s finally mean the same thing (draw nothing).
+Every fold on the way is "overwrite only when the update carried the field" —
+a live drop announces its stack once and is silent afterwards, so any layer that
+treats silence as an empty stack blanks the item one tick after it arrives. See
+[Dropped items](./dropped-items.md) for the render half, including what the
+conversion to `ResourceLocation` drops.

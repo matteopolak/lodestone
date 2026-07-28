@@ -1,36 +1,36 @@
 //! Live gate: an item entity the **server** spawned must reach the shell's
-//! entity path, and must reach pixels once its stack is known.
+//! entity path, must arrive knowing *which item it is*, and must reach pixels.
 //!
 //! ```text
-//! /summon item → ADD_ENTITY → ClientHandle::entities()
-//!   → NetClient::entity_snapshots()  (type_path == "item")
+//! /summon item → ADD_ENTITY + SET_ENTITY_DATA
+//!   → v770 metadata decode (index 8, SER_ITEM_STACK)
+//!   → EntityMetadataUpdate::item → EntityView::item
+//!   → NetClient::entity_snapshots()  (type_path == "item", item == Some(..))
 //!   → EntityInterpolator → EntityDraw → RenderState::render → GPU pixels
 //! ```
 //!
-//! # The one link this test supplies by hand, and why
+//! # Nothing here is faked
 //!
-//! Everything above is real except the item's **identity**. A dropped item
-//! carries its stack in entity metadata index 8 under the `ITEM_STACK`
-//! serializer, and the 26.2 adapter rejects that serializer outright
-//! (`protocol/v770/src/packets/metadata.rs`:
-//! `SER_ITEM_STACK | SER_PARTICLE | … => return Err(unknown_serializer(…))`,
-//! commented "complex, self-describing payloads mobs never emit" — true of mobs,
-//! false of item entities, which emit exactly this and nothing else). A failed
-//! metadata decode raises no event at all, so nothing downstream — not
-//! `EntityMetadataUpdate`, not `EntityView`, not `EntitySnapshot` — has anywhere
-//! to put an item id.
+//! This test used to call [`EntityInterpolator::set_item_stack`] by hand,
+//! standing in for a metadata decode the 26.2 adapter refused to do. That decode
+//! now exists and the whole chain above is wired, so the hand-supplied identity
+//! is gone: the item id asserted below is the one that came off the wire. If the
+//! chain regresses anywhere — adapter, read-model fold, snapshot lowering, or
+//! the interpolator — this reads `None` and fails, which is exactly what it did
+//! before the chain was closed.
 //!
-//! So this test calls [`EntityInterpolator::set_item_stack`] with the item it
-//! just summoned, standing in for that decode. That is deliberately the *only*
-//! thing it fakes, and it is stated here rather than hidden, because it makes
-//! the test's result precise: **everything except the metadata decode works
-//! against a real server.** When the adapter learns the serializer, deleting the
-//! `set_item_stack` line below must leave this test green.
+//! # Two items, because they answer different questions
 //!
-//! The first half is not faked at all, and is asserted separately: a server-sent
-//! item entity really does arrive as a tracked `EntityDraw` with type path
-//! `item`. That is the half that says "the drop exists but is invisible" rather
-//! than "the drop never arrives".
+//! * **`minecraft:diamond_block`** — a full block item, so it bakes to real 3-D
+//!   geometry and its silhouette is the least ambiguous thing available. This is
+//!   the one the pixel assertions use.
+//! * **`minecraft:diamond`** — a flat `item/generated` sprite. Its identity
+//!   decodes identically, but `BlockModels` only bakes world geometry for items
+//!   whose icon resolves to an `IconPart::Model`; a sprite item resolves to
+//!   `IconPart::Sprite` and is never inserted into the item-geometry map. So it
+//!   is *known* and still draws nothing. That gap is asserted here rather than
+//!   left as a surprise: "dropped items work" is currently true only for the
+//!   3-D-modelled ones.
 //!
 //! Per §12.52 this fails rather than skips when it cannot run.
 //!
@@ -57,7 +57,9 @@ const PROTOCOL_26_2: i32 = 776;
 
 /// A full block item, so the drawn geometry is a solid cube rather than a flat
 /// sprite standing on edge — the biggest, least ambiguous silhouette available.
-const ITEM: &str = "minecraft:diamond_block";
+const BLOCK_ITEM: &str = "minecraft:diamond_block";
+/// A flat `item/generated` item, to measure the other stream.
+const SPRITE_ITEM: &str = "minecraft:diamond";
 
 const W: u32 = 320;
 const H: u32 = 240;
@@ -80,9 +82,85 @@ fn look_at(eye: glam::Vec3, target: glam::Vec3) -> (f32, f32) {
     ((-d.x).atan2(d.z).to_degrees(), (-d.y).asin().to_degrees())
 }
 
+fn rcon() -> RconClient {
+    RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
+        "oracle RCON reachable at 127.0.0.1:25566 — a missing RCON is a harness \
+         failure, not a passing render path",
+    )
+}
+
+/// Clear the ground and drop one `item` on the player, returning where.
+///
+/// The summon uses the *player's own* position read back over RCON rather than
+/// `~ ~ ~`: a bare relative summon resolves against the console's origin, which
+/// puts the drop outside the bot's view distance, and an entity the client never
+/// tracks sends no metadata at all.
+///
+/// `PickupDelay` 32767 is the never-pick-up sentinel (`ItemLifecycle`'s
+/// `NEVER_PICKUP_DELAY`): without it the bot standing on the item collects it
+/// within a tick and there is nothing left to read. `Age` −32768 is
+/// `INFINITE_LIFETIME`, so a slow poll cannot lose it to a despawn.
+fn summon_drop(item: &str) -> (f64, f64, f64) {
+    let mut r = rcon();
+    let (px, py, pz) =
+        parse_list3(&r.cmd("data get entity @p Pos")).expect("player Pos readable via RCON");
+    r.cmd(&format!(
+        "forceload add {} {}",
+        px.floor() as i64,
+        pz.floor() as i64
+    ));
+    r.cmd("kill @e[type=item]");
+    r.cmd(&format!(
+        "summon item {px:.3} {:.3} {pz:.3} \
+         {{Item:{{id:\"{item}\",count:1}},PickupDelay:32767s,Age:-32768s}}",
+        py + 1.0
+    ));
+    r.cmd("tick sprint 20");
+    (px, py, pz)
+}
+
+/// Poll the live client until an item entity shows up within two blocks of
+/// `(px, pz)`, ignoring `exclude` (the previous phase's drop, which may still be
+/// in flight when the next one is summoned).
+fn wait_for_drop(
+    net: &NetClient,
+    interp: &mut EntityInterpolator,
+    px: f64,
+    pz: f64,
+    exclude: Option<i32>,
+) -> Option<EntityDraw> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let _ = net.poll();
+        interp.update(&net.entity_snapshots(), 1.0);
+        let nearest = interp
+            .draws()
+            .into_iter()
+            .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH && Some(d.id) != exclude)
+            .min_by(|a, b| {
+                let da = (f64::from(a.feet.x) - px).powi(2) + (f64::from(a.feet.z) - pz).powi(2);
+                let db = (f64::from(b.feet.x) - px).powi(2) + (f64::from(b.feet.z) - pz).powi(2);
+                da.total_cmp(&db)
+            });
+        // The identity rides a *separate* packet from the spawn, so a drop can
+        // be tracked a poll or two before its stack lands. Waiting for the item
+        // is what makes the assertion below about the decode rather than about
+        // poll timing — the timeout still fails if it never arrives.
+        if let Some(d) = nearest
+            && (f64::from(d.feet.x) - px).abs() < 2.0
+            && (f64::from(d.feet.z) - pz).abs() < 2.0
+            && d.item.is_some()
+        {
+            return Some(d);
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    None
+}
+
 #[test]
 #[ignore = "requires the live vanilla-26.2 oracle on :25565 (+ RCON :25566), a GPU adapter and client.jar"]
-fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
+fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     let ctx = GpuContext::new_headless_blocking().expect(
         "no wgpu adapter. This #[ignore]d gate is an explicit request for the full \
          live+GPU path — run it on a host with an adapter, don't 'skip'.",
@@ -99,7 +177,8 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
             resources.banner
         )
     });
-    let item: ResourceLocation = ITEM.parse().expect("valid item id");
+    let block_item: ResourceLocation = BLOCK_ITEM.parse().expect("valid item id");
+    let sprite_item: ResourceLocation = SPRITE_ITEM.parse().expect("valid item id");
 
     // --- connect ---------------------------------------------------------
     let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
@@ -119,77 +198,21 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
          a connection fault, not a render one"
     );
 
-    // --- cause a drop ----------------------------------------------------
-    let (px, py, pz) = {
-        let mut r = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
-            "oracle RCON reachable at 127.0.0.1:25566 — a missing RCON is a harness \
-             failure, not a passing render path",
-        );
-        let (px, py, pz) = parse_list3(&r.cmd("data get entity @p Pos"))
-            .expect("player Pos readable via RCON after join");
-        r.cmd(&format!(
-            "forceload add {} {}",
-            px.floor() as i64,
-            pz.floor() as i64
-        ));
-        r.cmd("kill @e[type=item]");
-        // PickupDelay 32767 is the never-pick-up sentinel (`ItemLifecycle`'s
-        // NEVER_PICKUP_DELAY): without it the bot standing on the item collects
-        // it within a tick and there is nothing left to render. Age -32768 is
-        // INFINITE_LIFETIME so a slow poll cannot lose it to a despawn.
-        r.cmd(&format!(
-            "summon item {px:.3} {:.3} {pz:.3} \
-             {{Item:{{id:\"{ITEM}\",count:1}},PickupDelay:32767s,Age:-32768s}}",
-            py + 1.0
-        ));
-        r.cmd("tick sprint 20");
-        (px, py, pz)
-    };
-
-    // --- observe it crossing the shell's entity path ---------------------
-    let mut interp = EntityInterpolator::new();
-    let mut drop: Option<EntityDraw> = None;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut ever_saw_item_snapshot = false;
-    while Instant::now() < deadline {
-        let _ = net.poll();
-        let snaps = net.entity_snapshots();
-        ever_saw_item_snapshot |= snaps
-            .iter()
-            .any(|s| s.type_path == ITEM_ENTITY_TYPE_PATH);
-        interp.update(&snaps, 1.0);
-        let nearest = interp
-            .draws()
-            .into_iter()
-            .filter(|d| d.type_path == ITEM_ENTITY_TYPE_PATH)
-            .min_by(|a, b| {
-                let da = (f64::from(a.feet.x) - px).powi(2) + (f64::from(a.feet.z) - pz).powi(2);
-                let db = (f64::from(b.feet.x) - px).powi(2) + (f64::from(b.feet.z) - pz).powi(2);
-                da.total_cmp(&db)
-            });
-        if let Some(d) = nearest
-            && (f64::from(d.feet.x) - px).abs() < 2.0
-            && (f64::from(d.feet.z) - pz).abs() < 2.0
-        {
-            drop = Some(d);
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-
     let cleanup = || {
         if let Ok(mut r) = RconClient::connect(RCON_ADDR, RCON_PASSWORD) {
             r.cmd("kill @e[type=item]");
         }
     };
 
-    let drop = drop.unwrap_or_else(|| {
+    // --- phase 1: a 3-D-modelled drop ------------------------------------
+    let (px, py, pz) = summon_drop(BLOCK_ITEM);
+    let mut interp = EntityInterpolator::new();
+    let drop = wait_for_drop(&net, &mut interp, px, pz, None).unwrap_or_else(|| {
         cleanup();
         panic!(
-            "the summoned item entity never crossed the shell's entity path within the \
-             timeout (saw an item-typed snapshot at some point: {ever_saw_item_snapshot}). \
-             The server accepted the summon, so this is a gap in the entity wiring \
-             upstream of the renderer."
+            "the summoned {BLOCK_ITEM} never crossed the shell's entity path carrying an \
+             item id within the timeout. The server accepted the summon, so this is a gap \
+             in the entity/metadata wiring upstream of the renderer."
         );
     });
 
@@ -202,16 +225,15 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
     eprintln!("drop.item (decoded) = {:?}", drop.item);
     eprintln!("age_ticks          = {:.2}", drop.anim.age_ticks);
 
-    // The unfaked half. Both halves of this are load bearing: the entity is
-    // tracked (so the drop is not lost upstream), *and* nothing knows what it
-    // is (so the invisibility is exactly the metadata gap and not something
-    // else).
     assert_eq!(drop.type_path, ITEM_ENTITY_TYPE_PATH);
+    // The whole point of the gate: the id came off the wire, nothing here
+    // supplied it. Before the metadata chain was closed this read `None`.
     assert_eq!(
-        drop.item, None,
-        "the adapter is not expected to decode the ITEM_STACK metadata serializer \
-         yet — if this now reads Some(..), the decode has landed and the \
-         set_item_stack call below should be deleted"
+        drop.item,
+        Some(block_item.clone()),
+        "the drop must arrive knowing it is a {BLOCK_ITEM} — a `None` here means the \
+         ITEM_STACK metadata never reached EntityDraw, and a different id means it \
+         reached it wrong"
     );
 
     // --- render it -------------------------------------------------------
@@ -238,26 +260,16 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
         (target.read_texels(device, queue), stats.item_drops_drawn)
     };
 
-    // Control, first: the drop exactly as the live client has it — tracked, but
-    // with no stack. It must draw nothing.
-    let (control, control_drops) = shoot(std::slice::from_ref(&drop));
-
-    // Subject: the same server-sent entity, at the same server-reported
-    // position, with the stack the summon used supplied by hand.
-    interp.set_item_stack(drop.id, item.clone());
-    let with_stack = interp
-        .draws()
-        .into_iter()
-        .find(|d| d.id == drop.id)
-        .expect("the drop must still be tracked");
-    assert_eq!(
-        with_stack.item,
-        Some(item.clone()),
-        "set_item_stack must reach the draw"
-    );
-    let (subject, subject_drops) = shoot(std::slice::from_ref(&with_stack));
-
-    cleanup();
+    // Control: the *same* server-sent entity at the same server-reported
+    // position with its identity taken away. It must draw nothing, which is what
+    // makes the pixel count below attributable to the decoded item and not to
+    // the terrain, the sky, or the drop merely existing.
+    let blank = EntityDraw {
+        item: None,
+        ..drop.clone()
+    };
+    let (control, control_drops) = shoot(std::slice::from_ref(&blank));
+    let (subject, subject_drops) = shoot(std::slice::from_ref(&drop));
 
     let mut lit = 0usize;
     let mut corner = 0usize;
@@ -291,7 +303,7 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
     assert_eq!(subject_drops, 1, "exactly one drop should have been meshed");
     assert!(
         lit > 300,
-        "a server-spawned {ITEM} drop should cover a real run of pixels at 1.2 \
+        "a server-spawned {BLOCK_ITEM} drop should cover a real run of pixels at 1.2 \
          blocks; only {lit} differ from the no-stack control"
     );
     assert_eq!(
@@ -300,6 +312,34 @@ fn a_server_spawned_drop_is_tracked_and_reaches_pixels() {
          there means the count above is not measuring a localised object"
     );
 
+    // --- phase 2: a flat sprite item -------------------------------------
+    // Same chain, same assertions about identity; the difference is what the
+    // renderer can do with it.
+    let (px, _, pz) = summon_drop(SPRITE_ITEM);
+    let sprite_drop =
+        wait_for_drop(&net, &mut interp, px, pz, Some(drop.id)).unwrap_or_else(|| {
+            cleanup();
+            panic!("the summoned {SPRITE_ITEM} never arrived with an item id");
+        });
+    eprintln!("sprite drop.item   = {:?}", sprite_drop.item);
+    assert_eq!(
+        sprite_drop.item,
+        Some(sprite_item),
+        "a flat sprite item's identity decodes exactly like a block item's"
+    );
+
+    let (_, sprite_drops) = shoot(std::slice::from_ref(&sprite_drop));
+    eprintln!("sprite item_drops_drawn = {sprite_drops}");
+    assert_eq!(
+        sprite_drops, 0,
+        "known gap, asserted so it cannot be mistaken for the metadata chain \
+         failing: `BlockModels` bakes world geometry only for items whose icon \
+         resolves to an IconPart::Model, and {SPRITE_ITEM} is an item/generated \
+         sprite, so it is identified and still draws nothing. When sprite items \
+         are extruded for the world pass, this assertion is the one to flip."
+    );
+
+    cleanup();
     drop_net(net);
 }
 
