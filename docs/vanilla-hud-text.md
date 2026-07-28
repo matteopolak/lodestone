@@ -1,0 +1,173 @@
+# Vanilla HUD text
+
+## What it is
+
+Every string the HUD draws — chat, the F3 overlay, titles, the action bar, the
+scoreboard, the tab list, stack counts — rendered as **vanilla's proportional
+`default` font** with its 1 px drop shadow, instead of the shell's fixed-advance
+5×7 debug bitmap.
+
+Two halves:
+
+- **Metrics + pixels** — `lodestone-assets::font`. `Font`/`FontLoader` (advances,
+  provider chain) existed since the first commit; `RasterFont`/`GlyphRaster` were
+  added to expose the *coverage* of each glyph cell, which is what a renderer
+  needs and what nothing had.
+- **Drawing** — `lodestone-shell::hud::vanilla_font::VanillaFont`.
+
+`lodestone_assets::font` was one of this repo's longest-lived **islands**: complete,
+tested, and consumed only by its own tests. `RasterFont` is the seam that closed it.
+
+## How it works
+
+### Load
+
+`VanillaFont::shared()` resolves `minecraft:default` once per process from the same
+`client.jar` the block/GUI/item atlases come from, via a `OnceLock`. It is
+**fail-open**: a jar-less run (headless gates, the demo world) gets `None` and every
+caller keeps the debug font. `HudRenderer::new` calls it, so no `attach_*` call and
+no GPU resource is involved — unlike the atlases, a font needs neither.
+
+Pack discovery in `vanilla_font::pack_root` duplicates `resources.rs`'s rule
+(`LODESTONE_ASSETS`, else the highest-sorting complete `.cache/mc/<version>` under
+any ancestor of the cwd) because `resources::vanilla_manager` is `#[cfg(test)]`.
+Dropping that attribute and calling it is the right end state.
+
+### Metrics
+
+Nothing here invents a width. `FontLoader` derives each glyph's advance from the
+**rightmost non-transparent column of its sheet cell** plus one, exactly as
+vanilla's `BitmapProvider.getActualGlyphWidth` does (it tests the alpha channel).
+`RasterFont::load_raster` then decodes each referenced sheet once, so ink and
+advance come from the same cell **by construction** rather than by coincidence.
+
+Measured against the real 26.2 jar: 2414 codepoints, 3 bitmap sheets (ascii,
+accented, nonlatin_european), `i`/`l`/`W` = 2/3/6 logical px.
+
+Vertical placement is `GlyphBitmap.getTop() == 7 - ascent`
+(`metrics::BEARING_TOP_BASE`), measured from the **top of the line**, not the
+baseline. The ascii sheet (`ascent: 7`) sits flush; the accented sheet
+(`ascent: 10`) hangs 3 px above.
+
+### Draw
+
+Glyph coverage is emitted as **quads on the HUD's existing colour stream**
+(`item_icon::ColourStream`), run-length merged along each row — an 8×8 cell costs at
+most 8 quads instead of 64, pixel-identically, since every texel in a run shares one
+colour.
+
+No font atlas, no texture upload, no fifth bind group. This matters: the model
+shader is already at wgpu's 4-bind-group floor (see `CLAUDE.md`), and text is the
+one HUD element whose colour is per-draw rather than per-texel. A textured path
+would be fewer vertices but needs a new pipeline, a new upload, and a new attach
+point in `app.rs`.
+
+The shadow is **two passes over the whole string**: the offset copy first at
+`SHADOW_OFFSET` (+1 logical px on both axes) and 25 % of the colour, then the text.
+Whole-string-first is what keeps a following glyph's ink on top of the previous
+glyph's shadow, matching vanilla's two-layer batch.
+
+`shadow_of` takes the quarter in **gamma space** (`ARGB.scaleRGB(color, 0.25F)` →
+`0xFF3F3F3F`, 63/255). The HUD's colour convention is sRGB 0..1 written verbatim
+(`hud::legacy_rgb` divides vanilla's hex codes by 255), so the quarter is taken
+directly on those floats. In linear space the shadow would land at ~54 % on screen —
+a grey outline instead of vanilla's near-black one.
+
+### Wiring, and why it is not an island
+
+`HudRenderer::render_with_item_models` is the single `HudGeometry::build_inner` call
+site in the renderer, and it passes `self.font`. `render()` delegates to it, so
+**every** HUD render path — `app.rs:677`, `gpu.rs`, `scoreboard.rs`, `tablist.rs` —
+gets vanilla text with no call-site change.
+
+Crucially, **measurement and drawing read the same field**. `Builder::text_width` /
+`Builder::legacy_width` pick the proportional or the fixed measure to match whatever
+`Builder::text` will actually draw with, so a centred or right-aligned string can
+never be laid out against a font other than the one that renders it. Every layout
+site was converted from the free `text_w` to `b.text_width`.
+
+## How to change it, and the gotchas
+
+- **Do not make the font a hard requirement.** The headless and demo paths have no
+  jar, and `hud/item_icon.rs`'s pixel gates assert against the fixed-width fallback.
+  `HudGeometry::build` stays jar-free and byte-deterministic on purpose; use
+  `build_with_font` when you want vanilla text from pure geometry.
+- **Bold / italic / obfuscated are not drawn.** The metrics exist
+  (`Font::advance_bold`, `metrics::ITALIC_SHEAR`); the draw side consumes `§l`/`§o`
+  as zero-width state and ignores them, as the old path did. Adding them is a change
+  in `hud/vanilla_font.rs`, not in `lodestone-assets`.
+- **Only bitmap providers rasterise.** `unihex` (CJK) and `ttf` parse but contribute
+  no glyphs, so those codepoints draw the hollow missing-glyph box.
+- **`§` pairs are zero-width in both fonts.** `hud::strip_legacy` exists so the
+  fallback measure does not over-count by two characters per code and push centred
+  lines left.
+- **The gates are pixel gates for a specific reason.** A font with every character
+  correct and every *width* wrong satisfies `assert_eq!` on the source string, on the
+  glyph count, on the vertex count, and on "did text draw". The defect is a property
+  of the geometry *between* glyphs. Never replace these with content assertions.
+
+## Verification
+
+```bash
+cargo test -p lodestone-assets --test vanilla_font_metrics -- --ignored --nocapture
+cargo test -p lodestone-shell  --test vanilla_font_pixels  -- --ignored --nocapture
+```
+
+Both fail closed: a missing jar is a failure, not a skip. The pixel gate asserts
+`HudRenderer::font_attached()` **before measuring anything** — without that, a
+missing jar silently degrades to the debug font and every "text drew something"
+assertion below would still pass.
+
+### What the pixel gate discriminates
+
+Two hypotheses, both named as constants so a reader can see which one the assertion
+separates:
+
+| hypothesis | 10×`i` vs 10×`W` span | ratio |
+|---|---|---|
+| proportional (vanilla) | 40 px vs 120 px | `PROPORTIONAL_RATIO` = 3.000 |
+| fixed 6 px advance (debug font) | 114 px vs 118 px | `FIXED_ADVANCE_RATIO` = 1.035 |
+
+The band is ±8 % around 3.0, which excludes the unfixed value by a factor of ~2.7.
+The control ratio is not exactly 1.0 only because the debug `i` bitmap is inset one
+column on the left; the advances are identical.
+
+Also asserted:
+
+- **Per-glyph advance read off the framebuffer.** For a probe `"<c>W"`, `W`'s ink
+  begins at column 0 of its cell, so the second run of main pixels starts exactly
+  `advance(c) * scale` px along. Measured: `i` 2, `l` 3, `I` 4, `t` 4, `f` 5, `W` 6,
+  `M` 6, `~` 7.
+- **The shadow is an offset copy, not a blur** — set equality, not "the region is
+  darker". The shadow pixel set must be *exactly* the main set translated
+  `(+1, +1)` logical px minus whatever main covers: 560 px expected, 560 observed. A
+  blur lights the other neighbours too and fails by inclusion. Plus a non-empty
+  check, so the set equality cannot pass vacuously.
+- **The shadow's brightness**, exactly: main peak 255, shadow peak 64. ~137 would
+  mean the quarter was taken in linear space.
+- **The negative control, executed.** `HudRenderer::detach_font()` restores the debug
+  font in the same renderer and the same frames; `is_proportional(control)` is
+  asserted **false**, and the control frame is asserted to contain no pixel between
+  the shadow and main brightness thresholds.
+
+The gate's target is deliberately `Rgba8Unorm`, **not** `Rgba8UnormSrgb`, so the
+HUD's colour floats land in the framebuffer verbatim and the gamma-space quarter can
+be asserted at its exact value. On an sRGB target it would read back as ~54 % and an
+exact assertion would be impossible to state honestly.
+
+## Configuration
+
+- `LODESTONE_ASSETS` — pack root containing `client.jar` and
+  `generated/reports/blocks.json`. Otherwise discovered under `.cache/mc/<version>`.
+- `metrics::SHADOW_OFFSET`, `metrics::SHADOW_BRIGHTNESS`,
+  `metrics::BEARING_TOP_BASE` in `lodestone-assets::font`.
+- GUI scale is still hard-coded (`let scale = 2.0` in `hud::build_inner`); the font
+  takes `scale` per call and does not care, but nothing exposes it yet.
+
+## Dependencies
+
+- `lodestone-assets`: `font` (`Font`, `FontLoader`, `RasterFont`, `GlyphRaster`),
+  `ResourceManager`/`ZipSource` for the jar, `Image::decode_png` for the sheets.
+- `lodestone-shell`: `hud::item_icon::ColourStream` (the colour vertex stream),
+  `hud::font` (the fixed-advance fallback), `hud::legacy_rgb` (`§` colours).
+- The vanilla `client.jar` for 26.2. No GPU resources.

@@ -61,6 +61,13 @@ pub mod metrics {
     /// Italic shear: the top of each glyph is sheared `+1` px relative to the
     /// bottom (vanilla shears by 1 over the glyph height).
     pub const ITALIC_SHEAR: f32 = 1.0;
+    /// The bearing-top a glyph is measured against when placing its bitmap:
+    /// `GlyphBitmap.getTop() == 7.0 - bearingTop`, and a bitmap glyph's
+    /// `bearingTop` is its provider's `ascent`. So the ascii sheet (`ascent: 7`)
+    /// puts its 8×8 cell flush with the line's top edge, and the accented sheet
+    /// (`ascent: 10`) hangs 3 px above it. Straight from
+    /// `com.mojang.blaze3d.font.GlyphBitmap` in the 26.2 client.
+    pub const BEARING_TOP_BASE: f32 = 7.0;
 }
 
 /// A font option that can gate a conditional provider.
@@ -659,6 +666,154 @@ impl<'a> FontLoader<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// A [`Font`] together with the decoded sheets its bitmap glyphs live in, so a
+/// consumer can ask not just "how wide is this glyph" but "which texels of it
+/// are ink".
+///
+/// [`Font`] alone is a *metrics* table: it knows each glyph's advance and which
+/// cell of which sheet it occupies, but it holds no pixels, so nothing can draw
+/// from it. That is exactly why the font machinery sat unconsumed — a renderer
+/// that wants vanilla text needs coverage, and had to re-open and re-decode the
+/// sheets itself. `RasterFont` closes that gap and is the type a HUD actually
+/// holds.
+///
+/// It is deliberately **GPU-free**: coverage is exposed as a per-texel predicate
+/// in *logical* (GUI) pixel space via [`GlyphRaster`], so a renderer can either
+/// blit the sheet or emit quads, and a test can assert on it with no adapter.
+#[derive(Debug)]
+pub struct RasterFont {
+    font: Font,
+    sheets: HashMap<ResourceLocation, Image>,
+}
+
+impl RasterFont {
+    /// The metrics half. Advances, coverage counts and `§`-aware widths all live
+    /// here; [`RasterFont`] adds only the pixels.
+    pub fn font(&self) -> &Font {
+        &self.font
+    }
+
+    /// The number of distinct bitmap sheets whose pixels are resident.
+    pub fn sheet_count(&self) -> usize {
+        self.sheets.len()
+    }
+
+    /// The advance of `codepoint` in logical pixels, or `None` when the font
+    /// does not cover it.
+    pub fn advance(&self, codepoint: u32) -> Option<f32> {
+        self.font.advance(codepoint)
+    }
+
+    /// The width of a plain string in logical pixels (see [`Font::string_width`]).
+    pub fn string_width(&self, s: &str) -> f32 {
+        self.font.string_width(s)
+    }
+
+    /// The width of a `§`-coded string in logical pixels (see
+    /// [`Font::legacy_width`]).
+    pub fn legacy_width(&self, s: &str) -> f32 {
+        self.font.legacy_width(s)
+    }
+
+    /// The drawable raster for `codepoint`, or `None` for a whitespace-only or
+    /// uncovered glyph (or one whose sheet failed to decode).
+    pub fn raster(&self, codepoint: u32) -> Option<GlyphRaster<'_>> {
+        let glyph = self.font.bitmap_glyph(codepoint)?;
+        let image = self.sheets.get(&glyph.file)?;
+        Some(GlyphRaster { glyph, image })
+    }
+}
+
+/// One glyph's pixels, addressed in *cell texels* and measured in logical pixels.
+///
+/// A renderer walks `0..cell_width()` × `0..cell_height()` and asks
+/// [`GlyphRaster::is_ink`]; each lit texel covers a
+/// [`texel_size`](GlyphRaster::texel_size)-square of logical pixels at
+/// `(x + tx * texel_size, y + top() + ty * texel_size)`, where `(x, y)` is the
+/// pen position and `y` is the **top of the line** (not the baseline).
+#[derive(Debug, Clone, Copy)]
+pub struct GlyphRaster<'a> {
+    glyph: &'a BitmapGlyph,
+    image: &'a Image,
+}
+
+impl GlyphRaster<'_> {
+    /// Cell width in sheet texels.
+    pub fn cell_width(&self) -> u32 {
+        self.glyph.cell[2]
+    }
+
+    /// Cell height in sheet texels.
+    pub fn cell_height(&self) -> u32 {
+        self.glyph.cell[3]
+    }
+
+    /// The logical size of one sheet texel (vanilla's `1 / oversample`).
+    pub fn texel_size(&self) -> f32 {
+        self.glyph.pixel_scale
+    }
+
+    /// The glyph box's top edge relative to the line's top, in logical pixels:
+    /// `7 - ascent`, per `GlyphBitmap.getTop`. Negative for tall sheets, which
+    /// is how accented capitals hang above the ascii line.
+    pub fn top(&self) -> f32 {
+        metrics::BEARING_TOP_BASE - self.glyph.ascent as f32
+    }
+
+    /// This glyph's advance in logical pixels.
+    pub fn advance(&self) -> f32 {
+        self.glyph.advance as f32
+    }
+
+    /// Whether the texel at `(tx, ty)` within the cell is ink.
+    ///
+    /// Vanilla's `getActualGlyphWidth` tests `getLuminanceOrAlpha() != 0` on an
+    /// image read as RGBA, i.e. the alpha channel — the same test used here, so
+    /// coverage and advance agree by construction rather than by coincidence.
+    pub fn is_ink(&self, tx: u32, ty: u32) -> bool {
+        if tx >= self.cell_width() || ty >= self.cell_height() {
+            return false;
+        }
+        alpha_at(self.image, self.glyph.cell[0] + tx, self.glyph.cell[1] + ty) != 0
+    }
+}
+
+impl FontLoader<'_> {
+    /// Loads `id` and decodes every bitmap sheet its glyphs reference, yielding
+    /// a [`RasterFont`].
+    ///
+    /// Sheets are decoded once each, not once per glyph. A sheet that decodes
+    /// here is by construction the same one [`FontLoader::load`] measured the
+    /// advances from, so ink and advance can never disagree.
+    pub fn load_raster(
+        &self,
+        id: &ResourceLocation,
+        options: &FontOptions,
+    ) -> Result<RasterFont, FontError> {
+        let font = self.load(id, options)?;
+        let mut files: Vec<ResourceLocation> = Vec::new();
+        for cp in font.codepoints() {
+            if let Some(g) = font.bitmap_glyph(cp)
+                && !files.contains(&g.file)
+            {
+                files.push(g.file.clone());
+            }
+        }
+        let mut sheets = HashMap::with_capacity(files.len());
+        for file in files {
+            let tex_path = format!("assets/{}/textures/{}", file.namespace(), file.path());
+            let bytes = self
+                .manager
+                .read(&tex_path)
+                .ok_or_else(|| FontError::MissingTexture {
+                    file: file.to_string(),
+                })?;
+            sheets.insert(file, Image::decode_png(&bytes)?);
+        }
+        Ok(RasterFont { font, sheets })
     }
 }
 

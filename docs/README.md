@@ -25,9 +25,20 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   slot: which of the two icon streams a part reaches, the pass order, and the
   four GPU resources borrowed from the world renderer rather than uploaded twice.
   Shared by the hotbar and the container screen.
+- [Vanilla HUD text](./vanilla-hud-text.md) — drawing real `ascii.png` glyphs with
+  per-glyph proportional advances and the gamma-space drop shadow, why the font is
+  fail-open rather than required, and why the gate measures distances between lit
+  columns instead of asserting on the source string.
 - [Container screen](./container-screen.md) — laying out an open `Menu` (chest,
   inventory, crafting table), why the crafting branch hangs off `Menu` instead of
   `MenuKind`, and why the result slot is never computed locally.
 - [Crafting](./crafting.md) — the recipe data model and matching rules, loading
   the vanilla corpus from the client jar's datapack JSON, and the crafting-table
   menu layout (including who actually computes the result slot).
+- [Frame pacing](./frame-pacing.md) — vanilla's ten-tick catch-up cap, why
+  presentation must never gate simulation (a stalled client is sent no chunks), and
+  the measured reason the unfocused frame schedule is absolute rather than
+  elapsed-based: the obvious gate delivers 26 fps at a 30 fps target.
+- [Main menu](./main-menu.md) — the screen state machine, the persisted
+  multiplayer server list, per-server status pings (MOTD, players, favicon), and
+  the dependency edge that gave `lodestone-net`'s ping its first consumer.

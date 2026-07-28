@@ -18,8 +18,10 @@
 
 mod font;
 pub(crate) mod item_icon;
+pub mod vanilla_font;
 
 pub use font::glyph_rows;
+pub use vanilla_font::VanillaFont;
 /// The hotbar's per-slot draw record. The container screen builds the same
 /// record for every menu slot, so the type itself lives in [`item_icon`]; this
 /// is the name the hotbar has always used for it.
@@ -350,7 +352,24 @@ impl HudGeometry {
     /// quads. This is the jar-less / headless path.
     #[must_use]
     pub fn build(frame: &HudFrame, width: u32, height: u32) -> Self {
-        Self::build_inner(frame, width, height, None, None, None)
+        Self::build_inner(frame, width, height, None, None, None, None)
+    }
+
+    /// Like [`build`](Self::build), but with vanilla text: proportional advances
+    /// and the drop shadow, from the real `ascii.png`. Everything else is
+    /// identical.
+    ///
+    /// Kept separate from [`build`](Self::build) deliberately — `build` must stay
+    /// jar-free and byte-deterministic, because it is what the geometry unit
+    /// tests and the jar-less fallback path use.
+    #[must_use]
+    pub fn build_with_font(
+        frame: &HudFrame,
+        width: u32,
+        height: u32,
+        font: &VanillaFont,
+    ) -> Self {
+        Self::build_inner(frame, width, height, None, None, None, Some(font))
     }
 
     /// Like [`build`](Self::build), but draws the survival vitals from the real
@@ -359,9 +378,10 @@ impl HudGeometry {
     /// crosshair, …) is identical and still emitted to the colour stream.
     #[must_use]
     pub fn build_with_gui(frame: &HudFrame, width: u32, height: u32, gui: &GuiAtlas) -> Self {
-        Self::build_inner(frame, width, height, Some(gui), None, None)
+        Self::build_inner(frame, width, height, Some(gui), None, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_inner(
         frame: &HudFrame,
         width: u32,
@@ -369,6 +389,7 @@ impl HudGeometry {
         gui: Option<&GuiAtlas>,
         items: Option<&ItemAtlas>,
         models: Option<&BlockModels>,
+        font: Option<&VanillaFont>,
     ) -> Self {
         let mut b = Builder::new(
             width.max(1) as f32,
@@ -376,6 +397,7 @@ impl HudGeometry {
             gui,
             items,
             models,
+            font,
         );
 
         let scale = 2.0;
@@ -521,7 +543,7 @@ impl HudGeometry {
                 }
                 let level_gap = if level > 0 {
                     let s = level.to_string();
-                    let tw = text_w(&s, scale);
+                    let tw = b.text_width(&s, scale);
                     b.text(
                         &s,
                         cx - tw * 0.5,
@@ -574,7 +596,7 @@ impl HudGeometry {
         // Action bar: a single centred line just above the vitals/XP cluster,
         // fading with the server-driven alpha. Legacy `§` colour codes render.
         if let Some((msg, alpha)) = frame.action_bar.as_ref().filter(|(_, a)| *a > 0.0) {
-            let tw = text_w(msg, scale);
+            let tw = b.legacy_width(msg, scale);
             b.text_legacy(
                 msg,
                 cx - tw * 0.5,
@@ -590,12 +612,12 @@ impl HudGeometry {
         // so it costs nothing off a server that sends none.
         if let Some((title, subtitle, alpha)) = frame.title.as_ref().filter(|(_, _, a)| *a > 0.0) {
             let ts = scale * 4.0;
-            let tw = text_w(title, ts);
+            let tw = b.text_width(title, ts);
             let ty = b.h * 0.40;
             b.text(title, (b.w - tw) * 0.5, ty, ts, [1.0, 1.0, 1.0, *alpha]);
             if let Some(sub) = subtitle {
                 let ss = scale * 2.0;
-                let sw = text_w(sub, ss);
+                let sw = b.text_width(sub, ss);
                 b.text(
                     sub,
                     (b.w - sw) * 0.5,
@@ -615,7 +637,7 @@ impl HudGeometry {
             let bx = (b.w - bar_w) * 0.5;
             for (i, bb) in frame.boss_bars.iter().enumerate() {
                 let top = margin + i as f32 * (line_h + bar_h + 6.0);
-                let tw = text_w(&bb.title, scale);
+                let tw = b.text_width(&bb.title, scale);
                 b.text(
                     &bb.title,
                     (b.w - tw) * 0.5,
@@ -636,21 +658,22 @@ impl HudGeometry {
         // right-aligned — vanilla's layout. Absent when nothing is displayed.
         if let Some(side) = frame.sidebar {
             let pad = 4.0;
-            let mut content_w = text_w(&side.title, scale);
+            let mut content_w = b.text_width(&side.title, scale);
             for l in &side.lines {
-                content_w = content_w.max(text_w(&l.label, scale) + 12.0 + text_w(&l.score, scale));
+                content_w =
+                    content_w.max(b.text_width(&l.label, scale) + 12.0 + b.text_width(&l.score, scale));
             }
             let panel_w = content_w + pad * 2.0;
             let panel_h = (side.lines.len() as f32 + 1.0) * line_h + pad * 2.0;
             let px = b.w - panel_w - margin;
             let py = ((b.h - panel_h) * 0.5).max(margin);
             b.rect_px(px, py, panel_w, panel_h, [0.0, 0.0, 0.0, 0.55]);
-            let title_x = px + (panel_w - text_w(&side.title, scale)) * 0.5;
+            let title_x = px + (panel_w - b.text_width(&side.title, scale)) * 0.5;
             b.text(&side.title, title_x, py + pad, scale, [1.0, 1.0, 1.0, 1.0]);
             for (i, l) in side.lines.iter().enumerate() {
                 let y = py + pad + (i as f32 + 1.0) * line_h;
                 b.text(&l.label, px + pad, y, scale, [0.85, 0.90, 1.0, 1.0]);
-                let sx = px + panel_w - pad - text_w(&l.score, scale);
+                let sx = px + panel_w - pad - b.text_width(&l.score, scale);
                 b.text(&l.score, sx, y, scale, [0.95, 0.35, 0.35, 1.0]);
             }
         }
@@ -777,7 +800,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
             let scale = 2.0;
             let line_h = (font::GLYPH_H as f32 + 2.0) * scale;
             let s = level.to_string();
-            let tw = text_w(&s, scale);
+            let tw = b.text_width(&s, scale);
             b.text(
                 &s,
                 cx - tw * 0.5,
@@ -826,8 +849,10 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
     row_y
 }
 
-/// Pixel width of `s` in the fixed-advance HUD font at `scale` (matches
-/// [`Builder::text`]'s per-glyph advance, so right-alignment lines up exactly).
+/// Pixel width of `s` in the **fixed-advance** HUD font at `scale`. Only correct
+/// when no vanilla font is attached — every layout site goes through
+/// [`Builder::text_width`], which picks this or the proportional measure to match
+/// whichever font [`Builder::text`] will actually draw with.
 fn text_w(s: &str, scale: f32) -> f32 {
     item_icon::text_w(s, scale)
 }
@@ -846,6 +871,24 @@ fn chat_line_alpha(age: f32) -> f32 {
     } else {
         (CHAT_VISIBLE_SECS - age) / CHAT_FADE_SECS
     }
+}
+
+/// The visible characters of a legacy `§`-coded string: each `§`+selector pair
+/// is dropped. Both text paths draw codes zero-width, so measuring the raw
+/// string over-counts by two characters per code and pushes centred lines left.
+fn strip_legacy(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{00a7}' {
+            if chars.next().is_none() {
+                break;
+            }
+            continue;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// The RGB of one of the sixteen legacy `§` colour codes (`0`..=`9`, `a`..=`f`),
@@ -892,6 +935,11 @@ struct Builder<'a> {
     /// rather than a flat sprite. `None` on jar-less / demo runs, where those
     /// slots stay empty wells exactly as before.
     models: Option<&'a BlockModels>,
+    /// The vanilla proportional font. `None` on jar-less / demo runs and in every
+    /// pure `HudGeometry::build*` call, where text falls back to the fixed-advance
+    /// 5×7 debug font. Measurement and drawing read the *same* field, so a layout
+    /// can never be computed against a font other than the one that draws.
+    font: Option<&'a VanillaFont>,
 }
 
 impl<'a> Builder<'a> {
@@ -901,6 +949,7 @@ impl<'a> Builder<'a> {
         gui: Option<&'a GuiAtlas>,
         items: Option<&'a ItemAtlas>,
         models: Option<&'a BlockModels>,
+        font: Option<&'a VanillaFont>,
     ) -> Self {
         Self {
             w,
@@ -912,6 +961,24 @@ impl<'a> Builder<'a> {
             gui,
             items,
             models,
+            font,
+        }
+    }
+
+    /// Pixel width of `s` at `scale` in whichever font [`Builder::text`] will
+    /// draw with. Every centring and right-alignment site must use this.
+    fn text_width(&self, s: &str, scale: f32) -> f32 {
+        match self.font {
+            Some(f) => f.width(s, scale),
+            None => text_w(s, scale),
+        }
+    }
+
+    /// Pixel width of a `§`-coded string at `scale`, codes counted as zero-width.
+    fn legacy_width(&self, s: &str, scale: f32) -> f32 {
+        match self.font {
+            Some(f) => f.legacy_width(s, scale),
+            None => text_w(&strip_legacy(s), scale),
         }
     }
 
@@ -991,8 +1058,29 @@ impl<'a> Builder<'a> {
     }
 
     /// Emit a string starting at pixel `(x, y)` (top-left of first glyph).
+    ///
+    /// With a [`VanillaFont`] attached this is vanilla text: proportional
+    /// advances, real `ascii.png` glyphs and the 1 px drop shadow. Without one it
+    /// is the fixed-advance 5×7 debug font, unshadowed, exactly as before.
     fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
-        self.colour().text(s, x, y, scale, c);
+        match self.font {
+            Some(f) => {
+                let (w, h) = (self.w, self.h);
+                f.draw(
+                    &mut ColourStream {
+                        verts: &mut self.verts,
+                        w,
+                        h,
+                    },
+                    s,
+                    x,
+                    y,
+                    scale,
+                    c,
+                );
+            }
+            None => self.colour().text(s, x, y, scale, c),
+        }
     }
 
     /// Draw a single glyph with its top-left at `(x, y)`. Space and unknown
@@ -1004,11 +1092,28 @@ impl<'a> Builder<'a> {
     /// Emit a string carrying legacy `§` colour/format codes as coloured runs.
     /// Colour codes (`§0`..=`§f`) recolour the following text; `§r` resets to
     /// `base`; format codes (`§k`/`l`/`m`/`n`/`o`) are consumed but not styled
-    /// (the shell's bitmap font has no bold/italic variants). Each code pair is
+    /// (neither font has bold/italic variants). Each code pair is
     /// **zero-width**, matching vanilla's "`§` codes are 2 chars / 0 width", so
     /// coloured and plain text of the same visible length line up exactly.
     /// `alpha` scales every run for the fade-out.
     fn text_legacy(&mut self, s: &str, x: f32, y: f32, scale: f32, base: [f32; 3], alpha: f32) {
+        if let Some(f) = self.font {
+            let (w, h) = (self.w, self.h);
+            f.draw_legacy(
+                &mut ColourStream {
+                    verts: &mut self.verts,
+                    w,
+                    h,
+                },
+                s,
+                x,
+                y,
+                scale,
+                base,
+                alpha,
+            );
+            return;
+        }
         let advance = (font::GLYPH_W as f32 + 1.0) * scale;
         let mut cursor = x;
         let mut rgb = base;
@@ -1047,6 +1152,15 @@ pub struct HudRenderer {
     /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
     /// container screen. Both halves start detached.
     icons: IconRenderer,
+    /// The vanilla proportional font, resolved once per process from the same
+    /// `client.jar` as the other atlases. `None` on a jar-less run, where the
+    /// fixed-advance debug font draws instead.
+    ///
+    /// Unlike the atlases this needs **no GPU resources**, so it is resolved in
+    /// [`HudRenderer::new`] rather than through an `attach_*` call — there is
+    /// nothing for a caller to supply. [`HudRenderer::attach_font`] exists to
+    /// override it (a resource pack, or a gate pinning a specific pack).
+    font: Option<Arc<VanillaFont>>,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -1135,7 +1249,33 @@ impl HudRenderer {
             capacity_floats,
             gui: None,
             icons: IconRenderer::new(),
+            font: VanillaFont::shared(),
         }
+    }
+
+    /// Whether vanilla text is in play. `false` means every string on screen is
+    /// the fixed-advance 5×7 fallback — the state a jar-less run is in.
+    ///
+    /// A gate that means to measure vanilla text **must assert this**: without
+    /// it, a missing jar silently degrades to the debug font and every
+    /// "text drew something" assertion still passes.
+    #[must_use]
+    pub fn font_attached(&self) -> bool {
+        self.font.is_some()
+    }
+
+    /// Override the font the HUD draws with (a resource pack, or a gate pinning
+    /// one specific pack). [`HudRenderer::new`] already resolves the vanilla
+    /// default, so this is only needed to *replace* it.
+    pub fn attach_font(&mut self, font: Arc<VanillaFont>) {
+        self.font = Some(font);
+    }
+
+    /// Drop back to the fixed-advance debug font. The executed negative control
+    /// for every proportional-width assertion: with this called, a gate that
+    /// claims to see vanilla advances must fail.
+    pub fn detach_font(&mut self) {
+        self.font = None;
     }
 
     /// Attach the vanilla GUI sprite atlas so the survival vitals (hearts,
@@ -1374,6 +1514,7 @@ impl HudRenderer {
         // attached pass or no depth attachment means the vertices could not be
         // rendered, and building them would be pure waste.
         let want_models = self.icons.models_attached() && depth.is_some();
+        let font = self.font.clone();
         let geo = HudGeometry::build_inner(
             frame,
             width,
@@ -1381,6 +1522,7 @@ impl HudRenderer {
             gui_atlas.as_deref(),
             item_atlas.as_deref(),
             models.filter(|_| want_models),
+            font.as_deref(),
         );
         if geo.verts.is_empty()
             && geo.sprite_verts.is_empty()
