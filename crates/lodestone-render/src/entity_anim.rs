@@ -35,6 +35,11 @@
 //! chicken wing flap speed — are deliberately absent rather than guessed. They
 //! slot into the same functions when the state arrives.
 //!
+//! One `setupAnim` **override** is ported rather than just the base classes:
+//! `AbstractZombieModel`'s raised arms ([`HumanoidArms::Zombie`]). It is not a
+//! state gap — the pose is unconditional, so leaving it out drew every zombie,
+//! husk and drowned with its arms hanging at its sides.
+//!
 //! Trigonometry here uses `f32::sin`/`cos` rather than vanilla's 65536-entry
 //! `Mth` lookup table. That is a deliberate exception to the project's
 //! bit-exactness rule: limb angles are never sent to a server and never feed
@@ -48,6 +53,36 @@ use lodestone_assets::entity::{Affine, BakedPart, PartPose};
 const DEG: f32 = std::f32::consts::PI / 180.0;
 /// Vanilla's walk-cycle frequency multiplier (`walkAnimationPos * 0.6662`).
 const WALK_FREQ: f32 = 0.6662;
+
+/// Which arm rig a [`AnimFamily::Humanoid`] model animates with.
+///
+/// Vanilla expresses this by subclassing: `HumanoidModel.setupAnim` swings the
+/// arms with the walk cycle, and `AbstractZombieModel.setupAnim` calls
+/// `super.setupAnim` and then **overwrites** both arms via
+/// `AnimationUtils.animateZombieArms`. A zombie's part hierarchy is identical to
+/// a player's, so — unlike [`AnimFamily`] — this cannot be classified
+/// structurally; the caller supplies it from the model name (see
+/// [`humanoid_arms_for`](crate::entity::humanoid_arms_for)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HumanoidArms {
+    /// `HumanoidModel`: arms swing opposite the legs, plus the idle bob.
+    #[default]
+    Swinging,
+    /// `AbstractZombieModel`: both arms held out in front, walk swing discarded.
+    Zombie,
+}
+
+/// `AnimationUtils.animateZombieArms`'s resting arm elevation,
+/// `-PI / (isAggressive ? 1.5 : 2.25)` radians about X. Negative raises the arm
+/// forward in the Y-down model frame, which is the "arms out in front" pose.
+#[must_use]
+fn zombie_arm_x_rest(aggressive: bool) -> f32 {
+    -std::f32::consts::PI / if aggressive { 1.5 } else { 2.25 }
+}
+
+/// `animateZombieArms`'s resting arm splay: `rightArm.yRot = -0.1`,
+/// `leftArm.yRot = 0.1` when not mid-swing.
+const ZOMBIE_ARM_Y_REST: f32 = 0.1;
 
 /// Which of vanilla's `setupAnim` implementations a model animates with.
 ///
@@ -132,6 +167,12 @@ pub struct AnimInput {
     pub attack_anim: f32,
     /// Continuous age in ticks, driving idle bob (`ageInTicks`).
     pub age_ticks: f32,
+    /// Vanilla's `LivingEntityRenderState.isAggressive` (`Mob.isAggressive`),
+    /// which raises a zombie's arms from `-PI/2.25` to `-PI/1.5`. Nothing
+    /// decodes the shared-flags bit that carries it yet, so the shell always
+    /// passes `false` — the non-aggressive branch is the pose a player sees on
+    /// an idle or merely-walking zombie, and it is the one that was missing.
+    pub aggressive: bool,
 }
 
 impl AnimInput {
@@ -143,6 +184,7 @@ impl AnimInput {
         limb_swing_amount: 0.0,
         attack_anim: 0.0,
         age_ticks: 0.0,
+        aggressive: false,
     };
 }
 
@@ -191,6 +233,7 @@ pub struct Skeleton {
     parts: Vec<SkelPart>,
     family: AnimFamily,
     slots: Slots,
+    arms: HumanoidArms,
 }
 
 impl Skeleton {
@@ -235,13 +278,54 @@ impl Skeleton {
                 .collect(),
             family,
             slots,
+            arms: HumanoidArms::Swinging,
         }
+    }
+
+    /// Selects the humanoid arm rig, folding a [`HumanoidArms::Zombie`] rig's
+    /// **resting** arm pose into the skeleton's authored rest.
+    ///
+    /// Why the rest pose and not just `setup_anim`: `animateZombieArms` assigns
+    /// `xRot = -PI/2.25` and `yRot = ±0.1` unconditionally, so those *are* the
+    /// zombie's resting arm angles — at `attackTime == 0` every other term in
+    /// the formula is zero. Baking them in keeps the two invariants the rest
+    /// pose carries elsewhere in the crate true for zombies as well: the mesh's
+    /// local AABB (taken from [`Self::rest_pose`]) bounds the mob as drawn, and
+    /// `pose(&AnimInput::REST)` differs from `rest_pose()` by no more than the
+    /// idle arm sway. A non-humanoid, or a model with no arm slots, is
+    /// unaffected.
+    #[must_use]
+    pub fn with_humanoid_arms(mut self, arms: HumanoidArms) -> Self {
+        if self.family != AnimFamily::Humanoid {
+            return self;
+        }
+        self.arms = arms;
+        if arms == HumanoidArms::Zombie {
+            let rest_x = zombie_arm_x_rest(false);
+            for (slot, y) in [
+                (self.slots.right_arm, -ZOMBIE_ARM_Y_REST),
+                (self.slots.left_arm, ZOMBIE_ARM_Y_REST),
+            ] {
+                if let Some(i) = slot {
+                    self.parts[i].rest.x_rot = rest_x;
+                    self.parts[i].rest.y_rot = y;
+                    self.parts[i].rest.z_rot = 0.0;
+                }
+            }
+        }
+        self
     }
 
     /// The animation family this model was classified into.
     #[must_use]
     pub fn family(&self) -> AnimFamily {
         self.family
+    }
+
+    /// The arm rig this model animates with.
+    #[must_use]
+    pub fn humanoid_arms(&self) -> HumanoidArms {
+        self.arms
     }
 
     /// Number of parts (equal to the number of matrices [`Self::pose`] returns).
@@ -372,8 +456,16 @@ impl Skeleton {
             AnimFamily::Humanoid => {
                 let arm = |phase: f32| (pos * WALK_FREQ + phase).cos() * 2.0 * amt * 0.5;
                 let leg = |phase: f32| (pos * WALK_FREQ + phase).cos() * 1.4 * amt;
-                set_x_rot(poses, s.right_arm, arm(std::f32::consts::PI));
-                set_x_rot(poses, s.left_arm, arm(0.0));
+                // A zombie rig runs `HumanoidModel.setupAnim` too, but
+                // `animateZombieArms` then *assigns* over both arms, so the walk
+                // swing and the first bob are dead stores. Skipping them here is
+                // that same net effect without the wasted work — and, unlike
+                // adding then overwriting, it cannot leave a stray term behind
+                // if the zombie formula later grows an additive branch.
+                if self.arms == HumanoidArms::Swinging {
+                    set_x_rot(poses, s.right_arm, arm(std::f32::consts::PI));
+                    set_x_rot(poses, s.left_arm, arm(0.0));
+                }
                 set_x_rot(poses, s.right_leg, leg(0.0));
                 set_x_rot(poses, s.left_leg, leg(std::f32::consts::PI));
                 // Vanilla nudges the legs off-axis so coincident faces never
@@ -385,9 +477,14 @@ impl Skeleton {
 
                 self.attack_anim(poses, input);
 
-                // AnimationUtils.bobModelPart on each arm, opposite signs.
-                bob(poses, s.right_arm, input.age_ticks, 1.0);
-                bob(poses, s.left_arm, input.age_ticks, -1.0);
+                match self.arms {
+                    // AnimationUtils.bobModelPart on each arm, opposite signs.
+                    HumanoidArms::Swinging => {
+                        bob(poses, s.right_arm, input.age_ticks, 1.0);
+                        bob(poses, s.left_arm, input.age_ticks, -1.0);
+                    }
+                    HumanoidArms::Zombie => self.animate_zombie_arms(poses, input),
+                }
             }
 
             // VillagerModel.setupAnim: legs at half a humanoid's amplitude, arms
@@ -410,6 +507,55 @@ impl Skeleton {
                 set_x_rot(poses, s.left_leg, leg(std::f32::consts::PI));
             }
         }
+    }
+
+    /// `AnimationUtils.animateZombieArms`: both arms held out in front, thrust
+    /// forward and inward during an attack, then bobbed.
+    ///
+    /// Transcribed from the decompiled 26.2 client:
+    ///
+    /// ```text
+    ///   f  = sin(attackTime * PI)
+    ///   f1 = sin((1 - (1 - attackTime)^2) * PI)
+    ///   rightArm.zRot = 0;            leftArm.zRot = 0
+    ///   rightArm.yRot = -(0.1 - f*0.6); leftArm.yRot = 0.1 - f*0.6
+    ///   f2 = -PI / (isAggressive ? 1.5 : 2.25)
+    ///   rightArm.xRot = f2;           leftArm.xRot = f2
+    ///   rightArm.xRot += f*1.2 - f1*0.4; leftArm.xRot += f*1.2 - f1*0.4
+    ///   bobArms(leftArm, rightArm, ageInTicks)
+    /// ```
+    ///
+    /// Three details that are easy to get wrong and are load bearing here:
+    ///
+    /// * It **assigns** all three rotations, so it overrides both the walk swing
+    ///   and `setupAttackAnimation`'s arm rotations. A zombie's arms do not
+    ///   swing as it walks — that is the whole visual signature.
+    /// * It does **not** touch the arms' `x`/`z` *translation*, so
+    ///   [`Self::attack_anim`]'s orbit of the twisting torso survives.
+    /// * The bob is applied *again* after the assignment. Vanilla bobs zombie
+    ///   arms twice (once in `HumanoidModel`, once here); only the second
+    ///   survives the assignment, so exactly one bob is correct.
+    ///
+    /// The `x_rot`/`y_rot` assignments here reproduce the resting values
+    /// [`Self::with_humanoid_arms`] folds into the rest pose whenever
+    /// `attack_anim == 0` and `aggressive == false`, which is what keeps
+    /// `pose(&AnimInput::REST)` and `rest_pose()` agreeing.
+    fn animate_zombie_arms(&self, poses: &mut [PartPose], input: &AnimInput) {
+        let t = input.attack_anim;
+        let f = (t * std::f32::consts::PI).sin();
+        let f1 = ((1.0 - (1.0 - t) * (1.0 - t)) * std::f32::consts::PI).sin();
+        let x_rot = zombie_arm_x_rest(input.aggressive) + (f * 1.2 - f1 * 0.4);
+        let y_rot = ZOMBIE_ARM_Y_REST - f * 0.6;
+        let s = &self.slots;
+        for (slot, sign) in [(s.right_arm, -1.0f32), (s.left_arm, 1.0)] {
+            if let Some(i) = slot {
+                poses[i].x_rot = x_rot;
+                poses[i].y_rot = sign * y_rot;
+                poses[i].z_rot = 0.0;
+            }
+        }
+        bob(poses, s.right_arm, input.age_ticks, 1.0);
+        bob(poses, s.left_arm, input.age_ticks, -1.0);
     }
 
     /// `HumanoidModel.setupAttackAnimation`'s `WHACK` branch: the body twists,
@@ -519,6 +665,9 @@ mod tests {
     use lodestone_assets::entity::bake_entity_parts;
     use lodestone_assets::entity_models::entity_models;
 
+    /// Build a skeleton the way the renderer does — through
+    /// [`crate::entity::humanoid_arms_for`], so a test never poses a rig the
+    /// screen does not.
     fn skeleton_for(name: &str) -> Skeleton {
         let models = entity_models();
         let entry = models
@@ -526,6 +675,17 @@ mod tests {
             .find(|e| e.name == name)
             .unwrap_or_else(|| panic!("no model named {name}"));
         Skeleton::from_parts(&bake_entity_parts(&(entry.build)()))
+            .with_humanoid_arms(crate::entity::humanoid_arms_for(name))
+    }
+
+    /// The forward reach of an arm in the model frame: how far a probe point
+    /// `0.75` blocks down the limb axis sits toward the mob's facing (model
+    /// `-Z`, which the placement flip turns into world-forward). Zero for an arm
+    /// hanging straight down, `0.75` for one pointing dead ahead.
+    fn arm_reach(skel: &Skeleton, arm: &str, input: &AnimInput) -> f32 {
+        let i = skel.index_of(arm).unwrap_or_else(|| panic!("no {arm}"));
+        let tip = skel.pose(input)[i].transform_point3(Vec3::new(0.0, 0.75, 0.0));
+        -tip.z
     }
 
     /// The composed rest chain must reproduce the geometry `bake_entity`
@@ -766,6 +926,120 @@ mod tests {
         assert_eq!(looked[body], rest[body], "body moved with the head");
     }
 
+    /// The reported defect: zombie arms hung at their sides instead of being
+    /// held out in front.
+    ///
+    /// The reading is the arm's **forward reach**, not "did the matrix change" —
+    /// a walk swing also changes the matrix, and the walk swing is exactly what
+    /// this pose is not. A player is the control: same skeleton, same family,
+    /// arms down, so a change that raised *every* humanoid's arms fails here.
+    #[test]
+    fn zombies_hold_their_arms_out_in_front_and_players_do_not() {
+        let player = skeleton_for("player_wide");
+        let player_reach = arm_reach(&player, "right_arm", &AnimInput::REST);
+        assert!(
+            player_reach.abs() < 0.1,
+            "a resting player's arm should hang straight down, reached {player_reach} forward"
+        );
+
+        for name in ["zombie", "husk", "drowned", "zombie_villager"] {
+            let skel = skeleton_for(name);
+            assert_eq!(skel.humanoid_arms(), HumanoidArms::Zombie, "{name}");
+            for arm in ["right_arm", "left_arm"] {
+                let reach = arm_reach(&skel, arm, &AnimInput::REST);
+                // -PI/2.25 (-80°) over a 0.75-block limb reaches 0.75*sin(80°)
+                // ≈ 0.739 blocks forward. Anything under half a limb length is
+                // an arm still pointing mostly downward.
+                assert!(
+                    reach > 0.5,
+                    "{name}'s {arm} reached only {reach} blocks forward at rest — vanilla's \
+                     animateZombieArms puts it at ~0.74"
+                );
+            }
+        }
+    }
+
+    /// The pose must be *unconditional*, not a by-product of the walk cycle:
+    /// vanilla assigns over `HumanoidModel`'s arm swing, so a walking zombie's
+    /// arms stay out in front while its legs swing normally.
+    #[test]
+    fn a_walking_zombie_keeps_its_arms_out_and_still_swings_its_legs() {
+        let skel = skeleton_for("zombie");
+        let mid_walk = AnimInput {
+            limb_swing: 0.0,
+            limb_swing_amount: 1.0,
+            ..AnimInput::REST
+        };
+        let half_cycle = AnimInput {
+            limb_swing: std::f32::consts::PI / WALK_FREQ,
+            ..mid_walk
+        };
+
+        for input in [&mid_walk, &half_cycle] {
+            let reach = arm_reach(&skel, "right_arm", input);
+            assert!(
+                reach > 0.5,
+                "a walking zombie's arm dropped to {reach} — the walk swing is still driving it"
+            );
+        }
+        // Both walk phases must give the *same* arm pose (the swing is gone)...
+        let a = arm_reach(&skel, "right_arm", &mid_walk);
+        let b = arm_reach(&skel, "right_arm", &half_cycle);
+        assert!(
+            (a - b).abs() < 1.0e-5,
+            "the arm moved between walk phases ({a} vs {b}) — animateZombieArms assigns, so a \
+             zombie's arms do not swing as it walks"
+        );
+        // ...while the legs must still be swinging, or this passed by freezing
+        // the whole model.
+        let leg = skel.index_of("right_leg").unwrap();
+        let delta: f32 = (0..4)
+            .map(|c| {
+                (skel.pose(&mid_walk)[leg].col(c) - skel.pose(&half_cycle)[leg].col(c)).length()
+            })
+            .sum();
+        assert!(delta > 1.0e-3, "the legs stopped swinging too (delta {delta})");
+    }
+
+    /// `animateZombieArms`'s attack and aggression terms, which a pose that only
+    /// hardcoded the resting elevation would silently drop.
+    #[test]
+    fn zombie_arms_thrust_on_attack_and_lift_when_aggressive() {
+        let skel = skeleton_for("zombie");
+        let rest = arm_reach(&skel, "right_arm", &AnimInput::REST);
+
+        // f = sin(attackTime*PI) peaks at attackTime = 0.5, adding +1.2 rad, so
+        // the arm swings up past vertical and its forward reach collapses.
+        let mid_attack = arm_reach(
+            &skel,
+            "right_arm",
+            &AnimInput {
+                attack_anim: 0.5,
+                ..AnimInput::REST
+            },
+        );
+        assert!(
+            mid_attack < rest - 0.3,
+            "mid-attack reach {mid_attack} barely differs from rest {rest} — the f*1.2 - f1*0.4 \
+             thrust is missing"
+        );
+
+        // isAggressive swaps -PI/2.25 for -PI/1.5, past horizontal, so the arm
+        // reaches *less* far forward while sitting higher.
+        let angry = arm_reach(
+            &skel,
+            "right_arm",
+            &AnimInput {
+                aggressive: true,
+                ..AnimInput::REST
+            },
+        );
+        assert!(
+            (angry - rest).abs() > 0.05,
+            "the aggressive branch changed nothing ({angry} vs {rest})"
+        );
+    }
+
     /// A swinging arm must leave the rest pose, and a non-swinging one must not.
     #[test]
     fn attack_swings_the_arm() {
@@ -802,6 +1076,7 @@ mod tests {
                 limb_swing_amount: 1.0,
                 attack_anim: 0.75,
                 age_ticks: 900.0,
+                aggressive: true,
             });
             for (i, m) in mats.iter().enumerate() {
                 assert!(

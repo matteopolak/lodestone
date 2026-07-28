@@ -222,9 +222,20 @@ taken from a running client, not from a unit test.
   or empty string**. Live: `…was slain by entity.minecraft.spider` → `…was slain by Spider`.
   Here too the defect was **a missing table, not missing logic** — the model already formatted
   correctly once given a real one, so the smallest correct fix was data plus a lowering shim rather
-  than a new formatter. Still parked: the shell doesn't consume it yet (`chat.rs:88`), and
-  `TextContent` models only `Literal`/`Translate`, so keybind/score are dropped before they reach
-  the resolver.
+  than a new formatter. **~~Still parked: the shell doesn't consume it yet (`chat.rs:88`).~~ CLOSED
+  by `71182c8`** — the shell resolves at *ingest*, not at draw: `sim.rs`'s `NetUpdate::Chat` handler
+  calls `Sim::resolve_text` before the text ever reaches `chat_log`, so by the time a `Text` gets to
+  `chat.rs` it contains no `translate` nodes at all. `chat.rs` is deliberately pure (no winit, no
+  GPU, no client handle, per its own module doc) and correctly does not own a `Language` table.
+  Still genuinely parked: `TextContent` models only `Literal`/`Translate`
+  (`lodestone-model/src/text.rs:260-269`), so keybind/score are dropped before they reach the
+  resolver.
+
+  > **Read this before trusting a grep.** This entry sent an agent to "wire up" something that had
+  > been wired for two commits. `grep resolve crates/lodestone-shell/src/chat.rs` returns zero hits
+  > — and that is *correct and expected*, because the consumer is one layer up. **Zero hits in the
+  > file a stale note names is not evidence the feature is unwired.** Grep for the *producer*
+  > (`text::resolve`) across the whole tree, not for the consumer in one named file.
 - **Block placement, at the game layer** (`e339e06`). `placement.rs` mirrors vanilla's
   `BlockPlaceContext`/`performUseItemOn`: replaceable target → place in-place, else adjacent;
   interactable block wins over placement unless sneaking; `Direction.fromYRot` and
@@ -637,11 +648,23 @@ decision; a library that hijacks it breaks every downstream consumer.
 - **Scripting host.** WASM (`wasmtime`, sandboxed) vs Lua (`mlua`, ergonomic). Leaning WASM for
   untrusted plugins with a capability-based API. No code exists.
 - **The other 13 protocol families.** See §1 for the real per-family cost (~900 irreducible lines).
-- **Entity model ports.** ~130–150 base mob meshes are hand-written `LayerDefinition`/
-  `MeshDefinition` classes in vanilla with **no data path** — nothing in the generated reports or
-  minecraft-data exposes mesh geometry. The version-free primitive (`CubeDef`/`PartPose`/`PartDef`
-  → `bake_entity`) exists in `lodestone-assets`; the per-mob data does not. Meshes are largely
-  stable across versions, so this is author-once, tweak-per-version.
+- **~~Entity model ports.~~ LARGELY DONE — this entry was badly stale and actively misleading.**
+  It used to say ~130–150 meshes have "no data path" and that only the *mechanism* was proven (via
+  pig). In fact `lodestone-assets/src/entity_models.rs` is **191 KB with ~85 hand-ported meshes** —
+  drowned, warden, wither, ender dragon, the horse family, illagers, fish — each sheet-size-checked
+  against the real PNG by the `real_jar` coverage test. The port largely happened and this entry
+  never got updated.
+
+  The reason pig looked like "the only proven mesh" is that pig was the only mob the *renderer
+  could reach*: `EntityModelSet::load()` and `gpu.rs` were baking and uploading all ~85 meshes and
+  textures every run, and a single alias table in `entity.rs` was gating them. **~70 mobs were
+  rendering nothing at all**, not for want of geometry.
+
+  > This entry sent an agent looking for a missing mesh when the bug was one line of name
+  > resolution. Still genuinely unported: the remaining ~45–65 meshes of the full vanilla set.
+  > The version-free primitive (`CubeDef`/`PartPose`/`PartDef` → `bake_entity`) is in
+  > `lodestone-assets`, and meshes are stable across versions, so it stays author-once,
+  > tweak-per-version.
 
 ### 7.1 Rendering remainder, in value order
 
@@ -1457,8 +1480,20 @@ Three things to port, not one:
 * **Depth write off**, depth compare pass-equal-or-nearer. Note vanilla is reversed-Z
   (`GREATER_THAN_OR_EQUAL`); we use `[0,1]` DirectX-style depth (§7 of `DESIGN.md`), so ours is
   `LessEqual`.
-* **Depth bias `constant 1.0, slope 10.0`.** This is what stops the overlay z-fighting with the
-  block face. Omitting it produces shimmer that reads as a mesher bug.
+* **Depth bias — and the transcription above was BACKWARDS.** The record is
+  `DepthStencilState(CompareOp depthTest, boolean writeDepth, float depthBiasScaleFactor, float
+  depthBiasConstant)`, so `(GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F)` is **slope 1.0, constant
+  10.0**, not "constant 1.0, slope 10.0". Verified against
+  `.cache/mc/26.2/client-src/com/mojang/blaze3d/pipeline/DepthStencilState.java`.
+  Both also **negate** under our depth convention: vanilla is reversed-Z, where biasing toward the
+  viewer is positive; we use `[0,1]` DirectX-style depth, where it is negative — the same sign flip
+  that turns `GREATER_THAN_OR_EQUAL` into `LessEqual`. So ours is
+  `DepthBiasState { constant: -10, slope_scale: -1.0 }`.
+  This is what stops the overlay z-fighting with the block face. Omitting it produces shimmer that
+  reads as a mesher bug and sends the next person hunting in the wrong crate.
+
+  > A four-argument constructor where two adjacent floats mean different things is exactly the kind
+  > of call a summary gets wrong. **Read the record definition, not the call site.**
 
 ### 1b. There is no per-block hardness, so obsidian and bedrock crack like dirt
 
@@ -1670,3 +1705,133 @@ Two build-time traps that will otherwise cost an hour each:
   lib compiles and whose lib-test does not reports green. Use `cargo check --workspace
   --all-targets`, and treat any count gathered while another agent is mid-edit as a sample rather
   than a measurement.
+
+---
+
+# Addendum — play-test round 2 (2026-07-27), and the standing backlog
+
+Reported by the user from real play. Split into **(A) defects with a source-level cause already
+confirmed**, **(B) defects diagnosed but unconfirmed**, and **(C) the standing backlog** — work
+that is wanted and not yet started. Nothing here is fixed yet.
+
+## A. Confirmed at source
+
+### A1. Physics and rendering disagree about what counts as water
+
+**Two symptoms, one cause.** The user reported that waterlogged blocks (a) do not let you swim and
+(b) show you as *out of* the water when your eye is inside them.
+
+The renderer knows about waterlogging. `render/block_models.rs:128` classifies any state with
+`waterlogged=true` as carrying a water source, and `0cc9534` added the five classes that get water
+from a hardcoded `getFluidState` override with no blockstate property at all (`KelpBlock`,
+`KelpPlantBlock`, `SeagrassBlock`, `TallSeagrassBlock`, `BubbleColumnBlock`).
+
+**Physics knows none of it.** `grep -rn "waterlogged" crates/lodestone-physics/src/` returns
+**zero hits**. The classification the physics side actually uses is the shell's `CollisionView`:
+
+```rust
+// crates/lodestone-shell/src/collision.rs:79   (offline)
+fn is_water(&self, x: i32, y: i32, z: i32) -> bool { self.block_at(x, y, z) == id::WATER }
+
+// crates/lodestone-shell/src/collision.rs:182  (live)
+fn is_water(&self, x: i32, y: i32, z: i32) -> bool { self.water.contains(&self.block_at(x,y,z)) }
+```
+
+An exact block-id match, and a set of "vanilla water state ids" (`collision.rs:118-120`). Neither
+can see a waterlogged stair, kelp, seagrass or a bubble column.
+
+Because `69f66c2` correctly routed the submerged flag through the **physics** producer, this one
+wrong classifier now drives *everything*: swimming, the fog, and (once drawn) the overlay and the
+ambient sounds.
+
+**This is the exact failure `69f66c2`'s own commit message warned about** — two consumers inventing
+their own answer to "is this water" and disagreeing. The fix is not to patch `is_water` locally but
+to give the **water-source classification one home** and have both the mesher and `CollisionView`
+read it. The jar-derived five-class list and the `waterlogged` property check already exist on the
+render side; that logic is the thing to lift, not to duplicate.
+
+### A2. Fog is never applied to entities or to the terrain-block path
+
+The user reported that mobs in water are drawn on top of the water and the underwater effect does
+not apply to them.
+
+```
+grep -n "fog\|Fog" crates/lodestone-render/src/entity_pipeline.rs crates/lodestone-render/src/block.rs
+→ 0 matches
+```
+
+**Only `model_pipeline.rs` applies fog.** `entity_pipeline.rs`, `block.rs` (the terrain path) and
+`crack_pipeline.rs` have no fog term at all. So every mob renders unfogged regardless of depth,
+which is precisely "the underwater effect does not apply to them".
+
+Note the constraint before fixing it: fog rides in the **group-0 camera uniform**
+(`ModelCameraUniform = CameraUniform + FogUniform`) specifically because the model shader is at
+wgpu's 4-bind-group floor. Adding fog to the entity shader must follow the same route — fold it
+into that shader's existing camera uniform. **Do not add a bind group** (see the M5 portability bug
+recorded in the previous addendum: a 5-group shader validates here and fails everywhere else).
+
+Draw **order** is a second, separate question from the fog term, and the report mentions both:
+entities are drawn with no ordering relative to translucent water. Vanilla draws entities before
+the translucent pass. Fixing fog without fixing order leaves mobs correctly tinted but still
+punched through the water surface.
+
+## B. Diagnosed, not yet confirmed
+
+### B1. Drowned (and probably every mob variant) renders as its base mob
+
+Reported: drowneds look like ordinary zombies. Expected cause is variant model/texture resolution —
+`drowned` has its own model and texture, not zombie's. Related open item: §7 "Never started" records
+that ~130-150 base mob meshes are hand-written `LayerDefinition` classes in vanilla with **no data
+path**, and that only the *mechanism* is proven (via pig), not the individual meshes. Confirm which
+of the two this is — a missing mesh, or a texture/variant lookup falling back — before building
+anything.
+
+### B2. Mob walk animation is wrong in three specific ways
+
+Reported: legs move too fast, arms are not held in front, no held items.
+
+* **Legs too fast** — the limb-swing amount/speed feeding `Skeleton::pose`. Vanilla scales limb
+  swing by distance travelled per tick, not by wall time.
+* **Arms not in front** — zombies use a *raised-arm* humanoid pose. `entity_anim.rs`'s known
+  divergence list already records that humanoid swim/crouch/ride/fall-flying/item poses are
+  **unported**; the zombie arm pose belongs to that same gap.
+* **No held items** — this is Open 2 (mob equipment), already blocked on the item-model render
+  pass, which is in progress.
+
+## C. Standing backlog (wanted, not started)
+
+Ordered by the player-visible value per unit of work, which is not the order of difficulty.
+
+1. **Block breaking is wrong — too fast — and needs tool/durability input.** Distinct from the
+   crack-cosmetics work already diagnosed in Open 1. `BreakInputs` carries `tool_speed`,
+   `mining_efficiency`, `correct_tool`, `haste_amplifier`, `mining_fatigue` and `submerged`
+   (`lodestone-game/src/mining.rs:48-85`) and **the shell feeds none of them** — it passes one
+   constant hardness plus `is_air`/`on_ground`. So every tool digs at bare-hand speed and the
+   client-side rate is wrong for every block. The per-state hardness table now exists; the missing
+   half is reading the **held item's** tool component and durability.
+   **Read the `LIVE_DIG_HARDNESS` sequencing warning in Open 1 before touching this** — that
+   constant is load-bearing for the currently-*correct* break timing, and it must be retired in the
+   same change that supplies real inputs, never tuned separately.
+2. **Air-supply bubbles.** The player has no indication of remaining air underwater. Vanilla draws
+   a bubble row above the hunger bar from the `air` field. The submerged flag exists now
+   (`69f66c2`); this needs the air value plumbed and the GUI sprites drawn.
+3. **Vanilla inventory and tab-list UI, using the resource-pack GUI textures.** Both currently draw
+   procedural quads. `lodestone-assets::gui` is complete and gated against the real jar
+   (`stretch`/`tile`/`nine_slice`, `.png.mcmeta`, `GuiScaling::geometry`) and — per the island
+   table — its only consumers were its own tests. 26.2 uses the **modern per-sprite layout**, not
+   the legacy `icons.png` sheet. Container slot icons are already queued behind the item-model
+   pass; this is the surrounding chrome.
+4. **Crafting.** Not started. `lodestone-game` already has `recipe.rs`, `click.rs` and the
+   `ClientMenu::reconcile` seam that `impl-game` built — **consume those, do not rebuild them** —
+   and mind the documented `MenuKind` slot-order trap: window 0 is `0` result / `1..=4` craft /
+   `5..=8` armour / `9..=35` main / `36..=44` hotbar / `45` offhand, while `Generic{n}` has no
+   armour or offhand and its hotbar is *not* at 36. A constant offset here draws a plausible,
+   wrongly-transposed inventory that reads as an art bug rather than a logic error.
+
+## The pattern these keep re-proving
+
+A1 and A2 are both the same shape as everything else in this file: **the knowledge exists in the
+tree and one consumer doesn't read it.** A1 has a correct water classifier that physics doesn't
+use; A2 has a working fog term that two of four pipelines don't apply. Neither is a missing
+algorithm. Before building anything for these, ask the question that has now found nine islands:
+*what actually consumes this?*
