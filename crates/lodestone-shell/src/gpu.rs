@@ -879,10 +879,16 @@ impl RenderState {
                     };
                     pass.set_bind_group(1, texture, &[]);
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
-                    pass.set_vertex_buffer(1, batch.instances.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..model.index_count, 0, 0..batch.count);
-                    stats.draw_calls += 1;
+                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                        stats.draw_calls += 1;
+                    }
                 }
             }
 
@@ -935,7 +941,7 @@ impl RenderState {
             .filter_map(|e| {
                 self.entities
                     .models
-                    .resolve(&e.type_path, e.feet, e.yaw, e.scale)
+                    .resolve(&e.type_path, e.feet, e.yaw, e.scale, &e.anim)
             })
             .collect();
 
@@ -943,27 +949,38 @@ impl RenderState {
         stats.entities_drawn = frame.stats.drawn;
         stats.entities_culled = frame.stats.culled_frustum;
 
+        // One instance buffer per *part*, not per entity: the mesh's vertices are
+        // part-local, so a limb only moves if its own matrices are uploaded
+        // separately. A mob is ~10–35 parts but hundreds of quads, so this moves
+        // roughly 1% of the data a per-entity vertex re-bake would.
         frame
             .batches
             .iter()
-            .filter_map(|batch| {
+            .map(|batch| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
-                upload_instances(device, &batch.transforms).map(|instances| EntityDrawBatch {
+                let parts = batch
+                    .parts
+                    .iter()
+                    .map(|p| upload_instances(device, p))
+                    .collect();
+                EntityDrawBatch {
                     model: batch.model,
                     count,
-                    instances,
-                })
+                    parts,
+                }
             })
             .collect()
     }
 }
 
-/// One model type's uploaded instance buffer for a frame.
+/// One model type's uploaded per-part instance buffers for a frame. `parts[p]`
+/// holds one matrix per visible instance of part `p`; a `None` slot is a part
+/// with no geometry (nothing to draw).
 #[derive(Debug)]
 struct EntityDrawBatch {
     model: &'static str,
     count: u32,
-    instances: wgpu::Buffer,
+    parts: Vec<Option<wgpu::Buffer>>,
 }
 
 #[cfg(test)]
@@ -1461,6 +1478,7 @@ mod tests {
                 head_yaw: 0.0,
                 pitch: 0.0,
                 scale: 1.0,
+                anim: lodestone_render::AnimInput::REST,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -1471,6 +1489,7 @@ mod tests {
                 head_yaw: 0.0,
                 pitch: 0.0,
                 scale: 1.0,
+                anim: lodestone_render::AnimInput::REST,
             },
         ];
 
@@ -1602,7 +1621,8 @@ mod tests {
             head_yaw: 0.0,
             pitch: 0.0,
             scale: 1.0,
-        }];
+                             anim: lodestone_render::AnimInput::REST,
+                         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the
         // model's single flat placeholder tint. Brightness scaling (lighting)

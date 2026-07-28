@@ -37,6 +37,11 @@
 use std::collections::HashMap;
 
 use glam::Vec3;
+use lodestone_entity::pose::{
+    ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
+    clamp_head_to_body, walk_target_speed,
+};
+use lodestone_render::AnimInput;
 
 /// One physics tick, in seconds.
 const TICK: f32 = 0.05;
@@ -53,6 +58,11 @@ const INTERP_WINDOW: f32 = TICK * INTERP_STEPS;
 
 /// Position change (blocks) below which a snapshot is treated as "no movement",
 /// so idle mobs don't restart their interpolation clock every frame.
+/// Seconds per server tick, the cadence the walk animation is advanced at.
+const TICK_SECONDS: f32 = TICK;
+/// Server ticks per second, for the continuous `ageInTicks` clock.
+const TICKS_PER_SECOND: f32 = 20.0;
+
 const POS_EPS: f32 = 1.0e-4;
 
 /// Yaw change (degrees) below which a snapshot is treated as "no turn". Applies
@@ -100,6 +110,12 @@ pub struct EntityDraw {
     pub pitch: f32,
     /// Uniform render scale.
     pub scale: f32,
+    /// Per-part animation drive (head tracking, walk cycle, idle age), already
+    /// interpolated for this frame and in the units
+    /// [`Skeleton::pose`](lodestone_render::Skeleton::pose) expects — note
+    /// `head_yaw_deg` is **relative to the body**, matching vanilla's
+    /// `netHeadYaw`.
+    pub anim: AnimInput,
 }
 
 /// Per-entity interpolation track: the position/yaw we are easing *from*, the
@@ -119,6 +135,15 @@ struct Track {
     curr_pitch: f32,
     /// Seconds since the ease was last re-anchored, capped at [`INTERP_WINDOW`].
     t: f32,
+    /// Vanilla's `WalkAnimationState`, ticked at 20 Hz.
+    walk: WalkAnimation,
+    /// Horizontal distance covered by the most recent server update, the input
+    /// to [`walk_target_speed`]. Zeroed once the ease runs dry, which is how a
+    /// mob that stops walking decays to a standing pose instead of freezing
+    /// mid-stride.
+    step: f32,
+    /// Continuous age in ticks (`ageInTicks`), driving idle bob.
+    age: f32,
 }
 
 impl Track {
@@ -148,12 +173,40 @@ impl Track {
     fn render_pitch(&self) -> f32 {
         self.prev_pitch + (self.curr_pitch - self.prev_pitch) * self.alpha()
     }
+
+    /// The animation drive for this frame.
+    ///
+    /// `partial_tick` is the fraction through the current 50 ms tick, used for
+    /// the walk cycle exactly as vanilla's `WalkAnimationState` interpolation.
+    /// The head yaw is clamped to the body (`Mob.clampHeadRotationToBody`) and
+    /// then expressed *relative* to it, because that is what
+    /// `LivingEntityRenderer` feeds `setupAnim` — passing the absolute value
+    /// would spin every mob's head with its body.
+    fn render_anim(&self, partial_tick: f32) -> AnimInput {
+        let body = self.render_yaw();
+        let head = clamp_head_to_body(body, self.render_head_yaw(), MAX_HEAD_YAW);
+        AnimInput {
+            head_yaw_deg: wrap_degrees(head - body),
+            head_pitch_deg: self.render_pitch(),
+            limb_swing: self.walk.position_lerp(partial_tick),
+            limb_swing_amount: self.walk.speed_lerp(partial_tick),
+            attack_anim: 0.0,
+            age_ticks: self.age,
+        }
+    }
+}
+
+/// Wraps degrees into `(-180, 180]`, like `Mth.wrapDegrees`.
+fn wrap_degrees(deg: f32) -> f32 {
+    angle_diff(deg, 0.0)
 }
 
 /// Tracks and interpolates every visible entity between server ticks.
 #[derive(Debug, Default)]
 pub struct EntityInterpolator {
     tracks: HashMap<i32, Track>,
+    /// Seconds accumulated toward the next 20 Hz animation tick.
+    tick_accum: f32,
 }
 
 impl EntityInterpolator {
@@ -175,6 +228,32 @@ impl EntityInterpolator {
         // frame starts the new window from exactly its previous render pose.
         for track in self.tracks.values_mut() {
             track.t = (track.t + dt).min(INTERP_WINDOW);
+            track.age += dt * TICKS_PER_SECOND;
+        }
+
+        // Advance the walk cycle on a fixed 20 Hz clock rather than per frame:
+        // vanilla's `WalkAnimationState` is a tick-rate state machine, and
+        // driving it per frame would make the swing speed depend on frame rate.
+        self.tick_accum += dt;
+        while self.tick_accum >= TICK_SECONDS {
+            self.tick_accum -= TICK_SECONDS;
+            for track in self.tracks.values_mut() {
+                // A finished ease with no new update means the entity stopped
+                // moving, so the target amplitude decays to zero.
+                let step = if track.t >= INTERP_WINDOW {
+                    0.0
+                } else {
+                    track.step
+                };
+                let limb_scale = if track.scale < 1.0 {
+                    BABY_LIMB_SCALE
+                } else {
+                    ADULT_LIMB_SCALE
+                };
+                track
+                    .walk
+                    .update(walk_target_speed(step), LIMB_SWING_SMOOTHING, limb_scale);
+            }
         }
 
         for snap in snapshots {
@@ -195,6 +274,9 @@ impl EntityInterpolator {
                             prev_pitch: snap.pitch,
                             curr_pitch: snap.pitch,
                             t: INTERP_WINDOW,
+                            walk: WalkAnimation::new(),
+                            step: 0.0,
+                            age: 0.0,
                         },
                     );
                 }
@@ -215,6 +297,7 @@ impl EntityInterpolator {
                         track.curr = snap.feet;
                         track.curr_yaw = snap.yaw;
                         track.curr_head_yaw = snap.head_yaw;
+                        track.step = (snap.feet - track.prev).with_y(0.0).length();
                         track.curr_pitch = snap.pitch;
                         track.t = 0.0;
                     }
@@ -240,6 +323,7 @@ impl EntityInterpolator {
                 head_yaw: t.render_head_yaw(),
                 pitch: t.render_pitch(),
                 scale: t.scale,
+                anim: t.render_anim((self.tick_accum / TICK_SECONDS).clamp(0.0, 1.0)),
             })
             .collect()
     }

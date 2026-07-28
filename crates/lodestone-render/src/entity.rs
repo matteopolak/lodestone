@@ -43,10 +43,11 @@
 //! data supports today (position + rotation, no limb angles).
 
 use glam::{Mat4, Vec3};
-use lodestone_assets::entity::{EntityModelDef, bake_entity};
+use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 
 use crate::camera::Frustum;
+use crate::entity_anim::{AnimInput, Skeleton};
 use crate::models::ModelVertex;
 
 /// The vanilla feet-to-model lift (`LivingEntityRenderer`'s
@@ -141,15 +142,39 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
 /// every instance of that type reuses it. Positions are in the baked model frame
 /// (blocks, Y-down): the per-instance [`entity_model_matrix`] moves them into the
 /// world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartRange {
+    /// First index belonging to this part.
+    pub index_start: u32,
+    /// Number of indices in this part.
+    pub index_count: u32,
+    /// First vertex belonging to this part.
+    pub vertex_start: u32,
+    /// Number of vertices in this part.
+    pub vertex_count: u32,
+}
+
+/// A baked entity model split into animatable parts.
+///
+/// Vertices are in **part-local** space: the part's own rest pose is *not* folded
+/// in, so a joint stays a joint. Multiplying a part's vertices by its matrix from
+/// [`Skeleton::rest_pose`] reproduces the whole-model bake exactly — asserted
+/// over the entire corpus by `lodestone-assets`' `part_bake_recomposes_to_the_
+/// whole_model_bake`. That equivalence is what lets the renderer keep one static
+/// vertex buffer per model *type* and move only matrices per frame.
 #[derive(Debug, Clone)]
 pub struct EntityMesh {
-    /// Four vertices per quad, in the shared model-vertex format.
+    /// Four vertices per quad, in the shared model-vertex format, part-local.
     pub vertices: Vec<ModelVertex>,
     /// Six indices per quad, wound so front faces point outward.
     pub indices: Vec<u32>,
-    /// Local-space AABB minimum (model frame, blocks).
+    /// One index sub-range per part, in [`Skeleton`] part order.
+    pub parts: Vec<PartRange>,
+    /// The part hierarchy and its animator.
+    pub skeleton: Skeleton,
+    /// Local-space AABB minimum (model frame, blocks), at rest.
     pub local_min: Vec3,
-    /// Local-space AABB maximum (model frame, blocks).
+    /// Local-space AABB maximum (model frame, blocks), at rest.
     pub local_max: Vec3,
 }
 
@@ -163,44 +188,77 @@ impl EntityMesh {
     /// mirror flag.
     #[must_use]
     pub fn from_model(def: &EntityModelDef) -> Self {
-        let quads = bake_entity(def);
-        let mut vertices = Vec::with_capacity(quads.len() * 4);
-        let mut indices = Vec::with_capacity(quads.len() * 6);
+        let baked = bake_entity_parts(def);
+        let skeleton = Skeleton::from_parts(&baked);
+        let rest = skeleton.rest_pose();
+
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut parts = Vec::with_capacity(baked.len());
         let mut local_min = Vec3::splat(f32::INFINITY);
         let mut local_max = Vec3::splat(f32::NEG_INFINITY);
 
-        for quad in &quads {
-            let base = vertices.len() as u32;
-            for i in 0..4 {
-                let p = quad.positions[i];
-                let pos = Vec3::from(p);
-                local_min = local_min.min(pos);
-                local_max = local_max.max(pos);
-                vertices.push(ModelVertex {
-                    position: p,
-                    uv: quad.uvs[i],
-                    ao: 1.0,
-                    light: ENTITY_LIGHT,
-                    tint: 255,
-                    _pad: [0, 0],
-                });
+        for (part_index, part) in baked.iter().enumerate() {
+            let index_start = indices.len() as u32;
+            let vertex_start = vertices.len() as u32;
+            // The rest matrix is used only for the local AABB: the vertices
+            // themselves stay part-local so the animator can rotate the joint.
+            let rest_m = rest[part_index];
+            for quad in &part.quads {
+                let base = vertices.len() as u32;
+                for i in 0..4 {
+                    let p = quad.positions[i];
+                    let pos = Vec3::from(p);
+                    let posed = rest_m.transform_point3(pos);
+                    local_min = local_min.min(posed);
+                    local_max = local_max.max(posed);
+                    vertices.push(ModelVertex {
+                        position: p,
+                        uv: quad.uvs[i],
+                        ao: 1.0,
+                        light: ENTITY_LIGHT,
+                        tint: 255,
+                        anim: 0,
+                        _pad: 0,
+                    });
+                }
+                // Wind the two triangles so the geometric normal agrees with the
+                // baked outward normal; otherwise back-face culling would drop
+                // the visible side.
+                let n = Vec3::from(quad.normal);
+                let p0 = Vec3::from(quad.positions[0]);
+                let p1 = Vec3::from(quad.positions[1]);
+                let p2 = Vec3::from(quad.positions[2]);
+                let facing = (p1 - p0).cross(p2 - p0).dot(n);
+                if facing >= 0.0 {
+                    indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
+                } else {
+                    indices.extend_from_slice(&[
+                        base,
+                        base + 2,
+                        base + 1,
+                        base,
+                        base + 3,
+                        base + 2,
+                    ]);
+                }
             }
-            // Wind the two triangles so the geometric normal agrees with the
-            // baked outward normal; otherwise back-face culling would drop the
-            // visible side.
-            let n = Vec3::from(quad.normal);
-            let p0 = Vec3::from(quad.positions[0]);
-            let p1 = Vec3::from(quad.positions[1]);
-            let p2 = Vec3::from(quad.positions[2]);
-            let facing = (p1 - p0).cross(p2 - p0).dot(n);
-            if facing >= 0.0 {
-                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            } else {
-                indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-            }
+            parts.push(PartRange {
+                index_start,
+                index_count: indices.len() as u32 - index_start,
+                vertex_start,
+                vertex_count: vertices.len() as u32 - vertex_start,
+            });
         }
 
-        if quads.is_empty() {
+        if indices.is_empty() {
             local_min = Vec3::ZERO;
             local_max = Vec3::ZERO;
         }
@@ -208,6 +266,8 @@ impl EntityMesh {
         EntityMesh {
             vertices,
             indices,
+            parts,
+            skeleton,
             local_min,
             local_max,
         }
@@ -240,12 +300,16 @@ pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
 
 /// A single entity to render: which model type draws it, its world transform,
 /// and its world-space AABB for frustum culling.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EntityInstance {
     /// The [`entity_models`] entry name that supplies this entity's mesh.
     pub model: &'static str,
-    /// The per-instance model → world matrix.
+    /// The per-instance model → world matrix (whole-entity placement).
     pub transform: Mat4,
+    /// One `entity → world` matrix per skeleton part, in mesh part order:
+    /// `transform * part_matrix`. Drawing part `p`'s index range instanced over
+    /// `part_transforms[p]` is what makes a limb swing.
+    pub part_transforms: Vec<Mat4>,
     /// World-space AABB minimum.
     pub aabb_min: Vec3,
     /// World-space AABB maximum.
@@ -259,17 +323,24 @@ impl EntityInstance {
     #[must_use]
     pub fn new(
         model: &'static str,
-        local_min: Vec3,
-        local_max: Vec3,
+        mesh: &EntityMesh,
         feet: Vec3,
         yaw_deg: f32,
         scale: f32,
+        anim: &AnimInput,
     ) -> Self {
         let transform = entity_model_matrix(feet, yaw_deg, scale);
-        let (aabb_min, aabb_max) = transformed_aabb(&transform, local_min, local_max);
+        let (aabb_min, aabb_max) = transformed_aabb(&transform, mesh.local_min, mesh.local_max);
+        let part_transforms = mesh
+            .skeleton
+            .pose(anim)
+            .into_iter()
+            .map(|part| transform * part)
+            .collect();
         EntityInstance {
             model,
             transform,
+            part_transforms,
             aabb_min,
             aabb_max,
         }
@@ -300,6 +371,9 @@ pub struct EntitySpawn<'a> {
     /// Uniform model scale: `1.0` for an adult; babies and slimes pass a smaller
     /// value. The caller owns the baby/variant → scale decision.
     pub scale: f32,
+    /// Per-part animation drive: head tracking, walk phase, attack swing, age.
+    /// Pass [`AnimInput::REST`] for a static pose.
+    pub anim: AnimInput,
 }
 
 /// corners and takes their component-wise min/max. Correct for the entity flip
@@ -382,17 +456,11 @@ impl EntityModelSet {
         feet: Vec3,
         yaw_deg: f32,
         scale: f32,
+        anim: &AnimInput,
     ) -> Option<EntityInstance> {
         let name = canonical_model_name(type_path)?;
         let mesh = self.get(name)?;
-        Some(EntityInstance::new(
-            name,
-            mesh.local_min,
-            mesh.local_max,
-            feet,
-            yaw_deg,
-            scale,
-        ))
+        Some(EntityInstance::new(name, mesh, feet, yaw_deg, scale, anim))
     }
 
     /// Resolve, frustum-cull and group a set of tracked entities into an
@@ -425,7 +493,7 @@ impl EntityModelSet {
     {
         let instances: Vec<EntityInstance> = spawns
             .into_iter()
-            .filter_map(|s| self.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale))
+            .filter_map(|s| self.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim))
             .collect();
         plan_entities(&instances, frustum)
     }
@@ -459,8 +527,12 @@ impl EntityCullStats {
 pub struct EntityBatch {
     /// The [`entity_models`] entry name.
     pub model: &'static str,
-    /// One model → world matrix per visible instance of this model.
+    /// One whole-entity model → world matrix per visible instance.
     pub transforms: Vec<Mat4>,
+    /// Per-part instance matrices: `parts[p][i]` places part `p` of instance
+    /// `i`. Outer length equals the mesh's part count; every inner vector has
+    /// one entry per visible instance, in the same order as `transforms`.
+    pub parts: Vec<Vec<Mat4>>,
 }
 
 /// The visible entity draws for one frame, grouped by model type, plus the
@@ -504,10 +576,16 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
         }
         stats.drawn += 1;
         match batches.iter_mut().find(|b| b.model == inst.model) {
-            Some(batch) => batch.transforms.push(inst.transform),
+            Some(batch) => {
+                batch.transforms.push(inst.transform);
+                for (slot, m) in batch.parts.iter_mut().zip(&inst.part_transforms) {
+                    slot.push(*m);
+                }
+            }
             None => batches.push(EntityBatch {
                 model: inst.model,
                 transforms: vec![inst.transform],
+                parts: inst.part_transforms.iter().map(|m| vec![*m]).collect(),
             }),
         }
     }
@@ -555,8 +633,20 @@ mod tests {
         // candidate, or that mob draws untextured. Drive this off the type→model
         // mapping so it tracks the drawable set, not the whole baked corpus.
         let drawable_types = [
-            "player", "zombie", "husk", "drowned", "skeleton", "stray", "creeper", "spider",
-            "cave_spider", "pig", "cow", "mooshroom", "sheep", "chicken",
+            "player",
+            "zombie",
+            "husk",
+            "drowned",
+            "skeleton",
+            "stray",
+            "creeper",
+            "spider",
+            "cave_spider",
+            "pig",
+            "cow",
+            "mooshroom",
+            "sheep",
+            "chicken",
         ];
         for ty in drawable_types {
             let model = model_for_type(ty)
@@ -586,7 +676,8 @@ mod tests {
         assert_eq!(mesh.vertices.len(), mesh.quad_count() * 4);
         assert_eq!(mesh.indices.len(), mesh.quad_count() * 6);
         // Matches the underlying bake exactly (one quad per baked quad).
-        let baked = bake_entity(&lodestone_assets::entity_models::pig_model());
+        let baked =
+            lodestone_assets::entity::bake_entity(&lodestone_assets::entity_models::pig_model());
         assert_eq!(mesh.quad_count(), baked.len());
     }
 
@@ -668,17 +759,25 @@ mod tests {
     fn instance_world_aabb_contains_the_transformed_mesh() {
         let mesh = pig_mesh();
         let feet = Vec3::new(5.0, 70.0, 5.0);
-        let inst = EntityInstance::new("pig", mesh.local_min, mesh.local_max, feet, 45.0, 1.0);
-        // Every transformed vertex must lie inside the reported world AABB.
-        for v in &mesh.vertices {
-            let w = inst.transform.transform_point3(Vec3::from(v.position));
-            assert!(
-                w.cmpge(inst.aabb_min - Vec3::splat(1e-3)).all()
-                    && w.cmple(inst.aabb_max + Vec3::splat(1e-3)).all(),
-                "vertex {w:?} escaped AABB [{:?}, {:?}]",
-                inst.aabb_min,
-                inst.aabb_max,
-            );
+        let inst = EntityInstance::new("pig", &mesh, feet, 45.0, 1.0, &AnimInput::REST);
+        // Vertices are part-local, so a vertex only lands in the world once it
+        // has been through *its own part's* matrix — the same matrix the GPU
+        // draws it with. Using `inst.transform` alone would collapse every part
+        // onto the model origin and the AABB check would be meaningless.
+        for (part, range) in mesh.parts.iter().enumerate() {
+            let m = inst.part_transforms[part];
+            let lo = range.vertex_start as usize;
+            let hi = lo + range.vertex_count as usize;
+            for v in &mesh.vertices[lo..hi] {
+                let w = m.transform_point3(Vec3::from(v.position));
+                assert!(
+                    w.cmpge(inst.aabb_min - Vec3::splat(1e-3)).all()
+                        && w.cmple(inst.aabb_max + Vec3::splat(1e-3)).all(),
+                    "vertex {w:?} escaped AABB [{:?}, {:?}]",
+                    inst.aabb_min,
+                    inst.aabb_max,
+                );
+            }
         }
     }
 
@@ -702,19 +801,19 @@ mod tests {
         let frustum = frustum_looking_down_pos_z();
         let in_front = EntityInstance::new(
             "pig",
-            mesh.local_min,
-            mesh.local_max,
+            &mesh,
             Vec3::new(0.0, 63.0, 20.0),
             0.0,
             1.0,
+            &AnimInput::REST,
         );
         let behind = EntityInstance::new(
             "pig",
-            mesh.local_min,
-            mesh.local_max,
+            &mesh,
             Vec3::new(0.0, 63.0, -20.0),
             0.0,
             1.0,
+            &AnimInput::REST,
         );
 
         let frame = plan_entities(&[in_front, behind], &frustum);
@@ -732,11 +831,11 @@ mod tests {
         let at = |model, m: &EntityMesh, z: f32| {
             EntityInstance::new(
                 model,
-                m.local_min,
-                m.local_max,
+                &m,
                 Vec3::new(0.0, 63.0, z),
                 0.0,
                 1.0,
+                &AnimInput::REST,
             )
         };
         let instances = [
@@ -768,14 +867,21 @@ mod tests {
         assert_eq!(set.len(), entity_models().len());
 
         let feet = Vec3::new(0.0, 63.0, 10.0);
-        let pig = set.resolve("pig", feet, 0.0, 1.0).expect("pig resolves");
+        let pig = set
+            .resolve("pig", feet, 0.0, 1.0, &AnimInput::REST)
+            .expect("pig resolves");
         assert_eq!(pig.model, "pig");
         assert_eq!(
-            set.resolve("cave_spider", feet, 0.0, 1.0).unwrap().model,
+            set.resolve("cave_spider", feet, 0.0, 1.0, &AnimInput::REST)
+                .unwrap()
+                .model,
             "spider"
         );
         // Unknown type resolves to nothing (renderer skips it).
-        assert!(set.resolve("ender_dragon", feet, 0.0, 1.0).is_none());
+        assert!(
+            set.resolve("ender_dragon", feet, 0.0, 1.0, &AnimInput::REST)
+                .is_none()
+        );
         // The resolved instance's model is present in the set for upload.
         assert!(set.get(pig.model).is_some());
     }
@@ -793,30 +899,35 @@ mod tests {
                 feet: Vec3::new(0.0, 63.0, 10.0),
                 body_yaw_deg: 0.0,
                 scale: 1.0,
+                anim: AnimInput::REST,
             },
             EntitySpawn {
                 type_path: "cow",
                 feet: Vec3::new(0.0, 63.0, 12.0),
                 body_yaw_deg: 0.0,
                 scale: 1.0,
+                anim: AnimInput::REST,
             },
             EntitySpawn {
                 type_path: "ender_dragon", // no model yet — dropped, not counted
                 feet: Vec3::new(0.0, 63.0, 14.0),
                 body_yaw_deg: 0.0,
                 scale: 1.0,
+                anim: AnimInput::REST,
             },
             EntitySpawn {
                 type_path: "pig",
                 feet: Vec3::new(0.0, 63.0, 16.0),
                 body_yaw_deg: 0.0,
                 scale: 1.0,
+                anim: AnimInput::REST,
             },
             EntitySpawn {
                 type_path: "pig",
                 feet: Vec3::new(0.0, 63.0, -30.0), // behind camera
                 body_yaw_deg: 0.0,
                 scale: 1.0,
+                anim: AnimInput::REST,
             },
         ];
 
@@ -835,7 +946,7 @@ mod tests {
         // The one-call seam is exactly manual resolve + plan_entities: same frame.
         let manual: Vec<EntityInstance> = spawns
             .iter()
-            .filter_map(|s| set.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale))
+            .filter_map(|s| set.resolve(s.type_path, s.feet, s.body_yaw_deg, s.scale, &s.anim))
             .collect();
         let manual_frame = plan_entities(&manual, &frustum);
         assert_eq!(frame.batches, manual_frame.batches);

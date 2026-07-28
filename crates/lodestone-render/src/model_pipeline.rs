@@ -341,7 +341,11 @@ impl ModelPipeline {
     /// with [`model_anim_buffer`]. Group **3** on the model pipeline, group
     /// **2** on the fluid pipeline (see [`Self::anim_layout`]).
     #[must_use]
-    pub fn anim_bind_group(&self, device: &wgpu::Device, anim_buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+    pub fn anim_bind_group(
+        &self,
+        device: &wgpu::Device,
+        anim_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lodestone-model-anim-bg"),
             layout: &self.anim_layout,

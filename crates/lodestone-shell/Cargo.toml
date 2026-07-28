@@ -27,6 +27,7 @@ lodestone-assets = { workspace = true }
 lodestone-sound = { workspace = true }
 lodestone-world = { workspace = true }
 lodestone-registry = { workspace = true }
+lodestone-entity.workspace = true
 lodestone-render = { path = "../lodestone-render", features = ["window"] }
 lodestone-physics = { path = "../lodestone-physics" }
 # Vanilla particle simulation (block-break debris, hit fragments). The shell

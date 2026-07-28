@@ -103,7 +103,7 @@
 //! animation — the *uniform*, not the mesh or the texture, changes per tick.
 
 use lodestone_assets::fluid::{
-    FaceSet, FluidGeometry, FlowNeighbor, bake_fluid, corner_height, flow_horizontal,
+    FaceSet, FlowNeighbor, FluidGeometry, bake_fluid, corner_height, flow_horizontal,
     neighbor_height,
 };
 use lodestone_assets::{BakedQuad, Direction};
@@ -196,8 +196,7 @@ impl ModelMesh {
     pub fn merge(&mut self, other: &ModelMesh) {
         let base = self.vertices.len() as u32;
         self.vertices.extend_from_slice(&other.vertices);
-        self.indices
-            .extend(other.indices.iter().map(|&i| i + base));
+        self.indices.extend(other.indices.iter().map(|&i| i + base));
     }
 }
 
@@ -553,9 +552,7 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                     flow_neighbor_at(view, kind, xi, yi, zi, -1, 0),
                 );
 
-                let same = |dx: i32, dy: i32, dz: i32| {
-                    matches!(view.fluid_at(xi + dx, yi + dy, zi + dz), Some(f) if f.kind == kind)
-                };
+                let same = |dx: i32, dy: i32, dz: i32| matches!(view.fluid_at(xi + dx, yi + dy, zi + dz), Some(f) if f.kind == kind);
                 let emit = |dx: i32, dy: i32, dz: i32| {
                     !same(dx, dy, dz) && !view.occludes_at(xi + dx, yi + dy, zi + dz)
                 };
@@ -892,7 +889,11 @@ mod tests {
         v.solid(8, 7, 8); // floor below
         let m = mesh_fluids(&v);
 
-        assert_eq!(m.water.quad_count(), 5, "top + 4 sides, bottom culled by floor");
+        assert_eq!(
+            m.water.quad_count(),
+            5,
+            "top + 4 sides, bottom culled by floor"
+        );
         assert!(m.lava.vertices.is_empty(), "no lava");
 
         // The top surface sits below the full block: a source's corners are
