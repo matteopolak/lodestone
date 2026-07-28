@@ -668,9 +668,9 @@ fn parse_key(name: &str, what: &str) -> Result<ResourceKey, AdapterError> {
 }
 
 /// Outcome of decoding one clientbound item stack.
-struct DecodedStack {
+pub(crate) struct DecodedStack {
     /// The decoded stack, or `None` for the empty stack.
-    stack: Option<ItemStack>,
+    pub(crate) stack: Option<ItemStack>,
     /// `false` when an unmodeled component halted decoding partway through the
     /// stack's `DataComponentPatch`, leaving the reader positioned mid-patch.
     ///
@@ -681,7 +681,7 @@ struct DecodedStack {
     /// still valid, but the remainder of the packet is unreadable and callers
     /// must stop reading further items and skip the trailing-bytes check rather
     /// than raising a fatal decode error.
-    complete: bool,
+    pub(crate) complete: bool,
 }
 
 /// Decodes a clientbound optional item stack.
@@ -699,7 +699,13 @@ struct DecodedStack {
 /// modeled components (custom name, damage, enchantments) are decoded, and the
 /// first unmodeled component stops the patch, flags the stack as partial
 /// ([`ItemComponents::has_unmodeled`]), and yields it with `complete == false`.
-fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, AdapterError> {
+///
+/// `pub(crate)` because entity metadata carries the *same* codec under its
+/// `ITEM_STACK` serializer (a dropped item's whole identity is one such field).
+/// That path must reuse this decoder rather than grow a second one — two
+/// independent readings of the component-patch wire is exactly how the two ends
+/// drift apart.
+pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if count <= 0 {
         return Ok(DecodedStack {
@@ -1608,6 +1614,14 @@ fn handle_set_entity_motion(payload: &[u8]) -> Result<Vec<Directive>, AdapterErr
 /// event is emitted — the entity simply keeps its prior metadata. A genuinely
 /// missing seam therefore surfaces as *absent fields* in a live test, loudly,
 /// rather than as a dropped connection.
+///
+/// The one case where trailing bytes are *expected* is a stack carrying an
+/// unmodeled data component: the item codec cannot skip it, so the metadata
+/// decoder abandons the rest of the list and reports `complete == false`.
+/// Running the misparse detector there would discard the item identity that was
+/// already decoded exactly — fail-closed on the very packet this seam exists to
+/// deliver — so the check is skipped and the partial update is emitted. Metadata
+/// is applied incrementally, so a partial update is ordinary, not lossy.
 fn handle_set_entity_data(
     payload: &[u8],
     variants: &Mutex<HashMap<i32, MetadataClass>>,
@@ -1621,10 +1635,15 @@ fn handle_set_entity_data(
         .ok()
         .and_then(|map| map.get(&entity_id).copied());
     match read_entity_metadata(&mut reader, class) {
-        Ok(metadata) if reader.ensure_empty().is_ok() && !metadata.is_empty() => {
+        // `complete == false` short-circuits the trailing-bytes check: the
+        // reader is deliberately parked mid-payload there.
+        Ok(decoded)
+            if (!decoded.complete || reader.ensure_empty().is_ok())
+                && !decoded.metadata.is_empty() =>
+        {
             vec![Directive::Emit(ClientEvent::EntityMetadataUpdated {
                 entity_id,
-                metadata,
+                metadata: decoded.metadata,
             })]
         }
         _ => Vec::new(),

@@ -51,6 +51,11 @@ Oracles (not part of repo state — recreate them):
   render commit. Nothing was lost, but the commit contains 169 lines its author never wrote, and a
   reviewer reading that diff would be misled about what the change was. `git add <file>` or
   `git add -p`, always.
+- **Read `git diff --cached` before every commit.** Explicit file paths are necessary but not
+  sufficient: a *shared* file can already contain someone else's in-flight edit. `0b95b4e` staged
+  `docs/README.md` by exact path and still captured another agent's index line pointing at a doc
+  that commit did not include — shipping a broken link. Review the staged diff, not just the file
+  list.
 - **This machine is shared with an unrelated project.** Docker holds images and volumes belonging to
   other work (`mht-*`, postgres, valkey, seaweedfs). **Never run `docker system prune`,
   `docker volume prune`, or `docker builder prune`.** Name every target explicitly; note Docker's

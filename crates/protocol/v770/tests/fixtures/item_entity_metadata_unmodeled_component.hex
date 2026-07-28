@@ -1,0 +1,22 @@
+# Captured from vanilla 26.2 (protocol 776) survival oracle.
+# Packet: clientbound set_entity_data for a `/summon item` drop of
+# {id:"minecraft:diamond_pickaxe",count:1,
+# components:{"minecraft:repair_cost":7}}.
+#
+# ..        VarInt entity id (session-scoped; not compared)
+# 08        metadata index 8 = ItemEntity.DATA_ITEM
+# 07        serializer 7 = ITEM_STACK
+# 01        VarInt stack count = 1
+# c6 07     VarInt item registry id 966 = minecraft:diamond_pickaxe
+# 01        DataComponentPatch: 1 added
+# 00        DataComponentPatch: 0 removed
+# 13        component type id 19 = minecraft:repair_cost  <-- UNMODELED
+# 07        its payload, which we cannot skip and never read
+# ff        end-of-list sentinel, likewise never reached
+#
+# The last two bytes are deliberately NOT consumed: a clientbound
+# patch length-prefixes neither itself nor its components, so an
+# unmodeled one ends the decode in place. Reading on would take `07`
+# as a metadata index and `ff` as a truncated serializer VarInt — a
+# plausible-looking misparse, which is why the rest is abandoned.
+a1 e4 01 08 07 01 c6 07 01 00 13 07 ff

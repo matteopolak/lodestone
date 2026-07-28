@@ -168,9 +168,9 @@ pub enum AnimationAction {
 /// given packet actually carried — every field is `Option`, and `None` means
 /// "this packet did not mention it", not "cleared".
 ///
-/// The one field that is itself optional on the wire, the custom name, uses a
-/// nested `Option`: the outer `Option` is "did this packet include the field",
-/// the inner is "is a name currently set".
+/// The fields that are themselves optional on the wire — the custom name and
+/// the displayed item stack — use a nested `Option`: the outer `Option` is "did
+/// this packet include the field", the inner is "is a value currently set".
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntityMetadataUpdate {
     /// The shared entity flags byte (on-fire / crouching / sprinting / swimming
@@ -193,6 +193,25 @@ pub struct EntityMetadataUpdate {
     /// not carry a variant field; a consumer treats that as "the type's vanilla
     /// default", not "unknown".
     pub variant: Option<EntityVariant>,
+    /// The item stack an item-carrying entity displays, when the packet carried
+    /// the field.
+    ///
+    /// This is what a dropped item (`minecraft:item`) is *made of*: its entire
+    /// visible identity rides this one metadata field. The same field carries
+    /// the display item of thrown projectiles (snowball, egg, ender pearl,
+    /// splash potion), fireballs, and the eye of ender.
+    ///
+    /// Nested like [`custom_name`](Self::custom_name): the outer `Option` is
+    /// "did this packet include the field", the inner is "is a stack currently
+    /// set" — `Some(None)` is the empty stack, which vanilla draws as nothing.
+    ///
+    /// A stack whose wire form carried a data component this build does not
+    /// model still arrives here with
+    /// [`ItemComponents::has_unmodeled`](crate::ItemComponents::has_unmodeled)
+    /// set. The item key and count are decoded *before* any component is, so an
+    /// unrecognised component costs detail, never the answer to "which item is
+    /// this".
+    pub item: Option<Option<ItemStack>>,
 }
 
 impl EntityMetadataUpdate {
@@ -206,6 +225,7 @@ impl EntityMetadataUpdate {
             && self.health.is_none()
             && self.baby.is_none()
             && self.variant.is_none()
+            && self.item.is_none()
     }
 }
 

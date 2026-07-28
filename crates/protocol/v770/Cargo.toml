@@ -88,3 +88,13 @@ live-physics = []
 # a wrong understanding of the component-patch wire and still agree. Off by
 # default and `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
 live-item = []
+
+# Enables the live item-entity gate (`live_item_entity_metadata`): joins the
+# real survival 26.2 server (game :25565, RCON :25566), `/summon`s a dropped
+# item, and captures the raw `set_entity_data` payload the *server* authored for
+# it. Those bytes are checked in under `tests/fixtures/` and replayed by the
+# hermetic `item_entity_metadata` test, so the decoder is never validated
+# against bytes our own encoder produced. This gate re-captures and asserts the
+# fixtures still match the live wire. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v770` stays hermetic.
+live-item-entity = []
