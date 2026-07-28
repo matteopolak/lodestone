@@ -42,6 +42,7 @@ pub mod camera;
 pub mod caps;
 pub mod crack;
 pub mod crack_pipeline;
+pub mod crack_resolver;
 pub mod device;
 pub mod driver;
 pub mod entity;
