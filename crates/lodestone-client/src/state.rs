@@ -25,11 +25,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
-use lodestone_game::{menu::Menu, menus::Menus};
+use lodestone_game::{
+    click::{Click, PlayerCtx},
+    menu::Menu,
+    menus::Menus,
+};
 use lodestone_model::{
-    BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityEquipment,
-    EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode, ItemStack,
-    PlayerListEntry, ResourceKey, Rotation, Text, Vec3,
+    BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, EntityAttributeSnapshot,
+    EntityEquipment, EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode,
+    ItemStack, PlayerListEntry, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
@@ -557,6 +561,28 @@ impl SharedState {
             title: inner.menus.opened_title()?.clone(),
             menu: inner.menus.opened()?.clone(),
         })
+    }
+
+    /// Predicts `click` against the live [`Menus`] session and returns the
+    /// [`ClientAction`] to transmit.
+    ///
+    /// This **must** run here rather than on a snapshot: prediction mutates
+    /// the one authoritative [`Menus`] this state owns (slots, the carried
+    /// stack, the crafting grid), and [`open_menu`](Self::open_menu) /
+    /// [`player_menu`](Self::player_menu) hand out *clones* with nowhere for
+    /// that mutation to land. A caller holding only a snapshot cannot predict
+    /// a click; it can only ask this state to do it.
+    pub(crate) fn menu_click(&self, click: Click, ctx: PlayerCtx) -> ClientAction {
+        let action = {
+            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            inner.menus.click_action(click, ctx)
+        };
+        // The prediction just changed slot contents/the carried stack the UI
+        // reads every frame; wake any `wait_for` waiter the same way every
+        // other mutator on this state does, so a bot awaiting an inventory
+        // change is not left hanging on a lost wakeup.
+        self.wake();
+        action
     }
 }
 

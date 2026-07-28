@@ -1127,12 +1127,16 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
                     rotation: Rotation::default(),
                     velocity: None,
                 }),
-                // First metadata packet: name + health.
+                // First metadata packet: name + health + the displayed stack.
+                // A dropped item announces its stack exactly once like this and
+                // then never mentions it again, so it is the sharpest case for
+                // the incremental merge below.
                 Directive::Emit(ClientEvent::EntityMetadataUpdated {
                     entity_id: 10,
                     metadata: EntityMetadataUpdate {
                         custom_name: Some(Some("Babe".to_string())),
                         health: Some(6.0),
+                        item: Some(Some(ItemStack::new(dim("diamond"), 12))),
                         ..Default::default()
                     },
                 }),
@@ -1190,6 +1194,13 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
     assert_eq!(pig.health, Some(6.0));
     assert_eq!(pig.pose, Some(EntityPose::Standing));
     assert_eq!(pig.baby, Some(true));
+    assert_eq!(
+        pig.item,
+        Some(Some(ItemStack::new(dim("diamond"), 12))),
+        "the second packet said nothing about the item, so the stack the first \
+         one reported must survive — flattening the nesting here is what makes \
+         a live drop go back to drawing a placeholder one tick after it spawns"
+    );
     // Replace-by-id: two distinct attributes, movement_speed updated to the
     // later snapshot (base 0.30 with its modifier), no duplicate.
     assert_eq!(

@@ -17,6 +17,7 @@ use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
 use lodestone_model::{BlockFace, PlayerInput, Vec3f};
+use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
     compute_fluid_state, tick,
@@ -236,6 +237,21 @@ fn face_from_normal(normal: [i32; 3]) -> BlockFace {
         // The raycast only ever yields a unit axis normal; treat any residue as
         // the remaining west face rather than panicking on malformed input.
         _ => BlockFace::West,
+    }
+}
+
+/// [`BlockFace`] to [`particle_emit::Face`] — the two enumerate the same six
+/// directions under different names because they come from different crates
+/// (`lodestone-model` for protocol-facing code, `lodestone-particle` for the
+/// vanilla particle simulation), not because they disagree about anything.
+fn particle_face(face: BlockFace) -> particle_emit::Face {
+    match face {
+        BlockFace::Down => particle_emit::Face::Down,
+        BlockFace::Up => particle_emit::Face::Up,
+        BlockFace::North => particle_emit::Face::North,
+        BlockFace::South => particle_emit::Face::South,
+        BlockFace::West => particle_emit::Face::West,
+        BlockFace::East => particle_emit::Face::East,
     }
 }
 
@@ -1187,6 +1203,23 @@ impl Sim {
 
     /// Recompute the targeted block by casting the view ray from the (already
     /// interpolated) camera. Call once per frame before rendering the outline.
+    ///
+    /// The pick ray does **not** consult `is_solid` alone. `is_solid` is the
+    /// *collision* predicate (also fed to the physics engine), and vanilla
+    /// deliberately gives cross-plants (`short_grass`, ferns, flowers) an empty
+    /// collision shape — you walk through grass — while picking them still
+    /// works, because vanilla's `clip`/`clipWithInteractionOverride` walks a
+    /// *separate* outline/interaction shape (`BlockBehaviour.getShape` /
+    /// `getInteractionShape`), not the collision shape. We have no such table:
+    /// `protocol::v770::collision_shapes` is a *collision*-only oracle dump, and
+    /// building an outline dump is a separate JVM-oracle effort, out of scope
+    /// here. So this approximates: any non-air, non-fluid block is picked as a
+    /// full unit cube even when its collision shape is empty. That is exact for
+    /// full cubes (unchanged — `is_solid` already covers them) and over-selects
+    /// at the edges of anything with a genuinely partial shape (a short_grass's
+    /// real outline is roughly 0.8×0.8×0.8; a slab or stair also over-selects
+    /// until it gets a real outline table). The correct fix is an
+    /// outline/interaction-shape oracle dump alongside the collision one.
     pub fn update_target(&mut self, aspect: f32) {
         let cam = self.camera(aspect);
         let origin = [
@@ -1202,13 +1235,23 @@ impl Sim {
         // face at the edge of reach is always covered. A `None` snapshot means
         // the player's own column has not streamed in; nothing is targetable.
         if self.is_live() {
-            self.target = self
-                .live_collision()
-                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z)));
+            self.target = self.live_collision().and_then(|view| {
+                raycast(origin, dir, REACH, |x, y, z| {
+                    view.is_solid(x, y, z)
+                        || (view.block_at(x, y, z) != id::AIR
+                            && !view.is_water(x, y, z)
+                            && !view.is_lava(x, y, z))
+                })
+            });
             return;
         }
         let view = WorldCollision::new(&self.world);
-        self.target = raycast(origin, dir, REACH, |x, y, z| view.is_solid(x, y, z));
+        self.target = raycast(origin, dir, REACH, |x, y, z| {
+            view.is_solid(x, y, z)
+                || (view.block_at(x, y, z) != id::AIR
+                    && !view.is_water(x, y, z)
+                    && !view.is_lava(x, y, z))
+        });
     }
 
     /// Distance fog for this frame: sized to the configured render distance
@@ -1479,9 +1522,35 @@ impl Sim {
             // `bare_hand_break_inputs`.
             self.fluid_state.eye_in_water,
         );
+        // Vanilla's `ClientLevel.addBreakingBlockEffect` — the per-tick "chip"
+        // that pops off the mined face — fires from `Minecraft.continueAttack`,
+        // *not* `startAttack`: the very first tick of a dig only starts the
+        // predictor and swings, and the chip begins appearing from the second
+        // tick onward. `self.mining.target()` still holds the *previous* tick's
+        // target here (`continue_` below is what advances it), so comparing it
+        // to `pos` before calling distinguishes "already mining this exact
+        // block" (continue) from "first tick of a new/retargeted dig" (start),
+        // exactly the split vanilla's own state machine makes.
+        let already_mining_here = self.mining.target() == Some(pos);
         // `continue_` delegates to `start` when no dig is live yet, so this one
         // entry point covers first-press, hold, and retarget uniformly.
         let actions = self.mining.continue_(pos, face, &inputs, None);
+        if already_mining_here
+            && actions
+                .iter()
+                .any(|a| matches!(a, ClientAction::SwingArm { .. }))
+        {
+            // Full-cube shape and untinted-white, for the same reason as the
+            // destroy-burst debris (see `destroy_block`/`NetUpdate::BlockDestroyed`
+            // below): the shell does not carry a block's outline shape, so the
+            // chip approximates with the unit cube rather than the true model.
+            self.particles.breaking_block(
+                hit.block,
+                state_id.unwrap_or(id::AIR),
+                [1.0; 3],
+                particle_face(face),
+            );
+        }
         if let Some(net) = &self.net {
             for action in actions {
                 net.send_action(action);
