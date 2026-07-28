@@ -1427,6 +1427,77 @@ fn particles_whole_corpus_coverage() {
     assert!(names.len() > 100, "expected the full particle corpus");
 }
 
+/// Stitches the real particle-sheet atlas end to end (every
+/// `assets/minecraft/particles/*.json` in the jar, discovered exactly like
+/// `particles_whole_corpus_coverage` above) and checks it against
+/// `lodestone_particle::Sheet` — the enum the shell actually resolves
+/// particles through. Every sheet frame that enum can name must be present
+/// with a non-degenerate UV rect, or the shell's `(Sheet, frame)` table built
+/// on top of this atlas would silently drop that particle type.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar"]
+fn particle_atlas_stitches_the_real_corpus() {
+    use lodestone_assets::ParticleAtlas;
+
+    let manager = manager();
+    let (atlas, report) = ParticleAtlas::build_reported(&manager).expect("build particle atlas");
+
+    eprintln!("== particle atlas (real jar) ==");
+    eprintln!(
+        "definitions={} sprites={} atlas={}x{}",
+        report.definitions,
+        report.sprites,
+        atlas.atlas().width,
+        atlas.atlas().height
+    );
+    eprintln!(
+        "  missing_textures={} parse_errors={}",
+        report.missing_textures.len(),
+        report.parse_errors.len()
+    );
+    assert!(report.parse_errors.is_empty(), "{:?}", report.parse_errors);
+    assert!(
+        report.missing_textures.is_empty(),
+        "{:?}",
+        report.missing_textures
+    );
+    assert!(report.definitions > 100, "expected the full particle corpus");
+    assert!(atlas.atlas().width > 0 && atlas.atlas().height > 0);
+
+    // Every physical frame of every sheet `lodestone_particle` can emit must
+    // resolve — this is the exact lookup `particles.rs::sheet_uv_table` does.
+    let sheets: &[(&str, u16)] = &[
+        ("generic", 8),
+        ("critical_hit", 1),
+        ("enchanted_hit", 1),
+        ("flame", 1),
+        ("splash", 4),
+        ("bubble", 1),
+        ("note", 1),
+        ("heart", 1),
+        ("effect", 8),
+        ("glitter", 8),
+    ];
+    let mut total = 0usize;
+    for (stem, frames) in sheets {
+        for frame in 0..*frames {
+            let name = if *frames == 1 {
+                format!("particle/{stem}")
+            } else {
+                format!("particle/{stem}_{frame}")
+            };
+            let loc = ResourceLocation::new("minecraft", name.clone()).unwrap();
+            let sprite = atlas
+                .sprite(&loc)
+                .unwrap_or_else(|| panic!("sheet frame {name} missing from particle atlas"));
+            assert!(sprite.uv_max[0] > sprite.uv_min[0]);
+            assert!(sprite.uv_max[1] > sprite.uv_min[1]);
+            total += 1;
+        }
+    }
+    eprintln!("  sheet frames resolved={total}");
+}
+
 /// Locates the external `sounds.json` object via `asset-index-*.json`. Sounds
 /// and `.ogg` files are NOT inside `client.jar`; they live in the external
 /// asset-object store addressed by the index (`<sha1[0..2]>/<sha1>`).

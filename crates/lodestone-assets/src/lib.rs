@@ -90,6 +90,7 @@ mod meta;
 pub mod mipmap;
 mod model;
 pub mod particle;
+pub mod particle_atlas;
 mod profile;
 pub mod sound;
 mod source;
@@ -111,8 +112,8 @@ pub use blockstate::{
 pub use error::AtlasSourceError;
 pub use error::{
     AssetError, AtlasError, BakeError, BlockStateError, FontError, GuiError, IconError,
-    ItemAtlasError, ItemModelError, ModelError, ParticleError, ResourceLocationError, SoundError,
-    TextureError, TintError,
+    ItemAtlasError, ItemModelError, ModelError, ParticleAtlasError, ParticleError,
+    ResourceLocationError, SoundError, TextureError, TintError,
 };
 pub use icon::{DefaultItemContext, GuiItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
 pub use item_atlas::{ItemAtlas, ItemAtlasReport};
@@ -129,6 +130,7 @@ pub use model::{
     Axis, Direction, DisplayTransform, Element, ElementRotation, Face, GuiLight, ModelResolver,
     RawModel, ResolvedModel, TextureBinding,
 };
+pub use particle_atlas::{ParticleAtlas, ParticleAtlasReport};
 pub use profile::AssetProfile;
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirectorySource;
