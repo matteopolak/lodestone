@@ -38,65 +38,63 @@ On screen: real terrain, grass blocks with green tops and dirt sides, tree trunk
 leaf canopies, and **short_grass as see-through cross-plants**. The world is the *server's*,
 meshed through per-state vanilla block models and lit by the server's own light data.
 
-Working end to end: join → chunk stream → model-meshed vanilla terrain → server lighting →
-movement with live-world collision → chat → tab list → scoreboard → containers → entity
-spawn/despawn → mining. Clientbound packet coverage is **108/141 decoded**, serverbound **53/69**.
+Working end to end: join → chunk stream → model-meshed vanilla terrain (including fluids) →
+server lighting → biome tint → movement with live-world collision → chat → tab list → scoreboard →
+containers → entity spawn/despawn with real textures and 3-tick interpolation → mining and
+placement reconciled against the server → block-break particles → hotbar item icons.
+Clientbound packet coverage is **108/141 decoded**, serverbound **53/69**.
+
+> **Read the status rows below, not this paragraph, before starting work.** Staleness is the most
+> common defect in this repo (there is a whole addendum on it): every wrong belief recorded here
+> was *true and evidenced when written*. When a task looks blocked on "X doesn't exist yet",
+> re-verify that X still doesn't exist before routing around it.
 
 ### Known-wrong things you will see immediately
 
 These are current, reproduced-on-screen defects, not speculation:
 
-- **Water and lava render as nothing.** `bake_state` emits 0 quads for fluids and the translucent
-  pass is not wired, so an ocean is an invisible pit. This is a *regression in appearance* from
-  the old grey-blob look and is the largest open rendering gap. (In progress: `3d08b80` classifies
-  fluids and resolves their atlas sprites; geometry and the translucent pass are still to come.)
-- **Cross-plants are not biome-tinted.** Measured on one frame: grass block tops sit at G/R ≈ 1.6
-  while short_grass sits at G/R ≈ 1.12 (untinted greyscale would be 1.0). Same biome, same
-  `tint_index` path — so tint is reaching block faces and missing plant quads. Vanilla plains
-  grass is `#91BD59`, G/R ≈ 1.30.
+- **~~Water and lava render as nothing.~~ CLOSED.** `29cfaea`/`544051e`/`867439c` mesh fluids into
+  water/lava geometry and add the translucent pipeline; `db0e2b9` gates see-through water on
+  offscreen pixels. What remains is *fog*, not geometry — see the underwater diagnosis below.
+- **~~Cross-plants are not biome-tinted.~~ CLOSED.** `92a4dc6` applies biome tint in gamma space.
+  The diagnostic that found it is worth keeping: averaging the whole frame gave G/R ≈ 1.13 and
+  read as "global gamma"; clustering by *location* separated two spatially distinct populations
+  (pale on tops/plants, saturated on grass **side-overlay strips only**), which a global transform
+  cannot produce. Ask *where*, not *what*.
 - **The hotbar is a placeholder bar**, while hearts and hunger beside it are pixel-correct vanilla
   sprites — so the GUI atlas and `gui.scaling` model are fine and the fault is isolated to the
   hotbar widget.
-- **The HUD font is a 5×7 debug font with uppercase glyphs only** (`hud/font.rs:16` calls
-  `to_ascii_uppercase`), with a fixed advance. Vanilla text needs `ascii.png` + unicode pages,
-  **per-glyph proportional widths**, and the 1px 25%-brightness drop shadow. Proportional widths
-  are most of what makes vanilla text look like vanilla text — and note that a font with the right
-  characters at the wrong widths passes every `assert_eq!` on the source string, so this has to be
-  gated on pixels.
+- **The HUD font is a 5×7 debug font** with a fixed advance (`3d838de` gave it mixed case, so
+  server text no longer shouts, but the metrics are still wrong). Vanilla text needs `ascii.png` +
+  unicode pages, **per-glyph proportional widths**, and the 1px 25%-brightness drop shadow.
+  Proportional widths are most of what makes vanilla text look like vanilla text — and note that a
+  font with the right characters at the wrong widths passes every `assert_eq!` on the source
+  string, so this has to be gated on pixels.
 - **No smooth lighting / AO on the model path** — flat per-block light plus directional shade.
   Correct, but one of the most recognisable "not Minecraft" tells now that geometry is right.
-- **Block placement does not exist.** `ClientAction::UseItemOn` is modeled and wired through the
-  adapter, but nothing in `lodestone-game` produces it. Mining works; the inverse does not.
-  *(Update: the game layer now exists — `e339e06` — but nothing calls it; see next item.)*
-- **The shell's dig and place are demo-world code running on the multiplayer path.**
-  `sim.rs:877 break_block()` sets the block to air in *our* copy and remeshes; `sim.rs:890
-  place_block()` writes a hardcoded `PLACE_BLOCK` constant. **Neither sends anything to the
-  server**, so on a live server the block simply returns on the next chunk update — while a
-  complete, live-gated mining (`bd7c51c`) and placement (`e339e06`) game layer sits entirely
-  unused. Another island, and the most consequential one found so far.
+- **~~Block placement does not exist.~~ CLOSED.** `e339e06` built the game layer and `d649bfe`
+  routed the shell's dig *and* place through it, so both now reconcile against the server instead
+  of editing our local copy. This also retires the *"the chunk only renders properly when I break
+  something"* report from a second direction: `BLOCK_UPDATE`/`SECTION_BLOCKS_UPDATE` previously
+  applied without emitting a directive, so server-authoritative block changes were
+  applied-but-never-drawn. Both now emit `ChunkLoaded`.
 
-  This is very likely the real explanation of the early *"the chunk only renders properly when I
-  break something"* report: `break_block` calls `remesh_around`, so the **remesh** fixed the
-  picture and the block edit was incidental. If a remesh is still being missed on the normal path,
-  that bug is masked rather than fixed.
-
-- **Mobs: three different problems that look like one.** Reported as "no textures, no animations,
-  no interpolation"; each has a different cause and they are worth keeping separate.
-  - **Textures — not implemented.** `shell/gpu.rs:342 synthetic_entity_texture` gives every model
-    a **2×2 solid colour** keyed off the model name, so mob types are merely distinguishable.
-    Real mob skins are never loaded, though `lodestone-assets` can already source
-    `textures/entity/**` from the jar.
+- **Mobs: three different problems that looked like one** — two now closed, one open. Reported as
+  "no textures, no animations, no interpolation"; each had a different cause.
+  - **~~Textures~~ CLOSED** (`b0722ea`). Real `textures/entity/**` skins are loaded from the jar;
+    `gpu.rs:327 synthetic_entity_texture` survives only as the fallback for an unresolved model.
   - **Animation — built, not wired.** `lodestone-entity/src/pose.rs` has `limb_swing`,
     `limb_swing_amount` and walk smoothing with partial-tick lerps, unit-tested. Nothing consumes
     it: `render/entity.rs` emits **one matrix per entity**, so there is no per-part articulation.
     Wiring it requires a real decision about the instancing scheme (bone palette vs per-part
-    instances vs CPU-baked vertices), not a tweak.
-  - **Interpolation — wired, but the window is wrong.** `shell/entities.rs:26` uses
-    `const TICK: f32 = 0.05` — **one** tick. Vanilla eases entity movement over **three**. Since
-    the server only sends movement when it changes, our ease finishes in 50 ms and the mob then
-    sits still until the next packet: move, freeze, move, freeze. That reads as "not interpolated"
-    even though interpolation is running. Head yaw is tracked in the client (`state.rs`) but the
-    shell's `Track` interpolates body yaw only.
+    instances vs CPU-baked vertices), not a tweak. The cheapest credible route is a **CPU re-bake
+    per frame**: clone the `EntityModelDef`, mutate the animated `PartPose`s per vanilla's
+    `setupAnim`, and re-`bake_entity`.
+  - **~~Interpolation~~ CLOSED** (`b0722ea`). The window was `TICK = 0.05` — **one** tick, where
+    vanilla eases over **three** — so the ease finished in 50 ms and the mob froze until the next
+    packet: move, freeze, move, freeze, which reads as "not interpolated" even though
+    interpolation was running. Now `INTERP_WINDOW = TICK * INTERP_STEPS` (150 ms), with head yaw
+    and pitch tracked alongside body yaw.
 
 ### Interaction feedback — full audit (what you see when you hit a block)
 
@@ -106,23 +104,24 @@ and the pixels are almost always missing.**
 
 | what the player expects | state | where |
 |---|---|---|
-| Block actually breaks on the server | **game layer done, shell not wired** | `lodestone-game` mining (`bd7c51c`); `sim.rs:877` still edits the local copy |
+| Block actually breaks on the server | **done** (`d649bfe`) | the shell's dig/place now route through the `lodestone-game` mining/placement layer instead of editing the local copy |
 | Crack overlay on the block you're mining | **state computed, never drawn** | `mining.rs:263 destroy_stage()` returns 0–9 exactly per `getDestroyStage` |
 | Crack overlay for *other* players' digs | **state computed, never drawn** | `mining.rs:420 BlockDestructionOverlays`, whose own doc says "rendering the crack is someone else's job" |
 | Your arm visible in first person | **does not exist** | no first-person/held-item renderer anywhere in the tree |
-| Your arm swinging when you hit | **does not exist, and not even sent** | `ClientAction::SwingArm` exists and `net.rs` can encode it, but `sim.rs` never sends it on dig — so *other* players don't see us swing either |
+| Your arm swinging when you hit | **sent, not drawn** | `sim.rs:1119` now sends `ClientAction::SwingArm` on dig, so *other* players see us swing; we still have no first-person arm to draw it on |
 | Other mobs' attack swing | **timer exists, not articulated** | `entity/pose.rs` tracks the swing; renderer emits one matrix per entity |
 | Broken block drops a visible item | **lifecycle done, never drawn** | `entity/item_entity.rs` (age, despawn, pickup delay, merge sentinel `32767`); no item-entity rendering |
 | Item flies to you when picked up | **not handled** | no `TakeItemEntity` consumer |
-| Item appears in your hotbar slot | **resolver done, never drawn** | `assets/icon.rs` turns an `ItemStack` into a drawable `ItemIcon`; `hud.rs:402` says "icons are deferred (no item atlas yet) so the cells are empty wells" |
-| Break particles | **does not exist** | no particle system in the renderer; `show_particles` in `effects.rs` is potion-effect metadata, unrelated |
+| Item appears in your hotbar slot | **done for sprite items** (`c562db4`) | a flat item-sprite atlas is built and drawn into the hotbar. **Block items (`IconPart::Model`) still draw empty wells** — they need an isometric 3-D GUI render pass (`display.gui` transform), which is the largest remaining hotbar gap. Container/inventory screen slots in `container.rs` do not use `ItemAtlas` at all yet. Enchant glint is plumbed but `enchanted` is hardcoded `false`; animated item textures take frame 0 only. |
+| Break particles | **done** (`9f30663`, `77c99bb`) | `lodestone-particle` runs vanilla's simulation; `shell/particles.rs` wraps it with a GPU renderer. Emitted offline from `break_block` and live from `LevelEvent` **2001** (`PARTICLES_DESTROY_BLOCK`, whose `data` is the pre-break block-state id). Gated on pixels by `shell/tests/break_particles_pixels.rs`. **Sheet-sourced particles (smoke, flame, crits, splashes) still resolve to `None`** — no stitched `particles.png` atlas exists — and are counted into `ParticleFrame::unresolved` rather than dropped silently. Translucency layer sorting is not implemented (one blended pass, `Layer` ignored). |
 | Break/place sounds | **appears wired** | server sound events reach `audio.play_sound` (`sim.rs:1223`) |
 
 Two things follow from the table. First, **the shortest path to a client that *feels* right is
-renderers, not logic** — crack overlay, item entities, item icons and a first-person arm are all
-blocked on drawing, not on understanding. Second, `assets/icon.rs` and `assets/item_model.rs`
-(the 1.21.4+ selector-tree item definitions) are the **sixth island**, and were built to completion
-before anything could consume them.
+renderers, not logic** — crack overlay, item entities and a first-person arm are all blocked on
+drawing, not on understanding. Second, `assets/icon.rs` and `assets/item_model.rs` (the 1.21.4+
+selector-tree item definitions) were the **sixth island**, built to completion before anything
+could consume them; `c562db4` connected them for sprite items, which is what the island pattern
+predicts is always the cheap half once someone owns the chain end to end.
 
 ### Rendering fidelity — audit (2026-07-30)
 
@@ -131,7 +130,8 @@ before anything could consume them.
 | Animated block textures (flowing lava/water, fire, portal, prismarine, sea lantern) | **built, no producer — seventh island** | `render/anim.rs` is complete and unit-tested: given a frame timeline and a tick it yields two atlas regions plus a blend factor, and the atlas deliberately keeps **every** physical frame resident so no re-upload is needed. Nothing constructs a `SpriteAnimation` — `lib.rs:68` re-exports it and that is the only reference in the tree. All 52 animated sprites render as a **single static frame**. |
 | Waterlogged blocks | **done (rendering)** | `render/block_models.rs:128` classifies any state with `waterlogged=true` as carrying a water source, so kelp, seagrass and waterlogged stairs/slabs mesh with water. Tested (`waterlogged_blocks_carry_a_water_source`). **Placement does not set it** — `lodestone-game`'s placement parks waterlogging along with stair shape and multi-part blocks. |
 | Entity shadows | **does not exist** | Vanilla draws a soft dark oval under every entity, radius scaled by the entity, projected onto the geometry below and faded by height. There is no shadow code of any kind; the only `shadow` matches in the tree are sky-light tests and the font's drop shadow. Mobs currently float visually. |
-| Distance fog | **does not exist** | No fog system at all. |
+| Distance fog | **does not exist** | No fog system at all. This is the diagnosed cause of the odd underwater look — culling was *verified correct* (`B − R` flat across depth), so do **not** rewrite the mesher. |
+| Particles | **done for block-break; sheet sources open** | `lodestone-particle` + `shell/particles.rs`; see the interaction table above. Remaining: a stitched `particles.png` atlas so smoke/flame/crit/splash resolve, and translucency layer sorting. |
 | Underwater rendering | **wrong in a specific, measurable way** | See below. |
 
 #### The underwater screenshot, diagnosed
@@ -621,6 +621,45 @@ decision; a library that hijacks it breaks every downstream consumer.
   minecraft-data exposes mesh geometry. The version-free primitive (`CubeDef`/`PartPose`/`PartDef`
   → `bake_entity`) exists in `lodestone-assets`; the per-mob data does not. Meshes are largely
   stable across versions, so this is author-once, tweak-per-version.
+
+### 7.1 Rendering remainder, in value order
+
+Everything here is *visible to a player* and blocked on drawing, not on understanding. Ordered by
+how much each changes the screen per unit of work, which is not the order of difficulty.
+
+1. **3-D block-item GUI pass.** Every block item in the hotbar draws an empty well. Needs an
+   isometric ortho camera plus the model's `display.gui` transform. Biggest single visible hotbar
+   remainder, and the same pass unblocks container slots.
+2. **Container / inventory screen slot icons.** `container.rs` does not use `ItemAtlas` at all;
+   reuse the existing `push_item_quad`. Watch the `MenuKind` slot-order trap in §8 — a constant
+   offset draws a plausible, wrongly-transposed inventory that reads as an art bug.
+3. **Entity animation.** See the mob row above. Cheapest credible route is a CPU re-bake per
+   frame. Note the sequencing fact: **mob physics is invisible until mobs animate**, so this gates
+   validation of the entity physics work, not just appearance.
+4. **Fog + underwater overlay.** The diagnosed cause of the odd water. `FogRenderer`-equivalent
+   with a short exponential biome-coloured water fog and reduced view distance, plus the
+   full-screen `textures/misc/underwater.png` overlay. **Culling is verified correct — do not
+   rewrite the mesher.**
+5. **Entity shadows.** Do not exist at all. Soft dark oval under every entity, radius scaled by
+   the entity, projected onto the geometry below and faded by height. Mobs currently float.
+6. **First-person hand + arm swing.** No first-person/held-item renderer exists. We already *send*
+   `SwingArm`, so other players see it; we have nothing to draw it on.
+7. **Item entities (drops) and pickup.** `entity/item_entity.rs` has the full lifecycle (age,
+   despawn, pickup delay, merge sentinel `32767`) and nothing renders it; there is no
+   `TakeItemEntity` consumer for the fly-to-player animation.
+8. **Crack overlay.** `mining.rs:263 destroy_stage()` returns vanilla's 0–9 exactly, for our own
+   dig *and* for other players' (`mining.rs:420 BlockDestructionOverlays`). Both are computed
+   every tick and neither is drawn.
+9. **Particle sheet atlas.** Smoke, flame, crits and splashes resolve to `None` because no
+   stitched `particles.png` atlas exists. They are counted into `ParticleFrame::unresolved`
+   rather than dropped, so the gap is observable rather than silent.
+10. **Smooth lighting / AO on the model path.** Flat per-block light plus directional shade today.
+    Correct, but one of the most recognisable "not Minecraft" tells now that geometry is right.
+11. **Vanilla font metrics.** Per-glyph proportional widths + the 1px 25%-brightness drop shadow.
+    A font with the right characters at the wrong widths passes every `assert_eq!` on the source
+    string, so **this must be gated on pixels**.
+12. **Waterlogging / stair shape / multipart on placement.** Rendering handles all three; the
+    placement path in `lodestone-game` parks them.
 
 ---
 
