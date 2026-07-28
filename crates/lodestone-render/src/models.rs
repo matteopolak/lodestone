@@ -127,8 +127,13 @@ pub struct ModelVertex {
     pub light: u8,
     /// Biome tint index, or `255` for untinted.
     pub tint: u8,
+    /// The animation slot of the sprite this vertex samples, or `0` when the
+    /// sprite is static. Repurposes the first padding byte (the stride is
+    /// unchanged): the shader reads it as `packed.z` and, when non-zero, offsets
+    /// the sampled V by the slot's per-frame amount to advance the animation.
+    pub anim: u8,
     /// Padding to keep the struct `4`-byte aligned and `Pod`-friendly.
-    pub _pad: [u8; 2],
+    pub _pad: u8,
 }
 
 impl ModelVertex {
@@ -429,7 +434,8 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], lig
             ao: shade,
             light,
             tint,
-            _pad: [0, 0],
+            anim: quad.anim,
+            _pad: 0,
         });
     }
     // Two triangles, matching the packed path's winding.

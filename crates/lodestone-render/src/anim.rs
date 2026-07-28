@@ -147,6 +147,54 @@ impl From<AnimSample> for AnimUniform {
     }
 }
 
+/// The per-slot animation state the **model/fluid shaders** actually consume:
+/// the two vertical UV offsets (in normalised atlas units) to add to a quad's
+/// baked frame-0 V, and the blend between them.
+///
+/// The shader only knows a quad's baked frame-0 UV, not the atlas geometry of
+/// the sprite behind it. So the region indices in [`AnimSample`] are resolved on
+/// the CPU into concrete V offsets here — `region * frame_v` — keeping the
+/// shader trivial: `sample(uv + vec2(0, v_off_a))` blended toward
+/// `sample(uv + vec2(0, v_off_b))`. Slot `0` (static) is all-zero, so an
+/// unanimated quad reads a no-op offset. 16 bytes for a std140-friendly array.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct AnimSlotUniform {
+    /// V offset (normalised atlas units) of the frame shown at blend `0.0`.
+    pub v_off_a: f32,
+    /// V offset of the frame blended toward at blend `1.0`.
+    pub v_off_b: f32,
+    /// Blend fraction, `0.0..1.0`.
+    pub blend: f32,
+    /// Padding to a 16-byte stride (std140-friendly).
+    pub _pad: f32,
+}
+
+impl AnimSlotUniform {
+    /// The static (no-offset) slot uniform, for slot `0` and any static sprite.
+    #[must_use]
+    pub const fn static_slot() -> Self {
+        Self {
+            v_off_a: 0.0,
+            v_off_b: 0.0,
+            blend: 0.0,
+            _pad: 0.0,
+        }
+    }
+
+    /// Resolve a timeline sample into concrete V offsets, given the normalised
+    /// height of one physical frame (`frame_height / atlas_height`).
+    #[must_use]
+    pub fn from_sample(sample: AnimSample, frame_v: f32) -> Self {
+        Self {
+            v_off_a: sample.region_a as f32 * frame_v,
+            v_off_b: sample.region_b as f32 * frame_v,
+            blend: sample.blend,
+            _pad: 0.0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

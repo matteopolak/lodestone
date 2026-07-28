@@ -35,6 +35,7 @@
 
 use wgpu::util::DeviceExt;
 
+use crate::anim::AnimSlotUniform;
 use crate::block::{CameraUniform, DEPTH_FORMAT};
 use crate::models::{ModelMesh, ModelVertex};
 use crate::texture::GpuAtlas;
@@ -89,6 +90,11 @@ pub struct ModelPipeline {
     /// Bind-group layout for the tint palette uniform (group 2). Present only on
     /// the model pipeline; the fluid pipeline carries its own tint and has none.
     pub palette_layout: Option<wgpu::BindGroupLayout>,
+    /// Bind-group layout for the per-slot animation uniform array. Its group
+    /// index depends on the pipeline: **3** on the model pipeline (after the
+    /// palette), **2** on the fluid pipeline (which has no palette). Both shaders
+    /// declare the matching `@group`.
+    pub anim_layout: wgpu::BindGroupLayout,
 }
 
 impl ModelPipeline {
@@ -187,10 +193,27 @@ impl ModelPipeline {
             })
         });
 
+        let anim_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lodestone-model-anim-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                // The vertex stage reads the per-slot V offsets and passes them
+                // (flat) to the fragment stage, so both stages bind it.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let mut bind_group_layouts = vec![Some(&camera_layout), Some(&atlas_layout)];
         if let Some(palette_layout) = &palette_layout {
             bind_group_layouts.push(Some(palette_layout));
         }
+        bind_group_layouts.push(Some(&anim_layout));
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("lodestone-model-layout"),
             bind_group_layouts: &bind_group_layouts,
@@ -247,6 +270,7 @@ impl ModelPipeline {
             camera_layout,
             atlas_layout,
             palette_layout,
+            anim_layout,
         }
     }
 
@@ -312,6 +336,21 @@ impl ModelPipeline {
             }],
         })
     }
+
+    /// Create the animation bind group from the per-slot uniform buffer built
+    /// with [`model_anim_buffer`]. Group **3** on the model pipeline, group
+    /// **2** on the fluid pipeline (see [`Self::anim_layout`]).
+    #[must_use]
+    pub fn anim_bind_group(&self, device: &wgpu::Device, anim_buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lodestone-model-anim-bg"),
+            layout: &self.anim_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: anim_buffer.as_entire_binding(),
+            }],
+        })
+    }
 }
 
 /// Build the tint-palette uniform buffer the model shader looks up per tinted
@@ -324,6 +363,45 @@ pub fn model_palette_buffer(device: &wgpu::Device, palette: &[[f32; 4]]) -> wgpu
         contents: bytemuck::cast_slice(palette),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
+}
+
+/// The fixed number of animation slots the shaders' uniform array holds. A quad's
+/// one-byte `anim` (0 = static, `1..=255` = a sprite slot) indexes this array, so
+/// it must cover the whole `u8` range plus the static sentinel at index 0.
+pub const ANIM_SLOT_UNIFORM_LEN: usize = 256;
+
+/// Build the per-slot animation uniform buffer the model/fluid shaders sample.
+///
+/// `slots` is [`BlockModels::anim_slot_uniforms`](crate::BlockModels::anim_slot_uniforms)
+/// for the current tick: index 0 is the static sentinel, index `s` is slot `s`.
+/// It is padded to [`ANIM_SLOT_UNIFORM_LEN`] (extra slots are static no-ops) so
+/// the buffer size is fixed and a quad's `anim` byte can never index out of
+/// range. Rewrite it each frame via [`update_model_anim_buffer`].
+#[must_use]
+pub fn model_anim_buffer(device: &wgpu::Device, slots: &[AnimSlotUniform]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lodestone-model-anim-uniform"),
+        contents: bytemuck::cast_slice(&padded_anim_slots(slots)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+/// Rewrite an existing animation uniform buffer with a new tick's slot values.
+pub fn update_model_anim_buffer(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    slots: &[AnimSlotUniform],
+) {
+    queue.write_buffer(buffer, 0, bytemuck::cast_slice(&padded_anim_slots(slots)));
+}
+
+/// Pad (or truncate) a slot list to the fixed [`ANIM_SLOT_UNIFORM_LEN`], filling
+/// the tail with static no-op slots.
+fn padded_anim_slots(slots: &[AnimSlotUniform]) -> [AnimSlotUniform; ANIM_SLOT_UNIFORM_LEN] {
+    let mut out = [AnimSlotUniform::static_slot(); ANIM_SLOT_UNIFORM_LEN];
+    let n = slots.len().min(ANIM_SLOT_UNIFORM_LEN);
+    out[..n].copy_from_slice(&slots[..n]);
+    out
 }
 
 /// Reuse the packed pass's camera uniform buffer builder for the model pass; the
@@ -350,10 +428,25 @@ struct Palette {
     colors: array<vec4<f32>, 256>,
 };
 
+// Per-slot animation offsets for the current tick. A quad's `anim` byte indexes
+// this; slot 0 is the static sentinel (all zero). `v_off_a`/`v_off_b` are the V
+// offsets (in normalised atlas units) of the two frames straddling the tick, and
+// `blend` is the interpolation weight between them.
+struct AnimSlot {
+    v_off_a: f32,
+    v_off_b: f32,
+    blend: f32,
+    pad: f32,
+};
+struct AnimSlots {
+    slots: array<AnimSlot, 256>,
+};
+
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
 @group(2) @binding(0) var<uniform> palette: Palette;
+@group(3) @binding(0) var<uniform> anim: AnimSlots;
 
 // sRGB transfer functions (component-wise). The atlas is an _srgb texture, so
 // `textureSample` returns linear-light texels; the tint palette holds straight
@@ -378,6 +471,7 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
     @location(2) @interpolate(flat) tint_idx: u32,
+    @location(3) @interpolate(flat) anim_idx: u32,
 };
 
 @vertex
@@ -400,12 +494,23 @@ fn vs_main(
     out.uv = uv;
     out.shade = ao * light_term;
     out.tint_idx = packed.y;
+    out.anim_idx = packed.z;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    // Unconditional sample keeps the plain (mipmapped) path in uniform control
+    // flow; static quads (anim_idx == 0) stop here with no extra sampling. Only
+    // animated quads pay for the two frame samples, and they use an explicit LOD
+    // (no derivatives) so the branch is legal.
+    var tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    if (in.anim_idx != 0u) {
+        let slot = anim.slots[in.anim_idx];
+        let a = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), 0.0);
+        let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
+        tex = mix(a, b, slot.blend);
+    }
     // Cutout: drop near-transparent texels (cross-plants, leaves) so they render
     // correctly on the opaque pass.
     if (tex.a < 0.5) {
@@ -438,11 +543,25 @@ struct Camera {
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
 
+// Per-slot animation offsets for the current tick (see the model shader). The
+// fluid pipeline has no palette, so this is group 2.
+struct AnimSlot {
+    v_off_a: f32,
+    v_off_b: f32,
+    blend: f32,
+    pad: f32,
+};
+struct AnimSlots {
+    slots: array<AnimSlot, 256>,
+};
+@group(2) @binding(0) var<uniform> anim: AnimSlots;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
     @location(2) tinted: f32,
+    @location(3) @interpolate(flat) anim_idx: u32,
 };
 
 @vertex
@@ -465,12 +584,19 @@ fn vs_main(
     out.uv = uv;
     out.shade = ao * light_term;
     out.tinted = select(0.0, 1.0, tint_idx != 255u);
+    out.anim_idx = packed.z;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    var tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    if (in.anim_idx != 0u) {
+        let slot = anim.slots[in.anim_idx];
+        let a = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), 0.0);
+        let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
+        tex = mix(a, b, slot.blend);
+    }
     // Default water colour (#3F76E4); untinted quads keep their own colour.
     let water = vec3<f32>(0.247, 0.463, 0.894);
     let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);

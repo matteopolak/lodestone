@@ -44,11 +44,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::tint::vanilla_tint_kind;
 use lodestone_assets::{
-    Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker, BlockStates, FirstWeight,
-    ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
+    AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker, BlockStates,
+    FirstWeight, ModelResolver, ResourceLocation, ResourceManager, TextureBinding,
 };
 use lodestone_model::BlockStateRegistry;
 
+use crate::anim::{AnimFrame, AnimSlotUniform, SpriteAnimation};
 use crate::block_resolver::DefaultTints;
 use crate::models::is_full_cube;
 use crate::translucency::RenderLayer;
@@ -291,6 +292,15 @@ pub struct BlockModels {
     /// The default (plains) tint colours the baked quads' `tint_index` values
     /// index into. Uploaded to the model shader; see [`Self::tint_palette`].
     tint_palette: Vec<[f32; 4]>,
+    /// Per-slot sprite animations, ordered by slot id (index `i` is slot
+    /// `i + 1`; slot `0` is static and has no entry). A baked quad's
+    /// [`anim`](lodestone_assets::bake::BakedQuad::anim) byte selects one; the
+    /// renderer samples each at the current tick to build the shader uniform.
+    animations: Vec<SpriteAnimation>,
+    /// Normalised per-frame V height for each slot, parallel to
+    /// [`animations`](Self::animations). Turns a sampled region index into the
+    /// vertical UV offset the shader adds to a quad's baked frame-0 V.
+    anim_frame_v: Vec<f32>,
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of each `destroy_stage_N`
     /// crack-overlay sprite, indexed by stage `0..CRACK_STAGE_COUNT`. The
     /// mining crack pass re-draws a block's model geometry sampling these.
@@ -386,6 +396,27 @@ impl BlockModels {
             [uv.min[0], uv.min[1], uv.max[0], uv.max[1]]
         });
 
+        // Resolve the atlas's animation slots into GPU-free timelines the
+        // renderer drives with `anim.rs`. Ordered by slot id, so slot `s`'s data
+        // is `animations[s - 1]` — matching the byte the baker stamped on quads.
+        let anim_table = AnimTable::from_atlas(&atlas);
+        let mut animations = Vec::with_capacity(anim_table.len());
+        let mut anim_frame_v = Vec::with_capacity(anim_table.len());
+        for slot in anim_table.slots() {
+            animations.push(SpriteAnimation {
+                frames: slot
+                    .frames
+                    .iter()
+                    .map(|f| AnimFrame {
+                        region: f.index,
+                        hold_ticks: f.hold_ticks,
+                    })
+                    .collect(),
+                interpolate: slot.interpolate,
+            });
+            anim_frame_v.push(slot.frame_v);
+        }
+
         Ok(Self {
             atlas,
             models,
@@ -394,6 +425,8 @@ impl BlockModels {
             water_sprites,
             lava_sprites,
             tint_palette: palette.colors().to_vec(),
+            animations,
+            anim_frame_v,
             crack_stages,
         })
     }
@@ -415,6 +448,42 @@ impl BlockModels {
     #[must_use]
     pub fn tint_palette(&self) -> &[[f32; 4]] {
         &self.tint_palette
+    }
+
+    /// The per-slot sprite animations, ordered by slot id (index `i` is slot
+    /// `i + 1`). A baked quad's
+    /// [`anim`](lodestone_assets::bake::BakedQuad::anim) byte of `s` refers to
+    /// `sprite_animations()[s - 1]`. Empty when the pack has no animated block
+    /// sprites.
+    #[must_use]
+    pub fn sprite_animations(&self) -> &[SpriteAnimation] {
+        &self.animations
+    }
+
+    /// The number of animation slots (excludes the static sentinel `0`).
+    #[must_use]
+    pub fn anim_slot_count(&self) -> usize {
+        self.animations.len()
+    }
+
+    /// Build the per-slot animation uniform array for game `tick`, ready to
+    /// upload to the model/fluid shaders' animation bind group.
+    ///
+    /// Index `0` is the static sentinel (all-zero: no offset, no blend); index
+    /// `s` (`1..=anim_slot_count`) is slot `s`, resolved by sampling its
+    /// timeline at `tick` and converting the region indices into concrete V
+    /// offsets via the slot's per-frame height. A quad's `anim` byte indexes
+    /// this array directly in the shader, so a static quad (`anim == 0`) reads a
+    /// no-op. The array always has at least one entry (the sentinel) so the
+    /// uniform buffer is never zero-sized.
+    #[must_use]
+    pub fn anim_slot_uniforms(&self, tick: u64) -> Vec<AnimSlotUniform> {
+        let mut out = Vec::with_capacity(self.animations.len() + 1);
+        out.push(AnimSlotUniform::static_slot());
+        for (anim, frame_v) in self.animations.iter().zip(&self.anim_frame_v) {
+            out.push(AnimSlotUniform::from_sample(anim.sample(tick), *frame_v));
+        }
+        out
     }
 
     /// The baked geometry of a state, or an empty model for air / out-of-range
