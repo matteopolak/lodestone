@@ -48,22 +48,72 @@
 //! *interpolated* step, not the packet delta. The two agree under dense packets
 //! and under sparse ones, which the gap measure never does.
 //!
-//! This module is deliberately GPU-free and depends only on `glam`, so the
-//! interpolation is unit-testable without a device or a server: the sim converts
-//! each [`EntityView`] into an [`EntitySnapshot`] (version-free, glam-only) and
+//! This module is deliberately GPU-free, so the interpolation is unit-testable
+//! without a device or a server: the sim converts each
+//! [`EntityView`](lodestone_client::EntityView) into an [`EntitySnapshot`]
+//! (version-free, `glam`-only aside from the physics dependency below) and
 //! feeds those in. The output is a flat list of [`EntityDraw`]s — type path,
-//! feet position, body yaw and scale — that the renderer resolves into instanced
-//! draws.
+//! feet position, body yaw and scale — that the renderer resolves into
+//! instanced draws.
+//!
+//! # Why dropped items get their own physics, not just an ease
+//!
+//! A **dropped item is not eased between position packets like every other
+//! entity** — it is simulated. `ItemEntity`'s `EntityType` registers
+//! `updateInterval(20)` and vanilla's `ServerEntity.sendChanges` only
+//! re-evaluates whether to send a position/motion packet at all once every
+//! `updateInterval` ticks (or immediately on a ground-state change, or when
+//! `needsSync`/dirty metadata forces it) — so **an airborne item gets exactly
+//! one position correction per second**, not one per tick like the module docs
+//! above assume for mobs. Easing that one-per-second correction over the usual
+//! three-tick (150 ms) window reproduces precisely the reported defect: the
+//! item spawns at the right spot, sits rendered at that spot for ~850 ms while
+//! nothing arrives to ease toward, then snaps through a 150 ms ease to wherever
+//! gravity has since carried it on the server — which reads as "pops out right,
+//! then teleports down" instead of arcing.
+//!
+//! Vanilla's own client does not treat this as an interpolation problem: it
+//! ticks `ItemEntity.tick()` locally every client tick, exactly like the
+//! server does, driven by the velocity `set_entity_motion`/`add_entity` report
+//! and the same gravity/drag constants — the rare server correction just
+//! nudges the local simulation back onto the authoritative track. This module
+//! does the same for entities whose `type_path` is [`ITEM_ENTITY_TYPE_PATH`]:
+//! [`Track::item_physics`] runs [`lodestone_entity::item_entity::ItemMotion`]
+//! (gravity `0.04`, air drag `0.98` — the vanilla constants, not
+//! reimplemented) once per real 20 Hz tick, and the render ease ([`Track::t`]
+//! / [`INTERP_WINDOW`]) is re-anchored off *that* simulated position each tick
+//! rather than off the sparse network packet. A server correction (when one
+//! arrives) resets the simulated position/velocity to the authoritative value
+//! rather than fighting it. While the last-known snapshot reports the item at
+//! rest on the ground, the simulation is paused rather than left to tunnel
+//! through a floor this module has no way to query — see
+//! [`EntitySnapshot::on_ground`].
+//!
+//! Every other entity type is unaffected: [`Track::item_physics`] stays `None`
+//! and the original pure position ease runs exactly as before.
 
 use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
+use lodestone_entity::item_entity::ItemMotion;
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
 };
 use lodestone_render::AnimInput;
+
+/// Converts a render-space [`glam::Vec3`] into the `f64` [`lodestone_model::Vec3`]
+/// [`ItemMotion`] is expressed in.
+fn to_model_vec3(v: Vec3) -> lodestone_model::Vec3 {
+    lodestone_model::Vec3::new(f64::from(v.x), f64::from(v.y), f64::from(v.z))
+}
+
+/// Converts an [`ItemMotion`]-space `f64` [`lodestone_model::Vec3`] back into
+/// render-space [`glam::Vec3`].
+fn to_glam_vec3(v: lodestone_model::Vec3) -> Vec3 {
+    Vec3::new(v.x as f32, v.y as f32, v.z as f32)
+}
 
 /// One physics tick, in seconds.
 const TICK: f32 = 0.05;
@@ -128,6 +178,21 @@ pub struct EntitySnapshot {
     /// at the boundary that builds this (`net::entity_snapshot`) — see the note
     /// there, since count is visible in vanilla.
     pub item: Option<Option<ResourceLocation>>,
+    /// The entity's last-reported velocity in blocks per tick
+    /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
+    ///
+    /// This is what [`Track::item_physics`] seeds and re-anchors its ballistic
+    /// simulation from — see the module docs on why a dropped item needs real
+    /// physics rather than a position ease. `None` is "never reported", not
+    /// "zero"; a zero velocity is reported as `Some(Vec3::ZERO)`.
+    pub velocity: Option<Vec3>,
+    /// Whether the server last reported this entity resting on the ground
+    /// (`on_ground` on `add_entity`/`teleport_entity`/`move_entity`).
+    ///
+    /// [`Track::item_physics`] pauses its simulation while this is `true`,
+    /// because this module has no world/collision query to know *where* the
+    /// ground is — see the module docs.
+    pub on_ground: bool,
 }
 
 /// The entity-type path a **dropped item** reports (`minecraft:item`).
@@ -202,6 +267,46 @@ struct Track {
     walk_pos: Vec3,
     /// Continuous age in ticks (`ageInTicks`), driving idle bob.
     age: f32,
+    /// Ballistic simulation state for a dropped item ([`ITEM_ENTITY_TYPE_PATH`]);
+    /// `None` for every other entity type, which keeps the original pure
+    /// position ease. See the module docs for why items need this.
+    item_physics: Option<ItemPhysics>,
+}
+
+/// A dropped item's client-run physics: the same gravity/drag
+/// [`ItemMotion`] the server itself steps, advanced once per real 20 Hz tick
+/// and corrected toward each authoritative server report rather than driven
+/// by it.
+#[derive(Debug, Clone, Copy)]
+struct ItemPhysics {
+    /// The locally-simulated position/velocity.
+    sim: ItemMotion,
+    /// The most recently reported *authoritative* feet position — kept
+    /// separate from [`Track::curr`], which the simulation itself advances
+    /// every tick, so re-polling the same still-current server value doesn't
+    /// look like a fresh "moved" event every frame.
+    last_reported: Vec3,
+    /// Whether the last-reported snapshot said the item is resting. The
+    /// simulation is paused while `true` (see the module docs on why: no
+    /// world query here means no way to know where a new floor is).
+    grounded: bool,
+}
+
+/// Seeds a fresh [`ItemPhysics`] from an item entity's first-seen (or
+/// freshly re-anchored) snapshot. A missing velocity seeds zero — gravity
+/// still applies to it, it just has nothing to arc with, which is exactly
+/// the discriminating behaviour the hermetic tests below pin.
+fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
+    let mut sim = ItemMotion::new(
+        to_model_vec3(snap.feet),
+        snap.velocity.map(to_model_vec3).unwrap_or_default(),
+    );
+    sim.on_ground = snap.on_ground;
+    ItemPhysics {
+        sim,
+        last_reported: snap.feet,
+        grounded: snap.on_ground,
+    }
 }
 
 impl Track {
@@ -335,6 +440,35 @@ impl EntityInterpolator {
         while self.tick_accum >= TICK_SECONDS {
             self.tick_accum -= TICK_SECONDS;
             for track in self.tracks.values_mut() {
+                // Step a dropped item's own ballistic physics once per real
+                // tick — the server itself only *corrects* this roughly once a
+                // second (`ItemEntity`'s `updateInterval(20)`), so the arc has
+                // to come from here, not from easing toward a sparse packet.
+                // See the module docs. Paused while the last report says the
+                // item is resting (no world query here to know the floor).
+                if track.item_physics.as_ref().is_some_and(|p| !p.grounded) {
+                    // Scoped so the mutable borrow of `item_physics` ends
+                    // before `render_pos()` below needs to borrow all of
+                    // `track` — ticking and reading `render_pos` can't happen
+                    // in the same borrow.
+                    let sim_pos = {
+                        let physics = track
+                            .item_physics
+                            .as_mut()
+                            .expect("checked Some above");
+                        physics.sim.tick();
+                        physics.sim.position
+                    };
+                    // Re-anchor exactly like a fresh authoritative snapshot
+                    // would: ease from wherever this frame is currently drawn
+                    // toward the freshly simulated point, so the simulation
+                    // reads as continuous motion rather than a series of
+                    // per-tick snaps.
+                    track.prev = track.render_pos();
+                    track.curr = to_glam_vec3(sim_pos);
+                    track.t = 0.0;
+                }
+
                 // Vanilla's `updateWalkAnimation` measures `this.getX() - this.xo`
                 // — how far the entity moved *this tick*. On the client that
                 // entity has already been advanced by `InterpolationHandler`, so
@@ -368,6 +502,7 @@ impl EntityInterpolator {
                 Some(None) => self.clear_item_stack(snap.id),
                 None => {}
             }
+            let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
             match self.tracks.get_mut(&snap.id) {
                 None => {
                     // A newly seen entity is drawn at rest at its reported pose.
@@ -388,13 +523,24 @@ impl EntityInterpolator {
                             walk: WalkAnimation::new(),
                             walk_pos: snap.feet,
                             age: 0.0,
+                            item_physics: is_item.then(|| new_item_physics(snap)),
                         },
                     );
                 }
                 Some(track) => {
                     track.type_path.clone_from(&snap.type_path);
                     track.scale = snap.scale;
-                    let moved = (snap.feet - track.curr).length() > POS_EPS;
+                    // A dropped item's own simulation moves `curr` every real
+                    // tick (see the physics step above), so comparing against
+                    // `track.curr` here would read as "moved" every single
+                    // frame even when the server has said nothing new since
+                    // the last poll. Compare against the last *authoritative*
+                    // report instead — `track.curr` only for every other
+                    // entity type, which the physics step never touches.
+                    let moved = match &track.item_physics {
+                        Some(physics) => (snap.feet - physics.last_reported).length() > POS_EPS,
+                        None => (snap.feet - track.curr).length() > POS_EPS,
+                    };
                     let turned = angle_diff(snap.yaw, track.curr_yaw).abs() > YAW_EPS;
                     let head_turned =
                         angle_diff(snap.head_yaw, track.curr_head_yaw).abs() > YAW_EPS;
@@ -410,6 +556,26 @@ impl EntityInterpolator {
                         track.curr_head_yaw = snap.head_yaw;
                         track.curr_pitch = snap.pitch;
                         track.t = 0.0;
+
+                        if is_item {
+                            match &mut track.item_physics {
+                                Some(physics) => {
+                                    physics.last_reported = snap.feet;
+                                    physics.grounded = snap.on_ground;
+                                    // Correct the simulation to the
+                                    // authoritative truth rather than fight
+                                    // it — this is the "rare server
+                                    // correction" vanilla's own local
+                                    // simulation also just snaps onto.
+                                    physics.sim.position = to_model_vec3(snap.feet);
+                                    if let Some(v) = snap.velocity {
+                                        physics.sim.velocity = to_model_vec3(v);
+                                    }
+                                    physics.sim.on_ground = snap.on_ground;
+                                }
+                                None => track.item_physics = Some(new_item_physics(snap)),
+                            }
+                        }
                     }
                 }
             }
@@ -487,6 +653,8 @@ mod tests {
             pitch: 0.0,
             scale: 1.0,
             item: None,
+            velocity: None,
+            on_ground: false,
         }
     }
 
@@ -735,7 +903,8 @@ mod tests {
 
     // ---- dropped items ---------------------------------------------------
 
-    /// An item entity whose stack the server has not (yet) reported.
+    /// An item entity whose stack the server has not (yet) reported, and
+    /// which has never reported a velocity — the pre-physics fallback path.
     fn item_snap(id: i32, feet: Vec3) -> EntitySnapshot {
         EntitySnapshot {
             id,
@@ -746,6 +915,8 @@ mod tests {
             pitch: 0.0,
             scale: 1.0,
             item: None,
+            velocity: None,
+            on_ground: false,
         }
     }
 
@@ -753,6 +924,22 @@ mod tests {
     fn item_snap_with(id: i32, feet: Vec3, item: Option<ResourceLocation>) -> EntitySnapshot {
         EntitySnapshot {
             item: Some(item),
+            ..item_snap(id, feet)
+        }
+    }
+
+    /// A dropped item's snapshot as the live path actually builds it once
+    /// `add_entity`/`set_entity_motion` have been decoded: position, velocity
+    /// (when the server has reported one) and ground state.
+    fn item_snap_moving(
+        id: i32,
+        feet: Vec3,
+        velocity: Option<Vec3>,
+        on_ground: bool,
+    ) -> EntitySnapshot {
+        EntitySnapshot {
+            velocity,
+            on_ground,
             ..item_snap(id, feet)
         }
     }
@@ -878,6 +1065,139 @@ mod tests {
         assert!(
             later > first + 9.0,
             "half a second must advance the age by ~10 ticks; {first} -> {later}"
+        );
+    }
+
+    // ---- ballistic item drops (the reported defect) ----------------------
+    //
+    // Vanilla's `ItemEntity` registers `updateInterval(20)`
+    // (`EntityTypes.ITEM`), so `ServerEntity.sendChanges` only re-evaluates a
+    // position/motion send once every 20 ticks while the item is airborne —
+    // roughly one correction per second, not one per tick. These tests feed a
+    // spawn (with vanilla's real pop velocity, `ItemEntity`'s zero-arg
+    // constructor: `vy = 0.2`, `vx/vz` up to `±0.1` blocks/tick) and then keep
+    // driving the clock **without** any further position snapshot, exactly
+    // matching that sparse-correction reality, and check the render position
+    // for a real parabola.
+
+    #[test]
+    fn item_pop_follows_a_ballistic_arc_not_a_flat_ease() {
+        // The discriminating assertion: an apex strictly above spawn height,
+        // plus real horizontal displacement. A straight-line position ease
+        // cannot produce an apex — it can only ever move monotonically toward
+        // (or sit frozen at) the one target it has, which is exactly the
+        // "pops out right, then teleports down" defect being fixed here.
+        let mut interp = EntityInterpolator::new();
+        let spawn = Vec3::new(10.0, 64.0, -5.0);
+        let vel = Vec3::new(0.08, 0.2, 0.0);
+        interp.update(
+            &[item_snap_moving(9, spawn, Some(vel), false)],
+            0.0,
+        );
+
+        let mut max_y = interp.draws()[0].feet.y;
+        // 40 ticks (2s) of real flight time with no further server packet —
+        // matching the ~1/s correction cadence, this window has none at all.
+        for _ in 0..40 {
+            interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], TICK);
+            max_y = max_y.max(interp.draws()[0].feet.y);
+        }
+        let final_feet = interp.draws()[0].feet;
+
+        assert!(
+            max_y > spawn.y + 0.05,
+            "expected a real apex above the spawn height {}; got max_y={max_y}",
+            spawn.y
+        );
+        assert!(
+            (final_feet.x - spawn.x).abs() > 0.5,
+            "expected real horizontal displacement from the popped velocity; dx={}",
+            final_feet.x - spawn.x
+        );
+    }
+
+    #[test]
+    fn item_pop_without_velocity_never_rises_above_spawn_apex_control() {
+        // The negative control the apex assertion above needs: with no
+        // velocity ever reported, `Track::item_physics` still exists (gravity
+        // alone still applies — see `new_item_physics`) but there is nothing
+        // to arc with, so the render position must never rise. This is the
+        // discriminator actually firing, not just described: an assertion
+        // that can't fail proves nothing.
+        let mut interp = EntityInterpolator::new();
+        let spawn = Vec3::new(0.0, 64.0, 0.0);
+        interp.update(&[item_snap_moving(9, spawn, None, false)], 0.0);
+
+        let mut max_y = interp.draws()[0].feet.y;
+        for _ in 0..40 {
+            interp.update(&[item_snap_moving(9, spawn, None, false)], TICK);
+            max_y = max_y.max(interp.draws()[0].feet.y);
+        }
+        assert!(
+            max_y <= spawn.y + 1.0e-3,
+            "no reported velocity means no apex is possible; got max_y={max_y}"
+        );
+    }
+
+    #[test]
+    fn item_pop_position_only_snapshots_produce_no_apex_either() {
+        // A second negative control: a spawn with no reported velocity,
+        // followed by a single late position correction that reports the item
+        // now grounded — no snapshot in this test ever carries a velocity, so
+        // there is still nothing to arc with (only gravity, which cannot
+        // rise). The render position must never exceed the spawn height, and
+        // the eventual correction must still be a smooth ease onto the
+        // reported position, not a snap.
+        let mut interp = EntityInterpolator::new();
+        let spawn = Vec3::new(0.0, 64.0, 0.0);
+        interp.update(&[item_snap_moving(9, spawn, None, false)], INTERP_WINDOW);
+
+        let mut max_y = interp.draws()[0].feet.y;
+        for _ in 0..16 {
+            interp.update(&[item_snap_moving(9, spawn, None, false)], TICK);
+            max_y = max_y.max(interp.draws()[0].feet.y);
+        }
+        // The one late correction a real server would send once the item has
+        // fallen under its own (server-side) gravity for about a second.
+        let landed = Vec3::new(0.3, 63.2, 0.0);
+        interp.update(&[item_snap_moving(9, landed, None, true)], TICK);
+        for _ in 0..10 {
+            interp.update(&[item_snap_moving(9, landed, None, true)], TICK);
+            max_y = max_y.max(interp.draws()[0].feet.y);
+        }
+        assert!(
+            max_y <= spawn.y + 1.0e-3,
+            "a position-only path has no apex to give; got max_y={max_y}"
+        );
+        assert!(
+            (interp.draws()[0].feet.y - landed.y).abs() < 1.0e-3,
+            "the ease should still land on the reported position"
+        );
+    }
+
+    #[test]
+    fn item_physics_is_paused_while_the_server_reports_it_grounded() {
+        // Once a snapshot says the item is resting, the simulation must not
+        // keep integrating gravity — this module has no world/collision query
+        // to know where the real floor is, so free-running would tunnel the
+        // item through it. A grounded item should simply hold still.
+        let mut interp = EntityInterpolator::new();
+        let resting = Vec3::new(2.0, 63.0, 4.0);
+        interp.update(
+            &[item_snap_moving(9, resting, Some(Vec3::ZERO), true)],
+            INTERP_WINDOW,
+        );
+        for _ in 0..40 {
+            interp.update(
+                &[item_snap_moving(9, resting, Some(Vec3::ZERO), true)],
+                TICK,
+            );
+        }
+        let feet = interp.draws()[0].feet;
+        assert!(
+            (feet.y - resting.y).abs() < 1.0e-3,
+            "a grounded item must hold its reported height, was {}",
+            feet.y
         );
     }
 }
