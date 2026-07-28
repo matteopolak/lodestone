@@ -369,46 +369,157 @@ pub trait ModelSectionView {
         let _ = dir;
         self.light_at(x, y, z)
     }
+
+    /// Packed sky/block light at a **signed** coordinate that may fall
+    /// outside the block whose face is being lit.
+    ///
+    /// Used only by the ambient-occlusion corner sampler
+    /// ([`quad_corner_sample`]), which needs the two edge-adjacent
+    /// neighbours and the diagonal around each of a quad's four corners —
+    /// [`face_light_at`](Self::face_light_at) only ever resolves the single
+    /// cell a face opens into, not the cells beside it. Defaults to
+    /// full-bright, matching [`light_at`](Self::light_at)'s default, for
+    /// views that model no neighbourhood at all (tests, GUI items).
+    fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        let _ = (x, y, z);
+        0xF0
+    }
+}
+
+/// AO shade of a fully-occluding corner neighbour. Mirrors [`crate::mesh`]'s
+/// constant of the same value — vanilla's darkest ambient-occlusion sample is
+/// `0.2`, not `0.0`, so a corner with all three neighbours occluding still
+/// averages to `0.4` once the always-open front cell's `1.0` is folded in.
+/// Duplicated rather than shared because that copy is private and keyed to
+/// `crate::mesh`'s `Cell`, not [`ModelSectionView`].
+const AO_OCCLUDED: f32 = 0.2;
+
+/// Vanilla only substitutes an occluding neighbour's light with the centre
+/// light once the centre itself is lit above this threshold
+/// (`LightCoordsUtil.smoothBlend`). Mirrors [`crate::mesh`]'s constant.
+const SMOOTH_LIGHT_MIN_CENTRE: u8 = 2;
+
+/// In-plane `(u, v)` unit axes of `face` — the two directions a quad's corner
+/// steps along to reach its edge-adjacent AO neighbours (the diagonal is
+/// `u + v`). Mirrors `crate::mesh::face_geom`'s `u`/`v` (that table is private
+/// to the demo mesher and carries a `base` this function does not need).
+const fn face_uv_axes(face: Face) -> ([i32; 3], [i32; 3]) {
+    match face {
+        Face::NegX => ([0, 0, 1], [0, 1, 0]),
+        Face::PosX => ([0, 1, 0], [0, 0, 1]),
+        Face::NegY => ([1, 0, 0], [0, 0, 1]),
+        Face::PosY => ([0, 0, 1], [1, 0, 0]),
+        Face::NegZ => ([0, 1, 0], [1, 0, 0]),
+        Face::PosZ => ([1, 0, 0], [0, 1, 0]),
+    }
+}
+
+/// Index of the single nonzero component of a unit axis.
+fn axis_of(v: [i32; 3]) -> usize {
+    if v[0] != 0 {
+        0
+    } else if v[1] != 0 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Rounds a `0..=15` light average to the nearest representable nibble.
+fn round_level(v: f32) -> u8 {
+    v.round().clamp(0.0, 15.0) as u8
+}
+
+/// Vanilla-style smooth light and ambient occlusion for one vertex of a quad.
+///
+/// Ported from `ModelBlockRenderer.AmbientOcclusionFace`. `np` is the cell the
+/// quad's face opens into (block position + face normal) — the same cell
+/// [`ModelSectionView::face_light_at`] already resolved into `centre_light`.
+/// `p` is the vertex's block-local position (`quad.positions[i]`); projecting
+/// it onto the face's in-plane axes ([`face_uv_axes`]) picks which of the four
+/// possible corners it belongs to, then samples the two edge-adjacent
+/// neighbours and the diagonal at that corner:
+///
+/// * **AO** averages a per-cell shade (`1.0` open, [`AO_OCCLUDED`] occluding)
+///   over those three plus the always-open front cell.
+/// * **Light** averages the same four cells' sky/block levels, but an
+///   occluding neighbour's value is replaced by the centre light
+///   (`smoothBlend`) once the centre itself is lit above
+///   [`SMOOTH_LIGHT_MIN_CENTRE`] — so a corner against a wall does not read as
+///   pitch black.
+///
+/// **Not ported**: vanilla weights these four samples by how much of the
+/// quad's actual face area is nearest each cube corner, which matters for a
+/// quad that doesn't span a full block face (a stair or slab). This always
+/// takes the corner nearest the vertex outright — exactly what the full-cube
+/// demo mesher ([`crate::mesh`]) does too, just generalised to a vertex
+/// position that may not land exactly on a cube corner. Also not ported:
+/// vanilla's `translucentN` hidden-diagonal substitution, which only affects
+/// non-cube models' interior faces.
+fn quad_corner_sample(
+    view: &dyn ModelSectionView,
+    np: [i32; 3],
+    face: Face,
+    p: [f32; 3],
+    centre_light: u8,
+) -> (f32, u8) {
+    let (u, v) = face_uv_axes(face);
+    let su = if p[axis_of(u)] >= 0.5 { 1 } else { -1 };
+    let sv = if p[axis_of(v)] >= 0.5 { 1 } else { -1 };
+    let a = [np[0] + su * u[0], np[1] + su * u[1], np[2] + su * u[2]];
+    let b = [np[0] + sv * v[0], np[1] + sv * v[1], np[2] + sv * v[2]];
+    let d = [a[0] + sv * v[0], a[1] + sv * v[1], a[2] + sv * v[2]];
+
+    let occ = |c: [i32; 3]| view.occludes_at(c[0], c[1], c[2]);
+    let (occ_a, occ_b, occ_d) = (occ(a), occ(b), occ(d));
+    let ao_of = |o: bool| if o { AO_OCCLUDED } else { 1.0 };
+    let ao = (ao_of(occ_a) + ao_of(occ_b) + ao_of(occ_d) + 1.0) * 0.25;
+
+    let centre_sky = centre_light >> 4;
+    let centre_block = centre_light & 0xF;
+    let substitute = |occludes: bool, sample: u8, centre_v: u8| {
+        if occludes && centre_v > SMOOTH_LIGHT_MIN_CENTRE {
+            centre_v
+        } else {
+            sample
+        }
+    };
+    let light_of = |c: [i32; 3], occludes: bool| {
+        let raw = view.corner_light_at(c[0], c[1], c[2]);
+        (
+            substitute(occludes, raw >> 4, centre_sky),
+            substitute(occludes, raw & 0xF, centre_block),
+        )
+    };
+    let (sky_a, block_a) = light_of(a, occ_a);
+    let (sky_b, block_b) = light_of(b, occ_b);
+    let (sky_d, block_d) = light_of(d, occ_d);
+    let sky =
+        round_level((centre_sky as f32 + sky_a as f32 + sky_b as f32 + sky_d as f32) / 4.0);
+    let block = round_level(
+        (centre_block as f32 + block_a as f32 + block_b as f32 + block_d as f32) / 4.0,
+    );
+    (ao, (sky << 4) | block)
 }
 
 /// Mesh the non-cube geometry of a section, emitting each visible baked quad
 /// once, never merged. A quad is culled only when it carries a `cullface` and
 /// the neighbouring block in that direction fully occludes it.
 ///
-/// # Lighting: flat today, smooth-capable tomorrow
+/// # Smooth lighting and ambient occlusion
 ///
-/// Every vertex of a quad currently receives the **same** two values: the packed
-/// sky/block light of the cell that quad's face opens into
-/// ([`ModelSectionView::face_light_at`]) and a constant per-face directional
-/// shade (see `emit_baked_quad`, carried in the
-/// `ao` slot). That is correct but flat — it has no ambient occlusion and no
-/// smooth (per-vertex interpolated) light, which is one of the most recognisable
-/// "not Minecraft" tells once the geometry itself is right.
+/// Each vertex gets its own AO factor and smoothed light from
+/// [`quad_corner_sample`], keyed on the cell the quad's face opens into
+/// ([`ModelSectionView::face_light_at`]) and the vertex's own position within
+/// that face. The AO factor rides in the per-vertex `ao` slot alongside the
+/// constant per-face directional shade (multiplied together — see
+/// `emit_baked_quad`); the shader already multiplies `ao * light_term` per
+/// vertex in gamma space (`4e8f058`'s rule), so a finer-grained `ao` is a
+/// drop-in, no shader change needed. When the two AO values on one diagonal of
+/// a quad disagree, the quad is triangulated along the other diagonal
+/// (vanilla's anisotropy fix), matching `crate::mesh::emit_quad`.
 ///
-/// Making it smooth is a **per-vertex, not per-block** change, and the mesh
-/// format already has room for it (`ao` is a per-vertex `f32`, `light` a
-/// per-vertex byte). What it would take:
-///
-/// 1. A neighbourhood light/opacity sampler: for each of a quad's four corners,
-///    read the four blocks meeting at that corner in the quad's facing plane
-///    (the face neighbour, the two edge neighbours, and the diagonal) — exactly
-///    the 3×3×3 snapshot the mesher already clones, so no new data crosses the
-///    thread boundary.
-/// 2. Vanilla AO: count how many of the three occluding corner neighbours are
-///    solid and map `{0,1,2,3}` occluders to the vanilla `{1.0, 0.8, 0.6, 0.5}`
-///    ratios (with the "two side blocks ⇒ fully dark corner" special case),
-///    writing a distinct value into each corner's `ao`.
-/// 3. Smooth light: average the sky and block light of the same four corner
-///    cells (skipping fully opaque ones) and write the per-corner packed result
-///    into each vertex's `light` instead of the single block value.
-/// 4. Anisotropy fix: because corners then differ, split each quad along the
-///    diagonal whose two shared corners are darker, or the interpolation flips
-///    the gradient across the quad (vanilla's "flip triangulation" rule).
-///
-/// None of that changes the pipeline, the vertex layout, or the shader (which
-/// already multiplies `ao * light_term` per vertex) — it is purely a richer
-/// fill in `emit_baked_quad`'s inner loop plus the corner sampler. The fluid
-/// path ([`mesh_fluids`]) would stay flat by design (`shade:false`).
+/// The fluid path ([`mesh_fluids`]) stays flat by design — see its own docs.
 #[must_use]
 pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
     let mut mesh = ModelMesh::default();
@@ -431,7 +542,16 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                     // Per *quad*, not per block: each face carries the light of
                     // the cell it opens into (see `face_light_at`).
                     let light = view.face_light_at(x, y, z, quad.direction);
-                    emit_baked_quad(&mut mesh, quad, [x as f32, y as f32, z as f32], light);
+                    let face = face_of_direction(quad.direction);
+                    let face_n = face.normal();
+                    let np = [
+                        x as i32 + face_n[0],
+                        y as i32 + face_n[1],
+                        z as i32 + face_n[2],
+                    ];
+                    let corners = [0, 1, 2, 3]
+                        .map(|i| quad_corner_sample(view, np, face, quad.positions[i], light));
+                    emit_baked_quad(&mut mesh, quad, [x as f32, y as f32, z as f32], corners);
                 }
             }
         }
@@ -459,25 +579,46 @@ fn face_shade(quad: &BakedQuad) -> f32 {
     }
 }
 
-fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], light: u8) {
+/// Emit one quad's four vertices, `corners[i]` supplying vertex `i`'s
+/// `(ao_factor, light)` from [`quad_corner_sample`] — or a uniform
+/// `(1.0, light)` per vertex for callers that skip smooth lighting (fluids).
+/// The AO factor multiplies into the constant per-face directional shade, so
+/// a flat caller (`ao_factor` always `1.0`) reproduces the pre-smoothing
+/// behaviour exactly.
+fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], corners: [(f32, u8); 4]) {
     let base = mesh.vertices.len() as u32;
     let shade = face_shade(quad);
     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
     for i in 0..4 {
         let p = quad.positions[i];
+        let (ao_factor, light) = corners[i];
         mesh.vertices.push(ModelVertex {
             position: [origin[0] + p[0], origin[1] + p[1], origin[2] + p[2]],
             uv: quad.uvs[i],
-            ao: shade,
+            ao: shade * ao_factor,
             light,
             tint,
             anim: quad.anim,
             _pad: 0,
         });
     }
-    // Two triangles, matching the packed path's winding.
-    mesh.indices
-        .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    // Flip the triangulation diagonal when AO disagrees across it, so the
+    // interpolated darkening stays symmetric (mirrors `crate::mesh::emit_quad`).
+    let d02 = corners[0].0 + corners[2].0;
+    let d13 = corners[1].0 + corners[3].0;
+    if d02 > d13 {
+        mesh.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 3, base]);
+    } else {
+        mesh.indices.extend_from_slice(&[
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 3,
+            base,
+            base + 1,
+        ]);
+    }
 }
 
 /// The packed light byte a GUI item vertex carries: sky `15`, block `0`. The
@@ -674,8 +815,11 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                     FluidKind::Water => (&mut out.water, view.light_at(x, y, z)),
                     FluidKind::Lava => (&mut out.lava, 0xFF),
                 };
+                // Fluids stay flat by design: uniform light, no AO, per the
+                // module docs on `mesh_fluids`.
+                let corners = [(1.0, light); 4];
                 for quad in &quads {
-                    emit_baked_quad(mesh, quad, [x as f32, y as f32, z as f32], light);
+                    emit_baked_quad(mesh, quad, [x as f32, y as f32, z as f32], corners);
                 }
             }
         }
@@ -763,8 +907,20 @@ mod tests {
             fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
                 if (x, y, z) == (8, 8, 8) { &self.quads } else { &[] }
             }
+            // Every AO corner neighbour occludes, and `corner_light_at` below
+            // returns `0x00` — so `quad_corner_sample`'s `smoothBlend`
+            // substitution replaces every occluded, above-threshold nibble
+            // with the centre's own value, and the below-threshold nibble
+            // falls back to the (also `0x00`) raw sample. Either way each
+            // corner's blended light reproduces `centre_light` exactly, so
+            // this keeps testing the thing it existed to test — light is
+            // asked **per quad facing** — without smooth lighting's
+            // per-vertex variation getting in the way.
             fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
-                false
+                true
+            }
+            fn corner_light_at(&self, _x: i32, _y: i32, _z: i32) -> u8 {
+                0x00
             }
             fn light_at(&self, _x: usize, _y: usize, _z: usize) -> u8 {
                 // The own-cell answer. If `mesh_models` ever falls back to this,
@@ -1028,6 +1184,99 @@ mod tests {
         let m = mesh_models(&view);
         // Block is at (8,8,8), so the first corner lands at (8,9,8).
         assert_eq!(m.vertices[0].position, [8.0, 9.0, 8.0]);
+    }
+
+    // --- Smooth lighting / ambient occlusion ------------------------------
+
+    /// A view with a single occluding cell, for probing [`quad_corner_sample`]
+    /// directly without going through a full [`mesh_models`] pass.
+    struct SingleOccluder {
+        at: [i32; 3],
+    }
+    impl ModelSectionView for SingleOccluder {
+        fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+            &[]
+        }
+        fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+            [x, y, z] == self.at
+        }
+    }
+
+    #[test]
+    fn ao_matches_vanillas_one_occluder_ratio_and_leaves_the_far_corner_bright() {
+        // An Up-face quad on block (8,8,8): `np` is (8,9,8), and a single
+        // occluder sits at its `-X` edge neighbour (7,9,8).
+        let view = SingleOccluder { at: [7, 9, 8] };
+        // Vertex at (x=0,z=0): its edge neighbour *is* the occluder, so one of
+        // the three corner samples (a/b/d) occludes. Vanilla's one-occluder AO
+        // ratio is 0.8 — `(1.0 + 1.0 + 1.0 + 0.2) / 4`.
+        let (ao_near, _) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0xF0);
+        assert!((ao_near - 0.8).abs() < 1e-6, "got {ao_near}");
+        // Vertex at (x=1,z=0): none of its three corner samples touch (7,9,8),
+        // so it stays fully bright — proving the AO is per-*corner*, not
+        // smeared across the whole quad.
+        let (ao_far, _) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [1.0, 1.0, 0.0], 0xF0);
+        assert!((ao_far - 1.0).abs() < 1e-6, "got {ao_far}");
+    }
+
+    #[test]
+    fn smooth_blend_substitutes_the_centre_only_above_the_threshold() {
+        // Every corner neighbour occludes and (per this synthetic view)
+        // stores no light of its own, so any brightness in the result must
+        // come from the `smoothBlend` substitution, not the raw sample.
+        struct AllOccludedAndDark;
+        impl ModelSectionView for AllOccludedAndDark {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                true
+            }
+            fn corner_light_at(&self, _x: i32, _y: i32, _z: i32) -> u8 {
+                0x00
+            }
+        }
+        let view = AllOccludedAndDark;
+
+        // Centre lit above `SMOOTH_LIGHT_MIN_CENTRE`: every occluded corner
+        // sample is replaced by the centre's own value, so the corner reads
+        // exactly the centre's light rather than the neighbours' stored 0 —
+        // the "corner against a wall must not read pitch black" rule.
+        let (_, bright) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0xF0);
+        assert_eq!(bright, 0xF0, "above-threshold centre must substitute in fully");
+
+        // Centre at/below the threshold: substitution does not fire, so the
+        // corner reads the neighbours' raw (dark) value and comes out dim.
+        let (_, dim) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0x20);
+        assert!(dim >> 4 <= 2, "below-threshold centre must not substitute, got {dim:#04x}");
+    }
+
+    #[test]
+    fn emit_baked_quad_flips_triangulation_when_ao_disagrees_across_a_diagonal() {
+        // Vanilla's anisotropy fix: cut along whichever diagonal is brighter,
+        // so the darker corner never bleeds its shade across the quad via
+        // interpolation. `crate::mesh::emit_quad` applies the identical rule.
+        let quad = cube_face(Direction::Up, None);
+
+        let mut cut_02 = ModelMesh::default();
+        // Corners 0 and 2 (diagonal) bright, 1 and 3 dark: cut along 0-2.
+        emit_baked_quad(
+            &mut cut_02,
+            &quad,
+            [0.0, 0.0, 0.0],
+            [(1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0), (0.2, 0x00)],
+        );
+        assert_eq!(cut_02.indices, vec![0, 1, 2, 2, 3, 0]);
+
+        let mut cut_13 = ModelMesh::default();
+        // The other diagonal (1-3) bright instead: cut flips to 1-3.
+        emit_baked_quad(
+            &mut cut_13,
+            &quad,
+            [0.0, 0.0, 0.0],
+            [(0.2, 0x00), (1.0, 0xF0), (0.2, 0x00), (1.0, 0xF0)],
+        );
+        assert_eq!(cut_13.indices, vec![1, 2, 3, 3, 0, 1]);
     }
 
     // --- GUI item meshing ------------------------------------------------
