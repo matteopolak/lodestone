@@ -30,15 +30,52 @@
 //! killing the connection. In tests the same error surfaces as a failed decode,
 //! which is the misparse detector doing its job.
 //!
-//! A handful of serializers carry genuinely complex, self-describing payloads
-//! (item stacks, particles, resolvable profiles). Mobs never emit those in
-//! practice, so they are deliberately *not* modelled: they decode to an explicit
-//! error rather than a guess.
+//! A couple of serializers carry genuinely complex, self-describing payloads
+//! (particles, resolvable profiles) that mobs never emit in practice, so they
+//! are deliberately *not* modelled: they decode to an explicit error rather than
+//! a guess.
+//!
+//! # The item-stack serializer, and the one place alignment is given up
+//!
+//! `ITEM_STACK` used to be in that rejected set, on the reasoning that mobs
+//! never emit it. True of mobs — and false of the entity whose entire identity
+//! it is: a dropped `minecraft:item` carries its stack under this serializer and
+//! nothing else. Rejecting it meant every dropped item reached the client with
+//! no idea what it was.
+//!
+//! It is decoded here by delegating to the adapter's existing clientbound
+//! item-stack codec ([`crate::adapter::read_item_stack`]), which already models
+//! 26.2's `DataComponentPatch` and already degrades correctly on a component it
+//! does not model. That degradation is *load-bearing* and interacts with this
+//! module's stream shape:
+//!
+//! * A clientbound component patch length-prefixes neither the patch nor its
+//!   individual components, so an unmodeled component cannot be skipped in
+//!   place. The item codec therefore stops there, keeps the item key, count, and
+//!   whatever components it already read, and reports `complete == false` with
+//!   the reader parked mid-payload.
+//! * Metadata, unlike the container packets that codec was written for, is a
+//!   *stream of indexed fields terminated by a `0xFF` sentinel*. A reader parked
+//!   mid-payload cannot resume: every following byte would decode as a plausible
+//!   but wrong `(index, serializer, value)` triple — garbage that never fails
+//!   loudly. Scanning ahead for the sentinel is no better, since `0xFF` occurs
+//!   freely inside payload bytes.
+//! * So this decoder **abandons the remainder of the list** at that point and
+//!   returns what it has, flagged [`DecodedMetadata::complete`] `== false`. The
+//!   caller must then skip its trailing-bytes assertion (there deliberately are
+//!   trailing bytes) and still emit the update.
+//!
+//! Abandoning is safe because metadata is applied *incrementally*: an update
+//! carrying a subset of fields is the normal case, not an error case, and every
+//! field it does carry was consumed byte-accurately before the abandonment
+//! point. The alternative — dropping the packet outright — would throw away the
+//! item identity that was already decoded, which is precisely the fail-closed
+//! behaviour this seam exists to remove.
 
 use lodestone_core::{Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt};
 use lodestone_model::{
     EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
-    EntityVariant, Identifier,
+    EntityVariant, Identifier, ItemStack,
 };
 
 use crate::attribute_types::attribute_name;
@@ -142,8 +179,33 @@ enum Value {
         profession: Identifier,
         level: i32,
     },
+    /// A decoded item stack; inner `None` is the empty stack.
+    ///
+    /// The only value whose decode can legitimately stop part-way: `complete`
+    /// is `false` when an unmodeled data component left the reader parked
+    /// mid-payload, which ends the whole list (see the module header).
+    Item {
+        stack: Option<ItemStack>,
+        complete: bool,
+    },
     /// Consumed correctly but not surfaced.
     Consumed,
+}
+
+/// Outcome of decoding one `set_entity_data` metadata list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedMetadata {
+    /// The fields decoded before the list ended.
+    pub metadata: EntityMetadataUpdate,
+    /// `false` when an unmodeled item data component halted decoding mid-value,
+    /// leaving the reader parked inside that payload and the remaining fields
+    /// deliberately abandoned.
+    ///
+    /// A caller must **not** run its trailing-bytes assertion when this is
+    /// `false` — there are trailing bytes by construction — and must still emit
+    /// the update, which is partial in exactly the way every metadata packet is
+    /// allowed to be.
+    pub complete: bool,
 }
 
 /// Maps a 26.2 `Pose` enum id to the version-free [`EntityPose`]. Ids the shared
@@ -289,9 +351,22 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             reader.f32()?;
             Value::Consumed
         }
+        // A dropped item's entire identity. Delegated to the adapter's single
+        // clientbound item-stack codec — never re-implemented here — so both
+        // paths share one reading of the `DataComponentPatch` wire. An
+        // unmodeled component yields a partial stack with `complete == false`
+        // rather than an error; the caller ends the list there.
+        SER_ITEM_STACK => {
+            let decoded = crate::adapter::read_item_stack(reader)
+                .map_err(|err| Error::Custom(err.to_string()))?;
+            Value::Item {
+                stack: decoded.stack,
+                complete: decoded.complete,
+            }
+        }
         // Genuinely complex, self-describing payloads mobs never emit. Rejected
         // rather than guessed at.
-        SER_ITEM_STACK | SER_PARTICLE | SER_PARTICLES | SER_RESOLVABLE_PROFILE => {
+        SER_PARTICLE | SER_PARTICLES | SER_RESOLVABLE_PROFILE => {
             return Err(unknown_serializer(serializer));
         }
         other => return Err(unknown_serializer(other)),
@@ -302,12 +377,16 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
 /// Decodes a `set_entity_data` metadata list into a version-free
 /// [`EntityMetadataUpdate`], resolving 26.2's indices and serializers.
 ///
-/// The reader is left positioned immediately after the `0xFF` terminator; the
-/// caller asserts the payload is then empty (the misparse detector).
+/// On a complete decode the reader is left positioned immediately after the
+/// `0xFF` terminator and the caller asserts the payload is then empty (the
+/// misparse detector). When the result reports `complete == false` an unmodeled
+/// item component ended the list early, the reader is parked mid-payload, and
+/// that assertion must be skipped — see the module header for why resuming is
+/// not an option.
 pub fn read_entity_metadata(
     reader: &mut Reader<'_>,
     class: Option<MetadataClass>,
-) -> Result<EntityMetadataUpdate> {
+) -> Result<DecodedMetadata> {
     let mut md = EntityMetadataUpdate::default();
     loop {
         let index = reader.u8()?;
@@ -316,6 +395,24 @@ pub fn read_entity_metadata(
         }
         let serializer = reader.var_i32()?;
         let value = decode_value(reader, serializer)?;
+        // An item stack identifies itself by serializer, so — like the
+        // registry-holder variants below — the index it arrives at is
+        // irrelevant. (It is 8 on a dropped item and an item frame, and 8 on
+        // thrown projectiles too, but nothing needs to know that.)
+        if let Value::Item { stack, complete } = value {
+            md.item = Some(stack);
+            if !complete {
+                // The reader is parked inside an unmodeled component's payload.
+                // Every following byte would decode as a plausible-but-wrong
+                // field, so the rest of the list is abandoned rather than
+                // guessed at. What was decoded before this point is exact.
+                return Ok(DecodedMetadata {
+                    metadata: md,
+                    complete: false,
+                });
+            }
+            continue;
+        }
         match (index, value) {
             (IDX_SHARED_FLAGS, Value::Byte(b)) => md.flags = Some(b as u8),
             (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Some(t),
@@ -359,7 +456,10 @@ pub fn read_entity_metadata(
             _ => {}
         }
     }
-    Ok(md)
+    Ok(DecodedMetadata {
+        metadata: md,
+        complete: true,
+    })
 }
 
 fn parse_identifier(raw: &str) -> Result<Identifier> {
@@ -477,7 +577,9 @@ mod tests {
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("no trailing bytes");
 
         assert_eq!(md.flags, Some(0x01));
@@ -497,7 +599,9 @@ mod tests {
     fn empty_list_is_empty_update() {
         let bytes = [EOF_MARKER];
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert!(md.is_empty());
     }
@@ -512,7 +616,9 @@ mod tests {
         bytes.push(0); // absent
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(md.custom_name, Some(None));
     }
@@ -530,15 +636,48 @@ mod tests {
         assert!(read_entity_metadata(&mut reader, None).is_err());
     }
 
-    /// A complex serializer mobs never emit is rejected explicitly, not guessed.
+    /// The complex serializers that remain unmodelled (particle, particles,
+    /// resolvable profile) are still rejected explicitly rather than guessed at.
+    /// `ITEM_STACK` is deliberately absent from this list — see
+    /// `tests/item_entity_metadata.rs`, which replays the server's own bytes.
     #[test]
-    fn complex_serializer_is_rejected() {
+    fn complex_serializers_are_rejected() {
+        for serializer in [SER_PARTICLE, SER_PARTICLES, SER_RESOLVABLE_PROFILE] {
+            let mut bytes = Vec::new();
+            bytes.push(5); // arbitrary index
+            bytes.extend(varint(serializer));
+            bytes.push(0);
+            bytes.push(EOF_MARKER);
+            let mut reader = Reader::new(&bytes);
+            assert!(
+                read_entity_metadata(&mut reader, None).is_err(),
+                "serializer {serializer} must not be guessed at"
+            );
+        }
+    }
+
+    /// An empty stack (`count <= 0`) is a *cleared* item field, distinct from the
+    /// field being absent — the same `Some(None)` shape the custom name uses. A
+    /// following field still decodes, because an empty stack consumes its whole
+    /// (one-byte) value.
+    #[test]
+    fn empty_item_stack_clears_the_field_and_stays_aligned() {
         let mut bytes = Vec::new();
-        bytes.push(5); // arbitrary index
+        bytes.push(8); // ItemEntity.DATA_ITEM
         bytes.extend(varint(SER_ITEM_STACK));
-        bytes.push(0);
+        bytes.extend(varint(0)); // count 0 = the empty stack
+        bytes.push(IDX_HEALTH);
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(7.0f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+
         let mut reader = Reader::new(&bytes);
-        assert!(read_entity_metadata(&mut reader, None).is_err());
+        let decoded = read_entity_metadata(&mut reader, None).expect("decode");
+        reader.ensure_empty().expect("no trailing bytes");
+
+        assert!(decoded.complete);
+        assert_eq!(decoded.metadata.item, Some(None));
+        assert_eq!(decoded.metadata.health, Some(7.0));
     }
 
     /// A sheep's wool byte at index 17 packs colour (low nibble) and the sheared
@@ -551,7 +690,9 @@ mod tests {
         bytes.push(0x1E); // colour 14 (red) + sheared bit (0x10)
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep)).expect("decode");
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep))
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(
             md.variant,
@@ -574,7 +715,9 @@ mod tests {
 
         for class in [None, Some(MetadataClass::Horse)] {
             let mut reader = Reader::new(&bytes);
-            let md = read_entity_metadata(&mut reader, class).expect("decode");
+            let md = read_entity_metadata(&mut reader, class)
+                .expect("decode")
+                .metadata;
             reader.ensure_empty().expect("empty");
             assert_eq!(md.variant, None);
         }
@@ -590,7 +733,9 @@ mod tests {
         bytes.extend(varint(0x0305)); // markings 3, colour 5
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Horse)).expect("decode");
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Horse))
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(
             md.variant,
@@ -610,7 +755,9 @@ mod tests {
         bytes.extend(varint(0x0305));
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep)).expect("decode");
+        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep))
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(md.variant, None);
     }
@@ -626,7 +773,9 @@ mod tests {
         bytes.extend(varint(5)); // holder wire value → registry id 4 → ashen
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(
             md.variant,
@@ -643,7 +792,9 @@ mod tests {
         bytes.extend(varint(2)); // wire value → registry id 1 → warm
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(
             md.variant,
@@ -664,7 +815,9 @@ mod tests {
         bytes.extend(5.0f32.to_be_bytes());
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(md.variant, None);
         assert_eq!(md.health, Some(5.0));
@@ -682,7 +835,9 @@ mod tests {
         bytes.extend(varint(3)); // level
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None).expect("decode");
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
         reader.ensure_empty().expect("empty");
         assert_eq!(
             md.variant,
