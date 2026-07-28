@@ -48,6 +48,12 @@ pub(crate) mod generated_entity_dimensions;
 #[path = "generated/attribute_types.rs"]
 pub(crate) mod generated_attribute_types;
 
+/// Generated per-block-state hardness/correct-tool table (raw rodata
+/// statics). Use the [`hardness`] module for the lookup API; this holds only
+/// the arrays.
+#[path = "generated/hardness.rs"]
+pub(crate) mod generated_hardness;
+
 /// Generated sound-event id→(name, fixed range) table (raw rodata statics). Use
 /// the [`sound_events`] module for the lookup API; this holds only the array.
 #[path = "generated/sound_events.rs"]
@@ -87,6 +93,7 @@ pub mod data_component_types;
 pub mod entity_dimensions;
 pub mod entity_types;
 pub mod entity_variants;
+pub mod hardness;
 pub mod items;
 pub mod menus;
 pub mod mob_effects;
