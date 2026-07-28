@@ -101,7 +101,8 @@ On `STOP_DESTROY_BLOCK` the server (26.2 `ServerPlayerGameMode`) computes
 
 The old fixed hardness always took the **delayed** branch, which is why break
 *times* were right despite the fake number: the server's own timer drove them.
-Real hardness moves the `STOP` to the true completion tick, which takes the
+Real hardness moves the `STOP` to the true completion tick, where for bare-hand
+stone `f1 ≈ 0.00667 × 151 ≈ 1.01` — clear of the gate — so it takes the
 **immediate** branch. Measured back-to-back on one connection, one block
 (bare-hand stone on the survival oracle):
 
@@ -126,7 +127,10 @@ Delayed-destroy survives as the safety net in the other direction.
   `BreakInputs::default()`, because `minecraft:tool` is not among the modelled
   item components (only `custom_name`, `damage`, `enchantments`). Digging
   therefore always times as an empty hand, even with a diamond pickaxe selected —
-  a pickaxe currently makes stone no faster. Closing this needs the `tool`
+  a pickaxe currently makes stone no faster. That is vanilla-correct *for an empty
+  hand*, but it means hard, tool-gated blocks are effectively unmineable in
+  practice: obsidian is 5000 ticks (~4 min 10 s) of unbroken holding, where a
+  diamond pickaxe would be seconds. Closing this needs the `tool`
   component decoded in the version crate first; `tool_inputs_stay_at_bare_hand_defaults`
   is the reminder in `sim.rs`.
 - Haste/Mining Fatigue are separately available from `Sim::hud_effects` and could
