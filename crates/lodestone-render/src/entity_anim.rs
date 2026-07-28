@@ -40,6 +40,16 @@
 //! state gap — the pose is unconditional, so leaving it out drew every zombie,
 //! husk and drowned with its arms hanging at its sides.
 //!
+//! # One thing here is not a `setupAnim` at all
+//!
+//! A creeper's pre-detonation swell ([`creeper_swell_scale`],
+//! [`Skeleton::pose_swelling`]) is a **whole-model scale**, not a joint rotation.
+//! In 26.2 it lives in `CreeperRenderer.scale` — a `PoseStack` op wrapped around
+//! the model — and `CreeperModel.setupAnim` knows nothing about it. It is
+//! implemented here anyway because this is the module that owns the part
+//! matrices, and folding a scale into them is how a caller that only knows about
+//! [`Skeleton`] can get it.
+//!
 //! Trigonometry here uses `f32::sin`/`cos` rather than vanilla's 65536-entry
 //! `Mth` lookup table. That is a deliberate exception to the project's
 //! bit-exactness rule: limb angles are never sent to a server and never feed
@@ -83,6 +93,113 @@ fn zombie_arm_x_rest(aggressive: bool) -> f32 {
 /// `animateZombieArms`'s resting arm splay: `rightArm.yRot = -0.1`,
 /// `leftArm.yRot = 0.1` when not mid-swing.
 const ZOMBIE_ARM_Y_REST: f32 = 0.1;
+
+/// The largest value `Creeper.getSwelling` can return: `30 / (30 - 2)`.
+///
+/// Vanilla computes `Mth.lerp(partialTick, oldSwell, swell) / (maxSwell - 2)`
+/// with `swell` capped at `maxSwell` and `maxSwell` defaulting to `30`. The
+/// divisor is `28`, not `30`, so the parameter overshoots `1.0` by ~7% at the
+/// instant of detonation — which is *deliberate*, not a rounding artefact: it is
+/// what makes the creeper still be growing when it explodes rather than easing
+/// to a stop. `maxSwell` is saved to NBT (`Fuse`) but never synchronised, so a
+/// client always divides by 28.
+pub const MAX_SWELL: f32 = 30.0 / (30.0 - 2.0);
+
+/// A conservative upper bound on any component [`creeper_swell_scale`] returns
+/// over `0..=MAX_SWELL`, for sizing bounds that must contain a swelling creeper.
+///
+/// The horizontal factor is `(1 + g⁴·0.4) · wobble` with `g⁴ ≤ 1` and
+/// `|wobble - 1| ≤ MAX_SWELL · 0.01`, so it cannot exceed `1.4 · (1 + 0.0107)`.
+/// The vertical factor peaks lower (`1.1 / 0.9893 ≈ 1.112`).
+///
+/// **This is not yet applied to anything.** [`EntityMesh::local_min`] /
+/// `local_max` in [`crate::entity`] are derived from
+/// [`Skeleton::rest_pose`], so a creeper's culling box describes it at its
+/// resting size while a swelling one is drawn up to 41% wider. That is the
+/// "correct until it clips at the screen edge" failure `from_named_model`'s own
+/// doc comment warns about, in a file this change was not permitted to touch;
+/// widening the creeper's local bounds by this factor is the fix.
+///
+/// [`EntityMesh::local_min`]: crate::entity::EntityMesh::local_min
+pub const MAX_SWELL_SCALE: f32 = 1.4 * (1.0 + MAX_SWELL * 0.01);
+
+/// `CreeperRenderer.scale`: the per-axis model scale for a creeper `swelling`
+/// fraction, as `[x, y, z]`.
+///
+/// Transcribed from the decompiled 26.2 client:
+///
+/// ```text
+///   float g = state.swelling;
+///   float wobble = 1.0F + Mth.sin(g * 100.0F) * g * 0.01F;
+///   g = Mth.clamp(g, 0.0F, 1.0F);
+///   g *= g;
+///   g *= g;
+///   float s  = (1.0F + g * 0.4F) * wobble;
+///   float hs = (1.0F + g * 0.1F) / wobble;
+///   poseStack.scale(s, hs, s);
+/// ```
+///
+/// Two details that a summary of this animation usually loses, and that are the
+/// whole look:
+///
+/// * The dominant term is the **growth** `1 + g⁴·0.4`, which puffs the creeper
+///   out by up to 40% horizontally and 10% vertically. The `sin(g · 100)`
+///   `wobble` is a ±1% shudder *on top* of it — describing the swell as just
+///   the sine term reproduces a barely-visible jitter and none of the swelling.
+/// * `g` is raised to the **fourth** power, so nearly nothing happens for the
+///   first two thirds of the fuse and then it balloons. A linear ramp would be
+///   the same total growth spread evenly and would read as a different mob.
+/// * Horizontal and vertical are *reciprocal* in `wobble` — the creeper
+///   squashes as it widens, conserving its apparent bulk while it shudders.
+///
+/// The sine is `f32::sin` rather than vanilla's `Mth` table, per the module
+/// note: this feeds a scale, never the wire.
+#[must_use]
+pub fn creeper_swell_scale(swell: f32) -> [f32; 3] {
+    let wobble = 1.0 + (swell * 100.0).sin() * swell * 0.01;
+    let g = swell.clamp(0.0, 1.0);
+    let g = g * g;
+    let g = g * g;
+    let horizontal = (1.0 + g * 0.4) * wobble;
+    let vertical = (1.0 + g * 0.1) / wobble;
+    [horizontal, vertical, horizontal]
+}
+
+/// The model-space transform that reproduces vanilla's creeper swell, to be
+/// composed *above* the root part.
+///
+/// # Why this is a scale about the feet and not about the model origin
+///
+/// `LivingEntityRenderer.render` orders the ops:
+///
+/// ```text
+///   scale(-1, -1, 1)          // into the Y-down model frame
+///   this.scale(state, stack)  // CreeperRenderer's swell
+///   translate(0, -1.501, 0)   // lift the feet to the ground plane
+/// ```
+///
+/// The swell is applied *before* the ground lift, so the lift is scaled too and
+/// the creeper grows **upward out of the ground**. This crate applies the lift
+/// later, in [`entity_model_matrix`](crate::entity::entity_model_matrix), so the
+/// equivalent here is the conjugated form `T(+offset) ∘ S ∘ T(-offset)` about
+/// the model-space plane the feet stand on.
+///
+/// Dropping the conjugation — scaling about the model origin, which is the
+/// obvious thing to write — is not a subtle error: at full swell the vertical
+/// factor `1.11` would drive the feet to `1.501 - 1.5·1.11 ≈ -0.16`, sinking the
+/// creeper an eighth of a block into the floor as it inflates.
+/// `swollen_creeper_keeps_its_feet_on_the_ground` pins this.
+fn swell_root_affine(swell: f32) -> Affine {
+    if swell == 0.0 {
+        return Affine::IDENTITY;
+    }
+    let [sx, sy, sz] = creeper_swell_scale(swell);
+    let offset = crate::entity::MODEL_FEET_OFFSET;
+    Affine {
+        m: [[sx, 0.0, 0.0], [0.0, sy, 0.0], [0.0, 0.0, sz]],
+        t: [0.0, offset * (1.0 - sy), 0.0],
+    }
+}
 
 /// Which of vanilla's `setupAnim` implementations a model animates with.
 ///
@@ -168,10 +285,15 @@ pub struct AnimInput {
     /// Continuous age in ticks, driving idle bob (`ageInTicks`).
     pub age_ticks: f32,
     /// Vanilla's `LivingEntityRenderState.isAggressive` (`Mob.isAggressive`),
-    /// which raises a zombie's arms from `-PI/2.25` to `-PI/1.5`. Nothing
-    /// decodes the shared-flags bit that carries it yet, so the shell always
-    /// passes `false` — the non-aggressive branch is the pose a player sees on
-    /// an idle or merely-walking zombie, and it is the one that was missing.
+    /// which raises a zombie's arms from `-PI/2.25` to `-PI/1.5`.
+    ///
+    /// It rides bit `0x04` of `Mob.DATA_MOB_FLAGS_ID` — a *separate* byte from
+    /// the shared entity flags, at its own metadata index (15 in 26.2), which
+    /// nothing decodes yet. (An earlier note here called it a shared-flags bit;
+    /// it is not, and looking for it at index 0 would find the unrelated
+    /// unused bit there.) So the shell always passes `false` — the
+    /// non-aggressive branch is the pose a player sees on an idle or
+    /// merely-walking zombie, and it is the one that was missing.
     pub aggressive: bool,
 }
 
@@ -354,9 +476,40 @@ impl Skeleton {
     /// world space.
     #[must_use]
     pub fn pose(&self, input: &AnimInput) -> Vec<Mat4> {
+        self.pose_swelling(input, 0.0)
+    }
+
+    /// [`Self::pose`], with a creeper's pre-detonation swell folded in as a
+    /// whole-model scale (see [`creeper_swell_scale`]).
+    ///
+    /// `swell` is vanilla's `Creeper.getSwelling(partialTick)`: `0.0` while the
+    /// fuse is unlit, rising to [`MAX_SWELL`] at detonation. `0.0` is exactly
+    /// [`Self::pose`] — the scale reduces to the identity, not merely to
+    /// something close to it, so passing it costs nothing and no non-creeper
+    /// caller has to care.
+    ///
+    /// # This is a separate method, and that is the honest shape today
+    ///
+    /// The natural home for `swell` is a field on [`AnimInput`], which is
+    /// already threaded from the shell all the way to this call. It is not one
+    /// yet for a concrete reason: **no swell value exists to put in it.** The
+    /// wire carries `Creeper.DATA_SWELL_DIR` (an `int`, `-1` or `1`) at metadata
+    /// index 16, and `v770`'s metadata reader decodes that serializer correctly
+    /// but drops the value — `EntityMetadataUpdate` has no field to carry it, so
+    /// it falls to the "decoded for alignment, not surfaced" arm. Even once it
+    /// is surfaced, `swelling` is not the synced value: vanilla integrates
+    /// `swell += swellDir` client-side every tick and divides by 28, so the
+    /// shell's per-entity tick track has to own a counter.
+    ///
+    /// Until then, adding the field would mean widening a struct literal in
+    /// `lodestone-shell` to pass a constant `0.0` — a wired-up-looking channel
+    /// carrying nothing. This method is the same computation with the gap left
+    /// visible.
+    #[must_use]
+    pub fn pose_swelling(&self, input: &AnimInput, swell: f32) -> Vec<Mat4> {
         let mut poses: Vec<PartPose> = self.parts.iter().map(|p| p.rest).collect();
         self.setup_anim(&mut poses, input);
-        self.compose(&poses)
+        self.compose_from(&poses, swell_root_affine(swell))
     }
 
     /// The unanimated matrices — what a [`AnimFamily::Static`] model draws with,
@@ -374,10 +527,17 @@ impl Skeleton {
     ///
     /// [`bake_entity_parts`]: lodestone_assets::entity::bake_entity_parts
     fn compose(&self, poses: &[PartPose]) -> Vec<Mat4> {
+        self.compose_from(poses, Affine::IDENTITY)
+    }
+
+    /// [`Self::compose`], starting the chain from `root` rather than the
+    /// identity, so a whole-model transform (the creeper swell) applies to every
+    /// part without any part having to know about it.
+    fn compose_from(&self, poses: &[PartPose], root: Affine) -> Vec<Mat4> {
         let mut chains: Vec<Affine> = Vec::with_capacity(self.parts.len());
         let mut out = Vec::with_capacity(self.parts.len());
         for (i, part) in self.parts.iter().enumerate() {
-            let parent = part.parent.map_or(Affine::IDENTITY, |p| chains[p]);
+            let parent = part.parent.map_or(root, |p| chains[p]);
             let world = parent.compose(&Affine::of_pose(&poses[i]));
             chains.push(world);
             out.push(affine_to_mat4(&world));
@@ -790,6 +950,183 @@ mod tests {
             "the set of models whose driven limbs carry an authored rotation changed; \
              each one animates differently from vanilla under additive `set_*_rot`"
         );
+    }
+
+    /// Where a model-space point ends up in world space, vertically.
+    ///
+    /// `entity_model_matrix` finishes with `scale(-1, -1, 1)` then
+    /// `translate(0, -MODEL_FEET_OFFSET, 0)`, so a model-frame `y` (which points
+    /// **down**) becomes `MODEL_FEET_OFFSET - y` blocks above the entity's feet
+    /// position. Asserting in world terms is the point: "the creeper grows
+    /// upward and does not sink" is a claim about the ground, and a model-frame
+    /// assertion would state it upside down.
+    fn world_height(model_y: f32) -> f32 {
+        crate::entity::MODEL_FEET_OFFSET - model_y
+    }
+
+    /// The world height of the bottom of a creeper's hind foot: the leg part's
+    /// pivot sits at `y = 18` texels and its cube runs 6 texels further down.
+    fn creeper_foot_height(skel: &Skeleton, swell: f32) -> f32 {
+        let i = skel.index_of("right_hind_leg").expect("hind leg");
+        let leg = skel.pose_swelling(&AnimInput::REST, swell)[i];
+        let sole = leg.transform_point3(Vec3::new(0.0, 6.0 / 16.0, 0.0));
+        world_height(sole.y)
+    }
+
+    /// The world height of the top of a creeper's head: pivot at `y = 6` texels,
+    /// cube top 8 texels above that.
+    fn creeper_head_height(skel: &Skeleton, swell: f32) -> f32 {
+        let i = skel.index_of("head").expect("head");
+        let head = skel.pose_swelling(&AnimInput::REST, swell)[i];
+        let crown = head.transform_point3(Vec3::new(0.0, -8.0 / 16.0, 0.0));
+        world_height(crown.y)
+    }
+
+    #[test]
+    fn swell_of_zero_is_bit_for_bit_the_unswollen_pose() {
+        // Not "close to": `pose` delegates to `pose_swelling(_, 0.0)`, so any
+        // drift here would apply to every mob in the game, every frame. The
+        // guard is an exact `swell == 0.0` early return rather than a tolerance.
+        assert_eq!(creeper_swell_scale(0.0), [1.0, 1.0, 1.0]);
+        for entry in entity_models() {
+            let skel = skeleton_for(entry.name);
+            assert_eq!(
+                skel.pose_swelling(&AnimInput::REST, 0.0),
+                skel.pose(&AnimInput::REST),
+                "{}: an unlit fuse perturbed the pose",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn creeper_swell_scale_transcribes_the_vanilla_formula() {
+        // Hand-evaluated from `CreeperRenderer.scale`, not read back off this
+        // implementation.
+        for swell in [0.25f32, 0.5, 0.75, 1.0, MAX_SWELL] {
+            let wobble = 1.0 + (swell * 100.0).sin() * swell * 0.01;
+            let g = swell.clamp(0.0, 1.0).powi(4);
+            let want = [
+                (1.0 + g * 0.4) * wobble,
+                (1.0 + g * 0.1) / wobble,
+                (1.0 + g * 0.4) * wobble,
+            ];
+            let got = creeper_swell_scale(swell);
+            for axis in 0..3 {
+                assert!(
+                    (got[axis] - want[axis]).abs() < 1e-6,
+                    "swell {swell} axis {axis}: {} vs {}",
+                    got[axis],
+                    want[axis]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_swell_is_quartic_so_it_balloons_only_at_the_end() {
+        // The signature of this animation: a creeper looks near-normal for most
+        // of the fuse. A linear ramp would grow the same total amount and read
+        // as a completely different mob, and it is the easy thing to write from
+        // a prose description of the effect.
+        let at = |s: f32| creeper_swell_scale(s)[0];
+        // Half way through the fuse, `g⁴ = 0.0625`: 2.5% wider, not 20%.
+        assert!(
+            at(0.5) < 1.05,
+            "half-fuse width was {}, which is a linear ramp, not a quartic one",
+            at(0.5)
+        );
+        assert!(
+            at(1.0) > 1.35,
+            "full-fuse width was only {}; the creeper barely puffs at all",
+            at(1.0)
+        );
+    }
+
+    #[test]
+    fn the_swell_wobbles_on_top_of_the_growth() {
+        // `sin(swell * 100)` cycles every ~0.063 of swell, so two samples a half
+        // cycle apart must straddle the growth curve rather than sit on it.
+        let mid = 0.6f32;
+        let half_cycle = std::f32::consts::PI / 100.0;
+        let a = creeper_swell_scale(mid)[0];
+        let b = creeper_swell_scale(mid + half_cycle)[0];
+        assert!(
+            (a - b).abs() > 1e-3,
+            "the ±1% shudder is missing: {a} vs {b} a half wobble-cycle apart"
+        );
+        // And it is reciprocal between the axes: as it widens it squashes.
+        let [x, y, _] = creeper_swell_scale(mid);
+        let growth_free = (1.0 + (mid.powi(4)) * 0.4, 1.0 + (mid.powi(4)) * 0.1);
+        assert!(
+            (x > growth_free.0) == (y < growth_free.1),
+            "the wobble moved both axes the same way; vanilla divides the vertical by it"
+        );
+    }
+
+    #[test]
+    fn swollen_creeper_keeps_its_feet_on_the_ground() {
+        // The scale is conjugated about the ground plane because vanilla applies
+        // it *before* the 1.501 ground lift. Scaling about the model origin
+        // instead — the obvious implementation — buries the feet, and every
+        // other assertion in this file would still pass.
+        let skel = skeleton_for("creeper");
+        let rest_foot = creeper_foot_height(&skel, 0.0);
+        for step in 0..=64 {
+            let swell = MAX_SWELL * step as f32 / 64.0;
+            let foot = creeper_foot_height(&skel, swell);
+            assert!(
+                foot.abs() < 0.005,
+                "at swell {swell} the sole sat {foot} blocks off the ground (rest: {rest_foot}); \
+                 scaling about the model origin rather than the feet does exactly this"
+            );
+        }
+    }
+
+    #[test]
+    fn a_swelling_creeper_grows_upward_and_outward() {
+        let skel = skeleton_for("creeper");
+        let rest = creeper_head_height(&skel, 0.0);
+        let full = creeper_head_height(&skel, MAX_SWELL);
+        assert!(
+            (rest - 1.626).abs() < 0.01,
+            "a resting creeper should stand 1.625 blocks tall, not {rest}"
+        );
+        assert!(
+            full > rest * 1.08,
+            "at full fuse the creeper reached {full} blocks against {rest} at rest — the vertical \
+             factor is ~1.11, so this is not growing"
+        );
+        // Width: the head cube's half-extent is 4 texels either side.
+        let i = skel.index_of("head").expect("head");
+        let flank = |swell: f32| {
+            skel.pose_swelling(&AnimInput::REST, swell)[i]
+                .transform_point3(Vec3::new(4.0 / 16.0, 0.0, 0.0))
+                .x
+        };
+        assert!(
+            flank(MAX_SWELL) > flank(0.0) * 1.3,
+            "the creeper widened from {} to {}; the horizontal factor is ~1.4",
+            flank(0.0),
+            flank(MAX_SWELL)
+        );
+    }
+
+    #[test]
+    fn max_swell_scale_bounds_every_point_of_the_fuse() {
+        // `MAX_SWELL_SCALE` is what a culling box must be widened by. If it ever
+        // stops being an upper bound, the box it sizes stops containing the mob.
+        for step in 0..=4096 {
+            let swell = MAX_SWELL * step as f32 / 4096.0;
+            for axis in creeper_swell_scale(swell) {
+                assert!(
+                    axis <= MAX_SWELL_SCALE,
+                    "swell {swell} scaled by {axis}, above the stated bound {MAX_SWELL_SCALE}"
+                );
+            }
+        }
+        // And it is not vacuously loose: the peak really does approach it.
+        assert!(creeper_swell_scale(MAX_SWELL)[0] > MAX_SWELL_SCALE * 0.98);
     }
 
     #[test]
