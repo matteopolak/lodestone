@@ -209,6 +209,19 @@ fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<
     }
 }
 
+/// The number of progressive crack-overlay stages (`destroy_stage_0..=9`),
+/// matching vanilla's `getDestroyStage` range.
+pub const CRACK_STAGE_COUNT: usize = 10;
+
+/// The `block/destroy_stage_<stage>` crack-overlay sprite location. `stage` is
+/// `0..CRACK_STAGE_COUNT`; these sprites are referenced by no block model, so
+/// they must be stitched into the atlas explicitly (like fluids).
+fn crack_stage_location(stage: usize) -> ResourceLocation {
+    format!("minecraft:block/destroy_stage_{stage}")
+        .parse()
+        .expect("valid destroy_stage location")
+}
+
 /// The `block/` texture locations of a fluid's still and flow sprites.
 fn fluid_texture_locations(kind: FluidKind) -> [ResourceLocation; 2] {
     let (still, flow) = match kind {
@@ -278,6 +291,10 @@ pub struct BlockModels {
     /// The default (plains) tint colours the baked quads' `tint_index` values
     /// index into. Uploaded to the model shader; see [`Self::tint_palette`].
     tint_palette: Vec<[f32; 4]>,
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of each `destroy_stage_N`
+    /// crack-overlay sprite, indexed by stage `0..CRACK_STAGE_COUNT`. The
+    /// mining crack pass re-draws a block's model geometry sampling these.
+    crack_stages: [[f32; 4]; CRACK_STAGE_COUNT],
 }
 
 impl BlockModels {
@@ -364,6 +381,10 @@ impl BlockModels {
 
         let water_sprites = resolve_fluid_sprites(&atlas, FluidKind::Water);
         let lava_sprites = resolve_fluid_sprites(&atlas, FluidKind::Lava);
+        let crack_stages = std::array::from_fn(|stage| {
+            let uv = sprite_uv(&atlas, &crack_stage_location(stage));
+            [uv.min[0], uv.min[1], uv.max[0], uv.max[1]]
+        });
 
         Ok(Self {
             atlas,
@@ -373,6 +394,7 @@ impl BlockModels {
             water_sprites,
             lava_sprites,
             tint_palette: palette.colors().to_vec(),
+            crack_stages,
         })
     }
 
@@ -428,6 +450,16 @@ impl BlockModels {
         self.state(state_id).layer
     }
 
+    /// Normalised atlas UVs `[u0, v0, u1, v1]` of the `destroy_stage_<stage>`
+    /// crack-overlay sprite, for the mining crack pass to re-texture a block's
+    /// model geometry. `stage` is the vanilla destroy stage `0..=9` (the value
+    /// `Mining::destroy_stage` / `BlockDestructionOverlays::stage_at` yield in
+    /// the game layer); out-of-range stages return `None`.
+    #[must_use]
+    pub fn crack_stage_uv(&self, stage: u8) -> Option<[f32; 4]> {
+        self.crack_stages.get(stage as usize).copied()
+    }
+
     /// The number of states baked.
     #[must_use]
     pub fn state_count(&self) -> usize {
@@ -466,15 +498,17 @@ fn resolve_fluid_sprites(atlas: &Atlas, kind: FluidKind) -> FluidSprites {
 /// The first-frame UV rect of an atlas sprite as a [`SpriteUv`], or a zero rect
 /// when the sprite is absent.
 fn sprite_uv(atlas: &Atlas, loc: &ResourceLocation) -> SpriteUv {
-    atlas
-        .sprite(loc)
+    let sprite = atlas.sprite(loc);
+    let anim = sprite.map_or(0, |s| s.anim_slot);
+    sprite
         .and_then(|s| s.frame_uv(0, atlas.width, atlas.height))
         .map_or(
             SpriteUv {
                 min: [0.0, 0.0],
                 max: [0.0, 0.0],
+                anim: 0,
             },
-            |(min, max)| SpriteUv { min, max },
+            |(min, max)| SpriteUv { min, max, anim },
         )
 }
 
@@ -530,6 +564,7 @@ fn build_complete_atlas(
             let _ = builder.load(manager, &loc);
         }
     }
+    // NEG-CONTROL: crack load removed
     builder.build()
 }
 
@@ -604,6 +639,7 @@ mod tests {
             tint_index: None,
             shade: true,
             layer: 0,
+            anim: 0,
         }
     }
 

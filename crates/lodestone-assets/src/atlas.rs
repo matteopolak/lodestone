@@ -97,6 +97,16 @@ pub struct AtlasSprite {
     /// Playback order over the physical frames. For a static sprite this is a
     /// single entry `{ index: 0 }`.
     pub frames: Vec<AnimationFrame>,
+    /// Global animation slot id for this sprite, or `0` when the sprite is
+    /// static (`frame_count == 1`). Animated sprites are numbered `1, 2, …` in
+    /// the atlas's deterministic (location-sorted) sprite order, so a baked
+    /// quad can carry the one-byte slot and the renderer can drive every
+    /// sprite's timeline from a per-slot uniform. See [`AnimTable`].
+    ///
+    /// Assigned by [`AtlasBuilder::build`]. Capped at [`u8::MAX`]: a pack with
+    /// more than 255 animated sprites leaves the overflow static rather than
+    /// aliasing slots (vanilla ships ~52, well under the cap).
+    pub anim_slot: u8,
 }
 
 impl AtlasSprite {
@@ -196,6 +206,117 @@ impl AtlasSprite {
             next,
             blend,
         }
+    }
+}
+
+/// One frame in an animation slot's timeline: which physical strip frame to
+/// display and for how many ticks. This is the version-free, GPU-free playback
+/// description a renderer turns into its own timing primitive (for example
+/// `lodestone-render`'s `SpriteAnimation`); the atlas itself never advances it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnimSlotFrame {
+    /// Physical frame index within the sprite's vertical strip.
+    pub index: u32,
+    /// How long this timeline slot is displayed, in ticks (`>= 1`).
+    pub hold_ticks: u32,
+}
+
+/// The playback data for one global animation slot, resolved from an animated
+/// [`AtlasSprite`].
+///
+/// A slot's identity is its [`location`](Self::location); its id is its
+/// position in [`AnimTable::slots`] plus one (slot `0` is the static sentinel,
+/// carried on [`AtlasSprite::anim_slot`] and [`BakedQuad::anim`]).
+///
+/// [`BakedQuad::anim`]: crate::bake::BakedQuad::anim
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimSlot {
+    /// The animated sprite this slot plays.
+    pub location: ResourceLocation,
+    /// The playback timeline over the sprite's physical frames.
+    pub frames: Vec<AnimSlotFrame>,
+    /// Whether the renderer should blend between successive frames.
+    pub interpolate: bool,
+    /// Normalised V height of one physical frame in the atlas
+    /// (`frame_height / atlas_height`). Physical frame `n`'s vertical offset
+    /// from frame 0 is `n * frame_v`, so a renderer advances the baked
+    /// (frame-0) UVs by sampling `uv + vec2(0, index * frame_v)`.
+    pub frame_v: f32,
+}
+
+/// Maps animated sprites to dense global animation slots.
+///
+/// Built once per [`Atlas`] from the slot ids the atlas stamped onto its
+/// sprites (see [`AtlasSprite::anim_slot`]). The baker copies each sprite's
+/// slot onto every quad that samples it; the renderer builds one per-slot
+/// uniform from this table and indexes it by that slot. Because both sides read
+/// the same atlas-assigned numbering, they agree by construction with no shared
+/// mutable state.
+///
+/// Slot `0` is the static sentinel and has no entry here; [`slots`](Self::slots)
+/// holds slot `1` at index `0`, slot `2` at index `1`, and so on.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AnimTable {
+    slots: Vec<AnimSlot>,
+}
+
+impl AnimTable {
+    /// Resolves every animated sprite in `atlas` into its playback slot.
+    ///
+    /// The result is ordered by slot id (`1, 2, …`), matching the numbering
+    /// [`AtlasBuilder::build`] wrote onto each [`AtlasSprite::anim_slot`], so
+    /// `table.slots()[slot - 1]` is the data for the quads carrying that slot.
+    #[must_use]
+    pub fn from_atlas(atlas: &Atlas) -> Self {
+        let atlas_h = atlas.height.max(1) as f32;
+        let mut with_id: Vec<(u8, AnimSlot)> = atlas
+            .sprites()
+            .iter()
+            .filter(|s| s.anim_slot != 0)
+            .map(|s| {
+                let frames = s
+                    .frames
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, f)| AnimSlotFrame {
+                        index: f.index,
+                        hold_ticks: s.slot_time(slot),
+                    })
+                    .collect();
+                (
+                    s.anim_slot,
+                    AnimSlot {
+                        location: s.location.clone(),
+                        frames,
+                        interpolate: s.interpolate,
+                        frame_v: s.frame_height as f32 / atlas_h,
+                    },
+                )
+            })
+            .collect();
+        // Order by the atlas-assigned slot id so index `i` is slot `i + 1`.
+        with_id.sort_by_key(|(id, _)| *id);
+        Self {
+            slots: with_id.into_iter().map(|(_, slot)| slot).collect(),
+        }
+    }
+
+    /// The playback slots, ordered by slot id (index `i` is slot `i + 1`).
+    #[must_use]
+    pub fn slots(&self) -> &[AnimSlot] {
+        &self.slots
+    }
+
+    /// The number of animated slots (excludes the static sentinel `0`).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether the atlas has no animated sprites.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
     }
 }
 
@@ -626,10 +747,23 @@ impl AtlasBuilder {
                     frametime: s.frametime,
                     interpolate: s.interpolate,
                     frames: s.frames.clone(),
+                    anim_slot: 0,
                 }
             })
             .collect();
         sprites.sort_by_key(|s| s.location.to_string());
+
+        // Assign global animation slots in the deterministic sorted order so the
+        // baker (which stamps each quad with its sprite's slot) and the renderer
+        // (which builds one uniform per slot) agree by construction. Slot `0` is
+        // the static sentinel; animated sprites take `1..=u8::MAX`.
+        let mut next_slot: u16 = 1;
+        for sprite in &mut sprites {
+            if sprite.is_animated() && next_slot <= u16::from(u8::MAX) {
+                sprite.anim_slot = next_slot as u8;
+                next_slot += 1;
+            }
+        }
 
         let index = sprites
             .iter()

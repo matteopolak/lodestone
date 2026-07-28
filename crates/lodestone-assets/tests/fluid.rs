@@ -154,6 +154,7 @@ fn uv(a: f32, b: f32, c: f32, d: f32) -> SpriteUv {
     SpriteUv {
         min: [a, b],
         max: [c, d],
+        anim: 0,
     }
 }
 

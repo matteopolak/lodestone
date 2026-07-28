@@ -96,7 +96,10 @@ mod source;
 mod texture;
 pub mod tint;
 
-pub use atlas::{Atlas, AtlasBuilder, AtlasSprite, MipCap, MipLevelRef, SpriteFrameSample};
+pub use atlas::{
+    AnimSlot, AnimSlotFrame, AnimTable, Atlas, AtlasBuilder, AtlasSprite, MipCap, MipLevelRef,
+    SpriteFrameSample,
+};
 pub use atlas_source::{AtlasDefinition, AtlasSource, AtlasSpriteEntry};
 pub use bake::{
     BakeOptions, BakedModel, BakedQuad, BlockBaker, FirstWeight, ModelTransform, SeededWeight,

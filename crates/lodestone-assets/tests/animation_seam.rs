@@ -21,6 +21,7 @@ fn sprite(frametime: u32, interpolate: bool, frames: Vec<AnimationFrame>) -> Atl
         frametime,
         interpolate,
         frames,
+        anim_slot: 0,
     }
 }
 

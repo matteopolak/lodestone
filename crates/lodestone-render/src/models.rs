@@ -616,6 +616,7 @@ mod tests {
             tint_index: None,
             shade: true,
             layer: 0,
+            anim: 0,
         }
     }
 
@@ -730,6 +731,7 @@ mod tests {
             tint_index: None,
             shade: true,
             layer: 0,
+            anim: 0,
         }
     }
 
@@ -866,6 +868,7 @@ mod tests {
             let unit = SpriteUv {
                 min: [0.0, 0.0],
                 max: [1.0, 1.0],
+                anim: 0,
             };
             FluidSprites {
                 still: unit,
