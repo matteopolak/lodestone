@@ -29,7 +29,8 @@
 //! was an atlas to draw from, so a jar-less run still shows *something* in an
 //! occupied slot.
 
-use lodestone_game::menu::{CraftLayout, Menu, MenuKind};
+use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
+use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
 use lodestone_render::{BlockModels, ModelVertex};
 
 use lodestone_assets::{ItemAtlas, ResourceLocation};
@@ -185,8 +186,7 @@ impl ContainerGeometry {
         let layout = slot_layout(menu);
         let w = width.max(1) as f32;
         let h = height.max(1) as f32;
-        let x = ((w - layout.width) * 0.5).max(8.0);
-        let y = ((h - layout.height) * 0.5).max(8.0);
+        let (x, y) = panel_origin(&layout, width, height);
         let mut b = Builder::new(w, h);
 
         b.rect_px(
@@ -431,6 +431,315 @@ fn crafting_layout(craft: CraftLayout, container_size: usize) -> SlotLayout {
         width: 176.0,
         height: hotbar_y + 24.0,
         slots,
+    }
+}
+
+/// Where the panel's top-left corner lands in viewport pixels.
+///
+/// The single source of the centring offset. [`ContainerGeometry::build_inner`]
+/// and [`hit_test`] must agree to the pixel or the screen and the mouse disagree
+/// about which slot is which — a bug that reads as "clicks land one slot off"
+/// and is invisible in any screenshot.
+#[must_use]
+pub fn panel_origin(layout: &SlotLayout, width: u32, height: u32) -> (f32, f32) {
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    (
+        ((w - layout.width) * 0.5).max(8.0),
+        ((h - layout.height) * 0.5).max(8.0),
+    )
+}
+
+/// What a viewport pixel is over, in an open menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuHit {
+    /// A menu slot, by its real menu-slot index — feed it straight to
+    /// [`Click`](lodestone_game::click::Click).
+    Slot(usize),
+    /// Inside the panel but not over a slot. Vanilla does **nothing** here; it
+    /// is deliberately not a drop.
+    Panel,
+    /// Outside the panel. Vanilla treats a click here as the outside-slot
+    /// sentinel (`-999`), i.e. throw the cursor stack into the world.
+    Outside,
+}
+
+/// Resolves a viewport pixel to a menu slot, mirroring vanilla
+/// `AbstractContainerScreen.findSlot` / `hasClickedOutside`.
+///
+/// The hit rect is vanilla's `isHovering(x, y, 16, 16, …)`: the 16×16 cell grown
+/// by one pixel on every side, which is exactly the 18×18 well this module
+/// draws — so the clickable area and the visible area are the same rectangle by
+/// construction rather than by coincidence.
+///
+/// Coordinates are raw viewport pixels, the same space the geometry is built in;
+/// this module applies no GUI scale of its own, so a caller that scales the
+/// overlay must scale the cursor identically.
+#[must_use]
+pub fn hit_test(menu: &Menu, width: u32, height: u32, x: f32, y: f32) -> MenuHit {
+    let layout = slot_layout(menu);
+    let (px, py) = panel_origin(&layout, width, height);
+    let local_x = x - px;
+    let local_y = y - py;
+    if local_x < 0.0 || local_y < 0.0 || local_x >= layout.width || local_y >= layout.height {
+        return MenuHit::Outside;
+    }
+    for rect in &layout.slots {
+        if local_x >= rect.x - 1.0
+            && local_x < rect.x + rect.w + 1.0
+            && local_y >= rect.y - 1.0
+            && local_y < rect.y + rect.h + 1.0
+        {
+            return MenuHit::Slot(rect.menu_index);
+        }
+    }
+    MenuHit::Panel
+}
+
+/// Which mouse button a menu gesture used.
+///
+/// `Pick` is vanilla's `keyPickItem` (middle-click by default), which only does
+/// anything with infinite materials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuButton {
+    /// Primary / left.
+    Left,
+    /// Secondary / right.
+    Right,
+    /// Pick-block (middle by default).
+    Pick,
+}
+
+impl MenuButton {
+    /// The raw button number vanilla puts in the packet for an ordinary click.
+    fn number(self) -> i32 {
+        match self {
+            Self::Left | Self::Pick => 0,
+            Self::Right => 1,
+        }
+    }
+
+    /// The drag distribution type this button paints with
+    /// ([`drag_type`](lodestone_game::click::drag_type)).
+    fn drag_kind(self) -> i32 {
+        match self {
+            Self::Left => drag_type::EVEN,
+            Self::Right => drag_type::ONE,
+            Self::Pick => drag_type::CLONE,
+        }
+    }
+}
+
+/// What the caller must tell the input machine about the menu at gesture time.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuContext {
+    /// Whether the cursor (carried stack) currently holds something. Read it off
+    /// the *predicted* menu: `menu.carried().is_some()`.
+    pub cursor_loaded: bool,
+    /// Whether the player has infinite materials (creative), which enables
+    /// pick-block cloning and the stack-per-slot drag type.
+    pub creative: bool,
+}
+
+/// The GUI-side press/drag/release protocol, turning mouse events into the
+/// [`Click`]s `Menus::click` expects.
+///
+/// This is the piece between [`hit_test`] and
+/// [`Menus::click`](lodestone_game::menus::Menus::click), and it exists as a state
+/// machine rather than a `fn(hit) -> Click` because **vanilla does not send a
+/// click on mouse-down when the cursor is loaded**. Read
+/// `AbstractContainerScreen.mouseClicked`: with a non-empty carried stack it only
+/// sets `isQuickCrafting` and sends *nothing*; the packet goes out on
+/// `mouseReleased`, as either a plain `PICKUP` (if the mouse never moved onto a
+/// slot) or the `QUICK_CRAFT` start/add…/end sequence (if it did). A naive
+/// press-to-`PICKUP` mapper looks right for every single-slot interaction and
+/// silently loses the entire paint-drag gesture — the "distribute one item per
+/// slot" right-drag most players use to fill a crafting grid.
+///
+/// The empty-cursor half *is* sent on press (`PICKUP` / `QUICK_MOVE` / `CLONE`),
+/// and vanilla's `skipNextRelease` then suppresses the release, which is what
+/// [`skip_next_release`](Self::press) models.
+///
+/// Ordering contract: [`press`](Self::press), then zero or more
+/// [`dragged`](Self::dragged), then [`release`](Self::release). `dragged` never
+/// emits — vanilla accumulates painted slots and sends the whole sequence from
+/// `quickCraftToSlots` at release.
+#[derive(Debug, Clone, Default)]
+pub struct MenuInput {
+    /// The button that armed a paint-drag, and the slots painted so far.
+    drag: Option<(MenuButton, Vec<usize>)>,
+    /// Set when the press already sent a click, so the release must not send one.
+    skip_next_release: bool,
+    /// Slot the previous press landed on, for double-click detection.
+    last_slot: Option<usize>,
+    /// The pending release should gather (`PICKUP_ALL`) instead.
+    double_click: bool,
+}
+
+impl MenuInput {
+    /// A fresh input machine with nothing armed.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether a paint-drag is currently armed. While this is true the screen
+    /// should draw the drag preview rather than a hover highlight.
+    #[must_use]
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Mouse-button press. Returns the clicks to send **now** (empty for the
+    /// loaded-cursor case, which sends on release).
+    ///
+    /// `is_repeat` is the platform's double-click flag; combined with hitting the
+    /// same slot twice it arms the gather that fires on release.
+    pub fn press(
+        &mut self,
+        hit: MenuHit,
+        button: MenuButton,
+        shift: bool,
+        ctx: MenuContext,
+        is_repeat: bool,
+    ) -> Vec<Click> {
+        let cloning = button == MenuButton::Pick && ctx.creative;
+        let slot_hit = match hit {
+            MenuHit::Slot(i) => Some(i),
+            _ => None,
+        };
+        self.double_click = is_repeat && slot_hit.is_some() && self.last_slot == slot_hit;
+        self.last_slot = slot_hit;
+        self.skip_next_release = false;
+        self.drag = None;
+
+        // A press with `Pick` and no infinite materials is vanilla's hotbar-rebind
+        // path, which sends no container click at all.
+        if button == MenuButton::Pick && !cloning {
+            return Vec::new();
+        }
+
+        // Inside the panel but not over a slot: vanilla's `slotId` stays -1 and the
+        // whole branch is skipped. Deliberately *not* a drop.
+        let slot = match hit {
+            MenuHit::Slot(i) => i as i32,
+            MenuHit::Outside => OUTSIDE_SLOT,
+            MenuHit::Panel => return Vec::new(),
+        };
+
+        if ctx.cursor_loaded {
+            // Arm a paint-drag and send nothing; the release decides.
+            self.drag = Some((button, Vec::new()));
+            return Vec::new();
+        }
+
+        self.skip_next_release = true;
+        let input = if cloning {
+            ContainerInput::Clone
+        } else if shift && slot != OUTSIDE_SLOT {
+            ContainerInput::QuickMove
+        } else if slot == OUTSIDE_SLOT {
+            // Vanilla sends THROW at -999 here. The server no-ops it (its THROW
+            // branch requires `slotIndex >= 0`), but sending what vanilla sends
+            // keeps the packet stream identical rather than merely equivalent.
+            ContainerInput::Throw
+        } else {
+            ContainerInput::Pickup
+        };
+        vec![Click {
+            slot,
+            button: button.number(),
+            input,
+        }]
+    }
+
+    /// The cursor moved to `hit` with the button still down. Records a painted
+    /// slot; never emits.
+    ///
+    /// Filtering (cursor has enough items, the slot may accept them) is left to
+    /// [`Menu::do_click`](lodestone_game::menu::Menu)'s own `can_drag_place`,
+    /// which both sides run — an `ADD` the server rejects is simply not recorded
+    /// there, so painting liberally cannot desynchronise.
+    pub fn dragged(&mut self, hit: MenuHit) {
+        let MenuHit::Slot(i) = hit else {
+            return;
+        };
+        let Some((_, slots)) = self.drag.as_mut() else {
+            return;
+        };
+        if !slots.contains(&i) {
+            slots.push(i);
+        }
+    }
+
+    /// Mouse-button release. Returns the clicks to send.
+    pub fn release(
+        &mut self,
+        hit: MenuHit,
+        button: MenuButton,
+        shift: bool,
+        ctx: MenuContext,
+    ) -> Vec<Click> {
+        let drag = self.drag.take();
+        let gather = std::mem::take(&mut self.double_click);
+        let skip = std::mem::take(&mut self.skip_next_release);
+
+        // A release on a different button than the one that armed the drag cancels
+        // it outright (vanilla returns early and swallows the next release too).
+        if drag.as_ref().is_some_and(|(armed, _)| *armed != button) {
+            self.skip_next_release = true;
+            return Vec::new();
+        }
+
+        if gather && button == MenuButton::Left {
+            if let MenuHit::Slot(i) = hit {
+                return vec![Click::double(i)];
+            }
+        }
+        if skip {
+            return Vec::new();
+        }
+
+        let painted = drag.map(|(_, slots)| slots).unwrap_or_default();
+        if !painted.is_empty() {
+            let kind = button.drag_kind();
+            let mut clicks = Vec::with_capacity(painted.len() + 2);
+            clicks.push(quick_craft(OUTSIDE_SLOT, drag_header::START, kind));
+            for i in painted {
+                clicks.push(quick_craft(i as i32, drag_header::ADD, kind));
+            }
+            clicks.push(quick_craft(OUTSIDE_SLOT, drag_header::END, kind));
+            return clicks;
+        }
+
+        if !ctx.cursor_loaded {
+            return Vec::new();
+        }
+        let slot = match hit {
+            MenuHit::Slot(i) => i as i32,
+            MenuHit::Outside => OUTSIDE_SLOT,
+            MenuHit::Panel => return Vec::new(),
+        };
+        let input = if button == MenuButton::Pick && ctx.creative {
+            ContainerInput::Clone
+        } else if shift && slot != OUTSIDE_SLOT {
+            ContainerInput::QuickMove
+        } else {
+            ContainerInput::Pickup
+        };
+        vec![Click {
+            slot,
+            button: button.number(),
+            input,
+        }]
+    }
+}
+
+fn quick_craft(slot: i32, header: i32, kind: i32) -> Click {
+    Click {
+        slot,
+        button: quick_craft_mask(header, kind),
+        input: ContainerInput::QuickCraft,
     }
 }
 
@@ -802,3 +1111,307 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_game::item::ItemStack;
+
+    const VIEW: (u32, u32) = (1280, 720);
+
+    fn survival() -> MenuContext {
+        MenuContext {
+            cursor_loaded: false,
+            creative: false,
+        }
+    }
+
+    fn loaded() -> MenuContext {
+        MenuContext {
+            cursor_loaded: true,
+            creative: false,
+        }
+    }
+
+    /// Centre of a slot's hit rect, in viewport pixels.
+    fn slot_point(menu: &Menu, menu_index: usize) -> (f32, f32) {
+        let layout = slot_layout(menu);
+        let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
+        let rect = layout
+            .slots
+            .iter()
+            .find(|r| r.menu_index == menu_index)
+            .unwrap_or_else(|| panic!("menu index {menu_index} has no rect"));
+        (px + rect.x + rect.w * 0.5, py + rect.y + rect.h * 0.5)
+    }
+
+    // ---------------------------------------------------------------------
+    // Layout: the transposition class of bug.
+    //
+    // These are the cheap checks that catch what is genuinely hard to see by
+    // eye: a plausible, fully populated inventory whose slots are all shifted
+    // by a constant. Every `SlotRect` carries a real menu index, so the gate is
+    // that hit-testing a rect's own centre returns that same index — round-trip,
+    // for every slot, in both layouts.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn every_slot_rect_hit_tests_back_to_its_own_menu_index() {
+        for menu in [Menu::player(), Menu::crafting(3, 3), Menu::generic(27)] {
+            let layout = slot_layout(&menu);
+            assert_eq!(
+                layout.slots.len(),
+                menu.slot_count(),
+                "every menu slot must be laid out exactly once"
+            );
+            let mut seen = vec![false; menu.slot_count()];
+            for rect in &layout.slots {
+                assert!(
+                    !std::mem::replace(&mut seen[rect.menu_index], true),
+                    "menu index {} laid out twice",
+                    rect.menu_index
+                );
+                let (x, y) = slot_point(&menu, rect.menu_index);
+                assert_eq!(
+                    hit_test(&menu, VIEW.0, VIEW.1, x, y),
+                    MenuHit::Slot(rect.menu_index),
+                    "hit test disagreed with the rect it came from"
+                );
+            }
+            assert!(seen.into_iter().all(|s| s), "a menu slot was never drawn");
+        }
+    }
+
+    /// The `MenuKind` trap, stated as an assertion rather than a comment: the
+    /// player screen's hotbar starts at 36 and it owns armour and an off-hand;
+    /// a crafting table is a `Generic { container_size: 10 }` whose hotbar
+    /// starts at **37** and which has neither. A single shared offset cannot
+    /// satisfy both.
+    #[test]
+    fn crafting_and_player_hotbars_are_not_at_the_same_index() {
+        let player = Menu::player();
+        assert_eq!(player.kind(), MenuKind::Player);
+        assert_eq!(player.slot_count(), 46);
+
+        let table = Menu::crafting(3, 3);
+        assert_eq!(table.kind(), MenuKind::Generic { container_size: 10 });
+        assert_eq!(table.slot_count(), 46);
+
+        // Same slot count, different meaning at the same index. Menu index 36 is
+        // the player screen's first hotbar cell and the crafting screen's *last*
+        // main-storage cell; the crafting hotbar begins one later.
+        let layout = slot_layout(&table);
+        let hotbar_first = layout
+            .slots
+            .iter()
+            .find(|r| r.menu_index == 37)
+            .expect("crafting hotbar starts at 37");
+        let main_last = layout
+            .slots
+            .iter()
+            .find(|r| r.menu_index == 36)
+            .expect("crafting main storage ends at 36");
+        assert!(
+            hotbar_first.y > main_last.y,
+            "the crafting hotbar row must sit below main storage; got hotbar y={} main y={}",
+            hotbar_first.y,
+            main_last.y
+        );
+        // And the player screen has slots the crafting screen does not.
+        assert!(slot_layout(&player).slots.iter().any(|r| r.menu_index == 45));
+        assert_eq!(
+            player.craft_layout().map(|c| (c.width, c.height)),
+            Some((2, 2))
+        );
+        assert_eq!(
+            table.craft_layout().map(|c| (c.width, c.height)),
+            Some((3, 3))
+        );
+    }
+
+    /// The crafting screen must not lay the result slot on top of a grid cell —
+    /// which is exactly what the plain 9-wide generic run would do with a
+    /// container size of 10.
+    #[test]
+    fn the_result_slot_is_not_inside_the_grid() {
+        let table = Menu::crafting(3, 3);
+        let (rx, ry) = slot_point(&table, 0);
+        assert_eq!(hit_test(&table, VIEW.0, VIEW.1, rx, ry), MenuHit::Slot(0));
+        for cell in 1..=9 {
+            let (cx, cy) = slot_point(&table, cell);
+            assert!(
+                (cx - rx).abs() > 1.0 || (cy - ry).abs() > 1.0,
+                "grid cell {cell} landed on top of the result slot"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The press/drag/release protocol.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn an_empty_cursor_sends_on_press_and_nothing_on_release() {
+        let mut input = MenuInput::new();
+        let clicks = input.press(MenuHit::Slot(37), MenuButton::Left, false, survival(), false);
+        assert_eq!(clicks, vec![Click::left(37)]);
+        // `skipNextRelease`: the release must not send a second packet.
+        assert!(
+            input
+                .release(MenuHit::Slot(37), MenuButton::Left, false, survival())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn shift_press_is_a_quick_move() {
+        let mut input = MenuInput::new();
+        assert_eq!(
+            input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), false),
+            vec![Click::shift(0)],
+            "shift-clicking the result slot must be QUICK_MOVE — the repeat-craft gesture"
+        );
+    }
+
+    /// The reason this is a state machine: with a loaded cursor the press sends
+    /// **nothing**, and the ordinary click is emitted by the release. A
+    /// press-to-`PICKUP` mapper passes every other test here and loses the drag.
+    #[test]
+    fn a_loaded_cursor_sends_the_click_on_release_not_on_press() {
+        let mut input = MenuInput::new();
+        assert!(
+            input
+                .press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false)
+                .is_empty(),
+            "vanilla only arms isQuickCrafting on press"
+        );
+        assert!(input.is_dragging());
+        assert_eq!(
+            input.release(MenuHit::Slot(1), MenuButton::Right, false, loaded()),
+            vec![Click::right(1)],
+            "no slot was painted, so it degrades to a plain place-one"
+        );
+        assert!(!input.is_dragging());
+    }
+
+    #[test]
+    fn painting_slots_emits_the_full_quick_craft_sequence() {
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false);
+        for cell in [1usize, 2, 4, 5] {
+            input.dragged(MenuHit::Slot(cell));
+        }
+        input.dragged(MenuHit::Slot(5)); // a repeat must not be painted twice
+        let clicks = input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded());
+        assert_eq!(clicks.len(), 6, "start + 4 slots + end, got {clicks:?}");
+        assert_eq!(clicks[0].slot, OUTSIDE_SLOT);
+        assert_eq!(clicks[5].slot, OUTSIDE_SLOT);
+        assert!(
+            clicks
+                .iter()
+                .all(|c| c.input == ContainerInput::QuickCraft)
+        );
+        assert_eq!(
+            clicks[1..5].iter().map(|c| c.slot).collect::<Vec<_>>(),
+            vec![1, 2, 4, 5]
+        );
+        // Right-drag distributes one item per slot.
+        for c in &clicks {
+            assert_eq!(
+                lodestone_game::click::quick_craft_type(c.button),
+                drag_type::ONE
+            );
+        }
+    }
+
+    /// The whole point of the sequence: driven into a real menu it distributes
+    /// exactly as vanilla does, filling a 2×2 of the crafting grid one plank per
+    /// cell. Nothing here fills the result slot — that is the server's.
+    #[test]
+    fn the_emitted_sequence_fills_a_crafting_grid_one_per_cell() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_carried(Some(ItemStack::new(
+            "minecraft:oak_planks".parse().unwrap(),
+            8,
+        )));
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false);
+        for cell in [1usize, 2, 4, 5] {
+            input.dragged(MenuHit::Slot(cell));
+        }
+        for click in input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded()) {
+            click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
+        }
+        for cell in [1usize, 2, 4, 5] {
+            assert_eq!(
+                menu.slot_item(cell).map(ItemStack::count),
+                Some(1),
+                "cell {cell} must hold exactly one plank"
+            );
+        }
+        assert_eq!(menu.carried().map(ItemStack::count), Some(4));
+        assert_eq!(
+            menu.slot_item(0),
+            None,
+            "the client must never put anything in the result slot"
+        );
+    }
+
+    #[test]
+    fn a_click_inside_the_panel_but_off_a_slot_does_nothing() {
+        let mut input = MenuInput::new();
+        assert!(
+            input
+                .press(MenuHit::Panel, MenuButton::Left, false, survival(), false)
+                .is_empty()
+        );
+        assert!(!input.is_dragging());
+        assert!(
+            input
+                .release(MenuHit::Panel, MenuButton::Left, false, loaded())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn releasing_a_loaded_cursor_outside_drops_it() {
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Outside, MenuButton::Left, false, loaded(), false);
+        assert_eq!(
+            input.release(MenuHit::Outside, MenuButton::Left, false, loaded()),
+            vec![Click::drop_cursor()]
+        );
+    }
+
+    #[test]
+    fn a_second_press_on_the_same_slot_gathers_on_release() {
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), false);
+        input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded());
+        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), true);
+        assert_eq!(
+            input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded()),
+            vec![Click::double(9)]
+        );
+    }
+
+    #[test]
+    fn pick_block_only_clones_with_infinite_materials() {
+        let creative = MenuContext {
+            cursor_loaded: false,
+            creative: true,
+        };
+        let mut input = MenuInput::new();
+        assert_eq!(
+            input.press(MenuHit::Slot(3), MenuButton::Pick, false, creative, false),
+            vec![Click::clone_slot(3)]
+        );
+        let mut survival_input = MenuInput::new();
+        assert!(
+            survival_input
+                .press(MenuHit::Slot(3), MenuButton::Pick, false, survival(), false)
+                .is_empty(),
+            "middle-click in survival is a hotbar rebind, not a container click"
+        );
+    }
+}

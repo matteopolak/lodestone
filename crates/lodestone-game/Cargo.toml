@@ -101,6 +101,18 @@ live-place = [
     "dep:tokio",
     "lodestone-client/live-v770",
 ]
+# Wires **crafting** end to end through the real client against the SURVIVAL
+# oracle (:25565, RCON :25566): open a real crafting table by interacting with
+# it, move planks into the grid with real `ContainerClick` packets predicted by
+# the click machine, and assert the *server* fills the result slot and consumes
+# the ingredients when it is taken. Every result-slot assertion reads the
+# server's own `container_set_slot` / `container_set_content`; the client never
+# matches a recipe. `#[ignore]`d.
+live-craft = [
+    "dep:lodestone-registry",
+    "dep:tokio",
+    "lodestone-client/live-v770",
+]
 
 [dev-dependencies]
 serde_json = { workspace = true }

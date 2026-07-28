@@ -21,6 +21,10 @@
 //! server's container packets, which a version adapter lowers from
 //! `container_set_slot` / `container_set_content` and friends.
 
+use lodestone_model::{
+    ClientAction, ContainerClickType, ContainerSlotChange, ItemStack as ModelItemStack,
+};
+
 use crate::{
     click::{Click, ClickOutcome, ContainerInput, PlayerCtx},
     item::ItemStack,
@@ -49,6 +53,67 @@ pub struct ClickIntent {
     pub carried: Option<ItemStack>,
     /// World-side effects (drops) the prediction produced.
     pub outcome: ClickOutcome,
+}
+
+impl ClickIntent {
+    /// Lowers this intent into the canonical [`ClientAction::ContainerClick`]
+    /// for `window_id`, ready for `ClientHandle::send_action`.
+    ///
+    /// This is the seam between the click machine and the wire, and it lives
+    /// here rather than in each caller because it embeds one non-obvious rule:
+    /// **the window id is the menu's, not the click's**. A click on the player's
+    /// own screen goes to window `0`; a click in an open container goes to that
+    /// container's id — including clicks on the player-inventory rows *inside*
+    /// it, which are that container's slots, not window 0's. Sending a crafting
+    /// grid click to window 0 makes the server reject the slot index outright.
+    ///
+    /// Component fidelity: the model's stack carries no component patch and
+    /// every adapter that ships writes an empty patch for a predicted stack
+    /// anyway (26.2's `HashedStack` hashes the patch, and an empty one is what
+    /// the server compares against for plain items), so the lowering keeps item
+    /// and count only. A stack whose components the server does track will
+    /// simply hash-mismatch and be corrected, which is the reconcile seam doing
+    /// its job rather than a silent desync.
+    #[must_use]
+    pub fn to_action(&self, window_id: i32) -> ClientAction {
+        ClientAction::ContainerClick {
+            window_id,
+            state_id: self.state_id as i32,
+            slot: self.slot,
+            button: self.button,
+            click_type: click_type_of(self.input),
+            changed_slots: self
+                .changed_slots
+                .iter()
+                .map(|(slot, item)| ContainerSlotChange {
+                    slot: i32::from(*slot),
+                    item: item.as_ref().map(to_model_stack),
+                })
+                .collect(),
+            carried_item: self.carried.as_ref().map(to_model_stack),
+        }
+    }
+}
+
+/// The canonical click mode for a [`ContainerInput`]; a total 1:1 mapping, so a
+/// new mode on either side is a compile error rather than a silent default.
+fn click_type_of(input: ContainerInput) -> ContainerClickType {
+    match input {
+        ContainerInput::Pickup => ContainerClickType::Pickup,
+        ContainerInput::QuickMove => ContainerClickType::QuickMove,
+        ContainerInput::Swap => ContainerClickType::Swap,
+        ContainerInput::Clone => ContainerClickType::Clone,
+        ContainerInput::Throw => ContainerClickType::Throw,
+        ContainerInput::QuickCraft => ContainerClickType::QuickCraft,
+        ContainerInput::PickupAll => ContainerClickType::PickupAll,
+    }
+}
+
+fn to_model_stack(stack: &ItemStack) -> ModelItemStack {
+    ModelItemStack::new(
+        stack.item().clone(),
+        u32::try_from(stack.count()).unwrap_or(0),
+    )
 }
 
 /// A server-authoritative container update, lowered from a packet.
@@ -141,7 +206,21 @@ impl ClientMenu {
             slot: click.slot,
             button: click.button,
             input: click.input,
-            state_id: self.predicted.state_id(),
+            // **The server's** last state id, not the freshly bumped local one.
+            // Vanilla's client sends `containerMenu.getStateId()` — a value only
+            // ever *written* by the server (`setItem`/`initializeContents`); the
+            // client never increments it (`MultiPlayerGameMode.handleContainerInput`).
+            // `Menu::do_click` does bump, mirroring the server's own
+            // `incrementStateId`, so `predicted.state_id()` here is always
+            // `server + 1` and every single click would arrive **stale**:
+            // `ServerGamePacketListenerImpl.handleContainerClick` then takes the
+            // `broadcastFullState()` branch, throwing away the changed-slot
+            // prediction we just computed and re-sending all 46 slots. Worse for
+            // a gate than for a player: with a full resync on every click the
+            // server's reply is unconditionally its own truth, so "our
+            // prediction matched" becomes unfalsifiable. `confirmed` is only
+            // written by `reconcile`, so its id *is* the server's.
+            state_id: self.confirmed.state_id(),
             changed_slots,
             carried: self.predicted.carried().cloned(),
             outcome,

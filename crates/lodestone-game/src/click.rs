@@ -226,7 +226,21 @@ impl Menu {
         if !self.may_pickup(index) {
             return;
         }
-        // Repeat until nothing more moves or an output slot stops re-filling.
+        // Vanilla's repeat loop, verbatim: keep quick-moving while the slot
+        // still holds the same item it held before the move.
+        //
+        // On a **result slot** this is what makes one shift-click craft a whole
+        // stack — but only where something refills the result between
+        // iterations, and that is the server. A client's `CraftingMenu` is
+        // built with `ContainerLevelAccess.NULL`, so its `slotsChanged` never
+        // recomputes the recipe and the result slot stays empty after the first
+        // take; the loop then exits after exactly one craft. That is precisely
+        // what vanilla's client predicts too. The server runs this same loop
+        // over a menu that *does* refill, crafts until the grid runs out, and
+        // pushes the difference back as `container_set_slot`s, which
+        // `ClientMenu::reconcile` folds in. Predicting more than one craft here
+        // would mean matching the recipe locally — a guess overwriting the one
+        // slot the server owns outright.
         while let Some(template) = self.quick_move(index) {
             match self.slot_item(index) {
                 Some(current) if ItemStack::is_same_item(current, &template) => continue,
@@ -264,6 +278,7 @@ impl Menu {
                 };
                 if let Some(taken) = self.try_remove(index, amount, i32::MAX) {
                     self.set_carried(Some(taken));
+                    self.on_take(index);
                 }
             }
             // Both occupied.
@@ -287,10 +302,14 @@ impl Menu {
                     }
                 } else if ItemStack::is_same_item_same_components(&clicked, &carried) {
                     // Slot rejects placement but same item: pull into cursor.
+                    // This is *the* result-slot path — left-clicking the output
+                    // while already holding a stack of the same result — so the
+                    // take hook here is what crafts the second and later items.
                     let room = carried.max_stack_size() - carried.count();
                     if let Some(taken) = self.try_remove(index, clicked.count(), room) {
                         carried.grow(taken.count());
                         self.set_carried(Some(carried));
+                        self.on_take(index);
                     }
                 }
             }
@@ -314,6 +333,7 @@ impl Menu {
                 if self.may_pickup(index) {
                     self.set_player_native(native, Some(target));
                     self.set_slot_item(index, None);
+                    self.on_take(index);
                 }
             }
             (Some(mut source), None) => {
@@ -341,9 +361,11 @@ impl Menu {
                         }
                         // Remaining source stays in the hotbar slot.
                         self.set_player_native(native, crate::item::normalize(source));
+                        self.on_take(index);
                     } else {
                         self.set_player_native(native, Some(target));
                         self.set_slot_item(index, Some(source));
+                        self.on_take(index);
                     }
                 }
             }
@@ -383,6 +405,9 @@ impl Menu {
         };
         if let Some(taken) = self.try_remove(index, amount, i32::MAX) {
             outcome.dropped.push(taken);
+            // `Slot.safeTake` = `tryRemove` + `onTake`; dropping the result of a
+            // craft with `Q` consumes the grid exactly like picking it up does.
+            self.on_take(index);
         }
         if drop_whole {
             // Drop-stack (button 1) empties the slot in one go; already handled
@@ -419,6 +444,7 @@ impl Menu {
                     continue;
                 };
                 if !self.may_pickup(i)
+                    || !self.can_take_for_pick_all(i)
                     || !ItemStack::is_same_item_same_components(&carried, &target)
                 {
                     continue;
@@ -434,6 +460,21 @@ impl Menu {
             }
         }
         self.set_carried(Some(carried));
+    }
+
+    /// Vanilla `AbstractContainerMenu.canTakeItemForPickAll`: `true` by default,
+    /// but **every** result-bearing menu overrides it to exclude its own result
+    /// container — `CraftingMenu`, `InventoryMenu`, `SmithingMenu`,
+    /// `StonecutterMenu` and `CartographyTableMenu` all carry the identical
+    /// `target.container != this.resultSlots` line.
+    ///
+    /// Without it a double-click gather in a crafting screen vacuums the result
+    /// slot along with everything else, which would craft an item the player
+    /// never asked for — and since `on_take` now charges the grid for a take,
+    /// it would silently eat the ingredients too.
+    fn can_take_for_pick_all(&self, menu_index: usize) -> bool {
+        self.craft_layout()
+            .is_none_or(|layout| menu_index != layout.result_slot)
     }
 
     // --- Drag (quick-craft) ---

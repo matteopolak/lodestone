@@ -412,6 +412,53 @@ impl Menu {
             .map_or(0, |slot| slot.effective_max(stack))
     }
 
+    /// Vanilla `Slot.onTake`, run after **every** successful removal from a
+    /// slot. Only the crafting result slot has behaviour: `ResultSlot.onTake`
+    /// removes exactly one item from every occupied grid cell.
+    ///
+    /// Without this, taking a result leaves the grid full — the ingredients are
+    /// never consumed, so the very next prediction contradicts the server on
+    /// every grid cell at once. It is the missing half of "slot 0 is take-only":
+    /// [`Slot::may_place`] stops you *putting* something there, and this is what
+    /// makes *taking* it cost something.
+    ///
+    /// The consumption is deliberately **recipe-free**: vanilla walks the
+    /// positioned craft input and calls `removeItem(cell, 1)` on each non-empty
+    /// cell, which needs no knowledge of which recipe matched.
+    ///
+    /// What *is* skipped is the **remainder** pass — the one that leaves an empty
+    /// bucket behind after crafting a cake. Note that this is *not* skipped
+    /// because it needs the recipe: `ResultSlot.getRemainingItems` only consults
+    /// the recipe on a `ServerLevel`, and on the client falls through to
+    /// `CraftingRecipe.defaultCraftingReminder`, which is a plain per-item lookup
+    /// (`Item.getCraftingRemainder()`). It is skipped because **we have no
+    /// crafting-remainder table** for 26.2's items yet, and inventing one would
+    /// be a guess. Until there is one, a remainder-bearing ingredient mispredicts
+    /// its cell for one round trip and the server corrects it with a
+    /// `container_set_slot`; only ~10 items in the game have a remainder.
+    ///
+    /// The call sites mirror vanilla's exactly: `doClick`'s pickup and
+    /// same-item-pull branches, `Slot.safeTake` (our throw), the swap take, and
+    /// the tail of `quickMoveStack`. The both-occupied swap branch also calls it
+    /// in vanilla, but is gated on `mayPlace`, which an output slot always
+    /// fails, so it can never fire there.
+    pub(crate) fn on_take(&mut self, menu_index: usize) {
+        let Some(layout) = self.craft else {
+            return;
+        };
+        if menu_index != layout.result_slot {
+            return;
+        }
+        for i in 0..layout.cell_count() {
+            let cell = layout.first_input + i;
+            let Some(mut stack) = self.slot_item_cloned(cell) else {
+                continue;
+            };
+            stack.shrink(1);
+            self.set_slot_item(cell, crate::item::normalize(stack));
+        }
+    }
+
     /// Moves a stack into the `[start, end)` menu-slot range, merging into
     /// matching stacks first then filling empties, mirroring vanilla
     /// `AbstractContainerMenu.moveItemStackTo`.
@@ -480,6 +527,14 @@ impl Menu {
     /// Returns a *template* copy of the pre-move stack (as vanilla does, so the
     /// caller's repeat loop can detect a re-filling output slot). Returns `None`
     /// when nothing could be moved.
+    ///
+    /// One vanilla tail is deliberately not modelled: `CraftingMenu` finishes a
+    /// result-slot quick move with `player.drop(stack, false)`, throwing any
+    /// remainder that would not fit into the inventory onto the floor rather
+    /// than leaving it in the result slot. Reaching it needs a result stack
+    /// larger than the free space in a 36-slot inventory, which one predicted
+    /// craft cannot produce; the server's own loop can, and corrects slot 0 when
+    /// it does.
     pub fn quick_move(&mut self, menu_index: usize) -> Option<ItemStack> {
         let original = self.slot_item_cloned(menu_index)?;
         let template = original.clone();
@@ -500,8 +555,11 @@ impl Menu {
             // Nothing actually transferred.
             return None;
         }
-        // Write back the (possibly reduced) source stack.
+        // Write back the (possibly reduced) source stack, then run the slot's
+        // take hook — for the result slot that is what consumes the grid, and
+        // it is the reason a shift-click can craft at all.
         self.set_slot_item(menu_index, crate::item::normalize(stack));
+        self.on_take(menu_index);
         Some(template)
     }
 
