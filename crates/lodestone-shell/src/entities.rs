@@ -113,6 +113,21 @@ pub struct EntitySnapshot {
     pub pitch: f32,
     /// Uniform render scale (baby mobs are drawn smaller).
     pub scale: f32,
+    /// Which item a dropped item (or other item-displaying entity) is showing.
+    ///
+    /// Nested exactly like the read-model's own field: the outer `Option` is
+    /// "has the server ever reported a stack for this entity", `Some(None)` is
+    /// an explicitly *empty* stack. `None` therefore means "unknown", and
+    /// [`EntityInterpolator::update`] leaves any previously recorded stack
+    /// alone rather than clearing it — a drop names itself once and then goes
+    /// quiet, so treating silence as "empty" would blank it a frame later.
+    ///
+    /// This is a [`ResourceLocation`], not a model `ItemStack`: `EntitySnapshot`
+    /// is deliberately model-free, and the renderer only ever needs the item
+    /// *id* to pick a model. The stack's `count` and data components are dropped
+    /// at the boundary that builds this (`net::entity_snapshot`) — see the note
+    /// there, since count is visible in vanilla.
+    pub item: Option<Option<ResourceLocation>>,
 }
 
 /// The entity-type path a **dropped item** reports (`minecraft:item`).
@@ -268,25 +283,28 @@ impl EntityInterpolator {
     /// Record which item a dropped-item entity is carrying, so its
     /// [`EntityDraw`] can name a model to draw.
     ///
-    /// # Why this is a setter and not a field on [`EntitySnapshot`]
+    /// # Where the live path calls this
     ///
-    /// Because nothing upstream decodes it yet. A dropped item's stack rides
-    /// entity metadata index 8 under the `ITEM_STACK` serializer, and the 26.2
-    /// adapter **rejects** that serializer outright
-    /// (`packets/metadata.rs`: `SER_ITEM_STACK … => return Err(...)`, commented
-    /// "complex, self-describing payloads mobs never emit" — true of mobs,
-    /// false of item entities, which emit exactly this). A failed metadata
-    /// decode raises no event, so `EntityMetadataUpdate` has no item field,
-    /// `EntityView` has no item field, and `entity_snapshot` has nothing to
-    /// lower. Every link in that chain is outside this change.
+    /// [`Self::update`] does, from [`EntitySnapshot::item`], for every snapshot
+    /// that carries a stack — the full live chain is
+    /// `ITEM_STACK` metadata (index 8) → `EntityMetadataUpdate::item` →
+    /// `EntityView::item` → `net::entity_snapshot` → here. It stays a public
+    /// setter because it is also the direct seam for tests and for any caller
+    /// that learns an item's identity outside the snapshot stream.
     ///
-    /// Until it lands, this is the seam: whoever teaches the adapter to decode
-    /// the stack calls this with the result and dropped items become visible
-    /// with no further render work. An item entity with no entry here draws
-    /// nothing, which is also what vanilla does with an empty stack
-    /// (`ItemEntityRenderer.submit` returns early on `state.item.isEmpty()`).
+    /// An item entity with no entry here draws nothing, which is also what
+    /// vanilla does with an empty stack (`ItemEntityRenderer.submit` returns
+    /// early on `state.item.isEmpty()`).
     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {
         self.item_stacks.insert(entity_id, item);
+    }
+
+    /// Forget the item recorded for `entity_id`, so it draws as an empty stack.
+    ///
+    /// Only reached when the server *explicitly* reports an empty stack; a
+    /// snapshot that is merely silent about the item leaves the record alone.
+    pub fn clear_item_stack(&mut self, entity_id: i32) {
+        self.item_stacks.remove(&entity_id);
     }
 
     /// The item recorded for `entity_id`, if any.
@@ -341,6 +359,15 @@ impl EntityInterpolator {
         }
 
         for snap in snapshots {
+            // Fold the reported identity first, so a drop is never drawn for a
+            // frame as a placeholder before its item lands. `None` is "this
+            // snapshot does not know", which must not clear what an earlier one
+            // established; only an explicit empty stack clears.
+            match &snap.item {
+                Some(Some(item)) => self.set_item_stack(snap.id, item.clone()),
+                Some(None) => self.clear_item_stack(snap.id),
+                None => {}
+            }
             match self.tracks.get_mut(&snap.id) {
                 None => {
                     // A newly seen entity is drawn at rest at its reported pose.
@@ -459,6 +486,7 @@ mod tests {
             head_yaw: yaw,
             pitch: 0.0,
             scale: 1.0,
+            item: None,
         }
     }
 
@@ -707,6 +735,7 @@ mod tests {
 
     // ---- dropped items ---------------------------------------------------
 
+    /// An item entity whose stack the server has not (yet) reported.
     fn item_snap(id: i32, feet: Vec3) -> EntitySnapshot {
         EntitySnapshot {
             id,
@@ -716,6 +745,15 @@ mod tests {
             head_yaw: 0.0,
             pitch: 0.0,
             scale: 1.0,
+            item: None,
+        }
+    }
+
+    /// The same, carrying a reported stack, as the live path builds it.
+    fn item_snap_with(id: i32, feet: Vec3, item: Option<ResourceLocation>) -> EntitySnapshot {
+        EntitySnapshot {
+            item: Some(item),
+            ..item_snap(id, feet)
         }
     }
 
@@ -791,6 +829,41 @@ mod tests {
             interp.item_stack(9).is_none(),
             "the stack must be pruned with the track it belonged to"
         );
+    }
+
+    #[test]
+    fn a_snapshot_that_carries_a_stack_needs_no_setter_call() {
+        // The live wiring: nothing calls `set_item_stack` by hand any more, the
+        // identity rides the snapshot from the metadata decode.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
+        assert_eq!(interp.draws()[0].item, Some(stone()));
+    }
+
+    #[test]
+    fn a_snapshot_silent_about_the_item_keeps_the_known_one() {
+        // The regression this rules out is the whole reason `EntitySnapshot`'s
+        // item is nested: a drop reports its stack once at spawn and is silent
+        // in every later metadata packet. Reading that silence as "empty" makes
+        // the drop flicker into a placeholder one frame after it appeared.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
+        interp.update(&[item_snap(9, Vec3::ZERO)], 0.016);
+        assert_eq!(
+            interp.draws()[0].item,
+            Some(stone()),
+            "an unknowing snapshot must not erase a reported stack"
+        );
+    }
+
+    #[test]
+    fn an_explicitly_empty_stack_clears_the_known_one() {
+        // The other half of the nesting: `Some(None)` is the server saying the
+        // stack is empty, which vanilla draws as nothing.
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[item_snap_with(9, Vec3::ZERO, Some(stone()))], 0.016);
+        interp.update(&[item_snap_with(9, Vec3::ZERO, None)], 0.016);
+        assert_eq!(interp.draws()[0].item, None);
     }
 
     #[test]

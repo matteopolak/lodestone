@@ -912,8 +912,47 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 /// to a uniform render scale. Baby scale is a single 0.5 approximation for every
 /// ageable mob (vanilla varies it per type); good enough to read a baby as
 /// smaller, and noted as a refinement rather than a fake.
+///
+/// # What the item stack loses here, and why the loss is on this side
+///
+/// [`EntitySnapshot`] deliberately depends on neither `lodestone-client` nor
+/// `lodestone-model` — that is what lets `entities.rs` be unit-tested with no
+/// server and no GPU — so the model's [`ItemStack`](lodestone_model::ItemStack)
+/// cannot cross into it. This function is the one place that knows both types,
+/// so the conversion lives here and keeps only the item *key*, as a
+/// [`ResourceLocation`](lodestone_assets::ResourceLocation). Two things are
+/// dropped:
+///
+/// * **`count`** — and this one is *visible*. Vanilla's `ItemEntityRenderer`
+///   draws up to five jittered copies of the model for a large stack
+///   (`getRenderedAmount`: 1 copy at count ≤ 1, then 2, 3, 4, 5 as the count
+///   passes 1, 16, 32 and 48), so until the count reaches the renderer a stack
+///   of 64 diamonds is drawn as a single diamond.
+///   Restoring it means widening `EntitySnapshot` with a plain `u32` — no model
+///   dependency needed — and teaching `EntityDraw`/the item pipeline to emit the
+///   extra instances. It is left out here rather than faked.
+/// * **`components`** — dyed leather colour, custom model data, trim, and the
+///   `has_unmodeled` marker. These change how an item *looks* but not *which*
+///   item it is, and nothing in the item pipeline reads them yet.
+///
+/// The nesting is preserved: `None` stays "never reported", `Some(None)` stays
+/// "explicitly empty". A key that somehow fails `ResourceLocation` validation
+/// degrades to "not reported" rather than to "empty", so a malformed id can
+/// never masquerade as the server clearing the stack.
 fn entity_snapshot(view: EntityView) -> EntitySnapshot {
     let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
+    let item = match view.item {
+        None => None,
+        Some(None) => Some(None),
+        // `.map(Some)` and not `.and_then` inside a `map`: a failed conversion
+        // must collapse to the *outer* `None` ("nothing reported"), never to
+        // `Some(None)`, which downstream reads as the server clearing the stack.
+        Some(Some(stack)) => {
+            lodestone_assets::ResourceLocation::new(stack.item.namespace(), stack.item.path())
+                .ok()
+                .map(Some)
+        }
+    };
     EntitySnapshot {
         id: view.entity_id,
         type_path: view.entity_type.path().to_string(),
@@ -926,6 +965,7 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
         head_yaw: view.head_yaw,
         pitch: view.rotation.pitch,
         scale,
+        item,
     }
 }
 

@@ -28,8 +28,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use lodestone_game::{menu::Menu, menus::Menus};
 use lodestone_model::{
     BlockPos, ChunkPos, ClientEvent, DimensionId, EntityAttributeSnapshot, EntityEquipment,
-    EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode, PlayerListEntry,
-    ResourceKey, Rotation, Text, Vec3,
+    EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode, ItemStack,
+    PlayerListEntry, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
@@ -159,6 +159,18 @@ pub struct EntityView {
     /// confirmation from the server. Collapsing the two loses that
     /// distinction, so do not default a missing slot to `None` in-place.
     pub equipment: Vec<EntityEquipment>,
+    /// The item stack this entity *displays*, once a metadata packet has
+    /// reported it — a dropped item's whole visible identity, and the display
+    /// item of thrown projectiles and the eye of ender.
+    ///
+    /// Nested like [`custom_name`](Self::custom_name), and for the same reason:
+    /// the outer `Option` is "has the server ever reported this field",
+    /// `Some(None)` is the server explicitly saying the stack is *empty* (which
+    /// vanilla draws as nothing). Metadata is incremental, so an update that
+    /// simply does not mention the field must leave a previously-known stack
+    /// alone rather than clear it — collapsing the two here would make every
+    /// subsequent position-only metadata packet erase the item.
+    pub item: Option<Option<ItemStack>>,
 }
 
 /// The mutable scalar state behind the lock. Private; only ever touched under
@@ -662,6 +674,7 @@ impl Inner {
                         variant: None,
                         attributes: Vec::new(),
                         equipment: Vec::new(),
+                        item: None,
                     },
                 );
             }
@@ -827,5 +840,14 @@ fn apply_metadata(entity: &mut EntityView, metadata: &EntityMetadataUpdate) {
     }
     if let Some(variant) = &metadata.variant {
         entity.variant = Some(variant.clone());
+    }
+    // Both levels are preserved deliberately: `metadata.item == None` is "this
+    // packet said nothing about the item" and must not overwrite a stack an
+    // earlier packet reported, while `Some(None)` is the server clearing it.
+    // A dropped item announces itself once, at spawn, and then sends
+    // item-free metadata for the rest of its life, so flattening here would
+    // lose the identity again a tick after it arrived.
+    if let Some(item) = &metadata.item {
+        entity.item = Some(item.clone());
     }
 }
