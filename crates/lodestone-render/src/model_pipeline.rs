@@ -579,17 +579,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     // Per-quad tint: the palette slot resolves grass/foliage/etc. to their real
-    // default colour; the untinted slot (255) leaves the texel untouched. The
-    // tint is applied in gamma space (see the transfer functions above) so its
-    // green/red ratio survives the sRGB surface encode and matches vanilla.
-    var rgb = tex.rgb;
+    // default colour; the untinted slot (255) leaves the texel untouched.
+    var tint_col = vec3<f32>(1.0, 1.0, 1.0);
     if (in.tint_idx != 255u) {
-        let tint_col = palette.colors[in.tint_idx].rgb;
-        rgb = srgb_to_linear(linear_to_srgb(rgb) * tint_col);
+        tint_col = palette.colors[in.tint_idx].rgb;
     }
+    // Both the tint and the shade (AO * light) are vanilla, non-colour-managed
+    // multiplies: vanilla applies them to gamma byte values, not linear light.
+    // Doing them in linear space and re-encoding pulls every factor toward
+    // 1.0 (a shade of 0.6 reads as 0.79 once re-encoded) — the washed-out
+    // look. So both go through one gamma round-trip together: convert the
+    // linear texel to sRGB, multiply tint and shade there, convert back. A
+    // single round-trip (rather than one per multiply) means fewer transfer
+    // applications and less rounding.
+    let lit = srgb_to_linear(linear_to_srgb(tex.rgb) * tint_col * in.shade);
     // Fade the lit fragment toward the fog colour by its view distance, so the
     // outermost loaded chunks dissolve into the sky rather than ending in a wall.
-    let lit = rgb * in.shade;
     let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
     return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
 }
@@ -637,6 +642,20 @@ fn fog_amount(dist: f32) -> f32 {
     return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
 }
 
+// sRGB transfer functions (component-wise); see the model shader for why the
+// water tint and the shade multiply both need to happen in gamma space.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -680,10 +699,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
         tex = mix(a, b, slot.blend);
     }
-    // Default water colour (#3F76E4); untinted quads keep their own colour.
+    // Default water colour (#3F76E4), a straight sRGB byte-space constant;
+    // untinted quads keep their own colour. Tint and shade both go through a
+    // single gamma round-trip together (see the model shader) rather than
+    // multiplying them into the linear texel directly, which is the same bug
+    // fixed there, on this shader's own multiply.
     let water = vec3<f32>(0.247, 0.463, 0.894);
     let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
-    let lit = tex.rgb * tint_col * in.shade;
+    let lit = srgb_to_linear(linear_to_srgb(tex.rgb) * tint_col * in.shade);
     let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
     return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
 }

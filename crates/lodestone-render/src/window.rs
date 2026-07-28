@@ -15,7 +15,7 @@ use std::sync::Arc;
 use winit::window::Window;
 
 use crate::device::{GpuContext, GpuError};
-use crate::target::SurfaceTarget;
+use crate::target::{RenderTarget, SurfaceTarget};
 
 /// Errors specific to windowed bring-up.
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +56,14 @@ pub fn attach_window(
         size.height,
     )
     .ok_or(WindowError::NoDefaultConfig)?;
+
+    // Diagnostic: the chosen swapchain format decides whether the surface
+    // performs the sRGB encode the terrain shader assumes (it writes linear
+    // colour and relies on an `*UnormSrgb` swapchain to do the rest). This
+    // crate has no `log`/`tracing` dependency, so `eprintln!` is the
+    // available idiom here; keep this line permanently, it is the cheapest
+    // possible catch for a whole class of "washed out" colour regressions.
+    eprintln!("[lodestone-render] surface format: {:?}", target.format());
 
     Ok((ctx, target))
 }

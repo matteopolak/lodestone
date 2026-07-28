@@ -175,7 +175,10 @@ mod tests {
         assert!(
             mesh.vertices.iter().all(|v| v.position[1] == 0.5),
             "crack should sit on the slab surface y=0.5, got {:?}",
-            mesh.vertices.iter().map(|v| v.position[1]).collect::<Vec<_>>()
+            mesh.vertices
+                .iter()
+                .map(|v| v.position[1])
+                .collect::<Vec<_>>()
         );
         assert!(
             mesh.vertices.iter().all(|v| v.position[1] != 1.0),
