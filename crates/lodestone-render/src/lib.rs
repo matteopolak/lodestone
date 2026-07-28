@@ -41,6 +41,7 @@ pub mod blocks_json;
 pub mod camera;
 pub mod caps;
 pub mod crack;
+pub mod crack_pipeline;
 pub mod device;
 pub mod driver;
 pub mod entity;

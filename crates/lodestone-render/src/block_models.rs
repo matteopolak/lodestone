@@ -460,6 +460,14 @@ impl BlockModels {
         &self.animations
     }
 
+    /// The per-slot normalised frame height (`frame_height / atlas_height`),
+    /// aligned with [`sprite_animations`](Self::sprite_animations): entry `i`
+    /// scales slot `i + 1`'s sampled region index into a concrete V offset.
+    #[must_use]
+    pub fn anim_frame_v(&self) -> &[f32] {
+        &self.anim_frame_v
+    }
+
     /// The number of animation slots (excludes the static sentinel `0`).
     #[must_use]
     pub fn anim_slot_count(&self) -> usize {

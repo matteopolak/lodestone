@@ -343,8 +343,14 @@ fn animated_sprite_changes_frame_while_static_sprite_holds() {
     );
 
     // Control 1: the static half is identical across every tick (localisation).
-    assert_eq!(r0, r2, "static half must not change with the animation tick");
-    assert_eq!(r0, r1, "static half must not change with the animation tick");
+    assert_eq!(
+        r0, r2,
+        "static half must not change with the animation tick"
+    );
+    assert_eq!(
+        r0, r1,
+        "static half must not change with the animation tick"
+    );
     assert!(
         diff(r0, r2) == 0,
         "static-half delta must be exactly zero, got {}",
@@ -361,7 +367,10 @@ fn animated_sprite_changes_frame_while_static_sprite_holds() {
     // true — LEFT no longer reaches blue at tick 2. Observed failure is printed.
     let (nl0, _) = render_scene(&gpu, 0, true);
     let (nl2, _) = render_scene(&gpu, 2, true);
-    println!("NEGATIVE CONTROL (forced anim=0): LEFT tick0={nl0:?} tick2={nl2:?}  delta={}", diff(nl0, nl2));
+    println!(
+        "NEGATIVE CONTROL (forced anim=0): LEFT tick0={nl0:?} tick2={nl2:?}  delta={}",
+        diff(nl0, nl2)
+    );
     assert_eq!(
         nl0, nl2,
         "with the animation slot forced off, the sprite must stay frozen on frame 0 — \
