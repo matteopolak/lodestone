@@ -564,7 +564,11 @@ fn build_complete_atlas(
             let _ = builder.load(manager, &loc);
         }
     }
-    // NEG-CONTROL: crack load removed
+    // Crack-overlay stages are likewise referenced by no block model; add them
+    // so the mining crack pass can sample them from this same atlas.
+    for stage in 0..CRACK_STAGE_COUNT {
+        let _ = builder.load(manager, &crack_stage_location(stage));
+    }
     builder.build()
 }
 
