@@ -16,7 +16,7 @@ use lodestone_model::{
     ItemEnchantment, ItemStack, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
-    ResourceKey, ResourcePackResponseKind, Rotation, ServerAddress, SoundCategory,
+    ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, SoundCategory,
     TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
     VersionAdapter, Visibility, WorldSink,
 };
@@ -2314,14 +2314,20 @@ impl V770Adapter {
             let state = u32::try_from(state)
                 .map_err(|_| AdapterError::Decode(format!("negative block state id {state}")))?;
             world.set_block(pos.x, pos.y, pos.z, state);
-            // A server-authoritative single-block change dirties the owning
-            // column. `ChunkLoaded` doubles as "re-read/re-mesh the region at
-            // pos" (its own docs), and without it a break/place the *server*
-            // sends is applied to the world but never drawn until some other
-            // event happens to dirty the column — the silent desync behind
-            // "the chunk only renders properly when I break something".
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded {
-                pos: ChunkPos::new(pos.x >> 4, pos.z >> 4),
+            // Dirty exactly the section that owns the block. Without this a
+            // break/place the *server* sends is applied to the world but never
+            // drawn until some other event happens to dirty the column — the
+            // silent desync behind "the chunk only renders properly when I
+            // break something". A section-scoped signal (rather than reusing
+            // `ChunkLoaded`) lets the consumer re-derive one section, and only
+            // the neighbours a boundary cell actually touches.
+            return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(pos.x >> 4, pos.y >> 4, pos.z >> 4),
+                blocks: vec![[
+                    pos.x.rem_euclid(16) as u8,
+                    pos.y.rem_euclid(16) as u8,
+                    pos.z.rem_euclid(16) as u8,
+                ]],
             })]);
         }
         if packet_id == play::clientbound::SECTION_BLOCKS_UPDATE {
@@ -2356,12 +2362,15 @@ impl V770Adapter {
             // Dirty the owning column so a server-authoritative multi-block
             // change (e.g. a falling tree, a piston, another player's edits) is
             // re-meshed rather than silently applied-but-invisible. An empty
-            // change set touched nothing, so it needs no re-mesh.
+            // change set touched nothing, so it needs no re-mesh. The relative
+            // coordinates ride along so the consumer can distinguish an
+            // interior edit from one on the section boundary.
             if blocks.is_empty() {
                 return Ok(Vec::new());
             }
-            return Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded {
-                pos: ChunkPos::new(section_x, section_z),
+            return Ok(vec![Directive::Emit(ClientEvent::SectionBlocksChanged {
+                section: SectionPos::new(section_x, section_y, section_z),
+                blocks: blocks.iter().map(|&(x, y, z, _)| [x, y, z]).collect(),
             })]);
         }
         if packet_id == play::clientbound::BLOCK_ENTITY_DATA {

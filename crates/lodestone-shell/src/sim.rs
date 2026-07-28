@@ -79,6 +79,54 @@ const HOTBAR_SLOTS: usize = 9;
 /// while keeping a load burst off a single frame.
 const DIRTY_COLUMN_BUDGET: usize = 4;
 
+/// Which section meshes a set of changed cells invalidates.
+///
+/// A section's geometry is a function of its whole 3×3×3 neighbourhood (face
+/// culling reads the 6 face-adjacent sections; AO samples the 3 cells around
+/// every vertex corner, which reach across section *edges and corners* too), so
+/// a changed cell dirties its own section **plus** every neighbour section it
+/// physically touches — and no others. A cell at local x=15 touches the +x
+/// neighbour; an interior cell touches nothing else. Skipping the neighbour is
+/// the defect that leaves a stale face at a chunk border while mining on a live
+/// server; dirtying all 27 unconditionally pays a 27× re-mesh for every redstone
+/// tick. Hence the per-axis filter rather than either extreme.
+///
+/// Coordinates are **section-relative** (`0..=15`), matching the wire form of
+/// `SECTION_BLOCKS_UPDATE`, and the result is in absolute section coordinates.
+fn dirty_sections_for_blocks(
+    sx: i32,
+    sy: i32,
+    sz: i32,
+    blocks: &[[u8; 3]],
+) -> BTreeSet<(i32, i32, i32)> {
+    let mut dirty: BTreeSet<(i32, i32, i32)> = BTreeSet::new();
+    for &[bx, by, bz] in blocks {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if (dx == -1 && bx != 0) || (dx == 1 && bx != 15) {
+                        continue;
+                    }
+                    if (dy == -1 && by != 0) || (dy == 1 && by != 15) {
+                        continue;
+                    }
+                    if (dz == -1 && bz != 0) || (dz == 1 && bz != 15) {
+                        continue;
+                    }
+                    dirty.insert((sx + dx, sy + dy, sz + dz));
+                }
+            }
+        }
+        // Every further cell can only add sections already reachable from a full
+        // 3×3×3, so once all 27 are queued there is nothing left to find. This
+        // is what bounds a 4096-cell `SECTION_BLOCKS_UPDATE` to 27 re-meshes.
+        if dirty.len() == 27 {
+            break;
+        }
+    }
+    dirty
+}
+
 /// A trivial [`PlacementWorld`] for the live path. The shell cannot classify
 /// blocks (no version-free replaceable/interactable seam is exposed by
 /// `lodestone-model`; see the report), and it does not need to: the server is
@@ -200,12 +248,6 @@ pub struct Sim {
     /// during a spiral load the same column is named by several arrivals and is
     /// re-meshed once.
     dirty_columns: BTreeSet<(i32, i32)>,
-    /// Columns whose horizontal neighbours have already been queued for a seam
-    /// re-mesh. `ChunkLoaded` doubles as the *block-update* dirty signal (the
-    /// adapter emits it for `BLOCK_UPDATE`/`SECTION_BLOCKS_UPDATE`), and only the
-    /// first — genuine arrival — invalidates a neighbour's seam. Without this,
-    /// every redstone tick on a busy server would re-mesh nine columns.
-    seam_healed: HashSet<(i32, i32)>,
     /// Count of server `TeleportPlayer` corrections adopted since start. At rest
     /// on settled ground this stays flat; a burst *during* a jump is the
     /// signature of the server rejecting the ascent and snapping the camera down
@@ -447,7 +489,6 @@ impl Sim {
             water_ids,
             mesh_drops: 0,
             dirty_columns: BTreeSet::new(),
-            seam_healed: HashSet::new(),
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
@@ -1398,12 +1439,13 @@ impl Sim {
     /// section edge changes the neighbour's mesh via culling/AO). Sections that
     /// became all-air are queued for GPU removal instead.
     fn remesh_around(&mut self, block: [i32; 3]) {
+        let (min_y, section_count) = self.mesh_dimensions();
         let cx = block[0].div_euclid(16);
         let cz = block[2].div_euclid(16);
         let lx = block[0].rem_euclid(16);
         let lz = block[2].rem_euclid(16);
-        let si = (block[1] - worldgen::MIN_Y).div_euclid(16);
-        let ly = (block[1] - worldgen::MIN_Y).rem_euclid(16);
+        let si = (block[1] - min_y).div_euclid(16);
+        let ly = (block[1] - min_y).rem_euclid(16);
 
         for dx in -1..=1 {
             for dy in -1..=1 {
@@ -1418,21 +1460,69 @@ impl Sim {
                         continue;
                     }
                     let nsi = si + dy;
-                    if nsi < 0 {
+                    if nsi < 0 || section_count.is_some_and(|c| nsi as usize >= c) {
                         continue;
                     }
-                    let key = SectionKey {
-                        cx: cx + dx,
-                        cz: cz + dz,
-                        si: nsi as usize,
-                        min_y: worldgen::MIN_Y,
-                    };
-                    match snapshot_section(&self.world, key) {
-                        Some(snap) => self.scheduler.submit(snap),
-                        None => self.pending_removals.push(key),
-                    }
+                    self.remesh_section(cx + dx, cz + dz, nsi as usize, min_y);
                 }
             }
+        }
+    }
+
+    /// `(min_y, section_count)` of whichever world this session meshes. The
+    /// count is `None` for the demo world, whose columns carry their own height
+    /// and where an out-of-range section simply snapshots to nothing.
+    fn mesh_dimensions(&self) -> (i32, Option<usize>) {
+        if self.vanilla_atlas.is_some()
+            && let Some(net) = &self.net
+            && let Some(dims) = net.world_dimensions()
+        {
+            return (dims.min_y, Some(dims.section_count()));
+        }
+        (worldgen::MIN_Y, None)
+    }
+
+    /// Re-snapshot and re-schedule one section, reading from the live
+    /// client-owned world or the demo world exactly as
+    /// [`Sim::mark_column_dirty`] chooses. A section that snapshots to nothing
+    /// is queued for GPU removal rather than left showing stale geometry.
+    fn remesh_section(&mut self, cx: i32, cz: i32, si: usize, min_y: i32) {
+        let key = SectionKey { cx, cz, si, min_y };
+        let snapshot = if self.vanilla_atlas.is_some()
+            && let Some(net) = &self.net
+            && let Some(dims) = net.world_dimensions()
+        {
+            snapshot_section_live(net, key, dims.section_count())
+        } else {
+            snapshot_section(&self.world, key)
+        };
+        match snapshot {
+            Some(snap) => self.scheduler.submit(snap),
+            None => self.pending_removals.push(key),
+        }
+    }
+
+    /// Re-mesh after a server-authoritative edit inside section
+    /// `(sx, sy, sz)`, where `blocks` are the section-relative coordinates of
+    /// every changed cell.
+    ///
+    /// Section granularity, not column: this is the signal every redstone tick
+    /// carries, and a whole-column re-mesh is ~24 sections each snapshotting a
+    /// 27-section neighbourhood. A cell on a section face also dirties the
+    /// section across that face — culling, AO and fluid corner heights all read
+    /// across the boundary — so an edit at local x=15 fixes the neighbouring
+    /// column's seam too, which a column-scoped signal cannot express. Keys are
+    /// deduplicated first, so a 4096-cell update still submits at most 27
+    /// snapshots.
+    fn remesh_changed_blocks(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
+        let (min_y, section_count) = self.mesh_dimensions();
+        let base_si = min_y.div_euclid(16);
+        for (nsx, nsy, nsz) in dirty_sections_for_blocks(sx, sy, sz, blocks) {
+            let si = nsy - base_si;
+            if si < 0 || section_count.is_some_and(|count| si as usize >= count) {
+                continue;
+            }
+            self.remesh_section(nsx, nsz, si as usize, min_y);
         }
     }
 
@@ -1455,12 +1545,6 @@ impl Sim {
     /// times instead of nine.
     fn on_column_arrived(&mut self, cx: i32, cz: i32) {
         self.mark_column_dirty(cx, cz);
-        // Only a genuine first arrival invalidates the neighbours' seams; later
-        // signals for the same column are block updates, which the column's own
-        // re-mesh already covers.
-        if !self.seam_healed.insert((cx, cz)) {
-            return;
-        }
         for dx in -1..=1 {
             for dz in -1..=1 {
                 if dx == 0 && dz == 0 {
@@ -1610,6 +1694,15 @@ impl Sim {
                     // (+ `world_dimensions` for geometry). `mark_column_dirty`
                     // meshes live columns through the vanilla classifier.
                     self.on_column_arrived(x, z);
+                }
+                NetUpdate::SectionBlocks { x, y, z, blocks } => {
+                    // A server-authoritative edit inside one loaded section.
+                    // Re-mesh at *section* granularity, not the whole column:
+                    // the same signal carries every redstone tick, and a column
+                    // re-mesh is ~24 sections × a 27-section snapshot each.
+                    // `remesh_around` also handles the boundary case, so a break
+                    // at x=15 dirties the neighbouring column's face too.
+                    self.remesh_changed_blocks(x, y, z, &blocks);
                 }
                 NetUpdate::Teleport {
                     pos,
@@ -2606,15 +2699,6 @@ mod tests {
                  against air (the chunk-border water wall)"
             );
         }
-
-        // `ChunkLoaded` is also the block-update dirty signal, so a second signal
-        // for the same column must re-mesh only that column: nine columns per
-        // redstone tick would be a real cost on a busy server.
-        sim.on_column_arrived(cx, cz);
-        assert!(
-            sim.dirty_columns.is_empty(),
-            "a repeat signal must not re-queue already-healed neighbours"
-        );
     }
 
     #[test]
@@ -2704,5 +2788,57 @@ mod tests {
             sim.step(1.0 / 20.0);
         }
         assert!(sim.player.position.y > y0, "jump lifts in fly mode");
+    }
+
+    #[test]
+    fn an_interior_block_change_dirties_exactly_its_own_section() {
+        // Local (8,8,8) touches no section boundary, so a live block update
+        // there must cost one re-mesh — not the 27 a blanket neighbourhood
+        // would submit, and not the ~216 a whole-column signal would.
+        let dirty = dirty_sections_for_blocks(3, 4, 5, &[[8, 8, 8]]);
+        assert_eq!(
+            dirty.iter().copied().collect::<Vec<_>>(),
+            vec![(3, 4, 5)],
+            "an interior cell reaches no neighbouring section"
+        );
+    }
+
+    #[test]
+    fn a_block_change_on_a_face_also_dirties_that_neighbour() {
+        // The bug this pins: breaking a block at local x=15 on a live server
+        // leaves the +x neighbour's face baked against the *old* state, which
+        // shows as a stale face or z-fighting at every chunk border while
+        // mining. The -x neighbour must NOT be dirtied — that is the half of
+        // the filter a "dirty all 27" implementation gets wrong.
+        let dirty = dirty_sections_for_blocks(3, 4, 5, &[[15, 8, 8]]);
+        assert_eq!(
+            dirty.iter().copied().collect::<Vec<_>>(),
+            vec![(3, 4, 5), (4, 4, 5)],
+            "a +x face cell dirties its own section and the +x neighbour only"
+        );
+    }
+
+    #[test]
+    fn a_corner_block_change_dirties_the_full_corner_octant() {
+        // (0,0,0) touches three faces, three edges and one corner: 8 sections.
+        // Edge and corner neighbours matter because AO samples the 3 cells
+        // around each vertex, which reach diagonally across section corners.
+        let dirty = dirty_sections_for_blocks(0, 0, 0, &[[0, 0, 0]]);
+        assert_eq!(dirty.len(), 8, "a corner cell reaches an octant: {dirty:?}");
+        assert!(dirty.contains(&(-1, -1, -1)), "the diagonal corner is included");
+        assert!(!dirty.contains(&(1, 0, 0)), "the far side is not reachable");
+    }
+
+    #[test]
+    fn a_whole_section_update_is_bounded_by_the_neighbourhood_not_the_cell_count() {
+        // A 4096-cell `SECTION_BLOCKS_UPDATE` (a full section rewrite) must not
+        // submit 4096 re-meshes. 27 is the hard ceiling because that is the
+        // entire neighbourhood any cell in the section can reach.
+        let all: Vec<[u8; 3]> = (0..16u8)
+            .flat_map(|x| (0..16u8).flat_map(move |y| (0..16u8).map(move |z| [x, y, z])))
+            .collect();
+        assert_eq!(all.len(), 4096, "control: the fixture really is a full section");
+        let dirty = dirty_sections_for_blocks(0, 0, 0, &all);
+        assert_eq!(dirty.len(), 27, "bounded by the 3x3x3 neighbourhood");
     }
 }

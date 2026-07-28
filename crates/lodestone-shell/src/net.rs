@@ -147,6 +147,22 @@ pub enum NetUpdate {
         /// Chunk Z.
         z: i32,
     },
+    /// Blocks changed inside one already-loaded section (a break, a place,
+    /// another player's edits). The client has applied them to its world;
+    /// `blocks` carries only the section-relative coordinates, so a consumer can
+    /// re-mesh this section and only the neighbours a boundary cell touches.
+    /// Block data is *not* carried — it is queried from the client-owned world
+    /// per the §12.24 ruling.
+    SectionBlocks {
+        /// Section X (block >> 4).
+        x: i32,
+        /// Section Y (block >> 4).
+        y: i32,
+        /// Section Z (block >> 4).
+        z: i32,
+        /// Section-relative `(x, y, z)`, each `0..16`, of every changed cell.
+        blocks: Vec<[u8; 3]>,
+    },
     /// The server reported a block being destroyed at `pos`, carrying the state
     /// id it had **before** breaking.
     ///
@@ -753,6 +769,12 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         // event to also carry `column`; we deliberately do not consume it, both
         // to honour the ruling and to stay robust if that field is reverted.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
+        ClientEvent::SectionBlocksChanged { section, blocks } => NetUpdate::SectionBlocks {
+            x: section.x,
+            y: section.y,
+            z: section.z,
+            blocks,
+        },
         // The server placing/relocating the player. The shell camera must adopt
         // this authoritative pose — the read-model's own `position()` is an
         // optimistic echo of our outbound moves, so it cannot substitute here.
