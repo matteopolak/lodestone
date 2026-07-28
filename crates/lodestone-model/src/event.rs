@@ -4,7 +4,7 @@ use crate::{
     common::{Difficulty, GameMode},
     ids::{DimensionId, Identifier, ResourceKey},
     item::ItemStack,
-    math::{BlockPos, ChunkPos, Rotation, Vec3, Vec3f},
+    math::{BlockPos, ChunkPos, Rotation, SectionPos, Vec3, Vec3f},
     text::{Text, TextColor},
 };
 
@@ -1096,6 +1096,29 @@ pub enum ClientEvent {
     ChunkUnloaded {
         /// Chunk position.
         pos: ChunkPos,
+    },
+    /// One or more blocks changed inside an already-loaded section, and the
+    /// adapter has already applied them to the client-owned
+    /// [`World`](lodestone_world::World).
+    ///
+    /// Like [`ClientEvent::ChunkLoaded`] this is a **dirty-region signal**, not
+    /// a data carrier — read the new states from the world. It exists
+    /// separately from `ChunkLoaded` because the region is far smaller: a
+    /// consumer that re-derives geometry needs to redo one section and only the
+    /// neighbours the changed cells actually touch, where a chunk arrival
+    /// invalidates a whole column and its horizontal seams. Overloading
+    /// `ChunkLoaded` for block updates forces the consumer to conflate the two
+    /// and pay the column-sized cost for every redstone tick.
+    ///
+    /// `section` is in section coordinates (block >> 4 on every axis).
+    /// `blocks` lists the section-relative `(x, y, z)` of each changed cell so a
+    /// consumer can tell an interior edit — which cannot affect a neighbouring
+    /// section — from one on a boundary, which can.
+    SectionBlocksChanged {
+        /// Section coordinates of the section that changed.
+        section: SectionPos,
+        /// Section-relative `(x, y, z)`, each `0..16`, of every changed cell.
+        blocks: Vec<[u8; 3]>,
     },
     /// A block-triggering "block event" (e.g. a note block playing, a piston
     /// starting to move, a chest lid animating) occurred.
