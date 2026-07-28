@@ -27,6 +27,20 @@ use crate::entities::EntityDraw;
 use crate::mesher::{SectionGeometry, SectionKey};
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
+/// The sky colour, in linear RGB.
+///
+/// Shared deliberately: this is both what the frame clears to *and* what
+/// distance fog fades terrain into. If the two drifted apart the horizon would
+/// show a band of haze in a colour the sky never is, so they read one constant.
+pub const SKY_COLOR: [f32; 3] = [0.53, 0.71, 0.92];
+
+/// Fraction of the view distance at which fog begins.
+///
+/// The outer quarter of the render volume is the fade band: near enough that
+/// the edge chunks dissolve rather than pop in, far enough that fog is not
+/// visible during normal play.
+pub const FOG_START_FRACTION: f32 = 0.75;
+
 /// The block currently being mined, for the progressive crack overlay: its world
 /// position, vanilla state id (to resolve the block's real model geometry) and
 /// destruction stage `0..=9`. Passed to [`RenderState::render_with_crack`].
@@ -702,15 +716,15 @@ impl RenderState {
             particle_atlas_bind_group,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
-                r: 0.53,
-                g: 0.71,
-                b: 0.92,
+                r: SKY_COLOR[0] as f64,
+                g: SKY_COLOR[1] as f64,
+                b: SKY_COLOR[2] as f64,
                 a: 1.0,
             },
             // Fog fades into that same sky colour. Sized for the default 8-chunk
             // render distance; the shell overrides it from its real render
             // distance (and underwater state) via `set_fog`.
-            fog: FogSettings::for_view_distance([0.53, 0.71, 0.92], 8.0 * 16.0, 0.75),
+            fog: FogSettings::for_view_distance(SKY_COLOR, 8.0 * 16.0, FOG_START_FRACTION),
         }
     }
 
