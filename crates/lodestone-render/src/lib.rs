@@ -48,6 +48,7 @@ pub mod driver;
 pub mod entity;
 pub mod entity_anim;
 pub mod entity_pipeline;
+pub mod fog;
 pub mod frame;
 pub mod gui_atlas;
 pub mod mesh;
