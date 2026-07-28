@@ -181,6 +181,9 @@ impl WindowApp {
             window.set_cursor_visible(true);
             self.grabbed = false;
             self.sim.input.release_all();
+            // Releasing the pointer also ends any held dig, so mining does not
+            // continue while the player is in a menu or the window is unfocused.
+            self.sim.end_attack();
         }
     }
 
@@ -503,25 +506,26 @@ impl ApplicationHandler for WindowApp {
                 self.ui.pause();
                 self.set_grab(false);
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
+            WindowEvent::MouseInput { state, button, .. } => {
                 if self.ui.is_paused() {
-                    // First click on the paused world resumes and re-grabs.
-                    if button == MouseButton::Left {
+                    // First click on the paused world resumes and re-grabs; it
+                    // is consumed by the resume, not passed on as an attack.
+                    if state == ElementState::Pressed && button == MouseButton::Left {
                         self.ui.resume();
                         self.set_grab(true);
                     }
                 } else if self.grabbed {
-                    // Left breaks the targeted block, right places against it.
-                    match button {
-                        MouseButton::Left => {
-                            self.sim.break_block();
+                    // Left mines (hold-to-mine on live; one-shot break on demo),
+                    // right uses/places against the targeted face.
+                    match (button, state) {
+                        (MouseButton::Left, ElementState::Pressed) => {
+                            self.sim.begin_attack();
                         }
-                        MouseButton::Right => {
-                            self.sim.place_block();
+                        (MouseButton::Left, ElementState::Released) => {
+                            self.sim.end_attack();
+                        }
+                        (MouseButton::Right, ElementState::Pressed) => {
+                            self.sim.use_item();
                         }
                         _ => {}
                     }

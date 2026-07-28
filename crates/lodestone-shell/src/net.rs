@@ -98,9 +98,9 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use lodestone_client::{
-    ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle, EntityView,
-    LoginProfile, OpenMenuSnapshot, PlayerListEntry, Rotation, SectionLight, ServerAddress, Vec3,
-    WorldDimensions,
+    BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
+    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Rotation, SectionLight,
+    ServerAddress, Vec3, WorldDimensions,
 };
 use lodestone_game::menu::Menu;
 use lodestone_model::event::SoundCategory;
@@ -337,6 +337,15 @@ impl NetClient {
     /// dropped (the shell keeps rendering regardless).
     pub fn send_action(&self, action: ClientAction) {
         let _ = self.action_tx.send(action);
+    }
+
+    /// Read the single block state at a world position from the client-owned
+    /// world, or `None` when that column/section is not held (before login, or
+    /// outside the loaded region). A cheap one-position read used by the live
+    /// dig loop to notice a block that has already become air.
+    #[must_use]
+    pub fn block_at(&self, pos: BlockPos) -> Option<u32> {
+        self.handle.get().and_then(|h| h.block_at(pos))
     }
 
     /// Batch-read owned section snapshots from the client-owned world, one lock
