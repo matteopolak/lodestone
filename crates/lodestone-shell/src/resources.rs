@@ -12,7 +12,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lodestone_assets::{ItemAtlas, Language, ResourceManager, ResourceSource, ZipSource};
+use lodestone_assets::{
+    ItemAtlas, Language, ParticleAtlas, ResourceManager, ResourceSource, ZipSource,
+};
 use lodestone_render::{
     BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, blocks_json_registry,
     entity_texture_candidates,
@@ -40,6 +42,16 @@ pub struct BlockResources {
     /// palette or when the pack has no language file — resolution then falls
     /// back to the component's own `fallback`/key, never an error.
     pub language: Option<Arc<Language>>,
+    /// The stitched particle atlas, for sheet-sourced particles (smoke, flame,
+    /// crits, splashes). `None` on the demo palette or when the pack has no
+    /// particle textures — every sheet particle then resolves to nothing and is
+    /// counted into [`ParticleFrame::unresolved`](crate::particles::ParticleFrame)
+    /// rather than dropped silently, so the gap stays observable.
+    ///
+    /// Separate from [`Self::vanilla_atlas`] because particle sprites are their
+    /// own stitch: they are not reachable from any blockstate, so the block
+    /// atlas never contains them.
+    pub particle_atlas: Option<Arc<ParticleAtlas>>,
 }
 
 impl BlockResources {
@@ -65,6 +77,7 @@ impl BlockResources {
                     vanilla_atlas: Some(atlas),
                     banner: None,
                     language: language.map(Arc::new),
+                    particle_atlas: load_particle_atlas(),
                 }
             }
             Err(reason) => Self::demo(Some(reason)),
@@ -80,6 +93,7 @@ impl BlockResources {
             vanilla_atlas: None,
             banner,
             language: None,
+            particle_atlas: None,
         }
     }
 
@@ -236,6 +250,56 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
 /// when no pack is found so the HUD simply draws empty wells rather than
 /// panicking.
 #[must_use]
+/// Stitch the vanilla particle atlas from `client.jar`.
+///
+/// Mirrors [`load_item_atlas`] exactly, including its fail-open contract:
+/// every failure path returns `None` and warns rather than propagating, because
+/// a jar-less or headless run is a supported mode. With `None`, sheet-sourced
+/// particles resolve to nothing and are *counted* into
+/// `ParticleFrame::unresolved` — the gap stays visible in the HUD instead of
+/// becoming a silent no-op.
+///
+/// Particle sprites need their own stitch: they are unreachable from any
+/// blockstate, so the block atlas the terrain renderer owns never contains
+/// them. Vanilla ships no pre-baked `particles.png` — 26.2 has 289 loose PNGs
+/// under `textures/particle/` that the client stitches at runtime, exactly as
+/// it does for blocks and items.
+pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
+    let root = asset_root()?;
+    let jar = root.join("client.jar");
+    let bytes = match std::fs::read(&jar) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let zip = match ZipSource::from_bytes(bytes) {
+        Ok(z) => z,
+        Err(e) => {
+            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    let (atlas, report) = match ParticleAtlas::build_reported(&manager) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(target: "assets", "build particle atlas from {}: {e}", root.display());
+            return None;
+        }
+    };
+    tracing::info!(
+        target: "assets",
+        definitions = report.definitions,
+        sprites = report.sprites,
+        missing_textures = report.missing_textures.len(),
+        parse_errors = report.parse_errors.len(),
+        "loaded vanilla particle atlas"
+    );
+    Some(Arc::new(atlas))
+}
+
 pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
     let root = asset_root()?;
     let jar = root.join("client.jar");

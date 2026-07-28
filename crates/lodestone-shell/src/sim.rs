@@ -484,10 +484,17 @@ impl Sim {
         // world it is the shell's own small block table. Binding the wrong one
         // does not fail — it draws correctly-shaped debris in some other block's
         // colours, which reads as an art bug rather than a wiring bug.
+        // Sheet particles (smoke, flame, crits, splashes) live in their own
+        // stitch — they are unreachable from any blockstate, so the block atlas
+        // above never contains them. Without this the emitter still runs and
+        // every sheet quad is counted into `ParticleFrame::unresolved` rather
+        // than drawn, which is why the HUD reports `0/0+Nunres` on a jar-less
+        // run instead of silently showing nothing.
         let particles = match resources.vanilla_atlas.as_ref() {
             Some(atlas) => Particles::new(atlas.models()),
             None => Particles::with_demo_palette(&crate::blocks::build_atlas().uv_table),
-        };
+        }
+        .with_particle_atlas(resources.particle_atlas.as_deref());
 
         Self {
             config,
