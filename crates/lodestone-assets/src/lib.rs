@@ -114,7 +114,7 @@ pub use error::{
     ItemAtlasError, ItemModelError, ModelError, ParticleError, ResourceLocationError, SoundError,
     TextureError, TintError,
 };
-pub use icon::{DefaultItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
+pub use icon::{DefaultItemContext, GuiItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
 pub use item_atlas::{ItemAtlas, ItemAtlasReport};
 pub use lang::Language;
 pub use item_model::{

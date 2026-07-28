@@ -34,6 +34,15 @@
 //! reports `false`. Resolution is pure over the definition tree (data) and an
 //! [`ItemPropertyContext`] the game supplies; [`DefaultItemContext`] gives the
 //! default inventory appearance a fresh stack shows.
+//!
+//! A handful of items (`spyglass`, `trident`, the spears, every bundle) branch
+//! on `minecraft:display_context` at the top of their definition, with a `gui`
+//! case naming the flat inventory sprite and the *fallback* naming the in-hand
+//! held model. [`DefaultItemContext`] never answers a `select`, so resolving
+//! through it silently takes that fallback — the wrong (in-hand) model — for
+//! those items. [`GuiItemContext`] is [`DefaultItemContext`] plus
+//! `minecraft:display_context -> "gui"`, and is what an inventory/GUI-slot
+//! resolution (e.g. [`crate::item_atlas::ItemAtlas`]) should use instead.
 
 use crate::error::IconError;
 use crate::item::LAYER_NAMES;
@@ -123,6 +132,38 @@ impl ItemPropertyContext for DefaultItemContext {
     }
     fn range(&self, _property: &str) -> f32 {
         0.0
+    }
+}
+
+/// The [`ItemPropertyContext`] for the inventory/GUI slot appearance
+/// specifically: identical to [`DefaultItemContext`] except that
+/// `minecraft:display_context` resolves to `"gui"`.
+///
+/// A handful of 26.2 items (`spyglass`, `trident`, the spears, every bundle)
+/// branch on `minecraft:display_context` at the top of their definition tree,
+/// with a `gui` case pointing at the flat inventory sprite and *no* fallback
+/// case for it — the fallback is the in-hand/held 3-D model instead. Under
+/// [`DefaultItemContext`] (which never answers a `select`), that branch always
+/// takes the fallback, so those items' item-atlas icon silently becomes the
+/// wrong (in-hand) model. This context exists so [`ItemIconBuilder::icon_with`]
+/// can resolve the tree the way the game does when drawing a hotbar/inventory
+/// slot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GuiItemContext;
+
+impl ItemPropertyContext for GuiItemContext {
+    fn condition(&self, property: &str, component: Option<&str>) -> bool {
+        DefaultItemContext.condition(property, component)
+    }
+    fn select(&self, property: &str) -> Option<String> {
+        if property == "minecraft:display_context" {
+            Some("gui".to_string())
+        } else {
+            DefaultItemContext.select(property)
+        }
+    }
+    fn range(&self, property: &str) -> f32 {
+        DefaultItemContext.range(property)
     }
 }
 

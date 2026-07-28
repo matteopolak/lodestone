@@ -19,7 +19,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::atlas::{Atlas, AtlasBuilder, AtlasSprite};
 use crate::error::{AtlasError, ItemAtlasError};
-use crate::icon::{IconPart, ItemIcon, ItemIconBuilder};
+use crate::icon::{GuiItemContext, IconPart, ItemIcon, ItemIconBuilder};
 use crate::location::ResourceLocation;
 use crate::manager::ResourceManager;
 use crate::texture::Image;
@@ -85,7 +85,7 @@ impl ItemAtlas {
 
         for id in item_ids(manager) {
             report.items += 1;
-            let icon = match builder.icon(&id) {
+            let icon = match builder.icon_with(&id, &GuiItemContext) {
                 Ok(icon) => icon,
                 Err(_) => {
                     report.unresolved_items.push(id.to_string());
