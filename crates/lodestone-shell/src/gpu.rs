@@ -10,14 +10,16 @@
 
 use std::collections::HashMap;
 
+use lodestone_assets::ResourceLocation;
 use lodestone_render::{
     AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer,
     ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas,
-    GpuEntityModel, GpuMesh, GpuModelMesh, Mesh, ModelCameraUniform, ModelPipeline,
-    SpriteAnimation,
+    GpuEntityModel, GpuMesh, GpuModelMesh, ItemGeometry, Mesh, ModelCameraUniform, ModelMesh,
+    ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
+    entity::{dropped_item_mesh, ground_transform_for, item_bob_offset},
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
@@ -27,7 +29,7 @@ use lodestone_render::{
 
 use glam::Vec3;
 
-use crate::entities::EntityDraw;
+use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 use crate::mesher::{SectionGeometry, SectionKey};
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
@@ -273,6 +275,12 @@ pub struct RenderStats {
     pub entities_culled: usize,
     /// Particle billboards drawn this frame.
     pub particles_drawn: usize,
+    /// Dropped-item entities drawn this frame (item entities with a known stack
+    /// *and* baked geometry). Distinct from `entities_drawn`, which counts only
+    /// the cuboid-rig mobs the entity pipeline handles — an item entity never
+    /// appears there, so without this counter a frame full of drops is
+    /// indistinguishable from an empty one.
+    pub item_drops_drawn: usize,
 }
 
 #[derive(Debug)]
@@ -359,6 +367,24 @@ struct ModelRenderer {
     /// `view_proj` each frame like the section uniforms.
     crack_cam_buffer: wgpu::Buffer,
     crack_cam_bind_group: wgpu::BindGroup,
+    /// Baked inventory geometry for every item that has some, snapshotted here
+    /// while `BlockModels` is still borrowable (exactly as
+    /// [`CrackResolver::from_models`] snapshots the per-state quads, and for the
+    /// same reason: the atlas is dropped after construction, so a per-frame
+    /// borrow is not available).
+    ///
+    /// This is what lets a dropped item be drawn from inside
+    /// [`RenderState::render`] with **no** new argument threaded through
+    /// `app.rs`: the geometry is already here, and the only thing a frame has to
+    /// supply is which item each drop is carrying, which rides on
+    /// [`EntityDraw::item`].
+    items: HashMap<ResourceLocation, ItemGeometry>,
+    /// The dropped-item pass's camera buffer + bind group. Item drops are meshed
+    /// with **world** positions baked in (the spin and bob are folded into the
+    /// vertex positions, not an instance matrix), so this carries the plain
+    /// view-projection with a zero section origin, like the crack pass's.
+    drop_cam_buffer: wgpu::Buffer,
+    drop_cam_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
 }
 
@@ -749,6 +775,21 @@ impl RenderState {
             );
             let crack_cam_bind_group =
                 crack_pipeline.camera_bind_group(device, &crack_cam_buffer);
+            // Dropped items: snapshot the baked item geometry and build the
+            // pass's own world-space camera buffer, both while `models` is still
+            // in scope.
+            let items: HashMap<ResourceLocation, ItemGeometry> = models
+                .items()
+                .map(|(id, geometry)| (id.clone(), geometry.clone()))
+                .collect();
+            let drop_cam_buffer = model_camera_buffer(
+                device,
+                CameraUniform {
+                    view_proj: [[0.0; 4]; 4],
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+            );
+            let drop_cam_bind_group = pipeline.camera_bind_group(device, &drop_cam_buffer);
             ModelRenderer {
                 pipeline,
                 water_pipeline,
@@ -765,6 +806,9 @@ impl RenderState {
                 crack_atlas_bind_group,
                 crack_cam_buffer,
                 crack_cam_bind_group,
+                items,
+                drop_cam_buffer,
+                drop_cam_bind_group,
                 sections: HashMap::new(),
             }
         });
@@ -1120,6 +1164,10 @@ impl RenderState {
         let mut stats = RenderStats::default();
         let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
 
+        // Dropped items, meshed and uploaded before the pass for the same reason
+        // as everything else here (no buffer creation mid-pass).
+        let item_drop_mesh = self.prepare_item_drops(device, queue, camera, entities, &mut stats);
+
         // Build the mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass). It follows the target block's real model geometry;
         // an air or unknown state, an out-of-range stage, or a block whose model
@@ -1250,6 +1298,25 @@ impl RenderState {
             }
 
             if let Some(model) = &self.model {
+                // Dropped items, through the *model* pipeline rather than the
+                // entity one: an item entity is an item model, not a cuboid
+                // rig. Same atlas / palette / animation bind groups as terrain,
+                // so a dropped block is textured from exactly the pixels the
+                // placed block is. Opaque and depth-writing, drawn alongside the
+                // mobs and before translucent water for the same reason they
+                // are (see the entity note above).
+                if let Some(mesh) = &item_drop_mesh {
+                    pass.set_pipeline(&model.pipeline.pipeline);
+                    pass.set_bind_group(0, &model.drop_cam_bind_group, &[]);
+                    pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                    pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                    pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    stats.draw_calls += 1;
+                }
+
                 // Mining-crack overlay on the target block, drawn after the
                 // opaque terrain it sits on (so the block face is already in the
                 // depth buffer) and before translucent water. The pipeline's
@@ -1302,6 +1369,82 @@ impl RenderState {
 
         stats.vram_bytes = vram_bytes(stats.total_quads);
         stats
+    }
+
+    /// Mesh this frame's dropped items into one world-space [`GpuModelMesh`],
+    /// and rewrite the drop pass's camera uniform.
+    ///
+    /// Returns `None` — and draws nothing — when there is no vanilla model pass,
+    /// when no tracked entity is an item, or when no item entity has both a
+    /// known stack and baked geometry. That last case is vanilla's own
+    /// behaviour: `ItemEntityRenderer.submit` returns immediately on an empty
+    /// stack.
+    ///
+    /// # One mesh, not one per drop
+    ///
+    /// Each drop's bob and spin are folded into its **vertex positions** by
+    /// [`dropped_item_mesh`], so unlike the mobs there is no per-instance matrix
+    /// to batch on and no shared geometry between two drops of different items.
+    /// Concatenating them into a single buffer is therefore both the simplest
+    /// and the cheapest option: one upload and one draw call per frame however
+    /// many items are on the ground, versus one of each per drop.
+    fn prepare_item_drops(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Option<GpuModelMesh> {
+        let model = self.model.as_ref()?;
+        let frustum = camera.frustum();
+        let mut combined = ModelMesh::default();
+        for draw in entities {
+            if draw.type_path != ITEM_ENTITY_TYPE_PATH {
+                continue;
+            }
+            // No stack reported (today: all of them — see
+            // `EntityInterpolator::set_item_stack`) or a sprite-only item with
+            // no 3-D geometry: draw nothing rather than a stand-in.
+            let Some(geometry) = draw.item.as_ref().and_then(|id| model.items.get(id)) else {
+                continue;
+            };
+            // A drop is at most a quarter-block across, so a cheap point-in-
+            // frustum test on its position is enough to keep off-screen piles
+            // out of the buffer without an AABB.
+            if !frustum.intersects_aabb(
+                draw.feet - glam::Vec3::splat(0.5),
+                draw.feet + glam::Vec3::splat(0.5),
+            ) {
+                continue;
+            }
+            let ground = ground_transform_for(geometry.gui_light);
+            combined.merge(&dropped_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                &ground,
+                draw.feet,
+                draw.anim.age_ticks,
+                item_bob_offset(draw.id),
+                self.entity_light.sample(draw.feet),
+            ));
+            stats.item_drops_drawn += 1;
+        }
+        let mesh = GpuModelMesh::upload(device, &combined)?;
+        stats.total_quads += combined.quad_count();
+        let eye = camera.position;
+        queue.write_buffer(
+            &model.drop_cam_buffer,
+            0,
+            bytemuck::bytes_of(&ModelCameraUniform {
+                camera: CameraUniform {
+                    view_proj: camera.view_projection().to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::new(&self.fog, [eye.x, eye.y, eye.z]),
+            }),
+        );
+        Some(mesh)
     }
 
     /// Resolve each interpolated entity into a renderable instance, frustum-cull
@@ -1903,7 +2046,9 @@ mod tests {
 
         let draws = vec![
             EntityDraw {
+                id: 1,
                 type_path: "pig".to_owned(),
+                item: None,
                 feet: pig_feet,
                 yaw: 0.0,
                 head_yaw: 0.0,
@@ -1914,7 +2059,9 @@ mod tests {
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
             EntityDraw {
+                id: 2,
                 type_path: "pig".to_owned(),
+                item: None,
                 feet: glam::Vec3::new(0.0, 0.0, -12.0),
                 yaw: 0.0,
                 head_yaw: 0.0,
@@ -2046,7 +2193,9 @@ mod tests {
             far: Camera::far_for_render_distance(8, 0),
         };
         let draws = vec![EntityDraw {
+            id: 1,
             type_path: "zombie".to_owned(),
+            item: None,
             feet: glam::Vec3::new(0.0, 0.0, 3.0),
             yaw: 0.0,
             head_yaw: 0.0,

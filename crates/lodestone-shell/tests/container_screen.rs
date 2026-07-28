@@ -54,6 +54,94 @@ fn player_inventory_layout_keeps_armour_hotbar_and_offhand_slots_distinct() {
     assert_ne!(offhand.x, first_hotbar.x, "offhand has its own player slot");
 }
 
+/// A crafting table is a `Generic { container_size: 10 }`, so without the
+/// `craft_layout` branch its first ten slots would be laid out as a 9-wide run —
+/// putting the take-only result slot inside the input grid, and the ninth input
+/// cell on a row of its own. The branch is additive on purpose: `MenuKind` is
+/// matched exhaustively across the crate and must not grow a variant for this.
+#[test]
+fn crafting_table_lays_out_a_grid_and_a_result_not_a_nine_wide_run() {
+    let menu = Menu::crafting(3, 3);
+    let craft = menu.craft_layout().expect("a crafting table has a grid");
+    let layout = slot_layout(&menu);
+    assert_eq!(layout.slots.len(), 46);
+
+    let at = |i: usize| {
+        *layout
+            .slots
+            .iter()
+            .find(|r| r.menu_index == i)
+            .unwrap_or_else(|| panic!("menu index {i} must be laid out"))
+    };
+
+    // The 3x3 grid is three rows of three, in row-major order.
+    let first = at(craft.first_input);
+    for row in 0..3 {
+        for col in 0..3 {
+            let cell = at(craft.first_input + row * 3 + col);
+            assert_eq!(cell.x, first.x + col as f32 * 18.0);
+            assert_eq!(cell.y, first.y + row as f32 * 18.0);
+        }
+    }
+
+    // The result sits to the right of the whole grid, vertically centred on it —
+    // not in it.
+    let result = at(craft.result_slot);
+    let last_input = at(craft.first_input + 8);
+    assert!(
+        result.x > last_input.x,
+        "the result slot must be right of the grid, not inside it"
+    );
+    assert_eq!(result.y, first.y + 18.0, "result centres on the middle row");
+
+    // ...and the player inventory is below the grid, with its hotbar last. The
+    // container hotbar starts at `n + 27` = 37, never at 36.
+    let main_start = at(10);
+    let hotbar_start = at(37);
+    assert!(main_start.y > last_input.y, "player storage sits below the grid");
+    assert!(hotbar_start.y > main_start.y, "hotbar sits below player storage");
+    assert_eq!(hotbar_start.x, main_start.x);
+    assert_ne!(
+        at(36).y,
+        hotbar_start.y,
+        "slot 36 is the last main-storage slot, not the first hotbar slot"
+    );
+}
+
+/// The result slot is drawn but never filled locally: a vanilla server computes
+/// the result and pushes it as a `container_set_slot` for slot 0. Reading it
+/// back is reading server truth.
+#[test]
+fn crafting_result_slot_renders_whatever_the_server_put_there() {
+    let mut menu = Menu::crafting(3, 3);
+    let craft = menu.craft_layout().expect("a crafting table has a grid");
+    // Inputs alone produce nothing client-side — no local matcher runs.
+    menu.set_slot_item(craft.first_input, Some(stack("oak_planks", 4)));
+    assert!(
+        menu.slot_item(craft.result_slot).is_none(),
+        "the shell must not synthesise a result; that is the server's job"
+    );
+
+    // The server's reply lands in the result slot and the screen draws it. The
+    // slot *well* already covers the whole cell, so coverage cannot see this;
+    // the observable is the extra geometry the contents emit.
+    let empty_verts = ContainerGeometry::build(&ContainerFrame::new(Some(&menu), "Crafting"), 640, 480)
+        .vertex_count();
+    menu.set_slot_item(craft.result_slot, Some(stack("crafting_table", 1)));
+    let filled_verts = ContainerGeometry::build(&ContainerFrame::new(Some(&menu), "Crafting"), 640, 480)
+        .vertex_count();
+    assert!(
+        filled_verts > empty_verts,
+        "a result slot the server filled must draw its contents: {empty_verts} -> \
+         {filled_verts} vertices"
+    );
+    assert_eq!(
+        menu.slot_item(craft.result_slot).map(|s| s.item().path()),
+        Some("crafting_table"),
+        "the result slot must hold exactly what the server sent"
+    );
+}
+
 #[test]
 fn non_empty_container_produces_pixel_coverage_inside_widget_rect() {
     let mut menu = Menu::player();

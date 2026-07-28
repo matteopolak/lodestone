@@ -17,18 +17,21 @@
 //! the terrain with no depth.
 
 mod font;
+pub(crate) mod item_icon;
 
 pub use font::glyph_rows;
+/// The hotbar's per-slot draw record. The container screen builds the same
+/// record for every menu slot, so the type itself lives in [`item_icon`]; this
+/// is the name the hotbar has always used for it.
+pub use item_icon::ItemIcon as HotbarSlot;
 
 use std::sync::Arc;
 
-use lodestone_render::{
-    BlockModels, CameraUniform, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelCameraUniform,
-    ModelPipeline, ModelVertex, RenderLayer, gui_item_pose, gui_ortho, mesh_item_quads,
-    model_camera_buffer,
-};
+use lodestone_render::{BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex};
 
-use lodestone_assets::{IconPart, ItemAtlas, ResourceLocation};
+use lodestone_assets::ItemAtlas;
+
+use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink};
 
 use crate::overlay::{BossBarView, Sidebar};
 
@@ -217,28 +220,6 @@ const FLOATS_PER_VERTEX: usize = 6;
 /// and an RGBA tint. The GUI sprite stream is separate from the colour stream
 /// so the existing colour pipeline is untouched.
 const SPRITE_FLOATS_PER_VERTEX: usize = 8;
-
-/// One occupied hotbar slot's drawable state, resolved shell-side from the
-/// player inventory [`lodestone_game::Menu`]. `item` is the item id
-/// (`minecraft:diamond_pickaxe`) used to look up the resolved icon in the
-/// [`ItemAtlas`]; `count` drives the stack number; `damage`/`max_damage` drive
-/// the durability bar; `enchanted` marks items that should get the glint overlay
-/// (deferred). A slot with no item is `None` in the [`HudFrame::hotbar_items`]
-/// slice, so the well stays empty.
-#[derive(Debug, Clone)]
-pub struct HotbarSlot {
-    /// The item id, e.g. `minecraft:stone` — the [`ItemAtlas`] icon key.
-    pub item: ResourceLocation,
-    /// Stack size; the number is drawn bottom-right when `> 1`.
-    pub count: u32,
-    /// Current damage, `Some` for damageable items that have taken damage.
-    pub damage: Option<u32>,
-    /// Max durability, `Some` for damageable items; pairs with `damage` for the
-    /// bar fraction.
-    pub max_damage: Option<u32>,
-    /// Whether the stack is enchanted (glint overlay is deferred; see notes).
-    pub enchanted: bool,
-}
 
 /// Everything the HUD draws for one frame, bundled so the geometry builder and
 /// the GPU renderer take one argument that can grow without churning every call
@@ -848,7 +829,7 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
 /// Pixel width of `s` in the fixed-advance HUD font at `scale` (matches
 /// [`Builder::text`]'s per-glyph advance, so right-alignment lines up exactly).
 fn text_w(s: &str, scale: f32) -> f32 {
-    s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0) * scale
+    item_icon::text_w(s, scale)
 }
 
 /// A chat line is fully lit for most of its life, then fades over its last
@@ -934,146 +915,28 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Draw one item slot's icon into the `size`×`size` rect at `(x, y)`: the
+    /// Draw one hotbar slot's icon into the `size`×`size` rect at `(x, y)`: the
     /// icon itself, its durability bar, and its stack count.
     ///
-    /// Two kinds of icon reach two different streams, decided by the resolved
-    /// [`IconPart`] the item atlas cached:
-    ///
-    /// * [`IconPart::Sprite`] — the flat `item/generated` majority, one textured
-    ///   quad per layer off the item atlas;
-    /// * [`IconPart::Model`] — a **block** item, drawn as vanilla's isometric
-    ///   mini-block from geometry baked against the block atlas
-    ///   ([`BlockModels::item`]).
-    ///
-    /// [`IconPart::Special`] (chests, shulkers, shields, banners) is still a
-    /// code-driven renderer we do not have, and deliberately draws nothing rather
-    /// than a wrong or missing-texture square — but its count and durability
-    /// still draw, keeping the well honest.
+    /// Delegates to the shared [`item_icon::draw_item_icon`], which is the one
+    /// implementation the container screen also uses; see that module for how
+    /// the two icon kinds reach two different streams.
     fn item_icon(&mut self, slot: &HotbarSlot, x: f32, y: f32, size: f32) {
-        let scale = size / 16.0;
-        if let Some(atlas) = self.items
-            && let Some(icon) = atlas.icon(&slot.item)
-        {
-            for part in &icon.parts {
-                match part {
-                    IconPart::Sprite { layers } => {
-                        for layer in layers {
-                            // Tint resolution (leather/potion/spawn-egg dyes,
-                            // foliage) is deferred; untinted white is correct for
-                            // the vast majority of items.
-                            self.item_sprite(&layer.sprite, x, y, size, size, [
-                                1.0, 1.0, 1.0, 1.0,
-                            ]);
-                        }
-                    }
-                    // The part's own `model`/`transform`/`gui_light` are *not*
-                    // used here: `BlockModels::build` resolved and baked exactly
-                    // this part (through the same `GuiItemContext`) and stored the
-                    // transform alongside the quads, so the item id is the whole
-                    // key. Going back to the part would risk the two disagreeing.
-                    IconPart::Model { .. } => self.item_model(&slot.item, x, y, size),
-                    IconPart::Special { .. } => {}
-                }
-            }
-        }
-
-        // Durability bar: a 13px track 2px above the slot bottom, filled by the
-        // remaining fraction, hue lerped green→red. Vanilla only draws it for a
-        // damaged item, so a pristine tool shows none.
-        if let (Some(dmg), Some(max)) = (slot.damage, slot.max_damage)
-            && dmg > 0
-            && max > 0
-        {
-            let remaining = 1.0 - (dmg.min(max) as f32 / max as f32);
-            let bx = x + 2.0 * scale;
-            let bw = 13.0 * scale;
-            let by = y + size - 3.0 * scale;
-            let bh = 2.0 * scale;
-            self.rect_px(bx, by, bw, bh, [0.0, 0.0, 0.0, 1.0]);
-            let col = [1.0 - remaining, remaining, 0.0, 1.0];
-            self.rect_px(bx, by, (bw * remaining).max(1.0 * scale), bh, col);
-        }
-
-        // Stack count, bottom-right, on the colour stream so it lands on top of
-        // the icon. A 1px drop shadow mirrors vanilla's number rendering.
-        if slot.count > 1 {
-            let s = slot.count.to_string();
-            let tscale = scale * 2.0;
-            let tw = text_w(&s, tscale);
-            let tx = x + size - tw;
-            let ty = y + size - font::GLYPH_H as f32 * tscale;
-            self.text(&s, tx + tscale, ty + tscale, tscale, [0.0, 0.0, 0.0, 1.0]);
-            self.text(&s, tx, ty, tscale, [1.0, 1.0, 1.0, 1.0]);
-        }
-    }
-
-    /// Emit one textured quad from the **item** atlas for `loc`, into the pixel
-    /// rect `(x, y, w, h)`. A no-op when no item atlas is attached or the sprite
-    /// is absent (block/model items), so callers need not branch.
-    fn item_sprite(&mut self, loc: &ResourceLocation, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
-        if let Some(atlas) = self.items
-            && let Some(spr) = atlas.sprite(loc)
-        {
-            let q = GuiSpriteQuad {
-                dst: [x, y, w, h],
-                uv_min: spr.uv_min,
-                uv_max: spr.uv_max,
-            };
-            self.push_item_quad(q, c);
-        }
-    }
-
-    /// Emit the 3-D isometric mini-block for a **block** item into the
-    /// `size`×`size` pixel rect at `(x, y)`.
-    ///
-    /// The geometry was baked once at asset-load time against the *block* atlas
-    /// and interned through the *block* tint palette, so nothing is resolved
-    /// here: the pose is `gui_item_pose` over the stored `display.gui` transform,
-    /// and [`mesh_item_quads`] applies it, fixes the light full-bright, and puts
-    /// `gui_light` in the `ao` slot. The result is already in **GUI pixel space**
-    /// (x right, y down, z toward the viewer) — the pass's `view_proj` is
-    /// [`gui_ortho`], which finishes the job.
-    ///
-    /// Indices are expanded into a flat triangle list because the HUD's other two
-    /// streams are non-indexed; the expansion preserves the mesh's winding, which
-    /// is load-bearing (see `docs/item-gui-geometry.md`: the visible faces are the
-    /// ones back-face culling keeps, and they must also be the nearest under the
-    /// depth test). A no-op when no model set is attached or the item has no
-    /// baked geometry, so jar-less runs keep the old empty well.
-    fn item_model(&mut self, item: &ResourceLocation, x: f32, y: f32, size: f32) {
-        let Some(models) = self.models else {
-            return;
+        let assets = IconAssets {
+            items: self.items,
+            models: self.models,
         };
-        let Some(geometry) = models.item(item) else {
-            return;
+        let (w, h) = (self.w, self.h);
+        let mut sink = IconSink {
+            colour: ColourStream {
+                verts: &mut self.verts,
+                w,
+                h,
+            },
+            sprite: &mut self.item_verts,
+            model: &mut self.model_verts,
         };
-        let pose = gui_item_pose([x, y, size, size], &geometry.transform);
-        let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
-        self.model_verts.reserve(mesh.indices.len());
-        for &i in &mesh.indices {
-            self.model_verts.push(mesh.vertices[i as usize]);
-        }
-    }
-
-    /// Push one textured item-atlas quad (two triangles) to the item stream.
-    fn push_item_quad(&mut self, q: GuiSpriteQuad, c: [f32; 4]) {
-        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
-        let [dx, dy, dw, dh] = q.dst;
-        let (x0, y0) = to_ndc(dx, dy);
-        let (x1, y1) = to_ndc(dx + dw, dy + dh);
-        let [u0, v0] = q.uv_min;
-        let [u1, v1] = q.uv_max;
-        let mut v = |vx: f32, vy: f32, tu: f32, tv: f32| {
-            self.item_verts
-                .extend_from_slice(&[vx, vy, tu, tv, c[0], c[1], c[2], c[3]]);
-        };
-        v(x0, y0, u0, v0);
-        v(x1, y0, u1, v0);
-        v(x1, y1, u1, v1);
-        v(x0, y0, u0, v0);
-        v(x1, y1, u1, v1);
-        v(x0, y1, u0, v1);
+        item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size);
     }
 
     /// Emit a GUI sprite scaled into the pixel rect `(x, y, w, h)`, tinted by
@@ -1098,39 +961,21 @@ impl<'a> Builder<'a> {
     /// Push one textured quad (two triangles) from an absolute-pixel destination
     /// rect and its atlas UVs, tinted by `c`.
     fn push_sprite_quad(&mut self, q: GuiSpriteQuad, c: [f32; 4]) {
-        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
-        let [dx, dy, dw, dh] = q.dst;
-        let (x0, y0) = to_ndc(dx, dy);
-        let (x1, y1) = to_ndc(dx + dw, dy + dh);
-        let [u0, v0] = q.uv_min;
-        let [u1, v1] = q.uv_max;
-        let mut v = |vx: f32, vy: f32, tu: f32, tv: f32| {
-            self.sprite_verts
-                .extend_from_slice(&[vx, vy, tu, tv, c[0], c[1], c[2], c[3]]);
-        };
-        v(x0, y0, u0, v0);
-        v(x1, y0, u1, v0);
-        v(x1, y1, u1, v1);
-        v(x0, y0, u0, v0);
-        v(x1, y1, u1, v1);
-        v(x0, y1, u0, v1);
+        item_icon::push_sprite_quad(&mut self.sprite_verts, self.w, self.h, q, c);
     }
 
     /// Emit a pixel-space rectangle as two triangles in NDC.
     fn rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
-        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
-        let (x0, y0) = to_ndc(x, y);
-        let (x1, y1) = to_ndc(x + w, y + h);
-        let mut v = |vx: f32, vy: f32| {
-            self.verts
-                .extend_from_slice(&[vx, vy, c[0], c[1], c[2], c[3]]);
-        };
-        v(x0, y0);
-        v(x1, y0);
-        v(x1, y1);
-        v(x0, y0);
-        v(x1, y1);
-        v(x0, y1);
+        self.colour().rect(x, y, w, h, c);
+    }
+
+    /// A handle onto the colour stream, for the shared pixel-space primitives.
+    fn colour(&mut self) -> ColourStream<'_> {
+        ColourStream {
+            w: self.w,
+            h: self.h,
+            verts: &mut self.verts,
+        }
     }
 
     /// Emit a row of 10 pips representing a `0..=20` gauge (health/food). A pip
@@ -1147,35 +992,13 @@ impl<'a> Builder<'a> {
 
     /// Emit a string starting at pixel `(x, y)` (top-left of first glyph).
     fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
-        let advance = (font::GLYPH_W as f32 + 1.0) * scale;
-        let mut cursor = x;
-        for ch in s.chars() {
-            self.glyph(ch, cursor, y, scale, c);
-            cursor += advance;
-        }
+        self.colour().text(s, x, y, scale, c);
     }
 
     /// Draw a single glyph with its top-left at `(x, y)`. Space and unknown
     /// handling match [`font::glyph_rows`]; blanks emit no quads.
     fn glyph(&mut self, ch: char, x: f32, y: f32, scale: f32, c: [f32; 4]) {
-        if ch == ' ' {
-            return;
-        }
-        let rows = font::glyph_rows(ch);
-        for (ry, row) in rows.iter().enumerate() {
-            for rx in 0..font::GLYPH_W {
-                let bit = (row >> (font::GLYPH_W - 1 - rx)) & 1;
-                if bit == 1 {
-                    self.rect_px(
-                        x + rx as f32 * scale,
-                        y + ry as f32 * scale,
-                        scale,
-                        scale,
-                        c,
-                    );
-                }
-            }
-        }
+        self.colour().glyph(ch, x, y, scale, c);
     }
 
     /// Emit a string carrying legacy `§` colour/format codes as coloured runs.
@@ -1221,8 +1044,9 @@ pub struct HudRenderer {
     buffer: wgpu::Buffer,
     capacity_floats: usize,
     gui: Option<GuiHud>,
-    items: Option<ItemHud>,
-    item_models: Option<ItemModelHud>,
+    /// The flat item atlas and the 3-D block-item pass, shared verbatim with the
+    /// container screen. Both halves start detached.
+    icons: IconRenderer,
 }
 
 /// The GPU resources for drawing HUD sprites from the vanilla GUI atlas: the
@@ -1238,61 +1062,6 @@ struct GuiHud {
     bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
-}
-
-/// The GPU resources for drawing item icons from the flat [`ItemAtlas`]: the
-/// uploaded item-sprite atlas, its textured pipeline + bind group, and a dynamic
-/// vertex buffer. Present only once [`HudRenderer::attach_items`] has run; the
-/// same shader/pipeline shape as [`GuiHud`], just bound to the item texture and
-/// fed the item-sprite vertex stream.
-#[derive(Debug)]
-struct ItemHud {
-    atlas: Arc<ItemAtlas>,
-    #[allow(dead_code)]
-    gpu: GpuAtlas,
-    pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
-    buffer: wgpu::Buffer,
-    capacity_floats: usize,
-}
-
-/// The GPU resources for drawing **3-D block items** in GUI slots. Present only
-/// once [`HudRenderer::attach_item_models`] has run.
-///
-/// Unlike [`GuiHud`] and [`ItemHud`] this owns no texture: it reuses the world's
-/// [`ModelPipeline`] and binds the *same* block atlas, tint palette and animation
-/// slots the terrain pass does. Four bind groups is exactly what the model shader
-/// declares — camera (0), atlas (1), palette (2), animation (3) — and `wgpu`'s
-/// portable `max_bind_groups` floor is **4**, so there is no room for a fifth.
-/// That is why the GUI camera and its (disabled) fog share group 0 as a single
-/// [`ModelCameraUniform`], and why nothing here introduces a new group: a
-/// five-group variant validates on an adapter that reports 8 and fails on the
-/// floor, which is a bug no local screenshot can find.
-///
-/// The three sharings are each load-bearing rather than merely tidy:
-///
-/// * **atlas** — a block item's faces *are* block textures; a second upload would
-///   cost tens of megabytes to draw nine 16 px icons;
-/// * **palette** — a grass block's hotbar icon and the world block resolve to the
-///   same slot, so they cannot drift to different greens;
-/// * **animation slots** — magma, sea lantern and prismarine icons advance in
-///   lock-step with the world, for free, off the one per-frame uniform write.
-#[derive(Debug)]
-struct ItemModelHud {
-    pipeline: ModelPipeline,
-    /// Group 0: the GUI orthographic `view_proj` with a zero section origin and
-    /// fog disabled. Rewritten each frame because it depends on the target size.
-    camera_buffer: wgpu::Buffer,
-    camera_bind_group: wgpu::BindGroup,
-    /// Group 1: the shared block atlas (view + sampler borrowed at attach time;
-    /// the bind group holds its own strong reference).
-    atlas_bind_group: wgpu::BindGroup,
-    /// Group 2: the shared tint palette.
-    palette_bind_group: wgpu::BindGroup,
-    /// Group 3: the shared per-slot animation uniforms.
-    anim_bind_group: wgpu::BindGroup,
-    buffer: wgpu::Buffer,
-    capacity_bytes: usize,
 }
 
 impl HudRenderer {
@@ -1365,8 +1134,7 @@ impl HudRenderer {
             buffer,
             capacity_floats,
             gui: None,
-            items: None,
-            item_models: None,
+            icons: IconRenderer::new(),
         }
     }
 
@@ -1492,10 +1260,10 @@ impl HudRenderer {
         });
     }
 
-    /// Attach the flat item-sprite [`ItemAtlas`] so hotbar/container slots draw
-    /// real item icons. Uploads the atlas texture, builds a textured pipeline
-    /// (identical in shape to the GUI one), and binds it. Without this call the
-    /// hotbar wells stay empty — the jar-less / headless behaviour.
+    /// Attach the flat item-sprite [`ItemAtlas`] so hotbar slots draw real item
+    /// icons. Without this call the wells stay empty — the jar-less / headless
+    /// behaviour. Delegates to the shared [`IconRenderer`]; the container screen
+    /// has the identical call on `ContainerRenderer`.
     pub fn attach_items(
         &mut self,
         device: &wgpu::Device,
@@ -1503,134 +1271,23 @@ impl HudRenderer {
         color_format: wgpu::TextureFormat,
         atlas: Arc<ItemAtlas>,
     ) {
-        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("hud-item-shader"),
-            source: wgpu::ShaderSource::Wgsl(HUD_SPRITE_WGSL.into()),
-        });
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("hud-item-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("hud-item-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hud-item-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x4,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                    ],
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("hud-item-bg"),
-            layout: &bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&gpu.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
-                },
-            ],
-        });
-        let capacity_floats = 4096;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("hud-item-verts"),
-            size: (capacity_floats * 4) as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.items = Some(ItemHud {
-            atlas,
-            gpu,
-            pipeline,
-            bind_group,
-            buffer,
-            capacity_floats,
-        });
+        self.icons
+            .attach_items(device, queue, color_format, atlas, "hud-item");
     }
 
-    /// Attach the GPU side of the **3-D block-item** icon pass, so hotbar and
-    /// container slots holding a block draw vanilla's isometric mini-block
-    /// instead of an empty well.
+    /// Attach the GPU side of the **3-D block-item** icon pass, so hotbar slots
+    /// holding a block draw vanilla's isometric mini-block instead of an empty
+    /// well.
     ///
-    /// Every resource is *borrowed from the world renderer* rather than created:
-    /// `atlas_view`/`atlas_sampler` are the stitched block atlas
-    /// ([`RenderState::model_atlas_view`](crate::gpu::RenderState::model_atlas_view)),
-    /// `palette` its tint palette, `anim` its per-slot animation uniforms. See
-    /// [`ItemModelHud`] for why each of those sharings matters. `wgpu` resources
-    /// are `Arc`-backed and a bind group keeps its own strong reference, so the
-    /// borrows need not outlive this call.
+    /// Every resource is *borrowed from the world renderer* rather than created;
+    /// see [`item_icon::IconRenderer::attach_item_models`] for why each sharing
+    /// is load-bearing.
     ///
     /// The **CPU** geometry is not captured here: it is passed per frame to
-    /// [`render_with_item_models`](Self::render_with_item_models), because
-    /// [`BlockModels`] exposes item geometry only by key lookup (there is no way
-    /// to enumerate its item ids from outside the render crate), and a per-slot
-    /// lookup of the nine visible stacks is cheaper than cloning ~750 items'
-    /// quads anyway.
+    /// [`render_with_item_models`](Self::render_with_item_models), because a
+    /// per-slot lookup of the nine visible stacks is cheaper than cloning ~750
+    /// items' quads. (`BlockModels::items` can now enumerate them, for consumers
+    /// that do want an attach-time snapshot.)
     ///
     /// Without this call the icons simply do not draw — the jar-less / demo
     /// behaviour, and the negative control the pixel gate exercises.
@@ -1643,53 +1300,15 @@ impl HudRenderer {
         palette: &wgpu::Buffer,
         anim: &wgpu::Buffer,
     ) {
-        // `Solid` (not `Translucent`): depth writes on, back-face culling on with
-        // `FrontFace::Ccw`. Both are required — culling is what removes the three
-        // far faces of the cube, and the depth test is what stops the near ones
-        // being overdrawn by them. The shader's cutout discard also drops
-        // near-transparent texels, so a cross-shaped model does not paint a box.
-        let pipeline = ModelPipeline::for_layer(device, color_format, RenderLayer::Solid);
-        // A placeholder view_proj; `render` rewrites it from the live target size
-        // before every draw. `model_camera_buffer` sizes the buffer for the
-        // camera **and** the folded fog block, and writes fog disabled.
-        let camera_buffer = model_camera_buffer(device, CameraUniform {
-            view_proj: [[0.0; 4]; 4],
-            section_origin: [0.0; 4],
-        });
-        let camera_bind_group = pipeline.camera_bind_group(device, &camera_buffer);
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("hud-item-model-atlas-bg"),
-            layout: &pipeline.atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(atlas_sampler),
-                },
-            ],
-        });
-        let palette_bind_group = pipeline.palette_bind_group(device, palette);
-        let anim_bind_group = pipeline.anim_bind_group(device, anim);
-        let capacity_bytes = 16 * 1024;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("hud-item-model-verts"),
-            size: capacity_bytes as wgpu::BufferAddress,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.item_models = Some(ItemModelHud {
-            pipeline,
-            camera_buffer,
-            camera_bind_group,
-            atlas_bind_group,
-            palette_bind_group,
-            anim_bind_group,
-            buffer,
-            capacity_bytes,
-        });
+        self.icons.attach_item_models(
+            device,
+            color_format,
+            atlas_view,
+            atlas_sampler,
+            palette,
+            anim,
+            "hud-item-model",
+        );
     }
 
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
@@ -1750,11 +1369,11 @@ impl HudRenderer {
         // verts; otherwise the whole HUD is the procedural colour stream. The
         // item atlas, when attached, feeds the separate item-sprite stream.
         let gui_atlas = self.gui.as_ref().map(|g| Arc::clone(&g.atlas));
-        let item_atlas = self.items.as_ref().map(|i| Arc::clone(&i.atlas));
+        let item_atlas = self.icons.item_atlas();
         // Only ask for model geometry when there is somewhere to draw it: no
         // attached pass or no depth attachment means the vertices could not be
         // rendered, and building them would be pure waste.
-        let want_models = self.item_models.is_some() && depth.is_some();
+        let want_models = self.icons.models_attached() && depth.is_some();
         let geo = HudGeometry::build_inner(
             frame,
             width,
@@ -1801,64 +1420,27 @@ impl HudRenderer {
             queue.write_buffer(&g.buffer, 0, bytemuck::cast_slice(&geo.sprite_verts));
         }
 
-        // Grow + upload the item-icon stream (only when the item atlas is set).
-        if !geo.item_verts.is_empty()
-            && let Some(it) = self.items.as_mut()
-        {
-            if geo.item_verts.len() > it.capacity_floats {
-                it.capacity_floats = geo.item_verts.len().next_power_of_two();
-                it.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("hud-item-verts"),
-                    size: (it.capacity_floats * 4) as wgpu::BufferAddress,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-            }
-            queue.write_buffer(&it.buffer, 0, bytemuck::cast_slice(&geo.item_verts));
-        }
-
-        // Grow + upload the 3-D item-model stream, and rewrite its GUI camera for
-        // the current target size. `gui_ortho` is the whole projection: the
-        // vertices are already posed into GUI pixel space, the section origin is
-        // zero (they are not section-local), and fog is disabled (an inventory
-        // slot is not in the world).
-        if !geo.model_verts.is_empty()
-            && let Some(im) = self.item_models.as_mut()
-        {
-            let bytes = std::mem::size_of_val(geo.model_verts.as_slice());
-            if bytes > im.capacity_bytes {
-                im.capacity_bytes = bytes.next_power_of_two();
-                im.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("hud-item-model-verts"),
-                    size: im.capacity_bytes as wgpu::BufferAddress,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-            }
-            queue.write_buffer(&im.buffer, 0, bytemuck::cast_slice(&geo.model_verts));
-            queue.write_buffer(
-                &im.camera_buffer,
-                0,
-                bytemuck::bytes_of(&ModelCameraUniform {
-                    camera: CameraUniform {
-                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
-                        section_origin: [0.0; 4],
-                    },
-                    fog: lodestone_render::fog::FogUniform::disabled(),
-                }),
-            );
-        }
+        // Grow + upload both icon streams, and rewrite the model pass's GUI
+        // camera for the current target size. Counts come back zero for a half
+        // that is not attached, so the draws below need no further branching.
+        let (item_count, model_count) = self.icons.upload(
+            device,
+            queue,
+            &geo.item_verts,
+            &geo.model_verts,
+            width,
+            height,
+            "hud-item-verts",
+        );
 
         let colour_count = geo.vertex_count() as u32;
         let sprite_count = geo.sprite_vertex_count() as u32;
-        let item_count = geo.item_vertex_count() as u32;
-        let model_count = geo.model_vertex_count() as u32;
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("hud") });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-pass"),
-                color_attachments: &[Some(hud_colour_attachment(view))],
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -1874,53 +1456,25 @@ impl HudRenderer {
                 pass.set_vertex_buffer(0, g.buffer.slice(..));
                 pass.draw(0..sprite_count, 0..1);
             }
-            if let Some(it) = &self.items
-                && item_count > 0
-            {
-                pass.set_pipeline(&it.pipeline);
-                pass.set_bind_group(0, &it.bind_group, &[]);
-                pass.set_vertex_buffer(0, it.buffer.slice(..));
-                pass.draw(0..item_count, 0..1);
-            }
+            self.icons.draw_sprites(&mut pass, item_count);
         }
 
         // The 3-D block items, in their own pass because they are the only part
         // of the HUD that needs a depth buffer. One draw for the whole hotbar.
-        if let (Some(im), Some(depth_view)) = (&self.item_models, depth)
-            && model_count > 0
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("hud-item-model-pass"),
-                color_attachments: &[Some(hud_colour_attachment(view))],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    // Cleared, not loaded: the world's depth is still in there and
-                    // would swallow a GUI item at clip depth ~0.5.
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&im.pipeline.pipeline);
-            pass.set_bind_group(0, &im.camera_bind_group, &[]);
-            pass.set_bind_group(1, &im.atlas_bind_group, &[]);
-            pass.set_bind_group(2, &im.palette_bind_group, &[]);
-            pass.set_bind_group(3, &im.anim_bind_group, &[]);
-            pass.set_vertex_buffer(0, im.buffer.slice(..));
-            pass.draw(0..model_count, 0..1);
-        }
+        self.icons.draw_models(
+            &mut encoder,
+            view,
+            depth,
+            model_count,
+            "hud-item-model-pass",
+        );
 
         // The colour stream (text, stack counts) last, so it lands on top of both
         // kinds of icon.
         if colour_count > 0 {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-colour-pass"),
-                color_attachments: &[Some(hud_colour_attachment(view))],
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
@@ -1931,21 +1485,6 @@ impl HudRenderer {
             pass.draw(0..colour_count, 0..1);
         }
         queue.submit(std::iter::once(encoder.finish()));
-    }
-}
-
-/// The colour attachment every HUD pass uses: load what the world already drew,
-/// store what we add. A free function rather than a closure because each pass
-/// needs the borrow of `view` to end with its own `RenderPassDescriptor`.
-fn hud_colour_attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
-    wgpu::RenderPassColorAttachment {
-        view,
-        depth_slice: None,
-        resolve_target: None,
-        ops: wgpu::Operations {
-            load: wgpu::LoadOp::Load,
-            store: wgpu::StoreOp::Store,
-        },
     }
 }
 
@@ -2001,6 +1540,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_assets::ResourceLocation;
 
     #[test]
     fn rss_is_observable() {

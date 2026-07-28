@@ -45,10 +45,12 @@
 use glam::{Mat4, Vec3};
 use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
+use lodestone_assets::{BakedQuad, DisplayTransform, GuiLight};
 
 use crate::camera::Frustum;
 use crate::entity_anim::{AnimInput, HumanoidArms, Skeleton};
-use crate::models::ModelVertex;
+use crate::item_render::display_matrix;
+use crate::models::{ModelMesh, ModelVertex, mesh_item_quads};
 
 /// The vanilla feet-to-model lift (`LivingEntityRenderer`'s
 /// `translate(0, -1.501, 0)`), in blocks.
@@ -708,9 +710,236 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
     EntityFrame { batches, stats }
 }
 
+// ---------------------------------------------------------------------------
+// Dropped items
+// ---------------------------------------------------------------------------
+//
+// A dropped item is an entity that is **not** a cuboid part rig, so none of the
+// machinery above applies to it: it has no skeleton, no per-mob sheet, and no
+// `entity_models` corpus entry. What it has is an *item model* — the same baked
+// geometry [`BlockModels::item_quads`](crate::BlockModels::item_quads) already
+// supplies for a hotbar icon — drawn in the world through the ordinary
+// [`ModelPipeline`](crate::ModelPipeline) rather than the entity pipeline.
+//
+// This section owns the *placement*: where in the world that geometry goes, and
+// how it bobs and spins. Transcribed from 26.2's `ItemEntityRenderer.submit`:
+//
+// ```text
+//   AABB box     = state.item.getModelBoundingBox()      // the GROUND-posed model
+//   minOffsetY   = -box.minY + 0.0625
+//   bob          = sin(ageInTicks / 10 + bobOffs) * 0.1 + 0.1
+//   translate(0, bob + minOffsetY, 0)
+//   mulPose(Axis.YP.rotation(getSpin(ageInTicks, bobOffs)))   // radians
+//   // then the item is drawn under its display.ground transform
+// ```
+//
+// and `ItemEntity.getSpin(age, bobOffs) = age / 20 + bobOffs`.
+//
+// # The winding invariant, stated for a *world* pose
+//
+// The GUI item path composes `gui_ortho * gui_item_pose`, and each of those two
+// matrices has a negative determinant so that the **product**'s determinant sign
+// matches [`Camera::view_projection`](crate::Camera::view_projection)'s — which
+// is itself negative, because `glam`'s DirectX right-handed perspective is.
+// That is a statement about the *composed* matrix, and it does not transfer to
+// this path.
+//
+// Here the pose is a **world-space model matrix** left-multiplied by the very
+// same `Camera::view_projection`, exactly like a terrain section's. So the pose
+// must not flip anything: its determinant has to be **positive**, and the
+// composed `view_projection * pose` then inherits the camera's negative sign.
+// Reading the GUI rule as "the pose determinant must be negative" and coding to
+// it would ship an item you are looking at the *inside* of — which spins
+// convincingly in a screenshot. `dropped_item_pose_preserves_winding` derives
+// the reference sign from the camera rather than hardcoding either answer.
+
+/// Vanilla's `ItemEntityRenderer.ITEM_MIN_HOVER_HEIGHT`: how far the lowest
+/// point of the posed model floats above the entity's own position, in blocks.
+pub const ITEM_MIN_HOVER_HEIGHT: f32 = 0.0625;
+
+/// Vanilla's `ItemEntityRenderer.FLAT_ITEM_DEPTH_THRESHOLD`: a posed model
+/// thinner than this in `z` is treated as a flat sprite and a stack of them is
+/// fanned along `z` rather than jittered in three axes.
+pub const FLAT_ITEM_DEPTH_THRESHOLD: f32 = 0.0625;
+
+/// Bob amplitude in blocks (`… * 0.1F + 0.1F`), so the bob spans `0.0..=0.2`.
+pub const ITEM_BOB_AMPLITUDE: f32 = 0.1;
+
+/// Ticks per radian of bob phase (`sin(ageInTicks / 10.0F + bobOffs)`).
+pub const ITEM_BOB_TICKS_PER_RADIAN: f32 = 10.0;
+
+/// Ticks per radian of spin (`getSpin = ageInTicks / 20.0F + bobOffs`).
+pub const ITEM_SPIN_TICKS_PER_RADIAN: f32 = 20.0;
+
+/// `display.ground` of `minecraft:block/block`, which **every** block item model
+/// inherits (verified against 26.2's `client.jar`).
+///
+/// # Why this is a constant and not read from the model
+///
+/// It should be read from the model. It cannot be yet:
+/// [`IconPart::Model`](lodestone_assets::IconPart) keeps only the `gui` slot —
+/// `icon.rs` does `resolved.display.get("gui")` and drops the rest — so
+/// [`ItemGeometry::transform`](crate::ItemGeometry) carries the isometric
+/// inventory pose and nothing else. Posing a dropped item with the *gui*
+/// transform would tilt it 30°/225° and scale it 0.625 instead of 0.25: visibly
+/// a "3-D item is there", and wrong in both orientation and size. Until the
+/// asset layer carries the whole `display` map, naming the real vanilla numbers
+/// here is the honest stopgap — and it is exact for the block items, which are
+/// what a broken block actually drops.
+pub const BLOCK_ITEM_GROUND: DisplayTransform = DisplayTransform {
+    rotation: [0.0, 0.0, 0.0],
+    translation: [0.0, 3.0, 0.0],
+    scale: [0.25, 0.25, 0.25],
+};
+
+/// `display.ground` of `minecraft:item/generated`, the parent of every flat
+/// sprite item. See [`BLOCK_ITEM_GROUND`] for why this is a constant.
+pub const GENERATED_ITEM_GROUND: DisplayTransform = DisplayTransform {
+    rotation: [0.0, 0.0, 0.0],
+    translation: [0.0, 2.0, 0.0],
+    scale: [0.5, 0.5, 0.5],
+};
+
+/// The `display.ground` transform to pose an item under, chosen by its GUI
+/// lighting mode: `side` is the block-model family (`block/block`), `front` the
+/// flat-sprite family (`item/generated`). Vanilla makes the same split — the two
+/// `gui_light` values partition the item models almost exactly along the same
+/// line — and it is the only signal reachable from a baked
+/// [`ItemGeometry`](crate::ItemGeometry) today.
+#[must_use]
+pub fn ground_transform_for(gui_light: GuiLight) -> DisplayTransform {
+    match gui_light {
+        GuiLight::Side => BLOCK_ITEM_GROUND,
+        GuiLight::Front => GENERATED_ITEM_GROUND,
+    }
+}
+
+/// A stable per-entity bob/spin phase in `[0, 2π)`, standing in for vanilla's
+/// `bobOffs = random.nextFloat() * PI * 2`.
+///
+/// Vanilla seeds it from the client's RNG at spawn; we cannot observe that, and
+/// re-rolling it every frame would make an item jitter instead of spin. Hashing
+/// the server-assigned entity id gives the same *property* that matters — two
+/// items dropped together do not bob in lockstep — while staying a pure function
+/// of data both the renderer and a test can see.
+#[must_use]
+pub fn item_bob_offset(entity_id: i32) -> f32 {
+    // A single multiplicative-hash round over the id, taken as a fraction.
+    let mixed = (entity_id as u32).wrapping_mul(0x9E37_79B9);
+    let frac = f32::from(u16::try_from(mixed >> 16).unwrap_or(0)) / 65536.0;
+    frac * std::f32::consts::TAU
+}
+
+/// Vanilla's vertical bob at `age_ticks`: `sin(age / 10 + offs) * 0.1 + 0.1`,
+/// so the result is in `0.0..=0.2` blocks and never negative.
+#[must_use]
+pub fn item_bob_height(age_ticks: f32, bob_offset: f32) -> f32 {
+    (age_ticks / ITEM_BOB_TICKS_PER_RADIAN + bob_offset).sin() * ITEM_BOB_AMPLITUDE
+        + ITEM_BOB_AMPLITUDE
+}
+
+/// Vanilla's `ItemEntity.getSpin`: the item's yaw in **radians** at `age_ticks`.
+#[must_use]
+pub fn item_spin_radians(age_ticks: f32, bob_offset: f32) -> f32 {
+    age_ticks / ITEM_SPIN_TICKS_PER_RADIAN + bob_offset
+}
+
+/// The model-space `y` extent of `quads` once posed by `ground`, as
+/// `(min_y, max_y)`. `(0, 0)` for an empty quad list.
+///
+/// This is vanilla's `state.item.getModelBoundingBox()` for the `y` axis: it is
+/// measured on the **posed** model, which is why it cannot be a constant — a
+/// scaled-down cube and a full-size one hover differently.
+#[must_use]
+pub fn posed_item_y_extent(quads: &[BakedQuad], ground: &DisplayTransform) -> (f32, f32) {
+    let pose = display_matrix(ground);
+    let mut min = f32::INFINITY;
+    let mut max = f32::NEG_INFINITY;
+    for quad in quads {
+        for p in &quad.positions {
+            let y = pose.transform_point3(Vec3::from(*p)).y;
+            min = min.min(y);
+            max = max.max(y);
+        }
+    }
+    if min > max { (0.0, 0.0) } else { (min, max) }
+}
+
+/// Vanilla's `minOffsetY`: the lift that puts the posed model's lowest point
+/// exactly [`ITEM_MIN_HOVER_HEIGHT`] above the entity's own position.
+#[must_use]
+pub fn item_hover_lift(quads: &[BakedQuad], ground: &DisplayTransform) -> f32 {
+    -posed_item_y_extent(quads, ground).0 + ITEM_MIN_HOVER_HEIGHT
+}
+
+/// The world placement matrix for a dropped item, matching
+/// `ItemEntityRenderer.submit`'s pose-stack order exactly:
+///
+/// ```text
+/// T(position) · T(0, bob + hover_lift, 0) · Ry(spin) · display_matrix(ground)
+/// ```
+///
+/// `position` is the item entity's reported world position, `age_ticks` its
+/// continuous age (`ageInTicks`, fractional between server ticks), `bob_offset`
+/// its per-entity phase ([`item_bob_offset`]) and `hover_lift`
+/// [`item_hover_lift`] for the same quads and transform.
+///
+/// The determinant is **positive** (a translation, a rotation and a positive
+/// uniform scale), so this composes with `Camera::view_projection` to the same
+/// winding as terrain. See the section note above for why "negative" is the
+/// tempting wrong answer.
+#[must_use]
+pub fn dropped_item_matrix(
+    position: Vec3,
+    age_ticks: f32,
+    bob_offset: f32,
+    ground: &DisplayTransform,
+    hover_lift: f32,
+) -> Mat4 {
+    let bob = item_bob_height(age_ticks, bob_offset);
+    let spin = item_spin_radians(age_ticks, bob_offset);
+    Mat4::from_translation(position)
+        * Mat4::from_translation(Vec3::new(0.0, bob + hover_lift, 0.0))
+        * Mat4::from_rotation_y(spin)
+        * display_matrix(ground)
+}
+
+/// Mesh one dropped item's baked geometry into a world-space [`ModelMesh`],
+/// ready for [`GpuModelMesh::upload`](crate::GpuModelMesh) and a draw through
+/// the ordinary [`ModelPipeline`](crate::ModelPipeline) with a *world* camera
+/// uniform (`section_origin` zero).
+///
+/// The geometry and the shading come from [`mesh_item_quads`], which the hotbar
+/// already uses, so a dropped stone and a stone in slot 0 are textured and shaded
+/// from the identical quads. The one thing overridden afterwards is the packed
+/// light byte: `mesh_item_quads` nails every vertex to
+/// [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) because an inventory slot is
+/// full-bright by definition, and a dropped item in a dark cave is emphatically
+/// not. Pass the world sample (see [`EntityLightSource`](crate::EntityLightSource)
+/// on the shell side); pass `GUI_ITEM_LIGHT` when there is no world to sample.
+#[must_use]
+pub fn dropped_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    ground: &DisplayTransform,
+    position: Vec3,
+    age_ticks: f32,
+    bob_offset: f32,
+    light: u8,
+) -> ModelMesh {
+    let lift = item_hover_lift(quads, ground);
+    let pose = dropped_item_matrix(position, age_ticks, bob_offset, ground, lift);
+    let mut mesh = mesh_item_quads(quads, pose, gui_light);
+    for vertex in &mut mesh.vertices {
+        vertex.light = light;
+    }
+    mesh
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lodestone_assets::Direction;
 
     fn pig_mesh() -> EntityMesh {
         EntityMesh::from_model(&lodestone_assets::entity_models::pig_model())
@@ -1187,5 +1416,271 @@ mod tests {
         let manual_frame = plan_entities(&manual, &frustum);
         assert_eq!(frame.batches, manual_frame.batches);
         assert_eq!(frame.instance_count(), manual_frame.instance_count());
+    }
+
+    // ---- dropped items ---------------------------------------------------
+
+    /// A unit cube's six outward-wound faces, in `mesh_item_quads`' vertex
+    /// order, as a stand-in for a baked block item's geometry.
+    fn cube_face(dir: Direction) -> [Vec3; 4] {
+        let n = match dir {
+            Direction::East => Vec3::X,
+            Direction::West => -Vec3::X,
+            Direction::Up => Vec3::Y,
+            Direction::Down => -Vec3::Y,
+            Direction::South => Vec3::Z,
+            Direction::North => -Vec3::Z,
+        };
+        let u = if n.x.abs() < 0.5 { Vec3::X } else { Vec3::Y };
+        let v = n.cross(u);
+        let centre = Vec3::splat(0.5) + n * 0.5;
+        [
+            centre - u * 0.5 - v * 0.5,
+            centre + u * 0.5 - v * 0.5,
+            centre + u * 0.5 + v * 0.5,
+            centre - u * 0.5 + v * 0.5,
+        ]
+    }
+
+    fn cube_quad(dir: Direction) -> BakedQuad {
+        let p = cube_face(dir);
+        BakedQuad {
+            positions: [p[0].into(), p[1].into(), p[2].into(), p[3].into()],
+            uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            direction: dir,
+            cullface: None,
+            tint_index: None,
+            shade: true,
+            layer: 0,
+            anim: 0,
+        }
+    }
+
+    fn unit_cube_quads() -> Vec<BakedQuad> {
+        [
+            Direction::East,
+            Direction::West,
+            Direction::Up,
+            Direction::Down,
+            Direction::South,
+            Direction::North,
+        ]
+        .into_iter()
+        .map(cube_quad)
+        .collect()
+    }
+
+    /// The signed screen area of a quad's first triangle after `m` — the sign
+    /// `FrontFace::Ccw` + `cull_mode: Back` acts on.
+    fn screen_area(m: Mat4, q: [Vec3; 4]) -> f32 {
+        let p: Vec<Vec3> = q.iter().map(|v| m.project_point3(*v)).collect();
+        let a = p[1] - p[0];
+        let b = p[2] - p[0];
+        a.x * b.y - a.y * b.x
+    }
+
+    #[test]
+    fn the_bob_never_dips_below_the_entity_position() {
+        // `sin(..) * 0.1 + 0.1` is bounded to 0.0..=0.2, so a dropped item
+        // hovers and never sinks into the block it landed on.
+        for tick in 0..400 {
+            let age = tick as f32 * 0.5;
+            let bob = item_bob_height(age, 1.234);
+            assert!(
+                (0.0..=2.0 * ITEM_BOB_AMPLITUDE + 1e-6).contains(&bob),
+                "bob {bob} at age {age} escaped 0..=0.2"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bob_and_the_spin_have_vanillas_periods() {
+        // Bob: sin(age/10 + offs) has period 20*PI ticks. Spin: age/20 + offs
+        // radians, so a full turn is 40*PI ticks. Asserting the *ratio* as well
+        // catches a swapped pair of divisors, which equal-period tests do not.
+        let offs = 0.0;
+        let bob_period = std::f32::consts::TAU * ITEM_BOB_TICKS_PER_RADIAN;
+        assert!(
+            (item_bob_height(0.0, offs) - item_bob_height(bob_period, offs)).abs() < 1e-4,
+            "the bob must repeat after {bob_period} ticks"
+        );
+        let spin_period = std::f32::consts::TAU * ITEM_SPIN_TICKS_PER_RADIAN;
+        assert!(
+            (item_spin_radians(spin_period, offs) - item_spin_radians(0.0, offs)
+                - std::f32::consts::TAU)
+                .abs()
+                < 1e-4,
+            "the spin must complete exactly one turn after {spin_period} ticks"
+        );
+        assert!(
+            (spin_period / bob_period - 2.0).abs() < 1e-4,
+            "vanilla bobs twice per revolution"
+        );
+    }
+
+    #[test]
+    fn two_entities_do_not_bob_in_lockstep() {
+        // The whole point of a per-entity phase: a pile of drops must not
+        // pulse as one object.
+        let offsets: Vec<f32> = (1..=8).map(item_bob_offset).collect();
+        for (i, a) in offsets.iter().enumerate() {
+            assert!(
+                (0.0..std::f32::consts::TAU).contains(a),
+                "phase {a} out of range"
+            );
+            for b in &offsets[i + 1..] {
+                assert!((a - b).abs() > 1e-3, "ids share a phase: {a} vs {b}");
+            }
+        }
+        // ...and it must be stable, or the item jitters instead of spinning.
+        assert_eq!(item_bob_offset(7), item_bob_offset(7));
+    }
+
+    #[test]
+    fn the_hover_lift_puts_the_lowest_point_one_pixel_up() {
+        // Vanilla's `minOffsetY = -box.minY + 0.0625`, measured on the GROUND-
+        // posed model. Under block/block's ground pose the unit cube is scaled
+        // to 0.25 and centred on y = 3/16, so its base sits at 3/16 - 1/8.
+        let quads = unit_cube_quads();
+        let (min_y, max_y) = posed_item_y_extent(&quads, &BLOCK_ITEM_GROUND);
+        assert!((min_y - (3.0 / 16.0 - 0.125)).abs() < 1e-5, "min_y = {min_y}");
+        assert!((max_y - (3.0 / 16.0 + 0.125)).abs() < 1e-5, "max_y = {max_y}");
+
+        let lift = item_hover_lift(&quads, &BLOCK_ITEM_GROUND);
+        let pose = dropped_item_matrix(Vec3::ZERO, 0.0, 0.0, &BLOCK_ITEM_GROUND, lift);
+        let lowest = unit_cube_quads()
+            .iter()
+            .flat_map(|q| q.positions)
+            .map(|p| pose.transform_point3(Vec3::from(p)).y)
+            .fold(f32::INFINITY, f32::min);
+        // At age 0 with phase 0 the bob is exactly its 0.1 midpoint.
+        let expected = ITEM_MIN_HOVER_HEIGHT + item_bob_height(0.0, 0.0);
+        assert!(
+            (lowest - expected).abs() < 1e-5,
+            "the posed model's base must float {expected} above the entity, got {lowest}"
+        );
+    }
+
+    #[test]
+    fn the_spin_is_about_the_entity_position_not_the_model_origin() {
+        // The centring inside `display_matrix` is what makes the item rotate on
+        // the spot. If it were dropped, the cube would orbit its own corner and
+        // swing half a block sideways every revolution.
+        let quads = unit_cube_quads();
+        let lift = item_hover_lift(&quads, &BLOCK_ITEM_GROUND);
+        let feet = Vec3::new(10.0, 64.0, -3.0);
+        for age in [0.0f32, 13.0, 27.5, 61.0] {
+            let pose = dropped_item_matrix(feet, age, 0.4, &BLOCK_ITEM_GROUND, lift);
+            let centre = pose.transform_point3(Vec3::splat(0.5));
+            assert!(
+                (centre.x - feet.x).abs() < 1e-4 && (centre.z - feet.z).abs() < 1e-4,
+                "at age {age} the item centre drifted to {centre} from {feet}"
+            );
+        }
+    }
+
+    #[test]
+    fn dropped_item_pose_preserves_winding() {
+        // Derive the front-facing sign from the camera rather than asserting
+        // "positive" or "negative" — the same discipline `item_render`'s
+        // `winding_matches_the_world_camera` uses, and the reason that test
+        // cannot be fooled by a misremembered glam/wgpu convention.
+        //
+        // The trap this pins: the GUI rule is that `gui_ortho * gui_item_pose`
+        // matches `view_projection`'s determinant SIGN (negative). Applying that
+        // to a *world* pose — which is left-multiplied by that same
+        // `view_projection` — inverts it. A world pose must have a POSITIVE
+        // determinant, and the composition then inherits the camera's negative.
+        let camera = crate::camera::Camera {
+            position: Vec3::new(0.5, 0.5, 4.0),
+            yaw: 180.0,
+            pitch: 0.0,
+            ..crate::camera::Camera::default()
+        };
+        let world = camera.view_projection();
+        assert!(
+            world.determinant() < 0.0,
+            "the reference camera's determinant is expected to be negative \
+             (glam's DirectX RH perspective); it is {}",
+            world.determinant()
+        );
+        let front_sign = screen_area(world, cube_face(Direction::South)).signum();
+        assert_eq!(
+            screen_area(world, cube_face(Direction::North)).signum(),
+            -front_sign,
+            "the reference camera must disagree about the far face"
+        );
+
+        let quads = unit_cube_quads();
+        let lift = item_hover_lift(&quads, &BLOCK_ITEM_GROUND);
+        // Several ages, so a spin angle cannot be what rescues the sign.
+        for age in [0.0f32, 5.0, 17.0, 33.0, 70.0] {
+            let pose = dropped_item_matrix(
+                Vec3::new(0.5, 0.5, 0.0),
+                age,
+                0.0,
+                &BLOCK_ITEM_GROUND,
+                lift,
+            );
+            assert!(
+                pose.determinant() > 0.0,
+                "a world-space item pose must not flip handedness; det = {} at age {age}",
+                pose.determinant()
+            );
+            let composed = world * pose;
+            assert_eq!(
+                composed.determinant().signum(),
+                world.determinant().signum(),
+                "view_projection * pose must keep the camera's winding at age {age}"
+            );
+            // And on-screen: whichever cube face currently points at the camera
+            // must carry the front-facing sign.
+            let towards_camera = if (item_spin_radians(age, 0.0) / std::f32::consts::TAU).fract()
+                < 0.25
+            {
+                Direction::South
+            } else {
+                continue;
+            };
+            assert_eq!(
+                screen_area(composed, cube_face(towards_camera)).signum(),
+                front_sign,
+                "the face turned towards the camera must survive back-face culling at age {age}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_mesh_carries_the_world_light_not_the_gui_full_bright() {
+        // The regression this guards: reusing `mesh_item_quads` verbatim nails
+        // every vertex to GUI_ITEM_LIGHT, so a drop in a pitch-black cave glows
+        // exactly as brightly as one at noon.
+        let quads = unit_cube_quads();
+        let dark = dropped_item_mesh(
+            &quads,
+            GuiLight::Side,
+            &BLOCK_ITEM_GROUND,
+            Vec3::ZERO,
+            0.0,
+            0.0,
+            0x02,
+        );
+        assert!(!dark.vertices.is_empty(), "the cube must mesh to something");
+        assert!(
+            dark.vertices.iter().all(|v| v.light == 0x02),
+            "every vertex must carry the sampled world light"
+        );
+        assert_eq!(dark.quad_count(), quads.len());
+    }
+
+    #[test]
+    fn the_two_ground_transforms_are_selected_by_gui_light() {
+        assert_eq!(ground_transform_for(GuiLight::Side), BLOCK_ITEM_GROUND);
+        assert_eq!(ground_transform_for(GuiLight::Front), GENERATED_ITEM_GROUND);
+        // The flat family is posed twice as large and one pixel lower; a swap
+        // would halve every dropped block.
+        const {
+            assert!(GENERATED_ITEM_GROUND.scale[0] > BLOCK_ITEM_GROUND.scale[0]);
+        }
     }
 }
