@@ -8,13 +8,36 @@
 //! chest must surface as a *special* renderer (the ex-`builtin/entity` seam that
 //! only `items/*.json` reveals).
 
+use std::path::PathBuf;
+
 use lodestone_assets::{
-    DisplayTransform, GuiLight, IconPart, ItemIconBuilder, ResourceLocation, ResourceManager,
-    MemorySource,
+    DisplayTransform, GuiItemContext, GuiLight, IconPart, ItemIconBuilder, ResourceLocation,
+    ResourceManager, MemorySource, ZipSource,
 };
 
 fn loc(s: &str) -> ResourceLocation {
     ResourceLocation::parse(s).unwrap()
+}
+
+/// Locates a fetched vanilla `client.jar`, preferring 26.2, matching the
+/// convention in `tests/real_jar.rs`.
+fn client_jar() -> Option<PathBuf> {
+    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .join(".cache/mc");
+    let preferred = cache.join("26.2").join("client.jar");
+    if preferred.is_file() {
+        return Some(preferred);
+    }
+    let entries = std::fs::read_dir(&cache).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("client.jar");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Builds a single-pack manager from `(in_pack_path, contents)` pairs.
@@ -259,5 +282,43 @@ fn default_context_takes_the_select_fallback() {
             assert_eq!(layers[0].sprite, loc("minecraft:item/compass_00"));
         }
         other => panic!("expected fallback Sprite, got {other:?}"),
+    }
+}
+
+/// Real 26.2 `items/spyglass.json` is a `minecraft:display_context` select with
+/// a `gui` case pointing at the flat sprite `minecraft:item/spyglass`, and a
+/// *fallback* (no matching case, not a `gui`/held distinction) pointing at the
+/// 3-D `minecraft:item/spyglass_in_hand` model. [`GuiItemContext`] must answer
+/// `select("minecraft:display_context") == Some("gui")` so this takes the `gui`
+/// case; under a context that never answers the select (the old
+/// `DefaultItemContext`-only resolution `ItemAtlas` used to use), this silently
+/// falls through to the fallback and the inventory icon becomes the in-hand
+/// model instead of the flat sprite.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar in .cache/mc/<version>/"]
+fn spyglass_resolves_to_the_flat_gui_sprite_not_the_in_hand_model() {
+    let jar = client_jar().expect("no client.jar under .cache/mc/<version>/; fetch it first");
+    let source = ZipSource::open(&jar).expect("open client.jar");
+    let mgr = ResourceManager::new(vec![Box::new(source)]);
+
+    let builder = ItemIconBuilder::new(&mgr);
+    let icon = builder
+        .icon_with(&loc("minecraft:spyglass"), &GuiItemContext)
+        .expect("spyglass definition resolves");
+
+    assert_eq!(icon.parts.len(), 1, "spyglass GUI icon is a single part");
+    match &icon.parts[0] {
+        IconPart::Sprite { layers } => {
+            assert_eq!(
+                layers[0].sprite,
+                loc("minecraft:item/spyglass"),
+                "GUI icon must be the flat spyglass sprite"
+            );
+        }
+        other => panic!(
+            "expected the GUI-case flat Sprite (minecraft:item/spyglass), got {other:?} — \
+             this is the `spyglass_in_hand` 3-D model, i.e. the select fell through to its \
+             fallback instead of taking the \"gui\" case"
+        ),
     }
 }
