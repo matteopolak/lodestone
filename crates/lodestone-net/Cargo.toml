@@ -12,6 +12,10 @@ lodestone-core = { workspace = true }
 thiserror = { workspace = true }
 flate2 = { workspace = true }
 tracing = { workspace = true }
+# Status-ping responses are JSON. `status.rs` decodes only the handful of fields
+# a server list renders, and does so here (rather than in each caller) so the
+# MOTD flattener has exactly one implementation. Pure and wasm-clean.
+serde_json = { workspace = true }
 
 # --- Encryption ---
 # AES-128-CFB8 is the online-mode stream cipher. `aes` + `cfb8` are pure-Rust

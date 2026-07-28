@@ -16,6 +16,7 @@ mod error;
 mod inbox;
 mod ping;
 mod resolve;
+mod status;
 mod transport;
 #[cfg(all(feature = "ws-native", not(target_arch = "wasm32")))]
 mod ws_native;
@@ -37,6 +38,9 @@ pub use ping::{
 pub use resolve::{
     DEFAULT_PORT, ResolvedAddress, choose_address, should_query_srv, srv_query_name,
 };
+pub use status::{MAX_FAVICON_BYTES, ServerStatus, decode_base64, decode_favicon, parse_status_json};
+#[cfg(not(target_arch = "wasm32"))]
+pub use status::server_status;
 #[cfg(not(target_arch = "wasm32"))]
 pub use resolve::{lookup_minecraft_srv, resolve_server_address};
 pub use transport::{DEFAULT_MEMORY_BUFFER, Transport, memory_pair};

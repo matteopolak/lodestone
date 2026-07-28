@@ -47,6 +47,13 @@ lodestone-testsupport = { workspace = true }
 # direct call is structured so that path replaces the call site, not the
 # generator (plan §8).
 lodestone-server = { path = "../lodestone-server" }
+# The status ping behind the multiplayer server list (MOTD, player counts,
+# favicon), plus the SRV resolution vanilla performs when no port is pinned.
+# Before this edge existed, `lodestone_net::ping` / `resolve` had **no consumer
+# anywhere in the workspace** — the only code that pinged a server
+# (`lodestone-game/tests/live_server.rs`) hand-rolled the whole handshake over a
+# raw `TcpStream`. See `menu/status.rs`.
+lodestone-net = { workspace = true }
 
 # GPU / windowing / math.
 wgpu = { workspace = true }
@@ -67,6 +74,12 @@ uuid = { workspace = true }
 # shell stays within the workspace's `deny(unsafe_code)` — the unsafe FFI lives
 # in the dependency, not here. A zero-reading gauge is worse than none (§12).
 memory-stats = "1"
+
+[dev-dependencies]
+# Encodes genuine PNG streams for the favicon-mosaic tests, so their input is a
+# real image (IHDR/IDAT/IEND, zlib, CRCs) rather than bytes only our own decoder
+# would accept.
+png = { workspace = true }
 
 [features]
 # Version-free by default. `live` compiles the vanilla-26.2 (protocol 776)
