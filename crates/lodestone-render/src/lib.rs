@@ -98,7 +98,10 @@ pub use mesher::{
     BuiltSection, LightGrid, MeshJob, SectionSnapshot, SectionSource, build_batch, column_of,
     dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
-pub use model_pipeline::{GpuModelMesh, ModelPipeline, model_camera_buffer, model_palette_buffer};
+pub use model_pipeline::{
+    GpuModelMesh, ModelPipeline, model_anim_buffer, model_camera_buffer, model_palette_buffer,
+    update_model_anim_buffer,
+};
 pub use models::{
     FluidMeshes, FluidSectionView, ModelMesh, ModelSectionView, ModelVertex, face_of_direction,
     is_full_cube, is_packed_cube, mesh_fluids, mesh_models,
