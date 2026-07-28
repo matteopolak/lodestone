@@ -11,6 +11,7 @@ use crate::error::{BotError, ClientClosed, SessionOutcome, WaitError};
 use crate::scoreboard::{BossBar, Scoreboard};
 use crate::spawn::DriverTask;
 use crate::state::{EntityView, OpenMenuSnapshot, PlayerSnapshot, SharedState};
+use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
 use lodestone_world::{ChunkSection, SectionLight};
 
@@ -213,6 +214,25 @@ impl ClientHandle {
     #[must_use]
     pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
         self.state.open_menu()
+    }
+
+    /// Predicts a container click locally and submits the resulting action to
+    /// the server.
+    ///
+    /// The prediction happens inside the read-model
+    /// ([`SharedState::menu_click`]), not on a snapshot: [`player_menu`](Self::player_menu)
+    /// and [`open_menu`](Self::open_menu) each hand back a clone, and a clone
+    /// has nowhere for the click's mutation to land. This call predicts
+    /// against the one live `Menus` the state owns, so the screen updates
+    /// immediately and [`ClientEvent`]s the server sends back
+    /// (`container_set_slot`, `set_cursor_item`, ...) reconcile over the same
+    /// prediction rather than a stale copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClientClosed`] if the session has already ended.
+    pub fn menu_click(&self, click: Click, ctx: PlayerCtx) -> Result<(), ClientClosed> {
+        self.send_action(self.state.menu_click(click, ctx))
     }
 
     /// Returns the block-state id at `pos`, or `None` if that block's chunk is

@@ -1,5 +1,6 @@
 use lodestone::container::{
-    ContainerFrame, ContainerGeometry, ContainerRenderer, Rect, slot_layout,
+    ContainerFrame, ContainerGeometry, ContainerRenderer, MenuHit, Rect, hit_test, panel_origin,
+    slot_layout,
 };
 use lodestone_game::{item::ItemStack, menu::Menu};
 use lodestone_model::Identifier;
@@ -140,6 +141,97 @@ fn crafting_result_slot_renders_whatever_the_server_put_there() {
         Some("crafting_table"),
         "the result slot must hold exactly what the server sent"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hit-testing: the inverse of the layout, and the half a click needs.
+//
+// The layout carries every slot's *real* menu index, so the hit test must too.
+// The failure this guards is not "clicks do nothing" — it is "clicks land on
+// the wrong slot", which produces a perfectly plausible screen and a server
+// that contradicts every prediction.
+// ---------------------------------------------------------------------------
+
+/// The centre of a laid-out slot, in viewport pixels.
+fn slot_centre(menu: &Menu, menu_index: usize, width: u32, height: u32) -> (f32, f32) {
+    let layout = slot_layout(menu);
+    let (px, py) = panel_origin(&layout, width, height);
+    let rect = layout
+        .slots
+        .iter()
+        .find(|r| r.menu_index == menu_index)
+        .unwrap_or_else(|| panic!("menu index {menu_index} must be laid out"));
+    (px + rect.x + rect.w * 0.5, py + rect.y + rect.h * 0.5)
+}
+
+#[test]
+fn hit_test_resolves_every_crafting_table_region_to_its_real_menu_index() {
+    let menu = Menu::crafting(3, 3);
+    let (w, h) = (400u32, 300u32);
+
+    for index in [0usize, 1, 5, 9, 10, 36, 37, 45] {
+        let (x, y) = slot_centre(&menu, index, w, h);
+        assert_eq!(
+            hit_test(&menu, w, h, x, y),
+            MenuHit::Slot(index),
+            "the centre of slot {index} must hit slot {index}"
+        );
+    }
+}
+
+/// The `MenuKind` transposition trap, from the mouse's side. The pixel that is
+/// the first hotbar slot on a crafting table is menu index **37**; the very
+/// same pixel on the player's own screen is **36**. A hit test that applied a
+/// constant offset — or reused the player numbering — would return 36 for both
+/// and every hotbar click in a container would address the wrong slot.
+#[test]
+fn the_same_hotbar_pixel_is_37_on_a_table_and_36_on_the_player_screen() {
+    let (w, h) = (400u32, 300u32);
+    let table = Menu::crafting(3, 3);
+    let player = Menu::player();
+
+    let (x, y) = slot_centre(&table, 37, w, h);
+    assert_eq!(hit_test(&table, w, h, x, y), MenuHit::Slot(37));
+    // Both panels are 176x166 and both put their hotbar at (8, 142), so this is
+    // literally the same pixel.
+    assert_eq!(slot_centre(&player, 36, w, h), (x, y));
+    assert_eq!(hit_test(&player, w, h, x, y), MenuHit::Slot(36));
+}
+
+#[test]
+fn hit_test_separates_outside_the_panel_from_a_gap_inside_it() {
+    let menu = Menu::crafting(3, 3);
+    let (w, h) = (400u32, 300u32);
+    let layout = slot_layout(&menu);
+    let (px, py) = panel_origin(&layout, w, h);
+
+    // Far outside: vanilla's -999 drop.
+    assert_eq!(hit_test(&menu, w, h, 2.0, 2.0), MenuHit::Outside);
+    // Just past the right edge.
+    assert_eq!(
+        hit_test(&menu, w, h, px + layout.width + 0.5, py + 4.0),
+        MenuHit::Outside
+    );
+    // Inside the panel, in the title strip above the grid: vanilla does nothing.
+    assert_eq!(hit_test(&menu, w, h, px + 8.0, py + 8.0), MenuHit::Panel);
+}
+
+/// Anti-drift: the hit test and the drawn geometry must place the panel at the
+/// same origin. They are separate code paths over the same layout, and a
+/// divergence here is exactly the "clicks land one slot off" bug.
+#[test]
+fn hit_test_and_drawn_geometry_share_one_panel_origin() {
+    let menu = Menu::crafting(3, 3);
+    for (w, h) in [(400u32, 300u32), (1920, 1080), (100, 90)] {
+        let geo = ContainerGeometry::build(&ContainerFrame::new(Some(&menu), "Crafting"), w, h);
+        let rect = geo.widget_rect.expect("a menu draws a panel");
+        let (px, py) = panel_origin(&slot_layout(&menu), w, h);
+        assert_eq!((rect.x, rect.y), (px, py), "at {w}x{h}");
+        // ...and the slot the geometry drew at the panel's first grid cell is
+        // the slot the mouse finds there.
+        let (x, y) = slot_centre(&menu, 1, w, h);
+        assert_eq!(hit_test(&menu, w, h, x, y), MenuHit::Slot(1), "at {w}x{h}");
+    }
 }
 
 #[test]

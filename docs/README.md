@@ -42,3 +42,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), and
   the dependency edge that gave `lodestone-net`'s ping its first consumer.
+- [Bevy ECS migration](./bevy-migration.md) — the staged plan for moving state onto
+  `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
+  the two sources of truth that already exist, what must stay a plain library, and
+  why a native plugin is not a substitute for the sandboxed WASM host.
