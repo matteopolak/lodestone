@@ -14,17 +14,31 @@
 //! texture of any of its faces (`grass_block` declares `block/dirt`). Only the
 //! shell holds both the engine and the atlas, so the join happens here.
 //!
-//! # What is not implemented yet
+//! # `SpriteSource::Sheet` resolution
 //!
-//! [`SpriteSource::Sheet`] particles — smoke, flame, crits, splashes — need the
-//! stitched `particles.png` sheet, which nothing builds. Rather than drop them
-//! silently, [`Particles::extract`] counts them into
-//! [`ParticleFrame::unresolved`] so the gap is visible in the HUD instead of
-//! looking like a working system that emits nothing.
+//! Smoke, flame, crits, splashes and the rest of [`SpriteSource::Sheet`] are
+//! resolved against a stitched [`ParticleAtlas`], the same way
+//! [`SpriteSource::BlockState`] is resolved against the baked model set:
+//! [`Particles::with_particle_atlas`] precomputes a `(Sheet, frame) -> UV
+//! rect` table at construction, mirroring the `state_uv` table below. Vanilla
+//! has no pre-baked `particles.png` on disk either — it stitches loose
+//! `textures/particle/*.png` sprites at load time — so [`ParticleAtlas`]
+//! reuses [`lodestone_assets`]'s [`AtlasBuilder`](lodestone_assets::AtlasBuilder)
+//! exactly as the block and item atlases do, rather than a second stitcher.
+//!
+//! Nothing in this crate loads `client.jar` itself (that needs a resource
+//! root, which is resolved elsewhere in the shell); a session that never
+//! calls [`Particles::with_particle_atlas`] simply keeps every sheet particle
+//! unresolved, same as before. [`Particles::extract`] counts whatever is
+//! unresolved into [`ParticleFrame::unresolved`] so the gap — full, partial,
+//! or none — is always visible rather than looking like a working system that
+//! quietly emits nothing.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use lodestone_particle::{Layer, ParticleEngine, ParticleQuad, SpriteSource, emit};
+use lodestone_assets::{ParticleAtlas, ResourceLocation};
+use lodestone_particle::{Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit};
 use lodestone_physics::{CollisionView, Vec3d};
 use lodestone_render::{BlockModels, Camera};
 use wgpu::util::DeviceExt;
@@ -66,8 +80,10 @@ pub struct ParticleFrame {
     pub alive: usize,
     /// Quads that resolved to a sprite and were uploaded.
     pub drawn: usize,
-    /// Quads dropped because their sprite could not be resolved — sheet-based
-    /// particles (no particle atlas yet) or a block state with no `#particle`.
+    /// Quads dropped because their sprite could not be resolved — a
+    /// sheet-based particle when no [`ParticleAtlas`] was attached (see
+    /// [`Particles::with_particle_atlas`]), or a block state with no
+    /// `#particle`.
     pub unresolved: usize,
 }
 
@@ -83,6 +99,11 @@ pub struct Particles {
     /// model set is loaded (the offline demo world), which is why
     /// [`ParticleFrame::unresolved`] exists rather than a silent no-op.
     state_uv: Arc<Vec<Option<[f32; 4]>>>,
+    /// Per-`(Sheet, frame)` atlas UV rect. Empty when no [`ParticleAtlas`] has
+    /// been attached via [`Self::with_particle_atlas`], in which case every
+    /// [`SpriteSource::Sheet`] particle counts into
+    /// [`ParticleFrame::unresolved`] rather than drawing nothing silently.
+    sheet_uv: Arc<HashMap<(Sheet, u16), [f32; 4]>>,
     quads: Vec<ParticleQuad>,
     instances: Vec<ParticleInstance>,
     last: ParticleFrame,
@@ -92,6 +113,10 @@ impl Particles {
     /// Build the simulation. `models`, when present, supplies each block state's
     /// `#particle` sprite; without it terrain particles still *simulate* but
     /// resolve to nothing and are counted as unresolved.
+    ///
+    /// Sheet-sourced particles (smoke, flame, crits, splashes, …) start
+    /// unresolved regardless — attach a stitched atlas with
+    /// [`Self::with_particle_atlas`] to resolve those too.
     #[must_use]
     pub fn new(models: Option<&BlockModels>) -> Self {
         let state_uv = match models {
@@ -103,10 +128,31 @@ impl Particles {
         Self {
             engine: ParticleEngine::new(),
             state_uv: Arc::new(state_uv),
+            sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
             last: ParticleFrame::default(),
         }
+    }
+
+    /// Attaches (or clears, with `None`) the stitched particle-sheet atlas
+    /// that resolves [`SpriteSource::Sheet`] particles — smoke, flame, crits,
+    /// splashes, and the rest of `lodestone_particle::Sheet`.
+    ///
+    /// Every `(Sheet, frame)` UV rect is precomputed here rather than looked
+    /// up per-particle per-frame, mirroring how `state_uv` precomputes one
+    /// entry per block state at construction: `Sheet::all()` names every sheet
+    /// this crate can ever emit, so the whole table is small (one entry per
+    /// physical frame across all ten sheets) and static once built.
+    ///
+    /// Building the atlas itself (reading `client.jar`, discovering
+    /// `particles/*.json`) is the caller's job — this module only consumes an
+    /// already-built [`ParticleAtlas`], the same separation `BlockModels`
+    /// gets in [`Self::new`].
+    #[must_use]
+    pub fn with_particle_atlas(mut self, atlas: Option<&ParticleAtlas>) -> Self {
+        self.sheet_uv = Arc::new(atlas.map(sheet_uv_table).unwrap_or_default());
+        self
     }
 
     /// Build the simulation over the offline demo palette, whose sprites are
@@ -135,6 +181,7 @@ impl Particles {
         Self {
             engine: ParticleEngine::new(),
             state_uv: Arc::new(state_uv),
+            sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
             last: ParticleFrame::default(),
@@ -264,10 +311,43 @@ impl Particles {
             SpriteSource::BlockState(id) => {
                 self.state_uv.get(id as usize).copied().flatten()
             }
-            // No stitched particle sheet exists yet; see the module docs.
-            SpriteSource::Sheet { .. } => None,
+            SpriteSource::Sheet { sheet, frame } => {
+                self.sheet_uv.get(&(sheet, frame)).copied()
+            }
         }
     }
+}
+
+/// Builds the `(Sheet, frame) -> UV rect` table [`Particles::with_particle_atlas`]
+/// installs, by walking every physical frame of every sheet
+/// `lodestone_particle` can emit ([`Sheet::all`]) and looking each one up in
+/// `atlas` by the same location [`Sheet::texture_name`] would resolve through
+/// vanilla's own `textures/particle/<name>.png` convention — see the module
+/// docs on why the atlas keys sprites that way. A sheet whose texture is
+/// missing from the atlas (a stripped-down or corrupt pack) simply has no
+/// entry and falls back to counting as unresolved, the same as an absent
+/// atlas entirely.
+fn sheet_uv_table(atlas: &ParticleAtlas) -> HashMap<(Sheet, u16), [f32; 4]> {
+    let mut table = HashMap::new();
+    for &sheet in Sheet::all() {
+        for frame in 0..sheet.frame_count() {
+            let Ok(loc) = ResourceLocation::new("minecraft", sheet.texture_name(frame)) else {
+                continue;
+            };
+            if let Some(sprite) = atlas.sprite(&loc) {
+                table.insert(
+                    (sheet, frame),
+                    [
+                        sprite.uv_min[0],
+                        sprite.uv_min[1],
+                        sprite.uv_max[0],
+                        sprite.uv_max[1],
+                    ],
+                );
+            }
+        }
+    }
+    table
 }
 
 /// The billboard render pass: one pipeline, one growable instance buffer, one
@@ -718,5 +798,126 @@ mod tests {
             0,
             "every fragment's lifetime is well under 200 ticks"
         );
+    }
+
+    /// Sheet-sourced particles (smoke, flame, crits, splashes, …) have no
+    /// resolution table by default — the same "counted, not dropped"
+    /// discipline as the terrain case above, but for `SpriteSource::Sheet`.
+    /// This is the negative control for
+    /// [`sheet_particle_resolves_with_an_atlas`] below: it proves the gap is
+    /// actually observed firing, not merely assumed.
+    #[test]
+    fn sheet_particle_without_atlas_is_counted_unresolved() {
+        let mut p = Particles::new(None);
+        emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        assert!(!p.engine.particles().is_empty(), "flame must emit a particle");
+
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        eprintln!(
+            "flame, no atlas: alive={} drawn={} unresolved={}",
+            frame.alive, frame.drawn, frame.unresolved
+        );
+        assert_eq!(
+            frame.drawn, 0,
+            "no particle atlas attached, so nothing can draw"
+        );
+        assert_eq!(
+            frame.unresolved, frame.alive,
+            "every live sheet-sourced particle must be counted unresolved, not dropped"
+        );
+        assert!(frame.unresolved > 0, "the negative control must actually fire");
+    }
+
+    /// With a `(Sheet, frame)` table present the same emission resolves.
+    /// Mirrors [`resolved_terrain_particles_produce_instances_inside_the_sprite_rect`]:
+    /// the table is populated directly (bypassing `ParticleAtlas`/jar I/O,
+    /// which [`sheet_particle_resolves_against_the_real_particle_atlas`]
+    /// below covers) so this stays a fast, hermetic gate on the resolution
+    /// *mechanism* — `sprite_rect`'s `Sheet` arm and the `unresolved` count —
+    /// rather than on atlas stitching.
+    #[test]
+    fn sheet_particle_resolves_with_an_atlas() {
+        let rect = [0.5f32, 0.0, 0.5625, 0.0625];
+        let mut p = Particles::new(None);
+        p.sheet_uv = Arc::new(HashMap::from([((Sheet::Flame, 0u16), rect)]));
+        emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        let alive = p.engine.particles().len();
+        assert!(alive > 0, "flame must emit a particle");
+
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        eprintln!(
+            "flame, with atlas: alive={} drawn={} unresolved={}",
+            frame.alive, frame.drawn, frame.unresolved
+        );
+        assert_eq!(
+            frame.unresolved, 0,
+            "flame's (Sheet, frame) is in the table, so nothing should be unresolved"
+        );
+        assert_eq!(frame.drawn, alive);
+
+        for inst in &p.instances {
+            for (i, uv) in inst.uv.iter().enumerate() {
+                let (lo, hi) = if i % 2 == 0 {
+                    (rect[0], rect[2])
+                } else {
+                    (rect[1], rect[3])
+                };
+                assert!(
+                    *uv >= lo - 1e-5 && *uv <= hi + 1e-5,
+                    "UV {uv} escaped the sprite rect {lo}..{hi} — a flame particle \
+                     would sample a neighbouring sheet frame"
+                );
+            }
+        }
+    }
+
+    /// End-to-end against the real vanilla particle atlas: builds
+    /// [`ParticleAtlas`] from the same jar `resources::vanilla_manager` opens
+    /// for the other GPU/jar gates, attaches it via
+    /// [`Particles::with_particle_atlas`], and checks that real flame, smoke
+    /// and crit emissions resolve. A synthetic fixture (as in the test above)
+    /// cannot catch a wrong sprite-naming convention — e.g. forgetting the
+    /// `particle/` directory segment `Sheet::texture_name` bakes in — because
+    /// it never exercises the real jar's actual paths; this test does.
+    #[test]
+    #[ignore = "requires a fetched vanilla client.jar (see crate::resources::vanilla_manager)"]
+    fn sheet_particle_resolves_against_the_real_particle_atlas() {
+        let manager = crate::resources::vanilla_manager()
+            .expect("no vanilla client.jar under .cache/mc/<version>/; fetch it first");
+        let (atlas, report) = ParticleAtlas::build_reported(&manager)
+            .expect("build particle atlas from the real jar");
+        eprintln!(
+            "particle atlas: definitions={} sprites={} atlas={}x{}",
+            report.definitions,
+            report.sprites,
+            atlas.atlas().width,
+            atlas.atlas().height
+        );
+        assert!(report.missing_textures.is_empty(), "{:?}", report.missing_textures);
+
+        let mut p = Particles::new(None).with_particle_atlas(Some(&atlas));
+        emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        emit::smoke(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0, 1.0);
+        emit::crit(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.0, 0.0);
+        let alive = p.engine.particles().len();
+        assert!(alive >= 3, "all three emitters must have added a particle");
+
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        eprintln!(
+            "flame/smoke/crit resolution: alive={} drawn={} unresolved={}",
+            frame.alive, frame.drawn, frame.unresolved
+        );
+        assert_eq!(
+            frame.unresolved, 0,
+            "flame, smoke and crit all name real vanilla sheets and must resolve \
+             against the stitched atlas"
+        );
+        assert_eq!(frame.drawn, frame.alive);
     }
 }
