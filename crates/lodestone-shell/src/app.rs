@@ -320,6 +320,7 @@ impl WindowApp {
         // needs the world; doing it here would hand out two borrows of `Sim`.
         let particle_frame = self.sim.extract_particles(&camera);
         render.prepare_particles(device, queue, self.sim.particle_instances(), &camera);
+        render.update_animation(queue, self.sim.tick_count());
         let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
 
         // Fold GPU counters + timing into the debug overlay.
@@ -739,6 +740,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let entity_draws = sim.entity_draws();
     let _ = sim.extract_particles(&camera);
     render.prepare_particles(device, queue, sim.particle_instances(), &camera);
+    render.update_animation(queue, sim.tick_count());
     let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
     let pixels = target.read_texels(device, queue);
     let frame_ms = start.elapsed().as_secs_f64() * 1000.0;
