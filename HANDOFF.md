@@ -83,13 +83,26 @@ These are current, reproduced-on-screen defects, not speculation:
   "no textures, no animations, no interpolation"; each had a different cause.
   - **~~Textures~~ CLOSED** (`b0722ea`). Real `textures/entity/**` skins are loaded from the jar;
     `gpu.rs:327 synthetic_entity_texture` survives only as the fallback for an unresolved model.
-  - **Animation — built, not wired.** `lodestone-entity/src/pose.rs` has `limb_swing`,
-    `limb_swing_amount` and walk smoothing with partial-tick lerps, unit-tested. Nothing consumes
-    it: `render/entity.rs` emits **one matrix per entity**, so there is no per-part articulation.
-    Wiring it requires a real decision about the instancing scheme (bone palette vs per-part
-    instances vs CPU-baked vertices), not a tweak. The cheapest credible route is a **CPU re-bake
-    per frame**: clone the `EntityModelDef`, mutate the animated `PartPose`s per vanilla's
-    `setupAnim`, and re-`bake_entity`.
+  - **~~Animation~~ CLOSED** (`58804e5`). Wired end to end and **proven at pixels**.
+    `lodestone-assets::entity::bake_entity_parts` emits per-part quads with no transform folded in;
+    `render/entity_anim.rs` is a pure, GPU-free animator (`Skeleton::pose`) reproducing vanilla's
+    `setupAnim` per family; `render/entity.rs` uploads **one instance buffer per part** and
+    `entity_pipeline.rs` draws each part's index range. Per-part instancing was chosen over CPU
+    re-baking (the route this handoff previously recommended) because re-baking needs a vertex
+    buffer per *entity*, whereas a mob is ~10–35 parts but hundreds of quads, so matrices move
+    ~1% of the data. A per-vertex `part_id` indexing a storage buffer was rejected: it needs a
+    vertex-stage storage buffer, the exact feature that killed WebGL2 (DESIGN §12.72).
+    `tests/entity_anim_pixels.rs` renders a pig side-on at two half-cycle-apart inputs and asserts
+    the leg band differs by ≥200 px (measured 2963) with a rest-vs-rest control at exactly 0; it
+    was falsified by swapping `.pose(anim)` for `.rest_pose()`, which drives the band to 0.
+    **Known divergence:** `set_*_rot` *adds* to the authored pose where vanilla *assigns*.
+    Identical wherever the driven limb is authored at zero rotation, which is nearly all of them;
+    `entity_anim.rs::models_that_author_a_driven_limb_rotation` pins the 14 that are not
+    (spider/cave\_spider — where vanilla also adds, so not a divergence at all — plus snow\_golem,
+    ender\_dragon, witch, villager, rabbit, bee, parrot, pillager, vindicator, evoker, illusioner,
+    wandering\_trader). Those need per-model `setupAnim` ports. Also still unported: humanoid
+    swim/crouch/ride/fall-flying/item poses, chicken wing flap, villager `isUnhappy` head shake,
+    and `attack_anim` (assumes the right arm, hard-wired to 0.0 in `entities.rs::render_anim`).
   - **~~Interpolation~~ CLOSED** (`b0722ea`). The window was `TICK = 0.05` — **one** tick, where
     vanilla eases over **three** — so the ease finished in 50 ms and the mob froze until the next
     packet: move, freeze, move, freeze, which reads as "not interpolated" even though
@@ -176,7 +189,7 @@ plausible, and the screen is wrong. Seven confirmed instances:
 | block models, layers, translucency | `render/{models,model_pipeline,translucency}.rs` | nothing — mesher emitted full cubes |
 | mining + placement | `lodestone-game`, live-gated over RCON | nothing — shell edited its local copy |
 | vanilla font loader | `lodestone-assets::font`, complete since the first commit | nothing — shell drew a 5×7 debug font |
-| entity pose / walk animation | `lodestone-entity::pose` | nothing — renderer draws a rigid lump |
+| ~~entity pose / walk animation~~ | `lodestone-entity::pose` → `render/entity_anim.rs` | **closed** — per-part instancing, gated at pixels (`58804e5`) |
 | item icons / item definitions | `lodestone-assets::{icon,item_model}` | nothing — hotbar cells are empty wells |
 | block texture animation | `render/anim.rs`, unit-tested | nothing — every animated sprite is frozen on frame 0 |
 
@@ -633,9 +646,9 @@ how much each changes the screen per unit of work, which is not the order of dif
 2. **Container / inventory screen slot icons.** `container.rs` does not use `ItemAtlas` at all;
    reuse the existing `push_item_quad`. Watch the `MenuKind` slot-order trap in §8 — a constant
    offset draws a plausible, wrongly-transposed inventory that reads as an art bug.
-3. **Entity animation.** See the mob row above. Cheapest credible route is a CPU re-bake per
-   frame. Note the sequencing fact: **mob physics is invisible until mobs animate**, so this gates
-   validation of the entity physics work, not just appearance.
+3. ~~**Entity animation.**~~ **Done** (`58804e5`) — see the mob row above. The sequencing fact it
+   was gating still holds and is now unblocked: **mob physics is invisible until mobs animate**, so
+   entity physics can finally be validated by watching a mob rather than by unit test alone.
 4. **Fog + underwater overlay.** The diagnosed cause of the odd water. `FogRenderer`-equivalent
    with a short exponential biome-coloured water fog and reduced view distance, plus the
    full-screen `textures/misc/underwater.png` overlay. **Culling is verified correct — do not
