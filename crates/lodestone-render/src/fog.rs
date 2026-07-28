@@ -171,7 +171,10 @@ mod tests {
 
     #[test]
     fn uniform_marks_enabled_only_for_a_real_range() {
-        let on = FogUniform::new(&FogSettings::for_view_distance([0.1; 3], 100.0, 0.5), [1.0, 2.0, 3.0]);
+        let on = FogUniform::new(
+            &FogSettings::for_view_distance([0.1; 3], 100.0, 0.5),
+            [1.0, 2.0, 3.0],
+        );
         assert_eq!(on.eye, [1.0, 2.0, 3.0, 0.0]);
         assert_eq!(on.color_start[3], 50.0); // start
         assert_eq!(on.end_enabled[0], 100.0); // end
