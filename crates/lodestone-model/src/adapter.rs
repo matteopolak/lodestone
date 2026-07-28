@@ -300,6 +300,41 @@ pub struct EntityBaseDimensions {
     pub height: f32,
 }
 
+/// A block state's break-time inputs: vanilla `destroySpeed` (hardness) and
+/// whether the correct tool is required for drops.
+///
+/// This is the [`VersionAdapter::block_hardness`] seam's return type. Both
+/// fields are read straight off the version's `BlockState` census, so they mean
+/// exactly what vanilla means by them — see the warning below before feeding
+/// either one into break-time math.
+///
+/// # Trap: `requires_correct_tool` is **not** "the player has the right tool"
+///
+/// `requires_correct_tool` mirrors `BlockState.requiresCorrectToolForDrops` — a
+/// property of the *block*, answering "does this block drop nothing unless mined
+/// with a suitable tool?". A break-time calculation instead needs
+/// `Player.hasCorrectToolForDrops` — a property of the *player's held item vs.
+/// the block* — which is what `lodestone-game`'s `BreakInputs.correct_tool`
+/// means, and which selects vanilla's `30` vs `100` speed divider.
+///
+/// The two are near-opposites bare-handed: with an empty hand,
+/// `correct_tool == !requires_correct_tool`. Assigning this field straight into
+/// `BreakInputs.correct_tool` therefore tells the math that stone is being mined
+/// *correctly* by a bare hand, breaking it in **45 ticks instead of 151** — 3.4x
+/// too fast — while looking for all the world like faithful data wiring. Wire
+/// `hardness` through directly; derive `correct_tool` from the held item (and,
+/// bare-handed, from `!requires_correct_tool`), never from this field as-is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockHardness {
+    /// `BlockState.getDestroySpeed` (vanilla's field name for hardness).
+    /// `-1.0` marks an unbreakable block (bedrock, barrier, ...).
+    pub hardness: f32,
+    /// `BlockState.requiresCorrectToolForDrops`: whether the *block* demands a
+    /// suitable tool for drops. **Not** the player's tool-match flag — see the
+    /// type-level warning above.
+    pub requires_correct_tool: bool,
+}
+
 /// Adapter implemented by protocol crates to lift packets into this canonical
 /// model and lower canonical actions back into packets.
 ///
@@ -435,6 +470,30 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// census simply reports "unknown", never a guessed box.
     fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
         let _ = entity_type_id;
+        None
+    }
+
+    /// Resolves a block state's break-time inputs — vanilla `destroySpeed` and
+    /// the block's correct-tool-for-drops requirement — from its **block-state
+    /// id** (the id chunk sections and `block_update` carry), if this version
+    /// knows the state.
+    ///
+    /// The block-state id space is version-specific (states are renumbered every
+    /// time a block gains or loses a property), so this is the sanctioned route
+    /// for a version-free consumer (mining/break-progress) to read per-state
+    /// hardness without naming a version crate: ask the registry for an adapter
+    /// and call this. A direct dependency on a version crate would mint a second,
+    /// divergent version-data seam beside this one.
+    ///
+    /// The default returns `None`: a version that has not homed a hardness census
+    /// reports "unknown", never a guessed number.
+    ///
+    /// **Before wiring this into break-time math, read the warning on
+    /// [`BlockHardness`]:** `requires_correct_tool` is the *block's* requirement,
+    /// not `Player.hasCorrectToolForDrops`. Passing it straight through as
+    /// `BreakInputs.correct_tool` makes stone break 3.4x too fast.
+    fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
+        let _ = state_id;
         None
     }
 }
