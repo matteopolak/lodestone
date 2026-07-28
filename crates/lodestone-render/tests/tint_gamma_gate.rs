@@ -86,7 +86,8 @@ fn quad(tint: u8) -> ModelMesh {
         ao: 1.0,
         light: 0xFF,
         tint,
-        _pad: [0, 0],
+        anim: 0,
+        _pad: 0,
     };
     ModelMesh {
         vertices: vec![
@@ -249,7 +250,9 @@ fn grass_tint_renders_at_vanilla_ratio_not_gamma_compressed() {
     let tinted = gr(tr, tg);
     let untinted = gr(ur, ug);
 
-    println!("grass-tinted grey quad: rgb=({tr},{tg},{tb})  G/R={tinted:.3}  (vanilla target 1.30)");
+    println!(
+        "grass-tinted grey quad: rgb=({tr},{tg},{tb})  G/R={tinted:.3}  (vanilla target 1.30)"
+    );
     println!(
         "untinted control:       rgb=({ur},{ug},{ub})  G/R={untinted:.3}  (grey, tint does nothing)"
     );
