@@ -77,10 +77,12 @@ pub struct SectionSnapshot {
     /// back to the full-bright bridge in [`mesh_snapshot`]; every present slot
     /// carries the world's real sky/block light.
     lights: Vec<Option<SectionLightData>>,
-    /// How to resolve *absent* (`Missing`) sky light, chosen per dimension by the
-    /// producer. The shell's local world is the overworld, so this is
-    /// [`SkyDefault::Full`]; a nether/end driver would pass [`SkyDefault::None`]
-    /// so absent sky stays `0` rather than defaulting up to daylight.
+    /// How to resolve *absent* (`Missing`) sky light, chosen per dimension by
+    /// the producer: [`snapshot_section`]'s demo world is always the
+    /// overworld ([`SkyDefault::Full`]); [`snapshot_section_live`] resolves
+    /// this per the *connected* dimension, defaulting to
+    /// [`SkyDefault::None`] outside the overworld so absent sky stays `0`
+    /// rather than defaulting up to daylight in the Nether/End.
     sky_default: SkyDefault,
 }
 
@@ -211,6 +213,14 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
 /// air section with the full-bright bridge for light (open sky above is bright
 /// anyway, and below-world is rarely visible) — the same absent-neighbour policy
 /// [`mesh_snapshot`] applies at horizontal world edges.
+///
+/// The returned snapshot's [`SkyDefault`] follows the **connected dimension**
+/// (read off [`NetClient::shared_handle`]'s player snapshot, since
+/// [`NetClient::world_dimensions`] carries only vertical extent): the
+/// overworld defaults absent sky to full daylight, everything else
+/// (Nether/End, and any non-`minecraft:overworld` dimension) defaults it to
+/// `0`. Getting this wrong is invisible in the overworld — measured 0 of 192
+/// sky sections `Missing` there — and renders the Nether full-bright.
 #[must_use]
 pub fn snapshot_section_live(
     net: &NetClient,
@@ -262,13 +272,34 @@ pub fn snapshot_section_live(
         return None;
     }
 
+    // `SkyDefault` follows the *connected* dimension, not a hardcoded
+    // overworld assumption: the Nether and the End have no sky light, so a
+    // `Missing` sky sample there must resolve to `0`, not daylight. Overworld
+    // measured 0 of 192 sky sections `Missing`, which is exactly why this was
+    // invisible until now — the wrong default never got exercised.
+    //
+    // `WorldDimensions` (the `section_count` parameter above) carries only
+    // `min_y`/`height`, not dimension identity, so this reads the connected
+    // dimension straight off the shared handle's player snapshot instead —
+    // the cheapest place this crate can reach it without growing that struct.
+    let sky_default = match net
+        .shared_handle()
+        .get()
+        .and_then(|h| h.player().dimension)
+    {
+        // Dimension not yet known (pre-login): keep the previous default.
+        None => SkyDefault::Full,
+        Some(dim) if dim.namespace() == "minecraft" && dim.path() == "overworld" => {
+            SkyDefault::Full
+        }
+        Some(_) => SkyDefault::None,
+    };
+
     Some(SectionSnapshot {
         key,
         sections,
         lights,
-        // The live path currently drives the overworld; a nether/end driver would
-        // pass `SkyDefault::None` here (the too-bright-nether guard).
-        sky_default: SkyDefault::Full,
+        sky_default,
     })
 }
 
@@ -521,6 +552,11 @@ impl ModelSectionView for SnapshotModelView<'_> {
     fn face_light_at(&self, x: usize, y: usize, z: usize, dir: Direction) -> u8 {
         self.light
             .face_light(x, y, z, face_of_direction(dir).normal())
+    }
+
+    fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+        let (sky, block) = self.light.levels_at(x, y, z);
+        (sky << 4) | block
     }
 }
 
