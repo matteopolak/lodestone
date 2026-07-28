@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lodestone_render::{
-    GpuContext, HeadlessTarget, RenderTarget, TargetError, window::attach_window,
+    GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings, window::attach_window,
 };
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, WindowEvent};
@@ -40,6 +40,17 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         Mode::Connect => run_connect(config),
         Mode::Window => run_windowed(config),
     }
+}
+
+/// Sky distance fog sized to the shell's real render distance, so terrain
+/// dissolves into the sky exactly where chunks stop loading rather than at the
+/// render crate's default 8-chunk fallback. The colour matches the sky clear so
+/// the fade is seamless; fog starts at 75% of the view distance and reaches full
+/// opacity at the edge. Driven once at render bring-up (render distance is fixed
+/// for the session); underwater fog is a separate concern owned by the render
+/// crate's eye-in-fluid path.
+fn sky_fog(render_distance: u32) -> FogSettings {
+    FogSettings::for_view_distance([0.53, 0.71, 0.92], render_distance as f32 * 16.0, 0.75)
 }
 
 /// Map a physical key to a movement [`Action`].
@@ -492,6 +503,9 @@ impl ApplicationHandler for WindowApp {
             h,
             self.sim.vanilla_atlas(),
         );
+        // Size the sky fog to our real render distance so terrain fades into the
+        // sky where chunks actually stop, not at the render crate's 8-chunk default.
+        render.set_fog(sky_fog(self.config.render_distance));
         let mut hud = HudRenderer::new(gpu.device(), format);
         // Attach the vanilla GUI sprite atlas so the survival vitals draw from
         // real textures; on a jar-less run this is `None` and the HUD keeps its
@@ -722,8 +736,10 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let (w, h) = (1280u32, 720u32);
     let mut target = HeadlessTarget::new(device, w, h, format);
 
+    let render_distance = config.render_distance;
     let mut sim = Sim::new(config);
     let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
+    render.set_fog(sky_fog(render_distance));
 
     // Mesh everything and upload.
     let meshes = sim.drain_all_meshes();
