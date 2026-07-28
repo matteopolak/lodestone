@@ -69,6 +69,68 @@ pub const MODEL_FEET_OFFSET: f32 = 1.501;
 /// test) gets this and renders as it always did.
 pub const ENTITY_FULLBRIGHT: u8 = 15 << 4;
 
+/// The factor the **sky** half of the lightmap is scaled by at a given server
+/// `time_of_day` — `1.0` at noon, `0.24` at midnight. Feed it to
+/// [`EntityCameraUniform::with_sky_darken`](crate::entity_pipeline::EntityCameraUniform::with_sky_darken).
+///
+/// # Why this is needed even when world light is sampled correctly
+///
+/// A server's sky-light array is time-**invariant** — it records how much sky
+/// reaches a block, not how bright the sky is right now. Measured live against a
+/// vanilla 26.2 oracle at a single sky-lit position, with the server's own clock
+/// as the control:
+///
+/// ```text
+/// noon     clock= 6000  packed=0xF0  light_term=1.000
+/// midnight clock=18000  packed=0xF0  light_term=1.000
+/// ```
+///
+/// So a mob sampling world light perfectly is still full-bright at midnight.
+/// Vanilla applies the darkening client-side only.
+///
+/// # The curve
+///
+/// Three vanilla steps composed, in order:
+///
+/// 1. `DimensionType::timeOfDay(dayTime)` — the celestial angle, `0.0` at noon
+///    and `0.5` at midnight.
+/// 2. `Level::getSkyDarken(partialTick)` — `1.0` in full day, floored at `0.2`.
+/// 3. `LightTexture::updateLightTexture`'s `skyDarken * 0.95 + 0.05` lift, which
+///    maps that `[0.2, 1.0]` onto `[0.24, 1.0]`.
+///
+/// Step 3 is included so the returned number is *directly* the shader's
+/// multiplier and no caller has to remember the lift.
+///
+/// # How to change it
+///
+/// Rain and thunder are two further multipliers inside step 2
+/// (`1 - rainLevel * 5/16`, likewise thunder). They are omitted because the
+/// shell tracks neither yet; add them as arguments here rather than at the call
+/// site, so the one place that knows vanilla's curve stays the one place. The
+/// `0.0`-means-daylight sentinel lives in the shader, not here — this function
+/// never returns `0.0`.
+#[must_use]
+pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {
+    // 1. Celestial angle. `time_of_day` counts up without wrapping, so reduce
+    //    into the day first; f64 because the day fraction is what `Mth.frac`
+    //    operates on and f32 loses ticks at large world ages.
+    let day = time_of_day.rem_euclid(24_000) as f64 / 24_000.0;
+    let frac = (day - 0.25).rem_euclid(1.0);
+    let eased = 0.5 - (frac * std::f64::consts::PI).cos() / 2.0;
+    let celestial = ((frac * 2.0 + eased) / 3.0) as f32;
+
+    // 2. `Level::getSkyDarken`. The double negation is vanilla's, kept literal:
+    //    a cosine that saturates the clamp for most of the day, inverted, then
+    //    lifted onto [0.2, 1.0].
+    let mut f = 1.0 - ((celestial * std::f32::consts::TAU).cos() * 2.0 + 0.2);
+    f = f.clamp(0.0, 1.0);
+    f = 1.0 - f;
+    let darken = f * 0.8 + 0.2;
+
+    // 3. `LightTexture`'s lift.
+    darken * 0.95 + 0.05
+}
+
 /// Look up the ported entity model for a canonical entity-type path (the
 /// `path()` of an entity type key, e.g. `"pig"` from `minecraft:pig`).
 ///
@@ -943,6 +1005,56 @@ mod tests {
 
     fn pig_mesh() -> EntityMesh {
         EntityMesh::from_model(&lodestone_assets::entity_models::pig_model())
+    }
+
+    /// The two vanilla anchor values, hand-derived from the decompiled curve
+    /// rather than from this implementation, so agreement is evidence rather
+    /// than a tautology:
+    ///
+    /// * noon (6000): `timeOfDay` = 0 → `cos(0)*2 + 0.2` = 2.2 → `1 - 2.2` =
+    ///   −1.2 → clamps to 0 → `1 - 0` = 1 → `1*0.8 + 0.2` = 1.0 → lift = 1.0.
+    /// * midnight (18000): `timeOfDay` = 0.5 → `cos(π)*2 + 0.2` = −1.8 →
+    ///   `1 + 1.8` = 2.8 → clamps to 1 → `1 - 1` = 0 → `0*0.8 + 0.2` = 0.2 →
+    ///   lift = `0.2*0.95 + 0.05` = 0.24.
+    #[test]
+    fn sky_darken_hits_vanillas_noon_and_midnight_anchors() {
+        assert!((sky_darken_for_time_of_day(6_000) - 1.0).abs() < 1e-5);
+        assert!((sky_darken_for_time_of_day(18_000) - 0.24).abs() < 1e-5);
+    }
+
+    /// A large world age must reduce into the day, not drift: `time_of_day`
+    /// keeps counting past 24000 for the life of a world, and a curve that read
+    /// it raw would eventually saturate at one end and stop darkening at all —
+    /// a bug that only appears on a world that has been running for a while,
+    /// i.e. never in a test and always for the player.
+    #[test]
+    fn sky_darken_reduces_a_large_world_age_into_the_day() {
+        assert_eq!(
+            sky_darken_for_time_of_day(18_000),
+            sky_darken_for_time_of_day(18_000 + 24_000 * 500)
+        );
+        assert_eq!(
+            sky_darken_for_time_of_day(6_000),
+            sky_darken_for_time_of_day(6_000 - 24_000 * 500)
+        );
+    }
+
+    /// The curve must stay inside vanilla's `[0.24, 1.0]` across a whole day and
+    /// must actually *vary* — a constant 1.0 is the shipped bug, and a value
+    /// that ever reaches 0.0 would collide with the shader's "not wired"
+    /// sentinel and silently mean full daylight at exactly the darkest moment.
+    #[test]
+    fn sky_darken_stays_in_vanillas_range_and_is_not_constant() {
+        let samples: Vec<f32> = (0..24_000)
+            .step_by(50)
+            .map(sky_darken_for_time_of_day)
+            .collect();
+        let lo = samples.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = samples.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(lo >= 0.24 - 1e-5, "dipped to {lo}, below vanilla's 0.24 floor");
+        assert!(hi <= 1.0 + 1e-5, "rose to {hi}, above 1.0");
+        assert!(lo > 0.0, "0.0 is the shader's 'unset' sentinel and must be unreachable");
+        assert!(hi - lo > 0.5, "the curve barely moves ({lo}..{hi}) — that is the defect");
     }
 
     #[test]

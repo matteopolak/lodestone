@@ -20,7 +20,9 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
-use crate::container::{ContainerFrame, ContainerRenderer};
+use crate::container::{
+    ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuInput, hit_test,
+};
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
@@ -32,6 +34,8 @@ use crate::net::NetClient;
 use crate::sim::Sim;
 use lodestone_assets::ResourceLocation;
 use lodestone_controller::Action;
+use lodestone_game::click::{Click, PlayerCtx};
+use lodestone_game::menu::Menu;
 
 /// Entry point: dispatch on the configured mode.
 ///
@@ -69,6 +73,18 @@ fn action_for(code: KeyCode) -> Option<Action> {
         KeyCode::Space => Action::Jump,
         KeyCode::ShiftLeft | KeyCode::ShiftRight => Action::Sneak,
         KeyCode::ControlLeft | KeyCode::ControlRight => Action::Sprint,
+        _ => return None,
+    })
+}
+
+/// Maps a winit mouse button to the container-click gesture it drives.
+/// `None` for anything but left/right/middle (e.g. the back/forward mouse
+/// buttons some mice send), which the container screen has no use for.
+fn menu_button_for(button: MouseButton) -> Option<MenuButton> {
+    Some(match button {
+        MouseButton::Left => MenuButton::Left,
+        MouseButton::Right => MenuButton::Right,
+        MouseButton::Middle => MenuButton::Pick,
         _ => return None,
     })
 }
@@ -129,6 +145,13 @@ pub(crate) const UNFOCUSED_FRAME_INTERVAL: Duration =
 /// being paced — if this ever exceeded 50 ms the sim would fall behind the
 /// server even though we are "still ticking".
 pub(crate) const BACKGROUND_POLL: Duration = Duration::from_millis(8);
+
+/// Maximum gap between two left-clicks on the same container slot for the
+/// second to count as a double-click gather. Winit hands us raw button
+/// up/down events with no click-count of its own, so this app tracks it —
+/// [`container::MenuInput::press`] still requires the *same slot* on top of
+/// this timing before it arms the gather.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 /// What one iteration of the event loop should do.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -376,6 +399,17 @@ struct WindowApp {
     tab_held: bool,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
+    /// Press/drag/release state machine for the open container screen; see
+    /// [`container::MenuInput`]. Drives every predicted click this app sends.
+    menu_input: MenuInput,
+    /// Whether either Shift key is currently held, tracked independently of
+    /// `sim.input` (which only feeds movement `Action`s and is not read back).
+    /// Container shift-clicks (`QuickMove`) need this even while the sim's own
+    /// gameplay input is not being accepted.
+    shift_held: bool,
+    /// When the left button last pressed on the container screen, for
+    /// [`DOUBLE_CLICK_WINDOW`]-based double-click detection.
+    last_menu_click: Option<Instant>,
     fps_ema: f32,
     last_log: Instant,
     /// The fog settings last uploaded to the renderer, so submerged fog is
@@ -412,6 +446,9 @@ impl WindowApp {
             show_debug: true,
             tab_held: false,
             chat_input: ChatInput::new(),
+            menu_input: MenuInput::new(),
+            shift_held: false,
+            last_menu_click: None,
             fps_ema: 0.0,
             last_log: Instant::now(),
             applied_fog,
@@ -491,6 +528,16 @@ impl WindowApp {
         let net = NetClient::connect(host, port, self.config.protocol);
         if let Some(render) = self.render.as_mut() {
             let handle = net.shared_handle();
+            // Terrain and mobs must read the same clock: `RenderState` folds this
+            // factor into the fog lane both the model and entity passes sample.
+            // Installing it for one and not the other makes mobs darker than the
+            // blocks they stand on at midnight.
+            let clock = net.shared_handle();
+            render.set_sky_darken_source(move || {
+                clock
+                    .get()
+                    .map(|h| lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1))
+            });
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
                     &handle,
@@ -501,6 +548,57 @@ impl WindowApp {
             });
         }
         self.sim.attach_net(net);
+    }
+
+    /// The menu currently drawn as the container screen — the open non-player
+    /// menu if the server has one open, else the player inventory while `E`
+    /// has it up — or `None` when no container UI is showing.
+    ///
+    /// Mirrors the `container_menu` selection `redraw` makes for drawing, so
+    /// hit-testing and drawing never disagree about which menu is on screen
+    /// (see the layout module's own warning about that class of bug).
+    fn active_container_menu(&self) -> Option<Menu> {
+        if let Some(open) = self.sim.open_menu() {
+            Some(open.menu)
+        } else if self.ui.is_container_open() {
+            Some(self.sim.player_menu())
+        } else {
+            None
+        }
+    }
+
+    /// Predicts a container click against the live client state and submits
+    /// it to the server.
+    ///
+    /// This goes straight to [`lodestone_client::ClientHandle::menu_click`]
+    /// rather than through `Sim`/`NetClient`'s `send_action` queue, and
+    /// deliberately so: the prediction has to run inside the read-model the
+    /// live `Menus` session lives in (see the doc comment on
+    /// `ClientHandle::menu_click`), and `NetClient::send_action` only ever
+    /// forwards an *already-built* [`lodestone_model::ClientAction`] — it has
+    /// no menu to predict a click against. `NetClient::shared_handle()` is
+    /// the existing, already-public seam onto that same live handle (used
+    /// today for the sky-darken and entity-light samplers), so this needs no
+    /// change to `net.rs` or `sim.rs`.
+    ///
+    /// Silently drops the click if there is no live connection yet (matches
+    /// every other best-effort send in this app, e.g. `NetClient::send_action`
+    /// itself).
+    fn send_menu_click(&self, click: Click) {
+        let Some(net) = self.sim.net() else { return };
+        // Named separately from its `.get()` below rather than chained: the
+        // `Arc<OnceLock<_>>` `shared_handle()` returns is an owned value, and
+        // `.get()` borrows from it — keeping it in a binding of its own avoids
+        // relying on let-else's temporary-scope-extension rules to keep that
+        // borrow valid.
+        let shared = net.shared_handle();
+        let Some(handle) = shared.get() else { return };
+        // `Sim` has no game-mode accessor to source a real `PlayerCtx` from
+        // (see the report on this change) — hardcoded survival, matching the
+        // only existing production-shaped precedent
+        // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
+        // /`::creative()` explicitly rather than reading one off anything).
+        let _ = handle.menu_click(click, PlayerCtx::survival());
     }
 
     /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
@@ -1030,6 +1128,14 @@ impl ApplicationHandler for WindowApp {
             // isn't `Clone` and doesn't outlive this function, only the shared
             // handle inside it does.
             let entity_light_handle = net.shared_handle();
+            // See `connect_to`: same clock for terrain and mobs, installed here
+            // too because this is the second, independent connect path.
+            let clock = net.shared_handle();
+            render.set_sky_darken_source(move || {
+                clock
+                    .get()
+                    .map(|h| lodestone_render::entity::sky_darken_for_time_of_day(h.world_time().1))
+            });
             render.set_entity_light_source(move |feet| {
                 crate::net::entity_light_at(
                     &entity_light_handle,
@@ -1116,6 +1222,57 @@ impl ApplicationHandler for WindowApp {
                     }
                 }
             }
+            // Track the cursor and, mid-drag, the slots it paints while a
+            // container screen is up. This is a separate arm from the menu one
+            // above because `Screen::Container` is not `owns_frame` — the
+            // container overlay draws over the world, it does not replace it.
+            WindowEvent::CursorMoved { position, .. } if self.ui.is_container_open() => {
+                self.cursor = (position.x as f32, position.y as f32);
+                if self.menu_input.is_dragging() {
+                    if let (Some(menu), Some((w, h))) = (
+                        self.active_container_menu(),
+                        self.target.as_ref().map(RenderTarget::size),
+                    ) {
+                        let hit = hit_test(&menu, w, h, self.cursor.0, self.cursor.1);
+                        self.menu_input.dragged(hit);
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } if self.ui.is_container_open() => {
+                if let Some(menu_button) = menu_button_for(button)
+                    && let (Some(menu), Some((w, h))) = (
+                        self.active_container_menu(),
+                        self.target.as_ref().map(RenderTarget::size),
+                    )
+                {
+                    let hit = hit_test(&menu, w, h, self.cursor.0, self.cursor.1);
+                    let ctx = MenuContext {
+                        cursor_loaded: menu.carried().is_some(),
+                        // No game-mode plumbing exists on `Sim` to source this
+                        // from yet — see the report on this change.
+                        creative: false,
+                    };
+                    let clicks = match state {
+                        ElementState::Pressed => {
+                            let now = Instant::now();
+                            let is_repeat = menu_button == MenuButton::Left
+                                && self
+                                    .last_menu_click
+                                    .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK_WINDOW);
+                            self.last_menu_click = Some(now);
+                            self.menu_input
+                                .press(hit, menu_button, self.shift_held, ctx, is_repeat)
+                        }
+                        ElementState::Released => {
+                            self.menu_input
+                                .release(hit, menu_button, self.shift_held, ctx)
+                        }
+                    };
+                    for click in clicks {
+                        self.send_menu_click(click);
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if self.ui.is_paused() {
                     // First click on the paused world resumes and re-grabs; it
@@ -1156,6 +1313,16 @@ impl ApplicationHandler for WindowApp {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let pressed = event.state == ElementState::Pressed;
+
+                // Tracked unconditionally (not gated on `accepts_gameplay_input`
+                // like `action_for`'s Sneak binding below): a container
+                // shift-click is a `QuickMove`, not movement, and must still
+                // work while gameplay input is not being accepted.
+                if let PhysicalKey::Code(code) = event.physical_key
+                    && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+                {
+                    self.shift_held = pressed;
+                }
 
                 // A menu screen captures every key: the edit form needs the
                 // whole keyboard, and no gameplay binding may fire behind it.
