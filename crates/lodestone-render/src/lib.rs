@@ -102,8 +102,8 @@ pub use mesher::{
     dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
 pub use model_pipeline::{
-    GpuModelMesh, ModelPipeline, model_anim_buffer, model_camera_buffer, model_palette_buffer,
-    update_model_anim_buffer,
+    GpuModelMesh, ModelCameraUniform, ModelPipeline, model_anim_buffer, model_camera_buffer,
+    model_camera_buffer_with_fog, model_palette_buffer, update_model_anim_buffer,
 };
 pub use models::{
     FluidMeshes, FluidSectionView, ModelMesh, ModelSectionView, ModelVertex, face_of_direction,

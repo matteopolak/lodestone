@@ -145,7 +145,9 @@ impl ModelPipeline {
             label: Some("lodestone-model-camera-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // Vertex reads the view-projection; fragment reads the folded fog
+                // block (eye, colour, range), so the group must be visible to both.
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -410,19 +412,60 @@ fn padded_anim_slots(slots: &[AnimSlotUniform]) -> [AnimSlotUniform; ANIM_SLOT_U
 
 /// Reuse the packed pass's camera uniform buffer builder for the model pass; the
 /// [`CameraUniform`] layout is identical.
+///
+/// The buffer is sized for a [`ModelCameraUniform`] — camera data followed by a
+/// **disabled** [`FogUniform`] — so the model/fluid shaders' single group-0
+/// binding carries both the view-projection and the distance fog. Callers that
+/// want fog build the buffer with [`model_camera_buffer_with_fog`] or overwrite
+/// it each frame with a full `ModelCameraUniform`.
 #[must_use]
 pub fn model_camera_buffer(device: &wgpu::Device, uniform: CameraUniform) -> wgpu::Buffer {
+    model_camera_buffer_with_fog(device, uniform, crate::fog::FogUniform::disabled())
+}
+
+/// Build the group-0 uniform buffer for the model/fluid pass with an explicit
+/// fog block. `fog` fades distant fragments toward the fog colour; pass
+/// [`FogUniform::disabled`](crate::fog::FogUniform::disabled) to turn fog off.
+#[must_use]
+pub fn model_camera_buffer_with_fog(
+    device: &wgpu::Device,
+    camera: CameraUniform,
+    fog: crate::fog::FogUniform,
+) -> wgpu::Buffer {
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("lodestone-model-camera-uniform"),
-        contents: bytemuck::bytes_of(&uniform),
+        contents: bytemuck::bytes_of(&ModelCameraUniform { camera, fog }),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     })
 }
 
+/// The group-0 uniform for the model and fluid pipelines: the per-section
+/// [`CameraUniform`] followed by the per-frame [`FogUniform`]. Folding fog into
+/// the camera group (rather than giving it its own bind group) keeps the model
+/// shader within the portable `max_bind_groups` floor of 4 — camera, atlas,
+/// palette and animation already occupy four groups on Metal's guaranteed
+/// minimum. Rewrite the whole struct each frame via [`queue.write_buffer`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ModelCameraUniform {
+    /// View-projection and section origin (group 0, first 80 bytes).
+    pub camera: CameraUniform,
+    /// Distance fog for this frame (eye position, colour, start/end).
+    pub fog: crate::fog::FogUniform,
+}
+
 const MODEL_WGSL: &str = r"
+// Camera plus this frame's distance fog, folded into one group-0 uniform. Fog
+// lives here (rather than in its own bind group) so the model shader stays
+// within the portable `max_bind_groups` floor of 4. `fog_eye.xyz` is the camera
+// world position; `fog_color_start.rgb` is the fog colour and `.w` the distance
+// where fog begins; `fog_end_enabled.x` is where fog is full and `.y` is 0/1.
 struct Camera {
     view_proj: mat4x4<f32>,
     section_origin: vec4<f32>,
+    fog_eye: vec4<f32>,
+    fog_color_start: vec4<f32>,
+    fog_end_enabled: vec4<f32>,
 };
 
 // The default (plains) tint palette. A quad's tint byte indexes this; slot 255
@@ -452,6 +495,19 @@ struct AnimSlots {
 @group(2) @binding(0) var<uniform> palette: Palette;
 @group(3) @binding(0) var<uniform> anim: AnimSlots;
 
+// Linear fog factor for a fragment `dist` world units from the eye: 0 nearer than
+// start, 1 beyond end, linear between, and always 0 when disabled. Mirrors
+// `crate::fog::fog_factor` so the headless tests describe the shader's behaviour.
+fn fog_amount(dist: f32) -> f32 {
+    let start = camera.fog_color_start.w;
+    let end = camera.fog_end_enabled.x;
+    let enabled = camera.fog_end_enabled.y;
+    if (end <= start) {
+        return 0.0;
+    }
+    return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+}
+
 // sRGB transfer functions (component-wise). The atlas is an _srgb texture, so
 // `textureSample` returns linear-light texels; the tint palette holds straight
 // sRGB bytes. Multiplying a linear texel by an sRGB tint and then re-encoding on
@@ -476,6 +532,7 @@ struct VsOut {
     @location(1) shade: f32,
     @location(2) @interpolate(flat) tint_idx: u32,
     @location(3) @interpolate(flat) anim_idx: u32,
+    @location(4) world: vec3<f32>,
 };
 
 @vertex
@@ -499,6 +556,7 @@ fn vs_main(
     out.shade = ao * light_term;
     out.tint_idx = packed.y;
     out.anim_idx = packed.z;
+    out.world = world;
     return out;
 }
 
@@ -529,7 +587,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let tint_col = palette.colors[in.tint_idx].rgb;
         rgb = srgb_to_linear(linear_to_srgb(rgb) * tint_col);
     }
-    return vec4<f32>(rgb * in.shade, tex.a);
+    // Fade the lit fragment toward the fog colour by its view distance, so the
+    // outermost loaded chunks dissolve into the sky rather than ending in a wall.
+    let lit = rgb * in.shade;
+    let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+    return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
 }
 ";
 
@@ -538,9 +600,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // tints `tint_index` quads with the default water colour (#3F76E4) rather than
 // foliage green. Water's greyscale texture becomes blue here.
 const FLUID_WGSL: &str = r"
+// Camera plus this frame's distance fog (see the model shader); folded into
+// group 0 so the fluid shader stays within four bind groups.
 struct Camera {
     view_proj: mat4x4<f32>,
     section_origin: vec4<f32>,
+    fog_eye: vec4<f32>,
+    fog_color_start: vec4<f32>,
+    fog_end_enabled: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -560,12 +627,23 @@ struct AnimSlots {
 };
 @group(2) @binding(0) var<uniform> anim: AnimSlots;
 
+fn fog_amount(dist: f32) -> f32 {
+    let start = camera.fog_color_start.w;
+    let end = camera.fog_end_enabled.x;
+    let enabled = camera.fog_end_enabled.y;
+    if (end <= start) {
+        return 0.0;
+    }
+    return clamp((dist - start) / (end - start), 0.0, 1.0) * enabled;
+}
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
     @location(2) tinted: f32,
     @location(3) @interpolate(flat) anim_idx: u32,
+    @location(4) world: vec3<f32>,
 };
 
 @vertex
@@ -589,6 +667,7 @@ fn vs_main(
     out.shade = ao * light_term;
     out.tinted = select(0.0, 1.0, tint_idx != 255u);
     out.anim_idx = packed.z;
+    out.world = world;
     return out;
 }
 
@@ -604,7 +683,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Default water colour (#3F76E4); untinted quads keep their own colour.
     let water = vec3<f32>(0.247, 0.463, 0.894);
     let tint_col = mix(vec3<f32>(1.0, 1.0, 1.0), water, in.tinted);
-    return vec4<f32>(tex.rgb * tint_col * in.shade, tex.a);
+    let lit = tex.rgb * tint_col * in.shade;
+    let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+    return vec4<f32>(mix(lit, camera.fog_color_start.rgb, amount), tex.a);
 }
 ";
 

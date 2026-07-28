@@ -30,7 +30,7 @@
 
 use lodestone_render::{
     CameraUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
-    model_camera_buffer, model_palette_buffer,
+    model_anim_buffer, model_camera_buffer, model_palette_buffer,
 };
 
 const W: u32 = 64;
@@ -116,6 +116,10 @@ fn render_center(gpu: &Gpu, tint: u8) -> (u8, u8, u8) {
     palette[0] = GRASS;
     let palette_buffer = model_palette_buffer(device, &palette);
     let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
+    // The model shader carries the animation group (group 3); bind an empty
+    // (all-static) slot table so the tinted quad renders unanimated.
+    let anim_buffer = model_anim_buffer(device, &[]);
+    let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
 
     let cam_buffer = model_camera_buffer(
         device,
@@ -187,6 +191,7 @@ fn render_center(gpu: &Gpu, tint: u8) -> (u8, u8, u8) {
         pass.set_bind_group(0, &cam_bg, &[]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_bind_group(2, &palette_bg, &[]);
+        pass.set_bind_group(3, &anim_bg, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..mesh.index_count, 0, 0..1);
