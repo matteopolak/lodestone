@@ -113,7 +113,15 @@ use crate::overlay::{BossBarView, Sidebar, boss_bars_from, sidebar_from};
 
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
-type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
+///
+/// `pub` so a caller that needs its own `'static` lookup closure — e.g.
+/// [`RenderState::set_entity_light_source`](crate::gpu::RenderState::set_entity_light_source)
+/// — can clone it out of a [`NetClient`] via [`NetClient::shared_handle`]
+/// *before* handing the client off to [`Sim::attach_net`](crate::sim::Sim::attach_net),
+/// and keep it past the point `NetClient` itself is no longer reachable. It is
+/// `Arc`-based (`Send + Sync + 'static`) and resolves lazily once login
+/// completes, same as `NetClient`'s own reads.
+pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 
 /// A decoded, version-free update the app can act on without touching tokio.
 #[derive(Debug, Clone)]
@@ -528,6 +536,20 @@ impl NetClient {
         self.handle.get().and_then(|h| h.position())
     }
 
+    /// Clone out the `Arc`-backed handle this `NetClient` publishes into once
+    /// login completes. Unlike every other read on `self`, this survives the
+    /// `NetClient` being moved (e.g. into [`crate::sim::Sim::attach_net`]),
+    /// because the net thread was handed its own clone of the same `Arc` at
+    /// [`connect`](Self::connect) and keeps publishing into it regardless of
+    /// what happens to this struct. Exists so a `'static` closure — the shape
+    /// [`RenderState::set_entity_light_source`](crate::gpu::RenderState::set_entity_light_source)
+    /// requires — can be built once at connect time instead of needing a
+    /// borrow of a `NetClient` that won't be around a frame later.
+    #[must_use]
+    pub fn shared_handle(&self) -> SharedHandle {
+        Arc::clone(&self.handle)
+    }
+
     /// A server-less client used only in tests: no thread, no connection. It
     /// captures every [`send_action`](Self::send_action) on the returned
     /// receiver so the outbound path can be asserted without a live server.
@@ -573,6 +595,49 @@ impl Drop for NetClient {
             let _ = t.join();
         }
     }
+}
+
+/// Sample packed sky/block light for a world block position through a
+/// [`SharedHandle`], for the entity-lighting seam
+/// ([`RenderState::set_entity_light_source`](crate::gpu::RenderState::set_entity_light_source)).
+///
+/// This is the same lookup [`Sim::extract_particles`](crate::sim::Sim::extract_particles)
+/// does per particle-frame (see that function's comments for the traps this
+/// repeats):
+/// - [`ClientHandle::sections_and_light_at`] takes `lodestone_client::ChunkPos`,
+///   built here from the raw coordinates — deliberately not the
+///   `lodestone_world` one used elsewhere in the shell.
+/// - Light section `i` covers block section `i-1`, so a lookup for block
+///   section `n` asks for light section `n + 1`. Not a bug to "align".
+/// - `None` here means "outside a loaded chunk / before login", never
+///   darkness; the caller (here, `EntityLightSource::sample`) substitutes
+///   full brightness, exactly like the particle path's fallback.
+///
+/// Returns the packed byte the entity shader unpacks
+/// (`crates/lodestone-render/src/entity_pipeline.rs`: `sky = (light >> 4) &
+/// 15; block = light & 15`) — sky light in the high nibble, block light in
+/// the low nibble, i.e. `sky << 4 | block`.
+#[must_use]
+pub fn entity_light_at(handle: &SharedHandle, x: i32, y: i32, z: i32) -> Option<u8> {
+    let h = handle.get()?;
+    let dims = h.world_dimensions()?;
+    let section = (y - dims.min_y).div_euclid(16);
+    if section < 0 || section >= dims.section_count() as i32 {
+        return None;
+    }
+    let pos = ChunkPos {
+        x: x.div_euclid(16),
+        z: z.div_euclid(16),
+    };
+    let got = h.sections_and_light_at(&[(pos, section as usize, section as usize + 1)]);
+    let (_, light) = got.into_iter().next()?;
+    let light = light?;
+    let lx = x.rem_euclid(16) as usize;
+    let ly = (y - dims.min_y).rem_euclid(16) as usize;
+    let lz = z.rem_euclid(16) as usize;
+    let block = light.block_at(lx, ly, lz);
+    let sky = light.sky_at(lx, ly, lz);
+    Some((sky << 4) | block)
 }
 
 fn run(
@@ -1032,5 +1097,133 @@ mod tests {
         assert_eq!(actions.try_recv().unwrap(), a);
         assert_eq!(actions.try_recv().unwrap(), b);
         assert!(actions.try_recv().is_err());
+    }
+
+    /// The hermetic half of the entity-light contract: before login, the
+    /// `SharedHandle`'s `OnceLock` is unset, so [`entity_light_at`] must read
+    /// `None` rather than panic or fabricate a byte — the same "no world yet"
+    /// case `EntityLightSource::sample` (`gpu.rs`) turns into full brightness,
+    /// never darkness.
+    ///
+    /// This cannot exercise the "returns a real value for a loaded position"
+    /// half: [`lodestone_client::ClientHandle`] has no public constructor
+    /// (its `new` is `pub(crate)` to that crate), so a handle with real,
+    /// loaded sections can only come from an actual session. That half is
+    /// covered by the `#[ignore]`d live gate below.
+    #[test]
+    fn entity_light_at_reads_none_before_login() {
+        let shared: SharedHandle = Arc::new(OnceLock::new());
+        assert_eq!(entity_light_at(&shared, 0, 64, 0), None);
+    }
+
+    /// Live gate for the entity-lighting seam: [`entity_light_at`] — the
+    /// function `WindowApp::resumed` (`app.rs`) closes over and installs into
+    /// [`crate::gpu::RenderState::set_entity_light_source`] — must return a
+    /// real packed light byte for a position inside a chunk the oracle has
+    /// actually streamed, and `None` for one far outside it. `None` here is
+    /// the "unloaded neighbour" case, never darkness, so the assertion is
+    /// specifically `is_some()`/`is_none()`, not a light-level comparison.
+    ///
+    /// Connects directly through `ClientBuilder`, bypassing the `NetClient`
+    /// background thread, so the test controls exactly when the handle is
+    /// published into the `SharedHandle` — mirroring what `run()` above does
+    /// at `shared_handle.set(...)`.
+    ///
+    /// ```text
+    /// cargo test -p lodestone-shell --features live --lib \
+    ///     net::tests::live_entity_light_at_distinguishes_loaded_from_unloaded \
+    ///     -- --ignored --nocapture
+    /// ```
+    #[cfg(feature = "live")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires the lodestone-survival server on 127.0.0.1:25565"]
+    async fn live_entity_light_at_distinguishes_loaded_from_unloaded() {
+        use lodestone_testsupport::poll_until;
+
+        let user = unique_username();
+        let protocol = 776; // vanilla 26.2 — the `live` feature's compiled-in family
+        let adapter = lodestone_registry::adapter_for_protocol(protocol)
+            .expect("the `live` feature compiles a family in for protocol 776");
+        let (handle, mut events) = ClientBuilder::new(
+            ServerAddress {
+                host: "127.0.0.1".into(),
+                port: 25565,
+            },
+            LoginProfile {
+                username: user.clone(),
+                uuid: uuid::Uuid::new_v4(),
+            },
+            adapter,
+        )
+        .connect()
+        .await
+        .expect("connect to lodestone-survival on 127.0.0.1:25565");
+        // Drain the event stream so the driver's bounded channel never blocks.
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+
+        assert!(
+            poll_until(
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+                || async {
+                    handle
+                        .players()
+                        .into_iter()
+                        .find(|p| p.name.as_deref() == Some(user.as_str()))
+                }
+            )
+            .await
+            .is_some(),
+            "player {user} never reached Play on the oracle"
+        );
+
+        let dims = poll_until(
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+            || async { handle.world_dimensions() },
+        )
+        .await
+        .expect("world dimensions never arrived");
+
+        let loaded = poll_until(
+            Duration::from_secs(15),
+            Duration::from_millis(200),
+            || async {
+                let chunks = handle.loaded_chunks();
+                if chunks.is_empty() {
+                    None
+                } else {
+                    Some(chunks)
+                }
+            },
+        )
+        .await
+        .expect("no chunks streamed in within 15s of login");
+
+        let shared: SharedHandle = Arc::new(OnceLock::new());
+        shared
+            .set(Arc::new(handle))
+            .expect("first (only) publish into a fresh OnceLock");
+
+        // Loaded: the middle of a chunk the oracle actually streamed, at a Y
+        // comfortably inside the dimension's build range.
+        let chunk = loaded[0];
+        let y = dims.min_y + (dims.height as i32 / 2);
+        let lit = entity_light_at(&shared, chunk.x * 16 + 8, y, chunk.z * 16 + 8);
+        assert!(
+            lit.is_some(),
+            "expected a real light byte for a loaded chunk {chunk:?}, got None"
+        );
+
+        // Unloaded: a chunk address far outside any sane render distance from
+        // spawn, so this reads the "outside loaded chunks" branch, not a
+        // fluke miss.
+        let far = entity_light_at(&shared, 1_000_000, y, 1_000_000);
+        assert_eq!(
+            far, None,
+            "an unloaded neighbour must read None (full-bright fallback), not a stale byte"
+        );
+
+        drain.abort();
     }
 }

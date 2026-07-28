@@ -592,6 +592,27 @@ impl ApplicationHandler for WindowApp {
                 self.config.port,
                 self.config.protocol,
             );
+            // Install the entity light sampler now, at connect time, not after
+            // login: `set_entity_light_source` wants a `'static` closure
+            // installed *once*, and the shared handle it needs is available
+            // immediately (it is an `Arc<OnceLock<_>>` the net thread resolves
+            // later — see `net::SharedHandle`). Waiting for `LoggedIn` would
+            // just delay the install for no benefit, since the closure already
+            // tolerates an unresolved handle (`entity_light_at` reads `None`
+            // and the sampler falls back to full-bright, exactly matching the
+            // "no world yet" state during connect). This has to happen before
+            // `attach_net` moves `net` into `self.sim` — `NetClient` itself
+            // isn't `Clone` and doesn't outlive this function, only the shared
+            // handle inside it does.
+            let entity_light_handle = net.shared_handle();
+            render.set_entity_light_source(move |feet| {
+                crate::net::entity_light_at(
+                    &entity_light_handle,
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                )
+            });
             self.sim.attach_net(net);
         } else {
             self.ui.enter_dev_world();
