@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockPos, BossAction, BossColor,
+    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockHardness, BlockPos, BossAction,
+    BossColor,
     BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
     ContainerSlotChange, DeathLocation, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
@@ -16,6 +17,7 @@ use lodestone_model::{
     ItemEnchantment, ItemStack, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
+    RecipeBookType,
     ResourceKey, ResourcePackResponseKind, Rotation, SectionPos, ServerAddress, SoundCategory,
     TeamAction, TeamColor, TeamParameters, TeleportFlags, Text, TextColor, Vec3, Vec3f,
     VersionAdapter, Visibility, WorldSink,
@@ -527,6 +529,18 @@ fn game_mode_to_ordinal(mode: GameMode) -> i32 {
         GameMode::Creative => 1,
         GameMode::Adventure => 2,
         GameMode::Spectator => 3,
+    }
+}
+
+/// Maps the canonical [`RecipeBookType`] to vanilla's `RecipeBookType` ordinal,
+/// as written by `FriendlyByteBuf.writeEnum` in
+/// `ServerboundRecipeBookChangeSettingsPacket`.
+fn recipe_book_type_to_ordinal(book_type: RecipeBookType) -> i32 {
+    match book_type {
+        RecipeBookType::Crafting => 0,
+        RecipeBookType::Furnace => 1,
+        RecipeBookType::BlastFurnace => 2,
+        RecipeBookType::Smoker => 3,
     }
 }
 
@@ -3742,6 +3756,99 @@ impl VersionAdapter for V770Adapter {
                 };
                 Ok(Some((play::serverbound::MOVE_VEHICLE, encode_body(&body)?)))
             }
+            ClientAction::SelectBundleItem {
+                slot_id,
+                selected_item_index,
+            } if state == ConnectionState::Play => {
+                let body = SelectBundleItem {
+                    slot_id: *slot_id,
+                    selected_item_index: *selected_item_index,
+                };
+                Ok(Some((
+                    play::serverbound::BUNDLE_ITEM_SELECTED,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetContainerSlotState {
+                slot_id,
+                container_id,
+                new_state,
+            } if state == ConnectionState::Play => {
+                let body = ContainerSlotStateChanged {
+                    slot_id: *slot_id,
+                    container_id: *container_id,
+                    new_state: *new_state,
+                };
+                Ok(Some((
+                    play::serverbound::CONTAINER_SLOT_STATE_CHANGED,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SetRecipeBookSettings {
+                book_type,
+                open,
+                filtering,
+            } if state == ConnectionState::Play => {
+                let body = RecipeBookChangeSettings {
+                    book_type: recipe_book_type_to_ordinal(*book_type),
+                    is_open: *open,
+                    is_filtering: *filtering,
+                };
+                Ok(Some((
+                    play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::RecipeBookSeenRecipe { recipe } if state == ConnectionState::Play => {
+                let body = RecipeBookSeenRecipe { recipe: *recipe };
+                Ok(Some((
+                    play::serverbound::RECIPE_BOOK_SEEN_RECIPE,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::PlaceRecipe {
+                container_id,
+                recipe,
+                use_max_items,
+            } if state == ConnectionState::Play => {
+                let body = PlaceRecipe {
+                    container_id: *container_id,
+                    recipe: *recipe,
+                    use_max_items: *use_max_items,
+                };
+                Ok(Some((play::serverbound::PLACE_RECIPE, encode_body(&body)?)))
+            }
+            // Play-state only: the identically-shaped status-state ping is
+            // driven by the ping flow, not by a canonical client action.
+            ClientAction::PingRequest { time } if state == ConnectionState::Play => {
+                let body = PingRequest { time: *time };
+                Ok(Some((
+                    play::serverbound::PING_REQUEST,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::SpectatorAction { target_entity_id } if state == ConnectionState::Play => {
+                Ok(Some((
+                    play::serverbound::SPECTATOR_ACTION,
+                    encode_spectator_action(*target_entity_id)?,
+                )))
+            }
+            ClientAction::TeleportToEntity { target } if state == ConnectionState::Play => {
+                let body = TeleportToEntity { uuid: *target };
+                Ok(Some((
+                    play::serverbound::TELEPORT_TO_ENTITY,
+                    encode_body(&body)?,
+                )))
+            }
+            ClientAction::ChangeGameMode { mode } if state == ConnectionState::Play => {
+                let body = ChangeGameMode {
+                    mode: game_mode_to_ordinal(*mode),
+                };
+                Ok(Some((
+                    play::serverbound::CHANGE_GAME_MODE,
+                    encode_body(&body)?,
+                )))
+            }
             _ => Ok(None),
         }
     }
@@ -3768,5 +3875,16 @@ impl VersionAdapter for V770Adapter {
         // names v770. Base dims only — the caller folds SCALE/STEP_HEIGHT from
         // the entity's attribute map.
         crate::entity_dimensions::base_dimensions(entity_type_id)
+    }
+
+    fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
+        // The per-block-state hardness census is version data homed in this
+        // crate; the registry seam reaches it through here so a version-free
+        // consumer never names v770. `requires_correct_tool` is the *block's*
+        // requirement, not the player's tool match — see `BlockHardness`.
+        crate::hardness::hardness(state_id).map(|entry| BlockHardness {
+            hardness: entry.hardness,
+            requires_correct_tool: entry.requires_correct_tool,
+        })
     }
 }

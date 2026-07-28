@@ -18,6 +18,12 @@ cargo build --release --bin lodestone --features live
 
 - **`cargo build` is NOT a health check.** It skips test targets, so a crate whose lib compiles and
   whose lib-test does not reports green. Always `--all-targets`.
+- **`cargo test -p <crate>` is not one either — it fail-fasts.** It aborts at the *first* failing
+  test binary, so everything alphabetically later is never run and never reported. This has misled
+  twice: a stale `block_updates` failure hid the new `hardness` gate entirely, and what looked like
+  "a red test" in `lodestone-v770` was really **three red binaries and 14 failing tests**, masked
+  because `serverbound_change_game_mode` sorts first. **Use `--no-fail-fast` when assessing crate
+  health.**
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
 - **`--features live` is mandatory for multiplayer and fails silently without it.** The client still
   starts, renders the demo world, and reports a plausible `chunks=169` while whispering
