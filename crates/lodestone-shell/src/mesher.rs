@@ -28,10 +28,10 @@ use std::thread::{self, JoinHandle};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
     FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
-    SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, mesh_fluids, mesh_models,
-    mesh_simple,
+    SectionNeighborhood, SkyDefault, UniformLight, WorldSectionLight, face_of_direction,
+    mesh_fluids, mesh_models, mesh_simple,
 };
-use lodestone_assets::BakedQuad;
+use lodestone_assets::{BakedQuad, Direction};
 use lodestone_world::{
     ChunkPos, ChunkSection, PaletteKind, SectionLight as SectionLightData, World,
 };
@@ -317,6 +317,116 @@ impl SectionLight for SnapLight<'_> {
     }
 }
 
+/// The whole 27-section light neighbourhood of a snapshot, plus the rule for
+/// resolving the light a *visible face* should carry.
+///
+/// The rule matters more than it looks. `lodestone-world`'s light engine (and
+/// vanilla's, which it matches cell-for-cell) stores `0` inside an opaque block:
+/// light propagates *to* a solid cell's neighbours, never into the solid itself.
+/// Measured against the live 26.2 oracle, **99.5 % of solid cells store sky
+/// light `0`**. So a mesher that lights a block from its own cell renders the
+/// entire opaque world at the shader's dark floor — and renders a *just-placed*
+/// block full-bright, because its cell still holds the sky light of the air it
+/// replaced until the server's relight arrives ~1 tick later. That contrast is
+/// the player-visible "blocks I place are super bright".
+///
+/// [`Self::face_light`] therefore samples the cell the face **opens into**,
+/// exactly as vanilla's `ModelBlockRenderer` does. The stale own-cell value is
+/// then never read at all, which is also what closes the optimistic-placement
+/// window: there is no interval in which a locally-known block is lit by data
+/// the server has not yet corrected.
+struct SnapshotLight<'a> {
+    /// One light source per snapshot slot, indexed `[dx+1][dy+1][dz+1]`.
+    slots: Vec<SnapLight<'a>>,
+}
+
+impl<'a> SnapshotLight<'a> {
+    /// Wrap every slot of `snapshot`'s light in a [`SnapLight`].
+    ///
+    /// Each present neighbour forwards the world's resolved sky/block levels
+    /// verbatim (with the dimension's [`SkyDefault`] applied only to
+    /// genuinely-absent sky); an absent neighbour — and *only* an absent
+    /// neighbour — keeps the full-bright bridge, so air at the edge of the
+    /// loaded world stays lit rather than rendering black.
+    fn new(snapshot: &'a SectionSnapshot) -> Self {
+        let mut slots: Vec<SnapLight<'a>> = Vec::with_capacity(27);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let src = match snapshot.light_at(dx, dy, dz) {
+                        Some(world_light) => SnapLight::World(WorldSectionLight::new(
+                            world_light,
+                            snapshot.sky_default,
+                        )),
+                        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
+                    };
+                    slots.push(src);
+                }
+            }
+        }
+        Self { slots }
+    }
+
+    /// Resolved `(sky, block)` at a **centre-relative signed** coordinate, which
+    /// may step one cell past the centre section into a neighbour. Out of the
+    /// 3×3×3 snapshot resolves to unlit `(0, 0)`; a one-step face probe from a
+    /// cell inside the centre section can never reach there.
+    fn levels_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
+        let (dx, lx) = split16(x);
+        let (dy, ly) = split16(y);
+        let (dz, lz) = split16(z);
+        if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            return (0, 0);
+        }
+        let src = &self.slots[((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize];
+        (
+            SectionLight::sky_light(src, lx, ly, lz),
+            SectionLight::block_light(src, lx, ly, lz),
+        )
+    }
+
+    /// Packed `sky << 4 | block` for a face of the centre-section cell
+    /// `(x, y, z)` pointing along `normal` — the light of the neighbouring cell,
+    /// read across the section boundary when the face sits on one.
+    fn face_light(&self, x: usize, y: usize, z: usize, normal: [i32; 3]) -> u8 {
+        let (sky, block) = self.levels_at(
+            x as i32 + normal[0],
+            y as i32 + normal[1],
+            z as i32 + normal[2],
+        );
+        (sky << 4) | block
+    }
+
+    /// Packed `sky << 4 | block` for geometry with no single facing (fluid
+    /// surfaces, cross-shaped models): the brightest of the cell itself and its
+    /// six orthogonal neighbours.
+    ///
+    /// Self is included deliberately — a non-opaque cell (water, glass, an
+    /// emitter) carries real light of its own, and including it cannot
+    /// manufacture a bright outlier: in a diffusive light field a cell's level
+    /// exceeds its brightest neighbour's by at most one, so a stale own-cell
+    /// value is bounded to ±1 rather than the 15-vs-0 contrast own-cell-only
+    /// sampling produces.
+    fn max_light(&self, x: usize, y: usize, z: usize) -> u8 {
+        const NEIGHBOURS: [[i32; 3]; 7] = [
+            [0, 0, 0],
+            [-1, 0, 0],
+            [1, 0, 0],
+            [0, -1, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+            [0, 0, 1],
+        ];
+        let (mut sky, mut block) = (0u8, 0u8);
+        for n in NEIGHBOURS {
+            let (s, b) = self.levels_at(x as i32 + n[0], y as i32 + n[1], z as i32 + n[2]);
+            sky = sky.max(s);
+            block = block.max(b);
+        }
+        (sky << 4) | block
+    }
+}
+
 /// Mesh a snapshot into geometry. Pure and thread-safe: touches only the owned
 /// snapshot and a stateless classifier. Generic over the [`BlockClassifier`] so
 /// the same code meshes the demo world (via [`crate::blocks::DemoClassifier`])
@@ -324,25 +434,11 @@ impl SectionLight for SnapLight<'_> {
 /// atlas) without duplication.
 #[must_use]
 pub fn mesh_snapshot<C: BlockClassifier>(snapshot: &SectionSnapshot, classifier: &C) -> Mesh {
-    // Real per-section light, replacing the retired full-bright bridge. Each
-    // present neighbour forwards the world's resolved sky/block levels verbatim
-    // (with the dimension's `SkyDefault` applied only to genuinely-absent sky);
-    // an absent neighbour — and *only* an absent neighbour — keeps the bridge, so
-    // air at the edge of the loaded world stays lit rather than rendering black.
-    let mut srcs: Vec<SnapLight<'_>> = Vec::with_capacity(27);
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                let src = match snapshot.light_at(dx, dy, dz) {
-                    Some(world_light) => {
-                        SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
-                    }
-                    None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
-                };
-                srcs.push(src);
-            }
-        }
-    }
+    // Real per-section light, replacing the retired full-bright bridge. The
+    // packed path lights each *cell* and lets `mesh_simple` sample the
+    // neighbouring cell per face itself, so it needs the raw per-slot sources
+    // rather than `SnapshotLight`'s face rule.
+    let srcs = SnapshotLight::new(snapshot).slots;
 
     // Build a view per neighbour section, then assemble the neighbourhood.
     let mut views: Vec<ChunkSectionView<'_, C, SnapLight<'_>>> = Vec::with_capacity(27);
@@ -381,12 +477,13 @@ pub fn mesh_snapshot<C: BlockClassifier>(snapshot: &SectionSnapshot, classifier:
 ///
 /// `quads_at`/`occludes_at` read vanilla block-state ids straight out of the
 /// snapshot's paletted sections and look up baked geometry/occlusion in
-/// [`BlockModels`]; `light_at` reads the centre section's real sky/block light.
+/// [`BlockModels`]; `face_light_at` reads the real sky/block light of the cell
+/// each face opens into, across section boundaries (see [`SnapshotLight`]).
 /// This is the model-path counterpart to the packed [`ChunkSectionView`].
 struct SnapshotModelView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
-    light: SnapLight<'a>,
+    light: SnapshotLight<'a>,
 }
 
 /// Split a signed section coordinate into a neighbour offset (`dx ∈ {-1,0,1}`)
@@ -416,9 +513,14 @@ impl ModelSectionView for SnapshotModelView<'_> {
     }
 
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
-        let sky = SectionLight::sky_light(&self.light, x, y, z);
-        let block = SectionLight::block_light(&self.light, x, y, z);
-        (sky << 4) | block
+        // No facing (cross plants, and any view that ignores `face_light_at`):
+        // the brightest cell in the immediate neighbourhood, self included.
+        self.light.max_light(x, y, z)
+    }
+
+    fn face_light_at(&self, x: usize, y: usize, z: usize, dir: Direction) -> u8 {
+        self.light
+            .face_light(x, y, z, face_of_direction(dir).normal())
     }
 }
 
@@ -431,16 +533,10 @@ impl ModelSectionView for SnapshotModelView<'_> {
 /// [`mesh_snapshot`].
 #[must_use]
 pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) -> ModelMesh {
-    let light = match snapshot.light_at(0, 0, 0) {
-        Some(world_light) => {
-            SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
-        }
-        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
-    };
     let view = SnapshotModelView {
         snapshot,
         models,
-        light,
+        light: SnapshotLight::new(snapshot),
     };
     mesh_models(&view)
 }
@@ -452,7 +548,7 @@ pub fn mesh_snapshot_models(snapshot: &SectionSnapshot, models: &BlockModels) ->
 struct SnapshotFluidView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
-    light: SnapLight<'a>,
+    light: SnapshotLight<'a>,
 }
 
 impl FluidSectionView for SnapshotFluidView<'_> {
@@ -479,9 +575,12 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     }
 
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
-        let sky = SectionLight::sky_light(&self.light, x, y, z);
-        let block = SectionLight::block_light(&self.light, x, y, z);
-        (sky << 4) | block
+        // A fluid surface has no single facing (its top slopes and its sides are
+        // baked together), so it takes the brightest cell of the immediate
+        // neighbourhood. Water is not opaque, so its own cell carries real light
+        // and dominates; the neighbours matter for the surface layer, whose cell
+        // sits under whatever air is above it.
+        self.light.max_light(x, y, z)
     }
 
     fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites {
@@ -494,16 +593,10 @@ impl FluidSectionView for SnapshotFluidView<'_> {
 /// emits no quads for fluid cells, so the two never double-render.
 #[must_use]
 fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
-    let light = match snapshot.light_at(0, 0, 0) {
-        Some(world_light) => {
-            SnapLight::World(WorldSectionLight::new(world_light, snapshot.sky_default))
-        }
-        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
-    };
     let view = SnapshotFluidView {
         snapshot,
         models,
-        light,
+        light: SnapshotLight::new(snapshot),
     };
     mesh_fluids(&view)
 }
@@ -918,6 +1011,383 @@ mod tests {
             "generated terrain should mesh both fully-shadowed (0) and sky-lit \
              (>200) faces; saw_dark={saw_dark} saw_bright={saw_bright} — an \
              all-Missing (flat full-bright) world would have no dark faces"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The model path's face-light rule, and the placement defect it caused
+    // -----------------------------------------------------------------------
+
+    /// A unit cube's six baked quads: one per direction, each culled by its own
+    /// facing, positioned on that face of the block. Enough geometry to carry a
+    /// light byte through [`mesh_models`] and be identified again by centroid.
+    fn cube_quads() -> Vec<BakedQuad> {
+        const DIRS: [Direction; 6] = [
+            Direction::Down,
+            Direction::Up,
+            Direction::North,
+            Direction::South,
+            Direction::West,
+            Direction::East,
+        ];
+        DIRS.iter()
+            .map(|&d| {
+                let n = face_of_direction(d).normal();
+                // The face plane: the fixed axis sits at 0 or 1, the other two
+                // sweep the unit square.
+                let (axis, plane) = match d {
+                    Direction::West => (0usize, 0.0f32),
+                    Direction::East => (0, 1.0),
+                    Direction::Down => (1, 0.0),
+                    Direction::Up => (1, 1.0),
+                    Direction::North => (2, 0.0),
+                    Direction::South => (2, 1.0),
+                };
+                let (a, b) = match axis {
+                    0 => (1usize, 2usize),
+                    1 => (0, 2),
+                    _ => (0, 1),
+                };
+                let corners = [[0.0f32, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+                let mut positions = [[0.0f32; 3]; 4];
+                for (i, c) in corners.iter().enumerate() {
+                    positions[i][axis] = plane;
+                    positions[i][a] = c[0];
+                    positions[i][b] = c[1];
+                }
+                let _ = n;
+                BakedQuad {
+                    positions,
+                    uvs: [[0.0, 0.0]; 4],
+                    direction: d,
+                    cullface: Some(d),
+                    tint_index: None,
+                    shade: true,
+                    layer: 0,
+                    anim: 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Which light rule a [`ProbeView`] applies — the shipped face rule, or the
+    /// **pre-fix** own-cell rule kept verbatim as the negative control.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LightRule {
+        /// `SnapshotModelView`'s rule: the cell the face opens into.
+        FaceNeighbour,
+        /// The rule this test exists to retire: `(sky << 4) | block` read at the
+        /// block's **own** cell, which is `0` inside every opaque block.
+        OwnCell,
+    }
+
+    /// A [`ModelSectionView`] over a snapshot that emits a full cube for every
+    /// non-air cell and resolves light through the real [`SnapshotLight`] — so
+    /// the assertions below run the shipped resolver, not a copy of it.
+    struct ProbeView<'a> {
+        snapshot: &'a SectionSnapshot,
+        light: SnapshotLight<'a>,
+        quads: Vec<BakedQuad>,
+        empty: Vec<BakedQuad>,
+        rule: LightRule,
+    }
+
+    impl ModelSectionView for ProbeView<'_> {
+        fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+            if self.snapshot.at(0, 0, 0).get_block(x, y, z) == id::AIR {
+                &self.empty
+            } else {
+                &self.quads
+            }
+        }
+
+        fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+            let (dx, lx) = split16(x);
+            let (dy, ly) = split16(y);
+            let (dz, lz) = split16(z);
+            if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+                return false;
+            }
+            self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz) != id::AIR
+        }
+
+        fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
+            self.light.max_light(x, y, z)
+        }
+
+        fn face_light_at(&self, x: usize, y: usize, z: usize, dir: Direction) -> u8 {
+            match self.rule {
+                LightRule::FaceNeighbour => self
+                    .light
+                    .face_light(x, y, z, face_of_direction(dir).normal()),
+                LightRule::OwnCell => {
+                    let (sky, block) = self.light.levels_at(x as i32, y as i32, z as i32);
+                    (sky << 4) | block
+                }
+            }
+        }
+    }
+
+    /// The packed light byte carried by the quad of block `b` facing `dir`,
+    /// located by its centroid in the emitted mesh. `None` when that face was
+    /// culled (so "the face is missing" can never read as "the face is dark").
+    fn quad_light(mesh: &ModelMesh, b: [usize; 3], dir: Direction) -> Option<u8> {
+        let n = face_of_direction(dir).normal();
+        let want = [
+            b[0] as f32 + 0.5 + 0.5 * n[0] as f32,
+            b[1] as f32 + 0.5 + 0.5 * n[1] as f32,
+            b[2] as f32 + 0.5 + 0.5 * n[2] as f32,
+        ];
+        for quad in mesh.vertices.chunks_exact(4) {
+            let mut c = [0.0f32; 3];
+            for v in quad {
+                for a in 0..3 {
+                    c[a] += v.position[a] / 4.0;
+                }
+            }
+            if (0..3).all(|a| (c[a] - want[a]).abs() < 1e-4) {
+                let light = quad[0].light;
+                assert!(
+                    quad.iter().all(|v| v.light == light),
+                    "a flat-lit quad must carry one light on all four vertices"
+                );
+                return Some(light);
+            }
+        }
+        None
+    }
+
+    /// The fixture: a one-block-thick stone platform at `y = 6` with a dark cave
+    /// beneath it, a stone roof over the `x < 8, z < 8` quadrant at `y = 12`,
+    /// and open sky everywhere else.
+    ///
+    /// Three *different* light populations, which is what stops this gate being
+    /// the "fully sunlit flat world" species of vacuous test:
+    ///
+    /// | region | sky | block |
+    /// |---|---|---|
+    /// | open air (`y >= 7`, outside the roofed quadrant) | 15 | 0 |
+    /// | roofed pocket (`y 7..=11`, `x < 8 && z < 8`) | 0 | 11 |
+    /// | cave under the platform (`y <= 5`) | 0 | 0 |
+    /// | any solid cell | 0 | 0 |
+    ///
+    /// `placed` optionally turns one air cell to stone **without touching the
+    /// light field** — precisely the optimistic-placement window, where the
+    /// block is known and the server's relight has not arrived.
+    fn platform_snapshot(placed: Option<[usize; 3]>) -> SectionSnapshot {
+        use lodestone_world::{LightData, NibbleArray};
+
+        let roofed = |x: usize, z: usize| x < 8 && z < 8;
+        let solid = |x: usize, y: usize, z: usize| y == 6 || (y == 12 && roofed(x, z));
+
+        let mut centre = air_section();
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    if solid(x, y, z) {
+                        centre.set_block(x, y, z, id::STONE);
+                    }
+                }
+            }
+        }
+        // The light field describes the world *before* the placement.
+        let mut sky = LightData::Uniform(0);
+        let mut block = LightData::Uniform(0);
+        for x in 0..16 {
+            for y in 0..16 {
+                for z in 0..16 {
+                    if solid(x, y, z) || y <= 5 {
+                        continue;
+                    }
+                    let i = NibbleArray::index(x, y, z);
+                    if roofed(x, z) && y <= 11 {
+                        block.set(i, 11);
+                    } else {
+                        sky.set(i, 15);
+                    }
+                }
+            }
+        }
+        if let Some([x, y, z]) = placed {
+            assert_eq!(
+                centre.get_block(x, y, z),
+                id::AIR,
+                "the fixture must place into an air cell"
+            );
+            centre.set_block(x, y, z, id::STONE);
+        }
+
+        let light = SectionLightData { sky, block };
+        let mut sections = Vec::with_capacity(27);
+        let mut lights = Vec::with_capacity(27);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    sections.push(if (dx, dy, dz) == (0, 0, 0) {
+                        centre.clone()
+                    } else {
+                        air_section()
+                    });
+                    // Every slot carries real light, so the absent-neighbour
+                    // bridge cannot leak full-bright into this measurement.
+                    lights.push(Some(light.clone()));
+                }
+            }
+        }
+        SectionSnapshot {
+            key: SectionKey {
+                cx: 0,
+                cz: 0,
+                si: 1,
+                min_y: 0,
+            },
+            sections,
+            lights,
+            sky_default: SkyDefault::Full,
+        }
+    }
+
+    fn probe(snapshot: &SectionSnapshot, rule: LightRule) -> ModelMesh {
+        let view = ProbeView {
+            snapshot,
+            light: SnapshotLight::new(snapshot),
+            quads: cube_quads(),
+            empty: Vec::new(),
+            rule,
+        };
+        mesh_models(&view)
+    }
+
+    /// Anti-vacuity: the fixture really does hold a lit/shadowed distinction, and
+    /// the shipped rule resolves *the same block's* two faces differently.
+    ///
+    /// Without this, every assertion below could be satisfied by a constant.
+    #[test]
+    fn face_light_distinguishes_sunlit_shadowed_and_torchlit_faces() {
+        let snap = platform_snapshot(None);
+        let mesh = probe(&snap, LightRule::FaceNeighbour);
+
+        // The platform block under open sky: bright on top (opens into sky-15
+        // air), dark underneath (opens into the unlit cave). One block, two
+        // values — a constant light field cannot produce this.
+        let open_top = quad_light(&mesh, [12, 6, 12], Direction::Up).expect("open top face");
+        let open_bottom = quad_light(&mesh, [12, 6, 12], Direction::Down).expect("open bottom");
+        assert_eq!(open_top, 0xF0, "a sunlit top face carries sky 15");
+        assert_eq!(open_bottom, 0x00, "the cave-side face carries no light");
+
+        // The platform under the roof: its top opens into the torchlit pocket,
+        // so it is neither 15 nor 0 — a third, independently sourced population.
+        let roofed_top = quad_light(&mesh, [2, 6, 2], Direction::Up).expect("roofed top face");
+        assert_eq!(
+            roofed_top, 0x0B,
+            "a roofed top face carries the pocket's block light 11 and sky 0"
+        );
+    }
+
+    /// **The defect.** A block placed into open sky must mesh with the same light
+    /// as the terrain beside it. Before the fix it did not: the model path lit
+    /// every block from its own cell, which the light engine stores as `0` for a
+    /// solid, while the just-placed block's cell still held the sky-15 of the air
+    /// it replaced. The new block rendered at the shader's maximum against
+    /// neighbours at its minimum — the player-reported "super bright".
+    ///
+    /// Asserted as a *relationship* (placed == its neighbours), not an absolute,
+    /// so it cannot be satisfied by clamping everything to one value: the
+    /// shadowed half of the same fixture is checked in the same test.
+    #[test]
+    fn a_placed_block_meshes_with_its_neighbours_light_not_full_bright() {
+        // Before: bare platform. After: one stone dropped on top of it, with the
+        // pre-placement light field still in force (the optimistic window).
+        let before = platform_snapshot(None);
+        let after = platform_snapshot(Some([12, 7, 12]));
+
+        let neighbour_before = quad_light(
+            &probe(&before, LightRule::FaceNeighbour),
+            [11, 6, 12],
+            Direction::Up,
+        )
+        .expect("neighbouring platform top");
+
+        let after_mesh = probe(&after, LightRule::FaceNeighbour);
+        let placed_top =
+            quad_light(&after_mesh, [12, 7, 12], Direction::Up).expect("placed block top");
+        let placed_side =
+            quad_light(&after_mesh, [12, 7, 12], Direction::East).expect("placed block side");
+        let neighbour_after = quad_light(&after_mesh, [11, 6, 12], Direction::Up)
+            .expect("neighbouring platform top, after");
+
+        assert_eq!(
+            neighbour_before, neighbour_after,
+            "placing a block must not change the light of the terrain beside it"
+        );
+        assert_eq!(
+            placed_top, neighbour_after,
+            "the placed block's top must match the sunlit terrain beside it \
+             ({placed_top:#04x} vs {neighbour_after:#04x})"
+        );
+        assert_eq!(
+            placed_side, neighbour_after,
+            "the placed block's side must match too ({placed_side:#04x})"
+        );
+
+        // And the same placement in shadow must land *dark*, so "matches its
+        // neighbours" cannot be met by returning full-bright everywhere.
+        let shadowed = platform_snapshot(Some([2, 7, 2]));
+        let shadow_mesh = probe(&shadowed, LightRule::FaceNeighbour);
+        let shadow_top =
+            quad_light(&shadow_mesh, [2, 7, 2], Direction::Up).expect("shadowed placed top");
+        assert_eq!(
+            shadow_top, 0x0B,
+            "a block placed in the torchlit, roofed pocket takes the pocket's \
+             light (sky 0, block 11) — not sky 15"
+        );
+        assert!(
+            shadow_top < placed_top,
+            "the shadowed placement must be measurably darker than the sunlit one"
+        );
+    }
+
+    /// The negative control, run rather than described: with the pre-fix
+    /// own-cell rule restored **and nothing else changed**, the same placement
+    /// renders full-bright against dark neighbours. If this ever stops failing
+    /// the way it does here, the assertion above has gone vacuous.
+    #[test]
+    fn control_own_cell_light_makes_the_placed_block_full_bright() {
+        let after = platform_snapshot(Some([12, 7, 12]));
+        let mesh = probe(&after, LightRule::OwnCell);
+
+        let placed_top = quad_light(&mesh, [12, 7, 12], Direction::Up).expect("placed block top");
+        let neighbour = quad_light(&mesh, [11, 6, 12], Direction::Up).expect("neighbour top");
+
+        assert_eq!(
+            placed_top, 0xF0,
+            "control: own-cell sampling reads the stale air light of the cell the \
+             block replaced — full bright"
+        );
+        assert_eq!(
+            neighbour, 0x00,
+            "control: own-cell sampling reads 0 inside every opaque block, so the \
+             established terrain beside it is at the shader's dark floor"
+        );
+        assert_ne!(
+            placed_top, neighbour,
+            "control must reproduce the reported defect: a just-placed block \
+             brighter than the terrain it sits on"
+        );
+
+        // The whole world, not just the placement: under the old rule *every*
+        // solid cell reads 0, sunlit and shadowed alike. Measured on the bare
+        // platform, where the sunlit top face is not covered by the placement.
+        let bare = probe(&platform_snapshot(None), LightRule::OwnCell);
+        assert_eq!(
+            quad_light(&bare, [12, 6, 12], Direction::Up),
+            Some(0x00),
+            "control: a sunlit top face reads its own (solid, unlit) cell"
+        );
+        assert_eq!(
+            quad_light(&bare, [12, 6, 12], Direction::Up),
+            quad_light(&bare, [2, 6, 2], Direction::Up),
+            "control: own-cell sampling cannot tell a sunlit face from a roofed one"
         );
     }
 }

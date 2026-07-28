@@ -340,9 +340,34 @@ pub trait ModelSectionView {
     /// the face pointing back towards its neighbour.
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool;
     /// Sky/block light at section-local `(x, y, z)`, packed sky<<4 | block.
+    ///
+    /// This is the block's **own** cell. For an opaque full cube that value is
+    /// `0` in every dimension — light does not propagate *into* a solid — so it
+    /// is almost never the value a visible face should carry. Implement
+    /// [`face_light_at`](Self::face_light_at) instead; this stays as the
+    /// fallback for views that model no neighbourhood (tests, GUI items).
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
         let _ = (x, y, z);
         0xF0
+    }
+
+    /// Packed sky/block light for a quad of the block at `(x, y, z)` facing
+    /// `dir` — the light of the **neighbouring cell the face opens into**.
+    ///
+    /// This is vanilla's rule (`ModelBlockRenderer` reads
+    /// `getLightColor(level, state, pos.relative(quad.getDirection()))`), and it
+    /// is not a refinement: sampling the block's own cell renders every opaque
+    /// block at its stored light, which the light engine defines as `0`. A world
+    /// meshed that way is uniformly dark, and a *just-placed* block — whose cell
+    /// still holds the air light it replaced until the server's relight lands —
+    /// renders full-bright against it. Reading the neighbour instead makes the
+    /// stale own-cell value unreachable, so there is no bright window at all.
+    ///
+    /// The default forwards to [`light_at`](Self::light_at) so existing views
+    /// keep their behaviour.
+    fn face_light_at(&self, x: usize, y: usize, z: usize, dir: Direction) -> u8 {
+        let _ = dir;
+        self.light_at(x, y, z)
     }
 }
 
@@ -352,9 +377,10 @@ pub trait ModelSectionView {
 ///
 /// # Lighting: flat today, smooth-capable tomorrow
 ///
-/// Every vertex of a quad currently receives the **same** two values: the
-/// block's single packed sky/block light ([`ModelSectionView::light_at`]) and a
-/// constant per-face directional shade (see `emit_baked_quad`, carried in the
+/// Every vertex of a quad currently receives the **same** two values: the packed
+/// sky/block light of the cell that quad's face opens into
+/// ([`ModelSectionView::face_light_at`]) and a constant per-face directional
+/// shade (see `emit_baked_quad`, carried in the
 /// `ao` slot). That is correct but flat — it has no ambient occlusion and no
 /// smooth (per-vertex interpolated) light, which is one of the most recognisable
 /// "not Minecraft" tells once the geometry itself is right.
@@ -394,7 +420,6 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                 if quads.is_empty() {
                     continue;
                 }
-                let light = view.light_at(x, y, z);
                 for quad in quads {
                     if let Some(cf) = quad.cullface {
                         let nrm = face_of_direction(cf).normal();
@@ -403,6 +428,9 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                             continue;
                         }
                     }
+                    // Per *quad*, not per block: each face carries the light of
+                    // the cell it opens into (see `face_light_at`).
+                    let light = view.face_light_at(x, y, z, quad.direction);
                     emit_baked_quad(&mut mesh, quad, [x as f32, y as f32, z as f32], light);
                 }
             }
@@ -710,6 +738,111 @@ mod tests {
                 None => false,
             }
         }
+    }
+
+    /// [`mesh_models`] must ask for light **per quad**, keyed on that quad's
+    /// facing, not once per block.
+    ///
+    /// This is the render half of the "placed blocks are super bright" fix. A
+    /// per-block light forces every face of a block to carry the block's own
+    /// cell value, which the light engine stores as `0` inside any opaque solid
+    /// — so terrain meshes uniformly dark while a just-placed block, whose cell
+    /// still holds the sky light of the air it replaced, meshes full-bright.
+    /// Reading per face lets the consumer hand back the neighbouring cell's
+    /// light, which is what vanilla's `ModelBlockRenderer` does.
+    #[test]
+    fn mesh_models_asks_for_light_per_quad_facing() {
+        use std::cell::RefCell;
+
+        /// Answers a distinct light per direction, and records what was asked.
+        struct PerFace {
+            quads: Vec<BakedQuad>,
+            asked: RefCell<Vec<(usize, usize, usize, Direction)>>,
+        }
+        impl ModelSectionView for PerFace {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                if (x, y, z) == (8, 8, 8) { &self.quads } else { &[] }
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn light_at(&self, _x: usize, _y: usize, _z: usize) -> u8 {
+                // The own-cell answer. If `mesh_models` ever falls back to this,
+                // every face below carries 0x00 and the assertions fail.
+                0x00
+            }
+            fn face_light_at(&self, x: usize, y: usize, z: usize, dir: Direction) -> u8 {
+                self.asked.borrow_mut().push((x, y, z, dir));
+                match dir {
+                    Direction::Up => 0xF0,
+                    Direction::Down => 0x00,
+                    _ => 0x0B,
+                }
+            }
+        }
+
+        let view = PerFace {
+            quads: vec![
+                cube_face(Direction::Up, None),
+                cube_face(Direction::Down, None),
+                cube_face(Direction::North, None),
+            ],
+            asked: RefCell::new(Vec::new()),
+        };
+        let mesh = mesh_models(&view);
+
+        // Three quads, four vertices each, in emission order.
+        assert_eq!(mesh.vertices.len(), 12);
+        let per_quad: Vec<u8> = mesh.vertices.chunks_exact(4).map(|q| q[0].light).collect();
+        assert_eq!(
+            per_quad,
+            vec![0xF0, 0x00, 0x0B],
+            "each quad must carry the light of its own facing; a per-block light \
+             would make all three equal"
+        );
+        for quad in mesh.vertices.chunks_exact(4) {
+            assert!(quad.iter().all(|v| v.light == quad[0].light));
+        }
+        assert_eq!(
+            *view.asked.borrow(),
+            vec![
+                (8, 8, 8, Direction::Up),
+                (8, 8, 8, Direction::Down),
+                (8, 8, 8, Direction::North),
+            ],
+            "the mesher must query the cell and the quad's facing, once per quad"
+        );
+    }
+
+    /// The default [`ModelSectionView::face_light_at`] falls back to
+    /// [`ModelSectionView::light_at`], so a view that models no neighbourhood
+    /// (GUI items, fixtures) keeps its previous behaviour.
+    #[test]
+    fn face_light_defaults_to_the_own_cell_light() {
+        struct OwnOnly;
+        impl ModelSectionView for OwnOnly {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+            fn light_at(&self, _x: usize, _y: usize, _z: usize) -> u8 {
+                0x7C
+            }
+        }
+        assert_eq!(OwnOnly.face_light_at(1, 2, 3, Direction::East), 0x7C);
+        // And the trait's own default (no `light_at` override) is still 0xF0.
+        struct Bare;
+        impl ModelSectionView for Bare {
+            fn quads_at(&self, _x: usize, _y: usize, _z: usize) -> &[BakedQuad] {
+                &[]
+            }
+            fn occludes_at(&self, _x: i32, _y: i32, _z: i32) -> bool {
+                false
+            }
+        }
+        assert_eq!(Bare.face_light_at(0, 0, 0, Direction::Up), 0xF0);
     }
 
     #[test]
