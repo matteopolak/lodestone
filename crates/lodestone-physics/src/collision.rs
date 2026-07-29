@@ -259,6 +259,28 @@ fn perpendicular_axes(axis: Axis) -> (Axis, Axis, Axis) {
     }
 }
 
+/// `Entity.collectCollidersIgnoringWorldBorder` (`Entity.java:1220-1236`) — the
+/// one collider list the sweep sees: **entity colliders first**, then the world
+/// border (unmodelled), then the block colliders over `region`.
+///
+/// The order is load-bearing, not cosmetic. [`collide_axis`] short-circuits to
+/// `0.0` as soon as the residual distance falls inside `EPSILON`, so which box is
+/// visited first can decide between `0.0` and a surviving sub-epsilon value.
+/// Vanilla puts entities first; so do we.
+fn collect_colliders(
+    view: &dyn CollisionView,
+    region: Aabb,
+    entity_colliders: &[Aabb],
+) -> Vec<Aabb> {
+    if entity_colliders.is_empty() {
+        return gather_colliders(view, region);
+    }
+    let mut out = entity_colliders.to_vec();
+    let blocks = gather_colliders(view, region);
+    out.extend_from_slice(&blocks);
+    out
+}
+
 /// `Entity.collideWithShapes(Vec3, AABB, List<VoxelShape>)` — resolves movement
 /// axis by axis, moving the box after each resolved axis.
 fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> Vec3d {
@@ -279,18 +301,32 @@ fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> 
 
 /// `Entity.collideBoundingBox` — gather colliders over the swept box, then
 /// resolve.
-fn collide_bounding_box(view: &dyn CollisionView, movement: Vec3d, bounding_box: Aabb) -> Vec3d {
+fn collide_bounding_box(
+    view: &dyn CollisionView,
+    movement: Vec3d,
+    bounding_box: Aabb,
+    entity_colliders: &[Aabb],
+) -> Vec3d {
     let region = bounding_box.expand_towards(movement.x, movement.y, movement.z);
-    let shapes = gather_colliders(view, region);
+    let shapes = collect_colliders(view, region, entity_colliders);
     collide_with_shapes(movement, bounding_box, &shapes)
 }
 
 /// `CollisionGetter.noCollision(entity, box)` restricted to **block** shapes:
 /// whether `box` overlaps no block collider at all.
 ///
-/// Entity-vs-entity collision is out of scope for this crate (it has no entity
-/// list), so this is the block half only, which is what the fluid hop-out check
-/// ([`crate::player::tick_water`]'s `jumpOutOfFluid`) needs. Overlap is the
+/// This is the `noBlockCollision` term alone. The entity term is
+/// [`crate::push::no_entity_collision`] and the conjunction of both is
+/// [`crate::push::no_collision_among_entities`], which is what
+/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` and `Player.canFallAtLeast`
+/// actually call; this block-only form stays for callers with no entity snapshot,
+/// which today is every caller inside this crate. The gap it leaves is narrow by
+/// construction — `getEntityCollisions` filters on `canBeCollidedWith`, which no
+/// player and no mob satisfies, so only a boat, a shulker or a happy ghast is ever
+/// missing from the answer. The remaining unmodelled term of the three is
+/// `noBorderCollision` (no world border in this engine).
+///
+/// Overlap is the
 /// strict `min < max` test vanilla's `Shapes.joinIsNotEmpty(…, AND)` reduces to
 /// for box shapes — a flush contact does **not** count as a collision, so a
 /// player standing exactly on a ledge can still hop onto it.
@@ -340,10 +376,16 @@ pub fn contains_any_liquid(view: &dyn CollisionView, box_: Aabb) -> bool {
     false
 }
 
-/// `Entity.collide(Vec3)` including the auto-step mechanic.
+/// `Entity.collide(Vec3)` including the auto-step mechanic, against **block
+/// geometry only**.
 ///
 /// `on_ground` and `max_up_step` come from the entity; for a player on the
 /// ground `max_up_step` is `0.6`. Returns the resolved movement.
+///
+/// Equivalent to [`collide_among_entities`] with an empty collider slice, which is
+/// what makes that addition provably inert for every existing caller: vanilla's
+/// `collectCollidersIgnoringWorldBorder` prepends an empty entity list to produce a
+/// bit-identical collider list.
 #[must_use]
 pub fn collide(
     view: &dyn CollisionView,
@@ -352,10 +394,38 @@ pub fn collide(
     on_ground: bool,
     max_up_step: f32,
 ) -> Vec3d {
+    collide_among_entities(view, movement, bounding_box, on_ground, max_up_step, &[])
+}
+
+/// `Entity.collide(Vec3)` (`Entity.java:1143-1172`) with the entity half wired: the
+/// same swept resolve, over blocks **and** the collider boxes of nearby collidable
+/// entities.
+///
+/// `entity_colliders` must be gathered by
+/// [`crate::push::entity_collision_boxes`] over
+/// `bounding_box.expand_towards(movement)` — vanilla's
+/// `getEntityCollisions(this, aabb.expandTowards(movement))` (`:1145`). Two things
+/// about that follow the source and would be natural to "improve" wrongly:
+///
+/// * the list is gathered **once**, from the *movement* box, and then reused
+///   verbatim for the step-up pass even though the step-up box (`stepUpAABB`) is
+///   strictly larger (`:1158`). An entity that only overlaps the taller step-up box
+///   is therefore invisible to the step. That is vanilla; do not re-gather.
+/// * entity colliders participate in `collectCandidateStepUpHeights`, so you can
+///   auto-step onto a boat's deck exactly as onto a slab.
+#[must_use]
+pub fn collide_among_entities(
+    view: &dyn CollisionView,
+    movement: Vec3d,
+    bounding_box: Aabb,
+    on_ground: bool,
+    max_up_step: f32,
+    entity_colliders: &[Aabb],
+) -> Vec3d {
     let movement_step = if movement.length_sqr() == 0.0 {
         movement
     } else {
-        collide_bounding_box(view, movement, bounding_box)
+        collide_bounding_box(view, movement, bounding_box, entity_colliders)
     };
 
     let x_collision = movement.x != movement_step.x;
@@ -375,7 +445,7 @@ pub fn collide(
             step_up_box = step_up_box.expand_towards(0.0, -EPSILON, 0.0);
         }
 
-        let colliders = gather_colliders(view, step_up_box);
+        let colliders = collect_colliders(view, step_up_box, entity_colliders);
         let step_height_to_skip = movement_step.y as f32;
         let candidates =
             candidate_step_up_heights(&grounded, &colliders, max_up_step, step_height_to_skip);

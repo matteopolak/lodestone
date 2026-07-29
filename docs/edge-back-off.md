@@ -162,10 +162,18 @@ both of these wrong.
   calling physics thousands of times pays nothing on non-sneaking candidates. A
   sneaking candidate pays one `no_collision` for `isAboveGround` plus one per loop
   iteration.
-* **`no_collision` is the block half only.** Vanilla's `noCollision(entity, box)` is
+* **`no_collision` is the block half only, and `canFallAtLeast` is one of the two
+  callers that notices.** Vanilla's `noCollision(entity, box)` is
   `noBlockCollision && noEntityCollision && noBorderCollision`
-  (`CollisionGetter.java:51-53`). This crate has no entity list and no world border, so
-  a box vanilla would consider blocked by another entity or by the border reads as free.
+  (`CollisionGetter.java:51-53`), and `Player.canFallAtLeast` calls the full form
+  (`Player.java:936-949`). **Update:** the entity term now exists as
+  `lodestone_physics::push::no_entity_collision`, with the conjunction as
+  `no_collision_among_entities` — see [`entity-push.md`](./entity-push.md). The back-off
+  still calls the block-only form, and the gap that leaves is narrower than it reads:
+  `getEntityCollisions` filters on `Entity.canBeCollidedWith`, which no player and no
+  mob overrides, so the only entities that could ever change the answer are a **boat,
+  a shulker or a happy ghast** — i.e. sneaking at the edge of a boat's deck. The world
+  border remains wholly unmodelled and is now the only unmodelled term of the three.
 * **Regenerating golden traces needs rustfmt afterwards.** `gen_golden.py` emits one
   line per tick; the checked-in `support/golden_traces.rs` is rustfmt'd to four. Run
   `python3 crates/lodestone-physics/tests/gen_golden.py` from the repo root, then

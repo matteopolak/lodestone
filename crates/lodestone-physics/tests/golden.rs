@@ -11,16 +11,18 @@ use lodestone_physics::collision::CollisionView;
 use lodestone_physics::fluid::{FluidCell, FluidKind};
 use lodestone_physics::geometry::Aabb;
 use lodestone_physics::player::{
-    MovementInput, PlayerState, StatusEffects, tick, tick_air, tick_elytra,
+    MovementInput, PlayerState, StatusEffects, tick, tick_air, tick_among_entities, tick_elytra,
 };
+use lodestone_physics::push::{NearbyEntity, PushSelf};
 use lodestone_physics::{PhysicsProfile, Vec3d};
 
 #[path = "support/golden_traces.rs"]
 mod golden_traces;
 use golden_traces::{
     GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_DIAGONAL_WALK, GOLDEN_ELYTRA_CLIMB,
-    GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GLIDE_LEVEL, GOLDEN_FREE_FALL,
-    GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE, GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB,
+    GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GLIDE_LEVEL,
+    GOLDEN_ENTITY_PUSH_FLUSH_CONTROL, GOLDEN_ENTITY_PUSH_SHOVE, GOLDEN_ENTITY_PUSH_WIDE_PLATEAU,
+    GOLDEN_FREE_FALL, GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE, GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB,
     GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SINK, GOLDEN_LEVITATION, GOLDEN_SLAB_STEP,
     GOLDEN_SLIME_BOUNCE, GOLDEN_SLIME_BOUNCE_SNEAK, GOLDEN_SLOW_FALLING_WATER,
     GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP, GOLDEN_SNEAK_EDGE_WALK_OFF,
@@ -903,4 +905,184 @@ fn grounded_facing(x: f64, y: f64, z: f64, yaw: f32) -> PlayerState {
     let mut s = PlayerState::at(Vec3d::new(x, y, z), yaw);
     s.on_ground = true;
     s
+}
+
+// --- entity push -----------------------------------------------------------
+//
+// The only three traces in this file with a **second entity in the world**. Every
+// other one runs against an empty neighbour slice, which is why they are all
+// byte-identical across this change: `tick_among_entities` with an empty slice is
+// `tick`, `apply_entity_push` returns before reading anything, and
+// `collide_among_entities` with an empty collider slice prepends nothing to the
+// block colliders. Regenerating `golden_traces.rs` after adding these produced
+// 1612 insertions and zero deletions.
+
+/// The neighbour construction the Python oracle's `Neighbour` uses: box centred on
+/// `(x, z)` horizontally, feet at `y`, spanning `width` on both horizontal axes.
+///
+/// Note `width / 2.0` in `f64` — the *neighbour* box is built from a plain `f64`
+/// width, whereas the *player* box comes from `EntityDimensions::PLAYER`'s `f32`
+/// `0.6` widened (half-width `0.300000011920929`). The two are deliberately not
+/// unified: the asymmetry is what made the first draft of the flush control
+/// overlap by 1.2e-8 and push.
+fn neighbour(x: f64, y: f64, z: f64, width: f64, height: f64) -> NearbyEntity {
+    let half = width / 2.0;
+    NearbyEntity::living(
+        Vec3d::new(x, y, z),
+        Aabb::new(x - half, y, z - half, x + half, y + height, z + half),
+    )
+}
+
+/// Replays a trace through [`tick_among_entities`] against a fixed set of
+/// stationary neighbours.
+fn assert_push_trace(
+    name: &str,
+    world: &World,
+    mut state: PlayerState,
+    golden: &[GoldenTick],
+    nearby: &[NearbyEntity],
+) {
+    let profile = PhysicsProfile::mc_1_21();
+    for (t, expected) in golden.iter().enumerate() {
+        tick_among_entities(
+            &mut state,
+            MovementInput::NONE,
+            world,
+            &profile,
+            nearby,
+            PushSelf::LIVING_PLAYER,
+        );
+        check(name, t, "pos.x", state.position.x, expected.pos[0]);
+        check(name, t, "pos.y", state.position.y, expected.pos[1]);
+        check(name, t, "pos.z", state.position.z, expected.pos[2]);
+        check(name, t, "vel.x", state.velocity.x, expected.vel[0]);
+        check(name, t, "vel.y", state.velocity.y, expected.vel[1]);
+        check(name, t, "vel.z", state.velocity.z, expected.vel[2]);
+    }
+}
+
+#[test]
+fn entity_push_shove_matches_golden() {
+    // One stationary pushable neighbour overlapping the player, offset on both
+    // horizontal axes (dx = 0.15, dz = 0.08) so the `sqrt(absMax)` normaliser is
+    // observable: normalising by the vector length instead would put the first
+    // tick's velocity ~6% off on both axes, not in the last bits.
+    let world = World::flat_floor(4);
+    let state = grounded(0.5, 1.0, 0.5);
+    let nearby = [neighbour(0.65, 1.0, 0.58, 0.6, 1.8)];
+    assert_push_trace(
+        "entity_push_shove",
+        &world,
+        state,
+        &GOLDEN_ENTITY_PUSH_SHOVE,
+        &nearby,
+    );
+
+    // Guard the intent, the way `water_current_push` does: a silently-zero push
+    // would otherwise agree with a stationary golden trace.
+    let last = GOLDEN_ENTITY_PUSH_SHOVE.last().unwrap();
+    let (fx, fz) = (f64::from_bits(last.pos[0]), f64::from_bits(last.pos[2]));
+    assert!(
+        fx < 0.4 && fz < 0.45,
+        "expected to be shoved away from the neighbour (-x, -z), ended at ({fx}, {fz})"
+    );
+    // And the gate must *close* again: once the boxes separate the push stops and
+    // friction brings the player to rest. A push that never cut out would leave a
+    // non-zero horizontal velocity at the end.
+    assert_eq!(
+        f64::from_bits(last.vel[0]),
+        0.0,
+        "the push must stop once the boxes no longer overlap"
+    );
+    assert_eq!(f64::from_bits(last.vel[2]), 0.0);
+}
+
+#[test]
+fn entity_push_wide_plateau_matches_golden() {
+    // The un-clamped `pow = 1.0 / sqrt(absMax)` branch. Two 0.6-wide bodies can
+    // never reach it — they stop overlapping at dx = 0.6 and every absMax below 1.0
+    // has `pow` clamped to 1.0 — so this needs a wide neighbour (4.0 × 4.0, a happy
+    // ghast) with dx = 1.05 and a deep overlap.
+    let world = World::flat_floor(6);
+    let state = grounded(1.0, 1.0, 1.0);
+    let nearby = [neighbour(2.05, 1.0, 1.4, 4.0, 4.0)];
+    assert_push_trace(
+        "entity_push_wide_plateau",
+        &world,
+        state,
+        &GOLDEN_ENTITY_PUSH_WIDE_PLATEAU,
+        &nearby,
+    );
+
+    // The branch guard: assert the fixture actually reaches `pow < 1.0`, so this
+    // test cannot silently degrade into a second copy of `entity_push_shove`.
+    let dx: f64 = 2.05 - 1.0;
+    assert!(
+        1.0 / dx.sqrt() < 1.0,
+        "fixture no longer reaches the un-clamped branch (absMax = {dx})"
+    );
+    // In this branch the magnitude is a flat `0.05f` on the dominant axis — no
+    // distance falloff. Assert the first tick's X impulse against the widened
+    // literal, which is the sharpest available statement of "the sqrt terms cancel".
+    let first = &GOLDEN_ENTITY_PUSH_WIDE_PLATEAU[0];
+    assert_eq!(
+        f64::from_bits(first.vel[0]).to_bits(),
+        (-f64::from(0.05_f32)).to_bits(),
+        "the un-clamped branch must deliver exactly -0.05f on the dominant axis"
+    );
+    let last = GOLDEN_ENTITY_PUSH_WIDE_PLATEAU.last().unwrap();
+    assert!(f64::from_bits(last.pos[0]) < 0.0, "must be shoved clear");
+}
+
+#[test]
+fn entity_push_flush_control_is_inert() {
+    // WORLD CONTROL for both traces above: identical fixture, the neighbour placed
+    // so its -X face sits *exactly* on the player's +X face. `AABB.intersects` is
+    // strict `min < max`, so a flush contact is not an overlap and no push happens.
+    //
+    // This is the control that proves the two positive traces measure the push
+    // rather than something else in the fixture, and it is also the only assertion
+    // in the file that would catch the push pair test acquiring the `1.0E-7`
+    // inflation that belongs to `getEntityCollisions` alone.
+    let world = World::flat_floor(4);
+    let state = grounded(0.5, 1.0, 0.5);
+    let flush_x = 0.5 + f64::from(0.6_f32) / 2.0 + 0.6 / 2.0;
+    let nearby = [neighbour(flush_x, 1.0, 0.5, 0.6, 1.8)];
+    assert_push_trace(
+        "entity_push_flush_control",
+        &world,
+        state,
+        &GOLDEN_ENTITY_PUSH_FLUSH_CONTROL,
+        &nearby,
+    );
+
+    // The control's own assertion: nothing moved horizontally, ever.
+    for (t, tick) in GOLDEN_ENTITY_PUSH_FLUSH_CONTROL.iter().enumerate() {
+        assert_eq!(
+            f64::from_bits(tick.pos[0]),
+            0.5,
+            "flush contact pushed on x at tick {t}"
+        );
+        assert_eq!(
+            f64::from_bits(tick.pos[2]),
+            0.5,
+            "flush contact pushed on z at tick {t}"
+        );
+    }
+    // …and the fixture is one ulp from being live, so "nothing moved" is not
+    // because the neighbour was nowhere near. Moving it a single ulp closer makes
+    // the boxes overlap and the push fire.
+    let live_x = f64::from_bits(flush_x.to_bits() - 1);
+    let live = [neighbour(live_x, 1.0, 0.5, 0.6, 1.8)];
+    let impulse = lodestone_physics::entity_push_impulse(
+        Vec3d::new(0.5, 1.0, 0.5),
+        lodestone_physics::EntityDimensions::PLAYER.bounding_box(Vec3d::new(0.5, 1.0, 0.5)),
+        PushSelf::LIVING_PLAYER,
+        true,
+        &live,
+    );
+    assert!(
+        impulse.x < 0.0,
+        "one ulp closer must push — otherwise the control is vacuous"
+    );
 }

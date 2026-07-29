@@ -98,6 +98,32 @@ pub fn java_min_f32(a: f32, b: f32) -> f32 {
     }
 }
 
+/// `java.lang.Math.max(double, double)`: propagates `NaN`, unlike Rust's
+/// `f64::max` which returns the non-`NaN` operand.
+#[must_use]
+pub fn java_max_f64(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// `Mth.absMax(double, double)` (`Mth.java:134-136`) —
+/// `Math.max(Math.abs(a), Math.abs(b))`, i.e. the **larger magnitude of the two
+/// components**, not the length of the vector they form.
+///
+/// The distinction is the whole story of `Entity.push(Entity)`, which normalises
+/// its horizontal separation by `sqrt(absMax(dx, dz))` where a reader expects
+/// `sqrt(dx*dx + dz*dz)`. For `(0.15, 0.08)` those are `0.3873…` and `0.4123…` —
+/// a 6% error in the push direction *and* magnitude, on every pair, every tick.
+/// Routed through [`java_max_f64`] so a `NaN` component poisons the result the way
+/// Java's does (which is what makes `Entity.push`'s `dd >= 0.01F` gate reject it).
+#[must_use]
+pub fn abs_max(a: f64, b: f64) -> f64 {
+    java_max_f64(a.abs(), b.abs())
+}
+
 /// `Mth.clamp(double, double, double)`.
 ///
 /// Note vanilla's asymmetric form: `value < min ? min : Math.min(value, max)`.
@@ -210,7 +236,11 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
 /// caller. NaN propagates in both.
 #[must_use]
 pub fn java_signum(v: f64) -> f64 {
-    if v == 0.0 || v.is_nan() { v } else { v.signum() }
+    if v == 0.0 || v.is_nan() {
+        v
+    } else {
+        v.signum()
+    }
 }
 
 #[cfg(test)]

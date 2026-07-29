@@ -11,6 +11,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   reaching the physics engine, why `blocks_motion` moved from a geometry
   approximation to a dumped census of its own, and the `is_solid_face`/`fluid_at`
   approximations that remain.
+- [Entity-versus-entity interaction](./entity-push.md) — the soft crowd push
+  (`Entity.push`) and the hard-collision half of `noCollision`: why `isPushable` and
+  `canBeCollidedWith` are different predicates, why players passing through each
+  other is vanilla, why the push has no distance falloff despite looking like it
+  does, and the shell interface it is waiting on.
 - [Block outline and interaction shapes](./block-outline-shapes.md) — the third
   shape census (selection/pick, distinct from collision): why cobweb outlines to a
   full cube while colliding with nothing, `is_pickable` reading it for real now,

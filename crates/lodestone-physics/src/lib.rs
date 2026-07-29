@@ -21,6 +21,11 @@
 //!   by players and mobs and parameterised by [`entity::EntityDimensions`].
 //! * [`player`] — the per-tick player movement pipeline (a thin caller of the
 //!   entity core).
+//! * [`push`] — entity-versus-entity interaction: the soft crowd push
+//!   (`Entity.push(Entity)`) and the entity half of `noCollision`. Deliberately
+//!   *not* on [`collision::CollisionView`]: that trait answers block geometry, and
+//!   entity data is a caller-owned per-tick snapshot rather than a repeatable
+//!   spatial query.
 //!
 //! The crate has no runtime dependencies; the sine table is generated once and
 //! checked in as [`sin_table`].
@@ -36,17 +41,24 @@ pub mod geometry;
 pub mod mth;
 pub mod player;
 pub mod profile;
+pub mod push;
 
 pub use collision::CollisionView;
 pub use effect::{DirectEffect, MovementEffect, classify, movement_speed_modifier};
 pub use entity::{
-    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity, travel_in_air,
+    AirTravelContext, EntityDimensions, EntityMotion, MoveContext, move_entity,
+    move_entity_among_entities, travel_in_air,
 };
 pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow};
 pub use fluid_state::{FluidState, compute_fluid_state};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
     EdgeBackOff, MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air,
-    tick_elytra, tick_lava, tick_water,
+    tick_among_entities, tick_elytra, tick_lava, tick_water,
 };
 pub use profile::{FluidModel, InputModel, PhysicsProfile};
+pub use push::{
+    CollisionRule, NearbyEntity, PushSelf, apply_entity_push, entity_collision_boxes,
+    entity_push_impulse, no_collision_among_entities, no_entity_collision, pair_push_vector,
+    reciprocal_push_impulse, self_is_pushable, team_allows_push,
+};
