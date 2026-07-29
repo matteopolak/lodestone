@@ -367,6 +367,40 @@ impl Menus {
 /// `minecraft:crafting`, whose `CraftingMenu` is `1 + 3*3 = 10` container slots;
 /// if the server disagrees about the size we fall back to a generic container
 /// rather than build a menu whose slot count contradicts the packet.
+///
+/// # Why everything else is `generic`, and what that costs
+///
+/// Vanilla overrides `quickMoveStack` per menu class, so in principle every
+/// `minecraft:menu` registry entry could need its own arm. In practice most of
+/// them are the *same* override with a different constant:
+/// `ChestMenu.java:94-109`, `HopperMenu.java:36-58`, `DispenserMenu.java:45-70`
+/// and `ShulkerBoxMenu.java:40-62` are line-for-line identical modulo the
+/// container size, which is exactly what [`Menu::generic`] implements. That one
+/// arm correctly covers chests, barrels, ender chests, every `generic_9xN`,
+/// hoppers, dispensers, droppers and shulker boxes.
+///
+/// Two families are genuinely different and are **knowingly** left on the
+/// generic order:
+///
+/// * `AbstractFurnaceMenu.java:87-133` routes by *item kind*: smeltables to slot
+///   0, fuel to slot 1, and only otherwise the main↔hotbar hop. Both predicates
+///   (`canSmelt` → the cooking-recipe input set, `isFuel` → the fuel-value
+///   registry) are server data this tree does not have. Modelling the structure
+///   without them would just move the guess.
+/// * `BrewingStandMenu.java:63-99` does the same for blaze powder, brewing
+///   ingredients and potions.
+///
+/// The cost is bounded and self-correcting: a shift-click in a furnace predicts
+/// a deposit into container slot 0 where vanilla would have chosen slot 1 or
+/// done nothing, the server disagrees, and
+/// [`ClientMenu::reconcile`](crate::reconcile::ClientMenu::reconcile) snaps it
+/// back one round trip later. It is a visible flicker, not a desync.
+///
+/// Adding a case must **not** grow [`MenuKind`](crate::menu::MenuKind): that
+/// enum is matched exhaustively in `lodestone-shell`'s `slot_layout`, and the
+/// crafting table was deliberately kept a `Generic` for exactly that reason.
+/// Carry the extra routing as a descriptor on [`Menu`], the way
+/// [`CraftLayout`](crate::menu::CraftLayout) already is.
 fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
     let is_crafting =
         menu_type.is_some_and(|key| key.namespace() == "minecraft" && key.path() == "crafting");
