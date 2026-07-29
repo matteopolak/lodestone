@@ -29,7 +29,6 @@
 use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
-use lodestone::net::NetClient;
 use lodestone::sim::{SessionPhase, Sim};
 use lodestone_testsupport::RconClient;
 
@@ -66,7 +65,9 @@ fn server_particles_reach_the_emitter() {
 
     let mut sim = Sim::new(live_config());
     let demo_spawn = sim.player().position;
-    sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
+    // §4.1(c): `Sim::connect` threads the shell\'s one `World` into the
+    // client, so the session fold lands where the HUD accessors read.
+    sim.connect(HOST.into(), PORT, PROTOCOL);
 
     // Drive the real join path until the server has placed us and chunks stream.
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -94,7 +95,7 @@ fn server_particles_reach_the_emitter() {
     }
     assert_eq!(
         sim.session_phase(),
-        &SessionPhase::Connected,
+        SessionPhase::Connected,
         "expected a live Connected session before asserting on server-sent particles"
     );
 

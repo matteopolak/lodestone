@@ -27,6 +27,48 @@ pub struct WorldTime {
     pub time_of_day: i64,
 }
 
+/// Vanilla's fixed tick period: 20 Hz, `1.0 / 20.0` seconds.
+///
+/// `f64` on purpose. The `f32` literal `0.05` is `0.050000000745…`, a relative
+/// error of ~1.5e-8 against this value — about one tick of drift per 39 days of
+/// continuous play. That term was measured and is *not* why the two pre-§4.1(c)
+/// clocks diverged (the clamp was, see [`MAX_CATCH_UP_SECS`]), but there is no
+/// reason to keep it now that there is one clock.
+pub const TICK_PERIOD: f64 = 1.0 / 20.0;
+
+/// Vanilla's `MAX_TICKS_PER_UPDATE` (`Minecraft.java`): how many catch-up ticks
+/// one driver iteration may run before the remaining backlog is dropped rather
+/// than replayed in a burst.
+pub const MAX_CATCH_UP_TICKS: u32 = 10;
+
+/// [`MAX_CATCH_UP_TICKS`] expressed as seconds — the clamp
+/// [`FrameClock::begin_frame`] applies to `dt`.
+///
+/// # This number is the §4.1(c) policy decision, and it is 0.5 not 0.25
+///
+/// Before the `World` unification there were **two** 20 Hz accumulators on two
+/// different catch-up policies: `Sim::step` clamped `dt` to `0.25 s` (five
+/// ticks) while `EntityInterpolator` banked the frame pacer's already-clamped
+/// `0.5 s` (ten) unclamped. A maximal stall therefore advanced item physics five
+/// ticks further than player physics, *per stall*, cumulatively and without
+/// bound, because the excess real time was discarded rather than reconciled.
+///
+/// Unifying them forced a choice, and this is it: **ten ticks**, because
+/// - it is vanilla's own `MAX_TICKS_PER_UPDATE`, which is the only external
+///   oracle either candidate has;
+/// - it is what `docs/frame-pacing.md` documents and what
+///   `lodestone_shell::app::FramePacer` already clamps to, so the driver's own
+///   two clamps now agree instead of one silently shadowing the other;
+/// - the tighter `0.25 s` had no derivation. It predates the frame pacer and its
+///   only written justification is the pacing test's own observation that it
+///   binds first ("measured **5**, not 10"), i.e. a record of the discrepancy
+///   rather than a reason for it.
+///
+/// The cost of loosening it is a longer worst-case catch-up burst: ten physics
+/// ticks in one frame instead of five. That is vanilla's own worst case, and the
+/// frame pacer already sized the budget for it.
+pub const MAX_CATCH_UP_SECS: f64 = MAX_CATCH_UP_TICKS as f64 * TICK_PERIOD;
+
 /// The **driver's** clock: real elapsed time, the fixed-timestep residual, and
 /// the tick/frame counters derived from them.
 ///
@@ -51,6 +93,16 @@ pub struct WorldTime {
 /// decreases and is never reset by a session teardown, which is what makes a
 /// chat timestamp from before a reconnect still age correctly. `accumulator` is
 /// the sub-tick residual and cycles within `[0, tick_period)`.
+///
+/// # This is the process's only 20 Hz accumulator (§4.1(c))
+///
+/// It used to be one of two: `lodestone_shell::entities::EntityInterpolator` had
+/// its own `TickAccum` because it had its own `World`, and
+/// `World::run_schedule(GameTick)` runs the systems in *that* `World`. One
+/// `World` is therefore what makes one clock possible, and
+/// [`begin_frame`](Self::begin_frame) / [`take_tick`](Self::take_tick) /
+/// [`end_frame`](Self::end_frame) exist so the loop that drains it is written
+/// once rather than per driver.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Default)]
 pub struct FrameClock {
     /// Monotonic wall-clock seconds since the driver started, accumulated from
@@ -69,6 +121,58 @@ pub struct FrameClock {
 }
 
 impl FrameClock {
+    /// Start a driver iteration: advance monotonic time by the real `dt` and bank
+    /// the catch-up-clamped share of it toward fixed ticks.
+    ///
+    /// `secs` takes the **unclamped** `dt` and `accumulator` the clamped one, and
+    /// that asymmetry is deliberate: `secs` answers "how long ago did this chat
+    /// line arrive", which must track wall time across a stall, while the
+    /// accumulator answers "how many ticks do we owe", which must not replay a
+    /// minute of them (see [`MAX_CATCH_UP_SECS`]).
+    pub fn begin_frame(&mut self, dt: f64) {
+        self.secs += dt.max(0.0);
+        self.accumulator += dt.clamp(0.0, MAX_CATCH_UP_SECS);
+        self.frames += 1;
+    }
+
+    /// Claim one fixed tick if the accumulator holds a whole period, counting it.
+    ///
+    /// The driver's loop is `while clock.take_tick() { … }`. Terminates because
+    /// [`begin_frame`](Self::begin_frame) banks at most [`MAX_CATCH_UP_SECS`] and
+    /// each claim withdraws a whole [`TICK_PERIOD`].
+    pub fn take_tick(&mut self) -> bool {
+        if self.accumulator >= TICK_PERIOD {
+            self.accumulator -= TICK_PERIOD;
+            self.ticks += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Finish a driver iteration: publish the sub-tick residual as the render
+    /// interpolation factor.
+    ///
+    /// Must run after the tick loop and before anything that interpolates — both
+    /// the camera's between-tick ease and the entity walk cycle's partial tick
+    /// read this, and they were two different residuals before the unification.
+    pub fn end_frame(&mut self) {
+        self.interp_alpha = (self.accumulator / TICK_PERIOD) as f32;
+    }
+
+    /// Drop the banked sub-tick residual (and the render factor derived from it)
+    /// without touching monotonic time or the counters.
+    ///
+    /// For a session teardown. `Sim::end_session` used to reset the
+    /// interpolator's accumulator (by replacing the whole interpolator) and *not*
+    /// the player's, so a quit-to-title re-phased the two clocks arbitrarily on
+    /// top of the clamp divergence. With one accumulator there is one thing to
+    /// reset, and this is it.
+    pub fn reset_accumulator(&mut self) {
+        self.accumulator = 0.0;
+        self.interp_alpha = 0.0;
+    }
+
     /// Frames per fixed tick since start — the fixed-timestep health number the
     /// debug overlay draws. `0.0` before the first tick, rather than a division
     /// by zero.
@@ -120,5 +224,87 @@ impl VersionData {
         state_id: u32,
     ) -> Option<lodestone_model::ToolMining> {
         self.0.as_ref()?.tool_mining(held, state_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drain one frame's worth of `dt` and report how many fixed ticks it bought.
+    fn ticks_in_one_frame(dt: f64) -> u32 {
+        let mut clock = FrameClock::default();
+        clock.begin_frame(dt);
+        let mut ticks = 0;
+        while clock.take_tick() {
+            ticks += 1;
+        }
+        clock.end_frame();
+        ticks
+    }
+
+    /// The §4.1(c) policy, pinned: a stall long enough to exhaust the budget runs
+    /// **ten** ticks, not five.
+    ///
+    /// Five was the number `lodestone_shell::app`'s pacing test measured before
+    /// the unification, because `Sim::step` applied a second, tighter `0.25 s`
+    /// clamp on top of the pacer's `0.5 s`. There is now one clamp.
+    #[test]
+    fn a_stall_longer_than_the_budget_runs_exactly_ten_ticks() {
+        assert_eq!(MAX_CATCH_UP_TICKS, 10);
+        assert_eq!(ticks_in_one_frame(60.0), MAX_CATCH_UP_TICKS);
+        assert_eq!(ticks_in_one_frame(MAX_CATCH_UP_SECS), MAX_CATCH_UP_TICKS);
+    }
+
+    /// The control for the above: a *short* frame is not clamped, so the
+    /// assertion is measuring the clamp rather than a constant ceiling every
+    /// input would hit.
+    #[test]
+    fn a_frame_shorter_than_the_budget_is_not_clamped() {
+        assert_eq!(ticks_in_one_frame(0.0), 0);
+        assert_eq!(ticks_in_one_frame(TICK_PERIOD), 1);
+        assert_eq!(ticks_in_one_frame(3.0 * TICK_PERIOD), 3);
+    }
+
+    /// Monotonic time tracks the *unclamped* stall even though the tick budget
+    /// does not — otherwise a chat line stamped before a one-minute stall would
+    /// age by half a second across it.
+    #[test]
+    fn monotonic_seconds_are_not_clamped_with_the_accumulator() {
+        let mut clock = FrameClock::default();
+        clock.begin_frame(60.0);
+        assert!((clock.secs - 60.0).abs() < 1e-12);
+        assert!(clock.accumulator <= MAX_CATCH_UP_SECS);
+    }
+
+    /// The residual published for interpolation is the *post-loop* one: half a
+    /// tick of leftover reads as `0.5`, not as the whole frame's fraction.
+    #[test]
+    fn the_interpolation_factor_is_the_residual_after_the_loop() {
+        let mut clock = FrameClock::default();
+        clock.begin_frame(TICK_PERIOD * 1.5);
+        while clock.take_tick() {}
+        clock.end_frame();
+        assert_eq!(clock.ticks, 1);
+        assert!(
+            (clock.interp_alpha - 0.5).abs() < 1e-6,
+            "{}",
+            clock.interp_alpha
+        );
+    }
+
+    /// A teardown drops the sub-tick residual but never rewinds monotonic time —
+    /// the asymmetry `reset_accumulator` exists for.
+    #[test]
+    fn resetting_the_accumulator_leaves_monotonic_time_alone() {
+        let mut clock = FrameClock::default();
+        clock.begin_frame(TICK_PERIOD * 1.5);
+        while clock.take_tick() {}
+        clock.end_frame();
+        clock.reset_accumulator();
+        assert_eq!(clock.accumulator, 0.0);
+        assert_eq!(clock.interp_alpha, 0.0);
+        assert!(clock.secs > 0.0);
+        assert_eq!(clock.ticks, 1);
     }
 }

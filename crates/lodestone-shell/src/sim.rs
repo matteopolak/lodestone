@@ -21,7 +21,9 @@ use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionChat,
     SessionHudPlugin, TitleOverlay, Vitals, Xp, insert_hud_components,
 };
-use lodestone_ecs::{ChunkWorld, CorePlugin, FrameClock, GameTick, Update, VersionData};
+use lodestone_ecs::{
+    ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
+};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
@@ -40,7 +42,7 @@ use crate::camera_rig::build_camera;
 use crate::chat::compose_chat_action;
 use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
-use crate::entities::{EntityDraw, EntityInterpolator};
+use crate::entities::EntityDraw;
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::interact::{
     Attacking, InteractPlugin, MiningPredictor, NetHandle, ParticleSim, PlacementPredictor,
@@ -59,8 +61,10 @@ use crate::worldgen;
 /// helpers and the `Sim` accessors share one name for it.
 type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
 
-/// Fixed physics timestep: 20 ticks per second, like vanilla.
-const TICK_DT: f64 = 1.0 / 20.0;
+// The fixed timestep constant used to live here as `TICK_DT`. It is
+// `lodestone_ecs::TICK_PERIOD` now, beside the one accumulator that counts in it
+// (§4.1(c)) — a driver-local copy is how the shell came to have a `0.25 s` catch-up
+// clamp that nothing else in the tree knew about.
 /// Cap how far worldgen spans regardless of render distance, so start-up meshing
 /// stays snappy for the demo. Only [`Sim::with_demo_world`] generates that world;
 /// a real client session has no offline terrain at all.
@@ -420,30 +424,50 @@ pub struct Sim {
     pub config: Config,
     /// Latest debug stats (the app fills in FPS/frame-time/GPU counters).
     pub stats: DebugStats,
-    /// The `World` the **local player** lives in as components, plus the
-    /// `GameTick` systems that advance it (`docs/bevy-migration.md` Stage 2,
-    /// `docs/local-player-components.md`), and since Stage 4 the
-    /// [`ChunkWorld`] store and all terrain-meshing state
-    /// (`docs/chunk-world-resource.md`).
+    /// **The** bevy `World`, per §4.1(c) — one per process, behind the shared
+    /// lock so the net thread can fold into it.
     ///
     /// `Sim` holds **no** `PlayerState`, `InputState`, `PhysicsProfile`,
     /// `FluidState`, hotbar slot, fly flag, death flag or wire edge-tracker of
     /// its own, since Stage 4 **no `lodestone_world::World`, no mesh scheduler
-    /// and no mesh queues** either, and since Stage 5 **no frame clock, chat log,
+    /// and no mesh queues** either, since Stage 5 **no frame clock, chat log,
     /// pick target, particle simulation, mining/placement predictor or version
-    /// adapter**: this is the sole store, reached through the accessors below.
-    /// That is the stages' authority test — a second copy here would make a
-    /// plugin's write to a component a write to nothing.
+    /// adapter**, and since §4.1(c) **no entity interpolator**: this is the sole
+    /// store, reached through the accessors below. That is the stages' authority
+    /// test — a second copy here would make a plugin's write to a component a
+    /// write to nothing.
     ///
-    /// This is still the **third** *bevy* `World` in the process (the net
-    /// thread's, the entity interpolator's, and this one). Stage 4 unified the two
-    /// `lodestone_world::World`s, which is a different §4.1 clause — see
-    /// `docs/chunk-world-resource.md` on why the bevy split needs `net.rs` and so
-    /// could not close here.
-    ecs: EcsWorld,
+    /// # What made this the *one* `World`
+    ///
+    /// There were three: the net thread's (`lodestone_client::state::SharedState`,
+    /// authoritative over the network read-model), the entity interpolator's, and
+    /// this one. `Sim` now builds this one and threads the handle **down** —
+    /// `attach_net` hands it to `NetClient::connect`, which hands it to
+    /// `ClientBuilder::ecs`, so ingest folds into the `World` these systems read.
+    /// The interpolator's is gone: [`crate::entities::EntityInterpPlugin`] is
+    /// installed here and its systems run in these schedules off this clock.
+    ///
+    /// The direction is load-bearing and not symmetric: adopting the *client's*
+    /// handle instead would make the `World`'s identity change at every connect,
+    /// and [`Self::local`] — held across [`Self::end_session`] by the
+    /// voluntary-teardown path — would be invalidated by each reconnect.
+    ///
+    /// # Locking
+    ///
+    /// Every access goes through [`Self::read`] / [`Self::write`], which take a
+    /// short guard and drop it. Read [`lodestone_ecs::EcsHandle`]'s three rules
+    /// before adding a call site: in particular **never** call into `NetClient` /
+    /// `ClientHandle` with a guard live, because those lock this same `World` and
+    /// `parking_lot::RwLock` is neither reentrant nor upgradable.
+    ecs: EcsHandle,
     /// The local player's entity in [`Self::ecs`]. Stable for the lifetime of
     /// the `Sim`, including across [`Sim::end_session`], because the driver and
     /// (later) plugins hold it.
+    ///
+    /// Since §4.1(c) it is **also** the client's session entity: one `World`, one
+    /// `LocalPlayer`. `spawn_local_player` and `spawn_session` both spawn an
+    /// entity marked `LocalPlayer`, so leaving them separate in one `World` would
+    /// give every `With<LocalPlayer>` system two players.
     local: Entity,
     net: Option<NetClient>,
     /// Whether the [`ChunkWorld`] resource in [`Self::ecs`] is the *client's*
@@ -497,9 +521,6 @@ pub struct Sim {
     /// on the death screen forever" bug as the live gate's negative control. Never
     /// flipped in real play.
     pub recover_from_death: bool,
-    /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
-    /// render-rate transforms the entity pass draws. Empty off a live server.
-    entity_interp: EntityInterpolator,
     /// Live audio, or `None` when disabled (no asset root, no device — see
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
@@ -660,6 +681,18 @@ impl Sim {
             LocalPlayerPlugin,
             ControllerPlugin,
             SessionHudPlugin,
+            // §4.1(c). `IngestPlugin` + `SessionPlugin` are the *net thread's*
+            // folds — the systems `lodestone_client::state::SharedState` runs — and
+            // they are installed here because there is now one `World` and this is
+            // it. Exactly once: `SessionPlugin` guards the shared
+            // `drain_ingest_queue` with `is_plugin_added`, because `add_systems`
+            // does not deduplicate and a second copy blanks every batch the first
+            // one filled (Stage 3 shipped that as a total ingest blackout).
+            lodestone_ecs::ingest::IngestPlugin,
+            lodestone_ecs::SessionPlugin,
+            // §4.1(c). The render-side entity interpolation, which used to own a
+            // second `World` and therefore a second 20 Hz accumulator.
+            crate::entities::EntityInterpPlugin,
             // Stage 4: the chunk store and the terrain-mesh queues become
             // resources, and `heal_dirty_columns` becomes an `Update` system in
             // `FrameSet::Terrain`.
@@ -678,7 +711,8 @@ impl Sim {
         // whichever block-id space this session's world holds.
         ecs.insert_resource(ParticleSim(particles));
         ecs.insert_resource(VersionData(version_data));
-        ecs.insert_resource(FrameClock::default());
+        // `FrameClock` and `WorldTime` come from `CorePlugin` now (§4.1(c) retired
+        // the guard that refused to insert them), so there is nothing to seed here.
         // `TerrainPlugin` inserts a *default* (empty) store; this replaces it with
         // the one this session actually meshes. The worker pool cannot come from a
         // plugin at all: it has to be built with the classifier for whichever
@@ -696,11 +730,16 @@ impl Sim {
         // plugins, and a plugin a harness leaves out must not leave a component
         // its systems never look at behind.
         insert_hud_components(&mut ecs, local);
+        // §4.1(c): the shared-fold half goes on the *same* entity too, instead of
+        // `lodestone_client::state::SharedState::default` spawning a second
+        // `LocalPlayer` in a `World` of its own. This is the entity
+        // `attach_net` names to `ClientBuilder::ecs`.
+        lodestone_ecs::session::insert_session_components(&mut ecs, local);
 
         let mut sim = Self {
             config,
             stats,
-            ecs,
+            ecs: std::sync::Arc::new(lodestone_ecs::parking_lot::RwLock::new(ecs)),
             local,
             net: None,
             adopted_live_world: false,
@@ -711,7 +750,6 @@ impl Sim {
             collide_against_live_world: true,
             asset_banner: resources.banner,
             recover_from_death: true,
-            entity_interp: EntityInterpolator::new(),
             audio: ShellAudio::from_env(),
         };
         sim.refresh_mesh_policy();
@@ -722,20 +760,51 @@ impl Sim {
     // The local player, which lives in `self.ecs` and nowhere else
     // -----------------------------------------------------------------------
 
-    /// The local player's `World`, for a caller that wants to query or mutate
-    /// the components directly.
+    /// The one `World`, for a caller that wants to query or mutate the components
+    /// directly — a plugin, a test, or the net thread.
     ///
     /// This is the seam that keeps the component set from being an island: a
-    /// plugin (or a test) can write [`PhysicsState`] and the next tick — and
-    /// the next movement packet — reflect it.
+    /// plugin can write [`PhysicsState`] and the next tick — and the next movement
+    /// packet — reflect it. Since §4.1(c) it is also what a *plugin* would be
+    /// handed, which is why it is the shared handle rather than a `&World`: there
+    /// is exactly one, and the net thread holds a clone of it.
+    ///
+    /// Callers take their own short guard. Do not hold one across a call into
+    /// `NetClient`/`ClientHandle` — see [`lodestone_ecs::EcsHandle`].
     #[must_use]
-    pub fn ecs(&self) -> &EcsWorld {
+    pub fn ecs(&self) -> &EcsHandle {
         &self.ecs
     }
 
-    /// The mutable form of [`Self::ecs`].
-    pub fn ecs_mut(&mut self) -> &mut EcsWorld {
-        &mut self.ecs
+    /// Run `f` under a short **read** guard on the one `World`.
+    ///
+    /// A closure rather than a returned guard on purpose: a guard that outlives one
+    /// statement is the shape that deadlocks, because `parking_lot`'s `read()`
+    /// blocks behind a queued writer even on a thread that already holds a read
+    /// lock. This keeps every borrow inside a scope the compiler can see.
+    fn read<R>(&self, f: impl FnOnce(&EcsWorld) -> R) -> R {
+        f(&self.ecs.read())
+    }
+
+    /// Run `f` under a short **write** guard on the one `World`.
+    ///
+    /// `&mut self` even though the lock makes it unnecessary: it is the borrow
+    /// checker, not the lock, that stops a caller from reaching another `Sim`
+    /// accessor (and so the same lock) from inside `f`.
+    fn write<R>(&mut self, f: impl FnOnce(&mut EcsWorld) -> R) -> R {
+        f(&mut self.ecs.write())
+    }
+
+    /// [`Self::write`], with the local player's `Entity` handed in.
+    ///
+    /// Exists only because `&mut self` makes the closure unable to read
+    /// `self.local` — which is the *point* of the `&mut`: it is what stops a
+    /// closure reaching another accessor and so the same lock a second time. This
+    /// is the one field it legitimately needs, so it is passed rather than
+    /// captured.
+    fn write_local<R>(&mut self, f: impl FnOnce(&mut EcsWorld, Entity) -> R) -> R {
+        let local = self.local;
+        f(&mut self.ecs.write(), local)
     }
 
     /// The local player's entity, for pairing with [`Self::ecs`].
@@ -757,14 +826,14 @@ impl Sim {
     /// every read site branched on which it meant.
     #[must_use]
     pub fn chunk_world(&self) -> ChunkWorld {
-        self.ecs.resource::<ChunkWorld>().clone()
+        self.read(|w| w.resource::<ChunkWorld>().clone())
     }
 
     /// Loaded column count in [`Self::chunk_world`]. The debug overlay's
     /// `world chunks` line.
     #[must_use]
     pub fn chunk_count(&self) -> usize {
-        self.ecs.resource::<ChunkWorld>().len()
+        self.read(|w| w.resource::<ChunkWorld>().len())
     }
 
     // -----------------------------------------------------------------------
@@ -778,63 +847,57 @@ impl Sim {
     // to delete.
     // -----------------------------------------------------------------------
 
-    /// The driver's frame clock.
+    /// The driver's frame clock — the process's only one since §4.1(c).
     #[must_use]
     fn clock(&self) -> FrameClock {
-        *self.ecs.resource::<FrameClock>()
+        self.read(|w| *w.resource::<FrameClock>())
     }
 
-    /// The mutable form of [`Self::clock`].
-    fn clock_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, FrameClock> {
-        self.ecs.resource_mut::<FrameClock>()
+    /// Mutate the frame clock in place.
+    fn clock_mut<R>(&mut self, f: impl FnOnce(&mut FrameClock) -> R) -> R {
+        self.write(|w| f(&mut w.resource_mut::<FrameClock>()))
     }
 
     /// The block the view ray currently points at.
     #[must_use]
     pub fn target(&self) -> Option<RayHit> {
-        self.ecs.resource::<RayTarget>().0
+        self.read(|w| w.resource::<RayTarget>().0)
     }
 
     /// Overwrite the pick target. Only the per-frame raycast and the two edit
     /// paths that consume a target should call this.
     fn set_target(&mut self, hit: Option<RayHit>) {
-        self.ecs.resource_mut::<RayTarget>().0 = hit;
+        self.write(|w| w.resource_mut::<RayTarget>().0 = hit);
     }
 
-    /// The particle simulation.
-    #[must_use]
-    fn particles(&self) -> &Particles {
-        &self.ecs.resource::<ParticleSim>().0
+    /// Mutate the particle simulation in place.
+    fn particles_mut<R>(&mut self, f: impl FnOnce(&mut Particles) -> R) -> R {
+        self.write(|w| f(&mut w.resource_mut::<ParticleSim>().0))
     }
 
-    /// The mutable form of [`Self::particles`].
-    fn particles_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, ParticleSim> {
-        self.ecs.resource_mut::<ParticleSim>()
+    /// Read the live mining predictor.
+    fn mining<R>(&self, f: impl FnOnce(&Mining) -> R) -> R {
+        self.read(|w| f(&w.resource::<MiningPredictor>().0))
     }
 
-    /// The live mining predictor.
-    #[must_use]
-    fn mining(&self) -> &Mining {
-        &self.ecs.resource::<MiningPredictor>().0
-    }
-
-    /// Terrain-meshing state (worker pool, dirty set, removal queue, drop count).
-    #[must_use]
-    fn terrain(&self) -> &TerrainMesh {
-        self.ecs.resource::<TerrainMesh>()
+    /// Read terrain-meshing state (worker pool, dirty set, removal queue, drops).
+    fn terrain<R>(&self, f: impl FnOnce(&TerrainMesh) -> R) -> R {
+        self.read(|w| f(w.resource::<TerrainMesh>()))
     }
 
     /// The mutable form of [`Self::terrain`].
-    fn terrain_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, TerrainMesh> {
-        self.ecs.resource_mut::<TerrainMesh>()
+    fn terrain_mut<R>(&mut self, f: impl FnOnce(&mut TerrainMesh) -> R) -> R {
+        self.write(|w| f(&mut w.resource_mut::<TerrainMesh>()))
     }
 
     /// Read the chunk store and the terrain state together — the shape every
     /// mesh-scheduling call site needs, and the reason [`TerrainMesh`] is one
     /// resource rather than five.
-    fn terrain_and_world(&mut self) -> (ChunkWorld, bevy_ecs::change_detection::Mut<'_, TerrainMesh>) {
-        let store = self.ecs.resource::<ChunkWorld>().clone();
-        (store, self.ecs.resource_mut::<TerrainMesh>())
+    fn terrain_and_world<R>(&mut self, f: impl FnOnce(&ChunkWorld, &mut TerrainMesh) -> R) -> R {
+        self.write(|w| {
+            let store = w.resource::<ChunkWorld>().clone();
+            f(&store, &mut w.resource_mut::<TerrainMesh>())
+        })
     }
 
     /// Recompute the two session facts terrain meshing cannot read off the store.
@@ -867,10 +930,11 @@ impl Sim {
             sky_default,
             id_spaces_agree,
         };
-        let mut terrain = self.terrain_mut();
-        if terrain.policy != policy {
-            terrain.policy = policy;
-        }
+        self.terrain_mut(|terrain| {
+            if terrain.policy != policy {
+                terrain.policy = policy;
+            }
+        });
     }
 
     /// Adopt the client's chunk store as ours, once the net thread has published
@@ -894,11 +958,14 @@ impl Sim {
             return;
         };
         let live = handle.chunk_world();
-        let mine = self.ecs.resource::<ChunkWorld>();
-        if mine.is_same_store(&live) || !mine.is_empty() {
+        let adopt = self.read(|w| {
+            let mine = w.resource::<ChunkWorld>();
+            !(mine.is_same_store(&live) || !mine.is_empty())
+        });
+        if !adopt {
             return;
         }
-        self.ecs.insert_resource(live);
+        self.write(|w| w.insert_resource(live));
         self.adopted_live_world = true;
     }
 
@@ -908,68 +975,81 @@ impl Sim {
     /// whole component set eagerly and nothing ever removes it, so a missing
     /// component means someone despawned the local player, which is a bug in
     /// the caller rather than a state a reader should have to handle.
+    ///
+    /// Returns by value rather than by reference since §4.1(c): the component
+    /// lives behind [`Self::ecs`]'s lock, and handing out a `&PlayerState` would
+    /// mean handing out a live read guard for a caller to hold for as long as it
+    /// liked. `PlayerState` is `Copy`, so this is a register copy and every
+    /// existing `sim.player().position`-shaped call site is unchanged.
     #[must_use]
-    pub fn player(&self) -> &PlayerState {
-        &self
-            .ecs
-            .get::<PhysicsState>(self.local)
-            .expect("the local player always carries PhysicsState")
-            .0
+    pub fn player(&self) -> PlayerState {
+        self.read(|w| {
+            w.get::<PhysicsState>(self.local)
+                .expect("the local player always carries PhysicsState")
+                .0
+        })
     }
 
-    /// The mutable form of [`Self::player`].
-    pub fn player_mut(&mut self) -> &mut PlayerState {
-        &mut self
-            .ecs
-            .get_mut::<PhysicsState>(self.local)
-            .expect("the local player always carries PhysicsState")
-            .into_inner()
-            .0
+    /// Mutate the player's physics state in place.
+    ///
+    /// A closure rather than `-> &mut PlayerState`, for the reason on
+    /// [`Self::player`]: the write guard must not escape.
+    pub fn player_mut<R>(&mut self, f: impl FnOnce(&mut PlayerState) -> R) -> R {
+        self.write_local(|w, local| {
+            f(&mut w
+                .get_mut::<PhysicsState>(local)
+                .expect("the local player always carries PhysicsState")
+                .0)
+        })
     }
 
     /// Held keys plus accumulated mouse motion. The platform layer
     /// ([`crate::app`]) is the only writer.
     #[must_use]
-    pub fn input(&self) -> &InputState {
-        &self.ecs.resource::<RawInput>().0
+    pub fn input(&self) -> InputState {
+        self.read(|w| w.resource::<RawInput>().0.clone())
     }
 
-    /// The mutable form of [`Self::input`].
-    pub fn input_mut(&mut self) -> &mut InputState {
-        &mut self.ecs.resource_mut::<RawInput>().into_inner().0
+    /// Mutate the raw input state in place — the platform layer's only writer.
+    pub fn input_mut<R>(&mut self, f: impl FnOnce(&mut InputState) -> R) -> R {
+        self.write(|w| f(&mut w.resource_mut::<RawInput>().0))
     }
 
     /// The physics tuning profile this world is simulated under.
     #[must_use]
-    pub fn profile(&self) -> &PhysicsProfile {
-        &self.ecs.resource::<Profile>().0
+    pub fn profile(&self) -> PhysicsProfile {
+        self.read(|w| w.resource::<Profile>().0)
     }
 
     /// Feet position at the start of the most recent physics tick — the camera's
     /// interpolation anchor.
     #[must_use]
     fn prev_position(&self) -> Vec3d {
-        self.ecs
-            .get::<PrevPosition>(self.local)
-            .expect("the local player always carries PrevPosition")
-            .0
+        self.read(|w| {
+            w.get::<PrevPosition>(self.local)
+                .expect("the local player always carries PrevPosition")
+                .0
+        })
     }
 
     /// Overwrite the camera's interpolation anchor, for a discontinuity the
     /// interpolator must not smear across (a server teleport).
     fn set_prev_position(&mut self, position: Vec3d) {
-        if let Some(mut prev) = self.ecs.get_mut::<PrevPosition>(self.local) {
-            prev.0 = position;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut prev) = w.get_mut::<PrevPosition>(local) {
+                prev.0 = position;
+            }
+        });
     }
 
     /// This tick's movement intent, as computed in `TickSet::Input`.
     #[must_use]
     fn movement_intent(&self) -> lodestone_physics::MovementInput {
-        self.ecs
-            .get::<MovementIntent>(self.local)
-            .expect("the local player always carries MovementIntent")
-            .0
+        self.read(|w| {
+            w.get::<MovementIntent>(self.local)
+                .expect("the local player always carries MovementIntent")
+                .0
+        })
     }
 
     /// Mark the local player dead (server death packet) or alive again (respawn).
@@ -981,14 +1061,16 @@ impl Sim {
     /// — the intent system forces `MovementInput::NONE` and the movement packet
     /// is withheld until the post-respawn placement teleport lands.
     fn set_dead(&mut self, dead: bool) {
-        let Ok(mut entity) = self.ecs.get_entity_mut(self.local) else {
-            return;
-        };
-        if dead {
-            entity.insert(Dead);
-        } else {
-            entity.remove::<Dead>();
-        }
+        self.write_local(|w, local| {
+            let Ok(mut entity) = w.get_entity_mut(local) else {
+                return;
+            };
+            if dead {
+                entity.insert(Dead);
+            } else {
+                entity.remove::<Dead>();
+            }
+        });
     }
 
     /// The stitched vanilla atlas, when the session is rendering the live server
@@ -1027,14 +1109,41 @@ impl Sim {
         lodestone_game::text::resolve(text, self.translator().as_ref())
     }
 
+    /// Open a live connection to `host:port` and attach it, threading this `Sim`'s
+    /// one `World` into the client so ingest folds where these systems read.
+    ///
+    /// This is the §4.1(c) wiring, and it is a `Sim` method rather than three lines
+    /// at every call site because getting it wrong is silent: a `NetClient` built
+    /// without the handle gets a `World` of its own, the session fold lands in it,
+    /// and every HUD read here returns an empty default. Prefer this over
+    /// [`Self::attach_net`], which exists for a client that has no connection to
+    /// share (the loopback test double).
+    pub fn connect(&mut self, host: String, port: u16, protocol: i32) {
+        let net = NetClient::connect(
+            host,
+            port,
+            protocol,
+            Some((Arc::clone(&self.ecs), self.local)),
+        );
+        self.attach_net(net);
+    }
+
     /// Attach a live connection whose updates are polled each frame.
-    pub fn attach_net(&mut self, net: NetClient) {
+    // `mut` is used only by the `#[cfg(test)]` `bind_session` below.
+    #[cfg_attr(not(test), allow(unused_mut))]
+    pub fn attach_net(&mut self, mut net: NetClient) {
+        // The `World`-sharing half of §4.1(c) for a test double, which has no
+        // `ClientBuilder` to hand the handle to. Production goes through
+        // [`Self::connect`], where the real client adopts it at build time.
+        #[cfg(test)]
+        net.bind_session(Arc::clone(&self.ecs), self.local);
         // Stage 5: the `Send + Sync` half of the connection goes into the `World`
         // so the `TickSet::Send` systems can read the client. Not a second copy —
         // it is the same `Arc<OnceLock<_>>` the net thread publishes into, and
         // `NetClient` itself can never be a resource because its `mpsc::Receiver`
         // is `!Sync`. See `crate::interact::NetHandle`.
-        self.ecs.insert_resource(NetHandle(Some(net.shared_handle())));
+        let handle = net.shared_handle();
+        self.write(|w| w.insert_resource(NetHandle(Some(handle))));
         self.net = Some(net);
         self.status = "connecting…".into();
         self.set_phase(SessionPhase::Connecting);
@@ -1120,24 +1229,36 @@ impl Sim {
         // method is about to reset out from under it.
         self.net = None;
 
-        self.entity_interp = EntityInterpolator::new();
         self.teleport_count = 0;
+
+        // §4.1(c): the entity interpolator no longer owns a `World` to throw away,
+        // so its tracks are cleared explicitly. Replacing the whole interpolator
+        // used to *also* zero that `World`'s private `TickAccum` while leaving the
+        // player's accumulator alone — a quit-to-title re-phased the two clocks
+        // arbitrarily on top of the clamp divergence. There is one accumulator now
+        // and it is reset on the next line, deliberately rather than incidentally.
+        self.write(|w| {
+            crate::entities::reset_entity_tracks(w);
+            w.resource_mut::<FrameClock>().reset_accumulator();
+        });
 
         // Stage 5: all four are resources now, and `chat_log` moved out of this
         // list entirely — it is a `SessionChat` component that
         // `insert_hud_components` below puts back with the rest of the set, which
         // is what stops it being the field a later addition forgets.
-        self.ecs.insert_resource(MiningPredictor(Mining::new()));
-        self.ecs.insert_resource(PlacementPredictor(Placement::new()));
-        self.ecs.insert_resource(Attacking(false));
-        self.ecs.insert_resource(NetHandle(None));
+        self.write(|w| {
+            w.insert_resource(MiningPredictor(Mining::new()));
+            w.insert_resource(PlacementPredictor(Placement::new()));
+            w.insert_resource(Attacking(false));
+            w.insert_resource(NetHandle(None));
+        });
 
         // Flush and discard mesh jobs still in flight for the old server's
         // chunks rather than letting them complete later and land silently
         // in whatever session comes next; clear the dirty set and the drop
         // counter; and queue every section this session ever uploaded for removal
         // through the app's ordinary drain path.
-        self.terrain_mut().end_session();
+        self.terrain_mut(TerrainMesh::end_session);
 
         // Release the server's chunk store. A client session adopted the client's
         // `World` at login (`adopt_live_world`); handing it back an empty store is
@@ -1146,7 +1267,7 @@ impl Sim {
         // never adopted, so its terrain is not the live store and survives, which
         // is the behaviour `resident_after_connect`'s control asserts.
         if std::mem::take(&mut self.adopted_live_world) {
-            self.ecs.insert_resource(ChunkWorld::default());
+            self.write(|w| w.insert_resource(ChunkWorld::default()));
         }
 
         // Back to whatever spawn this `Sim` was built around — the demo world's
@@ -1166,7 +1287,8 @@ impl Sim {
         // first packet is not suppressed as a redundant resend), and the `Dead`
         // marker. Keeping that list in one place is what stops a component added
         // later from being silently missed here.
-        reset_local_player(&mut self.ecs, self.local, player);
+        let local = self.local;
+        self.write(|w| reset_local_player(w, local, player));
         // The Stage-3 half of the same reset. `insert_hud_components` writes the
         // whole set back to its just-spawned value — phase, vitals, xp, the two
         // overlays, the effect stack, the respawn counter and the server entity
@@ -1174,9 +1296,9 @@ impl Sim {
         // misattribute the next session's mob effects to whichever entity the
         // new server happens to assign that id to first). One call rather than a
         // field-by-field reset, for the same reason `reset_local_player` is one.
-        insert_hud_components(&mut self.ecs, self.local);
+        self.write(|w| insert_hud_components(w, local));
         self.set_target(None);
-        self.input_mut().release_all();
+        self.input_mut(InputState::release_all);
 
         self.status = if self.vanilla_atlas.is_some() {
             "live world (vanilla atlas)".to_string()
@@ -1199,36 +1321,40 @@ impl Sim {
     ///
     /// Reads the [`Phase`] component; `Sim` holds no phase field.
     #[must_use]
-    pub fn session_phase(&self) -> &SessionPhase {
-        &self
-            .ecs
-            .get::<Phase>(self.local)
-            .expect("the local player always carries Phase")
-            .0
+    pub fn session_phase(&self) -> SessionPhase {
+        self.read(|w| {
+            w.get::<Phase>(self.local)
+                .expect("the local player always carries Phase")
+                .0
+                .clone()
+        })
     }
 
     /// Record a new session phase.
     fn set_phase(&mut self, phase: SessionPhase) {
-        if let Some(mut current) = self.ecs.get_mut::<Phase>(self.local) {
-            current.0 = phase;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut current) = w.get_mut::<Phase>(local) {
+                current.0 = phase;
+            }
+        });
     }
 
     /// Whether the local player is currently dead (awaiting the server-confirmed
     /// respawn). Movement is frozen while this holds.
     #[must_use]
     pub fn is_dead(&self) -> bool {
-        self.ecs.get::<Dead>(self.local).is_some()
+        self.read(|w| w.get::<Dead>(self.local).is_some())
     }
 
     /// Number of respawns observed since the session started — a diagnostic the
     /// live death gate reads to confirm the client recovered from a death.
     #[must_use]
     pub fn respawn_count(&self) -> u64 {
-        self.ecs
-            .get::<RespawnCount>(self.local)
-            .expect("the local player always carries RespawnCount")
-            .0
+        self.read(|w| {
+            w.get::<RespawnCount>(self.local)
+                .expect("the local player always carries RespawnCount")
+                .0
+        })
     }
 
     /// The most recent chat/system lines (oldest-first) for the HUD to draw,
@@ -1237,11 +1363,12 @@ impl Sim {
     #[must_use]
     pub fn recent_chat(&self, n: usize) -> Vec<(String, f32)> {
         let now = self.clock().secs;
-        self.ecs
-            .get::<SessionChat>(self.local)
-            .expect("the local player always carries SessionChat")
-            .0
-            .recent_ages(n, now)
+        self.read(|w| {
+            w.get::<SessionChat>(self.local)
+                .expect("the local player always carries SessionChat")
+                .0
+                .recent_ages(n, now)
+        })
     }
 
     /// Server-reported health in `0..=20`, or `None` off a live survival server.
@@ -1258,24 +1385,28 @@ impl Sim {
 
     /// The [`Vitals`] component.
     fn vitals(&self) -> Vitals {
-        *self
-            .ecs
-            .get::<Vitals>(self.local)
-            .expect("the local player always carries Vitals")
+        self.read(|w| {
+            *w.get::<Vitals>(self.local)
+                .expect("the local player always carries Vitals")
+        })
     }
 
     /// Record the server's latest `set_health`.
     fn set_vitals(&mut self, vitals: Vitals) {
-        if let Some(mut current) = self.ecs.get_mut::<Vitals>(self.local) {
-            *current = vitals;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut current) = w.get_mut::<Vitals>(local) {
+                *current = vitals;
+            }
+        });
     }
 
     /// Record the server's latest `set_experience`.
     fn set_xp(&mut self, xp: Option<(f32, i32, i32)>) {
-        if let Some(mut current) = self.ecs.get_mut::<Xp>(self.local) {
-            current.0 = xp;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut current) = w.get_mut::<Xp>(local) {
+                current.0 = xp;
+            }
+        });
     }
 
     /// The server-assigned entity id for the local player, `None` before login.
@@ -1284,17 +1415,20 @@ impl Sim {
     /// effects, most obviously, whose packet applies to any entity.
     #[must_use]
     fn server_entity_id(&self) -> Option<i32> {
-        self.ecs
-            .get::<ServerEntityId>(self.local)
-            .expect("the local player always carries ServerEntityId")
-            .0
+        self.read(|w| {
+            w.get::<ServerEntityId>(self.local)
+                .expect("the local player always carries ServerEntityId")
+                .0
+        })
     }
 
     /// Record the id the server assigned us at login.
     fn set_server_entity_id(&mut self, entity_id: Option<i32>) {
-        if let Some(mut current) = self.ecs.get_mut::<ServerEntityId>(self.local) {
-            current.0 = entity_id;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut current) = w.get_mut::<ServerEntityId>(local) {
+                current.0 = entity_id;
+            }
+        });
     }
 
     /// Server-reported experience as `(progress, level, total)`, or `None`
@@ -1303,46 +1437,53 @@ impl Sim {
     /// the next level.
     #[must_use]
     pub fn experience(&self) -> Option<(f32, i32, i32)> {
-        self.ecs
-            .get::<Xp>(self.local)
-            .expect("the local player always carries Xp")
-            .0
+        self.read(|w| {
+            w.get::<Xp>(self.local)
+                .expect("the local player always carries Xp")
+                .0
+        })
     }
 
     /// The current tab-list, formatted as `NAME  <latency>ms` rows sorted by
     /// vanilla display order. Empty until the server sends player-list data.
+    ///
+    /// # Read straight off the component since §4.1(c)
+    ///
+    /// This and the three accessors below used to go out through `NetClient` into
+    /// the *client's* `World`, because the net thread's fold lived there and a
+    /// component in one `World` is unreachable from another. There is one `World`
+    /// now and [`Self::local`] is the entity the fold writes, so the round trip is
+    /// gone. Still exactly one fold — `lodestone_ecs::session`'s `NetIngest`
+    /// systems — and still one copy of it; what changed is only who reads it.
     #[must_use]
     pub fn player_rows(&self) -> Vec<String> {
-        crate::tablist::player_rows(
-            &self
-                .net
-                .as_ref()
-                .map(NetClient::tab_list)
-                .unwrap_or_default(),
-            self.translator().as_ref(),
-        )
+        let list = self.read(|w| {
+            w.get::<lodestone_ecs::SessionTabList>(self.local)
+                .map(|list| list.0.clone())
+                .unwrap_or_default()
+        });
+        crate::tablist::player_rows(&list, self.translator().as_ref())
     }
 
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
     /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
     pub fn sidebar(&self) -> Option<Sidebar> {
-        crate::scoreboard::sidebar_from(
-            &self
-                .net
-                .as_ref()
-                .map(NetClient::scoreboard)
-                .unwrap_or_default(),
-            self.translator().as_ref(),
-        )
+        let board = self.read(|w| {
+            w.get::<lodestone_ecs::SessionScoreboard>(self.local)
+                .map(|board| board.0.clone())
+                .unwrap_or_default()
+        });
+        crate::scoreboard::sidebar_from(&board, self.translator().as_ref())
     }
 
     /// The active boss bars to draw, in render order. Empty off a live server.
     #[must_use]
     pub fn boss_bars(&self) -> Vec<BossBarView> {
-        self.net
-            .as_ref()
-            .map_or_else(Vec::new, NetClient::boss_bars)
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionBossBars>(self.local)
+                .map_or_else(Vec::new, |bars| crate::overlay::boss_bars_from(&bars.0))
+        })
     }
 
     /// The XP bar to draw as `(level, progress 0..=1)`, `Some` only once the
@@ -1359,11 +1500,12 @@ impl Sim {
     /// at read time, matching the chat path, so colour survives once decoded.
     #[must_use]
     pub fn title_overlay(&self) -> Option<(String, Option<String>, f32)> {
-        let state = &self
-            .ecs
-            .get::<TitleOverlay>(self.local)
-            .expect("the local player always carries TitleOverlay")
-            .0;
+        let state = self.read(|w| {
+            w.get::<TitleOverlay>(self.local)
+                .expect("the local player always carries TitleOverlay")
+                .0
+                .clone()
+        });
         let title = state.title()?;
         Some((
             self.resolve_text(title).to_legacy_string(),
@@ -1378,11 +1520,12 @@ impl Sim {
     /// message is visible (fades over its final ticks).
     #[must_use]
     pub fn action_bar_overlay(&self) -> Option<(String, f32)> {
-        let state = &self
-            .ecs
-            .get::<ActionBarOverlay>(self.local)
-            .expect("the local player always carries ActionBarOverlay")
-            .0;
+        let state = self.read(|w| {
+            w.get::<ActionBarOverlay>(self.local)
+                .expect("the local player always carries ActionBarOverlay")
+                .0
+                .clone()
+        });
         let text = state.text()?;
         Some((self.resolve_text(text).to_legacy_string(), state.alpha()))
     }
@@ -1390,28 +1533,43 @@ impl Sim {
     /// The local player's active status effects, for the top-right HUD overlay.
     /// Empty until a server applies one; ticked down in [`Sim::step`].
     #[must_use]
-    pub fn active_effects(&self) -> &lodestone_game::effect::ActiveEffects {
-        &self
-            .ecs
-            .get::<HudEffects>(self.local)
-            .expect("the local player always carries HudEffects")
-            .0
+    pub fn active_effects(&self) -> lodestone_game::effect::ActiveEffects {
+        self.read(|w| {
+            w.get::<HudEffects>(self.local)
+                .expect("the local player always carries HudEffects")
+                .0
+                .clone()
+        })
     }
 
     /// The folded player inventory menu. Off a live connection this returns an
     /// empty player menu so the local inventory screen can still render.
+    ///
+    /// Reads the [`lodestone_ecs::SessionMenus`] component — see
+    /// [`Self::player_rows`] on why that is a direct read since §4.1(c). Note the
+    /// *write* side is still `ClientHandle::menu_click`, which predicts against
+    /// this same component under its own short guard: prediction has to mutate the
+    /// one copy, and a clone has nowhere for the mutation to land.
     #[must_use]
     pub fn player_menu(&self) -> Menu {
-        self.net
-            .as_ref()
-            .and_then(NetClient::player_menu)
-            .unwrap_or_else(Menu::player)
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionMenus>(self.local)
+                .map_or_else(Menu::player, |menus| menus.0.player().clone())
+        })
     }
 
     /// The currently open server menu, if any.
     #[must_use]
     pub fn open_menu(&self) -> Option<OpenMenuSnapshot> {
-        self.net.as_ref().and_then(NetClient::open_menu)
+        self.read(|w| {
+            let menus = &w.get::<lodestone_ecs::SessionMenus>(self.local)?.0;
+            Some(OpenMenuSnapshot {
+                window_id: menus.opened_window_id()?,
+                menu_type: menus.opened_menu_type()?.clone(),
+                title: menus.opened_title()?.clone(),
+                menu: menus.opened()?.clone(),
+            })
+        })
     }
 
     /// Best-effort close request for the open server menu.
@@ -1443,10 +1601,11 @@ impl Sim {
     /// The currently selected hotbar slot, `0..9`.
     #[must_use]
     pub fn selected_slot(&self) -> usize {
-        self.ecs
-            .get::<SelectedSlot>(self.local)
-            .expect("the local player always carries SelectedSlot")
-            .0
+        self.read(|w| {
+            w.get::<SelectedSlot>(self.local)
+                .expect("the local player always carries SelectedSlot")
+                .0
+        })
     }
 
     /// Select hotbar slot `slot` (`0..9`); out-of-range values are ignored. When
@@ -1457,9 +1616,11 @@ impl Sim {
         if slot >= HOTBAR_SLOTS || slot == self.selected_slot() {
             return;
         }
-        if let Some(mut selected) = self.ecs.get_mut::<SelectedSlot>(self.local) {
-            selected.0 = slot;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut selected) = w.get_mut::<SelectedSlot>(local) {
+                selected.0 = slot;
+            }
+        });
         self.send_selected_slot();
     }
 
@@ -1488,7 +1649,7 @@ impl Sim {
     /// Number of meshing jobs still outstanding.
     #[must_use]
     pub fn pending_meshes(&self) -> usize {
-        self.terrain().scheduler.pending()
+        self.terrain(|t| t.scheduler.pending())
     }
 
     /// Collect finished meshes for the caller to upload to the GPU.
@@ -1497,38 +1658,42 @@ impl Sim {
     /// [`Sim::end_session`] later knows every section the GPU is holding for
     /// this session and can queue every one of them for removal.
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        self.terrain_mut().drain_meshes()
+        self.terrain_mut(TerrainMesh::drain_meshes)
     }
 
     /// Block until every scheduled mesh is ready (used by headless runs/tests).
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
-        self.terrain_mut().drain_all_meshes()
+        self.terrain_mut(TerrainMesh::drain_all_meshes)
     }
 
     /// Sections that became empty (drained by the app to remove GPU meshes).
     pub fn drain_removals(&mut self) -> Vec<SectionKey> {
-        self.terrain_mut().drain_removals()
+        self.terrain_mut(TerrainMesh::drain_removals)
     }
 
     /// Whether free-fly mode is active.
     #[must_use]
     pub fn flying(&self) -> bool {
-        self.ecs
-            .get::<Flying>(self.local)
-            .expect("the local player always carries Flying")
-            .0
+        self.read(|w| {
+            w.get::<Flying>(self.local)
+                .expect("the local player always carries Flying")
+                .0
+        })
     }
 
     /// Toggle free-fly (noclip) mode. Entering fly zeroes velocity so the player
     /// doesn't keep any fall momentum.
     pub fn toggle_fly(&mut self) {
         let flying = !self.flying();
-        if let Some(mut fly) = self.ecs.get_mut::<Flying>(self.local) {
-            fly.0 = flying;
-        }
-        let player = self.player_mut();
-        player.velocity = Vec3d::ZERO;
-        player.on_ground = false;
+        self.write_local(|w, local| {
+            if let Some(mut fly) = w.get_mut::<Flying>(local) {
+                fly.0 = flying;
+            }
+        });
+        self.player_mut(|player| {
+            player.velocity = Vec3d::ZERO;
+            player.on_ground = false;
+        });
     }
 
     /// Frames rendered per physics tick since start (fixed-timestep health).
@@ -1544,14 +1709,15 @@ impl Sim {
     /// tick), so binding it to 20 Hz would make aiming feel stepped at high
     /// frame rates.
     pub fn apply_mouse(&mut self) {
-        let (dx, dy) = self.input_mut().take_mouse();
+        let (dx, dy) = self.input_mut(InputState::take_mouse);
         if dx != 0.0 || dy != 0.0 {
             let sensitivity = self.config.sensitivity;
             let player = self.player();
             let (yaw, pitch) = apply_look(player.yaw, player.pitch, dx, dy, sensitivity);
-            let player = self.player_mut();
-            player.yaw = yaw;
-            player.pitch = pitch;
+            self.player_mut(|player| {
+                player.yaw = yaw;
+                player.pitch = pitch;
+            });
         }
     }
 
@@ -1685,7 +1851,11 @@ impl Sim {
     /// disconnected session cannot accumulate a session's worth of stale
     /// actions to deliver on reconnect.
     fn drain_action_queue(&mut self) {
-        let actions = std::mem::take(&mut self.ecs.resource_mut::<ActionQueue>().0);
+        // The guard is released before `net.send_action`, per `EcsHandle`'s rule 1:
+        // `send_action` is a channel push today, but the whole `NetClient` surface
+        // otherwise reads this same `World` through `ClientHandle`, and holding a
+        // write guard into it would deadlock the moment one of those was reached.
+        let actions = self.write(|w| std::mem::take(&mut w.resource_mut::<ActionQueue>().0));
         if let Some(net) = &self.net {
             for action in actions {
                 // Best-effort — a closed session just drops it.
@@ -1714,25 +1884,50 @@ impl Sim {
     /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
-        {
-            let mut clock = self.clock_mut();
-            clock.secs += dt.max(0.0);
-            clock.accumulator += dt.clamp(0.0, 0.25);
-        }
+        // The **one** accumulator, on the **one** catch-up policy
+        // (`lodestone_ecs::MAX_CATCH_UP_SECS` — ten ticks, vanilla's own; see that
+        // constant for why the shell's old inner `0.25 s` clamp lost).
+        self.clock_mut(|clock| clock.begin_frame(dt));
 
         // The derived egress gate. Refreshed once per frame because both of its
         // inputs are frame-stable: `poll_net` is the only thing that changes the
         // phase and it runs after the loop.
         let egress = Egress {
-            in_world: *self.session_phase() == SessionPhase::Connected,
+            in_world: self.session_phase() == SessionPhase::Connected,
             live: self.is_live(),
         };
-        self.ecs.insert_resource(egress);
+        self.write(|w| w.insert_resource(egress));
 
-        while self.clock().accumulator >= TICK_DT {
+        // `Update` before the tick loop, not after it. `FrameSet::Interpolate`'s
+        // `advance_interp_clocks` has to run first, because the tick systems
+        // (`tick_item_physics`, `tick_walk_animation`) measure off the *drawn*
+        // pose and would otherwise measure last frame's. That ordering was
+        // internal to `EntityInterpolator::update_with_view` before §4.1(c) and is
+        // now the frame's own.
+        //
+        // The one behaviour change this carries: `FrameSet::Terrain`'s
+        // `heal_dirty_columns` now runs *before* `poll_net`, so a column that
+        // arrives this frame has its neighbours healed on the next one. It is a
+        // coalescing drain feeding an async worker pool on a per-frame budget, so a
+        // single frame of latency is inside the noise it already tolerates —
+        // but it is a change, not a no-op.
+        let frame_dt = dt as f32;
+        self.write(|w| {
+            w.insert_resource(crate::entities::FrameDelta(frame_dt));
+            w.run_schedule(Update);
+        });
+
+        loop {
+            if !self.clock_mut(FrameClock::take_tick) {
+                break;
+            }
             let collision = self.tick_collision();
-            self.ecs.insert_resource(collision);
-            self.ecs.run_schedule(GameTick);
+            let item_collision = self.item_collision();
+            self.write(|w| {
+                w.insert_resource(collision);
+                w.insert_resource(item_collision);
+                w.run_schedule(GameTick);
+            });
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and
@@ -1744,11 +1939,8 @@ impl Sim {
             // `TickSet::Send` systems ordered after `send_player_input`, so their
             // actions sit behind the movement packet in the same single queue.
             self.drain_action_queue();
-            {
-                let mut clock = self.clock_mut();
-                clock.ticks += 1;
-                clock.accumulator -= TICK_DT;
-            }
+            // The tick was counted and withdrawn by `FrameClock::take_tick` at the
+            // top of this loop, so there is nothing to book-keep here any more.
             self.tick_particles();
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
@@ -1766,62 +1958,65 @@ impl Sim {
             // Stage 2 recorded (`Sim.target` / `version_data` / the live block
             // store) was not the real one.
         }
-        {
-            let alpha = (self.clock().accumulator / TICK_DT) as f32;
-            let mut clock = self.clock_mut();
-            clock.interp_alpha = alpha;
-            clock.frames += 1;
-        }
+        // Publish the sub-tick residual. One number now: the camera's between-tick
+        // ease and `extract_entity_draws`'s walk-cycle partial tick both read it,
+        // where they used to read two accumulators' residuals.
+        self.clock_mut(FrameClock::end_frame);
 
         self.poll_net();
-        // `Update` / `FrameSet::Terrain`: heal chunk seams whose neighbourhood
-        // changed since they were meshed, on a per-frame budget so a load burst
-        // spreads over frames rather than stalling one. This is the shell's only
-        // `Update` system today; it enqueues snapshots onto the worker pool and
-        // returns, so it cannot make presentation gate simulation.
-        self.ecs.run_schedule(Update);
-        self.update_entities(dt as f32);
+        // Fold this frame's server report into the render-side tracks, then extract.
+        // Still after the tick loop and after ingest, which is the order the ~25
+        // interpolation tests are written against — see `fold_snapshots`' docs for
+        // why it is not a `NetIngest` system even now that it could reach the
+        // components directly.
+        self.fold_entities();
+        self.write(|w| w.run_schedule(Extract));
         self.refresh_stats();
     }
 
-    /// Fold this frame's entity snapshots into the interpolator so
+    /// What **dropped items** are simulated against this tick.
+    ///
+    /// Deliberately not [`Self::tick_collision`], and the difference is the whole
+    /// reason [`crate::entities::ItemCollision`] is a second resource — see its
+    /// docs for the two cases where the player's answer is wrong for an item.
+    /// [`Self::live_collision`] is the same 3×3-column snapshot the physics tick
+    /// builds; off a live connection there are no tracked items either, so the
+    /// offline fallback is never actually asked to resolve real terrain.
+    fn item_collision(&self) -> crate::entities::ItemCollision {
+        crate::entities::ItemCollision(match self.live_collision() {
+            Some(view) => PlayerCollision::View(Arc::new(LiveCollisionSource(view))),
+            None => PlayerCollision::View(self.chunk_collision()),
+        })
+    }
+
+    /// Fold this frame's entity snapshots into the render-side component set, so
     /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
     /// No live connection means no entities.
     ///
-    /// Drives [`EntityInterpolator::update_with_view`], not the plain
-    /// `update`: a dropped item's own per-tick physics (`step_item_physics`
-    /// in `crate::entities`) needs a real [`CollisionView`] to stop at a
-    /// floor instead of sinking through it between the server's
-    /// once-a-second corrections — see the module docs on `crate::entities`.
-    /// [`Self::live_collision`] is the same player-column snapshot the
-    /// physics tick already builds; off a live connection (or before the
-    /// player's own column has streamed in) there is no view to build, but
-    /// `snapshots` is empty in that case too, so the offline-world fallback
-    /// view is never actually asked to resolve anything against real
-    /// terrain.
-    fn update_entities(&mut self, dt: f32) {
+    /// # What §4.1(c) changed here
+    ///
+    /// This used to be `update_entities`, which drove
+    /// `EntityInterpolator::update_with_view` — a whole second `World` running its
+    /// own `Update`, its own `GameTick` loop off its own accumulator, and its own
+    /// `Extract`. Those three schedule runs are now the frame's own, so all this
+    /// does is the fold. The item collision it used to pass by argument is the
+    /// [`crate::entities::ItemCollision`] resource the tick loop inserts.
+    fn fold_entities(&mut self) {
         let snapshots = self
             .net
             .as_ref()
             .map_or_else(Vec::new, NetClient::entity_snapshots);
-        let profile = self.profile().clone();
-        // Mirrors `Sim::tick_collision`'s own live/offline fallback, and for the
-        // same reason: item physics is a `GameTick`/`TickSet::Physics` system
-        // inside the interpolator's `World` now, so what it needs is a `'static`
-        // [`CollisionSource`] resource rather than a borrowed view.
-        let collision = match self.live_collision() {
-            Some(view) => PlayerCollision::View(Arc::new(LiveCollisionSource(view))),
-            None => PlayerCollision::View(self.chunk_collision()),
-        };
-        self.entity_interp
-            .update_with_view(&snapshots, dt, collision, &profile);
+        // `entity_snapshots` reads this same `World` through `ClientHandle`, so it
+        // is resolved to an owned `Vec` *before* the guard below is taken. Doing it
+        // the other way round is `EcsHandle`'s rule 1 and deadlocks.
+        self.write(|w| crate::entities::fold_entity_snapshots(w, &snapshots));
     }
 
     /// The interpolated entities to draw this frame, resolved by the renderer
     /// into instanced draws. Empty off a live server.
     #[must_use]
     pub fn entity_draws(&self) -> Vec<EntityDraw> {
-        self.entity_interp.draws()
+        self.read(crate::entities::extracted_entity_draws)
     }
 
     /// The local player's water/lava submersion this tick, for the shell's
@@ -1834,10 +2029,11 @@ impl Sim {
     /// the player.
     #[must_use]
     pub fn fluid_state(&self) -> FluidState {
-        self.ecs
-            .get::<Submersion>(self.local)
-            .expect("the local player always carries Submersion")
-            .0
+        self.read(|w| {
+            w.get::<Submersion>(self.local)
+                .expect("the local player always carries Submersion")
+                .0
+        })
     }
 
     /// Overwrite the submersion summary.
@@ -1848,9 +2044,11 @@ impl Sim {
     /// the "invents its own submerged boolean" this type exists to prevent.
     #[cfg(test)]
     fn set_fluid_state(&mut self, fluid: FluidState) {
-        if let Some(mut submersion) = self.ecs.get_mut::<Submersion>(self.local) {
-            submersion.0 = fluid;
-        }
+        self.write_local(|w, local| {
+            if let Some(mut submersion) = w.get_mut::<Submersion>(local) {
+                submersion.0 = fluid;
+            }
+        });
     }
 
     /// Build a [`LiveCollision`] snapshot of the server terrain around the
@@ -1999,7 +2197,7 @@ impl Sim {
     /// at all, matching vanilla.
     #[must_use]
     pub fn crack_target(&self) -> Option<crate::gpu::CrackTarget> {
-        let stage = self.mining().destroy_stage();
+        let stage = self.mining(Mining::destroy_stage);
         if stage < 0 {
             return None;
         }
@@ -2036,9 +2234,7 @@ impl Sim {
             // block's outline shape, which the shell does not carry, so debris
             // from a slab or fence fills the whole cell rather than hugging the
             // model.
-            self.particles_mut()
-                .0
-                .destroy_block(hit.block, broken, [1.0; 3]);
+            self.particles_mut(|p| p.destroy_block(hit.block, broken, [1.0; 3]));
             self.remesh_around(hit.block);
             self.set_target(None);
             true
@@ -2053,7 +2249,7 @@ impl Sim {
     /// the offline editing path is preserved.
     pub fn begin_attack(&mut self) {
         if self.is_live() {
-            self.ecs.resource_mut::<Attacking>().0 = true;
+            self.write(|w| w.resource_mut::<Attacking>().0 = true);
         } else {
             self.break_block();
         }
@@ -2065,8 +2261,10 @@ impl Sim {
         if !self.is_live() {
             return;
         }
-        self.ecs.resource_mut::<Attacking>().0 = false;
-        let actions = self.ecs.resource_mut::<MiningPredictor>().0.stop();
+        let actions = self.write(|w| {
+            w.resource_mut::<Attacking>().0 = false;
+            w.resource_mut::<MiningPredictor>().0.stop()
+        });
         // Sent directly rather than queued: `ActionQueue` is only drained inside
         // the tick loop, so a release on a frame that runs no tick would sit for
         // up to 50 ms before the `ABORT` reached the server. See
@@ -2128,11 +2326,11 @@ impl Sim {
         };
         let (UseOnDecision::Interact { action }
         | UseOnDecision::Place { action, .. }
-        | UseOnDecision::Nothing { action }) = self
-            .ecs
-            .resource_mut::<PlacementPredictor>()
-            .0
-            .use_on(&ctx, &ServerAuthoritativeWorld);
+        | UseOnDecision::Nothing { action }) = self.write(|w| {
+            w.resource_mut::<PlacementPredictor>()
+                .0
+                .use_on(&ctx, &ServerAuthoritativeWorld)
+        });
         if let Some(net) = &self.net {
             net.send_action(action);
             net.send_action(ClientAction::SwingArm { hand: Hand::Main });
@@ -2164,7 +2362,7 @@ impl Sim {
     }
 
     fn block_intersects_player(&self, block: [i32; 3]) -> bool {
-        let bb = self.player().bounding_box(self.profile());
+        let bb = self.player().bounding_box(&self.profile());
         let (x0, y0, z0) = (
             f64::from(block[0]),
             f64::from(block[1]),
@@ -2188,14 +2386,20 @@ impl Sim {
     fn tick_particles(&mut self) {
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             if let Some(view) = self.live_collision() {
-                self.particles_mut().0.tick(&view);
+                self.particles_mut(|p| p.tick(&view));
                 return;
             }
         }
+        // `World` lock outside, chunk lock inside — `EcsHandle`'s rule 3. Written
+        // this way round deliberately: the obvious spelling (take the chunk read
+        // guard, then reach for the emitter) is `chunks → World`, the one order that
+        // can ABBA against the net thread.
         let store = self.chunk_world();
-        let world = store.read();
-        let view = WorldCollision::new(&world);
-        self.ecs.resource_mut::<ParticleSim>().0.tick(&view);
+        self.write(|w| {
+            let world = store.read();
+            let view = WorldCollision::new(&world);
+            w.resource_mut::<ParticleSim>().0.tick(&view);
+        });
     }
 
     /// Rebuild this frame's particle instances for `camera` and report what
@@ -2205,7 +2409,7 @@ impl Sim {
         // The same alpha every other interpolated draw uses, rather than a
         // second computation of it -- two frame alphas that drift apart show up
         // as particles lagging the terrain by a fraction of a tick.
-        let partial = self.ecs.resource::<FrameClock>().interp_alpha;
+        let partial = self.clock().interp_alpha;
         // Light is sampled from the live world when there is one. A `None` here
         // is not darkness: `ParticleEngine::extract` substitutes full sky light,
         // matching how the demo terrain is meshed.
@@ -2244,19 +2448,28 @@ impl Sim {
             }
             None => Box::new(|_, _, _| None),
         };
-        // Field-level borrows deliberately, not `self.particles_mut()`: `light`
-        // above holds a borrow of `self.net`, and going through a `&mut self`
-        // accessor would conflict with it. Disjoint fields do not.
-        self.ecs
+        // `light` above borrows `self.net`, so this cannot go through the
+        // `&mut self` accessor. It takes the `World` guard directly instead —
+        // and note `light` is a *closure*: it reads chunk light through
+        // `ClientHandle` when called, i.e. `World → chunks`, which is the
+        // permitted order (`EcsHandle` rule 3) and not the reverse.
+        let mut world = self.ecs.write();
+        world
             .resource_mut::<ParticleSim>()
             .0
             .extract(camera, partial, &light)
     }
 
     /// This frame's particle instances, ready for upload.
+    ///
+    /// Owned rather than borrowed since §4.1(c). The alternative — handing back a
+    /// mapped read guard — would keep the one `World` read-locked for the whole GPU
+    /// upload, which is exactly the "ingest stalls the frame" failure this change
+    /// has to avoid, only inverted: the frame would stall ingest. A `memcpy` of a
+    /// few thousand POD instances is the cheaper end of that trade.
     #[must_use]
-    pub fn particle_instances(&self) -> &[ParticleInstance] {
-        self.particles().instances()
+    pub fn particle_instances(&self) -> Vec<ParticleInstance> {
+        self.read(|w| w.resource::<ParticleSim>().0.instances().to_vec())
     }
 
     /// The number of fixed simulation ticks (20/s) elapsed. Drives animated
@@ -2375,8 +2588,7 @@ impl Sim {
         section_count: usize,
     ) {
         let key = SectionKey { cx, cz, si, min_y };
-        let (store, mut terrain) = self.terrain_and_world();
-        terrain.mesh_section(&store, key, section_count);
+        self.terrain_and_world(|store, terrain| terrain.mesh_section(store, key, section_count));
     }
 
     /// Re-mesh after a server-authoritative edit inside section
@@ -2430,8 +2642,7 @@ impl Sim {
     /// column a small constant number of times instead of nine.
     fn on_column_arrived(&mut self, cx: i32, cz: i32) {
         self.mark_column_dirty(cx, cz);
-        let (store, mut terrain) = self.terrain_and_world();
-        terrain.mark_neighbours_dirty(&store, cx, cz);
+        self.terrain_and_world(|store, terrain| terrain.mark_neighbours_dirty(store, cx, cz));
     }
 
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
@@ -2448,8 +2659,7 @@ impl Sim {
     /// partial result — a divergence bug). Multiplayer *consumes* light;
     /// singleplayer computes it.
     fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
-        let (store, mut terrain) = self.terrain_and_world();
-        terrain.mesh_column(&store, cx, cz);
+        self.terrain_and_world(|store, terrain| terrain.mesh_column(store, cx, cz));
     }
 
     fn poll_net(&mut self) {
@@ -2513,7 +2723,7 @@ impl Sim {
                     // of stranded over the unmeshed demo platform. `prev_position`
                     // is moved with it so the frame interpolator does not smear the
                     // camera across the teleport.
-                    let player = self.player_mut();
+                    let placed = self.player_mut(|player| {
                     let base = player.position;
                     player.position = Vec3d::new(
                         if flags.relative_x {
@@ -2543,7 +2753,8 @@ impl Sim {
                         rotation.pitch
                     };
                     player.velocity = Vec3d::ZERO;
-                    let placed = player.position;
+                    player.position
+                    });
                     self.set_prev_position(placed);
                     self.teleport_count += 1;
                 }
@@ -2560,17 +2771,20 @@ impl Sim {
                     // so a `SessionChat` that somehow went missing drops the line
                     // rather than panicking mid-poll.
                     let now = self.clock().secs;
-                    if let Some(mut chat) = self.ecs.get_mut::<SessionChat>(self.local) {
-                        if player {
-                            chat.0.push_player(
-                                text,
-                                lodestone_game::chat::MessageTrust::NotSecure,
-                                now,
-                            );
-                        } else {
-                            chat.0.push_system(text, now);
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
+                            if player {
+                                chat.0.push_player(
+                                    text,
+                                    lodestone_game::chat::MessageTrust::NotSecure,
+                                    now,
+                                );
+                            } else {
+                                chat.0.push_system(text, now);
+                            }
                         }
-                    }
+                    });
                 }
                 NetUpdate::BlockDestroyed { pos, state } => {
                     // The live counterpart of the offline `break_block` emit.
@@ -2585,9 +2799,9 @@ impl Sim {
                     // outline shape, which the shell does not carry. Debris from
                     // a slab or a fence therefore fills the whole cell rather
                     // than hugging the model.
-                    self.particles_mut()
-                        .0
-                        .destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
+                    self.particles_mut(|p| {
+                        p.destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
+                    });
                 }
                 NetUpdate::Particles {
                     kind,
@@ -2613,13 +2827,15 @@ impl Sim {
                     let within_cutoff =
                         long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
                     if within_cutoff {
-                        self.particles_mut().0.spawn_particles(
-                            &kind,
-                            [pos.x, pos.y, pos.z],
-                            [offset.x, offset.y, offset.z],
-                            max_speed,
-                            count,
-                        );
+                        self.particles_mut(|p| {
+                            p.spawn_particles(
+                                &kind,
+                                [pos.x, pos.y, pos.z],
+                                [offset.x, offset.y, offset.z],
+                                max_speed,
+                                count,
+                            );
+                        });
                     }
                 }
                 NetUpdate::Health { health, food } => {
@@ -2669,9 +2885,12 @@ impl Sim {
                     // site across the world to the new spawn (the same class of
                     // bug as the original far-spawn camera gap).
                     self.set_dead(false);
-                    if let Some(mut count) = self.ecs.get_mut::<RespawnCount>(self.local) {
-                        count.0 += 1;
-                    }
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut count) = w.get_mut::<RespawnCount>(local) {
+                            count.0 += 1;
+                        }
+                    });
                     self.status = "respawned".into();
                 }
                 NetUpdate::Sound {
@@ -2716,33 +2935,41 @@ impl Sim {
                     show_icon,
                 } => {
                     if self.server_entity_id() == Some(entity_id) {
-                        self.player_mut().effects.apply(&effect, amplifier);
-                        if let Ok(id) =
-                            lodestone_model::Identifier::new("minecraft", effect.as_str())
-                            && let Some(mut effects) =
-                                self.ecs.get_mut::<HudEffects>(self.local)
-                        {
-                            effects.0.apply(lodestone_game::effect::StatusEffect {
-                                id,
-                                amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
-                                duration_ticks,
-                                ambient,
-                                show_particles: true,
-                                show_icon,
-                            });
-                        }
+                        let local = self.local;
+                        self.write(|w| {
+                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                state.0.effects.apply(&effect, amplifier);
+                            }
+                            if let Ok(id) =
+                                lodestone_model::Identifier::new("minecraft", effect.as_str())
+                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
+                            {
+                                effects.0.apply(lodestone_game::effect::StatusEffect {
+                                    id,
+                                    amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
+                                    duration_ticks,
+                                    ambient,
+                                    show_particles: true,
+                                    show_icon,
+                                });
+                            }
+                        });
                     }
                 }
                 NetUpdate::EffectRemoved { entity_id, effect } => {
                     if self.server_entity_id() == Some(entity_id) {
-                        self.player_mut().effects.remove(&effect);
-                        if let Ok(id) =
-                            lodestone_model::Identifier::new("minecraft", effect.as_str())
-                            && let Some(mut effects) =
-                                self.ecs.get_mut::<HudEffects>(self.local)
-                        {
-                            effects.0.remove(&id);
-                        }
+                        let local = self.local;
+                        self.write(|w| {
+                            if let Some(mut state) = w.get_mut::<PhysicsState>(local) {
+                                state.0.effects.remove(&effect);
+                            }
+                            if let Ok(id) =
+                                lodestone_model::Identifier::new("minecraft", effect.as_str())
+                                && let Some(mut effects) = w.get_mut::<HudEffects>(local)
+                            {
+                                effects.0.remove(&id);
+                            }
+                        });
                     }
                 }
                 // The tab-list and scoreboard arms are *deleted*, not moved:
@@ -2751,14 +2978,20 @@ impl Sim {
                 // through `NetClient`. Keeping a fold here as well is precisely
                 // the two-sources-of-truth Stage 3 exists to remove.
                 NetUpdate::TitleEvent(event) => {
-                    if let Some(mut title) = self.ecs.get_mut::<TitleOverlay>(self.local) {
-                        let _ = title.0.apply(&event);
-                    }
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut title) = w.get_mut::<TitleOverlay>(local) {
+                            let _ = title.0.apply(&event);
+                        }
+                    });
                 }
                 NetUpdate::ActionBar(text) => {
-                    if let Some(mut bar) = self.ecs.get_mut::<ActionBarOverlay>(self.local) {
-                        bar.0.set(text);
-                    }
+                    let local = self.local;
+                    self.write(|w| {
+                        if let Some(mut bar) = w.get_mut::<ActionBarOverlay>(local) {
+                            bar.0.set(text);
+                        }
+                    });
                 }
                 NetUpdate::Disconnected(reason) => {
                     self.status = format!("disconnected: {reason}");
@@ -2800,14 +3033,14 @@ impl Sim {
     }
 
     fn refresh_stats(&mut self) {
-        let player = *self.player();
+        let player = self.player();
         self.stats.position = [player.position.x, player.position.y, player.position.z];
         self.stats.yaw = player.yaw;
         self.stats.pitch = player.pitch;
         let store = self.chunk_world();
         self.stats.chunk_count = store.len();
         self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
-        self.stats.mesh_drops = self.terrain().drops;
+        self.stats.mesh_drops = self.terrain(|t| t.drops);
         self.stats.world_bytes = store.read().heap_bytes();
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
@@ -2835,7 +3068,7 @@ impl Sim {
     #[must_use]
     pub fn camera(&self, aspect: f32) -> Camera {
         let a = f64::from(self.clock().interp_alpha);
-        let mut interp = *self.player();
+        let mut interp = self.player();
         let prev = self.prev_position();
         interp.position = Vec3d::new(
             prev.x + (interp.position.x - prev.x) * a,
@@ -2884,7 +3117,7 @@ mod tests {
     fn resident_sections(sim: &mut Sim) -> usize {
         let _ = sim.drain_all_meshes();
         let _ = sim.drain_removals();
-        sim.terrain().uploaded_sections.len()
+        sim.terrain(|t| t.uploaded_sections.len())
     }
 
     /// Drive one loopback session to `Connected` and report what is resident.
@@ -2896,7 +3129,7 @@ mod tests {
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
         sim.poll_net();
-        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.session_phase(), SessionPhase::Connected);
         sim.step(5.0 / 20.0);
         resident_sections(&mut sim)
     }
@@ -3373,17 +3606,20 @@ mod tests {
         // or the seam regressed to the trait's `None` default. This asserts the
         // shell's *own* lookup, for the protocol its config names.
         let sim = Sim::new(test_config());
+        // Stage 5 deleted the `Sim.version_data` *field*; the adapter is the
+        // `VersionData` resource. This gate still read the field and so had not
+        // compiled since — invisible without `--features live`.
+        let world = sim.ecs().read();
+        let version = world.resource::<VersionData>();
         assert!(
-            sim.version_data.is_some(),
+            version.0.is_some(),
             "the `live` feature must compile a family in for protocol {}",
             sim.config.protocol
         );
 
         // Air is state 0 in every version's block-state registry, so it is the
         // one id the shell can name without naming a version.
-        let air = sim
-            .ecs()
-            .resource::<VersionData>()
+        let air = version
             .block_hardness(id::AIR)
             .expect("air must resolve through the seam");
         assert_eq!(air.hardness, 0.0);
@@ -3391,9 +3627,7 @@ mod tests {
         // Find the census entries the unit tests above assume, by value rather
         // than by id (ids renumber every data bump).
         let entries: Vec<_> = (0..40_000)
-            .filter_map(|id| sim.ecs()
-            .resource::<VersionData>()
-            .block_hardness(id))
+            .filter_map(|id| version.block_hardness(id))
             .collect();
         assert!(
             entries.len() > 30_000,
@@ -3415,9 +3649,7 @@ mod tests {
 
         // An id past the census reports unknown rather than a guess, which is
         // what makes `drive_mining` refuse to dig instead of inventing a rate.
-        assert_eq!(sim.ecs()
-            .resource::<VersionData>()
-            .block_hardness(u32::MAX), None);
+        assert_eq!(version.block_hardness(u32::MAX), None);
     }
 
     /// Live break-timing gate for the shell's own mining inputs, against the
@@ -3454,7 +3686,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires the lodestone-survival server on 127.0.0.1:25565 (RCON :25566)"]
     async fn live_bare_hand_stone_timing_survives_the_real_hardness_seam() {
-        use std::time::Duration;
+        // `Instant` was missing here and this whole gate did not compile under
+        // `--features live`; `--all-targets` alone cannot see it and `--lib`
+        // without the feature cannot either, which is the exact blind spot
+        // `CLAUDE.md`'s second health-check command exists to close. Pre-existing
+        // at `84ffba2`, found by running that command.
+        use std::time::{Duration, Instant};
 
         use lodestone_client::{ClientBuilder, ClientHandle, LoginProfile, ServerAddress};
         use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
@@ -3763,7 +4000,7 @@ mod tests {
     fn mouse_look_updates_view_and_clears_delta() {
         let mut sim = Sim::new(test_config());
         let yaw0 = sim.player().yaw;
-        sim.input_mut().add_mouse(50.0, 0.0);
+        sim.input_mut(|i| i.add_mouse(50.0, 0.0));
         sim.apply_mouse();
         assert_ne!(sim.player().yaw, yaw0);
         assert_eq!(sim.input().mouse_dx, 0.0);
@@ -3779,7 +4016,7 @@ mod tests {
         // must not spew movement yet: drive to Connected first.
         feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
         sim.poll_net(); // → Connected
-        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.session_phase(), SessionPhase::Connected);
         sim.step(5.0 / 20.0); // ~5 ticks, all now in-world.
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
         assert!(sent > 0, "a connected sim should send movement packets");
@@ -3796,7 +4033,7 @@ mod tests {
         let (net, actions, _feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
-        assert_eq!(*sim.session_phase(), SessionPhase::Connecting);
+        assert_eq!(sim.session_phase(), SessionPhase::Connecting);
         sim.step(5.0 / 20.0);
         assert!(sim.tick_count() > 0, "ticks must still run while connecting");
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
@@ -3836,13 +4073,14 @@ mod tests {
         while actions.try_recv().is_ok() {}
 
         let local = sim.local_player();
-        sim.ecs_mut()
+        sim.ecs()
+            .write()
             .get_mut::<PhysicsState>(local)
             .expect("local player")
             .0
             .position = Vec3d::new(11.5, 200.0, -3.5);
 
-        sim.step(TICK_DT);
+        sim.step(lodestone_ecs::TICK_PERIOD);
         let moved: Vec<_> = std::iter::from_fn(|| actions.try_recv().ok())
             .filter_map(|a| match a {
                 ClientAction::Move { pos, .. } => Some(pos),
@@ -3864,17 +4102,14 @@ mod tests {
     #[test]
     fn the_accessors_and_the_world_are_the_same_store() {
         let mut sim = Sim::new(test_config());
-        sim.player_mut().yaw = 42.0;
-        sim.input_mut()
-            .set(lodestone_controller::Action::Forward, true);
+        sim.player_mut(|p| p.yaw = 42.0);
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
 
         let local = sim.local_player();
+        let world = sim.ecs().read();
+        assert_eq!(world.get::<PhysicsState>(local).expect("local").0.yaw, 42.0);
         assert_eq!(
-            sim.ecs().get::<PhysicsState>(local).expect("local").0.yaw,
-            42.0
-        );
-        assert_eq!(
-            lodestone_controller::movement_intent(&sim.ecs().resource::<RawInput>().0).forward,
+            lodestone_controller::movement_intent(&world.resource::<RawInput>().0).forward,
             1.0
         );
     }
@@ -3974,13 +4209,13 @@ mod tests {
             .next()
             .expect("the fixture holds a column")
             .0;
-        sim.terrain_mut().dirty_columns.insert((pos.x, pos.z));
+        sim.terrain_mut(|t| t.dirty_columns.insert((pos.x, pos.z)));
         assert_eq!(sim.pending_meshes(), 0, "drained to a clean slate");
 
-        sim.ecs_mut().run_schedule(lodestone_ecs::Update);
+        sim.ecs().write().run_schedule(lodestone_ecs::Update);
 
         assert!(
-            sim.terrain().dirty_columns.is_empty(),
+            sim.terrain(|t| t.dirty_columns.is_empty()),
             "the Update schedule must drain the dirty set"
         );
         assert!(
@@ -4023,7 +4258,7 @@ mod tests {
             "the wire→StatusEffects seam must fold an effect for the local entity id"
         );
         // The same event must also reach the display model with its full data.
-        let chips = crate::effects::chips_from(sim.active_effects());
+        let chips = crate::effects::chips_from(&sim.active_effects());
         assert_eq!(chips.len(), 1, "the HUD effect model must fold it too");
         assert_eq!(chips[0].label, "levitation III"); // amplifier 2 → level III
         assert_eq!(chips[0].time, "0:10"); // 200 ticks → 10 s
@@ -4096,9 +4331,9 @@ mod tests {
         // `particles.rs`'s own hermetic tests use, so `unresolved == 0` is
         // actually reachable without fetching `client.jar`.
         let rect = [0.0f32, 0.0, 0.0625, 0.0625];
-        sim.particles_mut()
-            .0
-            .install_test_sheet_uv(HashMap::from([((Sheet::Flame, 0u16), rect)]));
+        sim.particles_mut(|p| {
+            p.install_test_sheet_uv(HashMap::from([((Sheet::Flame, 0u16), rect)]));
+        });
 
         // Keep the particle origin within vanilla's 32-block render cutoff of
         // wherever `Sim::new` spawned the player.
@@ -4115,15 +4350,14 @@ mod tests {
         sim.poll_net();
 
         assert_eq!(
-            sim.particles_mut().0.engine_mut().particles().len(),
+            sim.particles_mut(|p| p.engine_mut().particles().len()),
             9,
             "count must be honoured exactly once the event reaches the emitter"
         );
         let cam = sim.camera(1.0);
-        let frame = sim
-            .particles_mut()
-            .0
-            .extract(&cam, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT));
+        let frame = sim.particles_mut(|p| {
+            p.extract(&cam, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT))
+        });
         assert_eq!(frame.alive, 9);
         assert_eq!(
             frame.unresolved, 0,
@@ -4149,10 +4383,12 @@ mod tests {
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
         sim.poll_net();
-        sim.particles_mut().0.install_test_sheet_uv(HashMap::from([(
-            (Sheet::Flame, 0u16),
-            [0.0f32, 0.0, 0.0625, 0.0625],
-        )]));
+        sim.particles_mut(|p| {
+            p.install_test_sheet_uv(HashMap::from([(
+                (Sheet::Flame, 0u16),
+                [0.0f32, 0.0, 0.0625, 0.0625],
+            )]));
+        });
 
         // Comfortably past the 32-block (sqrt(1024)) cutoff on every axis.
         let origin = sim.player().position;
@@ -4169,7 +4405,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert_eq!(
-            sim.particles_mut().0.engine_mut().particles().len(),
+            sim.particles_mut(|p| p.engine_mut().particles().len()),
             0,
             "a far-away burst without long_distance must be dropped, not spawned off-screen"
         );
@@ -4185,7 +4421,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert_eq!(
-            sim.particles_mut().0.engine_mut().particles().len(),
+            sim.particles_mut(|p| p.engine_mut().particles().len()),
             3,
             "the same burst with long_distance set must bypass the cutoff"
         );
@@ -4197,17 +4433,17 @@ mod tests {
         let (net, _actions, feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         // Before any connection: purely local.
-        assert_eq!(*sim.session_phase(), SessionPhase::LocalOnly);
+        assert_eq!(sim.session_phase(), SessionPhase::LocalOnly);
 
         // Attaching a live connection moves us to Connecting immediately, so the
         // menu shows a loading screen rather than a lie.
         sim.attach_net(net);
-        assert_eq!(*sim.session_phase(), SessionPhase::Connecting);
+        assert_eq!(sim.session_phase(), SessionPhase::Connecting);
 
         // LoggedIn ⇒ Connected (the menu's "session_ready").
         feed.send(NetUpdate::LoggedIn { entity_id: 42 }).unwrap();
         sim.poll_net();
-        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.session_phase(), SessionPhase::Connected);
 
         // A mid-game disconnect ⇒ Ended with the reason preserved, which is what
         // drives the menu's Error screen. Assert the reason survives, so a
@@ -4252,7 +4488,7 @@ mod tests {
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
         sim.poll_net();
-        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.session_phase(), SessionPhase::Connected);
 
         // Populate every read-model `end_session` is responsible for
         // clearing, so this test can actually observe the reset rather than
@@ -4282,7 +4518,7 @@ mod tests {
         sim.end_session();
 
         assert!(sim.net().is_none(), "the connection must be dropped");
-        assert_eq!(*sim.session_phase(), SessionPhase::LocalOnly);
+        assert_eq!(sim.session_phase(), SessionPhase::LocalOnly);
         assert!(sim.recent_chat(10).is_empty(), "chat log must clear");
         assert_eq!(sim.health(), None, "health must clear");
         assert_eq!(sim.food(), None, "food must clear");
@@ -4298,10 +4534,10 @@ mod tests {
         // than merely reporting empty because nothing polled yet.
         let (net2, _actions2, feed2) = NetClient::loopback_with_feed();
         sim.attach_net(net2);
-        assert_eq!(*sim.session_phase(), SessionPhase::Connecting);
+        assert_eq!(sim.session_phase(), SessionPhase::Connecting);
         feed2.send(NetUpdate::LoggedIn { entity_id: 9 }).unwrap();
         sim.poll_net();
-        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.session_phase(), SessionPhase::Connected);
         assert_eq!(sim.server_entity_id(), Some(9));
         assert!(
             sim.recent_chat(10).is_empty(),
@@ -4673,8 +4909,8 @@ mod tests {
         // camera eye sits between the two feet positions.
         let mut sim = Sim::new(test_config());
         sim.set_prev_position(Vec3d::new(0.0, 64.0, 0.0));
-        sim.player_mut().position = Vec3d::new(10.0, 64.0, 0.0);
-        sim.clock_mut().interp_alpha = 0.5;
+        sim.player_mut(|p| p.position = Vec3d::new(10.0, 64.0, 0.0));
+        sim.clock_mut(|c| c.interp_alpha = 0.5);
         let cam = sim.camera(1.0);
         assert!(
             (cam.position.x - 5.0).abs() < 1e-4,
@@ -4726,8 +4962,8 @@ mod tests {
                 sim.step(1.0 / 20.0);
             }
             let start = sim.player().position;
-            sim.input_mut().set(lodestone_controller::Action::Forward, true);
-            sim.input_mut().set(lodestone_controller::Action::Sprint, sprint);
+            sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+            sim.input_mut(|i| i.set(lodestone_controller::Action::Sprint, sprint));
             for _ in 0..20 {
                 sim.step(1.0 / 20.0);
             }
@@ -4783,8 +5019,8 @@ mod tests {
             lodestone_physics::player::DEFAULT_EYE_HEIGHT
         );
 
-        sim.input_mut().set(lodestone_controller::Action::Forward, true);
-        sim.input_mut().set(lodestone_controller::Action::Sprint, true);
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Sprint, true));
         for _ in 0..10 {
             sim.step(1.0 / 20.0);
         }
@@ -4801,7 +5037,7 @@ mod tests {
         // about where between two ticks we happen to be.
         let settled = sim.player().position;
         sim.set_prev_position(settled);
-        sim.clock_mut().interp_alpha = 0.0;
+        sim.clock_mut(|c| c.interp_alpha = 0.0);
         let cam = sim.camera(1.0);
         let expected = sim.player().position.y as f32 + SWIMMING_EYE_HEIGHT;
         assert!(
@@ -4827,11 +5063,11 @@ mod tests {
     #[test]
     fn sneak_cancels_sprint_on_land_but_not_under_water() {
         let mut sim = Sim::new(test_config());
-        sim.input_mut().set(lodestone_controller::Action::Forward, true);
-        sim.input_mut().set(lodestone_controller::Action::Sprint, true);
-        sim.input_mut().set(lodestone_controller::Action::Sneak, true);
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Sprint, true));
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Sneak, true));
 
-        sim.step(TICK_DT);
+        sim.step(lodestone_ecs::TICK_PERIOD);
         assert!(
             !sim.movement_intent().sprint,
             "control: on land, sneaking still vetoes sprint"
@@ -4842,7 +5078,7 @@ mod tests {
             eye_in_water: true,
             ..FluidState::NONE
         });
-        sim.step(TICK_DT);
+        sim.step(lodestone_ecs::TICK_PERIOD);
         let intent = sim.movement_intent();
         assert!(
             intent.sprint,
@@ -4889,13 +5125,16 @@ mod tests {
         // site into the system, which is where `send_player_input` already keeps
         // its identical one.
         let sprint_once = |sim: &mut Sim| {
-            sim.ecs_mut().insert_resource(Egress {
-                in_world: true,
-                live: true,
-            });
-            sim.ecs_mut()
-                .run_system_once(crate::interact::send_sprint_command)
-                .expect("send_sprint_command runs");
+            {
+                let mut world = sim.ecs().write();
+                world.insert_resource(Egress {
+                    in_world: true,
+                    live: true,
+                });
+                world
+                    .run_system_once(crate::interact::send_sprint_command)
+                    .expect("send_sprint_command runs");
+            }
             sim.drain_action_queue();
         };
 
@@ -4907,7 +5146,7 @@ mod tests {
             "no sprint edge, no sprint packet"
         );
 
-        sim.player_mut().sprinting = true;
+        sim.player_mut(|p| p.sprinting = true);
         sprint_once(&mut sim);
         assert_eq!(
             drain(&actions),
@@ -4922,7 +5161,7 @@ mod tests {
         sprint_once(&mut sim);
         assert!(drain(&actions).is_empty(), "sprint is edge-triggered");
 
-        sim.player_mut().sprinting = false;
+        sim.player_mut(|p| p.sprinting = false);
         sprint_once(&mut sim);
         assert_eq!(
             drain(&actions),
@@ -5008,8 +5247,8 @@ mod tests {
         // `Sim::step` does rather than calling a method. `DIRTY_COLUMN_BUDGET` is
         // 4 and the fixture has up to 8 loaded neighbours, so drive it until the
         // dirty set is empty.
-        while !sim.terrain().dirty_columns.is_empty() {
-            sim.ecs_mut().run_schedule(lodestone_ecs::Update);
+        while !sim.terrain(|t| t.dirty_columns.is_empty()) {
+            sim.ecs().write().run_schedule(lodestone_ecs::Update);
         }
         let _ = neighbours.len();
         let meshed: HashSet<(i32, i32)> = sim
@@ -5038,7 +5277,7 @@ mod tests {
         sim.drain_all_meshes();
         sim.on_column_arrived(9999, 9999);
         assert!(
-            sim.terrain().dirty_columns.is_empty(),
+            sim.terrain(|t| t.dirty_columns.is_empty()),
             "no neighbour of an out-of-world column is loaded, so none is queued"
         );
     }
@@ -5115,7 +5354,7 @@ mod tests {
             "fly holds altitude"
         );
         // Jump ascends.
-        sim.input_mut().set(lodestone_controller::Action::Jump, true);
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Jump, true));
         for _ in 0..20 {
             sim.step(1.0 / 20.0);
         }
@@ -5172,5 +5411,182 @@ mod tests {
         assert_eq!(all.len(), 4096, "control: the fixture really is a full section");
         let dirty = dirty_sections_for_blocks(0, 0, 0, &all);
         assert_eq!(dirty.len(), 27, "bounded by the 3x3x3 neighbourhood");
+    }
+
+    // -----------------------------------------------------------------------
+    // §4.1(c): one `World`, one `GameTick`, one accumulator
+    // -----------------------------------------------------------------------
+
+    /// **The (c) authority test.** One `World` means one `LocalPlayer`.
+    ///
+    /// `spawn_local_player` and `spawn_session` both spawn an entity carrying the
+    /// `LocalPlayer` marker. They used to be in different `World`s, so both could
+    /// exist; in one `World` they have to be one entity, or every
+    /// `With<LocalPlayer>` system (`tick_hud_overlays`, the physics and egress
+    /// systems) silently runs against two players and the HUD reads whichever the
+    /// query happened to yield.
+    #[test]
+    fn the_one_world_holds_exactly_one_local_player() {
+        let sim = Sim::new(test_config());
+        assert_eq!(local_player_count(sim.ecs()), 1);
+        // …and it is the entity the driver named, not some other one.
+        assert!(
+            sim.ecs()
+                .read()
+                .get::<lodestone_ecs::SessionScoreboard>(sim.local_player())
+                .is_some(),
+            "the session fold's components must hang off Sim's own local player"
+        );
+    }
+
+    /// The control that proves the count above discriminates: spawning the session
+    /// entity separately — which is exactly what
+    /// `lodestone_client::state::SharedState::default` does when it is *not* handed
+    /// a `World` — takes it to two.
+    #[test]
+    fn a_separately_spawned_session_entity_makes_two_local_players() {
+        let sim = Sim::new(test_config());
+        lodestone_ecs::spawn_session(&mut sim.ecs().write());
+        assert_eq!(
+            local_player_count(sim.ecs()),
+            2,
+            "the detector must be able to see a second LocalPlayer"
+        );
+    }
+
+    /// Note the shape: **one** guard, named, then queried.
+    ///
+    /// The obvious spelling — `handle.write().query_filtered::<…>().iter(&handle.write())`
+    /// — takes the write lock twice in one expression and hangs forever, because
+    /// `parking_lot::RwLock` is not reentrant. It was written that way first and
+    /// deadlocked the test binary, which is why `EcsHandle`'s rule 1 is stated as
+    /// "one statement, one guard" rather than as advice.
+    fn local_player_count(handle: &EcsHandle) -> usize {
+        let mut world = handle.write();
+        let mut state =
+            world.query_filtered::<Entity, bevy_ecs::prelude::With<lodestone_ecs::LocalPlayer>>();
+        state.iter(&world).count()
+    }
+
+    /// **The clock-divergence gate.** A maximal stall must advance the *entity*
+    /// systems' tick count and the player's by the same amount, and that amount
+    /// must be vanilla's ten.
+    ///
+    /// This is the measurement Stage 5 recorded and could not fix: `Sim::step`
+    /// banked `dt.clamp(0.0, 0.25)` (five ticks) while `EntityInterpolator` banked
+    /// the pacer's `0.5 s` unclamped (ten), so a maximal stall advanced item
+    /// physics five ticks further than player physics — per stall, cumulatively,
+    /// with the excess real time discarded rather than reconciled. Counting a
+    /// system in `TickSet::Animate` (where `tick_walk_animation` lives) against
+    /// `FrameClock::ticks` is what would have caught it: before (c) those were two
+    /// schedules in two `World`s and could not have agreed.
+    #[test]
+    fn a_maximal_stall_advances_the_entity_and_player_clocks_by_the_same_ten_ticks() {
+        use bevy_ecs::resource::Resource;
+        use bevy_ecs::schedule::IntoScheduleConfigs;
+
+        #[derive(Resource, Default)]
+        struct AnimateRuns(u64);
+
+        let mut sim = Sim::new(test_config());
+        {
+            let mut world = sim.ecs().write();
+            world.init_resource::<AnimateRuns>();
+            world.schedule_scope(GameTick, |_w, schedule| {
+                schedule.add_systems(
+                    (|mut runs: bevy_ecs::system::ResMut<AnimateRuns>| runs.0 += 1)
+                        .in_set(lodestone_ecs::TickSet::Animate),
+                );
+            });
+        }
+
+        let before = sim.tick_count();
+        // Sixty seconds: 1200 ticks of real time, i.e. far past any budget.
+        sim.step(60.0);
+        let player_ticks = sim.tick_count() - before;
+        let animate_runs = sim.ecs().read().resource::<AnimateRuns>().0;
+
+        assert_eq!(
+            player_ticks,
+            u64::from(lodestone_ecs::MAX_CATCH_UP_TICKS),
+            "the one accumulator's catch-up policy is vanilla's ten, not the \
+             shell's old five"
+        );
+        assert_eq!(
+            animate_runs, player_ticks,
+            "the entity animation tick and the player tick are one schedule on \
+             one clock; a difference here is the divergence §4.1(c) deleted"
+        );
+        // The excess is dropped, not carried: the next frame owes nothing.
+        assert!(
+            sim.clock().accumulator < lodestone_ecs::TICK_PERIOD,
+            "accumulator {} should be a sub-tick residual",
+            sim.clock().accumulator
+        );
+    }
+
+    /// A quit-to-title resets the **one** accumulator and leaves monotonic time
+    /// alone.
+    ///
+    /// `end_session` used to reset the interpolator's accumulator (by replacing the
+    /// whole interpolator) and not the player's, so a reconnect re-phased the two
+    /// clocks arbitrarily. There is one to reset now, and the chat timestamps that
+    /// ride on `FrameClock::secs` must survive it — a line stamped before the
+    /// teardown still has to age correctly afterwards.
+    #[test]
+    fn end_session_resets_the_one_accumulator_and_not_the_monotonic_clock() {
+        let mut sim = Sim::with_demo_world(test_config());
+        // Leave a deliberate sub-tick residual.
+        sim.step(lodestone_ecs::TICK_PERIOD * 1.5);
+        assert!(sim.clock().accumulator > 0.0, "control: there is a residual");
+        let secs_before = sim.clock().secs;
+        let ticks_before = sim.tick_count();
+
+        sim.end_session();
+
+        assert_eq!(sim.clock().accumulator, 0.0);
+        assert_eq!(sim.clock().interp_alpha, 0.0);
+        assert!(
+            (sim.clock().secs - secs_before).abs() < 1e-12,
+            "monotonic time must not rewind, or pre-teardown chat ages break"
+        );
+        assert_eq!(sim.tick_count(), ticks_before);
+    }
+
+    /// A session teardown clears the render-side entity tracks.
+    ///
+    /// This used to be a side effect of replacing the whole `EntityInterpolator`
+    /// (and therefore of dropping its `World`). With one `World` it has to be an
+    /// explicit despawn, which is exactly the kind of thing that gets dropped in a
+    /// refactor and shows up as the previous server's mobs still drawn on the title
+    /// screen.
+    #[test]
+    fn end_session_clears_the_entity_tracks() {
+        use crate::entities::EntitySnapshot;
+
+        let mut sim = Sim::with_demo_world(test_config());
+        let snap = EntitySnapshot {
+            id: 7,
+            type_path: "pig".into(),
+            feet: glam::Vec3::new(1.0, 64.0, 1.0),
+            scale: 1.0,
+            yaw: 0.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            item: lodestone_model::Reported::Unreported,
+            velocity: None,
+            on_ground: true,
+            equipment: Vec::new(),
+        };
+        sim.write(|w| crate::entities::fold_entity_snapshots(w, &[snap]));
+        assert_eq!(
+            sim.read(crate::entities::tracked_entity_count),
+            1,
+            "control: the fold really did spawn a track"
+        );
+
+        sim.end_session();
+        assert_eq!(sim.read(crate::entities::tracked_entity_count), 0);
+        assert!(sim.entity_draws().is_empty());
     }
 }

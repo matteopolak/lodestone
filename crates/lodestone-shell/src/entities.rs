@@ -116,9 +116,10 @@
 //! server's once-a-second correction to keep it out of the ground, and
 //! visibly sank through blocks in between; [`EntityInterpolator::update`]
 //! (the default, used by tests and any caller with no world) still has no
-//! world to query and keeps the old free-fall behaviour, but
-//! [`EntityInterpolator::update_with_view`] — what [`crate::sim::Sim`]
-//! actually drives — resolves real collision every tick. This is bounded by
+//! world to query and keeps the old free-fall behaviour, but the real path —
+//! the [`ItemCollision`] resource [`crate::sim::Sim`] inserts each tick, or
+//! [`EntityInterpolator::update_with_view`] for a harness — resolves real
+//! collision every tick. This is bounded by
 //! the `view`'s own coverage (the live path's is the loaded-chunk radius
 //! around the player), not global: a drop far outside that radius still
 //! free-falls until it is back in range, same as before this existed.
@@ -265,9 +266,8 @@ fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &P
 /// Backs [`EntityInterpolator::update`]'s no-world-known default so every
 /// existing caller (tests, and any future offline/no-net path) keeps the
 /// pre-collision free-fall behaviour unchanged. The live path does not use
-/// this — see [`EntityInterpolator::update_with_view`], which
-/// [`crate::sim::Sim`] drives with a real [`CollisionView`] built from the
-/// player's loaded chunks.
+/// this: since §4.1(c) `crate::sim::Sim` inserts an [`ItemCollision`] resource
+/// built from the player's loaded chunks before each `GameTick` run.
 #[derive(Debug)]
 struct OpenAir;
 
@@ -291,7 +291,13 @@ fn to_glam_vec3(v: lodestone_model::Vec3) -> Vec3 {
 }
 
 /// One physics tick, in seconds.
-const TICK: f32 = 0.05;
+///
+/// Narrowed from [`lodestone_ecs::TICK_PERIOD`] rather than written as `0.05`
+/// again: the render eases below are all `f32`, but the *authoritative* period is
+/// the `f64` one the single accumulator counts in, and two spellings of "a tick"
+/// is how the pre-§4.1(c) clocks came to differ by 1.5e-8 per tick on top of the
+/// clamp that actually mattered.
+const TICK: f32 = lodestone_ecs::TICK_PERIOD as f32;
 
 /// Vanilla's `InterpolationHandler::DEFAULT_INTERPOLATION_STEPS`: entity moves
 /// ease over three ticks, not one. See the module docs for why a one-tick window
@@ -305,8 +311,6 @@ const INTERP_WINDOW: f32 = TICK * INTERP_STEPS;
 
 /// Position change (blocks) below which a snapshot is treated as "no movement",
 /// so idle mobs don't restart their interpolation clock every frame.
-/// Seconds per server tick, the cadence the walk animation is advanced at.
-const TICK_SECONDS: f32 = TICK;
 /// Server ticks per second, for the continuous `ageInTicks` clock.
 const TICKS_PER_SECOND: f32 = 20.0;
 
@@ -580,12 +584,23 @@ pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FrameDelta(pub f32);
 
-/// Seconds accumulated toward the next 20 Hz animation tick.
+/// The collision geometry **dropped items** are simulated against this tick.
 ///
-/// Also the partial-tick source [`extract_entity_draws`] interpolates the walk
-/// cycle with, so it must hold the *residual* after this frame's ticks have run.
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct TickAccum(pub f32);
+/// # Why this is not the player's `PlayerCollision`
+///
+/// It was the same type in a *different* `World` before §4.1(c), and unifying the
+/// `World`s would have silently merged two genuinely different decisions:
+///
+/// | case | the player's `PlayerCollision` | this |
+/// |---|---|---|
+/// | live, the player's column not streamed yet | `Pending` — hold the player still rather than drop them | fall back to the chunk store; an item elsewhere still has a floor |
+/// | `collide_against_live_world = false` (the live gate's negative control) | an explicitly **empty** store, so the player falls through | the real chunk store, so the control does not accidentally also disable item physics |
+///
+/// `docs/sim-dissolution.md` recorded this as the reason `tick_particles` stayed a
+/// method; the same reasoning applies here, and the answer is a second resource
+/// with its own documented decision rather than one resource with two meanings.
+#[derive(Resource, Debug, Default)]
+pub struct ItemCollision(pub PlayerCollision);
 
 /// Which item each dropped-item entity is carrying, keyed by **server** entity
 /// id.
@@ -729,7 +744,7 @@ pub fn tick_walk_animation(
 /// This is the boundary `docs/bevy-migration.md` §4.4 draws: the ECS side ends
 /// here, and nothing downstream of it knows bevy exists.
 pub fn extract_entity_draws(
-    accum: Res<TickAccum>,
+    clock: Res<lodestone_ecs::FrameClock>,
     stacks: Res<ItemStacks>,
     tracks: Query<(
         &MinecraftEntityId,
@@ -743,7 +758,11 @@ pub fn extract_entity_draws(
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
-    let partial_tick = (accum.0 / TICK_SECONDS).clamp(0.0, 1.0);
+    // The one accumulator's residual, published by `FrameClock::end_frame` before
+    // `Extract` runs. This used to be `TickAccum`, the interpolator `World`'s own
+    // second accumulator; it is now the *same* number the camera interpolates the
+    // player with, which is the point of §4.1(c).
+    let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
     for (id, kind, scale, from, to, clock, walk, equipment) in &tracks {
         out.0.push(EntityDraw {
@@ -790,14 +809,14 @@ pub fn extract_entity_draws(
 /// entities that have all four components, which [`spawn_track`] inserts
 /// atomically.
 pub fn tick_item_physics(
-    collision: Res<PlayerCollision>,
+    collision: Res<ItemCollision>,
     profile: Res<Profile>,
     mut items: Query<(&mut ItemPhysics, &mut InterpFrom, &mut InterpTo, &mut InterpClock)>,
 ) {
     // `NoWorld`/`Pending` mean there is nothing to collide against yet — leave
     // every item's simulation exactly where it was rather than free-falling it
     // through geometry we cannot query.
-    let PlayerCollision::View(source) = &*collision else {
+    let PlayerCollision::View(source) = &collision.0 else {
         return;
     };
     let profile = &profile.0;
@@ -1042,27 +1061,36 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
 /// Registers the render-side entity systems into the schedules `lodestone-ecs`
 /// owns, plus the resources they read.
 ///
-/// Separate from `lodestone_ecs::ingest::IngestPlugin` because the two halves
-/// currently live in **different `World`s** — the net thread's (authoritative
-/// over network state) and this one (render/interpolation state). Unifying them
-/// is `docs/bevy-migration.md` §4.1, and doing it early would mean the
-/// interpolation clock and the socket sharing a lock.
+/// Still separate from `lodestone_ecs::ingest::IngestPlugin`, but no longer
+/// because of a `World` boundary — §4.1(c) removed that, and the shell's one
+/// `App` now installs both. It stays separate because the *entities* are still
+/// separate: `IngestPlugin` folds the server's report onto one entity per mob and
+/// this plugin's [`fold_snapshots`] spawns a second, render-side entity per mob
+/// keyed by [`TrackIndex`], with [`EntitySnapshot`] the sanctioned intermediate
+/// between them.
+///
+/// Collapsing *that* is Stage 1's remaining debt, and §4.1(c) has removed one of
+/// its two stated blockers: [`fold_snapshots`]'s "its input is a borrowed slice
+/// from `sim.rs`" no longer holds, since the components it would read are now in
+/// the same `World`. The other blocker stands — ingest runs in `NetIngest`, which
+/// the plan orders *before* `GameTick`, while this module's order is clocks →
+/// ticks → fold and every numeric expectation in the ~25 tests below is written
+/// against it.
 #[derive(Debug, Default)]
 pub struct EntityInterpPlugin;
 
 impl Plugin for EntityInterpPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FrameDelta>();
-        app.init_resource::<TickAccum>();
         app.init_resource::<ItemStacks>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
-        // `PlayerCollision` and `Profile` are `lodestone_ecs::player`'s types,
-        // reused here rather than duplicated: this `World` is not the local
-        // player's, but a resource type carries no opinion about which
-        // `World` it lives in, and `tick_item_physics` wants exactly the same
-        // `CollisionSource` seam `player_physics` does.
-        app.init_resource::<PlayerCollision>();
+        // `Profile` is `lodestone_ecs::player`'s type, shared rather than
+        // duplicated: the item integrator wants the same `PhysicsProfile` the
+        // player's does, and since §4.1(c) they genuinely are one resource.
+        // `ItemCollision`, by contrast, is deliberately *not* the player's
+        // `PlayerCollision` — see its docs for the two decisions that differ.
+        app.init_resource::<ItemCollision>();
         app.init_resource::<Profile>();
         app.add_systems(Update, advance_interp_clocks.in_set(FrameSet::Interpolate));
         app.add_systems(
@@ -1076,14 +1104,69 @@ impl Plugin for EntityInterpPlugin {
     }
 }
 
+/// Reset every render-side entity track, for a session teardown.
+///
+/// `Sim::end_session` used to do this by replacing the whole
+/// [`EntityInterpolator`] — which also silently zeroed that `World`'s private
+/// `TickAccum` while leaving the player's accumulator alone, re-phasing the two
+/// clocks on every quit-to-title. There is one accumulator now and it is reset
+/// explicitly (`FrameClock::reset_accumulator`), so the track teardown has to be
+/// explicit too rather than a side effect of dropping a `World`.
+pub fn reset_entity_tracks(world: &mut World) {
+    let tracked: Vec<Entity> = world.resource::<TrackIndex>().0.values().copied().collect();
+    for entity in tracked {
+        if let Ok(entity) = world.get_entity_mut(entity) {
+            entity.despawn();
+        }
+    }
+    world.resource_mut::<TrackIndex>().0.clear();
+    world.resource_mut::<ItemStacks>().0.clear();
+    world.resource_mut::<ExtractedDraws>().0.clear();
+}
+
+/// Fold this frame's snapshots into the render-side component set — the free
+/// function behind [`EntityInterpolator::update_with_view`]'s third step, for a
+/// driver that owns the `World` itself.
+pub fn fold_entity_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
+    fold_snapshots(world, snapshots);
+}
+
+/// What [`extract_entity_draws`] produced on the last `Extract` run.
+#[must_use]
+pub fn extracted_entity_draws(world: &World) -> Vec<EntityDraw> {
+    world.resource::<ExtractedDraws>().0.clone()
+}
+
+/// Number of render-side entity tracks in `world`.
+#[must_use]
+pub fn tracked_entity_count(world: &World) -> usize {
+    world.resource::<TrackIndex>().0.len()
+}
+
+/// Record which item a dropped-item entity is carrying, in a `World` the caller
+/// owns. See [`EntityInterpolator::set_item_stack`] for the live chain.
+pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocation) {
+    world
+        .resource_mut::<ItemStacks>()
+        .0
+        .insert(entity_id, item);
+}
+
 /// Tracks and interpolates every visible entity between server ticks.
 ///
-/// Owns the `World` the render-side components live in and drives the three
-/// schedules over it. Everything it exposes is either a schedule run
-/// ([`Self::update_with_view`]) or a read of an extracted/resource value — there
-/// is no per-entity state on this struct itself, by design: the components *are*
-/// the state, so a plugin holding the same `World` sees and can change exactly
-/// what the renderer will draw.
+/// # This is a harness, not the production path, since §4.1(c)
+///
+/// It owns a `World` of its own. That used to be how the shell ran entity
+/// interpolation, and it is why there were two `GameTick` schedules on two
+/// accumulators. `lodestone_shell::sim::Sim` no longer holds one: it installs
+/// [`EntityInterpPlugin`] in the one `App` and calls the free functions above.
+///
+/// What it is still for is a caller with **no driver** — the `#[ignore]`d live
+/// GPU gates (`tests/live_entity_render.rs`, `tests/live_dropped_item.rs`) and
+/// this module's own ~25 unit tests, which drive interpolation against a bare
+/// `NetClient` with no `Sim` in sight. It runs the *same* systems in the same
+/// order off the *same* [`lodestone_ecs::FrameClock`] type, so it is a second
+/// instance of one mechanism rather than a second mechanism.
 pub struct EntityInterpolator {
     world: World,
 }
@@ -1229,14 +1312,25 @@ impl EntityInterpolator {
         profile: &PhysicsProfile,
     ) {
         self.world.insert_resource(FrameDelta(dt));
-        self.world.insert_resource(collision);
+        self.world.insert_resource(ItemCollision(collision));
         self.world.insert_resource(Profile(*profile));
         self.world.run_schedule(Update);
 
-        let mut accum = self.world.resource::<TickAccum>().0 + dt;
-        while accum >= TICK_SECONDS {
-            accum -= TICK_SECONDS;
-            // `tick_item_physics` now runs as part of this schedule
+        // The one accumulator, in this harness's own `World`. Identical to what
+        // `Sim::step` does with the driver's: `begin_frame` banks the clamped `dt`,
+        // `take_tick` drains it, `end_frame` publishes the residual — which is the
+        // partial tick `extract_entity_draws` reads, so it has to be published
+        // before `Extract`.
+        {
+            let mut clock = self.world.resource_mut::<lodestone_ecs::FrameClock>();
+            clock.begin_frame(f64::from(dt));
+        }
+        while self
+            .world
+            .resource_mut::<lodestone_ecs::FrameClock>()
+            .take_tick()
+        {
+            // `tick_item_physics` runs as part of this schedule
             // (`TickSet::Physics`, ordered before `tick_walk_animation`'s
             // `TickSet::Animate`) — the server itself only *corrects* a
             // dropped item's position roughly once a second (`ItemEntity`'s
@@ -1244,9 +1338,9 @@ impl EntityInterpolator {
             // from easing toward a sparse packet.
             self.world.run_schedule(GameTick);
         }
-        // The residual is also the partial tick `extract_entity_draws` reads, so
-        // it must be stored before `Extract` runs.
-        self.world.resource_mut::<TickAccum>().0 = accum;
+        self.world
+            .resource_mut::<lodestone_ecs::FrameClock>()
+            .end_frame();
 
         fold_snapshots(&mut self.world, snapshots);
 

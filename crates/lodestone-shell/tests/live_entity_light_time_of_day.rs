@@ -153,7 +153,7 @@ fn the_servers_sky_light_byte_is_identical_at_noon_and_midnight() {
     rcon.cmd("gamerule doDaylightCycle false");
     rcon.cmd("weather clear");
 
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
     let feet = join(&net);
 
     rcon.cmd("time set noon");

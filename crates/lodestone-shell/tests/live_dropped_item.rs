@@ -41,9 +41,9 @@
 
 use std::time::{Duration, Instant};
 
+use lodestone::net::NetClient;
 use lodestone::entities::{EntityDraw, EntityInterpolator, ITEM_ENTITY_TYPE_PATH};
 use lodestone::gpu::RenderState;
-use lodestone::net::NetClient;
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
@@ -181,7 +181,7 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     let sprite_item: ResourceLocation = SPRITE_ITEM.parse().expect("valid item id");
 
     // --- connect ---------------------------------------------------------
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
+    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
     let ready = Instant::now() + Duration::from_secs(25);
     let mut in_world = false;
     while Instant::now() < ready {

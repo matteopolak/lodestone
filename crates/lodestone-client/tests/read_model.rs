@@ -1889,3 +1889,157 @@ async fn respawning_into_another_dimension_updates_the_read_model() {
         "a respawn is exactly when the player stops being dead"
     );
 }
+
+// ---------------------------------------------------------------------------
+// §4.1(c): the caller's `World`
+// ---------------------------------------------------------------------------
+
+/// **The island detector for `ClientBuilder::ecs`.** A driver that hands its own
+/// `World` down must see the fold land *in that `World`*, on the entity it named.
+///
+/// Without this, the whole §4.1(c) wiring is exactly the defect class `CLAUDE.md`
+/// names: `SharedState::adopting` would be individually correct, `ClientBuilder::ecs`
+/// would be individually correct, and a component folded by the net thread would
+/// still be invisible to every system in the driver's `World` — with the client's own
+/// `scoreboard()` accessor reporting success either way, because it reads whichever
+/// `World` it was given.
+#[tokio::test]
+async fn a_caller_supplied_world_is_where_the_session_fold_lands() {
+    const OBJECTIVE_ID: i32 = 0x60;
+
+    // The shape a driver builds: the session components on an entity the *caller*
+    // spawned, in a `World` carrying the fold systems exactly once.
+    let world = lodestone_ecs::new_ingest_handle();
+    let entity = lodestone_ecs::spawn_session(&mut world.write());
+
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+        ConnectionState::Play,
+        OBJECTIVE_ID,
+        vec![
+            Directive::Emit(ClientEvent::ObjectiveUpdate {
+                name: "kills".into(),
+                mode: ObjectiveMode::Add,
+                display_name: Some(Text::literal("Kills")),
+                render_type: None,
+                number_format: None,
+            }),
+            Directive::Emit(ClientEvent::DisplayObjective {
+                slot: DisplaySlot::Sidebar,
+                objective: Some("kills".into()),
+            }),
+        ],
+    );
+
+    let (client_io, server_io) = memory_pair();
+    let (handle, mut events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .ecs(world.clone(), entity)
+        .connect_with(client_io);
+    let mut server = Connection::new(server_io);
+
+    server
+        .write_packet(OBJECTIVE_ID, &[])
+        .await
+        .expect("write objective packet");
+    // Drain until the fold has definitely run: `apply` happens before the event is
+    // surfaced, so seeing the second event means both are folded.
+    for _ in 0..2 {
+        events
+            .recv()
+            .await
+            .expect("the scripted events must arrive");
+    }
+
+    let displayed = world
+        .read()
+        .get::<lodestone_ecs::SessionScoreboard>(entity)
+        .expect("the caller's entity keeps its session components")
+        .0
+        .displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar)
+        .map(str::to_owned);
+    assert_eq!(
+        displayed.as_deref(),
+        Some("kills"),
+        "the fold must land in the World the caller handed down, not one the \
+         client minted for itself"
+    );
+    // …and the client's own accessor agrees, because it is the same store.
+    assert_eq!(
+        handle
+            .scoreboard()
+            .displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar),
+        Some("kills")
+    );
+}
+
+/// The control that proves the test above discriminates: **without** `.ecs(..)` the
+/// client mints its own `World` and the caller's stays empty, while
+/// `handle.scoreboard()` still reports success.
+///
+/// This is the whole point. The accessor assertion alone cannot tell a shared
+/// `World` from a private one, so a version of the test above that checked only
+/// `handle.scoreboard()` would have passed against no wiring at all.
+#[tokio::test]
+async fn without_the_ecs_builder_the_callers_world_stays_empty() {
+    const OBJECTIVE_ID: i32 = 0x60;
+
+    let world = lodestone_ecs::new_ingest_handle();
+    let entity = lodestone_ecs::spawn_session(&mut world.write());
+
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+        ConnectionState::Play,
+        OBJECTIVE_ID,
+        vec![
+            Directive::Emit(ClientEvent::ObjectiveUpdate {
+                name: "kills".into(),
+                mode: ObjectiveMode::Add,
+                display_name: Some(Text::literal("Kills")),
+                render_type: None,
+                number_format: None,
+            }),
+            Directive::Emit(ClientEvent::DisplayObjective {
+                slot: DisplaySlot::Sidebar,
+                objective: Some("kills".into()),
+            }),
+        ],
+    );
+
+    let (client_io, server_io) = memory_pair();
+    // No `.ecs(..)`.
+    let (handle, mut events) =
+        ClientBuilder::new(server(), profile(), Box::new(adapter)).connect_with(client_io);
+    let mut server = Connection::new(server_io);
+
+    server
+        .write_packet(OBJECTIVE_ID, &[])
+        .await
+        .expect("write objective packet");
+    for _ in 0..2 {
+        events
+            .recv()
+            .await
+            .expect("the scripted events must arrive");
+    }
+
+    assert_eq!(
+        handle
+            .scoreboard()
+            .displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar),
+        Some("kills"),
+        "control: the fold itself works either way"
+    );
+    assert_eq!(
+        world
+            .read()
+            .get::<lodestone_ecs::SessionScoreboard>(entity)
+            .expect("the caller's entity exists")
+            .0
+            .displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar),
+        None,
+        "…and the caller's World is untouched, so the assertion above is \
+         measuring the handover and not the fold"
+    );
+}

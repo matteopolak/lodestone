@@ -35,6 +35,9 @@ pub struct ClientBuilder {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     connect_timeout: Option<Duration>,
     event_buffer: usize,
+    /// The caller's `World` and session entity, when the caller has one — §4.1(c).
+    /// `None` means "mint your own", which is what a bot with no driver wants.
+    ecs: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 }
 
 impl ClientBuilder {
@@ -55,7 +58,33 @@ impl ClientBuilder {
             read_timeout: None,
             connect_timeout: None,
             event_buffer: DEFAULT_EVENT_BUFFER,
+            ecs: None,
         }
+    }
+
+    /// Fold this session's read-model into a `World` the caller already owns,
+    /// hanging the session components off `session`.
+    ///
+    /// This is how `docs/bevy-migration.md` §4.1(c) lands: a driver that has its
+    /// own `World` (`lodestone_shell::sim::Sim`) passes it down here, so the net
+    /// thread's ingest writes components the driver's `GameTick` systems can
+    /// actually read. Without this the session gets a `World` of its own and a
+    /// component written by ingest is invisible to every system in the driver's.
+    ///
+    /// `session` must already exist and must already carry the session component
+    /// set (`lodestone_ecs::session::insert_session_components`); the `World` must
+    /// already carry `IngestPlugin`'s and `SessionPlugin`'s systems. Neither is
+    /// installed here, because `add_systems` does not deduplicate and a second
+    /// copy of `drain_ingest_queue` blanks every batch the first one filled — the
+    /// exact bug Stage 3 shipped and caught.
+    #[must_use]
+    pub fn ecs(
+        mut self,
+        world: lodestone_ecs::EcsHandle,
+        session: lodestone_ecs::ecs::entity::Entity,
+    ) -> Self {
+        self.ecs = Some((world, session));
+        self
     }
 
     /// Sets the keep-alive policy. Defaults to [`KeepAlivePolicy::Automatic`].
@@ -160,7 +189,13 @@ impl ClientBuilder {
 
         // The maintained read-model. The driver holds the sole writing clone;
         // the handle holds a reading clone for cheap queries and waits.
-        let read_model = crate::state::SharedState::default();
+        //
+        // §4.1(c): fold into the caller's `World` when it gave us one, so ingest
+        // and the caller's systems share a store. Otherwise mint one.
+        let read_model = match self.ecs {
+            Some((world, session)) => crate::state::SharedState::adopting(world, session),
+            None => crate::state::SharedState::default(),
+        };
 
         let driver = Driver::new(
             connection,

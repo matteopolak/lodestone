@@ -218,9 +218,19 @@ pub struct EntityView {
 /// echo** of our own outbound movement ([`SharedState::set_local_movement`]),
 /// which is what lets a bot's `look`/`walk` build on the latest local pose
 /// instead of waiting a round trip. Its *vitals* (`health`, `food`,
-/// `saturation`, `xp_*`, `entity_id`, `alive`) do still duplicate the shell's —
-/// see the Stage 3 doc for the measurement and why the residue is bounded by
-/// the §4.1 `World` unification rather than by this stage.
+/// `saturation`, `xp_*`, `entity_id`, `alive`) do still duplicate the shell's
+/// `Vitals`/`Xp`/`ServerEntityId`.
+///
+/// Stages 2 and 3 both bounded that residue by "the §4.1 `World` unification".
+/// **That was wrong, and §4.1(c) landing is the proof**: there is one `World` now
+/// and the vitals are still duplicated. The second blocker is [`SharedState::apply`]'s
+/// **exclusive** routing switch — `Login`, `HealthChanged`, `Respawned` and
+/// `Death` each carry vitals *and* `dimension`/`game_mode`/`alive`, so claiming
+/// one of them for a `NetIngest` system stops this fold seeing it, freezing
+/// `dimension` (the too-bright-Nether bug, reached by traversal) and `alive`. See
+/// `docs/world-unification.md` for the full table, plus the separate finding that
+/// `alive` and the shell's `Dead` marker are two different rules over the same
+/// events and must not be merged.
 #[derive(Debug, Default)]
 struct Inner {
     player: PlayerSnapshot,
@@ -248,19 +258,30 @@ pub(crate) struct SharedState {
     inner: Arc<RwLock<Inner>>,
     world: Arc<RwLock<World>>,
     notify: Arc<Notify>,
-    /// The bevy_ecs `World` this state is authoritative over, per
-    /// `docs/bevy-migration.md` Stage 0. Currently backs only [`WorldTime`]
-    /// (folded from `ClientEvent::TimeChanged` in [`SharedState::apply`], not
-    /// `Inner::apply`, since that method has no access to sibling
-    /// `SharedState` fields like this one). This is a *separate* `World` from
-    /// any `lodestone_ecs::app::App` a driver (e.g. `lodestone-shell`'s
-    /// `WindowApp`) owns on its own thread — deliberately: unifying them is a
-    /// later stage (§4.1), and `CorePlugin` never inserts `WorldTime` itself
-    /// so that split cannot silently become two diverging clocks.
+    /// The bevy_ecs `World` this state is authoritative over: [`WorldTime`], the
+    /// entity component set, and (since Stage 3) the session read-model — the
+    /// scoreboard, tab list, boss bars and menus — as components on
+    /// [`Self::session`].
     ///
-    /// Since Stage 3 this `World` is also authoritative over the session
-    /// read-model — the scoreboard, tab list, boss bars and menus — as
-    /// components on [`Self::session`].
+    /// # Whose `World` this is, since §4.1(c)
+    ///
+    /// Either the driver's or its own, and the difference is which constructor
+    /// ran. [`SharedState::adopting`] takes the handle a driver already built
+    /// (`lodestone_shell::sim::Sim`'s) so ingest folds straight into the `World`
+    /// the driver's systems read — that is the unification, and it is what makes
+    /// a `Vitals` written here visible to a `GameTick` system without a mirror.
+    /// [`SharedState::default`] mints one, for a bot or a test with no driver at
+    /// all.
+    ///
+    /// The direction matters and is not symmetric: the *driver* owns the `World`
+    /// and hands it down. A `SharedState` that minted the `World` and let the
+    /// driver adopt it would make the `World`'s identity change at connect time,
+    /// and `Sim.local` — the local player's `Entity`, held across
+    /// `Sim::end_session` by the voluntary-teardown path — would be invalidated
+    /// by every reconnect.
+    ///
+    /// Every access here is a short guard, per [`EcsHandle`]'s lock discipline.
+    /// Nothing in this file holds one across an `.await`.
     ecs: EcsHandle,
     /// The session entity in [`Self::ecs`], carrying `lodestone_ecs::session`'s
     /// shared-fold component set.
@@ -329,6 +350,31 @@ fn to_model_pos(pos: WorldChunkPos) -> ChunkPos {
 }
 
 impl SharedState {
+    /// A read-model that folds into a `World` **the caller already owns**, hanging
+    /// the session components off an entity the caller already spawned.
+    ///
+    /// This is §4.1(c): `lodestone_shell::sim::Sim` builds the one `World` in the
+    /// process (with `IngestPlugin` and `SessionPlugin` among its plugins, so the
+    /// fold systems are registered exactly once — `add_systems` does not
+    /// deduplicate) and threads the handle down through `NetClient::connect`.
+    ///
+    /// Deliberately inserts **nothing**. [`Self::default`] seeds `WorldTime` and a
+    /// `ChunkWorld`; doing either here would overwrite a live clock and would
+    /// steal the chunk-store adoption decision from the driver, which owns it
+    /// (`Sim::adopt_live_world`, and the `collide_against_live_world` negative
+    /// control that depends on an explicitly empty store). The chunk store is
+    /// still reachable as [`Self::chunk_world`] for the driver to adopt when it
+    /// chooses.
+    pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Inner::default())),
+            world: Arc::new(RwLock::new(World::new())),
+            notify: Arc::new(Notify::new()),
+            ecs,
+            session,
+        }
+    }
+
     /// Returns a future-friendly handle used by waiters to be woken when the
     /// state changes. Callers register `notified()` *before* re-checking their
     /// predicate to avoid missing a wake-up.

@@ -52,7 +52,7 @@ fn settled_sim() -> Sim {
 /// that block's volume, so a downward view guarantees the particles are on
 /// screen rather than behind the camera.
 fn look_down(sim: &mut Sim) {
-    sim.player_mut().pitch = 89.0;
+    sim.player_mut(|p| p.pitch = 89.0);
     sim.update_target(W as f32 / H as f32);
 }
 
@@ -70,7 +70,7 @@ fn render_frame(
     let frame = target.acquire().expect("headless acquire");
     let entity_draws = sim.entity_draws();
     let instances: &[_] = if with_particles {
-        sim.particle_instances()
+        &sim.particle_instances()
     } else {
         &[]
     };

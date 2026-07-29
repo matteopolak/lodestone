@@ -68,7 +68,7 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     );
 
     // --- Connect the shell's own net client to the live oracle. --------------
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
+    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
 
     // Wait until the bot is actually in the world; drain poll() meanwhile so the
     // net thread's update channel can't grow unbounded while we wait.

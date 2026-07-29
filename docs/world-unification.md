@@ -1,0 +1,398 @@
+# One bevy `World` — §4.1(c)
+
+## What it is
+
+Until this change the process held **three** `bevy_ecs::World`s: the net thread's
+(`lodestone_client::state::SharedState`, authoritative over the network read-model), the entity
+interpolator's (`lodestone_shell::entities::EntityInterpolator`), and the driver's
+(`lodestone_shell::sim::Sim`). It now holds **one**, behind
+`lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World` carries **one**
+`GameTick` schedule driven by **one** 20 Hz accumulator.
+
+This is clause **(c)** of [`bevy-migration.md`](./bevy-migration.md) §4.1. Clause (d) — the *chunk*
+store — landed in Stage 4 and is a different thing; see
+[`chunk-world-resource.md`](./chunk-world-resource.md), which is where the two clauses were first
+disentangled.
+
+Five things were blocked on this and nothing else. Four are now done:
+
+| blocked on (c) | status |
+|---|---|
+| the two-clock divergence (below) | **fixed** — one accumulator, one clamp |
+| `CorePlugin`'s refusal to insert `WorldTime` | **retired** — it inserts `WorldTime` *and* `FrameClock` |
+| "a `GameTick` system must pick an `App` **and** a clock" | **gone** — there is one of each |
+| `Sim.entity_interp` (a `World` nested in a `World`) | **deleted** — 15 fields → 14 |
+| `PlayerSnapshot`'s vitals collapsing into `Vitals`/`Xp`/`ServerEntityId`/`Dead` | **not done, and not only blocked on (c)** — see [below](#the-vitals-did-not-collapse-and-c-was-not-the-only-thing-in-the-way) |
+
+---
+
+## How it works
+
+### The handle travels down, never up
+
+```
+Sim::build          →  App with every plugin  →  World  →  Arc<RwLock<World>>   ── Sim.ecs
+Sim::connect        →  NetClient::connect(host, port, protocol, Some((ecs, local)))
+                    →  ClientBuilder::ecs(world, session)
+                    →  SharedState::adopting(world, session)
+```
+
+`Sim` owns the `World` and hands it down. The reverse — `SharedState` minting it and the driver
+adopting it — is **not an alternative**, for a reason that is easy to miss: `Sim.local` (the local
+player's `Entity`) is held across `Sim::end_session` by the voluntary-teardown path, whose acceptance
+test is a genuine second connect. A `World` whose identity changed at each connect would invalidate
+that `Entity` every time.
+
+`SharedState::adopting` inserts **nothing**. `SharedState::default` (the no-driver path — bots,
+`tests/read_model.rs`) still seeds `WorldTime` and a `ChunkWorld`; doing either in `adopting` would
+zero a live clock and would steal the chunk-store adoption decision from `Sim::adopt_live_world`,
+which owns it — including the `collide_against_live_world` negative control that depends on naming an
+explicitly *empty* store.
+
+### One entity, because one `World`
+
+`spawn_local_player` and `spawn_session` both spawn an entity carrying the `LocalPlayer` marker. In
+separate `World`s that was fine; in one `World` it would give every `With<LocalPlayer>` system two
+players and the HUD would read whichever the query happened to yield first. So `Sim::build` calls
+all three on one entity:
+
+```rust
+let local = spawn_local_player(&mut ecs, player);   // physics, intent, hotbar, fly, wire edges
+insert_hud_components(&mut ecs, local);             // phase, vitals, xp, overlays, chat, respawns
+insert_session_components(&mut ecs, local);         // scoreboard, tab list, boss bars, menus
+```
+
+`the_one_world_holds_exactly_one_local_player` asserts the count, and
+`a_separately_spawned_session_entity_makes_two_local_players` is its control — it spawns the session
+entity separately (exactly what `SharedState::default` does) and observes 2.
+
+The direct consequence: `Sim::{sidebar, player_rows, boss_bars, player_menu, open_menu}` read
+components off `Sim.local` instead of round-tripping through `NetClient` → `ClientHandle` →
+the client's `World`. Still one fold (`lodestone_ecs::session`'s `NetIngest` systems), still one
+copy; only the reader changed.
+
+### The plugin list, and the one trap in it
+
+`Sim::build`'s `App` now installs `IngestPlugin` and `SessionPlugin` — the *net thread's* folds —
+because there is one `World` and this is it. **Exactly once**: `SessionPlugin` guards the shared
+`drain_ingest_queue` behind `is_plugin_added::<IngestQueuePlugin>()`. `add_systems` does not
+deduplicate, and two copies of that system silently blank every batch the first one filled (Stage 3
+shipped that as a total ingest blackout whose unit tests stayed green because they installed one
+plugin).
+
+`EntityInterpPlugin` joins them, and `EntityInterpolator` stops being a `World` owner in production.
+
+---
+
+## The clock: one accumulator, and the policy decision
+
+### What was wrong
+
+Measured by Stage 5 and recorded in [`sim-dissolution.md`](./sim-dissolution.md): two independent
+20 Hz accumulators, on two different catch-up policies.
+
+| | the player's | the interpolator's |
+|---|---|---|
+| where | `FrameClock::accumulator` (`f64`), `Sim::step` | `TickAccum` (`f32`), `EntityInterpolator::update_with_view` |
+| fed | `dt.clamp(0.0, 0.25)` — **five** ticks | the pacer's already-clamped `dt`, **unclamped** — ten |
+
+`FramePacer::begin_frame` clamps `dt` to `MAX_CATCHUP_SECS = 0.5 s`; `Sim::step` then clamped
+*again* to `0.25 s`. So a maximal stall advanced item physics and the walk cycle **five ticks
+further** than player physics — per stall, cumulatively, with no mechanism to reconcile, because the
+excess real time was discarded rather than carried. `end_session` reset one accumulator (by
+replacing the whole interpolator) and not the other, re-phasing them arbitrarily on every
+quit-to-title.
+
+The `f32`-vs-`f64` term is real and irrelevant: `0.05f32` against `1.0/20.0` is ~1.5e-8 relative,
+about one tick per 39 days.
+
+### The policy, and why ten won
+
+**`lodestone_ecs::MAX_CATCH_UP_TICKS = 10`.** Unifying forced a choice and this is it:
+
+- it is vanilla's own `MAX_TICKS_PER_UPDATE` (`Minecraft.java:262`, applied at `:1176`), which is the
+  only *external* oracle either candidate has;
+- it is what [`frame-pacing.md`](./frame-pacing.md) documents and what `FramePacer` already clamped
+  to, so the driver's two clamps now agree instead of one silently shadowing the other;
+- the tighter `0.25 s` had no derivation anywhere in the tree. It predates the frame pacer, and its
+  only written justification was the pacing test's own observation that it bound first ("measured
+  **5**, not 10") — a record of the discrepancy, not a reason for it. That assertion said out loud
+  "if this changed, reconcile the two caps".
+
+Cost of loosening: the worst-case catch-up burst is ten physics ticks in one frame instead of five.
+That is vanilla's own worst case and the frame pacer was already sized for it.
+
+**What was updated to match.** `app.rs`'s `a_long_stall_is_clamped_not_replayed` now asserts `10`
+and says why; `MAX_TICKS_PER_UPDATE`, `TICK_SECS` and `MAX_CATCHUP_SECS` in `app.rs` are now
+**aliases** of the `lodestone-ecs` constants rather than local re-derivations, and the test asserts
+the two are the same constant — a local copy that agreed today is precisely how the five-vs-ten
+divergence started. `sim.rs`'s `TICK_DT` is deleted.
+
+### The mechanism
+
+`FrameClock` owns the loop, so it is written once rather than per driver:
+
+```rust
+clock.begin_frame(dt);          // secs += dt (unclamped); accumulator += dt.clamp(0, 0.5); frames += 1
+while clock.take_tick() { … }   // accumulator -= TICK_PERIOD; ticks += 1
+clock.end_frame();              // interp_alpha = accumulator / TICK_PERIOD
+clock.reset_accumulator();      // teardown: residual only, never `secs`
+```
+
+`secs` takes the **unclamped** `dt` and the accumulator the clamped one. That asymmetry is
+load-bearing: `secs` answers "how long ago did this chat line arrive" and must track wall time across
+a stall, while the accumulator answers "how many ticks do we owe" and must not replay a minute of
+them. `reset_accumulator` therefore never touches `secs` — a chat line stamped before a
+quit-to-title still ages correctly after it.
+
+`interp_alpha` is now the single sub-tick residual: the camera's between-tick ease and
+`extract_entity_draws`'s walk-cycle partial tick both read it, where they used to read two
+accumulators' residuals.
+
+### The frame, in order
+
+```
+apply_mouse
+clock.begin_frame(dt)
+Egress ← phase == Connected && is_live()
+FrameDelta ← dt ;  run_schedule(Update)      ← FrameSet::{Input, Interpolate, Camera, Terrain}
+while clock.take_tick():
+    PlayerCollision ← tick_collision()
+    ItemCollision   ← item_collision()
+    run_schedule(GameTick)                   ← TickSet::{Input, Physics, Predict, Animate, Send}
+    drain_action_queue()                     ← everything TickSet::Send queued, in order
+    tick_particles()
+clock.end_frame()
+poll_net()
+fold_entity_snapshots()
+run_schedule(Extract)                        ← ExtractSet::{Terrain, Entities, Hud}
+refresh_stats()
+```
+
+Two ordering facts are load-bearing:
+
+1. **`Update` runs *before* the tick loop.** `FrameSet::Interpolate`'s `advance_interp_clocks` must
+   run first, because `tick_item_physics` and `tick_walk_animation` measure off the *drawn* pose and
+   would otherwise measure last frame's. That ordering used to be internal to
+   `EntityInterpolator::update_with_view`; it is now the frame's.
+2. **`fold_entity_snapshots` still runs after the tick loop and after ingest**, which is the order
+   the ~25 interpolation tests are written against.
+
+**One behaviour change rides on (1):** `FrameSet::Terrain`'s `heal_dirty_columns` now runs *before*
+`poll_net`, so a column that arrives this frame has its neighbours healed on the next one. It is a
+coalescing drain feeding an async worker pool on a per-frame budget, and the total
+arrival→upload latency already spans several frames, so one more is inside the noise — but it is a
+change, not a no-op, and it is the thing to look at first if chunk seams regress.
+
+### `ItemCollision` — the resource that must **not** be shared
+
+`tick_item_physics` used to read `PlayerCollision` in the interpolator's `World`. Merging the
+`World`s would have silently merged two genuinely different decisions:
+
+| case | the player's `PlayerCollision` | items' `ItemCollision` |
+|---|---|---|
+| live, the player's column not streamed | `Pending` — hold the player rather than drop them | fall back to the chunk store; an item elsewhere still has a floor |
+| `collide_against_live_world = false` | an explicitly **empty** store, so the player falls through | the real chunk store, so the negative control does not also disable item physics |
+
+`sim-dissolution.md` flagged exactly this for `tick_particles` and predicted the fix would be "a
+second per-tick collision resource with its own documented decision". It is.
+
+---
+
+## Lock discipline
+
+Three rules, on `lodestone_ecs::EcsHandle`. None of them is style.
+
+1. **Never hold a guard across a call that might take the same lock.** `parking_lot::RwLock` is
+   neither reentrant nor upgradable: `write()` → `read()` on one thread deadlocks instantly, and
+   `read()` → `read()` deadlocks whenever a writer is already queued (that is what `read_recursive`
+   is for, and nothing here relies on it). Concretely, the driver must not hold a guard while calling
+   into `NetClient`/`ClientHandle` — **every** read on those locks this same `World` now.
+   `Sim::fold_entities` resolves `net.entity_snapshots()` to an owned `Vec` *before* taking its
+   guard, for exactly this reason.
+2. **Never hold a guard across an `.await`.** `lodestone_client`'s driver already promised this for
+   the scalar read-model (`state.rs`'s module docs); it now matters for this lock too, because a task
+   parked with the `World` write-locked would stall the frame.
+3. **`World` before chunks, never the reverse.** The driver takes this lock and *then* (inside a
+   system, or inside `tick_particles`) the `ChunkWorld` lock. The net thread takes the chunk lock for
+   `handle_packet` and **releases it before folding events** (`driver.rs` scopes that guard
+   deliberately), so it only ever takes this one afterwards. Both orders are `World → chunks`.
+   Reversing either side is an ABBA deadlock and nothing in the type system stops it —
+   `tick_particles` is written inside-out (store handle cloned, `World` guard taken, chunk guard
+   taken inside) specifically to obey this, because the obvious spelling is the wrong order.
+
+`Sim` enforces (1) structurally rather than by convention: there is no accessor that returns a guard
+or a `&`-into-the-`World`. Reads return owned values (`player() -> PlayerState`, which is `Copy`;
+`session_phase() -> SessionPhase`; `particle_instances() -> Vec<_>`) and writes take a closure
+(`player_mut(|p| …)`, `input_mut(|i| …)`, `terrain_mut(|t| …)`). The private helpers are
+`Sim::read(f)` / `Sim::write(f)` / `Sim::write_local(f)`; `write` takes `&mut self` **so the borrow
+checker forbids reaching another accessor from inside the closure**, and `write_local` exists only
+because that `&mut` then makes `self.local` unreadable inside it.
+
+Rule 1 is not theoretical. Writing a test helper as
+`handle.write().query_filtered::<…>().iter(&handle.write())` — two guards in one expression — hung
+the test binary. It is now one named guard, with a comment saying why.
+
+### Can ingest stall the frame? Can the frame stall ingest?
+
+**Both, and the honest answer is worse than §4.1(a) implies.**
+
+§4.1(a) says the net thread "must keep draining regardless of frame rate… a slow frame delays
+*application*, never *receipt*". That is true of the socket→`ClientEvent` channel but **not** of the
+`World` lock, because `SharedState::apply` runs **inline in the driver task**: `Driver::run` reads a
+packet, executes directives, and `emit` calls `read_model.apply(&event)` *before*
+`events.send(event).await`. `apply` takes `ecs.write()`. On a `current_thread` runtime, blocking
+there blocks the whole driver task — so it stops reading the socket too. Before (c) that lock was
+uncontended (only the net thread ever wrote the client's `World`); now the driver contends for it.
+
+What bounds the damage is that **no guard spans the frame**. `Sim::step` never takes one long guard;
+counted from the code it takes on the order of 15 short guards plus ~8 per catch-up tick, and the
+longest single hold is one `run_schedule` call. Ingest's own hold is one `run_schedule(NetIngest)`
+for one event. So the worst case a packet can wait is *one guard hold*, not *one frame*.
+
+Two deliberate choices keep the longest hold small:
+
+- `Sim::particle_instances` returns an owned `Vec` rather than a mapped read guard. The guard version
+  would keep the `World` read-locked for the whole GPU upload — the same failure inverted, with the
+  frame stalling ingest. A `memcpy` of a few thousand POD instances is the cheaper side of that
+  trade.
+- `drain_action_queue` takes the queue out under a guard and releases it before `net.send_action`.
+
+**The longest remaining hold is `Sim::extract_particles`**, which holds the write guard across the
+particle extract *and* the per-particle light sampling closure (which reads chunks through
+`ClientHandle` — order-legal, rule 3, but not free). That is the first place to look if a live
+session ever shows delayed packet handling, and it is the one number this change could not measure:
+quantifying it needs a live session with real particle volume, and the oracles are not part of repo
+state. **Treat the bound above as structural, not measured.**
+
+For scale: keep-alive timeouts are seconds and the guard holds are sub-millisecond, so this is a
+latency question, not a disconnect risk.
+
+---
+
+## How to change it
+
+- **Adding a system:** one `App`, one clock. `CorePlugin` gives you the four schedules and their
+  public sets; add your plugin to `Sim::build`'s `add_plugins` tuple. Guard any *shared* registration
+  with `is_plugin_added` — `add_systems` does not deduplicate.
+- **Reading the `World` from outside the driver:** `Sim::ecs()` hands out the `EcsHandle`. Take a
+  short guard. Re-read the three rules above first; the failure mode is a hang, not an error.
+- **Adding a `Sim` accessor:** return an owned value, or take a closure. Do **not** return a guard or
+  a reference into the `World`, however tempting — that is how rule 1 gets violated by a caller who
+  never read this file.
+- **Adding a per-frame resource the schedules read:** insert it in `Sim::step` before the schedule
+  that reads it, in the same `write` block as the `run_schedule` where possible, so it is one guard
+  rather than two.
+- **Changing the catch-up policy:** `lodestone_ecs::MAX_CATCH_UP_TICKS`. `app.rs`'s constants alias
+  it and its pacing test asserts they are the same constant, so there is one place.
+- **A session teardown must reset three things explicitly** — the accumulator
+  (`FrameClock::reset_accumulator`), the entity tracks (`entities::reset_entity_tracks`) and the
+  component sets (`reset_local_player` + `insert_hud_components`). The first two used to be side
+  effects of dropping a `World`; they are now visible calls in `Sim::end_session`, which is the point,
+  and both have gates (`end_session_resets_the_one_accumulator_and_not_the_monotonic_clock`,
+  `end_session_clears_the_entity_tracks`).
+
+### `EntityInterpolator` survives as a harness
+
+It still owns a `World`, and that is deliberate: the `#[ignore]`d live GPU gates
+(`tests/live_entity_render.rs`, `tests/live_dropped_item.rs`) drive interpolation against a bare
+`NetClient` with no `Sim` anywhere, and so do this module's ~25 unit tests. It runs the *same*
+systems in the same order off the *same* `FrameClock` type — a second *instance* of one mechanism,
+not a second mechanism. `TickAccum` is deleted; there is no second accumulator **type** left in the
+tree.
+
+Production reaches the same systems through free functions on `&mut World`:
+`fold_entity_snapshots`, `extracted_entity_draws`, `tracked_entity_count`, `reset_entity_tracks`,
+`set_item_stack_in`.
+
+---
+
+## The vitals did **not** collapse, and (c) was not the only thing in the way
+
+`lodestone_client::state::PlayerSnapshot`'s vitals (`health`, `food`, `saturation`, `xp_*`,
+`entity_id`, `alive`) still duplicate the driver's `Vitals` / `Xp` / `ServerEntityId`. Stage 3 bounded
+that residue by "the §4.1 `World` unification". **That was not the whole blocker, and this is a
+correction to the plan.**
+
+`SharedState::apply` routes each `ClientEvent` to **exactly one** of two folds:
+
+```rust
+if TimeChanged            { …ECS resource… }
+else if ingest::handles_event(e) || session::handles_event(e) { …ECS systems… }
+else                      { inner.apply(e) }          // the scalar read-model
+```
+
+The events that carry the vitals do not carry *only* the vitals:
+
+| event | ECS-side | `Inner`-side |
+|---|---|---|
+| `Login` | `ServerEntityId` | `game_mode`, `dimension`, `alive` |
+| `HealthChanged` | `Vitals{health, food, saturation}` | `alive = health > 0.0` |
+| `Respawned` | `RespawnCount` | `dimension`, `game_mode`, `alive` |
+| `Death` | (`Dead`, gated — below) | `alive = false` |
+| `ExperienceChanged` | `Xp` | — |
+
+Claiming any of the first four for a `NetIngest` system stops `Inner::apply` seeing it, so
+`dimension` freezes (that is the too-bright-Nether bug, by traversal) and `alive` stops updating.
+Making the routing non-exclusive would weaken the invariant that module documents — *"an event routed
+here that no system folds vanishes silently"* — and moving `dimension`/`game_mode` into components as
+well is a larger change than a vitals collapse. Only `ExperienceChanged` is free of this, and
+collapsing one field of six buys nothing.
+
+There is also a second, smaller finding: **`alive` and `Dead` are not the same fact and must not be
+merged.** `Inner`'s `alive` is `false` on `Death` and `true` on `Login`/`Respawned`/a positive
+`HealthChanged`. The shell's `Dead` marker is inserted only on `NetUpdate::Death` and removed only on
+`Respawned`, *and it is gated on `Sim.recover_from_death`* — the live death gate's negative control
+flips that to reproduce "stranded on the death screen forever". So `HealthChanged` with `health == 0`
+sets `alive = false` without inserting `Dead` (deliberately — health reaching zero is not a session
+event), and a positive `HealthChanged` sets `alive = true` without removing `Dead`. Two rules, two
+readers, one of them with a test switch on it.
+
+`PlayerSnapshot` as a whole stays split from the `LocalPlayer` components regardless, and Stage 2 was
+right about that: the snapshot is the net thread's fold of the **server's** view plus a local echo of
+our own outbound movement; the components are the driver thread's **prediction**. (c) unified the
+*store*, not the facts.
+
+---
+
+## What `Sim` is down to
+
+**14 fields** (28 before Stage 5, 15 after it). `entity_interp` is gone. `ecs` is still a field but
+is no longer *blocked*: it is the shared handle now, so the shape of deleting `Sim` is "`WindowApp`
+holds the `EcsHandle`, every `Sim` method becomes a system or a free function over `&mut World`" —
+mechanical, with nothing structural in the way. Of the rest, `net` remains genuinely blocked
+(`NetClient` holds an `mpsc::Receiver`, which is `Send` but **`!Sync`**, so it can never be a
+`Resource`; the `NetHandle`/`SharedHandle` seam is how systems reach the client instead), and the
+other twelve are unfinished mechanical work — see
+[`sim-dissolution.md`](./sim-dissolution.md#not-blocked-just-not-done).
+
+## Configuration
+
+Nothing new. `--features live` is still the only version selector. `lodestone_ecs::TICK_PERIOD`,
+`MAX_CATCH_UP_TICKS` and `MAX_CATCH_UP_SECS` are the tick-policy constants; `app.rs` aliases them.
+
+## Dependencies
+
+- `lodestone-ecs` re-exports `parking_lot`, because `EcsHandle` is a `parking_lot::RwLock` and a
+  consumer that wants to *name* a guard type must spell it with the same `parking_lot` this crate
+  locked with. Matching the version by hand in each manifest is how you get two `RwLock`s that look
+  identical and are not the same lock.
+- `lodestone-client` gains `ClientBuilder::ecs(world, session)` and
+  `SharedState::adopting(world, session)`. No new external dependency — it already depended on
+  `lodestone-ecs`.
+- `lodestone-shell`: `NetClient::connect` gains a fourth parameter; `Sim::connect` is the wrapper
+  every non-loopback caller should use.
+
+## Two pre-existing breaks found by running the second health check
+
+Neither is from this change, and both were invisible to `cargo check --workspace --all-targets`
+because they live in `#[cfg(feature = "live")]` test code in `sim.rs`:
+
+- `use std::time::Instant` was missing from
+  `live_bare_hand_stone_timing_survives_the_real_hardness_seam` (introduced by `15d08e2`).
+- `the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume` still read the `Sim.version_data`
+  *field*, which Stage 5 deleted in favour of the `VersionData` resource.
+
+Both are fixed here. The lesson is the one `CLAUDE.md` already states — `--all-targets` alone misses
+non-default features — but it is worth recording that it caught two more, in a crate whose default
+test suite was entirely green.
