@@ -87,8 +87,12 @@ use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
 /// separate physical<->logical conversion. Scale-diversity is still exercised
 /// elsewhere in the suite —
 /// `container_screen.rs`'s `hit_test_and_drawn_geometry_share_one_panel_origin`
-/// runs the same panel-origin math at 1920x1080 (scale 4) — so this file
-/// dropping to scale 1 does not leave the GUI-scaling code path unexercised.
+/// runs the same panel-origin math at 1920x1080 (scale 4), but only for CPU
+/// geometry (`hit_test`/`panel_origin`), never a readback. The actual GPU
+/// pixel path at scale > 1 is covered by
+/// `container_item_pixels_scaled.rs`'s sibling gate (container icons at GUI
+/// scale 2, `640x480`) — this file dropping to scale 1 does not leave that
+/// blind: it just isn't the file responsible for it.
 const W: u32 = 480;
 const H: u32 = 320;
 

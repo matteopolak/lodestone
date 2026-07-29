@@ -1,66 +1,29 @@
-//! Pixel gate: **container and inventory slots must draw real item icons.**
+//! Pixel gate: container item icons at **GUI scale 2** — the blind spot
+//! `container_item_pixels.rs` leaves open.
 //!
-//! The sibling of `hotbar_block_item_pixels.rs`, and for the same reason. That
-//! gate proved the hotbar's nine cells reach pixels; the inventory screen kept
-//! drawing a hash-derived colour swatch and a single letter, so a player could
-//! see nine items and not the other thirty-seven — including, once crafting
-//! landed, the grid and the result slot. `container_screen.rs` stayed green
-//! throughout: it measures *coverage inside the widget rect*, which a swatch
-//! provides just as well as an icon does. Coverage cannot tell a picture of a
-//! diamond from a coloured square.
+//! Both GPU readback item-icon gates (`hotbar_block_item_pixels.rs` and
+//! `container_item_pixels.rs`) run at `480x320`, where
+//! `calculate_gui_scale(AUTO, 480, 320) == 1` and the logical<->physical
+//! canvas divide `HudGeometry`/`ContainerGeometry::build_inner` performs is a
+//! no-op. `container_screen.rs` exercises scale 4 (`1920x1080`), but only for
+//! **CPU geometry** — `hit_test`/`panel_origin` math, no rendering. So no
+//! pixel-level gate anywhere in the suite has ever driven the item-model pass
+//! through an actual scale-up. That is exactly the blind spot that mattered:
+//! every one of the three bugs found while wiring GUI scale (a hardcoded
+//! `const S = 2.0` double-applying on native sprites, `IconRenderer::upload`
+//! feeding `gui_ortho` a physical size while its geometry was posed
+//! logically, and `hit_test` comparing a physical cursor against a logical
+//! layout) manifests **only** at scale > 1. A gate that always runs at scale
+//! 1 cannot see any of them, no matter how many pixels it counts.
 //!
-//! This one drives the real [`ContainerRenderer`] through the same calls the
-//! shell makes:
-//!
-//! ```text
-//! Menu::slot_item -> ItemAtlas::icon -> IconPart::{Sprite,Model}
-//!   -> ContainerRenderer's icon passes -> pixels
-//! ```
-//!
-//! # What "lit" means here, and why it is a difference
-//!
-//! Unlike a hotbar cell over a black backdrop, a container slot is *never*
-//! blank: the panel and the slot well are chrome this screen always draws. So
-//! every measurement below is a **difference against a chrome-only baseline** —
-//! the identical menu with the identical wiring and no items in it. A pixel
-//! counts as lit when the populated render differs from that baseline, which is
-//! exactly "the icon put something here".
-//!
-//! # The numbers
-//!
-//! Container cells are 16 px, the same as the hotbar's procedural layout, so a
-//! **block** item's isometric silhouette is the same analytic figure:
+//! This is the sibling of `container_item_pixels.rs`, unchanged in every way
+//! except the fixture size and — because a "16 px logical cell" is now a
+//! *32 px physical* one — every pixel-area expectation is derived from the
+//! scale rather than re-measured by hand. See `EXPECTED_LIT` and
+//! `top_rows`/`bottom_rows` below.
 //!
 //! ```text
-//! A = 172.5 px^2 in a 16x16 = 256 px cell (bbox 14.14 x 15.73)
-//! ```
-//!
-//! derived in `docs/item-gui-geometry.md` and in the hotbar gate's module docs.
-//! The band is tight enough that a half-drawn cube (~86) or a mis-scaled one
-//! fails. The winding check (top band brighter than the bottom band, because the
-//! visible set is `{Up, East, North}` at `face_shade {1.0, 0.6, 0.8}` and the
-//! inside-out set is `{Down, West, South}` at `{0.5, 0.6, 0.8}`) is asserted too,
-//! since silhouette area alone cannot see an inside-out cube.
-//!
-//! A **flat sprite** item is measured separately and loosely: its coverage is
-//! whatever its texture's opaque texels happen to be, so the assertion is that
-//! it covers most of the cell rather than a specific count.
-//!
-//! # Controls
-//!
-//! * **an empty slot** must differ from the baseline by exactly **0** px, so the
-//!   counts above are localised to their own slot rather than a screen-wide leak;
-//! * **`attach_item_models` never called**, everything else identical: the block
-//!   slot must read exactly **0**. That is the executed proof that the new icon
-//!   pass is what puts those pixels there. It is a real control on this screen —
-//!   without it the block slot previously drew a swatch, which is *not* zero, so
-//!   this also pins that the fallback no longer fires once an atlas is attached.
-//!
-//! Fail-closed like its siblings: a missing GPU or a missing `client.jar` is a
-//! failure, never a skip.
-//!
-//! ```text
-//! cargo test -p lodestone-shell --test container_item_pixels -- --ignored --nocapture
+//! cargo test -p lodestone-shell --test container_item_pixels_scaled -- --ignored --nocapture
 //! ```
 
 use lodestone::config::{calculate_gui_scale, AUTO_GUI_SCALE};
@@ -72,27 +35,14 @@ use lodestone_game::{item::ItemStack, menu::Menu};
 use lodestone_model::Identifier;
 use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
 
-/// `ContainerGeometry::build_inner` divides the physical framebuffer down to
-/// a **logical** GUI canvas before laying out the panel and its slots (see
-/// `ContainerGeometry::widget_rect`'s doc comment), then the render pass
-/// stretches that canvas back out to fill the physical target. This gate's
-/// pixel-area math (`EXPECTED_LIT`, the top/bottom band rows) is derived for
-/// an exact 16x16 physical cell, which only holds if that divide is a no-op.
-/// `(480, 320)` is `hud.rs`'s own `hud_vitals_draw_the_real_heart_sprite`
-/// gate's fixture, chosen for exactly this reason:
-/// `calculate_gui_scale(AUTO, 480, 320) == 1`. `slot_rect` below still
-/// performs the physical<->logical conversion explicitly rather than assuming
-/// it away, so this file stays correct if `W`/`H` ever change; a scale > 1
-/// case is preserved elsewhere in the suite —
-/// `container_screen.rs`'s `hit_test_and_drawn_geometry_share_one_panel_origin`
-/// runs the equivalent panel-origin math at 1920x1080 (scale 4), but only for
-/// CPU geometry, never a GPU readback. `container_item_pixels_scaled.rs` is
-/// this file's sibling at GUI scale 2 (`640x480`) for exactly that reason:
-/// every one of the three bugs found while wiring GUI scale showed up only
-/// at scale > 1, and until that file existed nothing at the pixel level ran
-/// this pass through an actual scale-up.
-const W: u32 = 480;
-const H: u32 = 320;
+/// `640x480`: at scale 1 `640/2 = 320 >= 320` and `480/2 = 240 >= 240` so the
+/// loop in `calculate_gui_scale` advances to 2; at scale 2 `640/3 = 213 <
+/// 320` so it stops there. This is the same fixture `container_screen.rs`
+/// already names in its own comments as "640x480 (scale 2)" — chosen there,
+/// and here, for landing exactly on 2 rather than sliding on to 3 like a
+/// larger framebuffer (e.g. 960x720) would.
+const W: u32 = 640;
+const H: u32 = 480;
 
 /// A full opaque cube whose faces are all one sprite, so the silhouette is
 /// exactly the analytic figure with no cutout texels to argue about.
@@ -100,35 +50,31 @@ const BLOCK_ITEM: &str = "minecraft:stone";
 /// A flat `item/generated` icon, to exercise the other stream.
 const SPRITE_ITEM: &str = "minecraft:diamond";
 
-/// Player-menu slot indices under test. 36 is the first hotbar slot on the
-/// inventory screen, 37 the second, 38 the third — real `menu_index` values, not
-/// offsets: `slot_layout` carries the index through, so nothing here has to know
-/// where the hotbar starts.
 const BLOCK_SLOT: usize = 36;
 const SPRITE_SLOT: usize = 37;
 const EMPTY_SLOT: usize = 38;
 
-/// The analytic silhouette area of the vanilla block pose in a 16 px cell.
-const EXPECTED_LIT: f32 = 172.5;
+/// The analytic silhouette area of the vanilla block pose in a 16 **logical**
+/// px cell — see `container_item_pixels.rs` and `docs/item-gui-geometry.md`
+/// for the derivation. Physical pixel area scales with the *square* of the
+/// GUI scale (both width and height of the cell scale by it), so this is
+/// **not** re-measured at scale 2 — it is this same figure times `scale^2`,
+/// computed from the scale the fixture actually produces rather than
+/// hand-tuned to whatever a run of this test happens to emit. If a future
+/// change breaks that quadratic relationship (e.g. only one axis scales, or
+/// scale is applied twice), this expectation stays fixed while the actual
+/// count moves, and the test fails instead of quietly re-centring on the bug.
+const EXPECTED_LIT_AT_SCALE_1: f32 = 172.5;
 
 fn id(path: &str) -> Identifier {
     path.parse().expect("valid item id")
 }
 
-/// The `(x, y, 16, 16)` screen rect of a menu slot: the widget's own origin plus
-/// the slot's local offset, both straight from the module under test.
-///
-/// `widget_rect` and every slot offset in `layout` are in the **logical** GUI
-/// canvas `ContainerGeometry::build_inner` lays its fixed pixel constants into
-/// (see `ContainerGeometry::widget_rect`'s doc comment) — not the physical
-/// framebuffer this test reads back. The render pass stretches that logical
-/// canvas to fill the physical target, so the logical rect is scaled *up* by
-/// the effective GUI scale here before being handed back as a physical pixel
-/// rect — the mirror of what `hit_test` does to an incoming physical cursor
-/// position. At `W`x`H` this multiplication is a verified no-op (see the
-/// module-level comment), but it is written generally rather than assumed
-/// away, so this function stays correct even if that ever changes.
-fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize) -> [u32; 4] {
+/// The `(x, y, w, h)` **physical** screen rect of a menu slot at the given
+/// integer `scale`, mirroring `container_item_pixels.rs`'s `slot_rect`
+/// exactly (this file's whole point is to run that same conversion somewhere
+/// it is not a no-op).
+fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize, scale: f32) -> [u32; 4] {
     let widget = ContainerGeometry::build(frame, W, H)
         .widget_rect
         .expect("a populated frame has a widget rect");
@@ -138,7 +84,6 @@ fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize) -> [u32
         .iter()
         .find(|s| s.menu_index == menu_index)
         .expect("menu index must be laid out");
-    let scale = calculate_gui_scale(AUTO_GUI_SCALE, W, H).max(1) as f32;
     [
         ((widget.x + slot.x) * scale) as u32,
         ((widget.y + slot.y) * scale) as u32,
@@ -196,10 +141,10 @@ fn brightness(pixels: &[u8], x: u32, y: u32) -> u32 {
     u32::from(pixels[i].max(pixels[i + 1]).max(pixels[i + 2]))
 }
 
-/// Mean brightness over `rows` of `rect`, counting only pixels the icon changed.
-/// Comparing the horizontal face (top of the hexagon) against the vertical ones
-/// (bottom) is what tells `Up` from `Down`, and therefore a correctly wound cube
-/// from an inside-out one.
+/// Mean brightness over `rows` of `rect`, counting only pixels the icon
+/// changed. Comparing the horizontal face (top of the hexagon) against the
+/// vertical ones (bottom) is what tells `Up` from `Down`, and therefore a
+/// correctly wound cube from an inside-out one.
 fn band_mean(
     shot: &[u8],
     base: &[u8],
@@ -226,20 +171,21 @@ fn band_mean(
 
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
-fn container_slots_draw_real_item_icons() {
-    // `EXPECTED_LIT` and the top/bottom band rows below are derived for an
-    // exact 16x16 *physical* cell, which only holds while `slot_rect`'s
-    // logical->physical multiplication is a no-op. Assert the precondition
-    // rather than silently trusting it — a future change to `W`/`H` that
-    // broke this would otherwise sample a scaled cell against unscaled area
-    // expectations and either false-fail or false-pass by accident.
+fn a_block_item_in_a_container_slot_reaches_pixels_at_gui_scale_two() {
+    // The precondition this whole file exists to exercise. This must FAIL,
+    // not skip, if `W`/`H` stop producing scale 2 — a silent skip would
+    // quietly delete the only scale > 1 pixel gate in the suite while
+    // looking green, which is precisely the failure mode
+    // `hotbar_block_item_pixels.rs` and `container_item_pixels.rs` already
+    // guard against for scale 1.
+    let scale = calculate_gui_scale(AUTO_GUI_SCALE, W, H);
     assert_eq!(
-        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
-        1,
-        "the pixel-area math below assumes W x H divides to itself under the \
-         GUI scale; if this fails, EXPECTED_LIT and the band row ranges must \
-         be re-derived for the scaled cell size"
+        scale, 2,
+        "this fixture is chosen to land on GUI scale 2 exactly; if this \
+         fails, W/H no longer do and this file is not testing what its \
+         name claims. Do not relax this to a skip."
     );
+    let scale = scale as f32;
 
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
@@ -247,8 +193,6 @@ fn container_slots_draw_real_item_icons() {
     );
     let device = ctx.device();
     let queue = ctx.queue();
-    // sRGB, like the live surface: the model shader's tint/shade round-trip is
-    // written for an sRGB target.
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
     let resources = BlockResources::load(true);
@@ -279,8 +223,8 @@ fn container_slots_draw_real_item_icons() {
         );
     }
 
-    // Two menus with identical layout: one populated, one empty. The empty one
-    // is the chrome baseline every count below is measured against.
+    // Two menus with identical layout: one populated, one empty. The empty
+    // one is the chrome baseline every count below is measured against.
     let empty_menu = Menu::player();
     let mut menu = Menu::player();
     menu.set_slot_item(BLOCK_SLOT, Some(ItemStack::new(id(BLOCK_ITEM), 1)));
@@ -289,14 +233,11 @@ fn container_slots_draw_real_item_icons() {
     let frame = ContainerFrame::new(Some(&menu), "Inventory");
     let base_frame = ContainerFrame::new(Some(&empty_menu), "Inventory");
 
-    let block_rect = slot_rect(&menu, &frame, BLOCK_SLOT);
-    let sprite_rect = slot_rect(&menu, &frame, SPRITE_SLOT);
-    let empty_rect = slot_rect(&menu, &frame, EMPTY_SLOT);
+    let block_rect = slot_rect(&menu, &frame, BLOCK_SLOT, scale);
+    let sprite_rect = slot_rect(&menu, &frame, SPRITE_SLOT, scale);
+    let empty_rect = slot_rect(&menu, &frame, EMPTY_SLOT, scale);
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    // The world renderer is here for its *resources*, not its terrain: the icon
-    // pass borrows its block atlas, tint palette, animation slots and depth
-    // buffer. Nothing is uploaded twice.
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let mut shoot = |r: &mut ContainerRenderer, f: &ContainerFrame<'_>| -> Vec<u8> {
@@ -337,8 +278,8 @@ fn container_slots_draw_real_item_icons() {
     let chrome = shoot(&mut lit, &base_frame);
     let subject = shoot(&mut lit, &frame);
 
-    // Control: identical in every respect except that the item-model pass was
-    // never attached, so a block item's geometry has nowhere to draw.
+    // Control: identical in every respect except that the item-model pass
+    // was never attached, so a block item's geometry has nowhere to draw.
     let mut dark = ContainerRenderer::new(device, format);
     dark.attach_items(device, queue, format, item_atlas.clone());
     let control = shoot(&mut dark, &frame);
@@ -348,18 +289,32 @@ fn container_slots_draw_real_item_icons() {
     let empty_lit = diff_in(&subject, &chrome, empty_rect);
     let control_block = diff_in(&control, &chrome, block_rect);
     let control_sprite = diff_in(&control, &chrome, sprite_rect);
-    // Rows 1..5 of the 16 px cell are entirely the horizontal face (the top of
-    // the isometric hexagon); rows 11..15 are entirely side faces.
-    let top_mean = band_mean(&subject, &chrome, block_rect, 1..5)
+
+    // Rows 1..5 of a 16 *logical* px cell are entirely the horizontal face
+    // (the top of the isometric hexagon); rows 11..15 are entirely side
+    // faces — see `container_item_pixels.rs`. The pose is a pure affine
+    // scale-up at scale 2 (that is the whole property under test), so the
+    // same proportions hold; only the row indices move with the scale.
+    let top_rows = (1.0 * scale) as u32..(5.0 * scale) as u32;
+    let bottom_rows = (11.0 * scale) as u32..(15.0 * scale) as u32;
+    let top_mean = band_mean(&subject, &chrome, block_rect, top_rows)
         .expect("the block icon must light its top rows");
-    let side_mean = band_mean(&subject, &chrome, block_rect, 11..15)
+    let side_mean = band_mean(&subject, &chrome, block_rect, bottom_rows)
         .expect("the block icon must light its bottom rows");
 
-    eprintln!("=== container item-icon pixel gate ===");
+    // The load-bearing number: derived from the scale, not measured and then
+    // pasted back in. Physical area scales with `scale^2` because both the
+    // cell's width and height do.
+    let expected_lit = EXPECTED_LIT_AT_SCALE_1 * scale * scale;
+    let low = (expected_lit * 0.85) as usize;
+    let high = (expected_lit * 1.15) as usize;
+
+    eprintln!("=== container item-icon pixel gate (GUI scale 2) ===");
+    eprintln!("scale                     = {scale}");
     eprintln!("block slot  {BLOCK_SLOT} rect = {block_rect:?} ({BLOCK_ITEM})");
     eprintln!("sprite slot {SPRITE_SLOT} rect = {sprite_rect:?} ({SPRITE_ITEM})");
     eprintln!("empty slot  {EMPTY_SLOT} rect = {empty_rect:?}");
-    eprintln!("expected block silhouette = {EXPECTED_LIT:.1} px of 256");
+    eprintln!("expected block silhouette = {expected_lit:.1} px (172.5 * scale^2)");
     eprintln!("lit, block slot           = {block_lit}");
     eprintln!("lit, sprite slot          = {sprite_lit}");
     eprintln!("lit, empty slot           = {empty_lit}");
@@ -369,14 +324,13 @@ fn container_slots_draw_real_item_icons() {
     eprintln!("bottom-band mean = {side_mean:.1} (side faces, 0.6/0.8)");
     eprintln!("ratio            = {:.2}", top_mean / side_mean);
 
-    let low = (EXPECTED_LIT * 0.85) as usize;
-    let high = (EXPECTED_LIT * 1.15) as usize;
     assert!(
         (low..=high).contains(&block_lit),
-        "a block item's container icon must cover ~{EXPECTED_LIT:.0} of the 256 px \
-         cell (the 14.14x15.73 silhouette of the vanilla [30,225,0]/0.625 pose); got \
-         {block_lit}. Far below means faces are missing or the pass never drew; far \
-         above means the pose, the ortho, or the slot rect is wrong."
+        "a block item's container icon at GUI scale 2 must cover ~{expected_lit:.0} \
+         physical px (172.5 px^2 at scale 1, scaled by scale^2 = {scale}^2); got \
+         {block_lit}. This is exactly the shape of the two bugs this file exists to \
+         catch: a scale applied twice would read ~4x too high, a scale never applied \
+         (or applied to the wrong axis) would read ~1x (unscaled) or off-axis."
     );
 
     assert!(
@@ -386,11 +340,15 @@ fn container_slots_draw_real_item_icons() {
          means the winding flipped and you are seeing the inside of the cube"
     );
 
+    // Same derivation as the block silhouette: the flat sprite's threshold at
+    // scale 1 was "> 100 of a 256 px cell"; at scale 2 the cell's area is
+    // 4x (`scale^2`), so the threshold scales the same way rather than
+    // staying pinned to the scale-1 number.
+    let sprite_threshold = (100.0 * scale * scale) as usize;
     assert!(
-        sprite_lit > 100,
-        "a flat-sprite item must cover most of its 256 px cell; got {sprite_lit}. \
-         This is the other icon stream, and it shares no code with the block path \
-         beyond the sink it writes into"
+        sprite_lit > sprite_threshold,
+        "a flat-sprite item must cover most of its scaled cell; got {sprite_lit}, \
+         wanted > {sprite_threshold}"
     );
 
     assert_eq!(
@@ -400,10 +358,13 @@ fn container_slots_draw_real_item_icons() {
          and the counts above are not measuring what they claim"
     );
 
-    // The executed negative control: with the icon pass detached, the block slot
-    // must be indistinguishable from an empty one. This also pins that the
-    // atlas-less colour-swatch fallback does *not* fire once an atlas is
-    // attached — a swatch would show up here as ~100 changed pixels.
+    // The executed negative control: with the icon pass detached, the block
+    // slot must be indistinguishable from an empty one — proving the zero
+    // above is because nothing drew there, not because `slot_rect`'s scale
+    // conversion pointed the sample at the wrong (also-empty) region. The
+    // sprite-slot assertion right after it is what rules that out: it uses
+    // the exact same scaled `slot_rect` conversion and *does* see paint, so
+    // the conversion is not silently sampling dead space.
     assert_eq!(
         control_block, 0,
         "without attach_item_models the same frame must draw nothing in the block \
@@ -411,13 +372,12 @@ fn container_slots_draw_real_item_icons() {
          and the positive assertion is not evidence for the icon pass"
     );
 
-    // ...while the flat stream, which that control leaves attached, still draws.
-    // Without this the control above would also pass if `attach_items` were
-    // silently broken, and the whole gate would be measuring nothing.
     assert!(
-        control_sprite > 100,
+        control_sprite > sprite_threshold,
         "the control keeps the item atlas attached, so its sprite slot must still \
-         draw ({control_sprite} px); if it does not, the control is dark for the \
-         wrong reason"
+         draw ({control_sprite} px, wanted > {sprite_threshold}) at the same scaled \
+         rect the block-slot control just read zero from; if it does not, that zero \
+         is the scaled rect landing on dead space, not evidence attach_item_models \
+         is what draws the block"
     );
 }

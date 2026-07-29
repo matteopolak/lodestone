@@ -752,18 +752,42 @@ mod tests {
 
     #[test]
     fn the_main_menu_buttons_do_what_they_say() {
+        // This test's key sequence was wrong from the commit that introduced
+        // it (e6fd783): it pressed `Up` only once after landing on
+        // Multiplayer and expected to land on `Quit`, which is only true if
+        // `Up` wraps forward — it does not (`main_menu_selection_wraps_both_ways`
+        // pins `Up` from the *top* row wrapping to the *last* one, i.e.
+        // backwards through the list). One agent's fix attempt blamed the
+        // pause-menu `Options` insertion for reordering `MAIN_BUTTONS`, but
+        // replaying this exact sequence against the commit that introduced
+        // the test — three buttons, no `Options` in existence yet — fails
+        // identically. The test, not `MAIN_BUTTONS`, was wrong.
         let (mut nav, _) = nav("buttons");
         let mut ui = UiState::new();
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer);
         assert_eq!(ui.screen(), Screen::MainMenu, "the app drives the world");
 
         nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Multiplayer);
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Reprobe(None));
         assert_eq!(ui.screen(), Screen::ServerList);
 
         ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert_eq!(
+            nav.main_button(),
+            MainButton::Multiplayer,
+            "escape returns to the title without moving the highlight"
+        );
+
+        // Quit is always the last button: wrapping `Up` from the first row
+        // reaches it regardless of how many rows sit in between (that
+        // invariant is what `main_menu_selection_wraps_both_ways` pins down
+        // in isolation). Walk there for real, exercising the same edges.
         nav.key(&mut ui, MenuKey::Up);
-        assert_eq!(nav.main_button(), MainButton::Quit);
+        assert_eq!(nav.main_button(), MainButton::Singleplayer);
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Quit, "up from the top wraps");
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Quit);
         assert!(ui.quit_requested());
     }
