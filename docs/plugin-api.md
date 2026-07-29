@@ -176,10 +176,23 @@ can drive it even off-ECS. A plugin steering a bot (§2.2(1) and §2.3 of `docs/
 explain why overshoot correction needs sub-integer forward/strafe) has no route to analog input at
 all today.
 
-**3. A world-space debug-geometry channel in `Extract` — still missing.**
-`ExtractSet` (`crates/lodestone-ecs/src/sets.rs`) is `Terrain, Entities, Hud` — no debug/overlay set.
-`docs/baritone-port.md` §7.6 confirms `gpu.rs` has a single-box block-outline pipeline and nothing
-general. Unaddressed by `67ff7c3`.
+**3. A world-space debug-geometry channel in `Extract` — closed.** This gap is stale as of a later
+pass; re-verified directly against the tree rather than assumed from this paragraph's own age.
+`ExtractSet` (`crates/lodestone-ecs/src/sets.rs`) now has a fourth variant, `Debug`, and
+`crates/lodestone-ecs/src/player.rs` has the resource it guards: `DebugLines(pub Vec<DebugLine>)`,
+`init_resource`'d by `LocalPlayerPlugin` and cleared each frame by `clear_debug_lines`
+(`.before(ExtractSet::Debug)`) — so a plugin system ordered `.in_set(ExtractSet::Debug)` can push
+world-space segments via `ResMut<DebugLines>` exactly the way `ActionQueue` is written to. The render
+half exists too: `crates/lodestone-shell/src/gpu.rs`'s `DebugLineRenderer`/`DebugLinesSource`/
+`RenderState::set_debug_lines_source`, a real line-list pipeline distinct from the single-box outline
+pipeline `docs/baritone-port.md` §7.6 described. The one piece that was missing longest — the actual
+install call wiring the ECS resource to the renderer's polled source — is also done now:
+`WindowApp::install_debug_lines_source` (`crates/lodestone-shell/src/app.rs`) clones `Sim::ecs()`'s
+`EcsHandle` and installs `move || lodestone_ecs::hold_read(&ecs, |world| debug_line_vertices(&world
+.resource::<DebugLines>().0))`, called at all three places `install_outline_source` already was
+(`begin_singleplayer`, `connect_to`, `resumed`) — though unlike that one, this needs no live
+connection at all, since `LocalPlayerPlugin` is on every `Sim`'s one `World` regardless of session
+kind. A navigator plugin (`docs/baritone-port.md`) can draw its own planned route today.
 
 **4. `VersionAdapter::block_facts` — the physics-constants half closed in `24af787`; `PathType` is the
 remaining gap.** `67ff7c3` added exactly five methods to `crates/lodestone-model/src/adapter.rs`:

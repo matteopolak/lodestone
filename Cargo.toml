@@ -1,7 +1,25 @@
 [workspace]
 resolver = "3"
-# `crates/lodestone-*` deliberately avoids matching the `crates/protocol/` grouping dir.
-members = ["crates/lodestone-*", "crates/protocol/*", "xtask"]
+# `crates/lodestone-*` deliberately avoids matching the `crates/protocol/` and
+# `crates/plugins/` grouping dirs, each of which gets its own glob so a new member
+# needs no manifest edit. `crates/plugins/*` is where **plugins** live — crates
+# that consume the public plugin API (`docs/plugin-api.md`) rather than being part
+# of the engine, and which carry their own `LICENSE` because the copyleft boundary
+# is per-plugin. See `crates/plugins/README.md`.
+members = [
+    "crates/lodestone-*",
+    "crates/plugins/*",
+    "crates/protocol/*",
+    "xtask",
+]
+# `crates/plugins/lodestone-autopilot` is excluded because it is not a crate yet:
+# it holds only a `LICENSE`. Its manifest and source were destroyed by a stray
+# `git clean` (see the repo-hazards note in `CLAUDE.md`) before the plugin shell
+# that wraps `lodestone-nav` was written. Without the exclude the
+# `crates/plugins/*` glob makes the **whole workspace fail to load**, so every
+# `cargo` invocation dies on a manifest error and reports nothing about any other
+# crate. Delete this line in the same change that gives it a manifest.
+exclude = ["crates/plugins/lodestone-autopilot"]
 
 [workspace.package]
 version = "0.1.0"
@@ -29,6 +47,12 @@ lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
 lodestone-v735 = { path = "crates/protocol/v735" }
 lodestone-ecs  = { path = "crates/lodestone-ecs" }
+# Plugins (`crates/plugins/`, `docs/autonomous-navigation.md`). Listed here so a
+# plugin that depends on another plugin does not spell a relative path, and so the
+# licence boundary is visible in one place: both are LGPL-3.0-or-later, unlike the
+# MIT-OR-Apache-2.0 engine.
+lodestone-nav = { path = "crates/plugins/lodestone-nav" }
+lodestone-autopilot = { path = "crates/plugins/lodestone-autopilot" }
 
 thiserror = "2"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }

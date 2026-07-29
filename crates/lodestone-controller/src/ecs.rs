@@ -11,12 +11,12 @@
 //!
 //! ```text
 //! GameTick
-//!   TickSet::Input     compute_movement_intent → tick_sprint_window
+//!   TickSet::Intent    compute_movement_intent → tick_sprint_window
 //!   TickSet::Physics   lodestone_ecs::player::player_physics
 //!   TickSet::Send      send_move_action → send_player_input
 //! ```
 //!
-//! # Two orderings inside `TickSet::Input` that are behaviour, not style
+//! # Two orderings inside `TickSet::Intent` that are behaviour, not style
 //!
 //! [`compute_movement_intent`] runs **before** [`tick_sprint_window`]. The
 //! pre-Stage-2 driver computed the intent, ran physics, and only then aged the
@@ -122,10 +122,7 @@ pub fn compute_movement_intent(
             // holds still on the death screen until the respawn teleport lands.
             MovementInput::NONE
         } else {
-            swim_adjusted_intent(
-                &input.0,
-                submersion.0.under_water() || state.0.swimming,
-            )
+            swim_adjusted_intent(&input.0, submersion.0.under_water() || state.0.swimming)
         };
     }
 }
@@ -207,7 +204,7 @@ pub fn send_player_input(
     }
 }
 
-/// The controller's half of the `GameTick`: [`TickSet::Input`] and
+/// The controller's half of the `GameTick`: [`TickSet::Intent`] and
 /// [`TickSet::Send`].
 ///
 /// Pairs with [`lodestone_ecs::player::LocalPlayerPlugin`], which owns
@@ -220,11 +217,24 @@ pub struct ControllerPlugin;
 impl Plugin for ControllerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RawInput>();
+        // `TickSet::Intent` sits between `TickSet::Input` and
+        // `TickSet::Physics` in the enum, but the master ordering chain
+        // (`CorePlugin`, `Input, Physics, Predict, Animate, Send`) predates
+        // that variant and is out of this crate's edit scope, so the edge is
+        // added here. `configure_sets` is additive — `LocalPlayerPlugin`
+        // declares the identical edge for `apply_look_intent`'s benefit, and
+        // the two are redundant, not conflicting.
+        app.configure_sets(
+            GameTick,
+            TickSet::Intent
+                .after(TickSet::Input)
+                .before(TickSet::Physics),
+        );
         app.add_systems(
             GameTick,
             (compute_movement_intent, tick_sprint_window)
                 .chain()
-                .in_set(TickSet::Input),
+                .in_set(TickSet::Intent),
         );
         app.add_systems(
             GameTick,
@@ -256,7 +266,10 @@ mod tests {
     }
 
     fn press(app: &mut App, action: Action, held: bool) {
-        app.world_mut().resource_mut::<RawInput>().0.set(action, held);
+        app.world_mut()
+            .resource_mut::<RawInput>()
+            .0
+            .set(action, held);
     }
 
     fn tick(app: &mut App) {
@@ -356,11 +369,13 @@ mod tests {
             "control: dry, sneak vetoes sprint"
         );
 
-        app.world_mut().entity_mut(entity).insert(Submersion(FluidState {
-            water_height: 2.0,
-            eye_in_water: true,
-            ..FluidState::NONE
-        }));
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(Submersion(FluidState {
+                water_height: 2.0,
+                eye_in_water: true,
+                ..FluidState::NONE
+            }));
         tick(&mut app);
         assert!(
             app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
@@ -528,5 +543,66 @@ mod tests {
         app.world_mut().entity_mut(entity).insert(SelectedSlot(4));
         tick(&mut app);
         assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 4);
+    }
+
+    /// The reason `TickSet::Intent` exists: **exactly one system writes
+    /// `MovementIntent`.** A plugin adding a second, unordered writer in the
+    /// same set must fail the schedule build under strict ambiguity
+    /// detection — the failure mode `docs/plugin-api.md`'s gap list names
+    /// directly (`docs/bevy-migration.md`'s planned
+    /// `ambiguity_detection: LogLevel::Error`).
+    ///
+    /// Mirrors `lodestone_ecs::session`'s
+    /// `exactly_one_system_writes_each_session_component` pattern: a positive
+    /// case (the shipped `ControllerPlugin` alone, not ambiguous) and its
+    /// negative control (with a rogue second writer, ambiguous) — the control
+    /// is what proves the detector is actually switched on, rather than the
+    /// first assertion passing vacuously against a no-op checker.
+    #[test]
+    fn exactly_one_system_writes_movement_intent() {
+        assert!(
+            !game_tick_is_ambiguous(false),
+            "the shipped GameTick schedule must have no unordered conflicting pair"
+        );
+    }
+
+    /// The negative control for the test above.
+    #[test]
+    fn a_second_unordered_intent_writer_fails_the_ambiguity_check() {
+        assert!(
+            game_tick_is_ambiguous(true),
+            "a second unordered writer of MovementIntent must be reported"
+        );
+    }
+
+    /// Build `ControllerPlugin`'s `GameTick` with ambiguity detection promoted
+    /// to an error, optionally adding a rogue second `MovementIntent` writer
+    /// anchored on the same `TickSet::Intent` set with no explicit order
+    /// against the shipped writer.
+    fn game_tick_is_ambiguous(with_rogue_writer: bool) -> bool {
+        use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings};
+
+        fn rogue(mut intents: Query<&mut MovementIntent>) {
+            for mut intent in &mut intents {
+                intent.0 = MovementInput::NONE;
+            }
+        }
+
+        let mut app = App::new();
+        app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin));
+        if with_rogue_writer {
+            app.add_systems(GameTick, rogue.in_set(TickSet::Intent));
+        }
+        // Deliberately *not* run first: an already-built schedule is not
+        // rebuilt, so `initialize` would return `Ok` without ever consulting
+        // the new settings — which is exactly how this assertion would go
+        // vacuous.
+        app.world_mut().schedule_scope(GameTick, |world, schedule| {
+            schedule.set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Error,
+                ..ScheduleBuildSettings::default()
+            });
+            schedule.initialize(world).is_err()
+        })
     }
 }

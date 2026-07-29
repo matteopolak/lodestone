@@ -752,7 +752,7 @@ collapse is local: drop `Sprinting` and treat sprint as a post-pass, losing mome
 
 | kind | describes | milestone |
 |---|---|---|
-| `Walk(Dir4)` | same-cell-height step to an orthogonal neighbour, including step **up** or **down** within `step_height` (0.6) — this is what makes slabs, soul sand (0.875 top) and farmland work | M1 |
+| `Walk(Dir4)` | step to an orthogonal neighbour whose **surface** is within `step_height` (0.6), up or down — this is what makes slabs, soul sand (0.875 top) and farmland work. Note the bound is on the surface, **not** on the cell index: because the feet cell is `floor(feet y)`, a 0.125 step between a stone floor (surface = cell floor) and a soul-sand floor (surface = cell floor + 0.875) changes `y` by one. Reading "same cell height" as a constraint on `y` is what made `graph::walk_step` refuse every soul-sand column in both directions | M1 |
 | `WalkDiagonal(Dir4, Dir4)` | 1,1 step; requires **both** intermediate cells clear at both body heights (§2.3) | M2 |
 | `StepUp(Dir4)` | +1 Y; requires a jump, since 1.0 > 0.6 | M2 |
 | `Descend(Dir4)` | −1 Y onto solid ground; brake-vs-sprint decision per §2.3 | M2 |

@@ -27,6 +27,13 @@
 //! | [`SessionScoreboard`] / [`SessionTabList`] / [`SessionBossBars`] / [`SessionMenus`] | the **net thread's** — both the bot API and the shell HUD read them, and only that `World` was reachable from `ClientHandle` |
 //! | [`Phase`] / [`Vitals`] / [`Xp`] / [`TitleOverlay`] / [`ActionBarOverlay`] / [`HudEffects`] / [`RespawnCount`] / [`ServerEntityId`] | the **driver's** — nothing else folds them, and per-tick driver logic reads them |
 //!
+//! [`Vitals`], [`Xp`] and [`ServerEntityId`] have since moved to the **shared**
+//! half (below), because the rule is *the fold lives where the readers are
+//! shared* and `ClientHandle::health`/`food`/`experience_*`/`player` must work
+//! with no shell attached at all. The driver half is now [`Phase`], the two
+//! overlays, [`HudEffects`], [`RespawnCount`] and [`SessionChat`] — everything
+//! whose only reader is the driver.
+//!
 //! **There is one `World` now** (§4.1(c), `docs/world-unification.md`), and in the
 //! shell both halves hang off the *same* entity: `Sim::build` calls
 //! `spawn_local_player`, then [`insert_hud_components`], then
@@ -40,24 +47,34 @@
 //! so. `lodestone_client::state::SharedState::default` (a bot with no driver) still
 //! installs only [`SessionPlugin`], on an entity of its own.
 //!
-//! # What deliberately did **not** collapse, and why it survived §4.1(c)
+//! # The vitals collapse, and the routing decision it forced
 //!
-//! `lodestone_client::state::PlayerSnapshot`'s vitals (`health`, `food`,
-//! `saturation`, `xp_*`, `entity_id`, `alive`) still duplicate [`Vitals`] /
-//! [`Xp`] / [`ServerEntityId`]. Stage 3 recorded the reason as the `World` split
-//! and bounded the residue by §4.1 — **and that was not the whole story.** One
-//! `World` has shipped and the duplication is still here, because
-//! `lodestone_client::state::SharedState::apply` routes each event to **exactly
-//! one** of two folds, and the events carrying vitals also carry
-//! `dimension`/`game_mode`/`alive`: claiming `Login`/`HealthChanged`/`Respawned`/
-//! `Death` for a system here would stop the scalar fold seeing them and freeze
-//! `dimension` (the too-bright-Nether bug, reached by traversal).
-//! `docs/world-unification.md` has the table.
+//! `lodestone_client::state::PlayerSnapshot` used to hold its own `health`,
+//! `food`, `saturation`, `xp_*`, `entity_id`, `game_mode`, `dimension` and
+//! `alive` beside [`Vitals`] / [`Xp`] / [`ServerEntityId`] here. Stages 2 and 3
+//! bounded that residue by "the §4.1 `World` unification"; §4.1(c) shipped and it
+//! was **still** duplicated, because `SharedState::apply` routes each event to
+//! *exactly one* of two folds and `Login`/`HealthChanged`/`Respawned`/`Death`
+//! each carry vitals **and** `dimension`/`game_mode`/`alive`. Claiming one of
+//! them for a system here would have stopped the scalar fold seeing it and frozen
+//! `dimension` — the too-bright-Nether bug, reached by traversal.
 //!
-//! Note also that `alive` and the shell's `Dead` marker are **not** the same fact:
-//! `Dead` is inserted only on the death packet, removed only on respawn, and gated
-//! on a live-gate test switch (`Sim.recover_from_death`), while `alive` also tracks
-//! `health > 0.0`. Merging them would quietly delete a negative control.
+//! The resolution keeps the exclusive routing and moves the rest of the fold
+//! here: [`ServerGameMode`], [`ServerDimension`] and [`ServerAlive`] join the
+//! set, [`apply_local_player_state`] is the single fold, and `PlayerSnapshot`
+//! becomes **derived** from these components the way `EntityView` has been
+//! derived from the entity set since Stage 1. Weakening the routing to run both
+//! folds was the alternative and it was rejected: it would have left one event
+//! with two folds writing two copies of `dimension`, which is the defect class
+//! this whole module exists to delete. What is left in
+//! `lodestone_client::state` is the **local echo** of our own outbound movement
+//! (position/rotation/`on_ground`) and nothing else.
+//!
+//! `alive` and the shell's `Dead` marker are **not** the same fact and did not
+//! merge: [`ServerAlive`] also tracks `health > 0.0`, while `Dead` is inserted
+//! only on the death packet, removed only on respawn, and gated on a live-gate
+//! test switch (`Sim.recover_from_death`). Merging them would quietly delete a
+//! negative control. See [`ServerAlive`]'s own docs.
 //!
 //! See the Stage 3 doc for the third implementation this leaves standing
 //! (`lodestone_game::player_state::HudState`) and what blocks adopting it.
@@ -67,7 +84,7 @@ use bevy_ecs::component::Component;
 use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
-use lodestone_model::ClientEvent;
+use lodestone_model::{ClientEvent, DimensionId, GameMode};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
 use crate::player::LocalPlayer;
@@ -115,6 +132,101 @@ pub struct SessionBossBars(pub lodestone_game::bossbar::BossBarSet);
 #[derive(Component, Debug, Clone, Default)]
 pub struct SessionMenus(pub lodestone_game::menus::Menus);
 
+/// Server-reported vitals: the local player's health, food and saturation.
+///
+/// `Option` rather than a value with a default, and that is load-bearing:
+/// `None` means *the server has not reported this*, which is how the offline
+/// fixture world draws no health bar at all rather than a full one, and it is
+/// what `lodestone_client::state::PlayerSnapshot::health_known` is derived from.
+/// `lodestone_game::player_state::HudState` — the canonical aggregate — has no
+/// such bit, which is why this stage does not adopt it (see the Stage 3 doc).
+///
+/// All three fields arrive on one `set_health` packet and are written together;
+/// a half-populated `Vitals` is not a state the fold can produce.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct Vitals {
+    /// Health in `0..=20`, or `None` before the first `set_health`.
+    pub health: Option<f32>,
+    /// Food level in `0..=20`, or `None` before the first `set_health`.
+    pub food: Option<i32>,
+    /// Food saturation, or `None` before the first `set_health`.
+    ///
+    /// No reader draws this today — it is here because
+    /// `PlayerSnapshot::saturation` is a public bot-API field and dropping it in
+    /// the collapse would have been a silent API regression, not a cleanup.
+    pub saturation: Option<f32>,
+}
+
+/// Server-reported experience as `(progress, level, total)`, `None` until
+/// `set_experience` arrives.
+///
+/// The HUD must not substitute a locally-derived guess: there is no vanilla
+/// levelling curve the client could invert from partial data that is
+/// guaranteed to match a (possibly modded) server's own numbers.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct Xp(pub Option<(f32, i32, i32)>);
+
+/// The server-assigned entity id for the local player, `None` before login.
+///
+/// Entity-scoped updates that must decide "is this us" (mob effects, most
+/// obviously) compare against this rather than guessing, so an id the next
+/// session reuses cannot be misattributed.
+///
+/// This is the *scalar* answer to "which id are we". The **index** answer —
+/// `crate::entity::EntityIndex` mapping that id to this same entity, so
+/// id-addressed ingest (`update_attributes`) can reach the local player's own
+/// components — is written by
+/// [`crate::ingest::apply_local_player_login`] off the same event. Both are
+/// needed and neither derives the other: a `Query` cannot resolve an id without
+/// the index, and the index cannot answer "have we logged in yet".
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerEntityId(pub Option<i32>);
+
+/// The local player's game mode as the server last reported it, `None` before
+/// login.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerGameMode(pub Option<GameMode>);
+
+/// The dimension the local player is currently in, `None` before login.
+///
+/// **Updated on `Respawned` as well as `Login`**, because `Respawned` is how the
+/// server reports portal travel and not only death. A fold that only handled
+/// `Login` froze this at whatever the player logged into, which reintroduced the
+/// too-bright-Nether bug by traversal — see
+/// `lodestone-client/tests/read_model.rs`'s
+/// `respawning_into_another_dimension_updates_the_read_model`, which is that
+/// regression's gate and now reads this component through
+/// `PlayerSnapshot::dimension`.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct ServerDimension(pub Option<DimensionId>);
+
+/// Whether the **server** considers the local player alive.
+///
+/// Defaults to `true`: a client that has not been told otherwise is alive, and a
+/// `false` default would make every pre-login read report a dead player.
+///
+/// # Not the same fact as `crate::player::Dead`, and they must not merge
+///
+/// | | `ServerAlive` | [`Dead`](crate::player::Dead) |
+/// |---|---|---|
+/// | set false by | `Death`, **and** any `HealthChanged` with `health <= 0` | `Death` only |
+/// | set true by | `Login`, `Respawned`, any `HealthChanged` with `health > 0` | removed by `Respawned` only |
+/// | gated on a test switch | no | **yes** — `Sim.recover_from_death` |
+/// | who reads it | the bot API (`ClientHandle::is_alive`) | the driver: it freezes movement for a tick |
+///
+/// That last row is why merging them deletes evidence rather than duplication:
+/// flipping `recover_from_death` off is the live death gate's **negative
+/// control**, reproducing "stranded on the death screen forever". A merged
+/// marker has nowhere for that switch to live.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerAlive(pub bool);
+
+impl Default for ServerAlive {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 /// Ordering label for the session folds, inside [`IngestSet::Apply`].
 ///
 /// A plugin that wants to observe a folded scoreboard orders
@@ -151,6 +263,12 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             | ClientEvent::PlayerListRemove { .. }
             // boss bars
             | ClientEvent::BossBarUpdate { .. }
+            // the local player's server-reported state
+            | ClientEvent::Login { .. }
+            | ClientEvent::Respawned { .. }
+            | ClientEvent::HealthChanged { .. }
+            | ClientEvent::Death { .. }
+            | ClientEvent::ExperienceChanged { .. }
             // menus
             | ClientEvent::ScreenOpened { .. }
             | ClientEvent::ScreenClosed { .. }
@@ -198,12 +316,103 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
     }
 }
 
+/// `IngestSet::Apply`: the local player's own server-reported state →
+/// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
+/// [`ServerDimension`], [`ServerAlive`].
+///
+/// # Why this is one system over five event families and not five systems
+///
+/// `ServerAlive` is written by **four** of them (`Login`, `Respawned`,
+/// `HealthChanged`, `Death`) under one rule. Split across systems that rule lives
+/// in four places and the next person to touch one of them has no way to see the
+/// other three; kept here it is a single readable `match`. The cost is that this
+/// system claims six components, which is fine — the invariant
+/// `exactly_one_system_writes_each_session_component` asks for one *writer* per
+/// component, not one component per writer.
+///
+/// This replaces `lodestone_client::state::Inner::apply`'s `Login`,
+/// `Respawned`, `HealthChanged`, `Death` and `ExperienceChanged` arms, which are
+/// **deleted**; `PlayerSnapshot` is derived from these components now. `Inner`
+/// keeps only `TeleportPlayer`, which is not a fold of the server's view at all
+/// but a local echo of our own outbound movement.
+pub fn apply_local_player_state(
+    batch: Res<IngestBatch>,
+    mut players: Query<
+        (
+            &mut Vitals,
+            &mut Xp,
+            &mut ServerEntityId,
+            &mut ServerGameMode,
+            &mut ServerDimension,
+            &mut ServerAlive,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for event in batch.events() {
+        for (mut vitals, mut xp, mut id, mut game_mode, mut dimension, mut alive) in &mut players {
+            match event {
+                ClientEvent::Login {
+                    entity_id,
+                    game_mode: mode,
+                    dimension: dim,
+                } => {
+                    id.0 = Some(*entity_id);
+                    game_mode.0 = Some(*mode);
+                    dimension.0 = Some(dim.clone());
+                    alive.0 = true;
+                }
+                // `Respawned` is *also* how the server reports portal travel, not
+                // only death — see [`ServerDimension`].
+                ClientEvent::Respawned {
+                    dimension: dim,
+                    game_mode: mode,
+                    ..
+                } => {
+                    dimension.0 = Some(dim.clone());
+                    game_mode.0 = Some(*mode);
+                    alive.0 = true;
+                }
+                ClientEvent::HealthChanged {
+                    health,
+                    food,
+                    saturation,
+                } => {
+                    vitals.health = Some(*health);
+                    vitals.food = Some(*food);
+                    vitals.saturation = Some(*saturation);
+                    // Health reaching zero is not a session event and does *not*
+                    // insert `crate::player::Dead`; see [`ServerAlive`].
+                    alive.0 = *health > 0.0;
+                }
+                ClientEvent::Death { .. } => alive.0 = false,
+                ClientEvent::ExperienceChanged {
+                    progress,
+                    level,
+                    total,
+                } => xp.0 = Some((*progress, *level, *total)),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Insert the shared-fold session component set onto `entity`.
 ///
 /// Every component is inserted eagerly, like [`crate::spawn_local_player`] and
 /// unlike the *observed*-entity set: an empty scoreboard is a real state ("the
 /// server has sent no objectives"), not an unknown one, so there is no
-/// three-state encoding to preserve.
+/// three-state encoding to preserve. The "has the server reported this yet" bit
+/// the vitals *do* need lives inside them, as `Option`, rather than as component
+/// absence — see [`Vitals`].
+///
+/// **This is also the reset path**, the same way [`insert_hud_components`] is:
+/// `lodestone_shell::sim::Sim::end_session` calls both, so a component added here
+/// cannot be missed by a quit-to-title. Before the vitals collapse this function
+/// was spawn-only, and the note that said a teardown "need not clear the tab
+/// list, scoreboard, boss bars or menus" went stale the moment §4.1(c) merged the
+/// two `World`s: the reader is `Sim.local` now, not a `World` that goes away with
+/// the connection, so those really did survive a quit-to-title.
 pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::Entity) {
     if let Ok(mut entity) = world.get_entity_mut(entity) {
         entity.insert((
@@ -211,6 +420,12 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             SessionTabList::default(),
             SessionBossBars::default(),
             SessionMenus::default(),
+            Vitals::default(),
+            Xp::default(),
+            ServerEntityId::default(),
+            ServerGameMode::default(),
+            ServerDimension::default(),
+            ServerAlive::default(),
         ));
     }
 }
@@ -253,6 +468,7 @@ impl Plugin for SessionPlugin {
                 apply_tab_list,
                 apply_boss_bars,
                 apply_menus,
+                apply_local_player_state,
             )
                 .chain()
                 .in_set(SessionSet::Fold)
@@ -295,30 +511,6 @@ impl Default for Phase {
     }
 }
 
-/// Server-reported vitals for the HUD.
-///
-/// `Option` rather than a value with a default, and that is load-bearing:
-/// `None` means *the server has not reported this*, which is how the offline
-/// fixture world draws no health bar at all rather than a full one.
-/// `lodestone_game::player_state::HudState` — the canonical aggregate — has no
-/// such bit, which is why this stage does not adopt it (see the Stage 3 doc).
-#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
-pub struct Vitals {
-    /// Health in `0..=20`, or `None` before the first `set_health`.
-    pub health: Option<f32>,
-    /// Food level in `0..=20`, or `None` before the first `set_health`.
-    pub food: Option<i32>,
-}
-
-/// Server-reported experience as `(progress, level, total)`, `None` until
-/// `set_experience` arrives.
-///
-/// The HUD must not substitute a locally-derived guess: there is no vanilla
-/// levelling curve the client could invert from partial data that is
-/// guaranteed to match a (possibly modded) server's own numbers.
-#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
-pub struct Xp(pub Option<(f32, i32, i32)>);
-
 /// The title/subtitle overlay and its vanilla fade timer.
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct TitleOverlay(pub lodestone_game::player_state::TitleState);
@@ -340,14 +532,6 @@ pub struct HudEffects(pub lodestone_game::effect::ActiveEffects);
 /// confirm the client actually recovered rather than merely never dying.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RespawnCount(pub u64);
-
-/// The server-assigned entity id for the local player, `None` before login.
-///
-/// Entity-scoped updates that must decide "is this us" (mob effects, most
-/// obviously) compare against this rather than guessing, so an id the next
-/// session reuses cannot be misattributed.
-#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct ServerEntityId(pub Option<i32>);
 
 /// The received chat/system scrollback, with each line's arrival time.
 ///
@@ -374,7 +558,10 @@ pub struct SessionChat(pub lodestone_game::chat::ChatLog);
 /// makes each one frame-rate dependent: an action bar would vanish twice as
 /// fast at 120 fps as at 60.
 pub fn tick_hud_overlays(
-    mut players: Query<(&mut TitleOverlay, &mut ActionBarOverlay, &mut HudEffects), With<LocalPlayer>>,
+    mut players: Query<
+        (&mut TitleOverlay, &mut ActionBarOverlay, &mut HudEffects),
+        With<LocalPlayer>,
+    >,
 ) {
     for (mut title, mut action_bar, mut effects) in &mut players {
         title.0.tick(1);
@@ -392,13 +579,10 @@ pub fn insert_hud_components(world: &mut World, entity: bevy_ecs::entity::Entity
     if let Ok(mut entity) = world.get_entity_mut(entity) {
         entity.insert((
             Phase::default(),
-            Vitals::default(),
-            Xp::default(),
             TitleOverlay::default(),
             ActionBarOverlay::default(),
             HudEffects::default(),
             RespawnCount::default(),
-            ServerEntityId::default(),
             // Stage 5. Reset with the rest rather than by hand in the driver's
             // teardown: the old `Sim::end_session` cleared `chat_log` on its own
             // line, which is exactly the shape that gets missed when a component
@@ -431,6 +615,12 @@ mod tests {
     use lodestone_model::event::{DisplaySlot, ObjectiveMode};
     use lodestone_model::{BossAction, BossColor, BossOverlay, GameMode, PlayerListEntry, Text};
     use uuid::Uuid;
+
+    fn dim(path: &str) -> DimensionId {
+        format!("minecraft:{path}")
+            .parse()
+            .expect("valid dimension id")
+    }
 
     /// Build the net-thread shape: `SessionPlugin` plus one session entity.
     fn session_app() -> (App, bevy_ecs::entity::Entity) {
@@ -496,7 +686,11 @@ mod tests {
     #[test]
     fn an_unclaimed_event_changes_nothing() {
         let (mut app, entity) = session_app();
-        let before = app.world().get::<SessionScoreboard>(entity).unwrap().clone();
+        let before = app
+            .world()
+            .get::<SessionScoreboard>(entity)
+            .unwrap()
+            .clone();
         fold(&mut app, ClientEvent::KeepAlive { id: 7 });
         let after = app.world().get::<SessionScoreboard>(entity).unwrap();
         assert_eq!(&before, after);
@@ -526,7 +720,10 @@ mod tests {
                 }],
             },
         );
-        assert_eq!(app.world().get::<SessionTabList>(entity).unwrap().0.len(), 1);
+        assert_eq!(
+            app.world().get::<SessionTabList>(entity).unwrap().0.len(),
+            1
+        );
 
         fold(
             &mut app,
@@ -586,7 +783,14 @@ mod tests {
             .unwrap()
             .0
             .set(Text::literal("hi"));
-        assert!(app.world().get::<ActionBarOverlay>(entity).unwrap().0.text().is_some());
+        assert!(
+            app.world()
+                .get::<ActionBarOverlay>(entity)
+                .unwrap()
+                .0
+                .text()
+                .is_some()
+        );
 
         for _ in 0..lodestone_game::player_state::ActionBar::DISPLAY_TICKS {
             app.world_mut().run_schedule(GameTick);
@@ -618,10 +822,12 @@ mod tests {
         let entity = spawn_session(&mut handle.write());
         {
             let mut world = handle.write();
-            world.resource_mut::<crate::ingest::IngestQueue>().push(ClientEvent::DisplayObjective {
-                slot: DisplaySlot::Sidebar,
-                objective: Some("kills".into()),
-            });
+            world.resource_mut::<crate::ingest::IngestQueue>().push(
+                ClientEvent::DisplayObjective {
+                    slot: DisplaySlot::Sidebar,
+                    objective: Some("kills".into()),
+                },
+            );
             world.run_schedule(NetIngest);
         }
         assert_eq!(
@@ -646,14 +852,16 @@ mod tests {
         let handle = crate::new_ingest_handle();
         {
             let mut world = handle.write();
-            world.resource_mut::<crate::ingest::IngestQueue>().push(ClientEvent::EntitySpawned {
-                entity_id: 5,
-                uuid: None,
-                entity_type: ResourceKey::from_str("minecraft:pig").unwrap(),
-                pos: Vec3::new(1.0, 2.0, 3.0),
-                rotation: lodestone_model::Rotation::default(),
-                velocity: None,
-            });
+            world
+                .resource_mut::<crate::ingest::IngestQueue>()
+                .push(ClientEvent::EntitySpawned {
+                    entity_id: 5,
+                    uuid: None,
+                    entity_type: ResourceKey::from_str("minecraft:pig").unwrap(),
+                    pos: Vec3::new(1.0, 2.0, 3.0),
+                    rotation: lodestone_model::Rotation::default(),
+                    velocity: None,
+                });
             world.run_schedule(NetIngest);
         }
         assert!(
@@ -662,6 +870,163 @@ mod tests {
                 .resource::<crate::entity::EntityIndex>()
                 .get(5)
                 .is_some()
+        );
+    }
+
+    // ---- the local player's server-reported state -------------------------
+
+    /// The whole vitals collapse in one test: five event families, six
+    /// components, one fold, reached **through the schedule**.
+    #[test]
+    fn the_local_players_server_state_folds_onto_components() {
+        let (mut app, entity) = session_app();
+
+        // Everything is unknown before the server says anything — the state the
+        // offline fixture world draws no bars from.
+        {
+            let world = app.world();
+            assert_eq!(world.get::<Vitals>(entity).unwrap().health, None);
+            assert_eq!(world.get::<Xp>(entity).unwrap().0, None);
+            assert_eq!(world.get::<ServerEntityId>(entity).unwrap().0, None);
+            assert_eq!(world.get::<ServerGameMode>(entity).unwrap().0, None);
+            assert_eq!(world.get::<ServerDimension>(entity).unwrap().0, None);
+            assert!(
+                world.get::<ServerAlive>(entity).unwrap().0,
+                "a client nobody has told otherwise is alive"
+            );
+        }
+
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Creative,
+                dimension: dim("overworld"),
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::HealthChanged {
+                health: 18.0,
+                food: 15,
+                saturation: 2.5,
+            },
+        );
+        fold(
+            &mut app,
+            ClientEvent::ExperienceChanged {
+                progress: 0.375,
+                level: 12,
+                total: 289,
+            },
+        );
+
+        let world = app.world();
+        let vitals = *world.get::<Vitals>(entity).unwrap();
+        assert_eq!(vitals.health, Some(18.0));
+        assert_eq!(vitals.food, Some(15));
+        assert_eq!(vitals.saturation, Some(2.5));
+        assert_eq!(world.get::<Xp>(entity).unwrap().0, Some((0.375, 12, 289)));
+        assert_eq!(world.get::<ServerEntityId>(entity).unwrap().0, Some(7));
+        assert_eq!(
+            world.get::<ServerGameMode>(entity).unwrap().0,
+            Some(GameMode::Creative)
+        );
+        assert_eq!(
+            world.get::<ServerDimension>(entity).unwrap().0,
+            Some(dim("overworld"))
+        );
+    }
+
+    /// `Respawned` moves the dimension, because it is how the server reports a
+    /// **portal trip** and not only a death. A fold that only handled `Login`
+    /// froze `dimension` at whatever the player logged into — the too-bright-Nether
+    /// bug reached by traversal.
+    ///
+    /// The `Login` assertion is the control: it proves the field is genuinely
+    /// rewritten rather than having started out as the expected value.
+    #[test]
+    fn a_respawn_moves_the_dimension_and_revives() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 7,
+                game_mode: GameMode::Survival,
+                dimension: dim("overworld"),
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerDimension>(entity).unwrap().0,
+            Some(dim("overworld"))
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::Death {
+                message: Text::literal("you died"),
+            },
+        );
+        assert!(!app.world().get::<ServerAlive>(entity).unwrap().0);
+
+        fold(
+            &mut app,
+            ClientEvent::Respawned {
+                dimension: dim("the_nether"),
+                game_mode: GameMode::Adventure,
+                previous_game_mode: Some(GameMode::Survival),
+                last_death_location: None,
+            },
+        );
+        let world = app.world();
+        assert_eq!(
+            world.get::<ServerDimension>(entity).unwrap().0,
+            Some(dim("the_nether")),
+            "a respawn/portal trip must move the dimension"
+        );
+        assert_eq!(
+            world.get::<ServerGameMode>(entity).unwrap().0,
+            Some(GameMode::Adventure)
+        );
+        assert!(
+            world.get::<ServerAlive>(entity).unwrap().0,
+            "a respawn is exactly when the player stops being dead"
+        );
+    }
+
+    /// `ServerAlive` tracks `health > 0.0` as well as the death packet, and that
+    /// is the *whole* reason it cannot merge with `crate::player::Dead` — which is
+    /// set only by `Death`, and only when the driver's `recover_from_death` switch
+    /// allows it. Both directions are asserted here, because a fold that only
+    /// handled `Death` would pass a one-sided version of this.
+    #[test]
+    fn zero_health_kills_and_positive_health_revives_without_a_death_packet() {
+        let (mut app, entity) = session_app();
+        let health = |app: &mut App, health: f32| {
+            fold(
+                app,
+                ClientEvent::HealthChanged {
+                    health,
+                    food: 0,
+                    saturation: 0.0,
+                },
+            );
+        };
+
+        health(&mut app, 0.0);
+        assert!(
+            !app.world().get::<ServerAlive>(entity).unwrap().0,
+            "health reaching zero must clear liveness even with no Death packet"
+        );
+        health(&mut app, 20.0);
+        assert!(
+            app.world().get::<ServerAlive>(entity).unwrap().0,
+            "…and positive health must restore it, again with no packet"
+        );
+        assert!(
+            !app.world().entity(entity).contains::<crate::player::Dead>(),
+            "and none of that may insert the driver's `Dead` marker — health \
+             reaching zero is not a session event"
         );
     }
 
@@ -715,13 +1080,14 @@ mod tests {
         // Deliberately *not* run first: an already-built schedule is not rebuilt,
         // so `initialize` would return `Ok` without ever consulting the new
         // settings — which is exactly how this assertion would go vacuous.
-        app.world_mut().schedule_scope(NetIngest, |world, schedule| {
-            schedule.set_build_settings(ScheduleBuildSettings {
-                ambiguity_detection: LogLevel::Error,
-                ..ScheduleBuildSettings::default()
-            });
-            schedule.initialize(world).is_err()
-        })
+        app.world_mut()
+            .schedule_scope(NetIngest, |world, schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Error,
+                    ..ScheduleBuildSettings::default()
+                });
+                schedule.initialize(world).is_err()
+            })
     }
 
     /// The negative control for the tick test: without the schedule the same 60

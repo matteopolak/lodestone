@@ -248,7 +248,10 @@ mod tests {
         hold_write(&handle, |_| std::thread::sleep(Duration::from_millis(30)));
 
         let stats = hold_read(&handle, |w| w.resource::<LockHolds>().snapshot());
-        assert_eq!(stats.holds, 1, "only the write is counted; the read that reads the counter records itself *after* snapshotting");
+        assert_eq!(
+            stats.holds, 1,
+            "only the write is counted; the read that reads the counter records itself *after* snapshotting"
+        );
         assert!(
             stats.longest_ns >= 25_000_000,
             "a 30 ms hold must be visible as at least 25 ms; got {} ns — the detector is broken, \

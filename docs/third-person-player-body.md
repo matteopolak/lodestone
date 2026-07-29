@@ -120,14 +120,74 @@ layers (`hat`, `jacket`, `right_sleeve`, `left_sleeve`, `right_pants`,
 (`crates/lodestone-shell/src/gpu.rs`) — rather than for the first-person arm
 alone, which is what the pre-existing winding gates covered.
 
-## Zero pixels — read this before assuming the feature is live
+## Wired: the camera mode, the pullback, and the source (reaches pixels now)
 
-**This is pose-path plumbing with no consumer.** `grep -rn
-set_third_person_body_source crates` finds only its own definition in
-`gpu.rs` — nothing calls it. Per this repo's own dominant-defect-class rule
-(see `CLAUDE.md`, "nothing is done until something on screen changes"), that
-makes this an island until two things it deliberately does not build also
-exist:
+The two things the section below used to describe as missing now exist, both
+in `crates/lodestone-shell`:
+
+1. **The camera-mode toggle** is `Sim::third_person: bool`
+   (`crates/lodestone-shell/src/sim.rs`), flipped by `Sim::toggle_third_person`
+   and bound to `F5` in `app.rs`'s `WindowEvent::KeyboardInput` arm — vanilla's
+   own key for the same toggle. Exactly one bool, per
+   `ThirdPersonBodySource`'s own design note quoted below: there is still no
+   richer "camera mode" enum anywhere, because `Sim::render_camera` and
+   `Sim::third_person_body_state` both read this one flag and a `None`/`Some`
+   split from the latter *is* the toggle as far as `gpu.rs` is concerned.
+2. **The collision-aware pullback** is
+   `crate::camera_rig::{third_person_camera, collision_pullback}`
+   (`crates/lodestone-shell/src/camera_rig.rs`). `collision_pullback` marches
+   voxel-by-voxel along the camera's own backward view direction (the same
+   grid-DDA traversal `raycast.rs` uses for block targeting) and, at each
+   voxel, ray/AABB-intersects the *real* per-state collision boxes
+   (`CollisionView::collision_boxes`) rather than the coarse `is_solid`
+   occlusion predicate — `LiveCollision::is_solid`'s own doc comment warns that
+   method stopped being the collision answer, so a pullback built on it would
+   pull the camera in a full block early on every slab and could clip straight
+   through a barrier (collides, occludes nothing). `Sim::render_camera` builds
+   the `CollisionView` the exact way `Sim::update_target` already does — live
+   session → `LiveCollision` snapshot (falling back to an empty
+   [`NoCollision`] if the player's own column has not streamed in yet, so
+   "no data" pulls back the full desired distance rather than jamming the
+   camera against nothing), offline fixture → `WorldCollision`. Vanilla's
+   default zoom (`4.0` blocks, `camera_rig::THIRD_PERSON_DISTANCE`) is the
+   desired distance; a hit shaves an extra `0.1`-block margin
+   (`camera_rig::COLLISION_MARGIN`) so the eye stops just short of the surface
+   rather than sitting exactly on it.
+3. **The source** is `Sim::third_person_body_state`, called fresh every frame
+   from `app.rs`'s `redraw()` and handed to
+   `render.set_third_person_body_source(move || body_state.clone())` right
+   there — a cheap `Option<ThirdPersonBodyState>` clone per frame, not a
+   captured borrow of `Sim` (which the closure's `'static` bound would not
+   allow anyway, since `Sim` and `RenderState` are sibling fields on the same
+   `WindowApp`). `anim`'s walk cycle and idle age come from `Sim::body_pose`
+   (a `lodestone_entity::pose::EntityPose`), ticked once per physics tick from
+   the player's own post-physics position exactly the way `entities.rs`'s
+   `Track::render_anim` drives one for a tracked network entity — but facing
+   (`body_yaw_deg`/`head_pitch_deg`) is read straight off the *interpolated
+   player state* instead of that pose's own smoothed rotation, so the local
+   avatar's facing never lags the camera by a tick the way a *remote* player's
+   body yaw legitimately does. Held items are exactly the "rides along for
+   free" case this doc predicted: main hand (selected hotbar slot) and off
+   hand (native inventory index `40`, per `lodestone_game::menu`'s own slot
+   table) both resolve into `ThirdPersonBodyState::equipment`.
+
+Two gaps carried forward exactly where the equivalent gap already existed
+elsewhere, not guessed at: **head yaw never diverges from body yaw**
+(vanilla's `LivingEntity.tickHeadTurn` is not modelled for the local player
+anywhere in this engine, so `AnimInput::head_yaw_deg` is always `0`), and
+**`slim` stays `false`** (no real skin-model bit exists yet — unchanged from
+this doc's original "How to change it" note below, which is still exactly
+right about the fix).
+
+`update_target` and `set_audio_listener` deliberately keep reading `Sim::camera`
+(the true, un-pulled-back eye) rather than `Sim::render_camera` — block
+interaction and (for now) audio should not move just because the camera did.
+
+### What used to block this, verbatim (for the historical record)
+
+Per this repo's own dominant-defect-class rule (see `CLAUDE.md`, "nothing is
+done until something on screen changes"), this section used to name the two
+things that made this an island:
 
 1. **A third-person camera mode.** `ThirdPersonBodySource`'s doc comment
    states the design choice plainly: *"There is no separate 'camera mode' enum
@@ -137,13 +197,12 @@ exist:
    call `set_third_person_body_source` when the mode flips.
 2. **A collision-aware pullback.** Vanilla's third-person camera is not simply
    "the same eye position, pulled back": it raycasts from the head to avoid
-   clipping through blocks behind the player. Nothing in this client computes
+   clipping through blocks behind the player. Nothing in this client computed
    that yet.
 
-Until both land, `body_state` is always `None`, `entities_with_body` is never
-built, and the code added in `81f4cc4` runs zero times in a shipped binary.
-Naming that here rather than letting a green test suite read as "done" is the
-whole point of this doc — see `CLAUDE.md`'s §"the two rules that matter most".
+Both now exist (see above), and `Sim::third_person_body_state` is exercised by
+`app.rs`'s `redraw()` every frame the camera mode is third person — not just
+reachable in principle, but on the one path a shipped binary actually runs.
 
 ## How to change it, and the gotchas
 
@@ -151,16 +210,22 @@ whole point of this doc — see `CLAUDE.md`'s §"the two rules that matter most"
   vice versa.** See "The deliberate split" above — this is the one invariant
   most likely to get "simplified" away by someone who does not know why the
   split exists.
-- **Wiring a camera mode**: call `render_state.set_third_person_body_source`
-  with a closure that returns `None` in first person and `Some(state)` in
-  third person, where `state` is built from the local player's own tick state
-  (feet, body yaw, an `AnimInput` built the way `entities.rs` builds one for a
-  network entity). That single call is the entire remaining integration; no
-  change to `gpu.rs`'s render loop is needed.
+- **The camera mode is wired**: `app.rs`'s `redraw()` calls
+  `render.set_third_person_body_source(move || body_state.clone())` fresh
+  every frame, where `body_state = self.sim.third_person_body_state()`. If you
+  need a *different* camera-mode source (a settings toggle instead of `F5`,
+  say), change what flips `Sim::third_person` — nothing about the source call
+  itself needs to change, per `ThirdPersonBodySource`'s own "the bool is the
+  toggle" design.
+- **The pullback lives in `camera_rig.rs`, not `gpu.rs`.** `Sim::render_camera`
+  is the only caller of `camera_rig::third_person_camera`; if the desired
+  distance or margin ever need to change, they are
+  `camera_rig::THIRD_PERSON_DISTANCE`/`COLLISION_MARGIN`, not new constants in
+  the shell.
 - **Real skin data is still unmodelled.** `slim` has no per-player signal to
   read yet (the tab-list player-info packet would carry it, decoded in the
-  network layer) — every caller has to pick a value today, and `false`
-  (`player_wide`) reproduces the arm's existing default. `player_model_name`
+  network layer) — `Sim::third_person_body_state` always passes `false`
+  (`player_wide`), reproducing the arm's existing default. `player_model_name`
   exists specifically so that the day skin data arrives, selecting the right
   rig is a one-line change at the call site, not new plumbing in
   `lodestone-render`.
@@ -168,15 +233,30 @@ whole point of this doc — see `CLAUDE.md`'s §"the two rules that matter most"
   first-person arm's own documented gaps (`prepare_first_person_arm`'s doc
   comment). Adding them is a shell-side animation-input concern, not a change
   to this bridge.
+- **Head yaw never diverges from body yaw.** `Sim::third_person_body_state`
+  always passes `head_yaw_deg: 0.0` — vanilla's independent
+  head-turn-then-body-catches-up (`LivingEntity.tickHeadTurn`) is not modelled
+  for the local player anywhere in this engine. Adding it is a `sim.rs`-side
+  animation-input concern (a second smoothed yaw alongside `Sim::body_pose`),
+  not a change to this bridge.
 - **Held items ride along for free.** Because the body is folded into the same
   `entities` slice `prepare_item_geometry` reads, the local player's own held
   item renders through `merge_held_items` exactly like a mob's does — no
-  separate held-item path was or should be added for the third-person case.
+  separate held-item path was added for the third-person case.
+  `Sim::third_person_body_state` resolves both `MainHand` (selected hotbar
+  slot) and `OffHand` (native inventory index `40`) into
+  `ThirdPersonBodyState::equipment`; armour is deliberately not carried, same
+  as every other entity's `EntityDraw::equipment`.
 
 ## Configuration
 
-None. No feature flag or env var; `ThirdPersonBodySource` unset is the entire
-"feature off" state, by construction (see "Zero pixels" above).
+No feature flag or env var. In-game, `F5` toggles `Sim::third_person`, which is
+the entire "camera mode" state — `ThirdPersonBodySource` unset (`gpu.rs`'s
+constructed default) is no longer reachable in a real session once `app.rs`
+installs the per-frame source at first draw, but remains the correct "feature
+off" behaviour for any harness that never calls
+`set_third_person_body_source` at all (every existing render test, and
+`--headless`).
 
 ## Dependencies
 
@@ -185,10 +265,19 @@ None. No feature flag or env var; `ThirdPersonBodySource` unset is the entire
   and the pre-existing `Skeleton::pose` humanoid branch this reuses.
 - `lodestone-render::entity_anim` — `AnimInput`, the animation-drive shape
   shared with every other tracked entity.
+- `lodestone-entity::pose::EntityPose`/`WalkAnimation` — drives
+  `Sim::body_pose`'s walk cycle and idle age, the same machinery
+  `entities.rs` uses for every tracked network entity.
 - `crates/lodestone-shell/src/gpu.rs` — `RenderState::render_inner` (the splice
   point), `RenderState::prepare_entities`/`merge_held_items` (the shared path),
   and `RenderState::prepare_first_person_arm` (the path this mutually
-  excludes).
+  excludes). Read-only dependency for this pass — `gpu.rs` itself was held by
+  concurrent work throughout and none of the wiring below needed to touch it.
+- `crates/lodestone-shell/src/camera_rig.rs` — `third_person_camera` and
+  `collision_pullback`, the render-camera half of the wiring.
+- `crates/lodestone-shell/src/collision.rs` — `LiveCollision`/`WorldCollision`,
+  read (not edited) for their real `CollisionView::collision_boxes`
+  implementations, exactly as `Sim::update_target` already reads them.
 
 ## See also
 

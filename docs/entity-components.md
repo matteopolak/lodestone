@@ -74,6 +74,38 @@ sync point is what applies the spawn's deferred `Commands` before the movement
 system runs — there is a test for exactly that, because without the sync point the
 move is silently dropped.
 
+### The local player is in the index too, and that took two guards
+
+`apply_local_player_login` adds one more writer: **the local player's own id**,
+from `ClientEvent::Login`. It has to, because *vanilla never sends an `AddEntity`
+for yourself*, so the spawn-driven index never had our id and every id-addressed
+system — `apply_entity_attributes` above all — silently `continue`d past our own
+`update_attributes`. See
+[`swimming.md`](./swimming.md) for what that cost downstream.
+
+Three things about it are load-bearing:
+
+- **It runs first in the `Apply` chain**, so a `Login` and an `update_attributes`
+  for our own id in one batch still resolve, by the same sync-point mechanism as
+  spawn-then-move.
+- **The local player gets only `MinecraftEntityId` and `Attributes`** — no
+  `EntityKind`/`Position`/`Rotation`/`HeadYaw`, which would duplicate
+  `lodestone_ecs::player::PhysicsState`. `SharedState::entities()` therefore also
+  filters `LocalPlayer` explicitly rather than relying on `entity_view` failing
+  for want of those four: the shell maps `entities()` straight to render
+  instances, so including the local player draws our own body at our own camera,
+  and "it happens to be excluded because a component is missing" is exactly the
+  accidental invariant that breaks the first time someone adds one.
+- **`apply_entity_spawn` and `apply_entity_removal` skip an id held by a
+  `LocalPlayer`.** Both `despawn` the previous holder of a reused id; with our own
+  id in the index, either one firing would take `PhysicsState`, the HUD component
+  set and the driver's `Sim.local` identity with it, and every
+  `expect("the local player always carries …")` would panic a frame later.
+  Vanilla sends neither for the local player, which is precisely why nothing else
+  would have caught it. `the_same_guard_still_replaces_a_reused_id_for_an_ordinary_entity`
+  is the control that the guard keys on `LocalPlayer` and has not blanket-disabled
+  the replace path.
+
 **Arrival order.** Each system walks the batch in order, so intra-family order is
 exact. Cross-family order is the `.chain()` order — but `SharedState::apply`
 submits **one event per schedule run**, so a batch never holds two events and the

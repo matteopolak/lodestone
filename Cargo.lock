@@ -2102,6 +2102,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-nav"
+version = "0.1.0"
+dependencies = [
+ "lodestone-model",
+ "lodestone-physics",
+ "lodestone-world",
+]
+
+[[package]]
 name = "lodestone-net"
 version = "0.1.0"
 dependencies = [
