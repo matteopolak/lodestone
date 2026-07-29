@@ -31,6 +31,15 @@ lodestone-model = { workspace = true }
 # caller. wasm-safe: `lodestone-controller` already depends on it and is in
 # `scripts/wasm-check.sh`'s crate list.
 lodestone-physics = { workspace = true }
+# Stage 3: the session/HUD component set *is* `lodestone-game`'s canonical
+# aggregates (`scoreboard::Scoreboard`, `tablist::TabList`, `bossbar::BossBarSet`,
+# `menus::Menus`, `effect::ActiveEffects`, `player_state::{TitleState, ActionBar}`).
+# Wrapping them in components rather than reimplementing them is the whole point
+# of the stage: there were three folds of the scoreboard family, and this leaves
+# one (docs/bevy-migration.md §8: `lodestone-game`'s folds stay plain functions
+# the ECS calls). wasm-safe: `lodestone-client` already depends on it with
+# default features and is in `scripts/wasm-check.sh`'s crate list.
+lodestone-game = { workspace = true }
 # `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
 # this adds no new type to the graph, only the name.
 uuid = { workspace = true }

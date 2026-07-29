@@ -1,10 +1,16 @@
 //! Live UI pixel gate for the tab list and scoreboard sidebar.
 //!
 //! This test connects the shell's live net path to the flat creative 26.2 oracle
-//! (`:25570`, RCON `:25571`), creates a known scoreboard sidebar over RCON, folds
-//! live `ClientEvent` deltas through `lodestone-game`, lowers them through the
-//! shell's tab-list / scoreboard display projections, then renders the HUD into a
-//! headless target and reads pixels back.
+//! (`:25570`, RCON `:25571`), creates a known scoreboard sidebar over RCON, then
+//! reads the **client's** folded tab list and scoreboard back out through
+//! `NetClient`, lowers them through the shell's display projections, renders the
+//! HUD into a headless target and reads pixels back.
+//!
+//! Before Stage 3 of `docs/bevy-migration.md` this gate folded
+//! `NetUpdate::{TabListEvent, ScoreboardEvent}` into its *own* `TabList` /
+//! `Scoreboard` — i.e. it reimplemented the shell's fold rather than reading it,
+//! so it could have passed with the shell's own path broken. It now reads the one
+//! fold, which is what makes the pixels evidence about production.
 //!
 //! The assertions are deliberately pixel-based:
 //!
@@ -23,9 +29,8 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
-use lodestone::net::{NetClient, NetUpdate};
+use lodestone::net::NetClient;
 use lodestone::{scoreboard, tablist};
-use lodestone_game::{scoreboard::Scoreboard, tablist::TabList};
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::RconClient;
 
@@ -73,25 +78,18 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
     }
 
     let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
-    let mut tabs = TabList::new();
-    let mut scores = Scoreboard::new();
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut rows = Vec::new();
     let mut sidebar = None;
+    let mut scores = lodestone_game::scoreboard::Scoreboard::new();
     while Instant::now() < deadline {
-        for update in net.poll() {
-            match update {
-                NetUpdate::TabListEvent(event) => {
-                    let _ = tabs.apply(&event);
-                }
-                NetUpdate::ScoreboardEvent(event) => {
-                    let _ = scores.apply(&event);
-                }
-                _ => {}
-            }
-        }
-        rows = tablist::player_rows(&tabs, &|_: &str| None);
+        // Drain so the shell's bounded update channel cannot back up. Nothing in
+        // it is folded here any more — the tab list and scoreboard come out of
+        // the client's own `NetIngest` fold below.
+        let _ = net.poll();
+        scores = net.scoreboard();
+        rows = tablist::player_rows(&net.tab_list(), &|_: &str| None);
         sidebar = scoreboard::sidebar_from(&scores, &|_: &str| None);
         if !rows.is_empty()
             && sidebar

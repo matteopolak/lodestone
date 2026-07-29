@@ -8,11 +8,13 @@ use lodestone_model::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{BotError, ClientClosed, SessionOutcome, WaitError};
-use crate::scoreboard::{BossBar, Scoreboard};
 use crate::spawn::DriverTask;
 use crate::state::{EntityView, OpenMenuSnapshot, PlayerSnapshot, SharedState};
+use lodestone_game::bossbar::BossBarSet;
 use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
+use lodestone_game::scoreboard::Scoreboard;
+use lodestone_game::tablist::TabList;
 use lodestone_world::{ChunkSection, SectionLight};
 
 /// A handle to a running client session.
@@ -179,27 +181,54 @@ impl ClientHandle {
         self.state.entities()
     }
 
-    /// Returns the currently known player-list entries.
+    /// Returns the currently known player-list entries, flattened to the
+    /// model's wire shape.
+    ///
+    /// A *derived* view of the folded [`TabList`] — see
+    /// [`ClientHandle::tab_list`] for the richer one, which is what you want if
+    /// you need vanilla display order or the header/footer.
     #[must_use]
     pub fn players(&self) -> Vec<PlayerListEntry> {
         self.state.players()
     }
 
+    /// Returns a snapshot of the folded tab list.
+    ///
+    /// The one fold: Stage 3 of `docs/bevy-migration.md` deleted this crate's
+    /// own `HashMap<Uuid, PlayerListEntry>` and the shell's second `TabList`,
+    /// leaving `lodestone_game::tablist::TabList` behind one
+    /// `SessionTabList` component.
+    #[must_use]
+    pub fn tab_list(&self) -> TabList {
+        self.state.tab_list()
+    }
+
     /// Returns a snapshot of the folded scoreboard — objectives, per-objective
-    /// scores, display-slot assignments and teams.
+    /// scores, the nineteen display-slot assignments and teams.
     ///
     /// Query the returned [`Scoreboard`] with its accessors (`objective`,
-    /// `scores`, `scores_in_slot`, `displayed`, `team_of`, ...). The snapshot is
-    /// a point-in-time clone; call again to observe later updates.
+    /// `sorted_scores`, `displayed`, `sidebar_for_color`, `team_of`, ...). The
+    /// snapshot is a point-in-time clone; call again to observe later updates.
+    ///
+    /// **This type changed in Stage 3.** It used to be a second, poorer
+    /// `Scoreboard` defined in this crate: three display slots instead of
+    /// nineteen, no team decoration, and a `ScoreUpdate` that invented an
+    /// objective-less bucket where `lodestone-game` drops it. That type is
+    /// deleted; this is the aggregate the HUD has always rendered from.
     #[must_use]
     pub fn scoreboard(&self) -> Scoreboard {
         self.state.scoreboard()
     }
 
     /// Returns the currently active boss bars, in server insertion (render)
-    /// order.
+    /// order (`BossBarSet::iter`).
+    ///
+    /// Also changed in Stage 3, and for a sharper reason: this crate had its own
+    /// `Vec<BossBar>` fold while `lodestone_game::bossbar::BossBarSet` was a
+    /// complete, unit-tested implementation of the same thing that **nothing
+    /// called**. The island is now the live one.
     #[must_use]
-    pub fn boss_bars(&self) -> Vec<BossBar> {
+    pub fn boss_bars(&self) -> BossBarSet {
         self.state.boss_bars()
     }
 

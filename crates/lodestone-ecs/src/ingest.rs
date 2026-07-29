@@ -414,6 +414,32 @@ pub fn apply_entity_equipment(
     }
 }
 
+/// Registers the [`IngestQueue`] → [`IngestBatch`] hand-off: the two resources
+/// and the single [`drain_ingest_queue`] system in [`IngestSet::Drain`].
+///
+/// Its own plugin, and both [`IngestPlugin`] and [`crate::SessionPlugin`] add it
+/// through `is_plugin_added`, because **`drain_ingest_queue` must be registered
+/// exactly once per `World`.** `add_systems` does not deduplicate: a second copy
+/// runs after the first, clears the batch it just filled and appends a
+/// now-empty queue, so every `Apply` system sees zero events. That is a silent,
+/// total ingest blackout, and it is invisible to a test that installs only one
+/// of the two plugins — which is how it was found (the session unit tests passed
+/// while `new_ingest_handle`, the shape production actually uses, folded
+/// nothing).
+#[derive(Debug, Default)]
+pub struct IngestQueuePlugin;
+
+impl Plugin for IngestQueuePlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::CorePlugin>() {
+            app.add_plugins(crate::CorePlugin);
+        }
+        app.init_resource::<IngestQueue>();
+        app.init_resource::<IngestBatch>();
+        app.add_systems(NetIngest, drain_ingest_queue.in_set(IngestSet::Drain));
+    }
+}
+
 /// Registers the entity component set's ingest systems into
 /// [`crate::NetIngest`].
 ///
@@ -431,13 +457,10 @@ pub struct IngestPlugin;
 
 impl Plugin for IngestPlugin {
     fn build(&self, app: &mut App) {
-        if !app.is_plugin_added::<crate::CorePlugin>() {
-            app.add_plugins(crate::CorePlugin);
+        if !app.is_plugin_added::<IngestQueuePlugin>() {
+            app.add_plugins(IngestQueuePlugin);
         }
-        app.init_resource::<IngestQueue>();
-        app.init_resource::<IngestBatch>();
         app.init_resource::<EntityIndex>();
-        app.add_systems(NetIngest, drain_ingest_queue.in_set(IngestSet::Drain));
         app.add_systems(
             NetIngest,
             (

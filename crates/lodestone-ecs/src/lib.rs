@@ -31,7 +31,20 @@
 //! `lodestone_controller::ecs`, which cannot be a dependency of this crate
 //! (`lodestone-controller` → `lodestone-client` → here would be a cycle).
 //!
-//! Still where it was: HUD/session state, the chunk world, `Sim` itself.
+//! # Stage 3
+//!
+//! [`session`] holds the session/HUD component set and the fold that produces
+//! it. Its reason for existing is the *double fold*: two different types named
+//! `Scoreboard` (and two player-list folds, and an entirely unwired third
+//! boss-bar fold) all consuming the same `ClientEvent` stream.
+//! `lodestone_client::scoreboard` is **deleted**, `Inner`'s `players` /
+//! `scoreboard` / `boss_bars` / `menus` are **deleted**, and
+//! `lodestone_shell::sim::Sim`'s `phase`, `chat_log`, `tab_list`, `scoreboard`,
+//! `hud_effects`, `title`, `action_bar`, `health`, `food`, `experience`,
+//! `respawn_count` and `local_entity_id` are **deleted**. `lodestone-game`'s
+//! aggregates are the storage; one system per fold calls them.
+//!
+//! Still where it was: the chunk world, `Sim` itself.
 //!
 //! # What this crate depends on
 //!
@@ -58,6 +71,7 @@ mod plugin;
 mod resources;
 mod runner;
 mod schedules;
+pub mod session;
 mod sets;
 
 /// Re-exported so plugin authors never need to match `bevy_app`'s version by
@@ -75,6 +89,11 @@ pub use player::{
 };
 pub use plugin::CorePlugin;
 pub use resources::WorldTime;
+pub use session::{
+    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionBossBars,
+    SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard, SessionSet,
+    SessionTabList, TitleOverlay, Vitals, Xp, insert_hud_components, spawn_session,
+};
 pub use runner::Runner;
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use sets::{ExtractSet, FrameSet, IngestSet, TickSet};

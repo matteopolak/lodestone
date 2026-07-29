@@ -77,6 +77,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every entity's state lives in, the three-state `Reported<T>` encoding that keeps
   "never reported" distinct from "explicitly cleared" (and a dropped item visible),
   and the two folds that cannot be systems until the chunk world is a resource.
+- [Session and HUD components](./session-components.md) — the scoreboard, tab list,
+  boss bars and menus as ECS components: the *three* implementations Stage 3 collapsed,
+  the two that disagreed, and why `PlayerSnapshot`'s vitals are still a real duplicate
+  until the worlds unify.
 - [The local player as ECS components](./local-player-components.md) — the one entity
   the driver *is*, why the input half lives in `lodestone-controller`, the
   `CollisionSource` seam that lets a borrowed collision view reach a scheduled

@@ -54,7 +54,6 @@ use lodestone_game::scoreboard::{
     DisplaySlot as GDisplaySlot, RenderType as GRenderType, Scoreboard as GameScoreboard,
     TeamColor as GTeamColor,
 };
-use lodestone_model::{BossColor, DisplaySlot, ObjectiveRenderType, TeamColor};
 use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
 use uuid::Uuid;
 
@@ -178,17 +177,21 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
     // Poll, never assert immediately: the effects are tick-published and arrive
     // as separate packets. Wait until every piece is visible through the public
     // API, then snapshot the concrete values for assertion.
+    // Stage 3 of `docs/bevy-migration.md` collapsed the client's own
+    // `Scoreboard`/`BossBar` types into `lodestone-game`'s, so this snapshot now
+    // speaks the game vocabulary. See the note above the *second* snapshot for
+    // what that does to the two-fold comparison this test was built around.
     struct Snapshot {
-        objective_display: Option<String>,
-        render_type: Option<ObjectiveRenderType>,
+        objective_display: String,
+        render_type: GRenderType,
         score: Option<i32>,
         displayed: Option<String>,
-        team_color: Option<TeamColor>,
+        team_color: Option<GTeamColor>,
         team_prefix: String,
         team_has_member: bool,
         boss_title: String,
         boss_progress: f32,
-        boss_color: BossColor,
+        boss_color: GBossColor,
     }
 
     let snap = poll_until(
@@ -200,16 +203,16 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
             let score = sb.score(&objective, &holder)?;
             let team = sb.team(&team)?;
             let bars = handle.boss_bars();
-            let bar_state = bars
+            let (_, bar_state) = bars
                 .iter()
-                .find(|b| b.title.to_plain_string() == "LodeBoss")?;
+                .find(|(_, b)| b.title.to_plain_string() == "LodeBoss")?;
             Some(Snapshot {
-                objective_display: obj.display_name.as_ref().map(|t| t.to_plain_string()),
+                objective_display: obj.display_name.to_plain_string(),
                 render_type: obj.render_type,
                 score: Some(score.value),
-                displayed: sb.displayed(DisplaySlot::Sidebar).map(str::to_owned),
-                team_color: team.params.color,
-                team_prefix: team.params.prefix.to_plain_string(),
+                displayed: sb.displayed(GDisplaySlot::Sidebar).map(str::to_owned),
+                team_color: team.color,
+                team_prefix: team.prefix.to_plain_string(),
                 team_has_member: team.members.iter().any(|m| m == &holder),
                 boss_title: bar_state.title.to_plain_string(),
                 boss_progress: bar_state.progress,
@@ -232,14 +235,13 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
     let mut checked = 0usize;
 
     assert_eq!(
-        snap.objective_display.as_deref(),
-        Some("LodeBoard"),
+        snap.objective_display, "LodeBoard",
         "objective display name via ClientHandle::scoreboard()"
     );
     checked += 1;
     assert_eq!(
         snap.render_type,
-        Some(ObjectiveRenderType::Integer),
+        GRenderType::Integer,
         "dummy criterion renders as an integer"
     );
     checked += 1;
@@ -253,7 +255,7 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
     checked += 1;
     assert_eq!(
         snap.team_color,
-        Some(TeamColor::Red),
+        Some(GTeamColor::Red),
         "team colour set to red over RCON"
     );
     checked += 1;
@@ -269,18 +271,26 @@ async fn scoreboard_teams_bossbar_reach_client_public_api() {
         snap.boss_progress
     );
     checked += 1;
-    assert_eq!(snap.boss_color, BossColor::Red, "boss bar colour");
+    assert_eq!(snap.boss_color, GBossColor::Red, "boss bar colour");
     checked += 1;
 
-    // --- Same server truth, read through `lodestone-game`'s own fold ---------
+    // --- The same server truth, folded a second *way* --------------------------
     //
-    // Everything above went through `ClientHandle::scoreboard()` (the client's
-    // read-model). Now assert the identical server-set values through the game
-    // `Scoreboard`/`BossBarSet` that the drain task folded from the same live
-    // packets. This is the assertion that actually protects this crate: it fails
-    // if game's `apply()` transposes a field, drops an update, or mis-maps an
-    // enum — against the server, not against the client. Poll because the fold
-    // runs in the background task and may lag the client's snapshot by a tick.
+    // This block used to be the interesting half: `ClientHandle::scoreboard()`
+    // was a *different type with a different fold*, so comparing it against
+    // `lodestone-game`'s aggregate compared two implementations. Stage 3 of
+    // `docs/bevy-migration.md` deleted that duplication, and this test is the
+    // clearest statement of why it was a defect: it existed to check that two
+    // folds of one packet stream agreed.
+    //
+    // What it now pins is still worth having, and is arguably sharper: above,
+    // the fold ran inside the client as `lodestone_ecs::session`'s `NetIngest`
+    // *systems*; here, the drain task calls `Scoreboard::apply` / `BossBarSet::apply`
+    // directly on the same `ClientEvent`s. Agreement therefore means the schedule
+    // registration actually reaches the components — the island check the
+    // repo's dominant defect class demands — and disagreement means either the
+    // systems are not wired or the aggregate mutates differently under them.
+    // Poll because the fold runs in the background task and may lag by a tick.
     struct GameSnapshot {
         objective_display: String,
         render_type: GRenderType,

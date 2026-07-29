@@ -59,7 +59,8 @@ for the same class of reason one level down: a slot *absent* from the list is
 net thread → SharedState::apply(event)
   ├─ TimeChanged            → WorldTime resource (Stage 0)
   ├─ handles_event(e)       → IngestQueue.push(e); world.run_schedule(NetIngest)
-  └─ everything else        → Inner::apply (player, players, scoreboard, boss bars, menus)
+  ├─ session::handles_event → the same queue (Stage 3's session folds)
+  └─ everything else        → Inner::apply (the local-player echo only)
 ```
 
 Inside `NetIngest`: `IngestSet::Drain` (`drain_ingest_queue` moves the queue into

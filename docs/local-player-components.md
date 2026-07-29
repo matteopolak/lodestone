@@ -143,8 +143,11 @@ disconnected would record the current input into `LastPlayerInput` as "already
 sent", and the first real change after connecting would then be suppressed as a
 redundant resend. There is a test (`a_closed_session_queues_nothing_and_latches_nothing`).
 
-Session phase is Stage 3's; when it moves onto the local player, `Egress`
-collapses into it.
+Session phase moved onto the local player in Stage 3 (`lodestone_ecs::session::Phase`,
+see [`session-components.md`](./session-components.md)) and `Egress` **did not**
+collapse into it: `in_world` is now derived from that component, but `live` is
+`vanilla_atlas.is_some() && net.is_some()`, an asset/config fact rather than a
+phase. The resource survives as the derived two-bit gate it already was.
 
 ## How to change it, and the gotchas
 

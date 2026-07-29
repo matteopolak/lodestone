@@ -84,7 +84,6 @@ mod error;
 mod handle;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_time;
-mod scoreboard;
 mod spawn;
 mod state;
 
@@ -92,7 +91,18 @@ pub use builder::ClientBuilder;
 pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};
-pub use scoreboard::{BossBar, Objective, ScoreEntry, Scoreboard, Team};
+// Stage 3 of `docs/bevy-migration.md` deleted this crate's own `scoreboard`
+// module — a second `Scoreboard`/`Objective`/`ScoreEntry`/`Team`/`BossBar` set
+// folding the same `ClientEvent` stream as `lodestone-game`'s. The read-model
+// now hands out `lodestone-game`'s aggregates, re-exported here so a bot author
+// can name them without a second dependency.
+pub use lodestone_game::bossbar::{BossBar, BossBarColor, BossBarOverlay, BossBarSet};
+pub use lodestone_game::scoreboard::{
+    CollisionRule as TeamCollisionRule, DisplaySlot as ScoreboardSlot, NumberFormat as ScoreFormat,
+    Objective, RenderType as ScoreRenderType, ScoreEntry, Scoreboard, Team, TeamColor as TeamHue,
+    Visibility as TeamVisibility,
+};
+pub use lodestone_game::tablist::{GameProfile, TabList};
 pub use state::{EntityView, OpenMenuSnapshot, PlayerSnapshot};
 
 // The world read-model hands out owned section and light snapshots; re-export the

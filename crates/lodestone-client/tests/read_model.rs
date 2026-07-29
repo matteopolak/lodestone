@@ -13,8 +13,8 @@ use std::time::Duration;
 use lodestone_client::{
     BlockPos, BossAction, BossColor, BossOverlay, ChunkPos, ClientBuilder, ClientEvent,
     CollisionRule, ConnectionState, Directive, DisplaySlot, LoginProfile, NumberFormat,
-    ObjectiveMode, ObjectiveRenderType, OpenMenuSnapshot, Rotation, ServerAddress, TeamAction,
-    TeamParameters, Vec3, Visibility, WaitError,
+    ObjectiveMode, ObjectiveRenderType, OpenMenuSnapshot, Rotation, ScoreRenderType,
+    ScoreboardSlot, ServerAddress, TeamAction, TeamParameters, Vec3, Visibility, WaitError,
 };
 use lodestone_model::event::{
     ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
@@ -1456,21 +1456,25 @@ async fn scoreboard_folds_objectives_scores_and_display() {
         events.recv().await.unwrap();
     }
 
+    // Stage 3: `handle.scoreboard()` is `lodestone_game::scoreboard::Scoreboard`
+    // now — the aggregate the HUD has always rendered from — so this test speaks
+    // its vocabulary (`ScoreboardSlot`, `sorted_scores`) rather than the deleted
+    // client-local type's.
     let sb = handle.scoreboard();
     let obj = sb.objective("kills").expect("objective folded");
-    assert_eq!(obj.display_name, Some(Text::literal("Kills")));
-    assert_eq!(obj.render_type, Some(ObjectiveRenderType::Integer));
-    assert_eq!(sb.displayed(DisplaySlot::Sidebar), Some("kills"));
+    assert_eq!(obj.display_name, Text::literal("Kills"));
+    assert_eq!(obj.render_type, ScoreRenderType::Integer);
+    assert_eq!(sb.displayed(ScoreboardSlot::Sidebar), Some("kills"));
 
     // Sidebar order: Bob(12) before Alice(5), highest first.
-    let scores = sb.scores("kills");
+    let scores = sb.sorted_scores("kills");
     assert_eq!(scores.len(), 2);
-    assert_eq!(scores[0].holder, "Bob");
-    assert_eq!(scores[0].value, 12);
-    assert_eq!(scores[1].holder, "Alice");
-    assert_eq!(scores[1].value, 5);
-    // The slot resolver returns the same order for the objective on the slot.
-    assert_eq!(sb.scores_in_slot(DisplaySlot::Sidebar), scores);
+    assert_eq!(scores[0].0, "Bob");
+    assert_eq!(scores[0].1.value, 12);
+    assert_eq!(scores[1].0, "Alice");
+    assert_eq!(scores[1].1.value, 5);
+    // The slot resolver names the same objective the sidebar slot holds.
+    assert_eq!(sb.sidebar_for_color(None), Some("kills"));
     assert_eq!(sb.score("kills", "Alice").map(|s| s.value), Some(5));
 
     drop(handle);
@@ -1529,16 +1533,16 @@ async fn objective_remove_purges_scores_and_display() {
     // Precondition: everything is present before the remove.
     let before = handle.scoreboard();
     assert!(before.objective("kills").is_some());
-    assert_eq!(before.displayed(DisplaySlot::Sidebar), Some("kills"));
-    assert_eq!(before.scores("kills").len(), 1);
+    assert_eq!(before.displayed(ScoreboardSlot::Sidebar), Some("kills"));
+    assert_eq!(before.sorted_scores("kills").len(), 1);
 
     peer.write_packet(REMOVE, &[]).await.unwrap();
     events.recv().await.unwrap();
 
     let after = handle.scoreboard();
     assert!(after.objective("kills").is_none());
-    assert!(after.scores("kills").is_empty());
-    assert_eq!(after.displayed(DisplaySlot::Sidebar), None);
+    assert!(after.sorted_scores("kills").is_empty());
+    assert_eq!(after.displayed(ScoreboardSlot::Sidebar), None);
 
     drop(handle);
 }
@@ -1800,9 +1804,12 @@ async fn boss_bars_insertion_ordered_and_mutated() {
     for _ in 0..3 {
         events.recv().await.unwrap();
     }
+    // Stage 3: `boss_bars()` is `lodestone_game::bossbar::BossBarSet` now, whose
+    // `iter()` is the thing that carries insertion order (the `HashMap` behind it
+    // does not).
     let bars = handle.boss_bars();
     assert_eq!(
-        bars.iter().map(|b| b.id).collect::<Vec<_>>(),
+        bars.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         vec![id1, id2, id3],
         "insertion order preserved"
     );
@@ -1812,14 +1819,18 @@ async fn boss_bars_insertion_ordered_and_mutated() {
         events.recv().await.unwrap();
     }
     let bars = handle.boss_bars();
-    assert_eq!(bars[1].progress, 0.25, "id2 progress updated");
-    assert_eq!(bars[0].title, Text::literal("renamed"), "id1 title updated");
+    assert_eq!(bars.get(&id2).unwrap().progress, 0.25, "id2 progress updated");
+    assert_eq!(
+        bars.get(&id1).unwrap().title,
+        Text::literal("renamed"),
+        "id1 title updated"
+    );
 
     peer.write_packet(REMOVE, &[]).await.unwrap();
     events.recv().await.unwrap();
     let bars = handle.boss_bars();
     assert_eq!(
-        bars.iter().map(|b| b.id).collect::<Vec<_>>(),
+        bars.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         vec![id1, id3],
         "id2 removed, order of the rest intact"
     );

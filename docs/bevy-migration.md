@@ -591,6 +591,45 @@ control.
 
 ### Stage 3 — session and HUD state; the double fold dies
 
+**Landed.** See [`session-components.md`](./session-components.md) for the shipped shape. Five
+places where the plan below was wrong:
+
+- **The double fold was a *triple* implementation, and one leg was already dead.** Besides the two
+  §1.1 named, `lodestone_game::bossbar::BossBarSet` was a complete, unit-tested fold of the same
+  event family with **no production caller**, and `NetClient::sidebar()` — the only reader of
+  `lodestone_client::Scoreboard` on the shell side — had **zero callers**, so the client's scoreboard
+  never reached a pixel. The two live folds also *disagreed* (3 display slots vs 19, create-on-demand
+  vs drop for a score preceding its objective, `Option<Text>` vs defaulted display name), and the
+  player-list fold in `Inner::apply` had **no `PlayerListRemove` arm at all** — a player who left the
+  server never left `ClientHandle::players()`. Collapsing was right; the plan understated it.
+- **`Inner` is not empty and could not be.** The authority test as written ("`Inner` is empty at the
+  end of this stage and the struct is deleted") is unreachable while there are three `World`s.
+  `PlayerSnapshot` stays, per Stage 2's own ruling, and its *vitals* remain a genuine duplicate of
+  the driver's `Vitals`/`Xp`/`ServerEntityId`/`Dead` — because those are read by **systems** in the
+  driver's `World` (`Dead` gates `MovementIntent`, `ServerEntityId` filters mob effects) and a
+  component in one `World` is invisible to a system in the other. That residue closes at §4.1, not
+  here. What did happen is what the test was for: every one of the four `Inner` fields the stage
+  names is deleted, and `Sim` lost eleven fields plus the `SessionPhase` definition.
+- **`chat_log` did not move.** Every push needs `Sim.clock_secs` and every read needs it again to
+  age the line for the vanilla fade; a component would carry a second copy of `Sim`'s clock. It
+  moves with `clock_secs`, in Stage 5.
+- **`Egress` did not collapse into the session phase**, as Stage 2's note predicted it would. Its
+  `in_world` bit *is* now derived from the `Phase` component, but its `live` bit is
+  `vanilla_atlas.is_some() && net.is_some()` — an asset/config fact, not a phase — so the resource
+  survives as the derived gate it already was.
+- **`lodestone_game::player_state::HudState` is a fourth implementation of the vitals fold, also
+  with no production caller, and it is the wrong shape to adopt.** Its `health` is an `f32`
+  defaulting to `20.0` with no "reported yet" bit; both live folds carry one, and the HUD needs it
+  (the offline world must draw *no* health bar, not a full one). Adopting it is a change to a
+  canonical aggregate, not a migration step.
+
+One bug shipped and was caught inside the stage, and it is worth reading rather than summarising:
+`SessionPlugin` registered its own `drain_ingest_queue` "idempotently" beside `IngestPlugin`'s, but
+`add_systems` does not deduplicate — the second copy cleared the batch the first had filled, so the
+real `new_ingest_handle()` configuration folded **nothing** while `SessionPlugin`'s own unit tests
+stayed green on a one-plugin `App`. A closed loop, with no pixels involved. See
+[`session-components.md`](./session-components.md)'s gotchas.
+
 **Moves:** `chat_log`, `tab_list`, `scoreboard`, `hud_effects`, `title`, `action_bar`, `health`,
 `food`, `experience`, `phase`, `dead`, `respawn_count`, `local_entity_id`
 (`sim.rs:364-435`) and `Inner.{players, scoreboard, boss_bars, menus}` (`state.rs:186-193`) →
