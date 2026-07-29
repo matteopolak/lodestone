@@ -112,6 +112,6 @@ pub use lodestone_model::{
     BlockPos, BossAction, BossColor, BossOverlay, ChatAckInfo, ChatKind, ChunkPos, ClientAction,
     ClientEvent, CollisionRule, ConnectionState, DimensionId, Directive, DisplaySlot, GameMode,
     Hand, LoginProfile, NumberFormat, ObjectiveMode, ObjectiveRenderType, PlayerListEntry,
-    ResourceKey, Rotation, ServerAddress, TeamAction, TeamColor, TeamParameters, Text, Vec3,
-    VersionAdapter, Visibility,
+    Reported, ResourceKey, Rotation, ServerAddress, TeamAction, TeamColor, TeamParameters, Text,
+    Vec3, VersionAdapter, Visibility,
 };

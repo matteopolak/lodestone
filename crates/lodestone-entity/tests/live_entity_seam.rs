@@ -59,7 +59,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
+use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, Reported, ServerAddress};
 use lodestone_entity::attribute::default_def;
 use lodestone_entity::{AttributeInstance, Modifier, Operation};
 use uuid::Uuid;
@@ -533,7 +533,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
         probe = handle
             .entities()
             .into_iter()
-            .find(|e| e.custom_name == Some(Some(PROBE_NAME.to_string())));
+            .find(|e| e.custom_name == Reported::Reported(Some(PROBE_NAME.to_string())));
         // Wait until the attribute packet has also landed, so a single poll sees
         // a fully-populated view rather than metadata-then-attributes racing.
         if probe
@@ -593,7 +593,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
         "\n\n=== E7 SEAM GAP: no entity carried the probe's custom name ===\n\
          Either `set_entity_data` never crossed the public API (metadata seam missing),\n\
          or the metadata decode dropped the custom-name field. Expected a pig whose\n\
-         `custom_name == Some(Some(\"LodestarPig\"))` in handle.entities().\n",
+         `custom_name == Reported::Reported(Some(\"LodestarPig\"))` in handle.entities().\n",
     );
 
     // Known-value metadata checks. Each of these is a distinct serializer on the
@@ -603,7 +603,7 @@ async fn entity_metadata_and_attributes_cross_the_client_public_api() {
     // at least one of these.
     assert_eq!(
         view.custom_name,
-        Some(Some(PROBE_NAME.to_string())),
+        Reported::Reported(Some(PROBE_NAME.to_string())),
         "custom name mismatch (optional-component / network-NBT decode)"
     );
     assert_eq!(

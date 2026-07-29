@@ -41,7 +41,7 @@ use std::time::Duration;
 
 use lodestone_core::{Reader, Writer};
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, LoginProfile, ServerAddress, VersionAdapter,
+    ClientEvent, ConnectionState, Directive, LoginProfile, Reported, ServerAddress, VersionAdapter,
 };
 use lodestone_net::Connection;
 use lodestone_testsupport::{RconClient, unique_username};
@@ -404,11 +404,11 @@ async fn dropped_item_metadata_carries_its_item() {
     );
 
     let metadata = replay(&payload);
-    let stack = metadata
-        .item
-        .clone()
-        .expect("the drop's metadata must carry the item field")
-        .expect("a summoned drop is never the empty stack");
+    let stack = match metadata.item.clone() {
+        Reported::Unreported => panic!("the drop's metadata must carry the item field"),
+        Reported::Reported(None) => panic!("a summoned drop is never the empty stack"),
+        Reported::Reported(Some(stack)) => stack,
+    };
     assert_eq!(stack.item.to_string(), "minecraft:diamond");
     assert_eq!(stack.count, 1);
     assert!(
@@ -462,11 +462,11 @@ async fn unmodeled_component_still_yields_the_item() {
     );
 
     let metadata = replay(&payload);
-    let stack = metadata
-        .item
-        .clone()
-        .expect("an unmodeled component must not cost us the item field")
-        .expect("a summoned drop is never the empty stack");
+    let stack = match metadata.item.clone() {
+        Reported::Unreported => panic!("an unmodeled component must not cost us the item field"),
+        Reported::Reported(None) => panic!("a summoned drop is never the empty stack"),
+        Reported::Reported(Some(stack)) => stack,
+    };
     assert_eq!(
         stack.item.to_string(),
         "minecraft:diamond_pickaxe",

@@ -24,7 +24,8 @@
 
 use lodestone_core::{Reader, Writer};
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, EntityMetadataUpdate, ItemStack, VersionAdapter,
+    ClientEvent, ConnectionState, Directive, EntityMetadataUpdate, ItemStack, Reported,
+    VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
@@ -77,11 +78,11 @@ fn replay(payload: &[u8]) -> EntityMetadataUpdate {
 }
 
 fn stack(metadata: &EntityMetadataUpdate) -> ItemStack {
-    metadata
-        .item
-        .clone()
-        .expect("the packet carried the item field")
-        .expect("a summoned drop is never the empty stack")
+    match metadata.item.clone() {
+        Reported::Unreported => panic!("the packet carried the item field"),
+        Reported::Reported(None) => panic!("a summoned drop is never the empty stack"),
+        Reported::Reported(Some(stack)) => stack,
+    }
 }
 
 /// The bytes the server sent for a plain diamond drop decode to that item —
@@ -100,7 +101,7 @@ fn server_bytes_for_a_diamond_drop_carry_the_item() {
     );
     // Nothing else rides an item entity's metadata, and nothing must be invented.
     assert_eq!(metadata.health, None);
-    assert_eq!(metadata.custom_name, None);
+    assert_eq!(metadata.custom_name, Reported::Unreported);
     assert_eq!(metadata.variant, None);
 }
 
@@ -161,7 +162,7 @@ fn an_unmodeled_component_parks_the_reader_mid_payload() {
         "an unmodeled component cannot be skipped, so the decode is incomplete"
     );
     assert!(
-        decoded.metadata.item.is_some(),
+        decoded.metadata.item.is_reported(),
         "the item decoded before the unmodeled component must still be carried"
     );
     assert_eq!(
@@ -203,8 +204,8 @@ fn fields_after_a_partial_stack_are_abandoned_not_misread() {
         decoded
             .metadata
             .item
-            .as_ref()
-            .and_then(|s| s.as_ref())
+            .clone()
+            .into_value()
             .map(|s| s.item.to_string()),
         Some("minecraft:diamond_pickaxe".to_owned()),
         "the item ahead of the abandonment point is kept"
@@ -235,7 +236,7 @@ fn both_captures_raise_an_event_rather_than_being_dropped() {
         assert!(entity_id > 0, "{name}: captured a real entity id");
         let metadata = replay(&payload);
         assert!(
-            metadata.item.is_some(),
+            metadata.item.is_reported(),
             "{name}: the drop's identity must reach the event"
         );
     }
