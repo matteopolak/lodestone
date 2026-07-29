@@ -7,6 +7,19 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   factor, bounce, stuck multiplier, climbable and `blocksMotion`: the block facts that
   are *not* geometry, where they live, why they sit outside the version seam, and the
   measured 2,618 states the old shape-derived `blocksMotion` got wrong.
+- [Collision shapes](./collision-shapes.md) — the per-block-state collision census
+  reaching the physics engine, why `blocks_motion` moved from a geometry
+  approximation to a dumped census of its own, and the `is_solid_face`/`fluid_at`
+  approximations that remain.
+- [Block outline and interaction shapes](./block-outline-shapes.md) — the third
+  shape census (selection/pick, distinct from collision): why cobweb outlines to a
+  full cube while colliding with nothing, `is_pickable` reading it for real now,
+  and the selection-box render hook that exists but nothing installs yet.
+- [Item prototype components](./item-prototypes.md) — `max_stack_size`,
+  `max_damage` and `equippable`, the three item facts a clientbound stack never
+  carries because vanilla keeps them in the item's prototype rather than the wire
+  patch, and the seam that folds them in at decode time (the fix that made armour
+  equippable).
 - [Fluid classification](./fluid-classification.md) — the one answer to "does this
   block state carry water?", shared by the mesher and by physics (swimming, fog,
   overlay, ambient sounds) — and why that is a different question from "can I break
@@ -91,11 +104,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   why a native plugin is not a substitute for the sandboxed WASM host.
 - [Plugin API](./plugin-api.md) — the plugin surface as a specification: what a
   bevy plugin can read, write, schedule and intercept today versus what Stages
-  2–6 must still deliver, why a compiled-in plugin has no sandbox, why a native
-  plugin and the WASM host are not substitutes, and the gap list — four ABI
-  pieces (`TickSet::Intent`, the `SendAction`/`RawPacket` messages, an `Extract`
-  debug-geometry channel, and reachable block-physics constants) that no stage
-  currently claims.
+  4–6 must still deliver, why a compiled-in plugin has no sandbox, why a native
+  plugin and the WASM host are not substitutes, and the remaining gap list — the
+  `TickSet::Intent` anchor, the `SendAction`/`RawPacket` messages (partly closed
+  by the `ActionQueue` resource) and an `Extract` debug-geometry channel, now
+  that reachable block-physics constants closed in `24af787`.
+- [The third-person player body](./third-person-player-body.md) — the render
+  path that folds the local player's own state into an ordinary `EntityDraw` so
+  it draws through the same resolve/cull/pose/upload pipeline every mob does,
+  why it must never share a pose function with the first-person arm, and why it
+  is zero pixels until a third-person camera mode and a collision-aware
+  pullback exist.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded

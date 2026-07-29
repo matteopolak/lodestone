@@ -5,8 +5,11 @@
 The surface a third-party bevy plugin uses to do everything native Lodestone code can do — read
 world/entity/player state, write intent, order systems against internal ones, and observe events —
 specified against `docs/bevy-migration.md`'s six-stage plan. This is a specification, not an
-implementation: Stages 0–1 are landed (`crates/lodestone-ecs`, `415138f`, `8be6544`); Stages 2–6 are
-not. Read this before building any of them — several requirements below are things a stage must
+implementation: Stages 0–3 are landed (`crates/lodestone-ecs`, `415138f`, `8be6544`, `beae37c`,
+`b2baf02`); Stages 4–6 are not. (Stages 2 and 3 landed after this document's first draft — see
+"Two items below that landed after this document was written" for what that changed and, just as
+important, what it did not.) Read this before building any of them — several requirements below are
+things a stage must
 deliver, and finding that out at Baritone time (`docs/baritone-port.md`) would mean reopening
 finished stages.
 
@@ -72,6 +75,50 @@ egress that exists right now is off-ECS: `lodestone_client::ClientHandle::send_a
 which predate the ECS entirely. A plugin cannot reach either from inside a system today because
 neither is a bevy resource — this is one of the concrete Stage 2/6 deliverables (§4 below).
 
+### Correction: Stages 2 and 3 landed after the paragraphs above were written
+
+The three paragraphs above (components, resources, event/intent) describe the
+tree as it stood after Stage 1 (`8be6544`), which was current when this document
+was first drafted (`0b0facf`). `beae37c` (Stage 2) and `b2baf02` (Stage 3) landed
+immediately after, in the same twelve-commit run, and moved several of the
+"not yet built" claims above. Re-verified directly against the tree rather than
+assumed from the stage numbering:
+
+- **The local player is components now.** `crates/lodestone-ecs/src/player.rs`
+  has `PhysicsState`, `MovementIntent(MovementInput)`, `Submersion`,
+  `PrevPosition`, `Flying`, `SelectedSlot`, `LastPlayerInput`, `Dead` on the
+  `LocalPlayer` entity, plus a `TickSet::Physics` system that advances them by
+  calling `lodestone_physics` (the integrator itself stayed a plain library, per
+  §8). See [`docs/local-player-components.md`](./local-player-components.md).
+  `MovementIntent` existing means the second gap item below ("no `MovementIntent`
+  or `LookIntent` component exists") is now half true, not fully true — see that
+  item for the precise remaining half.
+- **The sanctioned egress exists, as a resource rather than a message.**
+  `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
+  (`player.rs:530`) and drained every tick by the driver
+  (`lodestone-shell/src/sim.rs:1529`, `resource_mut::<ActionQueue>()`). A plugin
+  system can push a `ClientAction` onto it via `ResMut<ActionQueue>` today — the
+  capability `docs/bevy-migration.md` §6 asked for (`MessageWriter<SendAction>`)
+  exists under a different shape (a plain `Vec` resource, not a bevy `Message`),
+  which is close enough that "no egress reachable from inside a system" is no
+  longer accurate. Whether that shape is the one to keep, or whether it should
+  still become a `Message` for the ordering/observability a `MessageWriter` gives
+  for free, is open.
+- **Session/HUD state is components too.** `crates/lodestone-ecs/src/session.rs`
+  holds the scoreboard/tab-list/boss-bar/menu/health/food/experience/phase fold,
+  with the `ambiguity_detection: LogLevel::Error` gate `docs/bevy-migration.md`
+  §Stage 3 asked for (`session.rs:681`). See
+  [`docs/session-components.md`](./session-components.md).
+- **What is still genuinely missing, unchanged:** `RawPacket`/raw-event
+  observation (`grep -rn RawPacket crates` is still empty) and `LookIntent` (see
+  the second gap item below). The chunk world is still off-ECS (Stage 4, in
+  progress elsewhere as of this writing).
+
+This correction is deliberately narrow — full paragraph-by-paragraph rewrites of
+the material above, and of the stage-map table further down, are a larger pass
+than this note; treat the bullets here as the authoritative current state where
+they overlap with the prose above, and the prose above as Stage-1-era history.
+
 ### What stays privileged, and why
 
 Two things are off-limits **by construction**, not by a permission check a plugin could route
@@ -134,46 +181,33 @@ all today.
 `docs/baritone-port.md` §7.6 confirms `gpu.rs` has a single-box block-outline pipeline and nothing
 general. Unaddressed by `67ff7c3`.
 
-**4. `VersionAdapter::block_facts` — partially closed, and the remaining half is the important
-half.** `67ff7c3` added exactly five methods to `crates/lodestone-model/src/adapter.rs`:
+**4. `VersionAdapter::block_facts` — the physics-constants half closed in `24af787`; `PathType` is the
+remaining gap.** `67ff7c3` added exactly five methods to `crates/lodestone-model/src/adapter.rs`:
 `block_collision(state_id) -> Option<&'static [BlockAabb]>`, `block_name(state_id) -> Option<&'static
 str>`, `block_outline`, `block_interaction`, and `item_prototype(item: &str) -> Option<ItemPrototype>`.
-Verified directly against the trait definition (`adapter.rs:673-830`) — this closes the *shape* and
-*name-lookup* half of the gap: a plugin (or `lodestone-nav`) can now get real per-state collision
-geometry and the block's canonical name through `VersionAdapter` without depending on a version
-crate.
+Verified directly against the trait definition — this closed the *shape* and *name-lookup* half of the
+gap: a plugin (or `lodestone-nav`) can get real per-state collision geometry and the block's canonical
+name through `VersionAdapter` without depending on a version crate.
 
-**It does not close the *physics-constants* half**, and this is worth stating precisely because it is
-easy to assume "block_facts landed" from the commit message alone:
+At the time this document was first written, the *physics-constants* half was still closed off: the
+six name-keyed constants `docs/baritone-port.md` §7.5 asked for lived as six private functions inside
+`crates/lodestone-shell/src/collision.rs`, reachable by nothing outside the driver crate. **That has
+since changed.** `24af787` moved them to a public function,
+`lodestone_model::block_physics(block_name: &str) -> BlockPhysics`
+(`crates/lodestone-model/src/adapter.rs`), returning a `BlockPhysics { friction, speed_factor,
+jump_factor, bounce_restitution, stuck_multiplier, climbable }` struct — the same six fields, now one
+call instead of six private match statements, and callable by anything depending on `lodestone-model`,
+which every plugin already does. `collision.rs`'s `physics_at` (`collision.rs:293`) is now a thin
+caller of it, not the owner: `v.name_of(...).map_or(DEFAULT_BLOCK_PHYSICS, block_physics)`. This is
+still deliberately **not** a `VersionAdapter` method — the data is name-keyed and stable across
+versions, not state-keyed, so putting it behind the version seam would be the over-engineering §"how
+to change it" below warns against — it is a plain function in the version-free crate a plugin already
+depends on, which is exactly where `docs/baritone-port.md` §7.5 wanted it to end up.
 
-- `friction`, `speed_factor`, `jump_factor`, `bounce_restitution`, `stuck_multiplier`, and
-  `climbable` — the six name-keyed constants `docs/baritone-port.md` §7.5 asked to fold into
-  `block_facts` — were **not** added to `VersionAdapter`, and they are **not** in any `protocol/v770`
-  census either. They were implemented as six private, module-level functions directly in
-  `crates/lodestone-shell/src/collision.rs` (`friction_for`, `speed_factor_for`, `jump_factor_for`,
-  `bounce_for`, `stuck_for`, `is_climbable_name`, lines 262–345), hand-transcribed from
-  `.cache/mc/26.2/src/.../Blocks.java` and keyed by the block name that `block_name` now supplies.
-  None of the six is `pub`.
-- `PathType` per state is unchanged: `crates/protocol/v770/src/path_types.rs`'s census still has no
-  `VersionAdapter` method (`lodestone_model::PathTypeRegistry` exists; nothing constructs one from
-  v770 data) — confirmed still true.
-
-**Why this matters more than it looks:** these six constants are exactly right to keep out of
-`VersionAdapter` in one sense — they are `BlockBehaviour.Properties` values keyed by block *name*,
-which is stable across versions, not by state id, which is renumbered every version — so putting
-them behind the version seam would be over-engineering a lookup that does not actually vary by
-protocol. But putting them as **private** functions inside `lodestone-shell` means they now live in
-the one place a plugin structurally cannot reach them: `lodestone-shell` owns the driver and the
-`App`, and a plugin depending on it to reuse six match statements is backwards. The result is that
-`docs/baritone-port.md`'s "the important one" gap is *more* closed for the player's own movement
-(§3.2's parity problem is fixed — `LiveCollision` now implements all thirteen `CollisionView`
-methods for real) and *no more* closed for a plugin than it was before `67ff7c3`: a navigator still
-has no public route to friction/speed/jump/bounce/stuck/climbable, only now the table it would
-duplicate lives in a different file than it used to. **The fix is to make those six functions `pub`
-and move them to `lodestone-model` (or a new small module `lodestone-model::block_facts`) keyed on
-the same `&str` `block_name` already returns** — not a new `VersionAdapter` method, since the data is
-not version-owned. This is a small, mechanical follow-up and it is the single highest-leverage gap
-left for a pathfinding-class plugin, per `docs/baritone-port.md` §7.5's own framing.
+**What is still open:** `PathType` per state. `crates/protocol/v770/src/path_types.rs`'s census still
+has no `VersionAdapter` method (`lodestone_model::PathTypeRegistry` exists; nothing constructs one
+from v770 data) — confirmed still true, unaffected by either `67ff7c3` or `24af787`. That is the one
+piece of `docs/baritone-port.md` §7.5's "the important one" gap still without a route for a plugin.
 
 ### Native versus WASM
 
@@ -187,7 +221,7 @@ other:
 | loading | compiled into the binary, `add_plugins` | loaded at runtime |
 | filesystem / network | unrestricted | denied unless a capability is granted |
 | stability | pinned to `bevy_ecs` 0.19's API; breaks on bevy bumps | Lodestone's own ABI, versioned by Lodestone |
-| exists today | Stages 0–1 only (entity read/write); nothing beyond | not started — no crate, no design doc yet |
+| exists today | Stages 0–3 (entity, local-player and session/HUD read/write, plus the `ActionQueue` egress); chunk world and beyond not started | not started — no crate, no design doc yet |
 
 **What the WASM boundary costs, concretely, using the pathfinder as the stress case.**
 `docs/baritone-port.md` §4 is unambiguous that `lodestone-nav`'s search runs on a dedicated OS thread
@@ -226,32 +260,34 @@ cheaper substitute for the other is the mistake `docs/bevy-migration.md` warns a
 | entity components (mobs, items): read + write | Stage 1 | **done** |
 | `NetIngest`/`GameTick`/`Update`/`Extract` schedules and their current sets | Stage 0 | **done** |
 | `WorldTime` resource | Stage 0 | **done** |
-| local player position/velocity/on-ground/collision as components | Stage 2 | not started |
-| `MovementIntent` (analog), `LookIntent` | Stage 2 | not started — **and no `TickSet::Intent` anchor is specified for it yet either; §5 flags this as a Stage-2 must-add, not merely a Stage-2 nice-to-have** |
-| `TickSet::Intent` ordering anchor | Stage 2 (recommended) | **gap — no stage currently names this explicitly; `docs/bevy-migration.md` §4.2 does not list it** |
-| health/hunger/effects/inventory/tab-list/scoreboard as components | Stage 3 | not started |
-| exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | not started |
+| local player position/velocity/on-ground/collision as components | Stage 2 | **done** — landed as `beae37c`, after this row was written; see the correction note above and [`docs/local-player-components.md`](./local-player-components.md) |
+| `MovementIntent` (analog), `LookIntent` | Stage 2 | **`MovementIntent` done, `LookIntent` still missing** — landed partly with `beae37c`; see the correction note above. `LookIntent` distinct from the camera is unaffected by this and remains a real gap |
+| `TickSet::Intent` ordering anchor | Stage 2 (recommended) | **gap — re-verified against `crates/lodestone-ecs/src/sets.rs` directly: `TickSet` is still exactly `Input, Physics, Predict, Animate, Send`, no `Intent` variant** |
+| health/hunger/effects/inventory/tab-list/scoreboard as components | Stage 3 | **done** — landed as `b2baf02`, after this row was written; see the correction note above and [`docs/session-components.md`](./session-components.md) |
+| exactly-one-writer ambiguity gate (`ambiguity_detection: Error`) | Stage 3 | **done** — `crates/lodestone-ecs/src/session.rs:681` |
 | chunk world as a `Resource` with batched snapshot reads | Stage 4 | not started |
-| `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **gap — `docs/bevy-migration.md` §6 specifies it but no stage in §7 lists "add the egress message" as a deliverable; it is implied by Stage 2 (local player) but never named** |
-| raw-packet observation (`RawPacket` message) | unassigned | **gap — §5.1 proposes it, no stage claims it** |
+| `SendAction` message / `MessageWriter<SendAction>` egress | unassigned | **closed under a different shape** — `player.rs`'s `ActionQueue(Vec<ClientAction>)` resource landed with Stage 2 and is reachable from a plugin system via `ResMut<ActionQueue>`; see the correction note above. Not a bevy `Message`, so the ordering/observability a `MessageWriter` gives for free is still absent — recorded here as a design question, not a completeness gap |
+| raw-packet observation (`RawPacket` message) | unassigned | **gap — re-verified: `grep -rn RawPacket crates` is still empty** |
 | `Sim` deleted; plugin no longer reaches into shell internals | Stage 5 | not started |
 | async bot tier / headless plugin host | Stage 6 | not started |
-| world-space debug-geometry `Extract` channel | unassigned | **gap — `docs/baritone-port.md` §7.6 names it, no stage in `docs/bevy-migration.md` §7 lists it** |
-| block physics constants (friction/speed/jump/bounce/stuck/climbable) reachable without depending on `lodestone-shell` | unassigned | **gap — see §3 above; a small follow-up (`pub` + relocate), not a new stage, but nothing currently owns doing it** |
+| world-space debug-geometry `Extract` channel | unassigned | **gap — re-verified against `crates/lodestone-ecs/src/sets.rs` directly: `ExtractSet` is still exactly `Terrain, Entities, Hud`, no debug/overlay set** |
+| block physics constants (friction/speed/jump/bounce/stuck/climbable) reachable without depending on `lodestone-shell` | unassigned | **closed in `24af787`** — `lodestone_model::block_physics(&str) -> BlockPhysics`; see §3 above |
 | `PathType` per state through the seam | unassigned | **gap — `docs/baritone-port.md` §3.3 named this in the original document; still true today** |
 
-**The gap list, restated as the single most useful output of this document:** four items above have
-**no stage that claims them** at all in `docs/bevy-migration.md`'s current §7 — the `TickSet::Intent`
-anchor, the `SendAction`/`RawPacket` messages, the `Extract` debug-geometry channel, and the
-relocation of the six block-physics constants. Each is small in isolation (an enum variant, a message
-type, a `Vec` resource drained per frame, six functions made `pub` and moved). None is *hard* — the
-risk is exactly the one `CLAUDE.md` names as the dominant defect class here: a stage lands, its
-authority test passes, and one of these four is quietly never added because no stage's checklist
-named it. **Recommendation:** fold the `TickSet::Intent` anchor and the `SendAction` message into
-Stage 2 explicitly (both are about the local player becoming ECS-authoritative and have no reason to
-wait), fold the debug-geometry channel into Stage 4 or 5 (it wants the chunk-world resource to be
-useful for anything spatial), and treat the block-physics-constants relocation as a standalone,
-stage-independent fix landable at any time — it depends only on `block_name`, which already exists.
+**The gap list, restated as the single most useful output of this document:** at the time this table
+was first written, four items had **no stage that claims them** at all in `docs/bevy-migration.md`'s
+§7. One of those four — the block-physics constants — closed in `24af787`, as a stage-independent fix
+exactly as recommended below, not by acquiring a stage. The other three remain open and re-verified
+current, directly against `crates/lodestone-ecs/src/sets.rs` for the two ordering-anchor gaps: the
+`TickSet::Intent` anchor, the `SendAction`/`RawPacket` messages (though `SendAction`'s underlying
+capability now exists in a different shape — a plain resource, not a message — via `ActionQueue`, per
+the correction note above), and the `Extract` debug-geometry channel. Each is small in isolation (an
+enum variant, a message type, a `Vec` resource drained per frame). None is *hard* — the risk is
+exactly the one `CLAUDE.md` names as the dominant defect class here: a stage lands, its authority test
+passes, and one of these is quietly never added because no stage's checklist named it. **Recommendation
+(unchanged for the three still open):** fold the `TickSet::Intent` anchor into whatever stage adds
+`LookIntent`, and fold the debug-geometry channel into Stage 4 or 5 (it wants the chunk-world resource
+to be useful for anything spatial).
 
 ### Two Stage-1 constraints that shape the API, both verified rather than assumed
 
@@ -295,13 +331,12 @@ is not.
   a borrow-shaped subsystem can become a `Resource` — the borrow has to be resolved (own the data) or
   the type has to change, not just add a derive.
 - **When closing a version-seam gap, check whether the data is state-keyed or name-keyed before
-  choosing where it lives.** The `block_facts` half-fix in §3 above is the cautionary example: state
-  ids are version-owned by construction (they're renumbered every version, per `adapter.rs`'s own doc
-  comments on `block_collision`/`block_hardness`), so state-keyed data belongs behind
-  `VersionAdapter`. Name-keyed constants (`friction_for` et al.) are *not* version-owned — they should
-  live in `lodestone-model` or another shared, plugin-reachable crate, keyed by the `&str` a
-  `VersionAdapter::block_name` call already supplies, never behind the version seam and never
-  privately in a leaf/driver crate like `lodestone-shell`.
+  choosing where it lives.** The `block_facts` half-fix in §3 above was the cautionary example while it
+  was still open: state ids are version-owned by construction (they're renumbered every version, per
+  `adapter.rs`'s own doc comments on `block_collision`/`block_hardness`), so state-keyed data belongs
+  behind `VersionAdapter`. Name-keyed constants are *not* version-owned, which is exactly why `24af787`
+  landed them as `lodestone_model::block_physics` rather than a new `VersionAdapter` method — the
+  general rule this bullet states is now also the worked example of someone following it.
 - **Verify docs against the actual trait/struct definitions, not the commit message.** `67ff7c3`'s
   message describes "10 [`CollisionView`] methods real" — true, and about `lodestone-shell`'s
   *consumption* of the new adapter methods for the player's own movement. It does not mean the

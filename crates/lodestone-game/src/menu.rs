@@ -1438,54 +1438,6 @@ mod tests {
         assert_eq!(carried_count(&menu), None);
     }
 
-    /// Live-play canary for the two prototype components nothing populates.
-    ///
-    /// `minecraft:equippable` and `minecraft:max_stack_size` live in vanilla's
-    /// **item prototype**, not in the clientbound component patch, so no wire
-    /// decoder will ever produce them — they need an item census in the version
-    /// crate, exactly like `generated/tools.rs` does for `minecraft:tool`.
-    /// Until that lands, a stack built the way an adapter builds one cannot be
-    /// equipped and reports a max stack size of 64 whatever the item is.
-    ///
-    /// This asserts the *current, wrong* state on purpose: when the census
-    /// lands, this test fails, and that failure is the reminder to delete it and
-    /// re-point the armour and per-item-cap gates at real wire stacks.
-    #[test]
-    fn canary_wire_stacks_carry_no_prototype_components() {
-        let wire = ItemStack::from(&lodestone_model::ItemStack {
-            item: id("minecraft:diamond_helmet"),
-            count: 1,
-            components: lodestone_model::ItemComponents::default(),
-        });
-        assert_eq!(
-            crate::container::equippable_slot(&wire),
-            None,
-            "if this now resolves, the equippable census landed"
-        );
-
-        let bucket = ItemStack::from(&lodestone_model::ItemStack {
-            item: id("minecraft:water_bucket"),
-            count: 1,
-            components: lodestone_model::ItemComponents::default(),
-        });
-        assert_eq!(
-            bucket.max_stack_size(),
-            64,
-            "a water bucket really stacks to 1; if this is now 1, the cap census landed"
-        );
-
-        // And the consequence, stated so it is not a surprise: armour cannot be
-        // worn via any click while the component is absent.
-        let mut menu = Menu::player();
-        menu.set_carried(Some(wire));
-        Click::left(5).apply(&mut menu, PlayerCtx::survival());
-        assert_eq!(
-            count_at(&menu, 5),
-            None,
-            "armour placement is dead until the census lands"
-        );
-    }
-
     /// The other half of the canary above: once the effective fields *are*
     /// populated, the conversion must carry them and armour must go on.
     ///
