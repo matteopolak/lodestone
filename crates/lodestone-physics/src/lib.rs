@@ -46,7 +46,7 @@ pub use fluid::{FluidCell, FluidKind, HorizontalDir, apply_fluid_push, get_flow}
 pub use fluid_state::{FluidState, compute_fluid_state};
 pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
-    MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air, tick_elytra,
-    tick_lava, tick_water,
+    EdgeBackOff, MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air,
+    tick_elytra, tick_lava, tick_water,
 };
 pub use profile::{FluidModel, InputModel, PhysicsProfile};

@@ -52,6 +52,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Crafting](./crafting.md) — the recipe data model and matching rules, loading
   the vanilla corpus from the client jar's datapack JSON, and the crafting-table
   menu layout (including who actually computes the result slot).
+- [Edge back-off](./edge-back-off.md) — `maybeBackOffFromEdge`: the sneak-at-a-ledge
+  rule the server replays through `MoverType.PLAYER`, its three stepping loops, why
+  the creative oracle structurally cannot observe it, and why it was a live desync
+  source rather than a theoretical one.
 - [Frame pacing](./frame-pacing.md) — vanilla's ten-tick catch-up cap, why
   presentation must never gate simulation (a stalled client is sent no chunks), and
   the measured reason the unfocused frame schedule is absolute rather than

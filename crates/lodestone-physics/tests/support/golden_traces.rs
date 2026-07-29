@@ -13796,3 +13796,1135 @@ pub static GOLDEN_WATER_CURRENT_PUSH: [GoldenTick; 100] = [
         vel: [0x0000000000000000, 0xbf747ae140000000, 0x0000000000000000],
     },
 ];
+
+/// Golden trace for the `sneak_edge_stop` scenario (120 ticks).
+pub static GOLDEN_SNEAK_EDGE_STOP: [GoldenTick; 120] = [
+    GoldenTick {
+        pos: [0x3fe0f0d846a29c78, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3f90700a93f66b71, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe1a483dc77edb0, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3f946fff7b6d3c51, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe338dc1ef5f40a, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3f9b98b66983da28, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe5067a18e4af53, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3f9f815ff4270a87, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe6f35d5f28841f, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa0d1de45136644, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe8f1538a1c56fb, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa1670665f1e6da, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3feaf89c371e11e1, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa1b876ef4ba076, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fed04fbecb56860, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa1e4ee3cacde4f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fef14231722d2bd, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa1fd3585514630, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff092675b0d41cc, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa20a7710ebc8b3, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff19b2736e5ee4e, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa211b3f12aec3b, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff2a420f9c093ec, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa215a79cc9d565, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff3ad3a59f830d3, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa217cffc0bb732, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa218fd946ad0a4, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa219a240316699, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa219fc293fcb03, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a2d40903786, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a480e515308, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a56b0d60228, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a5eae6f6927, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a630b551f24, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a656d2893f2, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a66ba1fa07f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a676fec2733, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a67d32f488b, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a680961c319, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a6826f93a75, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a6837216ef3, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a683ff3cd38, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a6844c4deee, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684766206e, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a6848d5b974, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a68499e6ecd, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a0c0504, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a47da9f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a68860a, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a7a5c76, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8419bb, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a896b0f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8c5258, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8de82c, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8ec5c2, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8f3ebe, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8f80cd, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fa4dd, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fb88e, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fc34f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fc92f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fcc64, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fce24, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fcf18, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fcf9e, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fcfe7, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd00f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd025, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd030, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd036, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03a, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03c, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4b664fd29dcc9, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fa21a684a8fd03d, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+];
+
+/// Golden trace for the `sneak_edge_walk_off` scenario (120 ticks).
+pub static GOLDEN_SNEAK_EDGE_WALK_OFF: [GoldenTick; 120] = [
+    GoldenTick {
+        pos: [0x3fe322d0e72f1aa0, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fab6566d154a819, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3fe579b7821ca9f2, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fb107ff7a59b9f8, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3feabd885896fbd1, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fb6ff428df95531, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff06020c8c2a08c, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fba412527bd73df, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff3959b8ed6051a, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fbc08724cfc75bb, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff6e78b273d59c6, 0x3ff0000000000000, 0x3fe0000000000000],
+        vel: [0x3fbd010a8272680f, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ffa490442fc0d97, 0x3fed7dbf489eecc0, 0x3fe0000000000000],
+        vel: [0x3fbd88c6114f4727, 0xbfc3dea467e4ffc7, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ffc71d8bafd2472, 0x3fe886162ea5acce, 0x3fe0000000000000],
+        vel: [0x3fbf7134531ad29b, 0xbfcd81ebb0177c46, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ffeb934171af404, 0x3fe1259b429fcdbc, 0x3fe0000000000000],
+        vel: [0x3fc096d692261e74, 0xbfd379ed4215a544, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40008e2b8025ed1d, 0x3fcda2928653ec68, 0x3fe0000000000000],
+        vel: [0x3fc16112aa08a070, 0xbfd81ab6c51d1981, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4001cc60b63c8858, 0xbfc292db03e6469a, 0x3fe0000000000000],
+        vel: [0x3fc2191b453c8834, 0xbfdca3ce2d67376c, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x400316167606620f, 0xbfe2f69dd7ad2d5c, 0x3fe0000000000000],
+        vel: [0x3fc2c093be4ea923, 0xbfe08ad666b06b8e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40046a43bd615dd5, 0xbff1c0ba1f2ecc75, 0x3fe0000000000000],
+        vel: [0x3fc358f9b1e3b98e, 0xbfe2b864c525ea39, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4005c7f763f5aaa2, 0xbffb1cec81c1c192, 0x3fe0000000000000],
+        vel: [0x3fc3e3a8644a96a2, 0xbfe4dacc7455b7c1, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40072e55f5b06540, 0xc002c5295df64eb9, 0x3fe0000000000000],
+        vel: [0x3fc461dbd8cb9d52, 0xbfe6f2468c3888c1, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40089c97beb33049, 0xc00881bb010470e9, 0x3fe0000000000000],
+        vel: [0x3fc4d4b3a1c03c9b, 0xbfe8ff0b00755ded, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x400a120704454547, 0xc00ec17dc121c864, 0x3fe0000000000000],
+        vel: [0x3fc53d356fdb9d24, 0xbfeb0150a63a3042, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x400b8dfe66b9104d, 0xc012c0e8f5582a3a, 0x3fe0000000000000],
+        vel: [0x3fc59c4f66798cd3, 0xbfecf94d39f6ae45, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x400d0fe76896ba4e, 0xc01660129c970003, 0x3fe0000000000000],
+        vel: [0x3fc5f2da3a427a0a, 0xbfeee73564f9a38c, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x400e973917b0f323, 0xc01a3cf949363474, 0x3fe0000000000000],
+        vel: [0x3fc6419b1ef8ffa1, 0xbff0659e6178d063, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401011bb6a8b4a29, 0xc01e5660e194688d, 0x3fe0000000000000],
+        vel: [0x3fc6894588d63997, 0xbff152caf3a8bbba, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4010da179c8d0490, 0xc0215589cf3f4bbe, 0x3fe0000000000000],
+        vel: [0x3fc6ca7cc574d57a, 0xbff23b39314c8cc8, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4011a47d8873b3d6, 0xc0239cf0f568dd57, 0x3fe0000000000000],
+        vel: [0x3fc705d56feea9b7, 0xbff31f0163c1b541, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401270be39ae31be, 0xc02600d121e113ff, 0x3fe0000000000000],
+        vel: [0x3fc73bd6c37cc281, 0xbff3fe3b580cc5f0, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40133eaef585206c, 0xc02880988ce2acbd, 0x3fe0000000000000],
+        vel: [0x3fc76cfbcf9d829b, 0xbff4d8fe615616ea, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40140e28d9bd151b, 0xc02b1bb8590d6f9a, 0x3fe0000000000000],
+        vel: [0x3fc799b4907f0448, 0xbff5af615b59b40b, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4014df0883fc15d7, 0xc02dd1a48478a61b, 0x3fe0000000000000],
+        vel: [0x3fc7c266ee2cb489, 0xbff6817aaccacefb, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4015b12dc1288415, 0xc03050e9ed08fffd, 0x3fe0000000000000],
+        vel: [0x3fc7e76fa4c5a0d9, 0xbff74f6049aaf69a, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4016847b4409b9b6, 0xc031c5dff1a3af67, 0x3fe0000000000000],
+        vel: [0x3fc8092317cc9a72, 0xbff81927b595526d, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401758d662832724, 0xc03347726cfd048e, 0x3fe0000000000000],
+        vel: [0x3fc827ce1273b2f0, 0xbff8dee605fe1f6e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40182e26d8d1cd56, 0xc034d560cd5ce685, 0x3fe0000000000000],
+        vel: [0x3fc843b676993ffa, 0xbff9a0afe466aa5b, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4019045692419ff0, 0xc0366f6bcba3512b, 0x3fe0000000000000],
+        vel: [0x3fc85d1bdc052404, 0xbffa5e9990860275, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4019db5176dcd1aa, 0xc038155564abb152, 0x3fe0000000000000],
+        vel: [0x3fc874382151372f, 0xbffb18b6e2669e74, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401ab3053da263fd, 0xc039c6e0d2d21b39, 0x3fe0000000000000],
+        vel: [0x3fc8893fefc70326, 0xbffbcf1b4c792c3b, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401b8b6142dba4b0, 0xc03b83d28799adfd, 0x3fe0000000000000],
+        vel: [0x3fc89c63335f4cfd, 0xbffc81d9dd9cc2d4, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401c64566231a7b2, 0xc03d4bf025737a2a, 0x3fe0000000000000],
+        vel: [0x3fc8adcd87f4dd24, 0xbffd3105431cacfe, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401d3dd6d42c5735, 0xc03f1f0079a544fa, 0x3fe0000000000000],
+        vel: [0x3fc8bda69ca35958, 0xbffddcafcaa401a4, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401e17d60ecc7a9a, 0xc0407e65bb27c28a, 0x3fe0000000000000],
+        vel: [0x3fc8cc128e349fa5, 0xbffe84eb64273e5e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401ef248a8f92831, 0xc041728d1648fc7d, 0x3fe0000000000000],
+        vel: [0x3fc8d932396ab065, 0xbfff29c9a3c41731, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x401fcd24407f864e, 0xc0426bdb63671d37, 0x3fe0000000000000],
+        vel: [0x3fc8e52385e1a9bb, 0xbfffcb5bc397adac, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4020542fb134ce1b, 0xc0436a364183daa4, 0x3fe0000000000000],
+        vel: [0x3fc8f001aa3476cc, 0xc00034d952c5b046, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4020c1f8babb2443, 0xc0446d83d6b035a8, 0x3fe0000000000000],
+        vel: [0x3fc8f9e569ff798d, 0xc000826f6a8c31fc, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40212fe95340a676, 0xc04575aacd58f8c8, 0x3fe0000000000000],
+        vel: [0x3fc902e54e4e7c6d, 0xc000ce78448128cf, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40219dfdeb5764b5, 0xc046829251a10b55, 0x3fe0000000000000],
+        vel: [0x3fc90b15d8f6818e, 0xc00118fbd2846f73, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40220c334598c308, 0xc04794220ec9524c, 0x3fe0000000000000],
+        vel: [0x3fc91289b350729f, 0xc0016201ddc87342, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40227a866f43891f, 0xc048aa422ca5d980, 0x3fe0000000000000],
+        vel: [0x3fc91951d8bf2c7c, 0xc001a99207a278ec, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4022e8f4b9840a1e, 0xc049c4db4d20010f, 0x3fe0000000000000],
+        vel: [0x3fc91f7dbd61cc68, 0xc001efb3ca56b6d8, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4023577bb357159d, 0xc04ae3d689c56c7c, 0x3fe0000000000000],
+        vel: [0x3fc9251b714a6c21, 0xc002346e79e05a7e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4023c61923f9c39b, 0xc04c071d71637224, 0x3fe0000000000000],
+        vel: [0x3fc92a37c0898a8b, 0xc00277c944b58da6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402434cb05d96e12, 0xc04d2e9a05aecafe, 0x3fe0000000000000],
+        vel: [0x3fc92ede505725e1, 0xc002b9cb34879009, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4024a38f81f84ef7, 0xc04e5a36b8f743ff, 0x3fe0000000000000],
+        vel: [0x3fc93319b99bf9f6, 0xc002fa7b2efef965, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40251264ebbc432c, 0xc04f89de6be73395, 0x3fe0000000000000],
+        vel: [0x3fc936f3a1175a37, 0xc00339dff67437ae, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40258149bd1e24e2, 0xc0505ebe35a73b88, 0x3fe0000000000000],
+        vel: [0x3fc93a74cd58add8, 0xc00378002aa45ca6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4025f03c93310be6, 0xc050fa7e36fc5e6d, 0x3fe0000000000000],
+        vel: [0x3fc93da53abea0dd, 0xc003b4e249624dbe, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40265f3c2af98ab6, 0xc0519825494770db, 0x3fe0000000000000],
+        vel: [0x3fc9408c2da99b00, 0xc003f08caf4468c6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4026ce475e8db56f, 0xc05237a9aec19421, 0x3fe0000000000000],
+        vel: [0x3fc94330430af39a, 0xc0042b05984eaf8d, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40273d5d2277658a, 0xc052d901db84099d, 0x3fe0000000000000],
+        vel: [0x3fc945977f769e58, 0xc004645320998c3e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4027ac7c8352c450, 0xc0537c247488d5ff, 0x3fe0000000000000],
+        vel: [0x3fc947c75cd9a725, 0xc0049c7b44f53fe4, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40281ba4a3a3af3a, 0xc05421084eb07ffe, 0x3fe0000000000000],
+        vel: [0x3fc949c4d6f4bc89, 0xc004d383e38a0c27, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40288ad4b9dd0679, 0xc054c7a46dccd05f, 0x3fe0000000000000],
+        vel: [0x3fc94b9476b737d9, 0xc0050972bc752902, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4028fa0c0e9567a5, 0xc0556ff003b079a7, 0x3fe0000000000000],
+        vel: [0x3fc94d3a5c94836b, 0xc0053e4d726296d6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40296949fae53e00, 0xc05619e26f438e5e, 0x3fe0000000000000],
+        vel: [0x3fc94eba49eb6ac8, 0xc00572198b23dcef, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4029d88de6ea6ff8, 0xc056c5733b9cad45, 0x3fe0000000000000],
+        vel: [0x3fc95017a994c269, 0xc005a4dc7043c439, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402a47d7486e474f, 0xc057729a1f1ecb67, 0x3fe0000000000000],
+        vel: [0x3fc9515597ace6c2, 0xc005d69b6f971d92, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402ab725a1aa7f37, 0xc058214efa9b8454, 0x3fe0000000000000],
+        vel: [0x3fc95276e8a9d12a, 0xc006075bbbcaa2e4, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402b2678802aaac9, 0xc058d189d879d96b, 0x3fe0000000000000],
+        vel: [0x3fc9537e2fcde855, 0xc00637226cee01cd, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402b95cf7bc766b7, 0xc0598342ebe14979, 0x3fe0000000000000],
+        vel: [0x3fc9546dc5063e0f, 0xc00665f480fc1e65, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402c052a35b903fc, 0xc05a36728fe92a6c, 0x3fe0000000000000],
+        vel: [0x3fc95547ca419953, 0xc00693d6dc609c5c, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402c748857bf8eae, 0xc05aeb1146cc2f4f, 0x3fe0000000000000],
+        vel: [0x3fc9560e304c77d3, 0xc006c0ce4a7abc66, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402ce3e9935e44da, 0xc05ba117b9200532, 0x3fe0000000000000],
+        vel: [0x3fc956c2bb3d1999, 0xc006ecdf7e1d9b9e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402d534da128bd8d, 0xc05c587eb510f20f, 0x3fe0000000000000],
+        vel: [0x3fc957670679aa54, 0xc007180f120de246, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402dc2b440202883, 0xc05d113f2da16121, 0x3fe0000000000000],
+        vel: [0x3fc957fc8861b3c3, 0xc0074261897cef10, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402e321d351f339f, 0xc05dcb5239ed489a, 0x3fe0000000000000],
+        vel: [0x3fc9588495a33155, 0xc0076bdb50818bbf, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402ea1884a5344b1, 0xc05e86b1147154f8, 0x3fe0000000000000],
+        vel: [0x3fc959006442dce7, 0xc0079480bc8e37c9, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402f10f54ec1d472, 0xc05f43551a55c6b6, 0x3fe0000000000000],
+        vel: [0x3fc959710e5e9d96, 0xc007bc560ce51551, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402f806415d8d335, 0xc060009be55e77b0, 0x3fe0000000000000],
+        vel: [0x3fc959d794b06257, 0xc007e35f6b098499, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x402fefd47709190b, 0xc0606029630a9dc2, 0x3fe0000000000000],
+        vel: [0x3fc95a34e0d72138, 0xc00809a0eb2f79c6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40302fa326b4fcee, 0xc060c04fe6b75ba9, 0x3fe0000000000000],
+        vel: [0x3fc95a89c76b304a, 0xc0082f1e8ca8989b, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4030675cbbb29575, 0xc061210c60e9fe0b, 0x3fe0000000000000],
+        vel: [0x3fc95ad709e2b547, 0xc00853dc3a4f2195, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40309f16eb351d06, 0xc061825bd1d33a91, 0x3fe0000000000000],
+        vel: [0x3fc95b1d584a7bd0, 0xc00877ddcaeebb8e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4030d6d1a7547424, 0xc061e43b48fef57f, 0x3fe0000000000000],
+        vel: [0x3fc95b5d52d71ec6, 0xc0089b2701ab24df, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40310e8ce368e488, 0xc06246a7e505a212, 0x3fe0000000000000],
+        vel: [0x3fc95b978b5216e6, 0xc008bdbb8e64d6b5, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4031464893ee4adc, 0xc062a99ed33f356d, 0x3fe0000000000000],
+        vel: [0x3fc95bcc8665ee78, 0xc008df9f0e1ba52a, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40317e04ae69d8df, 0xc0630d1d4f77a402, 0x3fe0000000000000],
+        vel: [0x3fc95bfcbccc8f12, 0xc00900d50b4f665f, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4031b5c129523424, 0xc0637120a3a4e19b, 0x3fe0000000000000],
+        vel: [0x3fc95c289c625a45, 0xc0092160fe5eaac0, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4031ed7dfbf9baff, 0xc063d5a6279e5c46, 0x3fe0000000000000],
+        vel: [0x3fc95c5089208016, 0xc00941464de3904e, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4032253b1e7abe26, 0xc0643aab40d5ea87, 0x3fe0000000000000],
+        vel: [0x3fc95c74de00cdab, 0xc00960884f0ebaa6, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40325cf889a581e8, 0xc064a02d62122572, 0x3fe0000000000000],
+        vel: [0x3fc95c95edccfb4b, 0xc0097f2a46007944, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403294b636efde05, 0xc065062a0b2a2757, 0x3fe0000000000000],
+        vel: [0x3fc95cb403db5214, 0xc0099d2f66202557, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4032cc74206656d0, 0xc0656c9ec8c2a7ec, 0x3fe0000000000000],
+        vel: [0x3fc95ccf64ba5740, 0xc009ba9ad271c041, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40330432409e8da5, 0xc065d389340c6eed, 0x3fe0000000000000],
+        vel: [0x3fc95ce84ecd042a, 0xc009d76f9de9dbb9, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40333bf092aae9d4, 0xc0663ae6f284165c, 0x3fe0000000000000],
+        vel: [0x3fc95cfefad8ef0a, 0xc009f3b0cbbfd457, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403373af120f5dd9, 0xc066a2b5b5b315ad, 0x3fe0000000000000],
+        vel: [0x3fc95d139c87a859, 0xc00a0f614fbe6715, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4033ab6dbab72f50, 0xc0670af33af20f49, 0x3fe0000000000000],
+        vel: [0x3fc95d2662dc73a8, 0xc00a2a840e92aa41, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4033e32c88ebaa5e, 0xc067739d4b2c59f2, 0x3fe0000000000000],
+        vel: [0x3fc95d37789f6821, 0xc00a451bde197214, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40341aeb794bab55, 0xc067dcb1baa4bfba, 0x3fe0000000000000],
+        vel: [0x3fc95d4704beecd6, 0xc00a5f2b85ab290c, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403452aa88c3eb55, 0xc068462e68bb6c5e, 0x3fe0000000000000],
+        vel: [0x3fc95d552aa86f00, 0xc00a78b5be6623ed, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40348a69b487fe5a, 0xc068b0113fb504ee, 0x3fe0000000000000],
+        vel: [0x3fc95d620a991c51, 0xc00a91bd33777938, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4034c228fa0bf2b9, 0xc0691a583482e2d3, 0x3fe0000000000000],
+        vel: [0x3fc95d6dc1e7594d, 0xc00aaa44826263ac, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4034f9e856fe8392, 0xc0698501468c6c62, 0x3fe0000000000000],
+        vel: [0x3fc95d786b459b12, 0xc00ac24e3b46374b, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403531a7c943d0ef, 0xc069f00a7f79853f, 0x3fe0000000000000],
+        vel: [0x3fc95d821eff3ce4, 0xc00ad9dce122f032, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403569674ef0918f, 0xc06a5b71f2fe1100, 0x3fe0000000000000],
+        vel: [0x3fc95d8af32fdc19, 0xc00af0f2ea1c6268, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4035a126e645b36e, 0xc06ac735bea6828a, 0x3fe0000000000000],
+        vel: [0x3fc95d92fbf5b88a, 0xc00b0792bfbc11b4, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4035d8e68dac6106, 0xc06b335409a572d1, 0x3fe0000000000000],
+        vel: [0x3fc95d9a4b9f8c5b, 0xc00b1dbebf31b852, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403610a643b26245, 0xc06b9fcb04a239b2, 0x3fe0000000000000],
+        vel: [0x3fc95da0f2d64387, 0xc00b337939928349, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403648660706d0f3, 0xc06c0c98e98883bf, 0x3fe0000000000000],
+        vel: [0x3fc95da700c2f243, 0xc00b48c474170afc, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40368025d67718fe, 0xc06c79bbfb58dfeb, 0x3fe0000000000000],
+        vel: [0x3fc95dac833160bb, 0xc00b5da2a8580e71, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4036b7e5b0ec3de6, 0xc06ce73285fa4025, 0x3fe0000000000000],
+        vel: [0x3fc95db186af7ae2, 0xc00b72160489f7a8, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4036efa595685f02, 0xc06d54fade0c6804, 0x3fe0000000000000],
+        vel: [0x3fc95db616a9ebed, 0xc00b8620abb72f34, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4037276583047500, 0xc06dc31360bb44c1, 0x3fe0000000000000],
+        vel: [0x3fc95dba3d8626b9, 0xc00b99c4b5f94535, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40375f2578ee4374, 0xc06e317a739329d6, 0x3fe0000000000000],
+        vel: [0x3fc95dbe04ba1660, 0xc00bad0430b0f5aa, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403796e5766679c7, 0xc06ea02e8455edad, 0x3fe0000000000000],
+        vel: [0x3fc95dc174e1ad01, 0xc00bbfe11ebd0df2, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4037cea57abeff48, 0xc06f0f2e08d0e1e5, 0x3fe0000000000000],
+        vel: [0x3fc95dc495d281d4, 0xc00bd25d78b0393d, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4038066585596672, 0xc06f7e777eb3a2ca, 0x3fe0000000000000],
+        vel: [0x3fc95dc76eadab46, 0xc00be47b2d05b989, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40383e2595a583ef, 0xc06fee096b67b9b0, 0x3fe0000000000000],
+        vel: [0x3fc95dca05effdc3, 0xc00bf63c205512b1, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403875e5ab202611, 0xc0702ef12df486fd, 0x3fe0000000000000],
+        vel: [0x3fc95dcc6180d435, 0xc00c07a22d84acee, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4038ada5c551e9e0, 0xc0706700724f9057, 0x3fe0000000000000],
+        vel: [0x3fc95dce86bf83e9, 0xc00c18af25fb741a, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x4038e565e3ce2b0e, 0xc0709f31d09b873f, 0x3fe0000000000000],
+        vel: [0x3fc95dd07a8f9a81, 0xc00c2964d1d178e1, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x40391d2606320c6a, 0xc070d7849a3f2a31, 0x3fe0000000000000],
+        vel: [0x3fc95dd2416401d8, 0xc00c39c4efff98fa, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x403954e62c239694, 0xc0710ff8241f2963, 0x3fe0000000000000],
+        vel: [0x3fc95dd3df492339, 0xc00c49d1368e3359, 0x0000000000000000],
+    },
+];
+
+/// Golden trace for the `sneak_edge_diagonal` scenario (40 ticks).
+pub static GOLDEN_SNEAK_EDGE_DIAGONAL: [GoldenTick; 40] = [
+    GoldenTick {
+        pos: [0x3ff4000000000000, 0x3ff0000000000000, 0x3ff4000000000000],
+        vel: [0x3fdbf48833333334, 0xbfb41205bb089a00, 0x3fdbf48833333334],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3fd97071c0032567, 0xbfb41205bb089a00, 0x3fd97071c0032567],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3fcbc7970cee9f00, 0xbfb41205bb089a00, 0x3fcbc7970cee9f00],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3fbe55db733890db, 0xbfb41205bb089a00, 0x3fbe55db733890db],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3fb0902895f8b377, 0xbfb41205bb089a00, 0x3fb0902895f8b377],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3fa21640eff9a59b, 0xbfb41205bb089a00, 0x3fa21640eff9a59b],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3f93c03cd26e0cda, 0xbfb41205bb089a00, 0x3f93c03cd26e0cda],
+    },
+    GoldenTick {
+        pos: [0x3ff496bba6666667, 0x3ff0000000000000, 0x3ff496bba6666667],
+        vel: [0x3f8591697e695206, 0xbfb41205bb089a00, 0x3f8591697e695206],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x3f778d61f87332e4, 0xbfb41205bb089a00, 0x3f778d61f87332e4],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x3f69b8163004c57e, 0xbfb41205bb089a00, 0x3f69b8163004c57e],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x3f5c15d2cf84c13f, 0xbfb41205bb089a00, 0x3f5c15d2cf84c13f],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+    GoldenTick {
+        pos: [0x3ff4c1de7963390b, 0x3ff0000000000000, 0x3ff4c1de7963390b],
+        vel: [0x0000000000000000, 0xbfb41205bb089a00, 0x0000000000000000],
+    },
+];
