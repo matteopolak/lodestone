@@ -25,6 +25,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
+use lodestone_ecs::{EcsHandle, WorldTime};
 use lodestone_game::{
     click::{Click, PlayerCtx},
     menu::Menu,
@@ -185,8 +186,6 @@ struct Inner {
     player: PlayerSnapshot,
     entities: HashMap<i32, EntityView>,
     players: HashMap<Uuid, PlayerListEntry>,
-    world_age: i64,
-    time_of_day: i64,
     scoreboard: Scoreboard,
     /// Boss bars in server insertion order (render order).
     boss_bars: Vec<BossBar>,
@@ -199,8 +198,6 @@ impl Default for Inner {
             player: PlayerSnapshot::default(),
             entities: HashMap::new(),
             players: HashMap::new(),
-            world_age: 0,
-            time_of_day: 0,
             scoreboard: Scoreboard::default(),
             boss_bars: Vec::new(),
             menus: Menus::new(),
@@ -230,6 +227,16 @@ pub(crate) struct SharedState {
     inner: Arc<RwLock<Inner>>,
     world: Arc<RwLock<World>>,
     notify: Arc<Notify>,
+    /// The bevy_ecs `World` this state is authoritative over, per
+    /// `docs/bevy-migration.md` Stage 0. Currently backs only [`WorldTime`]
+    /// (folded from `ClientEvent::TimeChanged` in [`SharedState::apply`], not
+    /// `Inner::apply`, since that method has no access to sibling
+    /// `SharedState` fields like this one). This is a *separate* `World` from
+    /// any `lodestone_ecs::app::App` a driver (e.g. `lodestone-shell`'s
+    /// `WindowApp`) owns on its own thread — deliberately: unifying them is a
+    /// later stage (§4.1), and `CorePlugin` never inserts `WorldTime` itself
+    /// so that split cannot silently become two diverging clocks.
+    ecs: EcsHandle,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -241,10 +248,13 @@ impl std::fmt::Debug for SharedState {
 
 impl Default for SharedState {
     fn default() -> Self {
+        let ecs = lodestone_ecs::new_handle();
+        ecs.write().insert_resource(WorldTime::default());
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
             world: Arc::new(RwLock::new(World::new())),
             notify: Arc::new(Notify::new()),
+            ecs,
         }
     }
 }
@@ -286,8 +296,22 @@ impl SharedState {
     ///
     /// Chunk data is written by the adapter through [`SharedState::world_write`]
     /// instead, so the heavy payload is never borrowed or cloned here.
+    ///
+    /// [`ClientEvent::TimeChanged`] is special-cased *here* rather than inside
+    /// [`Inner::apply`]: `WorldTime` lives in this state's [`EcsHandle`]
+    /// (`self.ecs`), a sibling field `Inner::apply` has no access to. Every
+    /// other event still folds through `Inner::apply` unchanged.
     pub(crate) fn apply(&self, event: &ClientEvent) {
+        if let ClientEvent::TimeChanged {
+            world_age,
+            time_of_day,
+        } = event
         {
+            let mut world = self.ecs.write();
+            let mut time = world.resource_mut::<WorldTime>();
+            time.age = *world_age;
+            time.time_of_day = *time_of_day;
+        } else {
             let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
             inner.apply(event);
         }
@@ -512,11 +536,14 @@ impl SharedState {
             .collect()
     }
 
-    /// Returns `(world_age, time_of_day)`.
+    /// Returns `(world_age, time_of_day)`, read from the [`WorldTime`]
+    /// resource in `self.ecs` — the sole backing store since Stage 0 of
+    /// `docs/bevy-migration.md` deleted `Inner.world_age`/`Inner.time_of_day`.
     #[must_use]
     pub(crate) fn time(&self) -> (i64, i64) {
-        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
-        (inner.world_age, inner.time_of_day)
+        let world = self.ecs.read();
+        let time = world.resource::<WorldTime>();
+        (time.age, time.time_of_day)
     }
 
     /// Clones out the current folded scoreboard (objectives, scores, display
@@ -664,13 +691,6 @@ impl Inner {
                 self.player.xp_level = *level;
                 self.player.xp_total = *total;
                 self.player.xp_known = true;
-            }
-            ClientEvent::TimeChanged {
-                world_age,
-                time_of_day,
-            } => {
-                self.world_age = *world_age;
-                self.time_of_day = *time_of_day;
             }
             ClientEvent::EntitySpawned {
                 entity_id,

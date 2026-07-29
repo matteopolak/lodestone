@@ -1,0 +1,146 @@
+//! Lodestone's `bevy_ecs`-backed world/entity/session state — the crate
+//! `docs/bevy-migration.md` (§7, Stage 0) introduces so third-party
+//! extensions become native Rust plugins with the same power as built-in
+//! code, per `DESIGN.md:520-521`.
+//!
+//! # Stage 0
+//!
+//! This is the App/schedule scaffold plus one real slice
+//! ([`WorldTime`]) migrated authoritatively off
+//! `lodestone_client::state::Inner`. Everything else in the plan — entities,
+//! the local player, HUD/session state, the chunk world, `Sim` itself —
+//! stays where it is; later stages move it here one at a time, each one
+//! *deleting* the old owner rather than adding a second reader (the
+//! "authority test", §1).
+//!
+//! # What this crate depends on
+//!
+//! `bevy_app` + `bevy_ecs`, `default-features = false, features = ["std"]`
+//! (§3): no `multi_threaded` (does not even compile on wasm32 with no
+//! threads, §3.1), no `bevy_reflect` (default-on upstream, but truly
+//! optional here — verified with `cargo tree -e features`, not assumed; see
+//! the Stage 0 report). `parking_lot` for [`EcsHandle`]'s lock, matching
+//! azalea's choice for the same purpose. Deliberately **no** dependency on
+//! any version crate, ever (§5) — `xtask check-isolation` is expected to
+//! enforce that once wired up.
+//!
+//! Deliberately **not** added to `cargo xtask check-connected`'s allowlist:
+//! per the plan, that tool going red for this crate is either "the island
+//! detector working" (a stage that left it disconnected) or a green light
+//! once a shipped binary root actually depends on it — never something to
+//! suppress.
+
+mod handle;
+mod plugin;
+mod resources;
+mod runner;
+mod schedules;
+mod sets;
+
+/// Re-exported so plugin authors never need to match `bevy_app`'s version by
+/// hand (azalea does the same at `azalea/src/lib.rs:63-64`).
+pub use bevy_app as app;
+/// Re-exported so plugin authors never need to match `bevy_ecs`'s version by
+/// hand.
+pub use bevy_ecs as ecs;
+
+pub use handle::{EcsHandle, new_handle};
+pub use plugin::CorePlugin;
+pub use resources::WorldTime;
+pub use runner::Runner;
+pub use schedules::{Extract, GameTick, NetIngest, Update};
+pub use sets::{ExtractSet, FrameSet, IngestSet, TickSet};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_ecs::world::World;
+
+    /// `CorePlugin` must not panic building on a bare `App`, and each of the
+    /// three schedules it owns must exist afterward (`init_schedule` is
+    /// otherwise silent, so "did it actually run" needs a positive check, not
+    /// just "the build didn't panic").
+    #[test]
+    fn core_plugin_registers_all_three_owned_schedules() {
+        use bevy_ecs::schedule::Schedules;
+
+        let mut app = app::App::new();
+        app.add_plugins(CorePlugin);
+
+        let schedules = app.world().resource::<Schedules>();
+        assert!(schedules.contains(NetIngest));
+        assert!(schedules.contains(GameTick));
+        assert!(schedules.contains(Extract));
+    }
+
+    /// The negative control for the above: a `World` nobody ran `CorePlugin`
+    /// on has no `Schedules` resource at all, so the assertion above is
+    /// actually discriminating rather than trivially true of any `World`.
+    #[test]
+    fn bare_world_has_no_schedules_resource() {
+        use bevy_ecs::schedule::Schedules;
+
+        let world = World::new();
+        assert!(world.get_resource::<Schedules>().is_none());
+    }
+
+    /// [`WorldTime`] is a plain resource: `CorePlugin` does not insert it
+    /// (see its doc comment), so a consumer inserts and updates it directly.
+    #[test]
+    fn world_time_is_a_plain_insertable_resource() {
+        let mut world = World::new();
+        world.insert_resource(WorldTime::default());
+        assert_eq!(world.resource::<WorldTime>().time_of_day, 0);
+        world.resource_mut::<WorldTime>().time_of_day = 13_000;
+        assert_eq!(world.resource::<WorldTime>().time_of_day, 13_000);
+    }
+
+    /// [`EcsHandle`] readers see writes made through another clone of the
+    /// same handle — the whole point of it being an `Arc<RwLock<_>>` rather
+    /// than an owned `World`.
+    #[test]
+    fn ecs_handle_clones_share_state() {
+        let handle = new_handle();
+        handle.write().insert_resource(WorldTime {
+            age: 42,
+            time_of_day: 6_000,
+        });
+
+        let reader = handle.clone();
+        assert_eq!(reader.read().resource::<WorldTime>().age, 42);
+    }
+
+    /// The headless [`Runner`] arm actually runs `GameTick` — a fixed-tick
+    /// accumulator is easy to write wrong in a way where it silently runs
+    /// zero ticks, so this counts them rather than only checking the loop
+    /// exits.
+    #[test]
+    fn headless_runner_runs_game_tick_at_least_once() {
+        use bevy_ecs::resource::Resource;
+
+        #[derive(Resource, Default)]
+        struct TickCount(u32);
+
+        let mut app = app::App::new();
+        app.add_plugins(CorePlugin);
+        app.init_resource::<TickCount>();
+        app.world_mut()
+            .schedule_scope(GameTick, |_world, schedule| {
+                schedule.add_systems(|mut count: bevy_ecs::system::ResMut<TickCount>| {
+                    count.0 += 1;
+                });
+            });
+
+        let runner = Runner::Headless {
+            tick_hz: 1000.0, // fast, so the test does not sleep meaningfully
+            max_catch_up_ticks: 10,
+        };
+        let mut iterations = 0;
+        runner.run_headless(&mut app, || {
+            iterations += 1;
+            iterations >= 3
+        });
+
+        assert!(app.world().resource::<TickCount>().0 >= 1);
+    }
+}

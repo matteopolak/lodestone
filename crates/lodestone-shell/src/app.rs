@@ -417,6 +417,15 @@ struct WindowApp {
     /// water/lava surface) rather than every frame. Seeded to the sky fog set at
     /// render bring-up so the first frame above water is a no-op.
     applied_fog: Option<FogSettings>,
+    /// This driver's own `bevy_ecs` `App` (`docs/bevy-migration.md` Stage 0),
+    /// stepped once per frame in [`WindowApp::redraw`] via `Runner::Winit`
+    /// (`app.update()` called directly, no internal timer — packet ingest
+    /// must never gate on frame rate). A genuinely empty scaffold today:
+    /// `CorePlugin` installs only the schedules/sets, no game state. This is
+    /// a *separate* `World` from `lodestone_client::SharedState`'s `EcsHandle`
+    /// (which owns `WorldTime`) — unifying the two is a later stage; see the
+    /// two-`World`s note in `docs/bevy-migration.md`'s Stage 0 report.
+    ecs: lodestone_ecs::app::App,
 }
 
 impl WindowApp {
@@ -425,6 +434,8 @@ impl WindowApp {
         // Matches the sky fog set at render bring-up, so the fog reconciliation's
         // first above-water frame is a no-op rather than a redundant upload.
         let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
+        let mut ecs = lodestone_ecs::app::App::new();
+        ecs.add_plugins(lodestone_ecs::CorePlugin);
         Self {
             config,
             sim,
@@ -452,6 +463,7 @@ impl WindowApp {
             fps_ema: 0.0,
             last_log: Instant::now(),
             applied_fog,
+            ecs,
         }
     }
 
@@ -774,6 +786,10 @@ impl WindowApp {
         let frame_start = Instant::now();
         let step = self.pacer.begin_frame(frame_start);
         let dt = step.dt;
+        // `Runner::Winit`: the host event loop drives this driver's `App`
+        // itself, once per `RedrawRequested`, by calling `update()` directly
+        // — no internal timer, so packet ingest is never gated on frame rate.
+        self.ecs.update();
         self.sim.step(dt);
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting
@@ -891,7 +907,12 @@ impl WindowApp {
             (None, String::new())
         };
         if container_menu.is_some() {
-            let container_frame = ContainerFrame::new(container_menu, &container_title);
+            // The carried stack follows the pointer, so the frame needs the cursor
+            // in physical pixels — the same space `hit_test` and the menu layout
+            // use (see the `cursor` field). Without this the stack is built but
+            // never positioned, and nothing draws.
+            let container_frame = ContainerFrame::new(container_menu, &container_title)
+                .with_cursor(Some([self.cursor.0, self.cursor.1]));
             container_renderer.render(device, queue, frame.view(), &container_frame, w, h);
         }
 

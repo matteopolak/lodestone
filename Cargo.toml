@@ -28,6 +28,7 @@ lodestone-v770   = { path = "crates/protocol/v770" }
 lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
 lodestone-v735 = { path = "crates/protocol/v735" }
+lodestone-ecs  = { path = "crates/lodestone-ecs" }
 
 thiserror = "2"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
@@ -50,6 +51,16 @@ pollster = "1"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.33"
 rayon = "1.12"
+
+# --- ECS (owned by lodestone-ecs; docs/bevy-migration.md) ---
+# `default-features = false, features = ["std"]`: no `multi_threaded` (does not
+# even compile on wasm32 with no threads), no `bevy_reflect` (default-on,
+# heavyweight, unneeded). Left off on every target, not just wasm, so native and
+# wasm run the same executor and the same system order (§3.1: Cargo features are
+# advisory under unification, so the boundary must not be feature-gated).
+bevy_app = { version = "0.19", default-features = false, features = ["std"] }
+bevy_ecs = { version = "0.19", default-features = false, features = ["std"] }
+parking_lot = "0.12"
 
 # --- Networking / crypto / auth (owned by lodestone-net + lodestone-auth) ---
 # AES-128-CFB8 online-mode cipher (pure-Rust RustCrypto, wasm-safe). `rsa` 0.9 is

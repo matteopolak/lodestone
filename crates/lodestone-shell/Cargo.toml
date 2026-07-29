@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 # Library seams the shell is a thin client over.
 lodestone-client = { workspace = true }
+lodestone-ecs = { workspace = true }
 lodestone-game = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-assets = { workspace = true }
