@@ -22,6 +22,14 @@ workspace = true
 # Library seams the shell is a thin client over.
 lodestone-client = { workspace = true }
 lodestone-ecs = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export, because bevy's derive
+# macros (`#[derive(Component)]`, `#[derive(Resource)]`) emit absolute
+# `bevy_ecs::` paths and therefore need the crate name in scope here. Same
+# version as `lodestone-ecs` pins, from `[workspace.dependencies]`, so there is
+# only ever one `bevy_ecs` in the graph. This is `entities.rs`'s render-side
+# component set and its `Extract` system — the shell is where extract lives
+# (docs/bevy-migration.md §4.4), precisely so `lodestone-render` stays bevy-free.
+bevy_ecs = { workspace = true }
 # `json` brings in `recipe_json::CorpusBuilder`, which `resources.rs` uses to
 # build the recipe corpus out of `client.jar`'s `data/**` at startup.
 lodestone-game = { workspace = true, features = ["json"] }

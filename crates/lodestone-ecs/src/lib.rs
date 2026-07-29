@@ -7,11 +7,21 @@
 //!
 //! This is the App/schedule scaffold plus one real slice
 //! ([`WorldTime`]) migrated authoritatively off
-//! `lodestone_client::state::Inner`. Everything else in the plan — entities,
-//! the local player, HUD/session state, the chunk world, `Sim` itself —
-//! stays where it is; later stages move it here one at a time, each one
-//! *deleting* the old owner rather than adding a second reader (the
-//! "authority test", §1).
+//! `lodestone_client::state::Inner`. Later stages move state here one at a
+//! time, each one *deleting* the old owner rather than adding a second reader
+//! (the "authority test", §1).
+//!
+//! # Stage 1
+//!
+//! [`entity`] holds the entity component set, and [`ingest`] the `NetIngest`
+//! systems that fold `ClientEvent`s into it. `Inner`'s
+//! `HashMap<i32, EntityView>` and its `apply_metadata` helper are **deleted**;
+//! `EntityView` survives only as a value type derived on demand for
+//! `ClientHandle::entities()`, which is the plan's one sanctioned intermediate
+//! (components authoritative, struct derived — never the reverse).
+//!
+//! Still where it was: the local player, HUD/session state, the chunk world,
+//! `Sim` itself.
 //!
 //! # What this crate depends on
 //!
@@ -30,7 +40,9 @@
 //! once a shipped binary root actually depends on it — never something to
 //! suppress.
 
+pub mod entity;
 mod handle;
+pub mod ingest;
 mod plugin;
 mod resources;
 mod runner;
@@ -44,7 +56,7 @@ pub use bevy_app as app;
 /// hand.
 pub use bevy_ecs as ecs;
 
-pub use handle::{EcsHandle, new_handle};
+pub use handle::{EcsHandle, new_handle, new_ingest_handle};
 pub use plugin::CorePlugin;
 pub use resources::WorldTime;
 pub use runner::Runner;

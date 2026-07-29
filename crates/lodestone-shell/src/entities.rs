@@ -2,13 +2,23 @@
 //! [`EntityView`](lodestone_client::EntityView) snapshots into smooth per-frame
 //! render transforms.
 //!
-//! The server reports entity positions at tick rate (20 Hz); the shell draws at
-//! 50–120 fps. Snapping each mob to its latest reported position would stutter
-//! visibly, so — exactly as vanilla does — we render *behind* the latest
-//! snapshot and ease from the previous position to the current one over a fixed
-//! window. When a fresh position arrives we start the new interpolation from
-//! where the mob is *currently being drawn*, not from the stale target, so
-//! motion is C0-continuous and never jumps.
+//! Since Stage 1 of [`docs/bevy-migration.md`](../../../docs/bevy-migration.md)
+//! the per-entity render state lives in **`bevy_ecs` components** — one entity
+//! per tracked mob, carrying [`InterpFrom`] / [`InterpTo`] / [`InterpClock`] /
+//! [`WalkAnim`] / [`ItemPhysics`] — and the work is done by systems registered
+//! into the schedules `lodestone-ecs` owns:
+//!
+//! | system | schedule / set |
+//! |---|---|
+//! | [`advance_interp_clocks`] | [`Update`] / `FrameSet::Interpolate` |
+//! | [`tick_walk_animation`] | [`GameTick`] / `TickSet::Animate` |
+//! | [`extract_entity_draws`] | [`Extract`] / `ExtractSet::Entities` |
+//!
+//! [`EntityInterpolator`] is the driver for those schedules and nothing else: it
+//! owns the `World`, runs the schedules in order, and hands out the extracted
+//! [`EntityDraw`] list. Two pieces of the fold are deliberately **not** systems
+//! yet, and the reasons are recorded in [`fold_snapshots`] and
+//! [`tick_item_physics`] — read those before moving them.
 //!
 //! # Why the window is three ticks, not one
 //!
@@ -42,11 +52,14 @@
 //! tick, the *phase* advances up to 3× too fast as well — legs that swing both
 //! too far and far too quickly, which is precisely how it was reported.
 //!
-//! Sampling `render_pos` once per 20 Hz tick measures `v` instead, because that
-//! is what vanilla is measuring: on the client the entity's own position has
+//! Sampling the drawn position once per 20 Hz tick measures `v` instead, because
+//! that is what vanilla is measuring: on the client the entity's own position has
 //! already been advanced by `InterpolationHandler`, so `getX() - xo` is the
 //! *interpolated* step, not the packet delta. The two agree under dense packets
-//! and under sparse ones, which the gap measure never does.
+//! and under sparse ones, which the gap measure never does. That sampling is
+//! [`tick_walk_animation`], and it runs on a fixed 20 Hz clock rather than per
+//! frame, because `WalkAnimationState` is a tick-rate state machine and driving
+//! it per frame would make swing speed depend on frame rate.
 //!
 //! This module is deliberately GPU-free, so the interpolation is unit-testable
 //! without a device or a server: the sim converts each
@@ -77,17 +90,17 @@
 //! server does, driven by the velocity `set_entity_motion`/`add_entity` report
 //! and the same gravity/drag constants — the rare server correction just
 //! nudges the local simulation back onto the authoritative track. This module
-//! does the same for entities whose `type_path` is [`ITEM_ENTITY_TYPE_PATH`]:
-//! [`Track::item_physics`] runs [`step_item_physics`]
-//! (gravity `0.04`, air drag `0.98` — [`lodestone_entity::item_entity`]'s
-//! vanilla constants, not reimplemented) once per real 20 Hz tick, and the
-//! render ease ([`Track::t`] / [`INTERP_WINDOW`]) is re-anchored off *that*
-//! simulated position each tick rather than off the sparse network packet. A
-//! server correction (when one arrives) resets the simulated
-//! position/velocity to the authoritative value rather than fighting it.
-//! While the last-known snapshot reports the item at rest on the ground, the
-//! simulation is paused rather than resimulated needlessly — see
-//! [`EntitySnapshot::on_ground`].
+//! does the same for entities whose [`RenderKind`] is
+//! [`ITEM_ENTITY_TYPE_PATH`]: an entity carrying an [`ItemPhysics`] component
+//! runs [`step_item_physics`] (gravity `0.04`, air drag `0.98` —
+//! [`lodestone_entity::item_entity`]'s vanilla constants, not reimplemented)
+//! once per real 20 Hz tick, and the render ease ([`InterpClock::t`] /
+//! [`INTERP_WINDOW`]) is re-anchored off *that* simulated position each tick
+//! rather than off the sparse network packet. A server correction (when one
+//! arrives) resets the simulated position/velocity to the authoritative value
+//! rather than fighting it. While the last-known snapshot reports the item at
+//! rest on the ground, the simulation is paused rather than resimulated
+//! needlessly — see [`EntitySnapshot::on_ground`].
 //!
 //! # Collision: falling through the floor between corrections
 //!
@@ -106,13 +119,18 @@
 //! around the player), not global: a drop far outside that radius still
 //! free-falls until it is back in range, same as before this existed.
 //!
-//! Every other entity type is unaffected: [`Track::item_physics`] stays `None`
-//! and the original pure position ease runs exactly as before.
+//! Every other entity type is unaffected: it carries no [`ItemPhysics`]
+//! component at all and the original pure position ease runs exactly as before.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use bevy_ecs::prelude::{Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource};
+use bevy_ecs::world::World;
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
+use lodestone_ecs::app::{App, Plugin};
+use lodestone_ecs::entity::MinecraftEntityId;
+use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
@@ -196,6 +214,11 @@ fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// ([`ITEM_GRAVITY`]/[`ITEM_AIR_DRAG`]) applied explicitly here, so passing
 /// the player's [`PhysicsProfile`] does not mix the two up for the fall
 /// itself, only for that one rare edge case.
+///
+/// **This stays a plain function, called by a system rather than being one**,
+/// for the same reason `docs/bevy-migration.md` §8 keeps `lodestone-physics` a
+/// library: it is the vanilla-constant carrier, and its per-tick trace is what
+/// the tests below pin.
 fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &PhysicsProfile) {
     // `ItemEntity.applyGravity()`, before the move.
     sim.velocity.y -= ITEM_GRAVITY;
@@ -281,6 +304,14 @@ const YAW_EPS: f32 = 1.0e-2;
 /// by the sim from an [`EntityView`](lodestone_client::EntityView); carries only
 /// what the renderer needs, in glam types, so this module needs no client or
 /// model dependency.
+///
+/// # Slated for deletion
+///
+/// `docs/bevy-migration.md` Stage 1 deletes this type: it is the second of the
+/// three entity-pose copies (`EntityView` → `EntitySnapshot` → the render
+/// components), and once ingest writes the render components directly there is
+/// nothing left for it to carry. It survives today only because its producer
+/// lives in `net.rs` and its consumer in `sim.rs` — see [`fold_snapshots`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntitySnapshot {
     /// The server-assigned entity id (interpolation key).
@@ -305,9 +336,9 @@ pub struct EntitySnapshot {
     /// is "the server has never reported a stack for this entity",
     /// [`Reported::Reported(None)`](Reported::Reported) is an explicitly
     /// *empty* stack. `Unreported` therefore means "unknown", and
-    /// [`EntityInterpolator::update`] leaves any previously recorded stack
-    /// alone rather than clearing it — a drop names itself once and then goes
-    /// quiet, so treating silence as "empty" would blank it a frame later.
+    /// [`fold_snapshots`] leaves any previously recorded stack alone rather than
+    /// clearing it — a drop names itself once and then goes quiet, so treating
+    /// silence as "empty" would blank it a frame later.
     ///
     /// This is a [`ResourceLocation`], not a model `ItemStack`: `EntitySnapshot`
     /// is deliberately model-free, and the renderer only ever needs the item
@@ -318,17 +349,16 @@ pub struct EntitySnapshot {
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
-    /// This is what [`Track::item_physics`] seeds and re-anchors its ballistic
-    /// simulation from — see the module docs on why a dropped item needs real
-    /// physics rather than a position ease. `None` is "never reported", not
-    /// "zero"; a zero velocity is reported as `Some(Vec3::ZERO)`.
+    /// This is what the [`ItemPhysics`] component seeds and re-anchors its
+    /// ballistic simulation from — see the module docs on why a dropped item
+    /// needs real physics rather than a position ease. `None` is "never
+    /// reported", not "zero"; a zero velocity is reported as `Some(Vec3::ZERO)`.
     pub velocity: Option<Vec3>,
     /// Whether the server last reported this entity resting on the ground
     /// (`on_ground` on `add_entity`/`teleport_entity`/`move_entity`).
     ///
-    /// [`Track::item_physics`] pauses its simulation while this is `true`,
-    /// because this module has no world/collision query to know *where* the
-    /// ground is — see the module docs.
+    /// [`tick_item_physics`] pauses its simulation while this is `true`, because
+    /// a resting item does not need resimulating.
     pub on_ground: bool,
     /// What this entity is wearing and holding, keyed by slot, as
     /// `SET_EQUIPMENT` last reported it.
@@ -341,11 +371,11 @@ pub struct EntitySnapshot {
     /// than a fixed-size array of `Option`s.
     ///
     /// The whole list is *accumulated server-side of this type*
-    /// (`lodestone_client::state` merges each update into the view and never
-    /// clears), so every snapshot carries the complete current set and
-    /// [`EntityInterpolator::update_with_view`] replaces its record wholesale —
-    /// unlike [`Self::item`], which arrives once and must never be cleared by
-    /// silence.
+    /// (`lodestone_ecs::ingest`'s `apply_entity_equipment` merges each update
+    /// into the `Equipment` component and never clears), so every snapshot
+    /// carries the complete current set and [`fold_snapshots`] replaces its
+    /// record wholesale — unlike [`Self::item`], which arrives once and must
+    /// never be cleared by silence.
     ///
     /// Only `MainHand`/`OffHand` reach a pixel today; see [`EntityDraw::equipment`].
     pub equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
@@ -363,6 +393,11 @@ pub const ITEM_ENTITY_TYPE_PATH: &str = "item";
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
+///
+/// Produced by [`extract_entity_draws`], the `ExtractSet::Entities` system —
+/// `docs/bevy-migration.md` §4.4's rule that extract systems live upstream of
+/// `lodestone-render`, which stays bevy-free, and that they emit plain PODs it
+/// already consumes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityDraw {
     /// The server-assigned entity id. Carried through to the draw because a
@@ -416,44 +451,208 @@ pub struct EntityDraw {
     pub anim: AnimInput,
 }
 
-/// Per-entity interpolation track: the position/yaw we are easing *from*, the
-/// latest reported target we are easing *to*, and how far through the tick we
-/// are.
-#[derive(Debug, Clone)]
-struct Track {
-    type_path: String,
-    scale: f32,
-    prev: Vec3,
-    curr: Vec3,
-    prev_yaw: f32,
-    curr_yaw: f32,
-    prev_head_yaw: f32,
-    curr_head_yaw: f32,
-    prev_pitch: f32,
-    curr_pitch: f32,
+// ---------------------------------------------------------------------------
+// The render-side component set
+// ---------------------------------------------------------------------------
+
+/// The entity type's canonical path, as the snapshot reported it.
+///
+/// Distinct from `lodestone_ecs::entity::EntityKind` (a `ResourceKey`) only
+/// because [`EntitySnapshot`] speaks the bare path string that
+/// `lodestone-render`'s model set is keyed by. When `EntitySnapshot` dies these
+/// two collapse into one component; until then this is the render vocabulary and
+/// `EntityKind` is the network one.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub struct RenderKind(pub String);
+
+/// Uniform render scale (baby mobs are drawn smaller).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct RenderScale(pub f32);
+
+/// The pose an ease is coming *from* — re-anchored to whatever was on screen at
+/// the moment a fresh target arrived, which is what keeps motion C0-continuous
+/// instead of jumping.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct InterpFrom {
+    /// Feet position in world space.
+    pub feet: Vec3,
+    /// Body yaw in degrees.
+    pub yaw: f32,
+    /// Absolute head yaw in degrees.
+    pub head_yaw: f32,
+    /// Head pitch in degrees.
+    pub pitch: f32,
+}
+
+/// The latest reported pose an ease is heading *to*.
+///
+/// For an entity with [`ItemPhysics`] this is advanced by the local simulation
+/// every tick, **not** by the sparse network packet — see the module docs.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct InterpTo {
+    /// Feet position in world space.
+    pub feet: Vec3,
+    /// Body yaw in degrees.
+    pub yaw: f32,
+    /// Absolute head yaw in degrees.
+    pub head_yaw: f32,
+    /// Head pitch in degrees.
+    pub pitch: f32,
+}
+
+/// How far through the current ease we are, and the entity's continuous age.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct InterpClock {
     /// Seconds since the ease was last re-anchored, capped at [`INTERP_WINDOW`].
-    t: f32,
-    /// Vanilla's `WalkAnimationState`, ticked at 20 Hz.
-    walk: WalkAnimation,
-    /// The drawn position at the previous 20 Hz walk tick. The distance between
-    /// this and the current drawn position *is* the per-tick travel
+    pub t: f32,
+    /// Continuous age in ticks (`ageInTicks`), driving idle bob.
+    pub age: f32,
+}
+
+/// Vanilla's `WalkAnimationState`, ticked at 20 Hz by [`tick_walk_animation`].
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WalkAnim {
+    /// The animation state itself.
+    pub walk: WalkAnimation,
+    /// The drawn position at the previous 20 Hz tick. The distance between this
+    /// and the current drawn position *is* the per-tick travel
     /// [`walk_target_speed`] wants — see the module note on why the eased gap is
     /// not.
-    walk_pos: Vec3,
-    /// Continuous age in ticks (`ageInTicks`), driving idle bob.
-    age: f32,
-    /// Ballistic simulation state for a dropped item ([`ITEM_ENTITY_TYPE_PATH`]);
-    /// `None` for every other entity type, which keeps the original pure
-    /// position ease. See the module docs for why items need this.
-    item_physics: Option<ItemPhysics>,
-    /// The occupied equipment slots, narrowed from
-    /// [`EntitySnapshot::equipment`]. Lives on the track rather than in a side
-    /// map (as [`EntityInterpolator::item_stacks`] does) precisely *because* it
-    /// is replaced wholesale every poll: there is no "reported once, then
-    /// silence" hazard to guard against, so there is nothing for a separate
-    /// map's `retain` to protect, and hanging it here means a despawn prunes it
-    /// for free.
-    equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+    pub last_feet: Vec3,
+}
+
+/// A dropped item's client-run physics: the same gravity/drag [`ItemMotion`] the
+/// server itself steps, advanced once per real 20 Hz tick and corrected toward
+/// each authoritative server report rather than driven by it.
+///
+/// **Present only on entities whose [`RenderKind`] is
+/// [`ITEM_ENTITY_TYPE_PATH`].** Every other entity type has no such component,
+/// which is what keeps it on the original pure position ease — the absence is
+/// the switch.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ItemPhysics {
+    /// The locally-simulated position/velocity.
+    pub sim: ItemMotion,
+    /// The most recently reported *authoritative* feet position — kept separate
+    /// from [`InterpTo::feet`], which the simulation itself advances every tick,
+    /// so re-polling the same still-current server value doesn't look like a
+    /// fresh "moved" event every frame.
+    pub last_reported: Vec3,
+    /// Whether the last-reported snapshot said the item is resting. The
+    /// simulation is paused while `true` — a resting item does not need
+    /// resimulating every tick, and this avoids any drift between the local
+    /// collision result and the server's own resting position. See
+    /// [`step_item_physics`] for the (collision-aware) airborne case.
+    pub grounded: bool,
+}
+
+/// The occupied equipment slots, narrowed from [`EntitySnapshot::equipment`].
+///
+/// A component rather than a side table (as [`ItemStacks`] is) precisely
+/// *because* it is replaced wholesale every poll: there is no "reported once,
+/// then silence" hazard to guard against, so there is nothing for a separate
+/// table's prune to protect, and hanging it on the entity means a despawn prunes
+/// it for free.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+/// This frame's elapsed seconds, read by [`advance_interp_clocks`].
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct FrameDelta(pub f32);
+
+/// Seconds accumulated toward the next 20 Hz animation tick.
+///
+/// Also the partial-tick source [`extract_entity_draws`] interpolates the walk
+/// cycle with, so it must hold the *residual* after this frame's ticks have run.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct TickAccum(pub f32);
+
+/// Which item each dropped-item entity is carrying, keyed by **server** entity
+/// id.
+///
+/// A resource keyed by server id rather than a component, because a caller may
+/// learn an item's identity *before* the entity is tracked at all
+/// ([`EntityInterpolator::set_item_stack`] is a public seam and the live path's
+/// metadata can precede the snapshot poll). Pruned alongside the tracks, so a
+/// despawned drop leaves nothing behind.
+#[derive(Resource, Debug, Default)]
+pub struct ItemStacks(HashMap<i32, ResourceLocation>);
+
+/// Server entity id → the ECS entity holding its render components.
+#[derive(Resource, Debug, Default)]
+pub struct TrackIndex(HashMap<i32, Entity>);
+
+/// This frame's extracted draw list, written by [`extract_entity_draws`].
+#[derive(Resource, Debug, Default)]
+pub struct ExtractedDraws(Vec<EntityDraw>);
+
+// ---------------------------------------------------------------------------
+// Pose readers
+// ---------------------------------------------------------------------------
+
+/// The fraction `[0, 1]` through the current interpolation window.
+fn alpha(clock: &InterpClock) -> f32 {
+    (clock.t / INTERP_WINDOW).clamp(0.0, 1.0)
+}
+
+/// The currently-drawn position: [`InterpFrom`] eased toward [`InterpTo`].
+fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
+    from.feet.lerp(to.feet, alpha(clock))
+}
+
+/// The currently-drawn body yaw, taking the shortest arc so a wrap across 360°
+/// (e.g. 350°→10°) turns +20° rather than −340°.
+fn render_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+    lerp_angle(from.yaw, to.yaw, alpha(clock))
+}
+
+/// The currently-drawn head yaw, shortest-arc like the body yaw.
+fn render_head_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+    lerp_angle(from.head_yaw, to.head_yaw, alpha(clock))
+}
+
+/// The currently-drawn head pitch. Pitch is bounded to ±90° and never wraps, so
+/// a plain linear ease is correct.
+fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
+    from.pitch + (to.pitch - from.pitch) * alpha(clock)
+}
+
+/// The animation drive for this frame.
+///
+/// `partial_tick` is the fraction through the current 50 ms tick, used for the
+/// walk cycle exactly as vanilla's `WalkAnimationState` interpolation. The head
+/// yaw is clamped to the body (`Mob.clampHeadRotationToBody`) and then expressed
+/// *relative* to it, because that is what `LivingEntityRenderer` feeds
+/// `setupAnim` — passing the absolute value would spin every mob's head with its
+/// body.
+fn render_anim(
+    from: &InterpFrom,
+    to: &InterpTo,
+    clock: &InterpClock,
+    walk: &WalkAnim,
+    partial_tick: f32,
+) -> AnimInput {
+    let body = render_yaw(from, to, clock);
+    let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
+    AnimInput {
+        head_yaw_deg: wrap_degrees(head - body),
+        head_pitch_deg: render_pitch(from, to, clock),
+        limb_swing: walk.walk.position_lerp(partial_tick),
+        limb_swing_amount: walk.walk.speed_lerp(partial_tick),
+        attack_anim: 0.0,
+        age_ticks: clock.age,
+        // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.
+        aggressive: false,
+    }
+}
+
+/// Wraps degrees into `(-180, 180]`, like `Mth.wrapDegrees`.
+fn wrap_degrees(deg: f32) -> f32 {
+    angle_diff(deg, 0.0)
 }
 
 /// Narrows a snapshot's per-slot equipment to the slots that actually hold an
@@ -468,31 +667,166 @@ fn occupied_equipment(
         .collect()
 }
 
-/// A dropped item's client-run physics: the same gravity/drag
-/// [`ItemMotion`] the server itself steps, advanced once per real 20 Hz tick
-/// and corrected toward each authoritative server report rather than driven
-/// by it.
-#[derive(Debug, Clone, Copy)]
-struct ItemPhysics {
-    /// The locally-simulated position/velocity.
-    sim: ItemMotion,
-    /// The most recently reported *authoritative* feet position — kept
-    /// separate from [`Track::curr`], which the simulation itself advances
-    /// every tick, so re-polling the same still-current server value doesn't
-    /// look like a fresh "moved" event every frame.
-    last_reported: Vec3,
-    /// Whether the last-reported snapshot said the item is resting. The
-    /// simulation is paused while `true` — a resting item does not need
-    /// resimulating every tick, and this avoids any drift between the local
-    /// collision result and the server's own resting position. See
-    /// [`step_item_physics`] for the (now collision-aware) airborne case.
-    grounded: bool,
+// ---------------------------------------------------------------------------
+// Systems
+// ---------------------------------------------------------------------------
+
+/// `Update` / `FrameSet::Interpolate`: advance every ease clock and age by this
+/// frame's [`FrameDelta`].
+///
+/// Runs **before** the 20 Hz tick loop, so a snapshot that resets `t` to 0 this
+/// frame starts its new window from exactly the pose that was on screen.
+pub fn advance_interp_clocks(delta: Res<FrameDelta>, mut clocks: Query<&mut InterpClock>) {
+    for mut clock in &mut clocks {
+        clock.t = (clock.t + delta.0).min(INTERP_WINDOW);
+        clock.age += delta.0 * TICKS_PER_SECOND;
+    }
 }
 
-/// Seeds a fresh [`ItemPhysics`] from an item entity's first-seen (or
-/// freshly re-anchored) snapshot. A missing velocity seeds zero — gravity
-/// still applies to it, it just has nothing to arc with, which is exactly
-/// the discriminating behaviour the hermetic tests below pin.
+/// `GameTick` / `TickSet::Animate`: one 20 Hz step of every entity's walk cycle.
+///
+/// Measures the per-tick travel off the *drawn* position, which is what vanilla
+/// measures — see the module docs on why the interpolation gap is wrong by
+/// [`INTERP_STEPS`]. It needs no separate "has it stopped?" rule: a mob that
+/// stops stops moving its drawn position, so the distance goes to zero and the
+/// amplitude decays on its own.
+pub fn tick_walk_animation(
+    mut tracks: Query<(&InterpFrom, &InterpTo, &InterpClock, &RenderScale, &mut WalkAnim)>,
+) {
+    for (from, to, clock, scale, mut walk) in &mut tracks {
+        let now = render_feet(from, to, clock);
+        let distance = (now - walk.last_feet).with_y(0.0).length();
+        walk.last_feet = now;
+        let limb_scale = if scale.0 < 1.0 {
+            BABY_LIMB_SCALE
+        } else {
+            ADULT_LIMB_SCALE
+        };
+        walk.walk
+            .update(walk_target_speed(distance), LIMB_SWING_SMOOTHING, limb_scale);
+    }
+}
+
+/// `Extract` / `ExtractSet::Entities`: components → the plain [`EntityDraw`]
+/// PODs `lodestone-render` consumes.
+///
+/// This is the boundary `docs/bevy-migration.md` §4.4 draws: the ECS side ends
+/// here, and nothing downstream of it knows bevy exists.
+pub fn extract_entity_draws(
+    accum: Res<TickAccum>,
+    stacks: Res<ItemStacks>,
+    tracks: Query<(
+        &MinecraftEntityId,
+        &RenderKind,
+        &RenderScale,
+        &InterpFrom,
+        &InterpTo,
+        &InterpClock,
+        &WalkAnim,
+        &RenderEquipment,
+    )>,
+    mut out: ResMut<ExtractedDraws>,
+) {
+    let partial_tick = (accum.0 / TICK_SECONDS).clamp(0.0, 1.0);
+    out.0.clear();
+    for (id, kind, scale, from, to, clock, walk, equipment) in &tracks {
+        out.0.push(EntityDraw {
+            id: id.0,
+            type_path: kind.0.clone(),
+            item: (kind.0 == ITEM_ENTITY_TYPE_PATH)
+                .then(|| stacks.0.get(&id.0).cloned())
+                .flatten(),
+            equipment: equipment.0.clone(),
+            feet: render_feet(from, to, clock),
+            yaw: render_yaw(from, to, clock),
+            head_yaw: render_head_yaw(from, to, clock),
+            pitch: render_pitch(from, to, clock),
+            scale: scale.0,
+            anim: render_anim(from, to, clock, walk, partial_tick),
+        });
+    }
+}
+
+/// One 20 Hz step of every dropped item's own ballistic physics, re-anchoring
+/// each one's render ease onto the freshly simulated point.
+///
+/// # Why this is not a system
+///
+/// It wants to be one — `docs/bevy-migration.md` Stage 1 asks for "a `GameTick`
+/// system for the 20 Hz item-physics step" — and it cannot be, yet. A `bevy_ecs`
+/// system reads its inputs from `Resource`s, and a `Resource` must be
+/// `'static`; the collision geometry arrives here as a borrowed
+/// `&dyn CollisionView` whose owner is a local in `Sim::update_entities`
+/// (`WorldCollision::new(&self.world)` borrows the chunk world outright). There
+/// is no safe way to put a borrow in a resource, and the workspace denies
+/// `unsafe_code`.
+///
+/// The collision source only becomes `'static` at the plan's §4.1(d) — the chunk
+/// world as an `Arc<RwLock<lodestone_world::World>>` **resource** — which is
+/// Stage 4. Until then this runs as a plain function called once per tick from
+/// [`EntityInterpolator::update_with_view`], immediately before the `GameTick`
+/// schedule, which puts it in the same position in the tick that
+/// `TickSet::Physics` would.
+///
+/// The behavioural consequence is nil (the same code runs at the same point in
+/// the same order); the *architectural* consequence is that a plugin cannot yet
+/// order a system against item physics. The two negative controls at the bottom
+/// of this file are unaffected either way: they discriminate on whether the
+/// physics *ran*, not on how it was scheduled.
+fn tick_item_physics(world: &mut World, view: &dyn CollisionView, profile: &PhysicsProfile) {
+    let tracked: Vec<Entity> = world.resource::<TrackIndex>().0.values().copied().collect();
+    for entity in tracked {
+        let Ok(mut entity) = world.get_entity_mut(entity) else {
+            continue;
+        };
+        // The absence of the component is the switch: only a dropped item has
+        // one, so every other entity type stays on the pure position ease.
+        let Some(mut physics) = entity.get::<ItemPhysics>().copied() else {
+            continue;
+        };
+        // Paused while the last *server* report says the item is resting; the
+        // floor within a tick is real collision, not a frozen flag.
+        if physics.grounded {
+            continue;
+        }
+        step_item_physics(&mut physics.sim, view, profile);
+        let simulated = to_glam_vec3(physics.sim.position);
+
+        // Re-anchor exactly like a fresh authoritative snapshot would: ease from
+        // wherever this frame is currently drawn toward the freshly simulated
+        // point, so the simulation reads as continuous motion rather than a
+        // series of per-tick snaps.
+        let drawn = {
+            let from = entity.get::<InterpFrom>().copied();
+            let to = entity.get::<InterpTo>().copied();
+            let clock = entity.get::<InterpClock>().copied();
+            match (from, to, clock) {
+                (Some(from), Some(to), Some(clock)) => render_feet(&from, &to, &clock),
+                // An `ItemPhysics` without an ease is not a state this module
+                // can produce (`spawn_track` inserts all four together), so
+                // there is nothing sensible to anchor from; leave it be.
+                _ => continue,
+            }
+        };
+        if let Some(mut item) = entity.get_mut::<ItemPhysics>() {
+            *item = physics;
+        }
+        if let Some(mut from) = entity.get_mut::<InterpFrom>() {
+            from.feet = drawn;
+        }
+        if let Some(mut to) = entity.get_mut::<InterpTo>() {
+            to.feet = simulated;
+        }
+        if let Some(mut clock) = entity.get_mut::<InterpClock>() {
+            clock.t = 0.0;
+        }
+    }
+}
+
+/// Seeds a fresh [`ItemPhysics`] from an item entity's first-seen (or freshly
+/// re-anchored) snapshot. A missing velocity seeds zero — gravity still applies
+/// to it, it just has nothing to arc with, which is exactly the discriminating
+/// behaviour the hermetic tests below pin.
 fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
     let mut sim = ItemMotion::new(
         to_model_vec3(snap.feet),
@@ -506,80 +840,289 @@ fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
     }
 }
 
-impl Track {
-    /// The fraction `[0, 1]` through the current interpolation window.
-    fn alpha(&self) -> f32 {
-        (self.t / INTERP_WINDOW).clamp(0.0, 1.0)
+/// Fold this frame's [`EntitySnapshot`]s into the component set: spawn tracks
+/// for newly-seen entities, re-anchor eases for ones that moved or turned, and
+/// prune everything the report no longer mentions.
+///
+/// # Why this is not a `NetIngest` system either
+///
+/// Two reasons, both of which the plan expects to disappear together with
+/// [`EntitySnapshot`]:
+///
+/// 1. **Its input is a borrowed slice from `sim.rs`.** Same `'static` problem as
+///    [`tick_item_physics`]; the fix is the same one — ingest writes these
+///    components directly instead of round-tripping through a `Vec` the caller
+///    owns.
+/// 2. **It runs *after* the tick loop, not before it.** The plan's schedule
+///    order is `NetIngest` → `GameTick`; this module's order is clocks →
+///    ticks → fold, and every numeric expectation in the ~25 tests below is
+///    written against it. Reordering is a behaviour change, not a refactor, so
+///    it belongs in the change that also deletes `EntitySnapshot`.
+fn fold_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
+    for snap in snapshots {
+        // Fold the reported identity first, so a drop is never drawn for a frame
+        // as a placeholder before its item lands. `Unreported` is "this snapshot
+        // does not know", which must not clear what an earlier one established;
+        // only an explicit empty stack clears.
+        match &snap.item {
+            Reported::Reported(Some(item)) => {
+                world.resource_mut::<ItemStacks>().0.insert(snap.id, item.clone());
+            }
+            Reported::Reported(None) => {
+                world.resource_mut::<ItemStacks>().0.remove(&snap.id);
+            }
+            Reported::Unreported => {}
+        }
+
+        match world.resource::<TrackIndex>().0.get(&snap.id).copied() {
+            None => spawn_track(world, snap),
+            Some(entity) => update_track(world, entity, snap),
+        }
     }
 
-    /// The currently-drawn position: `prev` eased toward `curr` by `alpha`.
-    fn render_pos(&self) -> Vec3 {
-        self.prev.lerp(self.curr, self.alpha())
+    // Drop tracks for entities no longer reported — and the item stacks recorded
+    // against them, or a long session leaks one entry per drop.
+    let seen: HashSet<i32> = snapshots.iter().map(|s| s.id).collect();
+    let stale: Vec<(i32, Entity)> = world
+        .resource::<TrackIndex>()
+        .0
+        .iter()
+        .filter(|(id, _)| !seen.contains(id))
+        .map(|(id, entity)| (*id, *entity))
+        .collect();
+    for (id, entity) in stale {
+        world.despawn(entity);
+        world.resource_mut::<TrackIndex>().0.remove(&id);
+    }
+    world
+        .resource_mut::<ItemStacks>()
+        .0
+        .retain(|id, _| seen.contains(id));
+}
+
+/// A newly seen entity is drawn at rest at its reported pose: both ends of the
+/// ease are the same, and the clock starts *finished* so nothing eases from
+/// nowhere.
+fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
+    let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
+    let mut entity = world.spawn((
+        MinecraftEntityId(snap.id),
+        RenderKind(snap.type_path.clone()),
+        RenderScale(snap.scale),
+        InterpFrom {
+            feet: snap.feet,
+            yaw: snap.yaw,
+            head_yaw: snap.head_yaw,
+            pitch: snap.pitch,
+        },
+        InterpTo {
+            feet: snap.feet,
+            yaw: snap.yaw,
+            head_yaw: snap.head_yaw,
+            pitch: snap.pitch,
+        },
+        InterpClock {
+            t: INTERP_WINDOW,
+            age: 0.0,
+        },
+        WalkAnim {
+            walk: WalkAnimation::new(),
+            last_feet: snap.feet,
+        },
+        RenderEquipment(occupied_equipment(&snap.equipment)),
+    ));
+    if is_item {
+        entity.insert(new_item_physics(snap));
+    }
+    let entity = entity.id();
+    world.resource_mut::<TrackIndex>().0.insert(snap.id, entity);
+}
+
+/// Fold a snapshot into an already-tracked entity.
+///
+/// A snapshot whose position or yaw differs from the current target starts a new
+/// interpolation *from the current render pose*, so the mob never jumps. A
+/// snapshot that matches the current target only lets the existing ease run to
+/// completion.
+fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
+
+    if let Some(mut kind) = entity.get_mut::<RenderKind>() {
+        kind.0.clone_from(&snap.type_path);
+    }
+    if let Some(mut scale) = entity.get_mut::<RenderScale>() {
+        scale.0 = snap.scale;
+    }
+    // **Outside** the `moved || turned` gate below, deliberately. Equipment
+    // changes with no movement at all — a mob picking up a dropped sword, a
+    // plugin swapping a villager's hat, the player's own hotbar switch mirrored
+    // back — and gating this on motion would leave a stationary mob holding
+    // whatever it was holding when it last took a step.
+    let occupied = occupied_equipment(&snap.equipment);
+    if let Some(mut equipment) = entity.get_mut::<RenderEquipment>() {
+        equipment.0 = occupied;
     }
 
-    /// The currently-drawn body yaw, taking the shortest arc so a wrap across
-    /// 360° (e.g. 350°→10°) turns +20° rather than −340°.
-    fn render_yaw(&self) -> f32 {
-        lerp_angle(self.prev_yaw, self.curr_yaw, self.alpha())
+    let (Some(from), Some(to), Some(clock)) = (
+        entity.get::<InterpFrom>().copied(),
+        entity.get::<InterpTo>().copied(),
+        entity.get::<InterpClock>().copied(),
+    ) else {
+        return;
+    };
+    let physics = entity.get::<ItemPhysics>().copied();
+
+    // A dropped item's own simulation moves `InterpTo` every real tick (see
+    // `tick_item_physics`), so comparing against it here would read as "moved"
+    // every single frame even when the server has said nothing new since the
+    // last poll. Compare against the last *authoritative* report instead —
+    // `InterpTo` only for every other entity type, which the physics step never
+    // touches.
+    let moved = match &physics {
+        Some(physics) => (snap.feet - physics.last_reported).length() > POS_EPS,
+        None => (snap.feet - to.feet).length() > POS_EPS,
+    };
+    let turned = angle_diff(snap.yaw, to.yaw).abs() > YAW_EPS;
+    let head_turned = angle_diff(snap.head_yaw, to.head_yaw).abs() > YAW_EPS;
+    let pitched = (snap.pitch - to.pitch).abs() > YAW_EPS;
+    if !(moved || turned || head_turned || pitched) {
+        return;
     }
 
-    /// The currently-drawn head yaw, shortest-arc like the body yaw.
-    fn render_head_yaw(&self) -> f32 {
-        lerp_angle(self.prev_head_yaw, self.curr_head_yaw, self.alpha())
+    // Re-anchor the ease at where the mob is drawn right now.
+    let anchored = InterpFrom {
+        feet: render_feet(&from, &to, &clock),
+        yaw: render_yaw(&from, &to, &clock),
+        head_yaw: render_head_yaw(&from, &to, &clock),
+        pitch: render_pitch(&from, &to, &clock),
+    };
+    if let Some(mut current) = entity.get_mut::<InterpFrom>() {
+        *current = anchored;
+    }
+    if let Some(mut target) = entity.get_mut::<InterpTo>() {
+        target.feet = snap.feet;
+        target.yaw = snap.yaw;
+        target.head_yaw = snap.head_yaw;
+        target.pitch = snap.pitch;
+    }
+    if let Some(mut clock) = entity.get_mut::<InterpClock>() {
+        clock.t = 0.0;
     }
 
-    /// The currently-drawn head pitch. Pitch is bounded to ±90° and never wraps,
-    /// so a plain linear ease is correct.
-    fn render_pitch(&self) -> f32 {
-        self.prev_pitch + (self.curr_pitch - self.prev_pitch) * self.alpha()
+    if !is_item {
+        return;
     }
-
-    /// The animation drive for this frame.
-    ///
-    /// `partial_tick` is the fraction through the current 50 ms tick, used for
-    /// the walk cycle exactly as vanilla's `WalkAnimationState` interpolation.
-    /// The head yaw is clamped to the body (`Mob.clampHeadRotationToBody`) and
-    /// then expressed *relative* to it, because that is what
-    /// `LivingEntityRenderer` feeds `setupAnim` — passing the absolute value
-    /// would spin every mob's head with its body.
-    fn render_anim(&self, partial_tick: f32) -> AnimInput {
-        let body = self.render_yaw();
-        let head = clamp_head_to_body(body, self.render_head_yaw(), MAX_HEAD_YAW);
-        AnimInput {
-            head_yaw_deg: wrap_degrees(head - body),
-            head_pitch_deg: self.render_pitch(),
-            limb_swing: self.walk.position_lerp(partial_tick),
-            limb_swing_amount: self.walk.speed_lerp(partial_tick),
-            attack_anim: 0.0,
-            age_ticks: self.age,
-            // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.
-            aggressive: false,
+    match physics {
+        Some(mut physics) => {
+            physics.last_reported = snap.feet;
+            physics.grounded = snap.on_ground;
+            // Correct the simulation to the authoritative truth rather than
+            // fight it — this is the "rare server correction" vanilla's own
+            // local simulation also just snaps onto.
+            physics.sim.position = to_model_vec3(snap.feet);
+            if let Some(v) = snap.velocity {
+                physics.sim.velocity = to_model_vec3(v);
+            }
+            physics.sim.on_ground = snap.on_ground;
+            if let Some(mut current) = entity.get_mut::<ItemPhysics>() {
+                *current = physics;
+            }
+        }
+        None => {
+            entity.insert(new_item_physics(snap));
         }
     }
 }
 
-/// Wraps degrees into `(-180, 180]`, like `Mth.wrapDegrees`.
-fn wrap_degrees(deg: f32) -> f32 {
-    angle_diff(deg, 0.0)
+/// Registers the render-side entity systems into the schedules `lodestone-ecs`
+/// owns, plus the resources they read.
+///
+/// Separate from `lodestone_ecs::ingest::IngestPlugin` because the two halves
+/// currently live in **different `World`s** — the net thread's (authoritative
+/// over network state) and this one (render/interpolation state). Unifying them
+/// is `docs/bevy-migration.md` §4.1, and doing it early would mean the
+/// interpolation clock and the socket sharing a lock.
+#[derive(Debug, Default)]
+pub struct EntityInterpPlugin;
+
+impl Plugin for EntityInterpPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FrameDelta>();
+        app.init_resource::<TickAccum>();
+        app.init_resource::<ItemStacks>();
+        app.init_resource::<TrackIndex>();
+        app.init_resource::<ExtractedDraws>();
+        app.add_systems(Update, advance_interp_clocks.in_set(FrameSet::Interpolate));
+        app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
+        app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
+    }
 }
 
 /// Tracks and interpolates every visible entity between server ticks.
-#[derive(Debug, Default)]
+///
+/// Owns the `World` the render-side components live in and drives the three
+/// schedules over it. Everything it exposes is either a schedule run
+/// ([`Self::update_with_view`]) or a read of an extracted/resource value — there
+/// is no per-entity state on this struct itself, by design: the components *are*
+/// the state, so a plugin holding the same `World` sees and can change exactly
+/// what the renderer will draw.
 pub struct EntityInterpolator {
-    tracks: HashMap<i32, Track>,
-    /// Seconds accumulated toward the next 20 Hz animation tick.
-    tick_accum: f32,
-    /// Which item each dropped-item entity is carrying, keyed by entity id.
-    /// Pruned alongside [`Self::tracks`], so a despawned drop leaves nothing
-    /// behind.
-    item_stacks: HashMap<i32, ResourceLocation>,
+    world: World,
+}
+
+impl std::fmt::Debug for EntityInterpolator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never dump the whole `World`; the interesting scalar is how many
+        // entities are tracked.
+        f.debug_struct("EntityInterpolator")
+            .field("tracked", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for EntityInterpolator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EntityInterpolator {
     /// A fresh interpolator with no tracked entities.
+    ///
+    /// Builds the `World` through an `App` because plugin `build` is the only
+    /// way to register schedules and systems, then keeps the `World` and drops
+    /// the `App` — azalea's own shape (`azalea-client/src/client.rs:143`), and
+    /// the reason nothing here calls `App::update`.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut app = App::new();
+        app.add_plugins((CorePlugin, EntityInterpPlugin));
+        Self {
+            world: std::mem::take(app.world_mut()),
+        }
+    }
+
+    /// The `World` the render components live in, for a caller that wants to
+    /// query or mutate them directly.
+    ///
+    /// This is the seam that keeps the component set from being an island: a
+    /// plugin (or `Sim`, or a test) can read [`InterpTo`] and write
+    /// [`InterpFrom`] on any tracked entity and the next
+    /// [`extract_entity_draws`] run puts it on screen. It is also how §4.1's
+    /// eventual World unification lands without changing this module: the driver
+    /// will own the `App` and pass its `World` in rather than this type owning
+    /// one.
+    #[must_use]
+    pub fn world(&self) -> &World {
+        &self.world
+    }
+
+    /// The mutable form of [`Self::world`].
+    pub fn world_mut(&mut self) -> &mut World {
+        &mut self.world
     }
 
     /// Record which item a dropped-item entity is carrying, so its
@@ -587,18 +1130,22 @@ impl EntityInterpolator {
     ///
     /// # Where the live path calls this
     ///
-    /// [`Self::update`] does, from [`EntitySnapshot::item`], for every snapshot
-    /// that carries a stack — the full live chain is
-    /// `ITEM_STACK` metadata (index 8) → `EntityMetadataUpdate::item` →
-    /// `EntityView::item` → `net::entity_snapshot` → here. It stays a public
-    /// setter because it is also the direct seam for tests and for any caller
-    /// that learns an item's identity outside the snapshot stream.
+    /// [`fold_snapshots`] does, from [`EntitySnapshot::item`], for every
+    /// snapshot that carries a stack — the full live chain is `ITEM_STACK`
+    /// metadata (index 8) → `EntityMetadataUpdate::item` →
+    /// `lodestone_ecs::entity::DisplayItem` → `EntityView::item` →
+    /// `net::entity_snapshot` → here. It stays a public setter because it is
+    /// also the direct seam for tests and for any caller that learns an item's
+    /// identity outside the snapshot stream.
     ///
     /// An item entity with no entry here draws nothing, which is also what
     /// vanilla does with an empty stack (`ItemEntityRenderer.submit` returns
     /// early on `state.item.isEmpty()`).
     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {
-        self.item_stacks.insert(entity_id, item);
+        self.world
+            .resource_mut::<ItemStacks>()
+            .0
+            .insert(entity_id, item);
     }
 
     /// Forget the item recorded for `entity_id`, so it draws as an empty stack.
@@ -606,13 +1153,13 @@ impl EntityInterpolator {
     /// Only reached when the server *explicitly* reports an empty stack; a
     /// snapshot that is merely silent about the item leaves the record alone.
     pub fn clear_item_stack(&mut self, entity_id: i32) {
-        self.item_stacks.remove(&entity_id);
+        self.world.resource_mut::<ItemStacks>().0.remove(&entity_id);
     }
 
     /// The item recorded for `entity_id`, if any.
     #[must_use]
     pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {
-        self.item_stacks.get(&entity_id)
+        self.world.resource::<ItemStacks>().0.get(&entity_id)
     }
 
     /// [`Self::update_with_view`] against [`OpenAir`] and a default
@@ -629,18 +1176,26 @@ impl EntityInterpolator {
 
     /// Advance every track by `dt` seconds, then fold in this frame's snapshots.
     ///
-    /// Entities absent from `snapshots` are dropped (despawned/out of range).
-    /// A snapshot whose position or yaw differs from the current target starts a
-    /// new interpolation *from the current render pose*, so the mob never jumps.
-    /// A snapshot that matches the current target only lets the existing ease
-    /// run to completion.
+    /// The order is load-bearing and is what the tests below are written
+    /// against:
     ///
-    /// `view`/`profile` feed only [`step_item_physics`] (every other entity is
-    /// a pure position ease and never touches either). `view` should cover
-    /// wherever a tracked item entity actually is — `Sim::live_collision`'s
-    /// 3×3-column-around-the-player snapshot is the intended source, so a
-    /// drop far outside that radius still free-falls with no floor until it
-    /// re-enters range, same as before this method existed.
+    /// 1. [`Update`] → [`advance_interp_clocks`]: every ease clock and age moves
+    ///    on, so a snapshot that resets `t` this frame anchors from the pose
+    ///    that was actually on screen.
+    /// 2. per 20 Hz tick: [`tick_item_physics`] then [`GameTick`] →
+    ///    [`tick_walk_animation`]. Both run on a fixed clock, not per frame.
+    /// 3. [`fold_snapshots`]: this frame's report, then the prune.
+    /// 4. [`Extract`] → [`extract_entity_draws`], so [`Self::draws`] is a plain
+    ///    read.
+    ///
+    /// Entities absent from `snapshots` are dropped (despawned/out of range).
+    ///
+    /// `view`/`profile` feed only [`step_item_physics`] (every other entity is a
+    /// pure position ease and never touches either). `view` should cover wherever
+    /// a tracked item entity actually is — `Sim::live_collision`'s
+    /// 3×3-column-around-the-player snapshot is the intended source, so a drop
+    /// far outside that radius still free-falls with no floor until it re-enters
+    /// range, same as before this method existed.
     pub fn update_with_view(
         &mut self,
         snapshots: &[EntitySnapshot],
@@ -648,213 +1203,50 @@ impl EntityInterpolator {
         view: &dyn CollisionView,
         profile: &PhysicsProfile,
     ) {
-        // Advance existing clocks first, so a snapshot that resets `t` to 0 this
-        // frame starts the new window from exactly its previous render pose.
-        for track in self.tracks.values_mut() {
-            track.t = (track.t + dt).min(INTERP_WINDOW);
-            track.age += dt * TICKS_PER_SECOND;
+        self.world.insert_resource(FrameDelta(dt));
+        self.world.run_schedule(Update);
+
+        let mut accum = self.world.resource::<TickAccum>().0 + dt;
+        while accum >= TICK_SECONDS {
+            accum -= TICK_SECONDS;
+            // Step a dropped item's own ballistic physics once per real tick —
+            // the server itself only *corrects* this roughly once a second
+            // (`ItemEntity`'s `updateInterval(20)`), so the arc has to come from
+            // here, not from easing toward a sparse packet.
+            tick_item_physics(&mut self.world, view, profile);
+            self.world.run_schedule(GameTick);
         }
+        // The residual is also the partial tick `extract_entity_draws` reads, so
+        // it must be stored before `Extract` runs.
+        self.world.resource_mut::<TickAccum>().0 = accum;
 
-        // Advance the walk cycle on a fixed 20 Hz clock rather than per frame:
-        // vanilla's `WalkAnimationState` is a tick-rate state machine, and
-        // driving it per frame would make the swing speed depend on frame rate.
-        self.tick_accum += dt;
-        while self.tick_accum >= TICK_SECONDS {
-            self.tick_accum -= TICK_SECONDS;
-            for track in self.tracks.values_mut() {
-                // Step a dropped item's own ballistic physics once per real
-                // tick — the server itself only *corrects* this roughly once a
-                // second (`ItemEntity`'s `updateInterval(20)`), so the arc has
-                // to come from here, not from easing toward a sparse packet.
-                // See the module docs. Paused while the last report says the
-                // item is resting (no world query here to know the floor) —
-                // once `step_item_physics` derives its own authoritative
-                // `on_ground` every tick, only the *server's* report still
-                // gates whether the sim runs at all; the floor within a tick
-                // is now real collision, not a frozen flag.
-                if track.item_physics.as_ref().is_some_and(|p| !p.grounded) {
-                    // Scoped so the mutable borrow of `item_physics` ends
-                    // before `render_pos()` below needs to borrow all of
-                    // `track` — ticking and reading `render_pos` can't happen
-                    // in the same borrow.
-                    let sim_pos = {
-                        let physics = track
-                            .item_physics
-                            .as_mut()
-                            .expect("checked Some above");
-                        step_item_physics(&mut physics.sim, view, profile);
-                        physics.sim.position
-                    };
-                    // Re-anchor exactly like a fresh authoritative snapshot
-                    // would: ease from wherever this frame is currently drawn
-                    // toward the freshly simulated point, so the simulation
-                    // reads as continuous motion rather than a series of
-                    // per-tick snaps.
-                    track.prev = track.render_pos();
-                    track.curr = to_glam_vec3(sim_pos);
-                    track.t = 0.0;
-                }
+        fold_snapshots(&mut self.world, snapshots);
 
-                // Vanilla's `updateWalkAnimation` measures `this.getX() - this.xo`
-                // — how far the entity moved *this tick*. On the client that
-                // entity has already been advanced by `InterpolationHandler`, so
-                // the quantity is the per-tick step of the **interpolated**
-                // position, which is what `render_pos` is here. Sampling it once
-                // per 20 Hz tick reproduces vanilla under both dense and sparse
-                // move packets, and needs no separate "has it stopped?" rule: a
-                // mob that stops stops moving `render_pos`, so the distance goes
-                // to zero and the amplitude decays on its own.
-                let now = track.render_pos();
-                let distance = (now - track.walk_pos).with_y(0.0).length();
-                track.walk_pos = now;
-                let limb_scale = if track.scale < 1.0 {
-                    BABY_LIMB_SCALE
-                } else {
-                    ADULT_LIMB_SCALE
-                };
-                track
-                    .walk
-                    .update(walk_target_speed(distance), LIMB_SWING_SMOOTHING, limb_scale);
-            }
-        }
-
-        for snap in snapshots {
-            // Fold the reported identity first, so a drop is never drawn for a
-            // frame as a placeholder before its item lands. `None` is "this
-            // snapshot does not know", which must not clear what an earlier one
-            // established; only an explicit empty stack clears.
-            match &snap.item {
-                Reported::Reported(Some(item)) => self.set_item_stack(snap.id, item.clone()),
-                Reported::Reported(None) => self.clear_item_stack(snap.id),
-                Reported::Unreported => {}
-            }
-            let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
-            match self.tracks.get_mut(&snap.id) {
-                None => {
-                    // A newly seen entity is drawn at rest at its reported pose.
-                    self.tracks.insert(
-                        snap.id,
-                        Track {
-                            type_path: snap.type_path.clone(),
-                            scale: snap.scale,
-                            prev: snap.feet,
-                            curr: snap.feet,
-                            prev_yaw: snap.yaw,
-                            curr_yaw: snap.yaw,
-                            prev_head_yaw: snap.head_yaw,
-                            curr_head_yaw: snap.head_yaw,
-                            prev_pitch: snap.pitch,
-                            curr_pitch: snap.pitch,
-                            t: INTERP_WINDOW,
-                            walk: WalkAnimation::new(),
-                            walk_pos: snap.feet,
-                            age: 0.0,
-                            item_physics: is_item.then(|| new_item_physics(snap)),
-                            equipment: occupied_equipment(&snap.equipment),
-                        },
-                    );
-                }
-                Some(track) => {
-                    track.type_path.clone_from(&snap.type_path);
-                    track.scale = snap.scale;
-                    // **Outside** the `moved || turned` gate below, deliberately.
-                    // Equipment changes with no movement at all — a mob picking up
-                    // a dropped sword, a plugin swapping a villager's hat, the
-                    // player's own hotbar switch mirrored back — and gating this on
-                    // motion would leave a stationary mob holding whatever it was
-                    // holding when it last took a step.
-                    track.equipment = occupied_equipment(&snap.equipment);
-                    // A dropped item's own simulation moves `curr` every real
-                    // tick (see the physics step above), so comparing against
-                    // `track.curr` here would read as "moved" every single
-                    // frame even when the server has said nothing new since
-                    // the last poll. Compare against the last *authoritative*
-                    // report instead — `track.curr` only for every other
-                    // entity type, which the physics step never touches.
-                    let moved = match &track.item_physics {
-                        Some(physics) => (snap.feet - physics.last_reported).length() > POS_EPS,
-                        None => (snap.feet - track.curr).length() > POS_EPS,
-                    };
-                    let turned = angle_diff(snap.yaw, track.curr_yaw).abs() > YAW_EPS;
-                    let head_turned =
-                        angle_diff(snap.head_yaw, track.curr_head_yaw).abs() > YAW_EPS;
-                    let pitched = (snap.pitch - track.curr_pitch).abs() > YAW_EPS;
-                    if moved || turned || head_turned || pitched {
-                        // Re-anchor the ease at where the mob is drawn right now.
-                        track.prev = track.render_pos();
-                        track.prev_yaw = track.render_yaw();
-                        track.prev_head_yaw = track.render_head_yaw();
-                        track.prev_pitch = track.render_pitch();
-                        track.curr = snap.feet;
-                        track.curr_yaw = snap.yaw;
-                        track.curr_head_yaw = snap.head_yaw;
-                        track.curr_pitch = snap.pitch;
-                        track.t = 0.0;
-
-                        if is_item {
-                            match &mut track.item_physics {
-                                Some(physics) => {
-                                    physics.last_reported = snap.feet;
-                                    physics.grounded = snap.on_ground;
-                                    // Correct the simulation to the
-                                    // authoritative truth rather than fight
-                                    // it — this is the "rare server
-                                    // correction" vanilla's own local
-                                    // simulation also just snaps onto.
-                                    physics.sim.position = to_model_vec3(snap.feet);
-                                    if let Some(v) = snap.velocity {
-                                        physics.sim.velocity = to_model_vec3(v);
-                                    }
-                                    physics.sim.on_ground = snap.on_ground;
-                                }
-                                None => track.item_physics = Some(new_item_physics(snap)),
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Drop tracks for entities no longer reported — and the item stacks
-        // recorded against them, or a long session leaks one entry per drop.
-        let seen: std::collections::HashSet<i32> = snapshots.iter().map(|s| s.id).collect();
-        self.tracks.retain(|id, _| seen.contains(id));
-        self.item_stacks.retain(|id, _| seen.contains(id));
+        self.world.run_schedule(Extract);
     }
 
     /// The interpolated draw list for this frame. Order is unspecified (grouped
     /// by model downstream), so no ordering guarantees are made here.
+    ///
+    /// A plain read of what [`extract_entity_draws`] produced at the end of the
+    /// last [`Self::update_with_view`] — the extraction is not repeated here,
+    /// because a `&self` method cannot run a schedule and because re-extracting
+    /// per call would let two reads in one frame disagree.
     #[must_use]
     pub fn draws(&self) -> Vec<EntityDraw> {
-        self.tracks
-            .iter()
-            .map(|(id, t)| EntityDraw {
-                id: *id,
-                type_path: t.type_path.clone(),
-                item: (t.type_path == ITEM_ENTITY_TYPE_PATH)
-                    .then(|| self.item_stacks.get(id).cloned())
-                    .flatten(),
-                feet: t.render_pos(),
-                yaw: t.render_yaw(),
-                head_yaw: t.render_head_yaw(),
-                pitch: t.render_pitch(),
-                scale: t.scale,
-                anim: t.render_anim((self.tick_accum / TICK_SECONDS).clamp(0.0, 1.0)),
-                equipment: t.equipment.clone(),
-            })
-            .collect()
+        self.world.resource::<ExtractedDraws>().0.clone()
     }
 
     /// Number of entities currently tracked.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.tracks.len()
+        self.world.resource::<TrackIndex>().0.len()
     }
 
     /// Whether no entities are tracked.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tracks.is_empty()
+        self.world.resource::<TrackIndex>().0.is_empty()
     }
 }
 
