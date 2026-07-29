@@ -118,7 +118,7 @@ use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
 };
-use lodestone_model::event::EquipmentSlot;
+use lodestone_model::event::{EquipmentSlot, Reported};
 use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
@@ -301,9 +301,10 @@ pub struct EntitySnapshot {
     pub scale: f32,
     /// Which item a dropped item (or other item-displaying entity) is showing.
     ///
-    /// Nested exactly like the read-model's own field: the outer `Option` is
-    /// "has the server ever reported a stack for this entity", `Some(None)` is
-    /// an explicitly *empty* stack. `None` therefore means "unknown", and
+    /// Exactly the shape the read-model's own field is: [`Reported::Unreported`]
+    /// is "the server has never reported a stack for this entity",
+    /// [`Reported::Reported(None)`](Reported::Reported) is an explicitly
+    /// *empty* stack. `Unreported` therefore means "unknown", and
     /// [`EntityInterpolator::update`] leaves any previously recorded stack
     /// alone rather than clearing it — a drop names itself once and then goes
     /// quiet, so treating silence as "empty" would blank it a frame later.
@@ -313,19 +314,7 @@ pub struct EntitySnapshot {
     /// *id* to pick a model. The stack's `count` and data components are dropped
     /// at the boundary that builds this (`net::entity_snapshot`) — see the note
     /// there, since count is visible in vanilla.
-    ///
-    /// This is a `Reported<T>`-shaped field
-    /// (`lodestone_model::event::Reported`) in every way but its actual type:
-    /// it should be `Reported<ResourceLocation>`, naming "never reported" vs
-    /// "explicitly cleared" instead of nesting `Option`, but retyping it here
-    /// alone does not compile. The producer is `net::entity_snapshot` in
-    /// `crates/lodestone-shell/src/net.rs` (outside this change's scope),
-    /// which builds the nested-`Option` `item` local by matching on
-    /// `EntityView::item` — itself `Option<Option<ItemStack>>` in
-    /// `lodestone-client`, one crate further out. A follow-up that touches
-    /// `net.rs` (and, to go all the way to the wire, `lodestone-client`) in
-    /// the same pass as this field can finish the conversion.
-    pub item: Option<Option<ResourceLocation>>,
+    pub item: Reported<ResourceLocation>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
     ///
@@ -735,9 +724,9 @@ impl EntityInterpolator {
             // snapshot does not know", which must not clear what an earlier one
             // established; only an explicit empty stack clears.
             match &snap.item {
-                Some(Some(item)) => self.set_item_stack(snap.id, item.clone()),
-                Some(None) => self.clear_item_stack(snap.id),
-                None => {}
+                Reported::Reported(Some(item)) => self.set_item_stack(snap.id, item.clone()),
+                Reported::Reported(None) => self.clear_item_stack(snap.id),
+                Reported::Unreported => {}
             }
             let is_item = snap.type_path == ITEM_ENTITY_TYPE_PATH;
             match self.tracks.get_mut(&snap.id) {
@@ -898,7 +887,7 @@ mod tests {
             head_yaw: yaw,
             pitch: 0.0,
             scale: 1.0,
-            item: None,
+            item: Reported::Unreported,
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
@@ -1239,7 +1228,7 @@ mod tests {
             head_yaw: 0.0,
             pitch: 0.0,
             scale: 1.0,
-            item: None,
+            item: Reported::Unreported,
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
@@ -1249,7 +1238,7 @@ mod tests {
     /// The same, carrying a reported stack, as the live path builds it.
     fn item_snap_with(id: i32, feet: Vec3, item: Option<ResourceLocation>) -> EntitySnapshot {
         EntitySnapshot {
-            item: Some(item),
+            item: Reported::Reported(item),
             ..item_snap(id, feet)
         }
     }

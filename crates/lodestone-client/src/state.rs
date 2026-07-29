@@ -34,7 +34,7 @@ use lodestone_game::{
 use lodestone_model::{
     BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, EntityAttributeSnapshot,
     EntityEquipment, EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode,
-    ItemStack, PlayerListEntry, ResourceKey, Rotation, Text, Vec3,
+    ItemStack, PlayerListEntry, Reported, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
@@ -130,9 +130,10 @@ pub struct EntityView {
     /// Shared entity flags byte (on-fire / crouching / sprinting / …), once a
     /// metadata packet has reported it.
     pub flags: Option<u8>,
-    /// The entity's custom name, once reported. `Some(None)` means a name was
-    /// explicitly cleared; `None` means none has ever been reported.
-    pub custom_name: Option<Option<String>>,
+    /// The entity's custom name. [`Reported::Reported(None)`](Reported::Reported)
+    /// means a name was explicitly cleared; [`Reported::Unreported`] means none
+    /// has ever been reported.
+    pub custom_name: Reported<String>,
     /// Whether the custom name renders above the entity, once reported.
     pub custom_name_visible: Option<bool>,
     /// The entity's pose, once reported.
@@ -168,14 +169,15 @@ pub struct EntityView {
     /// reported it — a dropped item's whole visible identity, and the display
     /// item of thrown projectiles and the eye of ender.
     ///
-    /// Nested like [`custom_name`](Self::custom_name), and for the same reason:
-    /// the outer `Option` is "has the server ever reported this field",
-    /// `Some(None)` is the server explicitly saying the stack is *empty* (which
-    /// vanilla draws as nothing). Metadata is incremental, so an update that
-    /// simply does not mention the field must leave a previously-known stack
-    /// alone rather than clear it — collapsing the two here would make every
-    /// subsequent position-only metadata packet erase the item.
-    pub item: Option<Option<ItemStack>>,
+    /// Same shape as [`custom_name`](Self::custom_name) and for the same
+    /// reason: [`Reported::Unreported`] is "the server has never reported this
+    /// field", [`Reported::Reported(None)`](Reported::Reported) is the server
+    /// explicitly saying the stack is *empty* (which vanilla draws as
+    /// nothing). Metadata is incremental, so an update that simply does not
+    /// mention the field must leave a previously-known stack alone rather than
+    /// clear it — collapsing the two here would make every subsequent
+    /// position-only metadata packet erase the item.
+    pub item: Reported<ItemStack>,
 }
 
 /// The mutable scalar state behind the lock. Private; only ever touched under
@@ -712,7 +714,7 @@ impl Inner {
                         velocity: *velocity,
                         on_ground: false,
                         flags: None,
-                        custom_name: None,
+                        custom_name: Reported::Unreported,
                         custom_name_visible: None,
                         pose: None,
                         health: None,
@@ -720,7 +722,7 @@ impl Inner {
                         variant: None,
                         attributes: Vec::new(),
                         equipment: Vec::new(),
-                        item: None,
+                        item: Reported::Unreported,
                     },
                 );
             }
@@ -869,8 +871,8 @@ fn apply_metadata(entity: &mut EntityView, metadata: &EntityMetadataUpdate) {
     if let Some(flags) = metadata.flags {
         entity.flags = Some(flags);
     }
-    if let Some(custom_name) = &metadata.custom_name {
-        entity.custom_name = Some(custom_name.clone());
+    if let Reported::Reported(custom_name) = &metadata.custom_name {
+        entity.custom_name = Reported::Reported(custom_name.clone());
     }
     if let Some(visible) = metadata.custom_name_visible {
         entity.custom_name_visible = Some(visible);
@@ -887,13 +889,13 @@ fn apply_metadata(entity: &mut EntityView, metadata: &EntityMetadataUpdate) {
     if let Some(variant) = &metadata.variant {
         entity.variant = Some(variant.clone());
     }
-    // Both levels are preserved deliberately: `metadata.item == None` is "this
+    // Both states are preserved deliberately: `Reported::Unreported` is "this
     // packet said nothing about the item" and must not overwrite a stack an
-    // earlier packet reported, while `Some(None)` is the server clearing it.
-    // A dropped item announces itself once, at spawn, and then sends
-    // item-free metadata for the rest of its life, so flattening here would
-    // lose the identity again a tick after it arrived.
-    if let Some(item) = &metadata.item {
-        entity.item = Some(item.clone());
+    // earlier packet reported, while `Reported::Reported(None)` is the server
+    // clearing it. A dropped item announces itself once, at spawn, and then
+    // sends item-free metadata for the rest of its life, so collapsing the two
+    // here would lose the identity again a tick after it arrived.
+    if let Reported::Reported(item) = &metadata.item {
+        entity.item = Reported::Reported(item.clone());
     }
 }

@@ -21,7 +21,7 @@ use lodestone_model::event::{
     EntityMetadataUpdate, EntityMovement, EntityPose, EquipmentSlot, TeleportFlags,
 };
 use lodestone_model::text::Text;
-use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier, ItemStack};
+use lodestone_model::{AdapterError, ClientAction, GameMode, Identifier, ItemStack, Reported};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ChunkSection, ColumnLight, Heightmaps, LoadedChunk,
@@ -1134,9 +1134,9 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
                 Directive::Emit(ClientEvent::EntityMetadataUpdated {
                     entity_id: 10,
                     metadata: EntityMetadataUpdate {
-                        custom_name: Some(Some("Babe".to_string())),
+                        custom_name: Reported::Reported(Some("Babe".to_string())),
                         health: Some(6.0),
-                        item: Some(Some(ItemStack::new(dim("diamond"), 12))),
+                        item: Reported::Reported(Some(ItemStack::new(dim("diamond"), 12))),
                         ..Default::default()
                     },
                 }),
@@ -1190,13 +1190,13 @@ async fn entity_metadata_and_attributes_merge_incrementally() {
 
     let pig = handle.entity(10).expect("entity 10 present");
     // Incremental merge: every field from both packets survives.
-    assert_eq!(pig.custom_name, Some(Some("Babe".to_string())));
+    assert_eq!(pig.custom_name, Reported::Reported(Some("Babe".to_string())));
     assert_eq!(pig.health, Some(6.0));
     assert_eq!(pig.pose, Some(EntityPose::Standing));
     assert_eq!(pig.baby, Some(true));
     assert_eq!(
         pig.item,
-        Some(Some(ItemStack::new(dim("diamond"), 12))),
+        Reported::Reported(Some(ItemStack::new(dim("diamond"), 12))),
         "the second packet said nothing about the item, so the stack the first \
          one reported must survive — flattening the nesting here is what makes \
          a live drop go back to drawing a placeholder one tick after it spawns"

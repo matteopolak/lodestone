@@ -179,23 +179,17 @@ pub enum AnimationAction {
 /// item's model one tick after it appears. `Reported(None)` is the actual
 /// clear.
 ///
-/// # Not yet applied everywhere the shape exists
+/// # Where this is applied
 ///
-/// This type exists so the fields *in this file* can, in principle, name
-/// their two states instead of nesting `Option`. It is intentionally not
-/// wired onto [`EntityMetadataUpdate::custom_name`] or
-/// [`EntityMetadataUpdate::item`] yet: both are produced with literal nested
-/// `Option` values from `protocol/v770/src/packets/metadata.rs` (a different
-/// crate, out of scope for the change that added this type) and consumed the
-/// same way from `lodestone-client/src/state.rs` (owned by a different agent
-/// in-flight on this checkout) — retyping the field here without also
-/// updating both would not compile. See those fields' doc comments for the
-/// exact blocking lines. The `EntitySnapshot` sibling in
-/// `lodestone-shell/src/entities.rs` has the identical blocker one layer up,
-/// against `lodestone-shell/src/net.rs`'s `entity_snapshot()`. A follow-up
-/// that touches all of `protocol/v770`, `lodestone-client` and
-/// `lodestone-shell/src/net.rs` in one pass can finish the job; changing only
-/// the fields named in isolation cannot.
+/// Wired end to end across the crates that touch a dropped item's or a named
+/// entity's identity: [`EntityMetadataUpdate::custom_name`] and
+/// [`EntityMetadataUpdate::item`] here; `lodestone-client`'s `EntityView`
+/// fields of the same names (folded from the above in
+/// `lodestone-client/src/state.rs`'s `apply_metadata`); and
+/// `lodestone-shell/src/entities.rs`'s `EntitySnapshot::item`, produced from
+/// the client view by `lodestone-shell/src/net.rs`'s `entity_snapshot()`. All
+/// four converted in the same pass because each is a producer or consumer of
+/// the next — retyping any one alone does not compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Reported<T> {
     /// The field was not present in this update. Must **not** overwrite a
@@ -213,6 +207,24 @@ impl<T> Reported<T> {
     #[must_use]
     pub const fn is_reported(&self) -> bool {
         matches!(self, Self::Reported(_))
+    }
+
+    /// Collapses to "the value right now, if any" — `Unreported` and
+    /// `Reported(None)` both become `None`.
+    ///
+    /// This deliberately discards the distinction the rest of this type
+    /// exists to keep: use it only at a call site that genuinely does not
+    /// care *why* there is no value (never reported vs. explicitly cleared),
+    /// same as it would not have cared with the old `Option<Option<T>>`
+    /// shape's `.flatten()`. A call site that needs to tell "never mentioned"
+    /// from "explicitly cleared" — e.g. to decide whether to overwrite a
+    /// previously known value — must match on the variants directly instead.
+    #[must_use]
+    pub fn into_value(self) -> Option<T> {
+        match self {
+            Self::Reported(v) => v,
+            Self::Unreported => None,
+        }
     }
 }
 
@@ -243,16 +255,11 @@ pub struct EntityMetadataUpdate {
     /// / invisible / glowing / fall-flying), when present. Bit meanings are
     /// stable across modern versions.
     pub flags: Option<u8>,
-    /// The custom name, when the field was present. Inner `None` clears it.
-    ///
-    /// This should be [`Reported<String>`], not a nested `Option` — see that
-    /// type's docs for why, and for exactly why it is not yet: the producer
-    /// (`protocol/v770/src/packets/metadata.rs`, e.g. `md.custom_name =
-    /// Some(t)` and `Some(None)`) and a consumer
-    /// (`lodestone-client/src/state.rs`'s `if let Some(custom_name) =
-    /// &metadata.custom_name`) are both outside the scope that can retype
-    /// this field alone.
-    pub custom_name: Option<Option<String>>,
+    /// The custom name. [`Reported::Unreported`] when this packet did not
+    /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
+    /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
+    /// is the name it now holds.
+    pub custom_name: Reported<String>,
     /// Whether the custom name renders above the entity, when present.
     pub custom_name_visible: Option<bool>,
     /// The entity pose, when present.
@@ -275,13 +282,12 @@ pub struct EntityMetadataUpdate {
     /// the display item of thrown projectiles (snowball, egg, ender pearl,
     /// splash potion), fireballs, and the eye of ender.
     ///
-    /// Nested like [`custom_name`](Self::custom_name): the outer `Option` is
-    /// "did this packet include the field", the inner is "is a stack currently
-    /// set" — `Some(None)` is the empty stack, which vanilla draws as nothing.
-    /// Same [`Reported<T>`] candidate, same blocker: the producer
-    /// (`protocol/v770/src/packets/metadata.rs`'s `md.item = Some(stack)`) and
-    /// a consumer (`lodestone-client/src/state.rs`'s `if let Some(item) =
-    /// &metadata.item`) are both outside this change's scope.
+    /// Like [`custom_name`](Self::custom_name): [`Reported::Unreported`] when
+    /// this packet did not mention the field,
+    /// [`Reported::Reported(None)`](Reported::Reported) is the empty stack
+    /// (which vanilla draws as nothing), and
+    /// [`Reported::Reported(Some(stack))`](Reported::Reported) is the stack it
+    /// now holds.
     ///
     /// A stack whose wire form carried a data component this build does not
     /// model still arrives here with
@@ -289,7 +295,7 @@ pub struct EntityMetadataUpdate {
     /// set. The item key and count are decoded *before* any component is, so an
     /// unrecognised component costs detail, never the answer to "which item is
     /// this".
-    pub item: Option<Option<ItemStack>>,
+    pub item: Reported<ItemStack>,
 }
 
 impl EntityMetadataUpdate {
@@ -297,13 +303,13 @@ impl EntityMetadataUpdate {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.flags.is_none()
-            && self.custom_name.is_none()
+            && !self.custom_name.is_reported()
             && self.custom_name_visible.is_none()
             && self.pose.is_none()
             && self.health.is_none()
             && self.baby.is_none()
             && self.variant.is_none()
-            && self.item.is_none()
+            && !self.item.is_reported()
     }
 }
 

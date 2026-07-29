@@ -75,7 +75,7 @@
 use lodestone_core::{Error, Reader, Result, plain_text_from_nbt_component, read_network_nbt};
 use lodestone_model::{
     EntityAttributeModifier, EntityAttributeSnapshot, EntityMetadataUpdate, EntityPose,
-    EntityVariant, Identifier, ItemStack,
+    EntityVariant, Identifier, ItemStack, Reported,
 };
 
 use crate::attribute_types::attribute_name;
@@ -400,7 +400,7 @@ pub fn read_entity_metadata(
         // irrelevant. (It is 8 on a dropped item and an item frame, and 8 on
         // thrown projectiles too, but nothing needs to know that.)
         if let Value::Item { stack, complete } = value {
-            md.item = Some(stack);
+            md.item = Reported::Reported(stack);
             if !complete {
                 // The reader is parked inside an unmodeled component's payload.
                 // Every following byte would decode as a plausible-but-wrong
@@ -415,7 +415,7 @@ pub fn read_entity_metadata(
         }
         match (index, value) {
             (IDX_SHARED_FLAGS, Value::Byte(b)) => md.flags = Some(b as u8),
-            (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Some(t),
+            (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Reported::Reported(t),
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
             (IDX_POSE, Value::Pose(p)) => md.pose = Some(pose_from_id(p)),
             (IDX_HEALTH, Value::Float(f)) => md.health = Some(f),
@@ -583,7 +583,10 @@ mod tests {
         reader.ensure_empty().expect("no trailing bytes");
 
         assert_eq!(md.flags, Some(0x01));
-        assert_eq!(md.custom_name, Some(Some("Hoglet".to_string())));
+        assert_eq!(
+            md.custom_name,
+            Reported::Reported(Some("Hoglet".to_string()))
+        );
         assert_eq!(md.custom_name_visible, Some(true));
         assert_eq!(md.pose, Some(EntityPose::Crouching));
         assert_eq!(md.health, Some(10.0));
@@ -607,9 +610,10 @@ mod tests {
     }
 
     /// A cleared custom name (present field, empty optional) surfaces as
-    /// `Some(None)`, distinct from "field absent" (`None`).
+    /// `Reported::Reported(None)`, distinct from "field absent"
+    /// (`Reported::Unreported`).
     #[test]
-    fn cleared_custom_name_is_some_none() {
+    fn cleared_custom_name_is_reported_none() {
         let mut bytes = Vec::new();
         bytes.push(IDX_CUSTOM_NAME);
         bytes.extend(varint(SER_OPTIONAL_COMPONENT));
@@ -620,7 +624,7 @@ mod tests {
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
-        assert_eq!(md.custom_name, Some(None));
+        assert_eq!(md.custom_name, Reported::Reported(None));
     }
 
     /// A truncated value (float claims 4 bytes, only 2 present) must error rather
@@ -657,9 +661,9 @@ mod tests {
     }
 
     /// An empty stack (`count <= 0`) is a *cleared* item field, distinct from the
-    /// field being absent — the same `Some(None)` shape the custom name uses. A
-    /// following field still decodes, because an empty stack consumes its whole
-    /// (one-byte) value.
+    /// field being absent — the same `Reported::Reported(None)` shape the custom
+    /// name uses. A following field still decodes, because an empty stack
+    /// consumes its whole (one-byte) value.
     #[test]
     fn empty_item_stack_clears_the_field_and_stays_aligned() {
         let mut bytes = Vec::new();
@@ -676,7 +680,7 @@ mod tests {
         reader.ensure_empty().expect("no trailing bytes");
 
         assert!(decoded.complete);
-        assert_eq!(decoded.metadata.item, Some(None));
+        assert_eq!(decoded.metadata.item, Reported::Reported(None));
         assert_eq!(decoded.metadata.health, Some(7.0));
     }
 

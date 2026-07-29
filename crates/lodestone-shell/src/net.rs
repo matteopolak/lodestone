@@ -99,7 +99,7 @@ use std::time::Duration;
 
 use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
-    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Rotation, SectionLight,
+    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Reported, Rotation, SectionLight,
     ServerAddress, Vec3, WorldDimensions,
 };
 use lodestone_game::menu::Menu;
@@ -935,10 +935,11 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 ///   `has_unmodeled` marker. These change how an item *looks* but not *which*
 ///   item it is, and nothing in the item pipeline reads them yet.
 ///
-/// The nesting is preserved: `None` stays "never reported", `Some(None)` stays
+/// The three states are preserved: [`Reported::Unreported`] stays "never
+/// reported", [`Reported::Reported(None)`](Reported::Reported) stays
 /// "explicitly empty". A key that somehow fails `ResourceLocation` validation
-/// degrades to "not reported" rather than to "empty", so a malformed id can
-/// never masquerade as the server clearing the stack.
+/// degrades to `Unreported` rather than to `Reported(None)`, so a malformed id
+/// can never masquerade as the server clearing the stack.
 ///
 /// [`EntityView::equipment`] goes through the same narrowing — `EquipmentSlot`
 /// is a `lodestone-model` type, which `EntitySnapshot` *does* depend on (it is a
@@ -949,15 +950,17 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 fn entity_snapshot(view: EntityView) -> EntitySnapshot {
     let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
     let item = match view.item {
-        None => None,
-        Some(None) => Some(None),
-        // `.map(Some)` and not `.and_then` inside a `map`: a failed conversion
-        // must collapse to the *outer* `None` ("nothing reported"), never to
-        // `Some(None)`, which downstream reads as the server clearing the stack.
-        Some(Some(stack)) => {
-            lodestone_assets::ResourceLocation::new(stack.item.namespace(), stack.item.path())
-                .ok()
-                .map(Some)
+        Reported::Unreported => Reported::Unreported,
+        Reported::Reported(None) => Reported::Reported(None),
+        // A failed conversion must collapse to `Unreported` ("nothing
+        // reported"), never to `Reported(None)`, which downstream reads as
+        // the server clearing the stack.
+        Reported::Reported(Some(stack)) => {
+            match lodestone_assets::ResourceLocation::new(stack.item.namespace(), stack.item.path())
+            {
+                Ok(id) => Reported::Reported(Some(id)),
+                Err(_) => Reported::Unreported,
+            }
         }
     };
     // `EntityView::equipment` is the *accumulated* per-slot state
@@ -1206,7 +1209,7 @@ mod tests {
             velocity,
             on_ground,
             flags: None,
-            custom_name: None,
+            custom_name: Reported::Unreported,
             custom_name_visible: None,
             pose: None,
             health: None,
@@ -1214,7 +1217,7 @@ mod tests {
             variant: None,
             attributes: Vec::new(),
             equipment: Vec::new(),
-            item: None,
+            item: Reported::Unreported,
         }
     }
 
