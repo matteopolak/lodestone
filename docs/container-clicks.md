@@ -192,25 +192,49 @@ not the truth… read the result slot for what the player is actually holding
 a claim to." `Menu::restore` is likewise labelled "server-authoritative
 resync" (`menu.rs:364`).
 
-### Armour is currently unequippable
+### Armour equips — the prototype census landed in `67ff7c3`
 
-Two prototype item components are missing entirely: `minecraft:equippable`
-and `minecraft:max_stack_size`. Like `minecraft:tool`
-(see [`tool-mining.md`](./tool-mining.md)), vanilla stores both in the
-item's *built-in* component map, not in the clientbound patch — so nothing a
-wire decoder produces will ever carry them without a version-owned census
-(an item→equippable table, the same shape as `generated/tools.rs`). Until
-that lands, `crate::container::equippable_slot` returns `None` for every
-real stack, which disables `Slot::may_place` for an `Armor` slot outright:
-no click of any kind can currently put armour on
-(`Menu::empty_equip_target`'s doc, `menu.rs:729-763`). Every stack also
-reports a max stack size of 64 regardless of the real item. This is asserted
-*on purpose*, as the current wrong state, by
-`canary_wire_stacks_carry_no_prototype_components` (`menu.rs:1441-1487`):
-when the census lands this test starts failing, and that failure is the
-reminder to delete it and re-point the armour/stack-cap tests at real wire
-stacks. The positive-path tests for equip logic (`armour_slot_refuses_the_
-wrong_equipment_position` etc.) build the component by hand in the meantime.
+This section originally recorded armour as unequippable because
+`minecraft:equippable` and `minecraft:max_stack_size` were prototype item
+components — vanilla stores both in the item's *built-in* component map, not
+in the clientbound patch, so no wire decoder could produce them without a
+version-owned census — and it flagged itself as likely to go stale within the
+hour, in the same session, once that census landed. It has: `67ff7c3` added
+`crates/protocol/v770/src/item_prototypes.rs` (an item→`{max_stack_size,
+max_damage, equip_slot}` table, the shape `generated/tools.rs` set the
+precedent for) and wired it into wire decoding at
+`read_component_patch` (`crates/protocol/v770/src/adapter.rs:752-830`): the
+effective `max_stack_size`/`max_damage`/`equippable` fields are seeded from
+the prototype *before* the patch is read, and a patch that does mention one
+overrides the seeded value. `crate::container::equippable_slot` reads
+`stack.components().get_str("minecraft:equippable")`, so a stack decoded off
+the real wire now resolves it, `Slot::may_place` accepts it into the matching
+`Armor` slot, and `Menu::empty_equip_target` (`menu.rs:729-763`) finds it. No
+click-mode change was needed — the routing in the table above was always
+right; it had nothing to route.
+
+The `"body"` → `Chest` fold this section used to describe is gone, and
+deliberately: `EquipmentSlot::from_name` (`crates/lodestone-game/src/
+container.rs`) leaves `"body"` unmapped, because vanilla gates humanoid
+armour on `EquipmentSlot.Type.HUMANOID_ARMOR` (`EquipmentSlot.java:15-19`),
+which **excludes** `BODY` — `wolf_armor` and the four `*_horse_armor` items
+are real `body`-slot equipment, so folding `"body"` into `Chest` would have
+put animal armour in a player's chestplate slot the moment the census made
+`"body"` reachable.
+
+**One loose end this landing left behind:** `canary_wire_stacks_carry_
+no_prototype_components` (`menu.rs:1441-1487`) is still in the tree, still
+green, and its own comment ("if this now resolves, the equippable census
+landed") is no longer an accurate description of what it tests. It builds its
+"wire stack" as `lodestone_model::ItemStack { …, components:
+lodestone_model::ItemComponents::default() }` directly — bypassing
+`read_component_patch` entirely — so `equippable_slot` on it returns `None`
+regardless of whether the census exists; the test cannot observe the fix it
+was written to detect. It was not touched here (this pass is docs-only), but
+the census landing is exactly the trigger its own comment named for deleting
+it and re-pointing the armour/stack-cap tests at a stack built through the
+real adapter, e.g. via a decoded `read_component_patch` call rather than a
+hand-built `ItemComponents::default()`.
 
 ### Three quirks that are transcribed deliberately, because they read as bugs
 
@@ -260,10 +284,10 @@ one stack's worth has to loop.
   version crate first (same shape as the tool census); do not special-case
   slot numbers without that data, and thread it through as a `Menu`-level
   descriptor, not a new `MenuKind`.
-- **Armour**, if you take it on: add an item→`equippable` census
-  (`generated/tools.rs`-shaped) to the version crate, wire it into stack
-  construction, then delete `canary_wire_stacks_carry_no_prototype_components`
-  and re-point its assertions at real wire stacks.
+- **Armour** — done (`67ff7c3`); see above. What is left is cleanup, not a
+  feature: delete `canary_wire_stacks_carry_no_prototype_components`
+  (`menu.rs:1454`) and re-point its assertions at a stack built through
+  `read_component_patch` instead of a hand-built `ItemComponents::default()`.
 
 ## Configuration
 
@@ -277,8 +301,10 @@ whatever `lodestone-shell` feeds it from input events.
 - `crate::reconcile` (`lodestone-game`) — the predict/reconcile machinery
   `Menus` routes into; not itself covered by this doc.
 - [`tool-mining.md`](./tool-mining.md) — the same prototype-vs-patch
-  component split (`minecraft:tool`) that explains why `equippable` and
-  `max_stack_size` are unreachable today.
+  component split (`minecraft:tool`) that `minecraft:equippable` and
+  `minecraft:max_stack_size` now also go through, per `67ff7c3`.
+- [`item-prototypes.md`](./item-prototypes.md) — the census itself
+  (`crates/protocol/v770/src/item_prototypes.rs`) and its wire-decode seam.
 
 ## Tests
 
@@ -299,6 +325,11 @@ modules — hermetic, no server or GPU needed. Notable ones cited above:
 `quick_move_refuses_to_merge_differing_components` /
 `control_quick_move_merges_identical_components`,
 `pickup_all_never_drains_the_crafting_result`,
-`canary_wire_stacks_carry_no_prototype_components`. Every negative-result
-test in this module is paired with a positive control that exercises the
-same mechanism, per the module's own stated evidence standard.
+`canary_wire_stacks_carry_no_prototype_components` — this last one is now
+stale in a way worth flagging rather than silently trusting: it builds its
+"wire stack" with `ItemComponents::default()` directly, never through
+`read_component_patch`, so it stays green whether or not the prototype census
+is wired up and can no longer serve as the reminder its own comment claims to
+be (see "Armour equips" above). Every negative-result test in this module is
+otherwise paired with a positive control that exercises the same mechanism,
+per the module's own stated evidence standard.

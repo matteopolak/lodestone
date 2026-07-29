@@ -11,10 +11,12 @@ plugin points for both the renderer and third-party extensions", and `DESIGN.md:
 the renderer should be "a separate crate that observes the same ECS world". `DESIGN.md:2083`
 names azalea as "the best reference for macro ergonomics and ECS client design".
 
-There is **no `bevy` dependency anywhere in the tree today** (`grep -rn bevy --include=Cargo.toml`
-returns nothing). The current architecture — a `RwLock`-guarded read-model in `lodestone-client`,
-a channel to a god-object `Sim` in `lodestone-shell` — is a *departure* from the design doc that
-was never reconciled. This migration is a return to it.
+**At the time this plan was written, there was no `bevy` dependency anywhere in the tree**
+(`grep -rn bevy --include=Cargo.toml` returned nothing). The architecture described below —
+a `RwLock`-guarded read-model in `lodestone-client`, a channel to a god-object `Sim` in
+`lodestone-shell` — was a *departure* from the design doc that had never been reconciled. This
+migration is a return to it, and Stages 0–3 (§7) have since landed: `bevy_app`/`bevy_ecs` are
+workspace dependencies today, and `crates/lodestone-ecs` is the crate this plan added.
 
 **It is not a performance win.** Live entity counts are ~30. `bevy_ecs` will not make that
 faster, and azalea's own docs are candid about the trade
@@ -462,6 +464,14 @@ supposed to go red, and its going red is the plan working.
 
 ### Stage 0 — the App, the schedules, and one real slice
 
+**Landed** (`415138f`). `crates/lodestone-ecs` exists with the four schedules and
+their set labels (§4.2), `WorldTime`, and the `Arc<RwLock<World>>` handle. `Inner`'s
+`world_age`/`time_of_day` fields are gone from `lodestone-client/src/state.rs` —
+`state.rs` now reads `WorldTime` through the resource and its own comment says so
+(`state.rs:647`: "`docs/bevy-migration.md` deleted `Inner.world_age`/`Inner.time_of_day`").
+`lodestone-ecs` is in `scripts/wasm-check.sh`'s `CRATES` list, and
+`cargo xtask check-connected` has no allowlist entry for it, per plan.
+
 **Moves:** `world_age` / `time_of_day` (`state.rs:188-189`, folded at `state.rs:668-674`) →
 `#[derive(Resource)] struct WorldTime { age: i64, time_of_day: i64 }`.
 
@@ -494,6 +504,24 @@ being default-on is the thing most likely to surprise.
 ---
 
 ### Stage 1 — entities become entities (three copies → one)
+
+**Landed** (`8be6544`). See [`entity-components.md`](./entity-components.md) for
+the shipped shape and three places it differs from the plan below:
+
+- **`EntitySnapshot` did not die.** Its own doc comment (`entities.rs`) says why:
+  it survives because its producer (`net.rs`) and its consumer (`sim.rs`) are on
+  opposite sides of a boundary this stage did not close, and it is explicitly
+  "slated for deletion" once ingest writes the render-side components directly —
+  which needs the collision source and the snapshot slice to become `'static`,
+  and neither can yet (see `docs/entity-components.md`'s "two things are not
+  systems yet" gotcha; that closes at Stage 4).
+- **`EntityView` is the sanctioned intermediate, exactly as planned** —
+  components authoritative, the struct derived on demand for
+  `ClientHandle::entities()` — not the reverse.
+- **The render and ingest sides landed as two `World`s, not one**, deliberately:
+  `crates/lodestone-ecs/src/{entity,ingest}.rs` (the net thread's `World`, owned
+  by `SharedState`) versus `crates/lodestone-shell/src/entities.rs`
+  (`EntityInterpolator`'s own `World`). Unifying them is §4.1, not this stage.
 
 **Moves:**
 - `EntityView` (`state.rs:107-178`) and `Inner.entities` (`state.rs:186`) → components:

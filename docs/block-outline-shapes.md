@@ -221,20 +221,37 @@ air's empty outline.
 - `crates/protocol/v770/src/collision_shapes.rs` — read only by the divergence
   control, never as a fallback.
 
-## Not yet consumed
+## Consumption status
 
-Nothing in `lodestone-shell` calls `block_outline` yet.
-`LiveCollision::is_pickable` still uses the has-baked-quads proxy and
-`Sim::update_target` still treats a picked cell as a full unit cube. Wiring is two
-changes:
+**1. `is_pickable` is done (`196d385`).** `LiveCollision::is_pickable`
+(`crates/lodestone-shell/src/collision.rs`) now reads
+`self.version.block_outline(state)` through the private `outline_of` helper,
+replacing the has-baked-quads proxy this section used to describe. The one
+behaviour change flagged below landed with it: `minecraft:light` is now
+**un**pickable when not holding a light item, matching vanilla — the proxy's
+"no fluid ⇒ pickable" clause used to keep it targetable as a side effect of
+having no baked model geometry.
 
-1. **`is_pickable`** → `!adapter.block_outline(state).unwrap_or(&[]).is_empty()`.
-   This is strictly more correct than the proxy, with one behaviour change worth
-   knowing: `minecraft:light` becomes **un**pickable, which is what vanilla does
-   when you are not holding a light item (see Gotcha 1). The proxy's clause 2
-   ("no fluid ⇒ pickable") currently keeps it targetable.
-2. **The selection box** → clip the ray against, and draw, the real boxes rather
-   than a unit cube. This is the fix for slabs, stairs and kelp over-selecting at
-   their edges, and it is the reason this census exists.
+**2. The selection box is still a unit cube, but not for lack of a shape or a
+render hook — both exist now, and only the wiring between them is missing.**
 
-Until then the census reaches zero pixels — see CLAUDE.md on islands.
+- `LiveCollision::outline_boxes_at(x, y, z) -> Vec<Aabb>` (`collision.rs`) returns
+  the real per-block outline boxes in world space — a half-height box on a slab,
+  kelp's thin column, and so on.
+- `RenderState::set_outline_shape_source` and the `OutlineShapeSource` it installs
+  (`crates/lodestone-shell/src/gpu.rs`) exist for exactly this: `RenderState`
+  samples `self.outline_shape.sample(block)` and hands the boxes to
+  `OutlineRenderer::prepare`, which already accepts a real shape (an empty slice
+  falls back to a unit cube — correct for the demo palette, which has no outline
+  census).
+- **Nothing calls `set_outline_shape_source`.** `grep -rn set_outline_shape_source
+  crates` finds only its own definition. Until some startup path (the shell's
+  `app.rs`, where the live `RenderState` and the live `CollisionSource` both
+  already exist) installs a closure over `LiveCollision::outline_boxes_at`, the
+  renderer keeps drawing `OutlineShapeSource::default()`'s unit cube, and every
+  slab/stair/kelp selection box over-selects at its edges exactly as before.
+
+The census itself, and the shape/render seam it needed, are no longer the gap —
+the missing piece is a single call at startup. Until that call exists, the
+selection-box half of this census still reaches zero pixels — see CLAUDE.md on
+islands.

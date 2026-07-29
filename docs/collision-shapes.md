@@ -100,29 +100,45 @@ are one shared code path rather than a stub on one side.
 
 ### Status of the 13 methods
 
-Real (10): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
+Real (11): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
 `jump_factor`, `is_water`, `is_climbable`, `is_lava`, `stuck_multiplier`,
-`bounce_restitution`.
+`bounce_restitution`, `blocks_motion`.
 
-Real with a stated approximation (3):
+- **`blocks_motion`** was itself a derived approximation until `24af787`. It is
+  now dumped per state — `BlockState.blocksMotion()`
+  (`block != COBWEB && block != BAMBOO_SAPLING && legacySolid`) — straight off the
+  real server, through `VersionAdapter::block_blocks_motion` →
+  `lodestone_v770::block_solidity` (`crates/protocol/v770/src/generated/block_solidity.rs`,
+  the same dump-and-commit shape as the collision census). `legacySolid` is a
+  *separate* cached boolean 26.2 overrides on 237 blocks with `forceSolidOn()`, 8
+  with `forceSolidOff()`, and leaves un-cached on 23 `dynamicShape()` blocks — none
+  of the three has a getter or appears in `blocks.json`, so no shape census could
+  ever have carried them; that is the whole reason this table exists.
+  `blocks_motion_at` (`collision.rs`) still carries the old geometry derivation
+  (`calculateSolid`: mean bounding-box dimension ≥ 0.7291666… or Y size ≥ 1.0, plus
+  the three name exclusions cobweb/bamboo_sapling/ladder) — but only as a
+  **fallback** for when `self.version` is `None` (no census reachable) or for
+  `WorldCollision`'s 10-block demo palette, whose blocks are all full cubes or air
+  and for which the fallback is exact. Used against real 26.2 data instead of the
+  census, that fallback is wrong for **2,618 of 32,366 states across 202 blocks**
+  (`crates/protocol/v770/tests/block_physics.rs::the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`):
+  signs, pressure plates, chains, banners, lanterns, turtle eggs, conduits and dead
+  coral read as *not* blocking; azalea, flowering azalea, big dripleaf, chorus
+  plant/flower, end rod, snow and scaffolding read as blocking. **Cobweb, bamboo
+  sapling and ladder are not part of that wrongness** — the fallback's three
+  hard-coded name exclusions get all three right on their own, cobweb and bamboo
+  sapling because they match vanilla's exclusion list verbatim and ladder because
+  it is separately hard-coded off (its mean extent sits *exactly* on the threshold
+  constant, which is why the constant is what it is). Blast radius of a wrong
+  answer here is still small — one consumer, `lodestone_physics::get_flow`'s
+  empty-neighbour branch; nothing in player movement reads it.
+
+Real with a stated approximation (2):
 
 - **`fluid_at`** — kind, amount and falling from `BlockModels::fluid`, live only.
   `WorldCollision` returns `None` deliberately: the demo palette's water is a
   single property-less id with no `level`, so there is no amount to report, and
   fabricating "source, amount 8" would invent a current in flat demo lakes.
-- **`blocks_motion`** — `BlockState.blocksMotion()` is
-  `block != COBWEB && block != BAMBOO_SAPLING && legacySolid`, and `legacySolid` is
-  a *separate* cached boolean that 26.2 overrides on **143 blocks with
-  `forceSolidOn()` and 8 with `forceSolidOff()`**. No committed table carries that
-  flag, so it is derived from the shape here (`calculateSolid`: mean bounding-box
-  dimension ≥ 0.7291666… or Y size ≥ 1.0), which is wrong for those 151: signs,
-  pressure plates, open fence gates, lanterns, chains, corals and turtle eggs read
-  as *not* blocking; snow, azalea, big dripleaf, chorus plant and end rod read as
-  blocking. Ladder is hard-coded off because a player meets it constantly, and
-  because its mean size is *exactly* the threshold constant — that is why vanilla
-  needs the override at all. Blast radius: one consumer,
-  `lodestone_physics::get_flow`'s empty-neighbour branch. Nothing in player
-  movement reads it.
 - **`is_solid_face`** — `isFaceSturdy(FULL)` is approximated by "does any *single*
   box cover the whole face", where vanilla unions the shape first. No false
   positives, possible false negatives. Also, the seam does not say which fluid is
@@ -131,16 +147,23 @@ Real with a stated approximation (3):
 
 ## How to change it
 
-- **Adding a name-keyed constant** — add a row to the matching `*_for` function in
-  `collision.rs` and cite the `Blocks.java` line. Do not add a second lookup path;
-  both adapters read the same function.
+- **Adding a name-keyed constant** — these no longer live in `collision.rs`. Add a
+  match arm to `lodestone_model::block_physics` (`crates/lodestone-model/src/adapter.rs`)
+  and cite the `Blocks.java` line; `collision.rs`'s `physics_at` just calls
+  `block_physics(name)` and delegates. Do not add a second lookup path — both
+  adapters, and any plugin depending on `lodestone-model` directly, read the same
+  function. See [`docs/plugin-api.md`](./plugin-api.md) for why this table is
+  version-free (name-keyed, not state-keyed) and reachable from outside
+  `lodestone-shell`.
 - **A data bump (new MC version)** — regenerate the census per
   `crates/protocol/v770/tests/collision_shapes.rs`, then re-read
   `data/minecraft/tags/block/suppresses_bounce.json`. Its only member today is
   `honey_block`, which sets no restitution, so `bounce_restitution` ignores the tag;
   a future bouncy suppressor would break that **silently**.
-- **Closing the `blocks_motion` gap** — dump `legacySolid` (or the `forceSolid*`
-  flags) as a column beside the collision census and add a seam for it.
+- **The `blocks_motion` gap is closed** (`24af787`) — it is dumped, not derived; see
+  "Status of the 13 methods" above. What is still open is only its fallback path
+  (no version data, or the demo palette) and its one consumer
+  (`lodestone_physics::get_flow`).
 
 ### Gotchas
 
@@ -149,11 +172,12 @@ Real with a stated approximation (3):
   collision-less cell *and* an empty outline; kelp has an outline (so it is
   breakable) and no collision; soul sand collides to 0.875 and outlines to 1.0.
   Nothing in this module may decide what the crosshair selects — that is
-  `LiveCollision::is_pickable`, and its real fix is an outline/interaction census
-  beside the collision one (in flight separately, as
-  `VersionAdapter::block_outline` / `block_interaction`). **The seam is exactly
-  there: `is_pickable` must move to `block_outline`, and `collision_boxes` must
-  never be offered as a substitute — kelp would stop being breakable.**
+  `LiveCollision::is_pickable`, and its real fix was an outline/interaction census
+  beside the collision one, `VersionAdapter::block_outline` / `block_interaction`.
+  **That has since landed (`196d385`):** `is_pickable` now reads `block_outline`
+  directly rather than the has-baked-quads proxy this note used to describe — see
+  [`docs/block-outline-shapes.md`](./block-outline-shapes.md). `collision_boxes`
+  was never offered as a substitute for either; kelp stays breakable.
 - **`max_y` is not capped at 1.0.** A fence is 1.5, and the 0.6 auto-step *cannot*
   mount it. Clamping makes fences look step-able and routes navigation straight
   through them.
@@ -193,12 +217,18 @@ Real with a stated approximation (3):
 | gate | where | runs |
 |---|---|---|
 | shape helpers vs vanilla's own numbers | `collision.rs::tests::shape_helpers_match_vanilla_on_hand_written_shapes` | always |
-| name-keyed constants vs decompiled values | `collision.rs::tests::name_keyed_constants_match_the_decompiled_values` | always |
+| name-keyed constants vs the shared model table | `collision.rs::tests::name_keyed_constants_come_from_the_shared_model_table` | always |
 | the census reaches `CollisionView` | `collision.rs::tests::the_real_per_state_collision_census_reaches_the_collision_view` | `#[ignore]` — needs the pack **and** `--features live` |
-| name-keyed constants reach the view | `collision.rs::tests::name_keyed_constants_reach_the_view_through_the_version_seam` | `#[ignore]` — same |
+| name-keyed constants **and `blocks_motion` routing** reach the view | `collision.rs::tests::name_keyed_constants_reach_the_view_through_the_version_seam` | `#[ignore]` — same |
 | what unit cubes cost, measured | `lodestone-physics/tests/partial_block_shapes.rs` | always |
+| the `blocks_motion` census itself, exhaustively, vs the JVM dump | `crates/protocol/v770/tests/block_physics.rs` (`committed_table_matches_the_committed_dump`, `blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling`, `the_geometry_branch_alone_is_wrong_for_two_thousand_states`, `the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`, `hand_checked_solidity_rows`) | always |
 
 Every one carries a control that must fail the same assertion: bottom slab vs top
 slab, empty-shape vs cube, and — in both the shell gate and the physics gate — the
 **pre-fix view itself**, asserted to be wrong by a stated amount (0.5 blocks
-vertically on a slab, 0.375 horizontally on a fence).
+vertically on a slab, 0.375 horizontally on a fence). The seam gate additionally
+carries four `forceSolidOn` states (a sign, a pressure plate, a lantern, a turtle
+egg) that only pass if `VersionAdapter::block_blocks_motion` is actually consulted
+— a view still deriving `blocks_motion` from geometry answers all four wrong and
+passes every other assertion in that test, which is exactly the routing gate the
+census needed.
