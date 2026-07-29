@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World as EcsWorld;
-use lodestone_assets::Language;
+use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
 use lodestone_ecs::player::{
@@ -25,24 +25,27 @@ use lodestone_ecs::{
     ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
 };
 pub use lodestone_ecs::SessionPhase;
+use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
+use lodestone_model::event::EquipmentSlot;
 use lodestone_model::{BlockFace, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{CollisionView, FluidState, PhysicsProfile, PlayerState, Vec3d};
-use lodestone_render::{BlockAtlas, Camera};
+use lodestone_render::{AnimInput, BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
 
 use crate::audio::ShellAudio;
 use crate::blocks::id;
-use crate::camera_rig::build_camera;
+use crate::camera_rig::{build_camera, third_person_camera};
 use crate::chat::compose_chat_action;
 use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
 use crate::entities::EntityDraw;
+use crate::gpu::ThirdPersonBodyState;
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::interact::{
     Attacking, InteractPlugin, MiningPredictor, NetHandle, ParticleSim, PlacementPredictor,
@@ -525,6 +528,23 @@ pub struct Sim {
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
     audio: Option<ShellAudio>,
+    /// The camera mode: `false` is first person (the only mode that existed
+    /// before this field), `true` is third person. There is deliberately no
+    /// richer enum — [`RenderState::set_third_person_body_source`]'s own doc
+    /// says the closure's `None`/`Some` *is* the camera-mode toggle, and this
+    /// bool is the one thing that decides which of the two it returns each
+    /// frame (see [`Self::third_person_body_state`] and
+    /// [`Self::render_camera`]).
+    ///
+    /// [`RenderState::set_third_person_body_source`]: crate::gpu::RenderState::set_third_person_body_source
+    third_person: bool,
+    /// The local player's own walk/head-look animation clock, driven once per
+    /// physics tick from its real position/orientation exactly the way
+    /// `entities.rs` drives an [`EntityPose`] for a tracked network entity
+    /// (see [`Self::step`]). Exists so a third-person body can visibly walk;
+    /// ticked unconditionally (cheap, and always correct if the mode flips
+    /// mid-flight) but only ever read by [`Self::third_person_body_state`].
+    body_pose: EntityPose,
 }
 
 impl Sim {
@@ -751,6 +771,8 @@ impl Sim {
             asset_banner: resources.banner,
             recover_from_death: true,
             audio: ShellAudio::from_env(),
+            third_person: false,
+            body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
         };
         sim.refresh_mesh_policy();
         sim
@@ -1265,11 +1287,22 @@ impl Sim {
     ///   place it would misattribute the *next* session's
     ///   `EffectApplied`/`EffectRemoved` to whichever entity the new server
     ///   happens to assign that same id to first).
-    /// - **The tab list, scoreboard, boss bars and menus need no clearing at
-    ///   all**, and that is Stage 3 working rather than an omission: they are
-    ///   components in the *client's* `World`, so dropping `net` above drops the
-    ///   only route to them and every reader falls back to an empty default. A
-    ///   `Sim`-side reset here would imply a `Sim`-side copy.
+    /// - **The shared-fold set — the tab list, scoreboard, boss bars, menus, and
+    ///   (since the vitals collapse) health/food/saturation, experience, the
+    ///   server entity id, game mode, dimension and liveness** — via
+    ///   `insert_session_components`, the same one-call reset
+    ///   `insert_hud_components` is for the driver half.
+    ///
+    ///   This bullet used to say those needed no clearing at all, "and that is
+    ///   Stage 3 working rather than an omission: they are components in the
+    ///   *client's* `World`, so dropping `net` above drops the only route to
+    ///   them". **That went stale the moment §4.1(c) merged the two `World`s** —
+    ///   it is one `World` and one entity now, `Sim::sidebar`/`player_rows`/
+    ///   `boss_bars` read `self.local` directly, and dropping `net` drops no route
+    ///   to anything. Left as written, the previous server's sidebar and tab list
+    ///   really did survive a quit-to-title. A stale-but-true-when-written note
+    ///   about state that "cannot" leak is exactly the shape `CLAUDE.md`'s rule 2
+    ///   warns about.
     /// - **In-flight prediction state**: `mining` and `placement` are
     ///   replaced wholesale rather than merely stopped — both track a
     ///   monotonic sequence counter with no public reset, and `Mining` also
@@ -1372,14 +1405,21 @@ impl Sim {
         // later from being silently missed here.
         let local = self.local;
         self.write(|w| reset_local_player(w, local, player));
-        // The Stage-3 half of the same reset. `insert_hud_components` writes the
-        // whole set back to its just-spawned value — phase, vitals, xp, the two
-        // overlays, the effect stack, the respawn counter and the server entity
-        // id (which is *stale*, not merely wrong: left in place it would
-        // misattribute the next session's mob effects to whichever entity the
-        // new server happens to assign that id to first). One call rather than a
-        // field-by-field reset, for the same reason `reset_local_player` is one.
-        self.write(|w| insert_hud_components(w, local));
+        // The Stage-3 half of the same reset, in two calls because the set is in
+        // two halves. `insert_hud_components` writes the driver half back to its
+        // just-spawned value (phase, the two overlays, the effect stack, the
+        // respawn counter, the chat log); `insert_session_components` does the
+        // shared half (scoreboard, tab list, boss bars, menus, vitals, xp, and the
+        // server entity id — which is *stale*, not merely wrong: left in place it
+        // would misattribute the next session's mob effects to whichever entity
+        // the new server happens to assign that id to first). Two calls rather
+        // than a field-by-field reset, for the same reason `reset_local_player` is
+        // one: a component added to a spawn path and missed here leaks the old
+        // session into the new one.
+        self.write(|w| {
+            insert_hud_components(w, local);
+            lodestone_ecs::insert_session_components(w, local);
+        });
         self.set_target(None);
         self.input_mut(InputState::release_all);
 
@@ -1467,6 +1507,17 @@ impl Sim {
     }
 
     /// The [`Vitals`] component.
+    ///
+    /// # Read-only from this side
+    ///
+    /// There is no `set_vitals`, and there must not be one again. `Vitals`, [`Xp`]
+    /// and [`ServerEntityId`] are folded by
+    /// `lodestone_ecs::session::apply_local_player_state` on the **net thread**,
+    /// into this same `World` and onto this same entity (§4.1(c) made
+    /// `SharedState`'s session entity and `Sim.local` one entity). The shell used
+    /// to fold `NetUpdate::{Health, Experience, LoggedIn}` into them itself, which
+    /// after the `World` unification meant two writers of one component; those
+    /// arms and the two `NetUpdate` variants are deleted.
     fn vitals(&self) -> Vitals {
         self.read(|w| {
             *w.get::<Vitals>(self.local)
@@ -1474,28 +1525,11 @@ impl Sim {
         })
     }
 
-    /// Record the server's latest `set_health`.
-    fn set_vitals(&mut self, vitals: Vitals) {
-        self.write_local(|w, local| {
-            if let Some(mut current) = w.get_mut::<Vitals>(local) {
-                *current = vitals;
-            }
-        });
-    }
-
-    /// Record the server's latest `set_experience`.
-    fn set_xp(&mut self, xp: Option<(f32, i32, i32)>) {
-        self.write_local(|w, local| {
-            if let Some(mut current) = w.get_mut::<Xp>(local) {
-                current.0 = xp;
-            }
-        });
-    }
-
     /// The server-assigned entity id for the local player, `None` before login.
     ///
     /// Read by every entity-scoped update that has to decide "is this us" — mob
-    /// effects, most obviously, whose packet applies to any entity.
+    /// effects, most obviously, whose packet applies to any entity. Written only
+    /// by the net thread's fold; see [`Self::vitals`].
     #[must_use]
     fn server_entity_id(&self) -> Option<i32> {
         self.read(|w| {
@@ -1503,15 +1537,6 @@ impl Sim {
                 .expect("the local player always carries ServerEntityId")
                 .0
         })
-    }
-
-    /// Record the id the server assigned us at login.
-    fn set_server_entity_id(&mut self, entity_id: Option<i32>) {
-        self.write_local(|w, local| {
-            if let Some(mut current) = w.get_mut::<ServerEntityId>(local) {
-                current.0 = entity_id;
-            }
-        });
     }
 
     /// Server-reported experience as `(progress, level, total)`, or `None`
@@ -2011,6 +2036,16 @@ impl Sim {
                 w.insert_resource(item_collision);
                 w.run_schedule(GameTick);
             });
+            // Drive the local player's own walk/head-look clock off the
+            // post-physics position, exactly like a tracked network entity's
+            // `EntityPose::tick` — see `Self::body_pose`'s doc for why this
+            // is unconditional rather than gated on `third_person`. Read
+            // *after* the `GameTick` write guard above is dropped: `Self::player`
+            // takes its own short read guard, and holding one across another
+            // accessor is exactly what this crate's locking rules forbid.
+            let p = self.player();
+            self.body_pose
+                .tick(p.position.x, p.position.z, p.yaw, p.yaw, p.pitch);
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and
@@ -2238,22 +2273,50 @@ impl Sim {
     }
 
     /// Distance fog for this frame: sized to the configured render distance
-    /// normally, and swapped for a short, dense water/lava fog while the
-    /// player's eye is submerged.
+    /// normally (further specialised by the connected *dimension* — the
+    /// Nether's fixed dense red haze, the End's near-black edge fade — when
+    /// neither override below applies), and swapped for a short, dense
+    /// water/lava fog while the player's eye is submerged.
     ///
     /// Selected from the bit-exact eye-in-fluid state (`FluidState`) the physics
     /// producer computes each tick, so the fog matches vanilla's submerged view
     /// rather than a locally-guessed boolean. Lava is checked before water,
-    /// matching vanilla's lava-first submersion order.
+    /// matching vanilla's lava-first submersion order, and both take priority
+    /// over the dimension fog: standing in lava in the Nether still gets lava
+    /// fog, not Nether fog.
+    ///
+    /// The dimension is read the same way `refresh_mesh_policy` reads it
+    /// for `SkyDefault` — `net.shared_handle().get().and_then(|h|
+    /// h.player().dimension)` — which is `None` before login and (per
+    /// `docs/dimension-visuals.md`) stale after a portal trip until
+    /// `lodestone-client`'s `Inner::apply` gets a `Respawned` arm; that staleness
+    /// is a pre-existing condition of the dimension field itself; this reads it
+    /// the same way every other dimension-conditioned decision in this crate
+    /// does, no better and no worse.
     #[must_use]
     pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
         let fluid = self.fluid_state();
         if fluid.under_lava() {
-            lava_fog()
-        } else if fluid.under_water() {
-            water_fog(self.config.render_distance)
-        } else {
-            fog_for_render_distance(self.config.render_distance)
+            return lava_fog();
+        }
+        if fluid.under_water() {
+            return water_fog(self.config.render_distance);
+        }
+        let dimension = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension));
+        match dimension {
+            Some(d) if d.namespace() == "minecraft" && d.path() == "the_nether" => {
+                lodestone_render::fog::FogSettings::nether(self.config.render_distance)
+            }
+            Some(d) if d.namespace() == "minecraft" && d.path() == "the_end" => {
+                lodestone_render::fog::FogSettings::the_end(
+                    self.config.render_distance,
+                    crate::gpu::FOG_START_FRACTION,
+                )
+            }
+            _ => fog_for_render_distance(self.config.render_distance),
         }
     }
 
@@ -2789,9 +2852,14 @@ impl Sim {
                     self.set_phase(SessionPhase::Connecting);
                 }
                 NetUpdate::LoggedIn { entity_id } => {
+                    // The id is *not* recorded here. `ClientEvent::Login` folds it
+                    // into the `ServerEntityId` component (and into
+                    // `EntityIndex`) on the net thread, in the same `World` this
+                    // `Sim` reads — a second write here would be the duplicate the
+                    // vitals collapse deleted. It stays in the status line because
+                    // that is a human-readable string, not state.
                     self.status = format!("connected (entity {entity_id})");
                     self.set_phase(SessionPhase::Connected);
-                    self.set_server_entity_id(Some(entity_id));
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
@@ -2940,24 +3008,15 @@ impl Sim {
                         });
                     }
                 }
-                NetUpdate::Health { health, food } => {
-                    // Record the vitals for the HUD. Death is a separate event
-                    // ([`NetUpdate::Death`], which the library always emits on the
-                    // death packet); health reaching zero is not itself a session
-                    // event and — contrary to the old status line — does not
-                    // unload chunks.
-                    self.set_vitals(Vitals {
-                        health: Some(health),
-                        food: Some(food),
-                    });
-                }
-                NetUpdate::Experience {
-                    progress,
-                    level,
-                    total,
-                } => {
-                    self.set_xp(Some((progress, level, total)));
-                }
+                // No `Health`/`Experience` arms, and no `NetUpdate` variants for
+                // them either: the net thread folds `ClientEvent::HealthChanged`
+                // and `ExperienceChanged` straight into the `Vitals`/`Xp`
+                // components on `self.local`, so [`Self::health`], [`Self::food`]
+                // and [`Self::experience`] read what they always read and this
+                // side has nothing left to do. Death is still a separate event
+                // ([`NetUpdate::Death`], which the library always emits on the
+                // death packet); health reaching zero is not itself a session
+                // event and does not unload chunks.
                 NetUpdate::Death => {
                     // Death is a state the shell rides through, not the end of the
                     // session. The client library's `RespawnPolicy::Automatic`
@@ -3151,24 +3210,15 @@ impl Sim {
         self.stats.status = self.status.clone();
     }
 
-    /// Build the render camera for the given viewport aspect ratio, with the
-    /// feet position interpolated between the last two physics ticks so motion
-    /// stays smooth even though physics runs at a fixed 20 Hz. View angles are
-    /// current (mouse-look is per-frame, matching vanilla).
-    ///
-    /// The pose's eye height is passed to [`build_camera`] explicitly, so the
-    /// position handed to it is the player's real interpolated feet in every pose
-    /// (`Avatar.java:22-36`: `0.4` swimming, `1.27` crouching, `1.62` standing).
-    /// It used to be folded into the feet Y as a bias instead — arithmetically the
-    /// same, but the argument was then not the feet whenever a non-standing pose
-    /// was active. See `camera_rig.rs`'s module docs.
-    ///
-    /// This is also the ray origin for [`update_target`](Self::update_target), so the
-    /// pick sees the world from where the player actually is: a swimmer looking down
-    /// at a block a metre in front of them targets it rather than the block a metre
-    /// beyond.
+    /// The player's physics state with `position` replaced by the feet
+    /// interpolated between the last two physics ticks — the "drawn" position
+    /// every per-frame consumer of the player's own placement wants, rather
+    /// than the raw tick-boundary value [`Self::player`] returns. Shared by
+    /// [`Self::camera`] and [`Self::third_person_body_state`] so the eye and
+    /// the third-person body it stands next to never disagree about where
+    /// "here" is.
     #[must_use]
-    pub fn camera(&self, aspect: f32) -> Camera {
+    fn interpolated_player(&self) -> PlayerState {
         let a = f64::from(self.clock().interp_alpha);
         let mut interp = self.player();
         let prev = self.prev_position();
@@ -3177,6 +3227,31 @@ impl Sim {
             prev.y + (interp.position.y - prev.y) * a,
             prev.z + (interp.position.z - prev.z) * a,
         );
+        interp
+    }
+
+    /// Build the **true first-person eye** camera for the given viewport
+    /// aspect ratio, with the feet position interpolated between the last two
+    /// physics ticks so motion stays smooth even though physics runs at a
+    /// fixed 20 Hz. View angles are current (mouse-look is per-frame, matching
+    /// vanilla).
+    ///
+    /// The pose's eye height is passed to [`build_camera`] explicitly, so the
+    /// position handed to it is the player's real interpolated feet in every pose
+    /// (`Avatar.java:22-36`: `0.4` swimming, `1.27` crouching, `1.62` standing).
+    /// It used to be folded into the feet Y as a bias instead — arithmetically the
+    /// same, but the argument was then not the feet whenever a non-standing pose
+    /// was active. See `camera_rig.rs`'s module docs.
+    ///
+    /// This is also the ray origin for [`update_target`](Self::update_target)
+    /// and the audio listener ([`Self::set_audio_listener`]'s caller in
+    /// `app.rs`), **deliberately unmodified by third-person mode**: block
+    /// interaction and hearing both originate from the real eye in vanilla,
+    /// not from wherever a pulled-back camera happens to be. Only the actual
+    /// render pass wants the third-person offset — see [`Self::render_camera`].
+    #[must_use]
+    pub fn camera(&self, aspect: f32) -> Camera {
+        let interp = self.interpolated_player();
         build_camera(
             &interp,
             interp.eye_height,
@@ -3184,6 +3259,140 @@ impl Sim {
             self.config.render_distance,
         )
     }
+
+    /// Flips the camera mode (vanilla's `F5`): first person ↔ third person.
+    ///
+    /// This one bool is the entire "camera mode" state in this shell —
+    /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
+    /// own doc says the closure's `None`/`Some` split *is* the camera-mode
+    /// toggle by design, and [`Self::render_camera`] /
+    /// [`Self::third_person_body_state`] are exactly that closure's two
+    /// halves: the same flag decides both, so they can never disagree about
+    /// which mode is active this frame.
+    pub fn toggle_third_person(&mut self) {
+        self.third_person = !self.third_person;
+    }
+
+    /// The camera the frame is actually **drawn** from: [`Self::camera`]
+    /// unmodified in first person, or that same eye pulled straight backward
+    /// along its own view direction in third person — vanilla's real
+    /// "back" algorithm, not a stand-in for it — clamped against live
+    /// collision geometry so it never clips through a wall (see
+    /// [`crate::camera_rig::collision_pullback`]).
+    ///
+    /// Reads whichever collision adapter [`Self::update_target`] would use
+    /// (`LiveCollision` on a server, `WorldCollision` on the offline fixture),
+    /// so a third-person camera respects the exact same geometry the player
+    /// collides against. A live session whose own column has not streamed in
+    /// yet (`Self::live_collision` returning `None`) has nothing real to
+    /// clamp against, so this falls back to the desired distance unclamped
+    /// rather than jamming the camera into the eye.
+    #[must_use]
+    pub fn render_camera(&self, aspect: f32) -> Camera {
+        let eye = self.camera(aspect);
+        if !self.third_person {
+            return eye;
+        }
+        if self.is_live() {
+            match self.live_collision() {
+                Some(view) => third_person_camera(eye, true, &view),
+                None => third_person_camera(eye, true, &NoCollision),
+            }
+        } else {
+            let store = self.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
+            third_person_camera(eye, true, &view)
+        }
+    }
+
+    /// The local player's own third-person body for this frame, or `None` in
+    /// first person — exactly the value `app.rs` hands
+    /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
+    /// closure every frame.
+    ///
+    /// The walk cycle and idle age come from [`Self::body_pose`], ticked once
+    /// per physics tick the same way `entities.rs`'s `Track::render_anim`
+    /// drives one for a tracked network entity, and interpolated here for the
+    /// current sub-tick alpha. Facing does **not** come from that pose,
+    /// though: `body_yaw_deg`/`head_pitch_deg` are read straight off the
+    /// interpolated player instead, so the avatar's own facing tracks the
+    /// camera with no per-tick lag — the lag `EntityPose`'s body-yaw smoothing
+    /// exists to model is a *third-party observer's* view of a remote entity,
+    /// which does not apply to your own body.
+    ///
+    /// Two gaps, both left exactly where the equivalent gap already is
+    /// elsewhere in this codebase rather than guessed at:
+    /// * **Head yaw never diverges from body yaw** (`head_yaw_deg` is always
+    ///   `0`): vanilla's independent head-turn-then-body-catches-up
+    ///   (`LivingEntity.tickHeadTurn`) is not modelled for the local player
+    ///   anywhere in this engine.
+    /// * **`slim`/skin data**: [`ThirdPersonBodyState::slim`]'s own doc
+    ///   already records that no real skin-model bit exists yet; `false`
+    ///   reproduces the first-person arm's existing default.
+    /// * **Equipment covers main hand and off hand only** (armour is not
+    ///   carried, matching every other entity's `EntityDraw::equipment`
+    ///   contract — see that field's own doc). Main hand is the selected
+    ///   hotbar slot; off hand is native inventory index `40`
+    ///   (`lodestone_game::menu`'s own table: `0..=8` hotbar, `40` off-hand).
+    #[must_use]
+    pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
+        if !self.third_person {
+            return None;
+        }
+        let partial_tick = self.clock().interp_alpha;
+        let interp = self.interpolated_player();
+        let feet = glam::Vec3::new(
+            interp.position.x as f32,
+            interp.position.y as f32,
+            interp.position.z as f32,
+        );
+        let walk = self.body_pose.render(partial_tick);
+        /// Native player-inventory index of the off-hand slot
+        /// (`lodestone_game::menu`'s doc table: hotbar `0..=8`, off-hand `40`).
+        const OFFHAND_NATIVE_INDEX: usize = 40;
+        let menu = self.player_menu();
+        let mut equipment = Vec::new();
+        if let Some(loc) = menu
+            .player_native(self.selected_slot())
+            .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
+        {
+            equipment.push((EquipmentSlot::MainHand, loc));
+        }
+        if let Some(loc) = menu
+            .player_native(OFFHAND_NATIVE_INDEX)
+            .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
+        {
+            equipment.push((EquipmentSlot::OffHand, loc));
+        }
+        Some(ThirdPersonBodyState {
+            feet,
+            body_yaw_deg: interp.yaw,
+            anim: AnimInput {
+                head_yaw_deg: 0.0,
+                head_pitch_deg: interp.pitch,
+                limb_swing: walk.limb_swing,
+                limb_swing_amount: walk.limb_swing_amount,
+                attack_anim: 0.0,
+                age_ticks: walk.age,
+                aggressive: false,
+            },
+            scale: 1.0,
+            slim: false,
+            equipment,
+        })
+    }
+}
+
+/// A [`CollisionView`] with no geometry at all, for
+/// [`Sim::render_camera`]'s third-person pullback when no live collision
+/// snapshot exists yet (the player's own column has not streamed in): there
+/// is nothing real to clamp against, so the camera pulls back the full
+/// desired distance rather than treating "no data" as "solid".
+struct NoCollision;
+
+impl CollisionView for NoCollision {
+    fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
 }
 
 #[cfg(test)]
@@ -3200,6 +3409,51 @@ mod tests {
             render_distance: 2,
             ..Config::default()
         }
+    }
+
+    /// Fold one `ClientEvent` into this `Sim`'s `World` exactly the way the net
+    /// thread's `lodestone_client::state::SharedState::apply` does — enqueue,
+    /// run `NetIngest` once, one event per run.
+    ///
+    /// # Why the loopback feed is not enough for these
+    ///
+    /// `NetClient::loopback_with_feed` models the `NetUpdate` channel — the
+    /// *driver's* reaction path. It does not model `SharedState::apply`, which is
+    /// where the local player's server-reported state (vitals, xp, the entity id,
+    /// game mode, dimension, liveness) is folded, and there is no `SharedState` in
+    /// a loopback harness at all. Production runs **both** paths for one packet,
+    /// so a test that needs both drives both — which is closer to production than
+    /// the `NetUpdate::Health` these tests used to feed, because that arm was the
+    /// duplicate fold the collapse deleted.
+    fn ingest(sim: &mut Sim, event: lodestone_client::ClientEvent) {
+        sim.write(|w| {
+            w.resource_mut::<lodestone_ecs::ingest::IngestQueue>().push(event);
+            w.run_schedule(lodestone_ecs::NetIngest);
+        });
+    }
+
+    /// A `ClientEvent::Login` for `entity_id`, creative in the overworld — the
+    /// event that seeds `ServerEntityId` **and** the local player's `EntityIndex`
+    /// entry.
+    fn login_event(entity_id: i32) -> lodestone_client::ClientEvent {
+        lodestone_client::ClientEvent::Login {
+            entity_id,
+            game_mode: lodestone_client::GameMode::Creative,
+            dimension: "minecraft:overworld".parse().expect("valid dimension id"),
+        }
+    }
+
+    /// The objective name currently displayed in the sidebar slot, read straight
+    /// off the [`lodestone_ecs::SessionScoreboard`] component rather than through
+    /// `Sim::sidebar` — which also needs the objective's own `ObjectiveUpdate` and
+    /// a translator, neither of which this is asking about.
+    fn displayed_sidebar(sim: &Sim) -> Option<String> {
+        sim.read(|w| {
+            w.get::<lodestone_ecs::SessionScoreboard>(sim.local)?
+                .0
+                .displayed(lodestone_game::scoreboard::DisplaySlot::Sidebar)
+                .map(str::to_owned)
+        })
     }
 
     /// What a real windowed client is built from — the path that must never hold
@@ -4341,7 +4595,12 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        // `ServerEntityId` — the "is this effect ours" test — is folded from
+        // `ClientEvent::Login` on the net thread, not from `NetUpdate::LoggedIn`.
+        // Production sees both for one packet; so does this test.
+        ingest(&mut sim, login_event(7));
         sim.poll_net();
+        assert_eq!(sim.server_entity_id(), Some(7), "setup: the id must be folded");
         assert!(sim.player().effects.levitation.is_none());
 
         feed.send(NetUpdate::EffectApplied {
@@ -4387,6 +4646,7 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        ingest(&mut sim, login_event(7));
         sim.poll_net();
 
         feed.send(NetUpdate::EffectApplied {
@@ -4752,22 +5012,38 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        ingest(&mut sim, login_event(7));
         sim.poll_net();
         assert_eq!(sim.session_phase(), SessionPhase::Connected);
 
         // Populate every read-model `end_session` is responsible for
         // clearing, so this test can actually observe the reset rather than
-        // asserting on fields that were already empty.
+        // asserting on fields that were already empty. The vitals go in through
+        // the *net thread's* fold (`ingest`) because that is now the only writer;
+        // the chat log still arrives on the `NetUpdate` channel.
         feed.send(NetUpdate::Chat {
             text: lodestone_model::Text::literal("hello"),
             player: false,
         })
         .unwrap();
-        feed.send(NetUpdate::Health {
-            health: 12.0,
-            food: 8,
-        })
-        .unwrap();
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::HealthChanged {
+                health: 12.0,
+                food: 8,
+                saturation: 3.0,
+            },
+        );
+        // A shared-fold component that is *not* a vital, to pin the other half of
+        // the stale-note fix: before this change `end_session` left the previous
+        // server's sidebar standing.
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::DisplayObjective {
+                slot: lodestone_model::event::DisplaySlot::Sidebar,
+                objective: Some("kills".into()),
+            },
+        );
         sim.poll_net();
         assert!(
             !sim.recent_chat(10).is_empty(),
@@ -4778,6 +5054,11 @@ mod tests {
             sim.server_entity_id(),
             Some(7),
             "setup: entity id must be populated"
+        );
+        assert_eq!(
+            displayed_sidebar(&sim).as_deref(),
+            Some("kills"),
+            "setup: the sidebar must be populated"
         );
 
         sim.end_session();
@@ -4792,6 +5073,13 @@ mod tests {
             None,
             "the local entity id must clear"
         );
+        assert_eq!(
+            displayed_sidebar(&sim),
+            None,
+            "the previous server's sidebar must clear too — §4.1(c) made this \
+             reachable from `Sim.local`, so the old 'it goes away with `net`' \
+             reasoning no longer holds"
+        );
 
         // The negative control this test exists for: a fresh connect
         // afterward must reach `Connected` and must not carry the old
@@ -4801,6 +5089,7 @@ mod tests {
         sim.attach_net(net2);
         assert_eq!(sim.session_phase(), SessionPhase::Connecting);
         feed2.send(NetUpdate::LoggedIn { entity_id: 9 }).unwrap();
+        ingest(&mut sim, login_event(9));
         sim.poll_net();
         assert_eq!(sim.session_phase(), SessionPhase::Connected);
         assert_eq!(sim.server_entity_id(), Some(9));
@@ -4883,44 +5172,78 @@ mod tests {
         );
     }
 
+    /// The HUD's health/food accessors must reflect the **net thread's** fold.
+    ///
+    /// This used to feed `NetUpdate::Health` and assert the shell's own arm folded
+    /// it. That arm was the duplicate the vitals collapse deleted, so the test now
+    /// drives `ClientEvent::HealthChanged` through the one remaining fold — the
+    /// `NetIngest` schedule inside this `Sim`'s own `World`, which is exactly what
+    /// production does — and asserts the same accessors. Sharper, not weaker: the
+    /// old version could have passed with the production fold missing entirely.
     #[test]
     fn server_health_and_food_reach_the_hud_accessors() {
-        use crate::net::NetUpdate;
-        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let (net, _actions, _feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
         // Off a live server there is no survival state, so the HUD draws no bars.
         assert_eq!(sim.health(), None);
         assert_eq!(sim.food(), None);
 
-        feed.send(NetUpdate::Health {
-            health: 14.0,
-            food: 17,
-        })
-        .unwrap();
-        sim.poll_net();
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::HealthChanged {
+                health: 14.0,
+                food: 17,
+                saturation: 2.5,
+            },
+        );
         // Both fields must land — a one-sided store would leave the other None.
         assert_eq!(sim.health(), Some(14.0));
         assert_eq!(sim.food(), Some(17));
     }
 
+    /// The negative control for the two tests above: enqueueing without running
+    /// the schedule must change nothing, so "the accessor reports 14" is evidence
+    /// the *fold* ran and not merely that the event was constructed.
+    #[test]
+    fn queueing_health_without_running_net_ingest_folds_nothing() {
+        let mut sim = Sim::new(test_config());
+        let local = sim.local;
+        sim.write(|w| {
+            w.resource_mut::<lodestone_ecs::ingest::IngestQueue>().push(
+                lodestone_client::ClientEvent::HealthChanged {
+                    health: 14.0,
+                    food: 17,
+                    saturation: 2.5,
+                },
+            );
+        });
+        assert_eq!(sim.health(), None, "pushing must not fold; only NetIngest folds");
+        // …and the local player really is the entity the fold would write, so the
+        // assertion above is not passing because it is looking at the wrong one.
+        assert!(
+            sim.read(|w| w.get::<Vitals>(local).is_some()),
+            "the local player must carry Vitals for this control to mean anything"
+        );
+    }
+
     #[test]
     fn server_experience_reaches_the_hud_accessor() {
-        use crate::net::NetUpdate;
-        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let (net, _actions, _feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
         // Off a live server (or before the first packet) there is no real XP
         // value, so the HUD must not draw a faked bar.
         assert_eq!(sim.experience(), None);
 
-        feed.send(NetUpdate::Experience {
-            progress: 0.6,
-            level: 30,
-            total: 1395,
-        })
-        .unwrap();
-        sim.poll_net();
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::ExperienceChanged {
+                progress: 0.6,
+                level: 30,
+                total: 1395,
+            },
+        );
         assert_eq!(sim.experience(), Some((0.6, 30, 1395)));
     }
 
@@ -5368,8 +5691,25 @@ mod tests {
         let (net, actions, feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
+        // Both halves of one login packet, because the packet carries the entity id
+        // and `send_sprint_command` will not send without one. `NetUpdate::LoggedIn`
+        // drives the phase (and therefore `Egress::in_world`); `ClientEvent::Login`
+        // is what folds `ServerEntityId`, on the net thread, since the vitals
+        // collapse deleted `poll_net`'s duplicate `set_server_entity_id` write.
+        // Feeding only the `NetUpdate` left the id `None`, which made the whole
+        // test a *precondition*-species vacuity: the query hit
+        // `let Some(entity_id) = … else { continue }` every time, so the two
+        // "no packet" assertions below held for a reason that had nothing to do
+        // with edge-triggering.
+        ingest(&mut sim, login_event(7));
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
         sim.poll_net();
+        assert_eq!(
+            sim.server_entity_id(),
+            Some(7),
+            "setup: without the folded id no sprint command can be sent at all, \
+             and every assertion below passes vacuously"
+        );
         while actions.try_recv().is_ok() {}
 
         let drain = |actions: &std::sync::mpsc::Receiver<ClientAction>| -> Vec<ClientAction> {

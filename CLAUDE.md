@@ -50,8 +50,19 @@ Oracles (not part of repo state — recreate them):
 ## Repo hazards
 
 - **Single shared checkout, no per-agent worktrees.** Multiple agents edit concurrently.
-  **Never `git add -A`. Never `git reset --hard`, `git checkout .`, or `git stash`.** A blanket
-  stage has clobbered in-flight work three times and destroyed a `lib.rs` edit once.
+  **Never `git add -A`. Never `git reset --hard`, `git checkout .`, `git stash`, or `git clean`
+  (in any form, including `-n`-then-`-f`).** A blanket stage has clobbered in-flight work three
+  times and destroyed a `lib.rs` edit once.
+- **`git clean` is the worst of these, because it destroys what nothing can recover.** The others
+  discard *modifications* to tracked files, which at least existed in a commit once.
+  `git clean` deletes **untracked** files — which in this repo means whole new crates, new
+  `docs/*.md`, new oracle dumps and new test files, none of which are in any commit or reflog.
+  It has already cost real work: an agent ran it while others were mid-flight and destroyed
+  `docs/autonomous-navigation.md` outright, plus `crates/plugins/lodestone-autopilot`'s manifest
+  and source, leaving only the `LICENSE` behind and the workspace unloadable. The author had to
+  rewrite it from nothing. There is **no legitimate use** for it here: build output is already
+  gitignored, and "tidying up" a shared checkout is not a thing any single agent has the standing
+  to do.
 - **Stage explicit *file* paths, never a directory.** `git add docs/` is the same mistake as
   `git add -A`, just narrower — it sweeps up whatever else happens to be in there. This bit me
   personally: `53850ce` swept another agent's then-unfinished `docs/block-break-timing.md` into a

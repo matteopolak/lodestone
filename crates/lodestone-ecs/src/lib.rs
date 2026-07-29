@@ -91,6 +91,24 @@
 //!
 //! See `docs/world-unification.md` for the lock discipline this buys and costs.
 //!
+//! # The ingest seam — the local player, and the vitals
+//!
+//! §4.1(c) left two things at the `lodestone-client` ↔ `lodestone-ecs` seam, and
+//! they turned out to be the same problem:
+//!
+//! - **The local player was not in [`entity::EntityIndex`] at all.** It is
+//!   populated by `ClientEvent::EntitySpawned`, and vanilla never sends an
+//!   `AddEntity` for yourself — only `Login`. So `update_attributes` for our *own*
+//!   id was folded into nothing, and so would any future per-player component fed
+//!   from entity ingest. [`ingest::apply_local_player_login`] closes it.
+//! - **`PlayerSnapshot`'s vitals were still duplicated**, and the `World`
+//!   unification was not the blocker — `SharedState::apply`'s *exclusive* routing
+//!   was. [`session::ServerGameMode`], [`session::ServerDimension`] and
+//!   [`session::ServerAlive`] complete the component set so the whole fold can
+//!   move here and `PlayerSnapshot` can be **derived**, rather than weakening the
+//!   routing so that one event has two folds. `docs/session-components.md` records
+//!   the decision.
+//!
 //! # What this crate depends on
 //!
 //! `bevy_app` + `bevy_ecs`, `default-features = false, features = ["std"]`
@@ -138,21 +156,23 @@ pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
 };
 pub use player::{
-    ActionQueue, CollisionSource, Dead, Egress, Flying, LastPlayerInput, LastSprintingSent,
-    LocalPlayer, LocalPlayerPlugin, MovementIntent, PhysicsState, PlayerCollision, PrevPosition,
-    Profile, SelectedSlot, SprintKeyHeld, Submersion, reset_local_player, spawn_local_player,
+    ActionQueue, CollisionSource, Dead, DebugLine, DebugLines, Egress, Flying, LastPlayerInput,
+    LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState,
+    PlayerCollision, PrevPosition, Profile, SelectedSlot, SprintKeyHeld, Submersion,
+    apply_look_intent, clear_debug_lines, reset_local_player, spawn_local_player,
 };
 pub use plugin::CorePlugin;
 pub use resources::{
     FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
 };
-pub use session::{
-    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionBossBars,
-    SessionChat, SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard,
-    SessionSet, SessionTabList, TitleOverlay, Vitals, Xp, insert_hud_components, spawn_session,
-};
 pub use runner::Runner;
 pub use schedules::{Extract, GameTick, NetIngest, Update};
+pub use session::{
+    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerAlive, ServerDimension,
+    ServerEntityId, ServerGameMode, SessionBossBars, SessionChat, SessionHudPlugin, SessionMenus,
+    SessionPhase, SessionPlugin, SessionScoreboard, SessionSet, SessionTabList, TitleOverlay,
+    Vitals, Xp, insert_hud_components, insert_session_components, spawn_session,
+};
 pub use sets::{ExtractSet, FrameSet, IngestSet, TickSet};
 
 #[cfg(test)]

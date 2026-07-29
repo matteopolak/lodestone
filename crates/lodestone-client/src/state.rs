@@ -26,7 +26,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::session::{
-    SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList,
+    ServerAlive, ServerDimension, ServerEntityId, ServerGameMode, SessionBossBars, SessionMenus,
+    SessionScoreboard, SessionTabList, Vitals, Xp,
 };
 use lodestone_ecs::{ChunkWorld, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
@@ -49,6 +50,24 @@ use uuid::Uuid;
 ///
 /// Fields are `Option` where the server has not told us yet: `position` and
 /// `entity_id` are unknown until login and the first teleport, for example.
+///
+/// # This is a *derived* value, not storage
+///
+/// Same rule as [`EntityView`], and it arrived for the same reason. Everything
+/// here except `position`/`rotation`/`on_ground` is read from
+/// `lodestone_ecs::session`'s component set on [`SharedState::session`]:
+/// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
+/// [`ServerDimension`], [`ServerAlive`]. Those three exceptions are the **local
+/// echo** of our own outbound movement ([`SharedState::set_local_movement`]) —
+/// genuinely not a fold of anything the server said, which is what lets a bot's
+/// `look`/`walk` build on the latest local pose without a round trip.
+///
+/// The flattened `health: f32` + `health_known: bool` shape (and `xp_*` +
+/// `xp_known`) is preserved deliberately: the storage is
+/// `Vitals { health: Option<f32>, .. }` and `Xp(Option<(..)>)`, and these fields
+/// are that `Option` split in two for a public API whose consumers already read
+/// it this way. **Do not add a field here without adding the component it is read
+/// from**, or the new field becomes a second source of truth by definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerSnapshot {
     /// The local player's entity id, once [`ClientEvent::Login`] has arrived.
@@ -200,40 +219,37 @@ pub struct EntityView {
     pub item: Reported<ItemStack>,
 }
 
-/// The mutable scalar state behind the lock. Private; only ever touched under
-/// [`SharedState`]'s lock. World (chunk) state lives in a separate lock so a
-/// chunk write never contends with a scalar read.
+/// The local player's own outbound pose, as we last claimed it — the **whole** of
+/// what is left behind [`SharedState`]'s scalar lock. World (chunk) state lives in
+/// a separate lock so a chunk write never contends with a scalar read.
 ///
-/// # What is left in here, and why it is only this
+/// # Why this is all that is left
 ///
-/// Stage 3 of [`docs/bevy-migration.md`](../../../docs/bevy-migration.md)
-/// **deleted** `players`, `scoreboard`, `boss_bars` and `menus`: they are now
+/// Stage 3 **deleted** `players`, `scoreboard`, `boss_bars` and `menus`: they are
 /// [`SessionTabList`], [`SessionScoreboard`], [`SessionBossBars`] and
 /// [`SessionMenus`] components in [`SharedState::ecs`], folded by
-/// `lodestone_ecs::session`'s `NetIngest` systems. There is nowhere left in
-/// this struct for a second copy of any of them to live.
+/// `lodestone_ecs::session`'s `NetIngest` systems. The ingest-seam change then
+/// deleted the rest of the `PlayerSnapshot` fold — `entity_id`, `health`, `food`,
+/// `saturation`, `xp_*`, `game_mode`, `dimension`, `alive` — into that same
+/// component set, and with it [`Inner::apply`]'s `Login`, `Respawned`,
+/// `HealthChanged`, `Death` and `ExperienceChanged` arms. [`PlayerSnapshot`] is
+/// derived now; there is nowhere in this struct for a second copy to live.
 ///
-/// [`PlayerSnapshot`] stays, and its position/rotation/`on_ground` are the
-/// reason: they are not a fold of anything the server said, they are a **local
-/// echo** of our own outbound movement ([`SharedState::set_local_movement`]),
-/// which is what lets a bot's `look`/`walk` build on the latest local pose
-/// instead of waiting a round trip. Its *vitals* (`health`, `food`,
-/// `saturation`, `xp_*`, `entity_id`, `alive`) do still duplicate the shell's
-/// `Vitals`/`Xp`/`ServerEntityId`.
-///
-/// Stages 2 and 3 both bounded that residue by "the §4.1 `World` unification".
-/// **That was wrong, and §4.1(c) landing is the proof**: there is one `World` now
-/// and the vitals are still duplicated. The second blocker is [`SharedState::apply`]'s
-/// **exclusive** routing switch — `Login`, `HealthChanged`, `Respawned` and
-/// `Death` each carry vitals *and* `dimension`/`game_mode`/`alive`, so claiming
-/// one of them for a `NetIngest` system stops this fold seeing it, freezing
-/// `dimension` (the too-bright-Nether bug, reached by traversal) and `alive`. See
-/// `docs/world-unification.md` for the full table, plus the separate finding that
-/// `alive` and the shell's `Dead` marker are two different rules over the same
-/// events and must not be merged.
-#[derive(Debug, Default)]
-struct Inner {
-    player: PlayerSnapshot,
+/// **This is not a fold and that is the point.** `position`/`rotation`/`on_ground`
+/// are an echo of what *we* told the server ([`SharedState::set_local_movement`],
+/// plus the authoritative correction in [`ClientEvent::TeleportPlayer`]), so a
+/// bot's `look`/`walk` can build on the latest local pose without a round trip.
+/// The server's own view of where we are is the driver's prediction, in
+/// `crate::player::PhysicsState`, and the two are genuinely different facts.
+#[derive(Debug, Default, Clone, Copy)]
+struct LocalEcho {
+    /// The player's position, once the server has placed us with a teleport or we
+    /// have moved ourselves.
+    position: Option<Vec3>,
+    /// The look direction we last claimed.
+    rotation: Rotation,
+    /// Whether we last reported ourselves on the ground.
+    on_ground: bool,
 }
 
 /// A snapshot of the currently open non-player menu.
@@ -255,7 +271,7 @@ pub struct OpenMenuSnapshot {
 /// sole writer and the [`crate::ClientHandle`] holds another for reads.
 #[derive(Clone)]
 pub(crate) struct SharedState {
-    inner: Arc<RwLock<Inner>>,
+    inner: Arc<RwLock<LocalEcho>>,
     world: Arc<RwLock<World>>,
     notify: Arc<Notify>,
     /// The bevy_ecs `World` this state is authoritative over: [`WorldTime`], the
@@ -323,7 +339,7 @@ impl Default for SharedState {
             lodestone_ecs::spawn_session(&mut world_ecs)
         };
         Self {
-            inner: Arc::new(RwLock::new(Inner::default())),
+            inner: Arc::new(RwLock::new(LocalEcho::default())),
             world,
             notify: Arc::new(Notify::new()),
             ecs,
@@ -367,7 +383,7 @@ impl SharedState {
     /// chooses.
     pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(Inner::default())),
+            inner: Arc::new(RwLock::new(LocalEcho::default())),
             world: Arc::new(RwLock::new(World::new())),
             notify: Arc::new(Notify::new()),
             ecs,
@@ -448,8 +464,8 @@ impl SharedState {
                 world.run_schedule(lodestone_ecs::NetIngest);
             });
         } else {
-            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            inner.apply(event);
+            let mut echo = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            echo.apply(event);
         }
         self.wake();
     }
@@ -482,22 +498,114 @@ impl SharedState {
     /// server to echo it back.
     pub(crate) fn set_local_movement(&self, pos: Vec3, rotation: Rotation, on_ground: bool) {
         {
-            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            inner.player.position = Some(pos);
-            inner.player.rotation = rotation;
-            inner.player.on_ground = on_ground;
+            let mut echo = self.inner.write().unwrap_or_else(|e| e.into_inner());
+            echo.position = Some(pos);
+            echo.rotation = rotation;
+            echo.on_ground = on_ground;
         }
         self.wake();
     }
 
-    /// Clones out the current player snapshot.
+    /// The local echo on its own — our last claimed pose, with **no ECS lock
+    /// taken**.
+    ///
+    /// [`Self::position`] and [`Self::rotation`] go through this rather than
+    /// through [`Self::player`] deliberately: they are the two reads a moving bot
+    /// makes most often, and there is no reason for them to contend with ingest
+    /// for the `World` lock just to reach a field that does not live there.
+    fn local_echo(&self) -> LocalEcho {
+        *self.inner.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The player's last claimed position, or `None` before the server has placed
+    /// us. Echo-only; takes no ECS lock.
+    #[must_use]
+    pub(crate) fn position(&self) -> Option<Vec3> {
+        self.local_echo().position
+    }
+
+    /// The player's last claimed look direction. Echo-only; takes no ECS lock.
+    #[must_use]
+    pub(crate) fn rotation(&self) -> Rotation {
+        self.local_echo().rotation
+    }
+
+    /// Builds the current player snapshot.
+    ///
+    /// **Derived, not stored** — see [`PlayerSnapshot`]'s docs. The local echo and
+    /// the component set are two locks, and they are taken in that order, once,
+    /// with the echo guard **released before** the ECS guard is acquired. Nothing
+    /// anywhere takes them the other way round, so there is no ABBA pair to
+    /// worry about; the release is for the lock-hold discipline
+    /// (`docs/world-unification.md`), not for correctness.
+    ///
+    /// # This read is ECS-backed now, which moves it under rule 1
+    ///
+    /// It used to touch only the scalar lock. A caller holding an
+    /// `lodestone_ecs::EcsHandle` guard — a driver inside `run_schedule`, say —
+    /// must **not** call this: `parking_lot::RwLock` is not reentrant and
+    /// `read()` behind a queued writer deadlocks. The one shell call site
+    /// (`Sim::refresh_mesh_policy`, and `mesher::snapshot_section_live` behind it)
+    /// runs with no guard held.
     #[must_use]
     pub(crate) fn player(&self) -> PlayerSnapshot {
-        self.inner
+        let echo = self.local_echo();
+        let world = self.ecs.read();
+        let vitals = world
+            .get::<Vitals>(self.session)
+            .copied()
+            .unwrap_or_default();
+        let xp = world.get::<Xp>(self.session).and_then(|xp| xp.0);
+        PlayerSnapshot {
+            entity_id: world.get::<ServerEntityId>(self.session).and_then(|id| id.0),
+            position: echo.position,
+            rotation: echo.rotation,
+            on_ground: echo.on_ground,
+            // `Vitals` holds one `Option` per field; the snapshot splits it into a
+            // value plus `health_known`, which is the shape `ClientHandle::health`
+            // and the HUD already read. Unreported reads as zero *and*
+            // `health_known == false`, never as a plausible full bar.
+            health: vitals.health.unwrap_or(0.0),
+            food: vitals.food.unwrap_or(0),
+            saturation: vitals.saturation.unwrap_or(0.0),
+            health_known: vitals.health.is_some(),
+            game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
+            dimension: world
+                .get::<ServerDimension>(self.session)
+                .and_then(|d| d.0.clone()),
+            // Absent component reads as *alive*, matching `ServerAlive::default`:
+            // a client nobody has told otherwise is not dead.
+            alive: world
+                .get::<ServerAlive>(self.session)
+                .is_none_or(|alive| alive.0),
+            xp_progress: xp.map_or(0.0, |(progress, _, _)| progress),
+            xp_level: xp.map_or(0, |(_, level, _)| level),
+            xp_total: xp.map_or(0, |(_, _, total)| total),
+            xp_known: xp.is_some(),
+        }
+    }
+
+    /// The local player's own attributes, as `update_attributes` last reported
+    /// them.
+    ///
+    /// Empty before login, and empty on a server that has sent none. This reads
+    /// the [`Attributes`](lodestone_ecs::entity::Attributes) component on the
+    /// session entity, which only became reachable once
+    /// `lodestone_ecs::ingest::apply_local_player_login` put our own id in
+    /// `EntityIndex` — before that, `apply_entity_attributes` dropped every
+    /// snapshot for the local player on the floor.
+    ///
+    /// Deliberately **not** routed through [`Self::entity`]: the local player
+    /// carries no `EntityKind`/`Position`/`Rotation`/`HeadYaw` (those would
+    /// duplicate the driver's `PhysicsState`), so [`entity_view`] cannot build a
+    /// view of it and must not be taught to.
+    #[must_use]
+    pub(crate) fn local_attributes(&self) -> Vec<EntityAttributeSnapshot> {
+        self.ecs
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .player
-            .clone()
+            .get::<lodestone_ecs::entity::Attributes>(self.session)
+            .map(|attributes| attributes.0.clone())
+            .unwrap_or_default()
     }
 
     /// Returns the block-state id at `pos`, or `None` if the containing chunk is
@@ -670,13 +778,33 @@ impl SharedState {
     }
 
     /// Derives all currently tracked entities from their components.
+    ///
+    /// # The local player is excluded, explicitly
+    ///
+    /// `EntityIndex` now holds our *own* id too
+    /// (`lodestone_ecs::ingest::apply_local_player_login`), and this must keep
+    /// meaning "the other entities" — the shell maps it straight to render
+    /// instances (`NetClient::entity_snapshots`), so including the local player
+    /// would draw our own body at our own camera.
+    ///
+    /// The filter is written out rather than left to fall out of the local
+    /// player having no `EntityKind`/`Position`/`Rotation`/`HeadYaw` for
+    /// [`entity_view`] to read. That *would* also exclude it today, and it is
+    /// exactly the kind of accidental invariant that breaks silently the first
+    /// time someone adds one of those components for an unrelated reason.
     #[must_use]
     pub(crate) fn entities(&self) -> Vec<EntityView> {
         let world = self.ecs.read();
         world
             .resource::<lodestone_ecs::entity::EntityIndex>()
             .iter()
-            .filter_map(|(_, entity)| entity_view(world.get_entity(entity).ok()?))
+            .filter_map(|(_, entity)| {
+                let entity = world.get_entity(entity).ok()?;
+                if entity.contains::<lodestone_ecs::LocalPlayer>() {
+                    return None;
+                }
+                entity_view(entity)
+            })
             .collect()
     }
 
@@ -803,127 +931,75 @@ impl SharedState {
     }
 }
 
-impl Inner {
-    /// Folds one non-chunk, non-entity, non-session event into the model.
+impl LocalEcho {
+    /// Applies the server's authoritative correction to our own pose.
     ///
-    /// The `Menus::apply` early-return that used to head this method is gone
-    /// with the field: menus are folded by `lodestone_ecs::session::apply_menus`
-    /// now, and `SharedState::apply` routes them there before this is reached.
+    /// **`TeleportPlayer` is the only event left here.** This used to be the
+    /// scalar read-model's whole fold; everything else it folded now lives in
+    /// components:
+    ///
+    /// | was an arm here | folded by |
+    /// |---|---|
+    /// | `Login`, `Respawned` | `lodestone_ecs::session::apply_local_player_state` (game mode, dimension, alive) **and** `lodestone_ecs::ingest::apply_local_player_login` (the entity id, and the `EntityIndex` entry) |
+    /// | `HealthChanged`, `Death`, `ExperienceChanged` | `lodestone_ecs::session::apply_local_player_state` |
+    /// | the eight entity arms + `apply_metadata` | `lodestone_ecs::ingest` (Stage 1) |
+    /// | `PlayerListUpdate`, the scoreboard family, `BossBarUpdate`, the `Menus` family | `lodestone_ecs::session` (Stage 3) |
+    ///
+    /// `SharedState::apply` routes every one of those to the `NetIngest` schedule
+    /// *instead of* here, and that routing stays **exclusive** — an event reaches
+    /// one fold, never both. That was the whole design question the vitals collapse
+    /// turned on: running both folds would have kept a second `dimension` alive,
+    /// which is the duplicate this migration exists to delete. What made the
+    /// exclusive answer possible was moving `game_mode`/`dimension`/`alive` into
+    /// components too, so no event carries a field this side still owns.
+    ///
+    /// Note what the deleted `PlayerListUpdate` arm did *not* have: a
+    /// `PlayerListRemove` arm, so a player who left the server never left this
+    /// read-model. `lodestone_game::tablist::TabList::apply` handles both.
+    ///
+    /// Chat, `KeepAlive` and `Disconnect` carry no scalar read-model state.
+    /// `ChunkLoaded`/`ChunkUnloaded` are applied by the adapter through the
+    /// `WorldSink`, so their heavy payload never reaches this fold at all.
     fn apply(&mut self, event: &ClientEvent) {
-        match event {
-            ClientEvent::Login {
-                entity_id,
-                game_mode,
-                dimension,
-            } => {
-                self.player.entity_id = Some(*entity_id);
-                self.player.game_mode = Some(*game_mode);
-                self.player.dimension = Some(dimension.clone());
-                self.player.alive = true;
-            }
-            // `Respawned` is *also* how the server reports portal travel, not
-            // only death. Without this arm `dimension` froze at whatever the
-            // player logged into, so walking into the Nether left every
-            // dimension-conditioned rendering decision reading "overworld" —
-            // reintroducing the too-bright-Nether bug by traversal rather than
-            // by fresh login. `alive` is set here too because a respawn is
-            // exactly when the player stops being dead.
-            ClientEvent::Respawned {
-                dimension,
-                game_mode,
-                ..
-            } => {
-                self.player.dimension = Some(dimension.clone());
-                self.player.game_mode = Some(*game_mode);
-                self.player.alive = true;
-            }
-            ClientEvent::TeleportPlayer {
-                pos,
-                rotation,
-                flags,
-            } => {
-                let base = self.player.position.unwrap_or_default();
-                let new = Vec3::new(
-                    if flags.relative_x {
-                        base.x + pos.x
-                    } else {
-                        pos.x
-                    },
-                    if flags.relative_y {
-                        base.y + pos.y
-                    } else {
-                        pos.y
-                    },
-                    if flags.relative_z {
-                        base.z + pos.z
-                    } else {
-                        pos.z
-                    },
-                );
-                self.player.position = Some(new);
-                let base_rot = self.player.rotation;
-                self.player.rotation = Rotation::new(
-                    if flags.relative_yaw {
-                        base_rot.yaw + rotation.yaw
-                    } else {
-                        rotation.yaw
-                    },
-                    if flags.relative_pitch {
-                        base_rot.pitch + rotation.pitch
-                    } else {
-                        rotation.pitch
-                    },
-                );
-            }
-            ClientEvent::HealthChanged {
-                health,
-                food,
-                saturation,
-            } => {
-                self.player.health = *health;
-                self.player.food = *food;
-                self.player.saturation = *saturation;
-                self.player.health_known = true;
-                self.player.alive = *health > 0.0;
-            }
-            ClientEvent::Death { .. } => {
-                self.player.alive = false;
-            }
-            ClientEvent::ExperienceChanged {
-                progress,
-                level,
-                total,
-            } => {
-                self.player.xp_progress = *progress;
-                self.player.xp_level = *level;
-                self.player.xp_total = *total;
-                self.player.xp_known = true;
-            }
-            // Every entity event is folded by `lodestone_ecs::ingest`'s
-            // `NetIngest` systems instead and never reaches here —
-            // `SharedState::apply` routes them by `lodestone_ecs::ingest::handles_event`
-            // before this fold is called. The arms that used to live here (spawn,
-            // movement, velocity, head rotation, removal, metadata, attributes,
-            // equipment) plus the `apply_metadata` helper are *deleted*, not
-            // mirrored: `Inner` has no `entities` map for a second copy to live in.
-            //
-            // Likewise, Stage 3 deleted the *session* arms — `PlayerListUpdate`,
-            // `ObjectiveUpdate`, `DisplayObjective`, `ScoreUpdate`, `ScoreReset`,
-            // `TeamUpdate`, `BossBarUpdate` and the whole `Menus` family — along
-            // with the `players` / `scoreboard` / `boss_bars` / `menus` fields
-            // they wrote and the crate-local `scoreboard` module they wrote into.
-            // `lodestone_ecs::session`'s systems are the only fold now, over
-            // `lodestone-game`'s aggregates. Note what the deleted
-            // `PlayerListUpdate` arm did *not* have: a `PlayerListRemove` arm, so
-            // a player who left the server never left this read-model.
-            // `lodestone_game::tablist::TabList::apply` handles both.
-            //
-            // Chat, KeepAlive, Disconnect carry no scalar read-model state.
-            // ChunkLoaded / ChunkUnloaded are handled by the adapter through the
-            // `WorldSink`, so their heavy payload never reaches this fold; the
-            // events themselves are lightweight position-only notifications.
-            _ => {}
-        }
+        let ClientEvent::TeleportPlayer {
+            pos,
+            rotation,
+            flags,
+        } = event
+        else {
+            return;
+        };
+        let base = self.position.unwrap_or_default();
+        self.position = Some(Vec3::new(
+            if flags.relative_x {
+                base.x + pos.x
+            } else {
+                pos.x
+            },
+            if flags.relative_y {
+                base.y + pos.y
+            } else {
+                pos.y
+            },
+            if flags.relative_z {
+                base.z + pos.z
+            } else {
+                pos.z
+            },
+        ));
+        let base_rot = self.rotation;
+        self.rotation = Rotation::new(
+            if flags.relative_yaw {
+                base_rot.yaw + rotation.yaw
+            } else {
+                rotation.yaw
+            },
+            if flags.relative_pitch {
+                base_rot.pitch + rotation.pitch
+            } else {
+                rotation.pitch
+            },
+        );
     }
 }
 

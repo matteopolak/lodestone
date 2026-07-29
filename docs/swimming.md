@@ -107,38 +107,41 @@ list rather than leaving them to be rediscovered:
   one `AddMultipliedTotal`, chosen so the two multiplicative stages can't
   coincide if swapped).
 
-  What is genuinely still missing, upstream of that fold, in crates this doc
-  cannot edit (`lodestone-shell`, `lodestone-client`, `lodestone-ecs`):
+  **Update (2026-07-29, the ingest-seam change): the two blockers below are
+  closed. One step is left, and it is the physics call site.**
 
-  1. **No `NetClient` accessor surfaces the local player's own attributes.**
-     `net.rs`'s `entity_snapshots()`/`entity_snapshot()` build
-     `crate::entities::EntitySnapshot` (render/interpolation shape, no
-     `attributes` field, and not the relevant gap) — the actual missing
-     piece is a new method entirely, `NetClient::local_player_attributes()`,
-     since nothing currently reads a *specific* entity's `EntityView` by id
-     for this purpose.
-  2. **The deeper blocker: `lodestone_ecs::ingest`'s `EntityIndex` never
-     gets an entry for the local player's own id**, so even a correct
-     `local_player_attributes()` accessor would return empty forever.
-     `EntityIndex` is populated **only** by `apply_entity_spawn`
-     (`crates/lodestone-ecs/src/ingest.rs:138-181`), driven only by
-     `ClientEvent::EntitySpawned` — and vanilla never sends an `AddEntity`
-     for yourself, only `Login`. `apply_entity_attributes`
-     (`ingest.rs:347-377`) silently drops any `EntityAttributesUpdated` for
-     an id `EntityIndex` doesn't know, via its `index.get(*entity_id) else
-     { continue; }` guard (`ingest.rs:360-362`) — so the server's own
-     `update_attributes` packet for the local player is folded into nothing,
-     regardless of what `net.rs` exposes. No system in `ingest.rs` handles
-     `ClientEvent::Login` at all today (`lodestone_client::state::Inner
-     ::apply`'s `Login` arm, `state.rs:758-767`, only sets the scalar
-     `PlayerSnapshot::entity_id` — nothing seeds the ECS side). Fixing this
-     needs the local player's own entity registered in `EntityIndex` at
-     `Login`, without breaking that existing scalar arm (`ClientEvent::Login`
-     is not currently in `lodestone_ecs::ingest::handles_event`'s match, and
-     `SharedState::apply`'s if/else‑if/else, `state.rs:376-397`, routes an
-     event to *either* the ECS schedule *or* `Inner::apply`, never both — so
-     naively adding `Login` to `handles_event` would silently stop the
-     scalar arm from running).
+  1. ~~No accessor surfaces the local player's own attributes.~~
+     `ClientHandle::local_player_attributes()` does
+     (`crates/lodestone-client/src/handle.rs`), reading the `Attributes`
+     component off the session entity. Deliberately *not* routed through
+     `ClientHandle::entity(id)`: the local player carries no
+     `EntityKind`/`Position`/`Rotation`/`HeadYaw` — those would duplicate
+     `PhysicsState` — so `entity_view` cannot build a view of it and must
+     not be taught to.
+  2. ~~`EntityIndex` never gets an entry for the local player's own id.~~
+     `lodestone_ecs::ingest::apply_local_player_login` inserts it from
+     `ClientEvent::Login`, together with `MinecraftEntityId` and an empty
+     `Attributes`, so `apply_entity_attributes` resolves our own id and folds
+     the server's `update_attributes` onto a real component.
+     `login_indexes_the_local_player_so_its_own_attributes_fold` is the gate
+     and `without_the_login_the_local_players_attributes_are_dropped_on_the_floor`
+     is its control — the pre-fix behaviour verbatim.
+
+     The routing hazard the old text warned about was real and was handled by
+     moving the *whole* `PlayerSnapshot` fold into components rather than by
+     making `SharedState::apply` non-exclusive; see
+     [`world-unification.md`](./world-unification.md#the-vitals-collapse-and-the-second-blocker-c-hid).
+
+     Two guards came with it: `apply_entity_spawn` and `apply_entity_removal`
+     now skip an id held by a `LocalPlayer`, because indexing our own id put
+     the local player inside reach of two systems that `despawn` by index.
+
+  3. **Still open, and it is one line: nothing consumes the value.**
+     `lodestone_ecs::player::player_physics` computes `movement_speed` from
+     `profile.base_movement_speed` and the sprint modifier — see the
+     "`movement_speed` is not attribute-driven" note under *How to change it*
+     below. `water_movement_efficiency` needs the same treatment in the same
+     function.
 - **Bubble columns are not implemented.** `docs/fluid-classification.md`
   already documents that `bubble_column` is one of the five classes
   hardcoded to read as water for classification purposes
@@ -182,25 +185,53 @@ does on land.
   "Not modelled" doc list is the authoritative gap inventory; update it
   alongside any fix so the list doesn't go stale the way `docs/in-flight.md`
   did.
-- **Wiring `WATER_MOVEMENT_EFFICIENCY` for real**: the fold and the wire-to-
-  fold conversion both exist now (`lodestone_entity::attribute` —
+- **`movement_speed` is not attribute-driven either, and it looks like it is.**
+  Measured while closing the `EntityIndex` hole above.
+  `lodestone_ecs::player::player_physics` does call the physics seam —
+  `*player = player.with_movement_speed(attr)` — but `attr` is
+  `profile.base_movement_speed` (a hardcoded `0.1`, `lodestone-physics`'s
+  `profile.rs:142`) times `(1 + profile.sprint_speed_modifier)` when
+  sprinting. **No server-reported attribute reaches it.** So:
+
+  - a `/attribute @s minecraft:movement_speed base set 0.5` changes nothing
+    client-side;
+  - **Speed and Slowness do not change the local player's walk speed.**
+    `lodestone_physics::movement_speed_modifier` exists, is unit-tested, and
+    has no production caller — `player_physics` never folds
+    `PhysicsState.effects` into the value. `effective_speed`'s own doc comment
+    says "sprint + Speed/Slowness already folded in by the entity layer",
+    which is true of the *seam's contract* and false of every caller.
+
+  This is the same hole as the attribute one, one layer further on: the value
+  had nowhere to come from, so the caller invented one. The read side is now
+  wired (`ClientHandle::local_player_attributes`), so both fixes are the same
+  shape of change in the same place.
+
+- **Wiring `WATER_MOVEMENT_EFFICIENCY` (and `movement_speed`) for real**: the
+  fold and the wire-to-fold conversion exist (`lodestone_entity::attribute` —
   `AttributeInstance::value`, `instance_from_snapshot`, `attribute_value`,
-  `water_movement_efficiency_key`). What's left is entirely in
-  `lodestone-shell`/`lodestone-client`/`lodestone-ecs`:
-  1. Seed the local player's own id into `lodestone_ecs::ingest::EntityIndex`
-     at `Login` (nothing does today — see the "still missing" list above for
-     the exact hazard with `handles_event`/`SharedState::apply`'s routing).
-  2. Add `NetClient::local_player_attributes(&self) -> Vec<EntityAttributeSnapshot>`
-     in `net.rs`, e.g. `self.handle.get()?.player().entity_id` then
-     `.entity(id).map(|v| v.attributes)`.
-  3. Each physics tick, fold that through `attribute::attribute_value` and
-     write the `f32` result into a new per-player component (mirroring how
-     `sim.rs` already writes `Flying`/`MovementIntent` straight into the ECS
-     `World`), then have `lodestone-ecs`'s `player_physics`
-     (`crates/lodestone-ecs/src/player.rs:395-452`) call
-     `*player = player.with_water_movement_efficiency(value)` beside the
-     existing `with_movement_speed` call at line 434 — `sim.rs` no longer
-     owns this call site directly; Stage 5 moved it here.
+  `water_movement_efficiency_key`), and so does the read —
+  `ClientHandle::local_player_attributes`, which is where the fold now lands.
+  What's left:
+  0. A `NetClient::local_player_attributes` passthrough in
+     `crates/lodestone-shell/src/net.rs` (`self.handle.get().map_or_else(
+     Vec::new, |h| h.local_player_attributes())`). Deliberately **not** added
+     ahead of a consumer: an accessor with no caller is the island `CLAUDE.md`
+     rule 1 is about, and it is three lines to write beside step 1.
+  1. Each physics tick, fold the snapshot list through
+     `attribute::attribute_value` and write the results into per-player
+     components (mirroring how `sim.rs` already writes `Flying`/`MovementIntent`
+     straight into the ECS `World`). Do this in `sim.rs`'s per-tick path, **not**
+     inside a system that would have to reach `ClientHandle` under the `World`
+     write guard — `local_player_attributes` is an ECS-backed read and rule 1 in
+     [`world-unification.md`](./world-unification.md) applies.
+  2. Have `lodestone-ecs`'s `player_physics`
+     (`crates/lodestone-ecs/src/player.rs`) read those components instead of
+     deriving from `profile`: `with_water_movement_efficiency(value)` beside the
+     existing `with_movement_speed` call, and `with_movement_speed` fed from the
+     attribute rather than `profile.base_movement_speed`. Keep the profile value
+     as the fallback for when the server has reported nothing — that is what the
+     offline fixture world needs.
   Don't hardcode a Depth Strider constant as a shortcut — that reintroduces
   exactly the "guessed number instead of real data" pattern `CLAUDE.md` warns
   against elsewhere in this repo.

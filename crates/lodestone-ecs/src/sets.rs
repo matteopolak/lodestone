@@ -23,8 +23,32 @@ pub enum IngestSet {
 /// (`azalea-client/src/plugins/tick_end.rs:18-26`) is the precedent.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TickSet {
-    /// Turn buffered input into this tick's movement intent.
+    /// Poll the platform's held keys / raw device state for this tick.
+    /// Nothing lives here yet — it is reserved for whatever eventually reads
+    /// a keyboard or gamepad as a system rather than a plain resource write —
+    /// but it stays a distinct anchor from [`Self::Intent`] so a future
+    /// raw-input system and an intent-writing system are never mistaken for
+    /// the same ordering concern.
     Input,
+    /// Write this tick's [`crate::player::MovementIntent`] (and
+    /// [`crate::player::LookIntent`]).
+    ///
+    /// A dedicated anchor, split out from [`Self::Input`], because intent
+    /// writers are exactly the systems a plugin adds a second one of — a
+    /// navigator alongside human input — and `docs/bevy-migration.md`'s
+    /// planned `ambiguity_detection: LogLevel::Error` turns two unordered
+    /// writers of the same component into a schedule *build failure*, not a
+    /// race. Anchoring intent on its own set gives a plugin author one place
+    /// to order against (`.after(TickSet::Intent)` to override human input
+    /// this tick, or `.in_set(TickSet::Intent).after(...)` to compose with
+    /// it) without having to reason about whatever else might land in
+    /// [`Self::Input`] later.
+    ///
+    /// **`compute_movement_intent` must stay ordered before
+    /// `tick_sprint_window`** (`lodestone_controller::ecs`) — both are
+    /// anchored here, chained. Swapping them moves the double-tap sprint
+    /// window by one tick: see their doc comments.
+    Intent,
     /// `lodestone-physics` integration. The math stays a plain library the
     /// system calls (`docs/bevy-migration.md` §8) — this set is only ever a
     /// caller, never the integrator itself.
@@ -65,6 +89,14 @@ pub enum ExtractSet {
     Terrain,
     /// Entity draw-instance extraction.
     Entities,
+    /// World-space debug geometry a plugin wants drawn this frame — a
+    /// pathfinder's planned route, a bot's reachability probe, anything that
+    /// is otherwise invisible and therefore undebuggable (`CLAUDE.md`'s
+    /// island rule). A plugin system that pushes into
+    /// [`crate::player::DebugLines`] belongs in this set. Grouped with the
+    /// other world-space extracts (after [`Self::Entities`]) and before
+    /// [`Self::Hud`], which is screen-space.
+    Debug,
     /// HUD/overlay extraction.
     Hud,
 }

@@ -4,10 +4,12 @@
 
 How the client's render path is supposed to look different in the Nether and the
 End, versus what it actually does today: which parts already work (sky light
-defaulting), which parts are stubbed and ready to wire (fog/sky colour), and
-one confirmed bug that undermines both — the connected dimension the render
-path reads goes stale the moment a player changes dimension without
-reconnecting (portal travel, `/execute in`, end-gateway teleport).
+defaulting, and now fog colour and the frame clear colour), the one dimension
+attribute deliberately left unwired (the End's sky-darken factor, pending a
+live-server check), and one confirmed bug that undermines the rest — the
+connected dimension the render path reads goes stale the moment a player
+changes dimension without reconnecting (portal travel, `/execute in`,
+end-gateway teleport).
 
 This doc also carries the portal traversal diagnosis: what the client sends,
 what happens to the dimension-change packet, and where the picture actually
@@ -52,20 +54,24 @@ This client has no dimension-type *registry* decode at all (see below) — the
 match is by well-known dimension id, not by an actual `has_skylight` bit read
 off the wire.
 
-### Fog and sky colour — stubbed, not wired
+### Fog colour and clear colour — both wired now
 
-There is exactly **one** fog colour/range in the whole client:
-`crates/lodestone-shell/src/gpu.rs::SKY_COLOR`, a compile-time overworld sky
-blue, used both as the frame's clear colour and as
-`sim::fog_for_render_distance`'s fog colour. `Sim::fog_settings()`
-(`crates/lodestone-shell/src/sim.rs`) branches **only** on the eye's fluid state
-(lava / water / neither) — never on dimension. Standing in the Nether or the
-End today renders exactly the overworld's blue sky-fog fade, just with
-different terrain underneath.
+`Sim::fog_settings()` (`crates/lodestone-shell/src/sim.rs`) now branches on the
+connected dimension, read the same way `mesher.rs` does
+(`net.shared_handle().get().and_then(|h| h.player().dimension)`), *before*
+falling through to the lava/water override so submersion still wins over the
+dimension fog (the priority order this doc originally specified):
+`minecraft:the_nether` selects `FogSettings::nether`,
+`minecraft:the_end` selects `FogSettings::the_end`, and anything else
+(including pre-login `None`) keeps `fog_for_render_distance`. This reaches a
+pixel every frame through the existing `app.rs` call site
+(`let desired_fog = self.sim.fog_settings(); ... render.set_fog(desired_fog);`),
+which needed no change at all — it already re-applied whatever
+`fog_settings()` returned each frame the value changed.
 
-This pass adds the missing presets to `lodestone-render` (in scope for this
-task) so the one remaining step is a call-site change in files this task was
-not permitted to touch:
+The **frame clear colour is the one half still not wired** — see below.
+
+This pass had already added the presets to `lodestone-render`:
 
 - `lodestone_render::fog::FogSettings::nether(render_distance: u32)` — the
   Nether's fixed `10..96`-block dense fog (not render-distance-relative, per
@@ -96,39 +102,22 @@ All hermetically unit-tested in `crates/lodestone-render/src/fog.rs`
 `nether_and_end_fog_are_disjoint_from_the_overworld_sky`,
 `srgb_to_linear_hits_known_anchors`).
 
-**What is still zero-pixel** — the wiring these presets need, in files this
-task could not touch:
-
-1. `Sim::fog_settings()` (`crates/lodestone-shell/src/sim.rs`) needs a
-   dimension branch, read the same way `mesher.rs` already does
-   (`net.shared_handle().get().and_then(|h| h.player().dimension)`), inserted
-   *before* the existing lava/water override so submersion still wins:
-   ```rust
-   let base = match dimension {
-       Some(d) if d.namespace() == "minecraft" && d.path() == "the_nether" => {
-           lodestone_render::fog::FogSettings::nether(self.config.render_distance)
-       }
-       Some(d) if d.namespace() == "minecraft" && d.path() == "the_end" => {
-           lodestone_render::fog::FogSettings::the_end(
-               self.config.render_distance,
-               crate::gpu::FOG_START_FRACTION,
-           )
-       }
-       _ => fog_for_render_distance(self.config.render_distance),
-   };
-   // then: if under_lava { lava_fog() } else if under_water { water_fog(..) } else { base }
-   ```
-2. The frame's **background/clear colour** (`RenderState`'s private `clear:
-   wgpu::Color` in `crates/lodestone-shell/src/gpu.rs`) is set once at
-   construction from `SKY_COLOR` and never updated per frame — unlike fog,
-   there is no `set_clear_color`-style setter. The Nether has no sky dome in
-   vanilla either (`"skybox": "none"` in its dimension type) — its "sky" *is*
-   the fog colour — so without a per-frame clear-colour setter, the edge of
-   the loaded Nether world will fade into red fog and then hit a hard blue
-   wall at the horizon/above the world. This needs a new setter mirroring
-   `set_fog`, called with the same colour as the active `FogSettings` (e.g.
-   `render.set_clear_color(fog.color)` right after `render.set_fog(fog)`), and
-   touches `gpu.rs`, which this task could not edit.
+**The frame clear colour is now wired too.** `RenderState::set_clear_color`
+(`crates/lodestone-shell/src/gpu.rs`) mirrors `set_fog` exactly — it replaces
+the private `clear: wgpu::Color` field the constructor seeds from `SKY_COLOR`
+— and `app.rs`'s `redraw()` calls it right after `render.set_fog(desired_fog)`,
+with the *same* `desired_fog.color`, inside the existing
+`if self.applied_fog != Some(desired_fog)` change-detection (so this piggybacks
+on that guard at zero extra cost rather than adding a second one). Fog and
+clear colour are therefore always one value, per `SKY_COLOR`'s own doc comment
+on why a second, independently-drifting copy of the sky colour is exactly how
+the horizon ends up banding in a colour the sky never is. The Nether has no sky
+dome in vanilla (`"skybox": "none"` in its dimension type) — its "sky" *is* the
+fog colour — so this closes the exact gap this section used to describe: the
+edge of the loaded Nether world now fades into the correct red fog *and* the
+horizon/above-world clear is that same red, not a hard blue wall. `gpu.rs` was
+off limits to the task that wrote the original version of this section; it is
+not off limits to whoever landed this.
 
 ### Sky darkening (`sky_darken`) — open question, not touched
 
@@ -258,9 +247,13 @@ reported rather than fixed. Flagged as a background-task suggestion.
 - New dimension colour → add an sRGB hex constant plus a `FogSettings`
   constructor in `crates/lodestone-render/src/fog.rs`, converted through
   `srgb_u8_to_linear`, never hand-typed as linear (see that function's doc
-  comment for why).
+  comment for why). Add the dimension-id branch in `Sim::fog_settings()`
+  (`crates/lodestone-shell/src/sim.rs`) the same way the Nether/End branches
+  already read — a `d.namespace() == "minecraft" && d.path() == "..."` match
+  *before* the `_ =>` fallthrough, still inside the lava/water priority order.
 - New dimension-conditioned render decision → resolve the dimension the same
-  way `mesher.rs::sky_default_for_dimension` does (well-known id match on
+  way `mesher.rs::sky_default_for_dimension` and `Sim::fog_settings` both do
+  (well-known id match on
   `net.shared_handle().get().and_then(|h| h.player().dimension)`), until the
   registry decode above exists.
 - Gotcha: any such decision is only as fresh as `player.dimension`, which is
@@ -268,6 +261,13 @@ reported rather than fixed. Flagged as a background-task suggestion.
   live gate through an actual dimension change, not just a fresh login into
   the target dimension, or the same "invisible until traversal" trap will
   repeat.
+- The clear colour tracks the fog colour automatically now
+  (`RenderState::set_clear_color`, called from `app.rs` with
+  `desired_fog.color`) — a new dimension colour added to `fog.rs`/
+  `Sim::fog_settings()` per the bullet above reaches the clear colour for free,
+  with no separate wiring. Do not add a second colour source that computes the
+  clear independently; it must always be fed the same `desired_fog.color`
+  `app.rs` already computes for `set_fog`.
 
 ## Configuration
 
@@ -277,7 +277,9 @@ worldgen/biome}/*.json`), not runtime-configurable.
 
 ## Dependencies
 
-- `lodestone-render::fog` — the presets and the sRGB helper.
+- `lodestone-render::fog` — the presets and the sRGB helper, and now
+  `Sim::fog_settings()`'s direct call target for the Nether/End branches.
 - `lodestone-render::world::SkyDefault` — the sky-light-default policy.
 - `lodestone-client::DimensionId`/`ClientHandle::shared_handle` — the (stale,
-  see above) dimension identity every consumer here reads.
+  see above) dimension identity every consumer here reads, `Sim::fog_settings`
+  included.

@@ -216,13 +216,19 @@ pub enum NetUpdate {
         /// exactly one particle with a non-randomized velocity.
         count: i32,
     },
-    /// Player health/food changed.
-    Health {
-        /// Current health in `0..=20`.
-        health: f32,
-        /// Current food level in `0..=20`.
-        food: i32,
-    },
+    // `Health` and `Experience` used to live here, forwarded from
+    // `ClientEvent::{HealthChanged, ExperienceChanged}` and folded by
+    // `Sim::poll_net` into the `Vitals`/`Xp` components. **Both are deleted**, for
+    // the same reason Stage 3 deleted `TabListEvent` and `ScoreboardEvent`: the
+    // net thread's `SharedState::apply` now folds those events into those same
+    // components (`lodestone_ecs::session::apply_local_player_state`), so a shell
+    // arm would be a *second* writer of one component. The HUD reads
+    // `Sim::health`/`food`/`experience` exactly as before; only the writer moved.
+    //
+    // `Death` and `Respawned` deliberately stayed: they drive the driver's own
+    // `Dead` marker and `RespawnCount`, which are not folds of the server's view
+    // (see `lodestone_ecs::session::ServerAlive`'s docs on why the two liveness
+    // rules must not merge).
     /// The player died. A transient state, not the end of the session: the
     /// client library auto-respawns, and [`NetUpdate::Respawned`] follows.
     Death,
@@ -230,19 +236,6 @@ pub enum NetUpdate {
     /// `/respawn`). The fresh position arrives in the placement
     /// [`NetUpdate::Teleport`] that follows.
     Respawned,
-    /// Player experience changed (`set_experience`): progress toward the next
-    /// level, the level itself, and total accumulated points. The HUD's XP bar
-    /// must draw these real numbers, not a locally-faked value — there is no
-    /// vanilla formula the shell could derive them from that would match the
-    /// server's own (possibly modded) leveling curve.
-    Experience {
-        /// Progress toward the next level, in `0.0..1.0`.
-        progress: f32,
-        /// Current experience level.
-        level: i32,
-        /// Total accumulated experience points.
-        total: i32,
-    },
     /// A positioned sound to play (`SOUND` packet). `name` is the sound event
     /// key's path (namespace stripped, e.g. `"entity.slime.squish"`); `seed` is
     /// the server-rolled value that makes weighted variant selection
@@ -897,18 +890,12 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));
             return Err(());
         }
-        ClientEvent::HealthChanged { health, food, .. } => NetUpdate::Health { health, food },
+        // No `HealthChanged`/`ExperienceChanged` arms: those fold into the
+        // `Vitals`/`Xp` components on the net thread, and forwarding them here as
+        // well would put a second writer on the shell side. See `NetUpdate`'s note
+        // where the two variants used to be.
         ClientEvent::Death { .. } => NetUpdate::Death,
         ClientEvent::Respawned { .. } => NetUpdate::Respawned,
-        ClientEvent::ExperienceChanged {
-            progress,
-            level,
-            total,
-        } => NetUpdate::Experience {
-            progress,
-            level,
-            total,
-        },
         // Sound events: strip the namespace to the `sounds.json` key path and
         // pass the server's seed through unchanged (client-side variant
         // selection would desync every client). `fixed_range` is intentionally
@@ -1152,27 +1139,52 @@ mod tests {
         let _ = client.poll();
     }
 
+    /// The vitals events must **not** cross this channel any more.
+    ///
+    /// This replaces `forward_translates_experience_changed`, and it is the
+    /// negative control for the collapse: `SharedState::apply` folds
+    /// `HealthChanged`/`ExperienceChanged` into `Vitals`/`Xp` on the net thread, so
+    /// a `NetUpdate` for either would be a second writer of a component that
+    /// already has one. Re-adding a `forward` arm for them silently reintroduces
+    /// the duplicate fold this test exists to forbid.
     #[test]
-    fn forward_translates_experience_changed() {
+    fn the_vitals_events_are_not_forwarded_to_the_shell_at_all() {
         let (tx, rx) = mpsc::channel();
-        let event = ClientEvent::ExperienceChanged {
-            progress: 0.25,
-            level: 5,
-            total: 55,
-        };
-        forward(&tx, event).expect("forward does not stop the loop");
-        match rx.try_recv().expect("an update was forwarded") {
-            NetUpdate::Experience {
-                progress,
-                level,
-                total,
-            } => {
-                assert_eq!(progress, 0.25);
-                assert_eq!(level, 5);
-                assert_eq!(total, 55);
-            }
-            other => panic!("expected Experience, got {other:?}"),
-        }
+        forward(
+            &tx,
+            ClientEvent::ExperienceChanged {
+                progress: 0.25,
+                level: 5,
+                total: 55,
+            },
+        )
+        .expect("forward does not stop the loop");
+        forward(
+            &tx,
+            ClientEvent::HealthChanged {
+                health: 12.0,
+                food: 8,
+                saturation: 1.5,
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert!(
+            rx.try_recv().is_err(),
+            "the vitals fold lives in `lodestone_ecs::session`; nothing may cross this channel"
+        );
+        // …and the control that `forward` is genuinely running: an event that
+        // *does* have a shell-side reaction still arrives.
+        forward(
+            &tx,
+            ClientEvent::Death {
+                message: lodestone_client::Text::literal("you died"),
+            },
+        )
+        .expect("forward does not stop the loop");
+        assert!(matches!(
+            rx.try_recv().expect("Death still crosses"),
+            NetUpdate::Death
+        ));
     }
 
     #[test]

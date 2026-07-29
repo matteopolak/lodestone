@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use lodestone_model::{
-    BlockPos, ChunkPos, ClientAction, ClientEvent, GameMode, Hand, PlayerListEntry, Rotation, Vec3,
+    BlockPos, ChunkPos, ClientAction, ClientEvent, EntityAttributeSnapshot, GameMode, Hand,
+    PlayerListEntry, Rotation, Vec3,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -108,15 +109,20 @@ impl ClientHandle {
 
     /// Returns the player's current position, or `None` if the server has not
     /// placed the player yet.
+    ///
+    /// Reads the local echo directly rather than building a whole
+    /// [`PlayerSnapshot`], so it takes no ECS lock — this is the read a moving bot
+    /// makes most often and there is nothing in the component set it needs.
     #[must_use]
     pub fn position(&self) -> Option<Vec3> {
-        self.state.player().position
+        self.state.position()
     }
 
-    /// Returns the player's current look direction.
+    /// Returns the player's current look direction. Echo-only, like
+    /// [`Self::position`].
     #[must_use]
     pub fn rotation(&self) -> Rotation {
-        self.state.player().rotation
+        self.state.rotation()
     }
 
     /// Returns the player's current health in half-hearts, or `None` if the
@@ -170,15 +176,44 @@ impl ClientHandle {
     }
 
     /// Returns a view of a tracked entity by id, if present.
+    ///
+    /// Never returns the **local player**, even when handed our own
+    /// [`PlayerSnapshot::entity_id`]: we carry no
+    /// `EntityKind`/`Position`/`Rotation`/`HeadYaw` (they would duplicate the
+    /// driver's own physics state), and an [`EntityView`] cannot be built without
+    /// them. Use [`Self::local_player_attributes`] for the one piece of
+    /// entity-shaped state the local player does fold.
     #[must_use]
     pub fn entity(&self, entity_id: i32) -> Option<EntityView> {
         self.state.entity(entity_id)
     }
 
-    /// Returns views of all currently tracked entities.
+    /// Returns views of all currently tracked entities, **excluding the local
+    /// player**.
     #[must_use]
     pub fn entities(&self) -> Vec<EntityView> {
         self.state.entities()
+    }
+
+    /// Returns the local player's own attributes, as `update_attributes` last
+    /// reported them. Empty before login.
+    ///
+    /// # Why this needed a fix rather than just an accessor
+    ///
+    /// `lodestone_ecs::ingest::EntityIndex` used to be populated only by
+    /// `ClientEvent::EntitySpawned`, and **vanilla never sends an `AddEntity` for
+    /// yourself — only `Login`**. So `apply_entity_attributes` silently dropped
+    /// every snapshot naming our own id and this would have returned an empty list
+    /// forever, however correct the accessor was. See
+    /// `lodestone_ecs::ingest::apply_local_player_login`.
+    ///
+    /// Fold a value out of these with
+    /// `lodestone_entity::attribute::attribute_value`, which applies vanilla's
+    /// three-stage `AttributeInstance::calculateValue` order. Do not read `base`
+    /// and ignore the modifiers.
+    #[must_use]
+    pub fn local_player_attributes(&self) -> Vec<EntityAttributeSnapshot> {
+        self.state.local_attributes()
     }
 
     /// Returns the currently known player-list entries, flattened to the

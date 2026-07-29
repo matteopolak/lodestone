@@ -561,12 +561,40 @@ impl WindowApp {
         }
     }
 
+    /// Install the debug-lines source: the render half of `ExtractSet::Debug`
+    /// (`docs/plugin-api.md`), the channel a plugin (e.g. a navigator) uses to
+    /// push world-space line geometry onto screen via
+    /// `lodestone_ecs::player::DebugLines`. `RenderState::set_debug_lines_source`
+    /// and the line pipeline it drives already existed with no caller —
+    /// `gpu.rs`'s own `DebugLinesSource` doc names this as "the one wire this
+    /// crate cannot lay itself."
+    ///
+    /// Unlike [`install_outline_source`](Self::install_outline_source), this
+    /// needs no live connection: `Sim::new`/`Sim::with_demo_world` always add
+    /// `LocalPlayerPlugin` (`crates/lodestone-ecs/src/player.rs`), which
+    /// `init_resource`s `DebugLines` on the one `World` regardless of session
+    /// kind, so `self.sim.ecs()` is enough. Callable — and safe to call
+    /// repeatedly, since it only replaces the closure with an equivalent one —
+    /// the moment `self.render` exists.
+    fn install_debug_lines_source(&mut self) {
+        let Some(render) = self.render.as_mut() else {
+            return;
+        };
+        let ecs = self.sim.ecs().clone();
+        render.set_debug_lines_source(move || {
+            lodestone_ecs::hold_read(&ecs, |world| {
+                crate::gpu::debug_line_vertices(&world.resource::<lodestone_ecs::DebugLines>().0)
+            })
+        });
+    }
+
     fn begin_singleplayer(&mut self) {
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
         match launch_singleplayer() {
             Ok(net) => {
                 self.sim.attach_net(net);
                 self.install_outline_source();
+                self.install_debug_lines_source();
             }
             Err(e) => self.ui.session_failed(e.to_string()),
         }
@@ -610,6 +638,7 @@ impl WindowApp {
             });
         }
         self.install_outline_source();
+        self.install_debug_lines_source();
     }
 
     /// The menu currently drawn as the container screen — the open non-player
@@ -925,7 +954,21 @@ impl WindowApp {
         let aspect = w as f32 / h as f32;
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
+        // The true first-person eye: block targeting and the audio listener
+        // deliberately keep reading this one even in third person (see
+        // `Sim::camera`'s doc) — only the actual draw call below wants the
+        // pulled-back camera.
         let camera = self.sim.camera(aspect);
+        // What the frame is actually drawn from: `camera` unmodified in first
+        // person, or `camera` pulled back (collision-clamped) behind the
+        // player in third person. Installing the third-person body source
+        // every frame is cheap (one small `Option` clone, no live borrow of
+        // `Sim` needed inside the closure) and keeps the two in lock-step —
+        // see `RenderState::set_third_person_body_source`'s doc for why a
+        // `None`/`Some` source *is* the camera-mode toggle.
+        let render_camera = self.sim.render_camera(aspect);
+        let body_state = self.sim.third_person_body_state();
+        render.set_third_person_body_source(move || body_state.clone());
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the
@@ -933,6 +976,13 @@ impl WindowApp {
         let desired_fog = self.sim.fog_settings();
         if self.applied_fog != Some(desired_fog) {
             render.set_fog(desired_fog);
+            // The clear colour must never disagree with the fog colour it is
+            // set alongside — see `RenderState::set_clear_color`'s doc and
+            // `docs/dimension-visuals.md`'s wiring note. Piggybacking on the
+            // same change-detected `if` this fog upload already used is free:
+            // there is no separate "did the clear colour change" condition to
+            // get out of sync with it.
+            render.set_clear_color(desired_fog.color);
             self.applied_fog = Some(desired_fog);
         }
         // Drive the audio listener from the exact camera we render, so what the
@@ -955,12 +1005,19 @@ impl WindowApp {
                 device,
                 queue,
                 frame.view(),
-                &camera,
+                &render_camera,
                 outline,
                 &entity_draws,
                 crack,
             ),
-            None => render.render(device, queue, frame.view(), &camera, outline, &entity_draws),
+            None => render.render(
+                device,
+                queue,
+                frame.view(),
+                &render_camera,
+                outline,
+                &entity_draws,
+            ),
         };
 
         // Fold GPU counters + timing into the debug overlay.
@@ -1296,6 +1353,10 @@ impl ApplicationHandler for WindowApp {
         // Now that `self.render` exists and `attach_net` has already run above,
         // the outline source can be installed on this path too.
         self.install_outline_source();
+        // Debug lines need no connection at all (see the method doc), so this
+        // is the one call that actually matters — the two above are just
+        // keeping the three connect paths uniform.
+        self.install_debug_lines_source();
         self.hud = Some(hud);
         self.effects = Some(effects);
         self.container = Some(container);
@@ -1559,6 +1620,9 @@ impl ApplicationHandler for WindowApp {
                         self.set_grab(false);
                     } else if code == KeyCode::KeyF && pressed && self.ui.accepts_gameplay_input() {
                         self.sim.toggle_fly();
+                    } else if code == KeyCode::F5 && pressed && self.ui.accepts_gameplay_input() {
+                        // Vanilla's own third-/first-person toggle.
+                        self.sim.toggle_third_person();
                     } else if let Some(slot) = hotbar_slot_for(code)
                         && pressed
                         && self.ui.accepts_gameplay_input()

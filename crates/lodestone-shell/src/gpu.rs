@@ -53,6 +53,13 @@ use crate::particles::{ParticleInstance, ParticleRenderer};
 /// again on the way to the screen, so the mislabelled value washed the sky out
 /// (it displayed as `(192, 219, 246)`, saturation 0.22, instead of the intended
 /// `(135, 181, 235)`).
+///
+/// This is the **bring-up default** only — `RenderState::new` seeds both the
+/// clear colour and the fog colour from it, but `app.rs`'s `redraw()` then
+/// drives both away from it together every frame a dimension-conditioned fog
+/// (`Sim::fog_settings`, e.g. `FogSettings::nether`/`the_end`) or a submersion
+/// override is active, via `RenderState::set_fog`/`set_clear_color` — always
+/// called as a pair with the same colour, per `docs/dimension-visuals.md`.
 pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 
 /// Fraction of the view distance at which fog begins.
@@ -305,6 +312,298 @@ fn fs_main() -> @location(0) vec4<f32> {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..24, 0..1);
+    }
+}
+
+/// One coloured vertex of a world-space debug line segment — the render half
+/// of `lodestone_ecs::player::DebugLine` (`docs/plugin-api.md`'s
+/// `ExtractSet::Debug` channel). A separate, `bytemuck`-friendly type rather
+/// than reusing the ECS one directly, so this module (and `wgpu`) never has
+/// to care whether the ECS type's layout is `f32` or `f64` — see
+/// [`debug_line_vertices`] for the conversion.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct DebugLineVertex {
+    /// World-space position.
+    pub position: [f32; 3],
+    /// Linear RGBA, `0.0..=1.0`.
+    pub color: [f32; 4],
+}
+
+/// Lower a plugin's world-space debug segments
+/// (`lodestone_ecs::player::DebugLine`) into the vertex pairs
+/// [`DebugLineRenderer`] draws. The one piece of glue between the ECS
+/// channel and this pass — see [`DebugLinesSource`]'s docs for why installing
+/// it is the one wire this crate cannot lay itself.
+#[must_use]
+pub fn debug_line_vertices(lines: &[lodestone_ecs::player::DebugLine]) -> Vec<DebugLineVertex> {
+    lines
+        .iter()
+        .flat_map(|line| {
+            let start = [
+                line.start.x as f32,
+                line.start.y as f32,
+                line.start.z as f32,
+            ];
+            let end = [line.end.x as f32, line.end.y as f32, line.end.z as f32];
+            [
+                DebugLineVertex {
+                    position: start,
+                    color: line.color,
+                },
+                DebugLineVertex {
+                    position: end,
+                    color: line.color,
+                },
+            ]
+        })
+        .collect()
+}
+
+/// Fixed capacity for the debug-line pass, in line segments (two vertices
+/// each). A debug overlay does not need to grow without bound the way
+/// [`crate::particles::ParticleRenderer`]'s instance count does — a few
+/// thousand segments is far more than one pathfinder's route — so this stays
+/// a **fixed** buffer, like [`OutlineRenderer`]'s, rather than the
+/// grow-and-reallocate pattern particles use. That choice is what lets
+/// [`DebugLineRenderer::prepare`] take `&self`: [`RenderState::render`] itself
+/// takes `&self` (it is called through a shared reference from the frame
+/// loop), so a `prepare` that needed to reallocate would need `&mut self` and
+/// a second, `app.rs`-level call before every frame — exactly the wiring this
+/// crate cannot add (see [`DebugLinesSource`]). Beyond this many segments,
+/// [`DebugLineRenderer::prepare`] truncates rather than growing.
+const MAX_DEBUG_LINE_SEGMENTS: usize = 4096;
+
+/// Draws arbitrary coloured world-space line segments — a pathfinder's
+/// planned route, a reachability probe, anything a plugin wants visible for
+/// debugging (`CLAUDE.md`'s island rule: a subsystem with no way onto the
+/// screen is undebuggable by construction).
+///
+/// A generalisation of [`OutlineRenderer`] immediately above: the same
+/// `view_proj`-only bind group and line-list topology, but a per-vertex
+/// colour instead of a hardcoded black, and an arbitrary (fixed-capacity)
+/// vertex count instead of one hardcoded unit cube.
+#[derive(Debug)]
+struct DebugLineRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    uniform: wgpu::Buffer,
+    vertices: wgpu::Buffer,
+}
+
+impl DebugLineRenderer {
+    fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lodestone-debug-lines-shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                r"
+struct Uniform { view_proj: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: Uniform;
+
+struct VOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) pos: vec3<f32>, @location(1) color: vec4<f32>) -> VOut {
+    var out: VOut;
+    out.clip_pos = u.view_proj * vec4<f32>(pos, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"
+                .into(),
+            ),
+        });
+
+        // Same bind-group-layout shape as `OutlineRenderer`: one `view_proj`
+        // uniform, nothing else. A dedicated pipeline entirely outside the
+        // model shader's four bind groups, so this pass has no bearing on the
+        // 4-bind-group floor `CLAUDE.md` warns about (`gpu.rs`'s own
+        // `BlockPipeline`/`ModelPipeline` are untouched by this addition).
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lodestone-debug-lines-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-debug-lines-uniform"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lodestone-debug-lines-bg"),
+            layout: &bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            }],
+        });
+
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lodestone-debug-lines-vertices"),
+            size: (MAX_DEBUG_LINE_SEGMENTS * 2 * std::mem::size_of::<DebugLineVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("lodestone-debug-lines-layout"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("lodestone-debug-lines-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<DebugLineVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x4],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            // Same depth treatment as `OutlineRenderer`: tested against
+            // terrain (so a debug line behind a wall does not bleed through
+            // the block in front of it) but not written, so overlapping debug
+            // lines never punch depth holes in each other or in what is drawn
+            // after them.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            bind_group,
+            uniform,
+            vertices,
+        }
+    }
+
+    /// Upload this frame's view-projection and line vertices. Must run before
+    /// the render pass opens — buffers cannot be written mid-pass. Returns the
+    /// vertex count actually written, capped at
+    /// `2 * `[`MAX_DEBUG_LINE_SEGMENTS`] — pass it to [`draw`](Self::draw).
+    ///
+    /// Takes `&self`, not `&mut self`: see [`MAX_DEBUG_LINE_SEGMENTS`]'s docs
+    /// for why a fixed buffer is what makes that possible.
+    fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &[[f32; 4]; 4],
+        vertices: &[DebugLineVertex],
+    ) -> u32 {
+        queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
+        let capped = &vertices[..vertices.len().min(MAX_DEBUG_LINE_SEGMENTS * 2)];
+        if capped.is_empty() {
+            return 0;
+        }
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(capped));
+        u32::try_from(capped.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Record the draw. No-op when `vertex_count` (the last
+    /// [`prepare`](Self::prepare)'s return value) is zero.
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, vertex_count: u32) {
+        if vertex_count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.draw(0..vertex_count, 0..1);
+    }
+}
+
+/// Polled source for this frame's world-space debug lines — the render half
+/// of `ExtractSet::Debug` (`docs/plugin-api.md`). Same idiom as
+/// [`OutlineShapeSource`]/[`ThirdPersonBodySource`] immediately below: the
+/// renderer cannot reach the ECS `DebugLines` resource directly (this crate
+/// has no dependency edge back to whoever owns the `World`), and threading it
+/// through [`RenderState::render`]'s signature would touch every call site —
+/// which, for this change, means `app.rs`'s `render(...)` calls, and
+/// `app.rs` is out of scope for this work (a different agent holds it; see
+/// `docs/plugin-api.md`).
+///
+/// **This is the one wire this crate cannot lay itself.** Unset — the
+/// default, and the state until someone installs a source — samples to
+/// nothing, so [`RenderState::render`]'s behaviour is unchanged from before
+/// this existed: zero pixels from this pass until a caller installs a real
+/// source with [`RenderState::set_debug_lines_source`]. The install call
+/// itself is one line, e.g. (schematically — the exact accessor depends on
+/// how `app.rs` reaches the `EcsHandle`):
+///
+/// ```text
+/// render_state.set_debug_lines_source(move || {
+///     let world = ecs_handle.read();
+///     lodestone_render_shell::gpu::debug_line_vertices(
+///         &world.resource::<lodestone_ecs::player::DebugLines>().0,
+///     )
+/// });
+/// ```
+#[derive(Default)]
+pub struct DebugLinesSource(
+    #[allow(clippy::type_complexity)] Option<Box<dyn Fn() -> Vec<DebugLineVertex> + Send + Sync>>,
+);
+
+impl DebugLinesSource {
+    #[must_use]
+    fn sample(&self) -> Vec<DebugLineVertex> {
+        self.0.as_ref().map_or_else(Vec::new, |f| f())
+    }
+}
+
+impl std::fmt::Debug for DebugLinesSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("DebugLinesSource")
+            .field(&if self.0.is_some() {
+                "installed"
+            } else {
+                "empty"
+            })
+            .finish()
     }
 }
 
@@ -766,7 +1065,11 @@ impl EntityLightSource {
 impl std::fmt::Debug for EntityLightSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("EntityLightSource")
-            .field(&if self.0.is_some() { "set" } else { "full-bright" })
+            .field(&if self.0.is_some() {
+                "set"
+            } else {
+                "full-bright"
+            })
             .finish()
     }
 }
@@ -947,7 +1250,11 @@ impl ThirdPersonBodySource {
 impl std::fmt::Debug for OutlineShapeSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("OutlineShapeSource")
-            .field(&if self.0.is_some() { "real-outline" } else { "unit-cube" })
+            .field(&if self.0.is_some() {
+                "real-outline"
+            } else {
+                "unit-cube"
+            })
             .finish()
     }
 }
@@ -955,7 +1262,11 @@ impl std::fmt::Debug for OutlineShapeSource {
 impl std::fmt::Debug for ThirdPersonBodySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("ThirdPersonBodySource")
-            .field(&if self.0.is_some() { "set" } else { "first-person" })
+            .field(&if self.0.is_some() {
+                "set"
+            } else {
+                "first-person"
+            })
             .finish()
     }
 }
@@ -973,11 +1284,20 @@ pub struct RenderState {
     sections: HashMap<SectionKey, SectionGpu>,
     model: Option<ModelRenderer>,
     outline: OutlineRenderer,
+    /// The render half of `ExtractSet::Debug` (`docs/plugin-api.md`); see
+    /// [`DebugLinesSource`] for why it starts empty until something installs
+    /// a source.
+    debug_lines: DebugLineRenderer,
+    debug_lines_source: DebugLinesSource,
     entities: EntityRenderer,
     /// Block-break debris. Bound to whichever atlas the terrain draws from, so a
     /// fragment is textured from the same pixels as the block it came off.
     particles: ParticleRenderer,
     particle_atlas_bind_group: wgpu::BindGroup,
+    /// What a pixel nothing else drew this frame clears to. Seeded from
+    /// [`SKY_COLOR`] at construction; kept in step with [`fog`](Self::fog)'s
+    /// colour thereafter via [`RenderState::set_clear_color`] — see that
+    /// method's doc for why the two must never disagree.
     clear: wgpu::Color,
     /// Linear distance fog fading the outermost loaded chunks into the sky (or,
     /// later, a biome water colour when submerged). Defaults to a sky-coloured
@@ -1037,6 +1357,7 @@ impl RenderState {
         let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas, &uv_buffer);
         let depth = DepthBuffer::new(device, width.max(1), height.max(1));
         let outline = OutlineRenderer::new(device, color_format);
+        let debug_lines = DebugLineRenderer::new(device, color_format);
         let entities = EntityRenderer::new(device, queue, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
@@ -1078,8 +1399,7 @@ impl RenderState {
                     section_origin: [0.0, 0.0, 0.0, 0.0],
                 },
             );
-            let crack_cam_bind_group =
-                crack_pipeline.camera_bind_group(device, &crack_cam_buffer);
+            let crack_cam_bind_group = crack_pipeline.camera_bind_group(device, &crack_cam_buffer);
             // Dropped items: snapshot the baked item geometry and build the
             // pass's own world-space camera buffer, both while `models` is still
             // in scope.
@@ -1136,6 +1456,8 @@ impl RenderState {
             sections: HashMap::new(),
             model,
             outline,
+            debug_lines,
+            debug_lines_source: DebugLinesSource::default(),
             entities,
             particles,
             particle_atlas_bind_group,
@@ -1170,6 +1492,28 @@ impl RenderState {
     /// to turn fog off.
     pub fn set_fog(&mut self, fog: FogSettings) {
         self.fog = fog;
+    }
+
+    /// Replace the frame's clear colour — the colour drawn where nothing else
+    /// covers a pixel (above the world, or beyond the far plane if a caller
+    /// ever set one shorter than the horizon).
+    ///
+    /// Mirrors [`set_fog`](Self::set_fog) exactly, and is meant to be called
+    /// with the *same* `[f32; 3]` as the fog colour just set
+    /// (`docs/dimension-visuals.md`'s wiring note): [`SKY_COLOR`]'s own doc
+    /// comment records that a second, independently-maintained copy of the sky
+    /// colour is exactly how the horizon has previously ended up banding in a
+    /// colour the sky never actually is. There is deliberately no
+    /// dimension-aware default baked in here — the caller (`app.rs`) already
+    /// computed the right colour for `set_fog`; this just stops the clear from
+    /// disagreeing with it.
+    pub fn set_clear_color(&mut self, color: [f32; 3]) {
+        self.clear = wgpu::Color {
+            r: f64::from(color[0]),
+            g: f64::from(color[1]),
+            b: f64::from(color[2]),
+            a: 1.0,
+        };
     }
 
     /// Install the world light sampler mobs are lit by (see
@@ -1295,6 +1639,19 @@ impl RenderState {
         f: impl Fn([i32; 3]) -> Vec<lodestone_physics::Aabb> + Send + Sync + 'static,
     ) {
         self.outline_shape = OutlineShapeSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's world-space debug lines (see
+    /// [`DebugLinesSource`]). Until installed, [`render`](Self::render) draws
+    /// none — this pass is a real pipeline, not a stub, but it is wired to
+    /// nothing until a caller polls `lodestone_ecs::player::DebugLines` and
+    /// hands the result here (typically once, at connect time, next to
+    /// [`set_outline_shape_source`](Self::set_outline_shape_source)).
+    pub fn set_debug_lines_source(
+        &mut self,
+        f: impl Fn() -> Vec<DebugLineVertex> + Send + Sync + 'static,
+    ) {
+        self.debug_lines_source = DebugLinesSource(Some(Box::new(f)));
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -1580,6 +1937,14 @@ impl RenderState {
             self.outline.prepare(queue, &view_proj, block, &boxes);
         }
 
+        // Same constraint for the debug-line pass: sample and upload before
+        // the pass opens. Zero vertices (the default, until a caller installs
+        // `set_debug_lines_source`) is a cheap no-op, not a wasted upload —
+        // `prepare` returns early on an empty slice.
+        let debug_line_count =
+            self.debug_lines
+                .prepare(queue, &view_proj, &self.debug_lines_source.sample());
+
         let mut stats = RenderStats::default();
 
         // The local player's own third-person body, if a caller has wired one
@@ -1823,6 +2188,11 @@ impl RenderState {
             if outline.is_some() {
                 self.outline.draw(&mut pass);
             }
+
+            // After the outline, for the same reason it is after debris: it
+            // is a diagnostic overlay, so it should read clearly over
+            // everything real that was drawn this frame.
+            self.debug_lines.draw(&mut pass, debug_line_count);
         }
 
         // ------------------------------------------------------------------
@@ -2364,8 +2734,14 @@ mod tests {
                 .unwrap_or_else(|| panic!("{expected_model} must resolve through the corpus"));
             assert_eq!(instance.model, expected_model);
             let mesh = models.get(expected_model).expect("mesh");
-            for overlay in ["hat", "jacket", "right_sleeve", "left_sleeve", "right_pants", "left_pants"]
-            {
+            for overlay in [
+                "hat",
+                "jacket",
+                "right_sleeve",
+                "left_sleeve",
+                "right_pants",
+                "left_pants",
+            ] {
                 assert!(
                     mesh.skeleton.index_of(overlay).is_some(),
                     "{expected_model} is missing its outer-layer part {overlay:?} — an \
@@ -2609,6 +2985,143 @@ mod tests {
         assert_eq!(
             changed, darkened,
             "an outline only darkens pixels it covers"
+        );
+    }
+
+    /// Headless proof that the debug-line pass — the render half of
+    /// `ExtractSet::Debug` (`docs/plugin-api.md`) — actually draws pixels
+    /// through [`RenderState::set_debug_lines_source`], not merely that a
+    /// pipeline object exists. Same differential idiom as
+    /// `block_outline_draws_visible_edges`: render the same scene with the
+    /// source unset and with it returning a bright line across open sky, and
+    /// confirm the second frame lit pixels the first did not.
+    ///
+    /// This is deliberately the *only* place that calls
+    /// `set_debug_lines_source` in this repo today — see that method's docs,
+    /// and [`DebugLinesSource`]'s, for why the ECS `DebugLines` resource is
+    /// not actually polled by anything yet. This test proves the pipeline
+    /// side works in isolation; it does not and cannot prove the ECS-to-here
+    /// wire exists, because that wire is unbuilt.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn debug_lines_source_draws_visible_pixels() {
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (320u32, 240u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+
+        // Open sky, no terrain at all: nothing else in the scene could
+        // account for a pixel changing between the two frames below.
+        let mut state = RenderState::new(device, queue, format, w, h, None);
+
+        let camera = Camera {
+            position: glam::Vec3::new(0.5, 64.5, -2.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 70.0,
+            aspect: w as f32 / h as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+
+        let frame = target.acquire().expect("acquire");
+        state.render(device, queue, frame.view(), &camera, None, &[]);
+        let without_lines = target.read_texels(device, queue);
+
+        // A bright red line squarely in view, well inside the frustum near
+        // and far planes, and thick enough (drawn as several parallel
+        // segments) to survive the near-black outline's "only darkens" logic
+        // not applying here — a bright line lightens sky-blue pixels.
+        state.set_debug_lines_source(|| {
+            let mut verts = Vec::new();
+            for dy in [-0.5f32, 0.0, 0.5] {
+                verts.push(DebugLineVertex {
+                    position: [-3.0, 64.0 + dy, 4.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
+                });
+                verts.push(DebugLineVertex {
+                    position: [3.0, 64.0 + dy, 4.0],
+                    color: [1.0, 0.0, 0.0, 1.0],
+                });
+            }
+            verts
+        });
+
+        let frame = target.acquire().expect("acquire");
+        state.render(device, queue, frame.view(), &camera, None, &[]);
+        let with_lines = target.read_texels(device, queue);
+
+        let mut changed = 0usize;
+        for (a, b) in without_lines
+            .chunks_exact(4)
+            .zip(with_lines.chunks_exact(4))
+        {
+            let d = (i32::from(a[0]) - i32::from(b[0])).abs()
+                + (i32::from(a[1]) - i32::from(b[1])).abs()
+                + (i32::from(a[2]) - i32::from(b[2])).abs();
+            if d > 20 {
+                changed += 1;
+            }
+        }
+
+        eprintln!("=== debug-line pixel readback ===");
+        eprintln!("pixels changed by debug lines = {changed}");
+
+        assert!(
+            changed > 20,
+            "installing a debug-lines source should visibly change the frame, \
+             only {changed} px moved"
+        );
+    }
+
+    /// Negative control for the test above: with no source installed (the
+    /// default state of a fresh [`RenderState`]), two renders of the same
+    /// scene must be pixel-identical. Without this, the assertion above could
+    /// be satisfied by a pass that draws unconditionally regardless of
+    /// whether a source was ever installed.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn no_debug_lines_source_installed_draws_nothing() {
+        let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+            "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU (or a software adapter such as \
+             LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+             would assert nothing",
+        );
+        let device = ctx.device();
+        let queue = ctx.queue();
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let (w, h) = (320u32, 240u32);
+        let mut target = HeadlessTarget::new(device, w, h, format);
+        let state = RenderState::new(device, queue, format, w, h, None);
+        let camera = Camera {
+            position: glam::Vec3::new(0.5, 64.5, -2.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 70.0,
+            aspect: w as f32 / h as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+
+        let frame = target.acquire().expect("acquire");
+        state.render(device, queue, frame.view(), &camera, None, &[]);
+        let first = target.read_texels(device, queue);
+
+        let frame = target.acquire().expect("acquire");
+        state.render(device, queue, frame.view(), &camera, None, &[]);
+        let second = target.read_texels(device, queue);
+
+        assert_eq!(
+            first, second,
+            "an unset debug-lines source must draw nothing"
         );
     }
 

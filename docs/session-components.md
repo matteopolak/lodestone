@@ -150,25 +150,19 @@ a *second* sidebar projection reachable only through that dead method.
   clock — a second copy of `Sim`'s — or need one passed in on every access. It
   moves with `clock_secs`, in Stage 5.
 
-- **`PlayerSnapshot`'s vitals.** `health`, `food`, `saturation`, `xp_*`,
-  `entity_id` and `alive` still exist on the net thread beside `Vitals` / `Xp` /
-  `ServerEntityId` / `Dead` on the driver. This is a **real remaining duplicate
-  and it is measured, not overlooked.** The blocker is concrete: the driver-side
-  copies are read by *systems and per-tick logic* — `Dead` gates
-  `MovementIntent` in `TickSet::Input`, `ServerEntityId` decides which entity's
-  mob effects reach `PlayerState::effects` — and a component in one `World` is not
-  visible to a system in the other. Collapsing them today means either a per-tick
-  mirror (a second source of truth by construction) or taking the net thread's
-  lock inside the physics tick. It closes with the `World` unification,
-  [`bevy-migration.md`](./bevy-migration.md) §4.1. This is the same ruling Stage 2
-  made for `PlayerSnapshot`, extended to the fields Stage 3 touched.
+- **`PlayerSnapshot`'s vitals — this one has since closed.** Stage 3 left
+  `health`, `food`, `saturation`, `xp_*`, `entity_id` and `alive` on the net
+  thread beside `Vitals` / `Xp` / `ServerEntityId` on the driver, bounded by
+  "the `World` unification". §4.1(c) shipped and they were still duplicated. See
+  [the vitals collapse](#the-vitals-collapse) below for what the second blocker
+  actually was and how it was resolved.
 
-  What *did* change: `position` / `rotation` / `on_ground` are now visibly the
-  only thing in `Inner` that is not a fold at all — they are a **local echo** of
-  our own outbound movement (`set_local_movement`), which is why a bot's
-  `look`/`walk` can build on the latest local pose without a round trip. That is
-  the genuine prediction-vs-server-view distinction, and it is not duplicated
-  anywhere.
+  What Stage 3 *did* establish and what survived: `position` / `rotation` /
+  `on_ground` are the only thing in the client's scalar state that is not a fold
+  at all — a **local echo** of our own outbound movement (`set_local_movement`),
+  which is why a bot's `look`/`walk` can build on the latest local pose without a
+  round trip. That is the genuine prediction-vs-server-view distinction, it is not
+  duplicated anywhere, and it is now the *whole* of what is left there.
 
 - **`lodestone_game::player_state::HudState`.** A fourth implementation of the
   vitals fold: complete, unit-tested (`tests/hud.rs`, `tests/hud_snapshot.rs`),
@@ -181,6 +175,41 @@ a *second* sidebar projection reachable only through that dead method.
   canonical aggregate with its own tests, which is a change to
   `lodestone-game`'s model rather than a migration step. Recorded so the next
   stage does not rediscover it.
+
+## The vitals collapse
+
+The residue Stage 3 named above closed after §4.1(c), and it needed a decision
+rather than only a rebase. The full record — the routing table, the two options
+and why the second won, and the `ClientHandle::player` lock consequence — is in
+[`world-unification.md`](./world-unification.md#the-vitals-collapse-and-the-second-blocker-c-hid).
+The short version:
+
+- Stage 3's stated blocker (a component in one `World` is invisible to a system in
+  the other) was real and is gone. **The one that remained was
+  `SharedState::apply`'s exclusive routing**: `Login`, `HealthChanged`,
+  `Respawned` and `Death` each carry vitals *and*
+  `dimension`/`game_mode`/`alive`, so claiming one for a `NetIngest` system froze
+  `dimension` — the too-bright-Nether bug, reached by traversal.
+- **The routing stayed exclusive.** `ServerGameMode`, `ServerDimension` and
+  `ServerAlive` joined the component set so that no event carries a field the
+  scalar side still owns. The alternative — run both folds — would have kept two
+  copies of `dimension` alive, which is precisely the double fold this stage
+  exists to delete.
+- `Vitals`, `Xp` and `ServerEntityId` moved from the driver half of
+  `session.rs` to the **shared** half, because the rule is *the fold lives where
+  the readers are shared* and `ClientHandle::health`/`experience_*`/`player` must
+  work with no shell attached. `insert_session_components` inserts them; the
+  driver half is now `Phase`, the two overlays, `HudEffects`, `RespawnCount` and
+  `SessionChat`.
+- `PlayerSnapshot` is **derived** from those components, with its public shape
+  unchanged — the same intermediate Stage 1 established for `EntityView`. `Vitals`
+  gained a `saturation` field so nothing was silently dropped from the bot API.
+- `NetUpdate::Health` and `NetUpdate::Experience` are **deleted**, along with their
+  `forward` and `Sim::poll_net` arms, exactly as Stage 3 deleted `TabListEvent`
+  and `ScoreboardEvent`: with the net thread folding those events into the same
+  components the HUD reads, a shell arm would be a second writer.
+- `alive` and `Dead` did **not** merge. Two rules, two readers, and one of them
+  has a live-gate negative control switch on it.
 
 ## How to change it, and the gotchas
 
@@ -222,15 +251,24 @@ a *second* sidebar projection reachable only through that dead method.
   behind it: `iter()` walks the `order` vec, which is what makes the on-screen bar
   stack stable frame to frame.
 
-- **`Sim::end_session` does not clear the tab list, scoreboard, boss bars or
-  menus, and must not start.** They are components in the *client's* `World`;
-  dropping `net` drops the only route to them and every reader falls back to an
-  empty default. A `Sim`-side reset there would imply a `Sim`-side copy.
+- **`Sim::end_session` *does* clear the tab list, scoreboard, boss bars and
+  menus — and this bullet used to say the opposite.** It read: "they are
+  components in the *client's* `World`; dropping `net` drops the only route to
+  them and every reader falls back to an empty default." That was true and
+  evidenced when written, and **§4.1(c) falsified it** — there is one `World`, the
+  readers are `Sim::sidebar`/`player_rows`/`boss_bars` off `Sim.local`, and
+  dropping `net` drops no route to anything. The previous server's sidebar
+  genuinely survived a quit-to-title until `end_session` started calling
+  `insert_session_components`. A note asserting that state *cannot* leak is the
+  most expensive kind to leave stale, because nothing about it looks wrong on
+  inspection.
 
-- **Add a driver component? Add it to `insert_hud_components`.** That one function
-  is both the spawn path and the `end_session` reset path, for the same reason
-  `reset_local_player` is one function: a component added to the spawn and
-  forgotten in the reset leaks the previous session's value into the next one.
+- **Add a driver component? Add it to `insert_hud_components`. Add a *shared*
+  one? Add it to `insert_session_components`.** Both are now the spawn path *and*
+  the `end_session` reset path, for the same reason `reset_local_player` is one
+  function: a component added to the spawn and forgotten in the reset leaks the
+  previous session's value into the next one. Pick the half by asking who reads
+  it — if `ClientHandle` must answer for it with no shell attached, it is shared.
 
 - **The live gate changed meaning, on purpose.**
   `crates/lodestone-shell/tests/live_tab_scoreboard_pixels.rs` used to fold

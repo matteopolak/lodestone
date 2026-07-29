@@ -22,7 +22,7 @@ Five things were blocked on this and nothing else. Four are now done:
 | `CorePlugin`'s refusal to insert `WorldTime` | **retired** — it inserts `WorldTime` *and* `FrameClock` |
 | "a `GameTick` system must pick an `App` **and** a clock" | **gone** — there is one of each |
 | `Sim.entity_interp` (a `World` nested in a `World`) | **deleted** — 15 fields → 14 |
-| `PlayerSnapshot`'s vitals collapsing into `Vitals`/`Xp`/`ServerEntityId`/`Dead` | **not done, and not only blocked on (c)** — see [below](#the-vitals-did-not-collapse-and-c-was-not-the-only-thing-in-the-way) |
+| `PlayerSnapshot`'s vitals collapsing into `Vitals`/`Xp`/`ServerEntityId` | **done, but (c) was not the only thing in the way** — see [below](#the-vitals-collapse-and-the-second-blocker-c-hid) |
 
 ---
 
@@ -219,7 +219,18 @@ Three rules, on `lodestone_ecs::EcsHandle`. None of them is style.
    and `crate::net::entity_light_at` does the same lookup for entity lighting. Both are `World →
    chunks`, i.e. rule 3, not rule 1. The rule-1 set is the *ECS*-backed reads: `entities`,
    `entity_snapshots`, `world_time`, `tab_list`, `scoreboard`, `boss_bars`, `player_menu`,
-   `open_menu`, `menu_click`.
+   `open_menu`, `menu_click`, and — **new with the vitals collapse** — `player`,
+   `local_player_attributes` and everything derived from `player` (`health`, `food`, `is_alive`,
+   `game_mode`, `experience_*`).
+
+   **`ClientHandle::player` changed sides, and that is the one hazard the collapse introduced.** It
+   used to touch only `SharedState`'s scalar lock, so it was safe to call from anywhere; it is built
+   from components now. The shell's one production call site is `Sim::refresh_mesh_policy` (via
+   `mesher::sky_default_for_dimension`), which runs at the top of `poll_net` with no guard held, and
+   `mesher::snapshot_section_live`'s only caller is `tests/live_world_mesh.rs`, likewise unguarded —
+   both audited at the time of writing. `ClientHandle::position` and `rotation` are deliberately
+   **not** in the rule-1 set: they read the local echo directly and take no ECS lock, because they
+   are the reads a moving bot makes most often and there is nothing in the component set they need.
 2. **Never hold a guard across an `.await`.** `lodestone_client`'s driver already promised this for
    the scalar read-model (`state.rs`'s module docs); it now matters for this lock too, because a task
    parked with the `World` write-locked would stall the frame.
@@ -388,24 +399,22 @@ Production reaches the same systems through free functions on `&mut World`:
 
 ---
 
-## The vitals did **not** collapse, and (c) was not the only thing in the way
+## The vitals collapse, and the second blocker (c) hid
 
-`lodestone_client::state::PlayerSnapshot`'s vitals (`health`, `food`, `saturation`, `xp_*`,
-`entity_id`, `alive`) still duplicate the driver's `Vitals` / `Xp` / `ServerEntityId`. Stage 3 bounded
-that residue by "the §4.1 `World` unification". **That was not the whole blocker, and this is a
-correction to the plan.**
-
+`lodestone_client::state::PlayerSnapshot`'s vitals used to duplicate `Vitals` / `Xp` /
+`ServerEntityId`. Stage 3 bounded that residue by "the §4.1 `World` unification", and **that was not
+the whole blocker** — (c) shipped and the duplication was still there. The second one:
 `SharedState::apply` routes each `ClientEvent` to **exactly one** of two folds:
 
 ```rust
 if TimeChanged            { …ECS resource… }
 else if ingest::handles_event(e) || session::handles_event(e) { …ECS systems… }
-else                      { inner.apply(e) }          // the scalar read-model
+else                      { echo.apply(e) }           // now: TeleportPlayer only
 ```
 
-The events that carry the vitals do not carry *only* the vitals:
+The events that carry the vitals did not carry *only* the vitals:
 
-| event | ECS-side | `Inner`-side |
+| event | ECS-side, before | `Inner`-side, before |
 |---|---|---|
 | `Login` | `ServerEntityId` | `game_mode`, `dimension`, `alive` |
 | `HealthChanged` | `Vitals{health, food, saturation}` | `alive = health > 0.0` |
@@ -413,26 +422,63 @@ The events that carry the vitals do not carry *only* the vitals:
 | `Death` | (`Dead`, gated — below) | `alive = false` |
 | `ExperienceChanged` | `Xp` | — |
 
-Claiming any of the first four for a `NetIngest` system stops `Inner::apply` seeing it, so
-`dimension` freezes (that is the too-bright-Nether bug, by traversal) and `alive` stops updating.
-Making the routing non-exclusive would weaken the invariant that module documents — *"an event routed
-here that no system folds vanishes silently"* — and moving `dimension`/`game_mode` into components as
-well is a larger change than a vitals collapse. Only `ExperienceChanged` is free of this, and
+So claiming any of the first four for a `NetIngest` system would have stopped `Inner::apply` seeing
+it: `dimension` freezes, which is the too-bright-Nether bug reached by traversal, fixed in `fc6b6c6`
+and one careless routing change away from returning. Only `ExperienceChanged` was free, and
 collapsing one field of six buys nothing.
 
-There is also a second, smaller finding: **`alive` and `Dead` are not the same fact and must not be
-merged.** `Inner`'s `alive` is `false` on `Death` and `true` on `Login`/`Respawned`/a positive
-`HealthChanged`. The shell's `Dead` marker is inserted only on `NetUpdate::Death` and removed only on
-`Respawned`, *and it is gated on `Sim.recover_from_death`* — the live death gate's negative control
-flips that to reproduce "stranded on the death screen forever". So `HealthChanged` with `health == 0`
-sets `alive = false` without inserting `Dead` (deliberately — health reaching zero is not a session
-event), and a positive `HealthChanged` sets `alive = true` without removing `Dead`. Two rules, two
-readers, one of them with a test switch on it.
+### The decision: move the rest of the fold, do not weaken the routing
 
-`PlayerSnapshot` as a whole stays split from the `LocalPlayer` components regardless, and Stage 2 was
-right about that: the snapshot is the net thread's fold of the **server's** view plus a local echo of
-our own outbound movement; the components are the driver thread's **prediction**. (c) unified the
-*store*, not the facts.
+Two options, and the second was taken:
+
+1. **Make the routing non-exclusive** — run the ECS schedule *and* `Inner::apply` for events both
+   claim. Cheap, and it leaves one event with two folds writing two copies of `dimension`. That is
+   the double-fold defect `docs/session-components.md` exists to delete, re-created deliberately;
+   the routing switch's documented invariant would have had to be rewritten to permit it.
+2. **Move `game_mode`, `dimension` and `alive` into components too**, so no event carries a field
+   the scalar side still owns, and the routing stays exclusive with no wording changed.
+
+(2) costs three new components — `lodestone_ecs::session::{ServerGameMode, ServerDimension,
+ServerAlive}` — one new system (`apply_local_player_state`), and it makes `PlayerSnapshot` a
+**derived** value, which is the same sanctioned intermediate Stage 1 established for `EntityView`:
+components authoritative, struct derived, never the reverse. `PlayerSnapshot`'s public shape is
+unchanged, so `ClientHandle`'s accessors, `mesher.rs`'s `player().dimension` and all 27 of
+`tests/read_model.rs` were untouched by it.
+
+What is left behind the client's scalar lock is `LocalEcho { position, rotation, on_ground }` and
+`TeleportPlayer` as its only fold arm. Stage 2 was right that `PlayerSnapshot` as a whole stays split
+from the `LocalPlayer` *prediction* components — but the split is narrower than it looked: only the
+echo is genuinely a different fact. The vitals were a plain duplicate.
+
+Two consequences worth knowing before touching this:
+
+- **`ClientHandle::player` is ECS-backed now**, so it joins rule 1 above. `position`/`rotation` are
+  not: they read the echo and take no ECS lock.
+- **`NetUpdate::Health` and `NetUpdate::Experience` are deleted**, along with their `forward` arms and
+  `Sim::poll_net` arms, for the same reason Stage 3 deleted `TabListEvent`/`ScoreboardEvent`: the net
+  thread folds those events into the components the HUD already reads, so a shell-side arm would be a
+  *second writer of one component*. `NetUpdate::{Death, Respawned}` stayed, because they drive the
+  driver's own `Dead` marker and `RespawnCount`, which are not folds of the server's view.
+
+### `alive` and `Dead` did not merge, and that is the point
+
+**`ServerAlive` and `crate::player::Dead` are not the same fact.** `ServerAlive` is `false` on
+`Death` **and** on any `HealthChanged` with `health <= 0`, `true` on `Login`/`Respawned`/a positive
+`HealthChanged`. The `Dead` marker is inserted only on `NetUpdate::Death` and removed only on
+`Respawned`, *and it is gated on `Sim.recover_from_death`* — the live death gate's negative control
+flips that to reproduce "stranded on the death screen forever". Merging them deletes that control.
+`zero_health_kills_and_positive_health_revives_without_a_death_packet` pins both directions of the
+`ServerAlive` rule and asserts that neither inserts `Dead`.
+
+### A stale note found on the way, and fixed
+
+`Sim::end_session`'s doc said the tab list, scoreboard, boss bars and menus "need no clearing at all
+… they are components in the *client's* `World`, so dropping `net` drops the only route to them".
+**True when written, false since (c).** There is one `World`, the readers are
+`Sim::sidebar`/`player_rows`/`boss_bars` off `Sim.local`, and dropping `net` drops no route to
+anything — the previous server's sidebar and tab list survived a quit-to-title. `end_session` now
+calls `insert_session_components` beside `insert_hud_components`, and
+`end_session_tears_down_and_a_fresh_connect_afterward_starts_clean` asserts the sidebar clears.
 
 ---
 

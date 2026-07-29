@@ -54,7 +54,7 @@ use std::sync::Arc;
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::component::Component;
-use bevy_ecs::prelude::{Entity, Query, Res, With};
+use bevy_ecs::prelude::{Entity, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::world::World;
@@ -64,8 +64,8 @@ use lodestone_physics::{
     compute_fluid_state, tick,
 };
 
-use crate::schedules::GameTick;
-use crate::sets::TickSet;
+use crate::schedules::{Extract, GameTick};
+use crate::sets::{ExtractSet, TickSet};
 
 /// Eye height of `Pose.SWIMMING` — `EntityDimensions.scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
 /// (`Avatar.java:28`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
@@ -109,6 +109,61 @@ pub struct PhysicsState(pub PlayerState);
 /// that changes observably.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct MovementIntent(pub MovementInput);
+
+/// This tick's look target, in degrees, same convention as
+/// [`lodestone_physics::PlayerState`]'s `yaw`/`pitch` — **distinct from the
+/// camera.**
+///
+/// [`MovementIntent`] says which way to walk; this says which way to face,
+/// and the two are not the same thing for anything that steers the player
+/// programmatically. A pathfinder aims at the block it is about to break or
+/// place while walking toward a waypoint several blocks past it, and a human
+/// player routinely walks backward while looking forward — `MovementInput`'s
+/// `forward`/`strafe` are already relative to facing for exactly this reason.
+/// The camera is a third, separate thing again: it free-runs ahead of the
+/// fixed 20 Hz tick for smoothness (`FrameSet::Camera`, per-frame) while this
+/// is read once per tick by [`apply_look_intent`], so a camera
+/// mid-interpolation and this tick's committed look direction can differ by
+/// design.
+///
+/// Optional and additive: absent (the default — [`spawn_local_player`] does
+/// not insert it), [`apply_look_intent`] is a no-op and whatever already set
+/// [`PhysicsState`]'s `yaw`/`pitch` this tick — mouse-look, via the driver's
+/// per-frame `apply_mouse` — is left alone. A plugin claims the rotation by
+/// inserting this component on the [`LocalPlayer`] entity; there is no
+/// "give it back" handshake because insertion and removal already are one
+/// (`world.entity_mut(e).remove::<LookIntent>()` hands control straight back
+/// to mouse-look next tick).
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct LookIntent {
+    /// Degrees, vanilla convention (0 = south, increasing clockwise viewed
+    /// from above).
+    pub yaw: f32,
+    /// Degrees, clamped to `[-90, 90]` by [`apply_look_intent`] — straight
+    /// down to straight up, vanilla's own range.
+    pub pitch: f32,
+}
+
+/// Write this tick's rotation from [`LookIntent`] onto [`PhysicsState`], for
+/// every [`LocalPlayer`] that has one.
+///
+/// Ordered in [`TickSet::Intent`], before [`TickSet::Physics`]: physics reads
+/// `yaw` to resolve `MovementInput`'s forward/strafe axes into a world-space
+/// direction (vanilla's `getInputVector`), and the egress side reads the same
+/// field to report rotation on the wire — see
+/// `lodestone_controller::action::move_action`. Writing here, once, before
+/// both is what makes "look" and "walk" agree for the same tick regardless of
+/// which one a plugin drives.
+///
+/// **Does not touch `PhysicsState` at all when no [`LookIntent`] is
+/// present** — not even to re-write the existing value — so a human session
+/// with no plugin installed is bit-identical to before this system existed.
+pub fn apply_look_intent(mut players: Query<(&mut PhysicsState, &LookIntent), With<LocalPlayer>>) {
+    for (mut state, look) in &mut players {
+        state.0.yaw = look.yaw;
+        state.0.pitch = look.pitch.clamp(-90.0, 90.0);
+    }
+}
 
 /// The **raw** sprint key, ungated by the forward-only/sneak rules
 /// [`MovementIntent`] applies.
@@ -280,6 +335,48 @@ pub struct ActionQueue(pub Vec<ClientAction>);
 /// `vanilla_atlas.is_some() && net.is_some()` — whether the session is rendering
 /// a real server world with vanilla assets — which is an asset/config fact and
 /// not a phase. Two bits, two origins, one derived gate.
+/// One coloured world-space line segment, for a plugin's debug-geometry
+/// channel (see [`DebugLines`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DebugLine {
+    pub start: Vec3d,
+    pub end: Vec3d,
+    /// Linear RGBA, `0.0..=1.0`.
+    pub color: [f32; 4],
+}
+
+/// World-space debug geometry a plugin wants drawn this frame — a
+/// pathfinder's planned route, a reachability probe, anything otherwise
+/// invisible and therefore undebuggable (`CLAUDE.md`'s island rule: "nothing
+/// is done until something on screen changes").
+///
+/// A plugin reaches the screen by pushing here from a system ordered
+/// `.in_set(ExtractSet::Debug)`, mirroring how [`ActionQueue`] is the one
+/// sanctioned way to reach the wire. [`clear_debug_lines`] empties it before
+/// that set runs each frame — ordered `.before(ExtractSet::Debug)`, not
+/// `.in_set` it, specifically so it can never race a plugin's own writer for
+/// a position within the set — so a plugin only ever appends this frame's
+/// geometry, never last frame's leftovers.
+///
+/// This lives on `LocalPlayerPlugin` rather than a set-specific plugin of its
+/// own for a build-topology reason, not a conceptual one: it is the plugin
+/// already wired into every shipped `App` (`lodestone_shell::sim::Sim`'s
+/// `app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin, ...))`),
+/// so extending it is what reaches a running client without a driver-crate
+/// change. The render half — turning this resource into pixels — is
+/// `lodestone_shell::gpu`'s `DebugLineRenderer` / `DebugLinesSource`; see its
+/// module docs for the one remaining wire (installing the source) that is
+/// out of scope for this crate to make.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DebugLines(pub Vec<DebugLine>);
+
+/// Empty [`DebugLines`] before this frame's `ExtractSet::Debug` systems run.
+/// See that resource's docs for why this is `.before(ExtractSet::Debug)`
+/// rather than a member of the set.
+pub fn clear_debug_lines(mut lines: ResMut<DebugLines>) {
+    lines.0.clear();
+}
+
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Egress {
     /// The server has placed us in the world (`SessionPhase::Connected`), so a
@@ -332,8 +429,17 @@ fn update_pose(player: &mut PlayerState, intent: MovementInput) {
 /// jump/sneak, ignoring gravity and collision.
 ///
 /// A driver-side camera, not a physics model — the engine has no flight.
-fn fly_step(player: &mut PlayerState, intent: MovementInput, sprint_key: bool, fluid: &mut FluidState) {
-    let speed = if sprint_key { FLY_SPEED * 2.0 } else { FLY_SPEED };
+fn fly_step(
+    player: &mut PlayerState,
+    intent: MovementInput,
+    sprint_key: bool,
+    fluid: &mut FluidState,
+) {
+    let speed = if sprint_key {
+        FLY_SPEED * 2.0
+    } else {
+        FLY_SPEED
+    };
     let yaw = f64::from(player.yaw).to_radians();
     let (sy, cy) = yaw.sin_cos();
     let f = f64::from(intent.forward);
@@ -371,7 +477,11 @@ fn fly_step(player: &mut PlayerState, intent: MovementInput, sprint_key: bool, f
 
 /// Vanilla `EntityFluidInteraction.update` for the local player against
 /// `view`.
-fn player_fluid_state(player: &PlayerState, profile: &PhysicsProfile, view: &dyn CollisionView) -> FluidState {
+fn player_fluid_state(
+    player: &PlayerState,
+    profile: &PhysicsProfile,
+    view: &dyn CollisionView,
+) -> FluidState {
     compute_fluid_state(
         player.bounding_box(profile),
         player.position,
@@ -529,6 +639,33 @@ impl Plugin for LocalPlayerPlugin {
         app.init_resource::<Profile>();
         app.init_resource::<ActionQueue>();
         app.init_resource::<Egress>();
+        // `TickSet::Intent` before `TickSet::Physics`: the master chain in
+        // `CorePlugin` (`Input, Physics, Predict, Animate, Send`) predates
+        // this variant and is out of scope for this crate's edit list, so
+        // the constraint is added here instead — `configure_sets` is
+        // additive, so declaring the same edge from more than one plugin
+        // (see `lodestone_controller::ecs::ControllerPlugin`, which needs it
+        // for `MovementIntent`) is redundant, not contradictory.
+        app.configure_sets(
+            GameTick,
+            TickSet::Intent
+                .after(TickSet::Input)
+                .before(TickSet::Physics),
+        );
+        app.add_systems(GameTick, apply_look_intent.in_set(TickSet::Intent));
+
+        app.init_resource::<DebugLines>();
+        // Same reasoning as the `TickSet::Intent` edge above: `CorePlugin`'s
+        // `Extract` chain is `Terrain, Entities, Hud` and predates
+        // `ExtractSet::Debug`, so this plugin adds the missing edges.
+        app.configure_sets(
+            Extract,
+            ExtractSet::Debug
+                .after(ExtractSet::Entities)
+                .before(ExtractSet::Hud),
+        );
+        app.add_systems(Extract, clear_debug_lines.before(ExtractSet::Debug));
+
         app.add_systems(GameTick, player_physics.in_set(TickSet::Physics));
     }
 }
@@ -583,14 +720,26 @@ mod tests {
     #[test]
     fn a_game_tick_run_falls_the_player_toward_the_floor() {
         let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
-        let before = app.world().get::<PhysicsState>(entity).unwrap().0.position.y;
+        let before = app
+            .world()
+            .get::<PhysicsState>(entity)
+            .unwrap()
+            .0
+            .position
+            .y;
         // Two ticks, not one: a player starting from rest does not move on the
         // first tick, because `tick` runs `move()` *before* applying gravity
         // (see `PlayerState::on_ground`'s docs on the one settle tick). One
         // tick here asserts nothing.
         run_tick(&mut app);
         run_tick(&mut app);
-        let after = app.world().get::<PhysicsState>(entity).unwrap().0.position.y;
+        let after = app
+            .world()
+            .get::<PhysicsState>(entity)
+            .unwrap()
+            .0
+            .position
+            .y;
         assert!(
             after < before,
             "gravity should have moved the player down: {before} → {after}"
@@ -705,7 +854,11 @@ mod tests {
         app.world_mut().entity_mut(entity).insert(sneaking);
         run_tick(&mut app);
         assert_eq!(
-            app.world().get::<PhysicsState>(entity).unwrap().0.eye_height,
+            app.world()
+                .get::<PhysicsState>(entity)
+                .unwrap()
+                .0
+                .eye_height,
             CROUCHING_EYE_HEIGHT
         );
 
@@ -713,7 +866,11 @@ mod tests {
         app.world_mut().entity_mut(entity).insert(sneaking);
         run_tick(&mut app);
         assert_eq!(
-            app.world().get::<PhysicsState>(entity).unwrap().0.eye_height,
+            app.world()
+                .get::<PhysicsState>(entity)
+                .unwrap()
+                .0
+                .eye_height,
             lodestone_physics::player::DEFAULT_EYE_HEIGHT
         );
     }
@@ -736,5 +893,132 @@ mod tests {
         assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 0);
         assert!(!app.world().get::<Flying>(entity).unwrap().0);
         assert!(app.world().get::<Dead>(entity).is_none());
+    }
+
+    /// The whole point of [`LookIntent`]: inserting it changes the tick's
+    /// rotation, distinctly from [`MovementIntent`], through the schedule —
+    /// not just through a directly-called function.
+    #[test]
+    fn a_look_intent_writes_the_ticks_rotation() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut().entity_mut(entity).insert(LookIntent {
+            yaw: 123.0,
+            pitch: -45.0,
+        });
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert_eq!(state.yaw, 123.0);
+        assert_eq!(state.pitch, -45.0);
+    }
+
+    /// The negative control: with no [`LookIntent`] present, a tick must not
+    /// perturb the rotation at all — without this, the assertion above could
+    /// pass against a system that unconditionally zeroed rotation and
+    /// happened to be fed zero.
+    #[test]
+    fn no_look_intent_leaves_rotation_untouched() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.insert_resource(PlayerCollision::NoWorld);
+        let mut state = PlayerState::at(Vec3d::new(0.5, 4.0, 0.5), 77.0);
+        state.pitch = 12.0;
+        let entity = spawn_local_player(app.world_mut(), state);
+        run_tick(&mut app);
+        let after = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert_eq!(after.yaw, 77.0);
+        assert_eq!(after.pitch, 12.0);
+    }
+
+    /// [`apply_look_intent`]'s clamp: vanilla's own pitch range is
+    /// `[-90, 90]`, and a plugin computing a raw aim vector should not have
+    /// to re-derive that clamp itself.
+    #[test]
+    fn look_intent_pitch_is_clamped_to_vanilla_range() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut().entity_mut(entity).insert(LookIntent {
+            yaw: 0.0,
+            pitch: 400.0,
+        });
+        run_tick(&mut app);
+        assert_eq!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.pitch,
+            90.0
+        );
+    }
+
+    /// [`DebugLines`] is the plugin-writable half of the world-space debug
+    /// channel; [`clear_debug_lines`] is the driver-owned half that must run
+    /// first each `Extract`, or a plugin that stops drawing would leave its
+    /// last frame's geometry on screen forever.
+    #[test]
+    fn clear_debug_lines_empties_the_resource_through_the_schedule() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.world_mut()
+            .resource_mut::<DebugLines>()
+            .0
+            .push(DebugLine {
+                start: Vec3d::ZERO,
+                end: Vec3d::new(1.0, 0.0, 0.0),
+                color: [1.0, 0.0, 0.0, 1.0],
+            });
+        app.world_mut().run_schedule(crate::Extract);
+        assert!(app.world().resource::<DebugLines>().0.is_empty());
+    }
+
+    /// The negative control for the above: without running `Extract` at all,
+    /// the same push must still be sitting there — otherwise the assertion
+    /// above could be trivially satisfied by a `DebugLines` that starts empty
+    /// and nothing ever populates.
+    #[test]
+    fn debug_lines_survive_until_extract_actually_runs() {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.world_mut()
+            .resource_mut::<DebugLines>()
+            .0
+            .push(DebugLine {
+                start: Vec3d::ZERO,
+                end: Vec3d::new(1.0, 0.0, 0.0),
+                color: [1.0, 0.0, 0.0, 1.0],
+            });
+        assert_eq!(app.world().resource::<DebugLines>().0.len(), 1);
+    }
+
+    /// A plugin's own system ordered `.in_set(ExtractSet::Debug)` must run
+    /// *after* the clear, so it is this frame's geometry that survives, not
+    /// last frame's push landing after the clear by luck of registration
+    /// order.
+    #[test]
+    fn a_plugin_writer_in_extract_debug_survives_the_clear() {
+        fn push_a_line(mut lines: ResMut<DebugLines>) {
+            lines.0.push(DebugLine {
+                start: Vec3d::ZERO,
+                end: Vec3d::new(2.0, 0.0, 0.0),
+                color: [0.0, 1.0, 0.0, 1.0],
+            });
+        }
+
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.add_systems(Extract, push_a_line.in_set(ExtractSet::Debug));
+        // Push a stale line directly, simulating "last frame's leftovers",
+        // before running `Extract` at all.
+        app.world_mut()
+            .resource_mut::<DebugLines>()
+            .0
+            .push(DebugLine {
+                start: Vec3d::ZERO,
+                end: Vec3d::ZERO,
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+        app.world_mut().run_schedule(Extract);
+        let lines = &app.world().resource::<DebugLines>().0;
+        assert_eq!(
+            lines.len(),
+            1,
+            "the clear must have run before the plugin's write"
+        );
+        assert_eq!(lines[0].end, Vec3d::new(2.0, 0.0, 0.0));
     }
 }

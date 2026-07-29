@@ -40,7 +40,8 @@
 //! can be named in `.after(...)`.
 
 use bevy_app::{App, Plugin};
-use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut};
+use bevy_ecs::entity::Entity;
+use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use lodestone_model::{ClientEvent, EntityMovement, Reported};
 
@@ -49,6 +50,7 @@ use crate::entity::{
     EntityKind, EntityUuid, Equipment, HeadYaw, Health, MinecraftEntityId, OnGround, Pose,
     Position, Rotation, Variant, Velocity,
 };
+use crate::player::LocalPlayer;
 use crate::schedules::NetIngest;
 use crate::sets::IngestSet;
 
@@ -106,7 +108,15 @@ impl IngestBatch {
 pub fn handles_event(event: &ClientEvent) -> bool {
     matches!(
         event,
-        ClientEvent::EntitySpawned { .. }
+        // `Login` is claimed by [`apply_local_player_login`], and *also* by
+        // `crate::session::apply_local_player_state`. Both is correct and not a
+        // double fold: they write disjoint state off the same event (this side
+        // the index and the entity id component, that side the session scalars),
+        // and `SharedState::apply` routes on `ingest::handles_event(e) ||
+        // session::handles_event(e)`, so the event reaches the one schedule once
+        // either way.
+        ClientEvent::Login { .. }
+            | ClientEvent::EntitySpawned { .. }
             | ClientEvent::EntityRemoved { .. }
             | ClientEvent::EntityMoved { .. }
             | ClientEvent::EntityVelocity { .. }
@@ -123,6 +133,64 @@ pub fn drain_ingest_queue(mut queue: ResMut<IngestQueue>, mut batch: ResMut<Inge
     batch.0.append(&mut queue.0);
 }
 
+/// `IngestSet::Apply`: `ClientEvent::Login` → the **local player** joins
+/// [`EntityIndex`] under the id the server just assigned us.
+///
+/// # The hole this closes
+///
+/// [`EntityIndex`] used to be populated *only* by [`apply_entity_spawn`], driven
+/// only by `ClientEvent::EntitySpawned` — and **vanilla never sends an
+/// `AddEntity` for yourself, only `Login`**. So every id-addressed ingest system
+/// silently `continue`d for our own id: the server's own `update_attributes` for
+/// the local player was folded into nothing at all, which is why
+/// `docs/swimming.md` could not reach Depth Strider's
+/// `minecraft:water_movement_efficiency` however correct the arithmetic
+/// underneath it was. The hole is *general* — any future per-player component fed
+/// from entity ingest had it too — so it is closed here rather than by teaching
+/// one system about one attribute.
+///
+/// # What the local player deliberately does **not** get
+///
+/// Only [`MinecraftEntityId`] and [`Attributes`]. **No** [`EntityKind`],
+/// [`Position`], [`Rotation`] or [`HeadYaw`]: those would be a second copy of
+/// `crate::player::PhysicsState`, and
+/// `lodestone_client::state::entity_view` requires all four, so their absence is
+/// also what keeps the local player out of `ClientHandle::entities()` and
+/// therefore off the render path — a self-model drawn at our own camera. That
+/// exclusion is asserted explicitly in `lodestone-client` rather than left to
+/// depend on which components happen to be missing.
+///
+/// A relogin re-indexes: the previous id's entry is dropped first, so a server
+/// that assigns a different id on reconnect cannot leave a stale mapping
+/// pointing at us.
+pub fn apply_local_player_login(
+    batch: Res<IngestBatch>,
+    mut index: ResMut<EntityIndex>,
+    locals: Query<(Entity, Option<&MinecraftEntityId>), With<LocalPlayer>>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::Login { entity_id, .. } = event else {
+            continue;
+        };
+        for (entity, previous) in &locals {
+            if let Some(previous) = previous
+                && previous.0 != *entity_id
+            {
+                index.remove(previous.0);
+            }
+            index.insert(*entity_id, entity);
+            // `Attributes::default()` is an empty list, i.e. "the server has not
+            // reported any attribute yet" — the same state a fresh spawn gets.
+            // Re-inserting on a relogin is deliberate: last session's attributes
+            // are not this session's.
+            commands
+                .entity(entity)
+                .insert((MinecraftEntityId(*entity_id), Attributes::default()));
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `ClientEvent::EntitySpawned` → a fresh ECS entity.
 ///
 /// **Spawns only the components the spawn packet actually reported.** No
@@ -134,10 +202,18 @@ pub fn drain_ingest_queue(mut queue: ResMut<IngestQueue>, mut batch: ResMut<Inge
 /// `DisplayItem` blanks it a tick later and the drop goes invisible.
 ///
 /// A spawn for an id already tracked **replaces** the previous entity outright,
-/// matching the old `HashMap::insert` and covering a server reusing an id.
+/// matching the old `HashMap::insert` and covering a server reusing an id — with
+/// one exception: an id currently held by the **local player** is ignored
+/// entirely. Since [`apply_local_player_login`] indexes our own id, the "replace
+/// the previous holder" branch would otherwise `despawn` the local player entity,
+/// taking `PhysicsState`, the HUD components and `Sim.local`'s identity with it —
+/// every `expect("the local player always carries …")` in the driver panics one
+/// frame later. Vanilla never sends an `AddEntity` for the local player, so this
+/// costs nothing and the failure it prevents is total.
 pub fn apply_entity_spawn(
     batch: Res<IngestBatch>,
     mut index: ResMut<EntityIndex>,
+    locals: Query<(), With<LocalPlayer>>,
     mut commands: Commands,
 ) {
     for event in batch.events() {
@@ -152,6 +228,12 @@ pub fn apply_entity_spawn(
         else {
             continue;
         };
+        if index
+            .get(*entity_id)
+            .is_some_and(|held| locals.contains(held))
+        {
+            continue;
+        }
         if let Some(previous) = index.remove(*entity_id) {
             commands.entity(previous).despawn();
         }
@@ -183,9 +265,16 @@ pub fn apply_entity_spawn(
 
 /// `IngestSet::Apply`: `ClientEvent::EntityRemoved` → despawn, and drop the
 /// index entry so nothing can resolve the id afterwards.
+///
+/// The **local player** is exempt, for the same reason [`apply_entity_spawn`] is:
+/// our own id is in the index since [`apply_local_player_login`], and a
+/// `remove_entities` naming it would despawn the entity the whole driver hangs
+/// off. Both the index entry and the entity survive — the id stays resolvable,
+/// because we are still that entity.
 pub fn apply_entity_removal(
     batch: Res<IngestBatch>,
     mut index: ResMut<EntityIndex>,
+    locals: Query<(), With<LocalPlayer>>,
     mut commands: Commands,
 ) {
     for event in batch.events() {
@@ -193,6 +282,12 @@ pub fn apply_entity_removal(
             continue;
         };
         for entity_id in entity_ids {
+            if index
+                .get(*entity_id)
+                .is_some_and(|held| locals.contains(held))
+            {
+                continue;
+            }
             if let Some(entity) = index.remove(*entity_id) {
                 commands.entity(entity).despawn();
             }
@@ -464,6 +559,12 @@ impl Plugin for IngestPlugin {
         app.add_systems(
             NetIngest,
             (
+                // First in the chain, because `.chain()`'s sync point is what
+                // applies its deferred `Commands` before the id-addressed systems
+                // below run — a `Login` and an `update_attributes` for our own id
+                // in one batch must still resolve. Same mechanism as the
+                // spawn-then-move test.
+                apply_local_player_login,
                 apply_entity_spawn,
                 apply_entity_removal,
                 apply_entity_movement,
@@ -497,6 +598,35 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(IngestPlugin);
         std::mem::take(app.world_mut())
+    }
+
+    /// The same, plus the one [`LocalPlayer`] entity every real `World` has —
+    /// `SharedState::default`'s session entity, or the driver's `Sim.local`.
+    fn ingest_world_with_local_player() -> (World, bevy_ecs::entity::Entity) {
+        let mut world = ingest_world();
+        let local = world.spawn(LocalPlayer).id();
+        (world, local)
+    }
+
+    fn login_event(entity_id: i32) -> ClientEvent {
+        ClientEvent::Login {
+            entity_id,
+            game_mode: lodestone_model::GameMode::Creative,
+            dimension: "minecraft:overworld".parse().expect("valid dimension id"),
+        }
+    }
+
+    fn attributes_event(entity_id: i32, base: f64) -> ClientEvent {
+        ClientEvent::EntityAttributesUpdated {
+            entity_id,
+            attributes: vec![lodestone_model::EntityAttributeSnapshot {
+                attribute: "minecraft:water_movement_efficiency"
+                    .parse()
+                    .expect("valid attribute id"),
+                base,
+                modifiers: Vec::new(),
+            }],
+        }
     }
 
     /// Feed one event and run the schedule, exactly as `SharedState::apply`
@@ -680,7 +810,9 @@ mod tests {
             ),
         );
         assert_eq!(
-            entity_for(&world, 1).get::<CustomName>().map(|n| n.0.clone()),
+            entity_for(&world, 1)
+                .get::<CustomName>()
+                .map(|n| n.0.clone()),
             Some(Some("Lodestar".to_owned()))
         );
 
@@ -695,7 +827,9 @@ mod tests {
             ),
         );
         assert_eq!(
-            entity_for(&world, 1).get::<CustomName>().map(|n| n.0.clone()),
+            entity_for(&world, 1)
+                .get::<CustomName>()
+                .map(|n| n.0.clone()),
             Some(Some("Lodestar".to_owned())),
             "a silent update must not clear the name"
         );
@@ -711,7 +845,9 @@ mod tests {
             ),
         );
         assert_eq!(
-            entity_for(&world, 1).get::<CustomName>().map(|n| n.0.clone()),
+            entity_for(&world, 1)
+                .get::<CustomName>()
+                .map(|n| n.0.clone()),
             Some(None)
         );
     }
@@ -745,7 +881,10 @@ mod tests {
         let mut world = ingest_world();
         feed(&mut world, spawn_event(7, "minecraft:pig"));
         let entity = entity_for(&world, 7);
-        assert_eq!(entity.get::<Position>().map(|p| p.0), Some(Vec3::new(1.0, 64.0, 2.0)));
+        assert_eq!(
+            entity.get::<Position>().map(|p| p.0),
+            Some(Vec3::new(1.0, 64.0, 2.0))
+        );
         assert_eq!(entity.get::<HeadYaw>().map(|h| h.0), Some(90.0));
         assert_eq!(entity.get::<OnGround>().map(|g| g.0), Some(false));
         assert_eq!(
@@ -804,7 +943,9 @@ mod tests {
         let entity = world.resource::<EntityIndex>().get(7).expect("indexed");
         feed(
             &mut world,
-            ClientEvent::EntityRemoved { entity_ids: vec![7] },
+            ClientEvent::EntityRemoved {
+                entity_ids: vec![7],
+            },
         );
         assert!(world.resource::<EntityIndex>().get(7).is_none());
         assert!(
@@ -914,7 +1055,11 @@ mod tests {
             .expect("spawned with an empty list")
             .0
             .clone();
-        assert_eq!(equipment.len(), 2, "the second slot must merge, not replace: {equipment:?}");
+        assert_eq!(
+            equipment.len(),
+            2,
+            "the second slot must merge, not replace: {equipment:?}"
+        );
         assert!(
             equipment
                 .iter()
@@ -969,6 +1114,126 @@ mod tests {
         assert!((attributes[0].base - 0.25).abs() < 1.0e-9);
     }
 
+    // ---- the local player -------------------------------------------------
+
+    #[test]
+    fn login_indexes_the_local_player_so_its_own_attributes_fold() {
+        // The seam this closes: vanilla sends no `AddEntity` for yourself, so
+        // `EntityIndex` never had our own id and `apply_entity_attributes`
+        // `continue`d past every `update_attributes` naming it. Depth Strider's
+        // `water_movement_efficiency` is the attribute that made this visible.
+        let (mut world, local) = ingest_world_with_local_player();
+        feed(&mut world, login_event(7));
+        assert_eq!(
+            world.resource::<EntityIndex>().get(7),
+            Some(local),
+            "our own id must resolve to the local player entity"
+        );
+        assert_eq!(
+            world.get::<MinecraftEntityId>(local).map(|id| id.0),
+            Some(7)
+        );
+
+        feed(&mut world, attributes_event(7, 0.5));
+        let attributes = world
+            .get::<Attributes>(local)
+            .expect("login inserts an empty Attributes")
+            .0
+            .clone();
+        assert_eq!(attributes.len(), 1);
+        assert!((attributes[0].base - 0.5).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn without_the_login_the_local_players_attributes_are_dropped_on_the_floor() {
+        // The control, and it is the *pre-fix behaviour* verbatim: same event, same
+        // id, same entity — only the `Login` is missing. Without this,
+        // the test above cannot distinguish "the login fold works" from "attribute
+        // ingest would have found the local player anyway".
+        let (mut world, local) = ingest_world_with_local_player();
+        feed(&mut world, attributes_event(7, 0.5));
+        assert!(
+            world.resource::<EntityIndex>().get(7).is_none(),
+            "nothing but Login can index the local player"
+        );
+        assert!(
+            world.get::<Attributes>(local).is_none(),
+            "an unindexed local player gets no Attributes component at all"
+        );
+    }
+
+    #[test]
+    fn a_relogin_under_a_new_id_drops_the_old_mapping() {
+        let (mut world, local) = ingest_world_with_local_player();
+        feed(&mut world, login_event(7));
+        feed(&mut world, login_event(9));
+        assert_eq!(world.resource::<EntityIndex>().get(9), Some(local));
+        assert!(
+            world.resource::<EntityIndex>().get(7).is_none(),
+            "a stale id must not keep resolving to us — a mob could inherit it"
+        );
+        assert_eq!(world.resource::<EntityIndex>().len(), 1);
+    }
+
+    #[test]
+    fn a_spawn_or_removal_naming_our_own_id_never_despawns_the_local_player() {
+        // Indexing our own id put the local player inside reach of the two systems
+        // that `despawn` by index. If either fired, `PhysicsState`, the HUD
+        // component set and the driver's `Sim.local` identity would all vanish
+        // mid-session and every `expect("the local player always carries …")`
+        // would panic a frame later. Vanilla sends neither for the local player,
+        // which is exactly why nothing else would catch it.
+        let (mut world, local) = ingest_world_with_local_player();
+        feed(&mut world, login_event(7));
+
+        feed(&mut world, spawn_event(7, "minecraft:pig"));
+        assert!(
+            world.get_entity(local).is_ok(),
+            "a spawn must not despawn us"
+        );
+        assert_eq!(world.resource::<EntityIndex>().get(7), Some(local));
+
+        feed(
+            &mut world,
+            ClientEvent::EntityRemoved {
+                entity_ids: vec![7],
+            },
+        );
+        assert!(
+            world.get_entity(local).is_ok(),
+            "a removal must not despawn us"
+        );
+        assert_eq!(
+            world.resource::<EntityIndex>().get(7),
+            Some(local),
+            "…and the id must stay resolvable, because we are still that entity"
+        );
+    }
+
+    #[test]
+    fn the_same_guard_still_replaces_a_reused_id_for_an_ordinary_entity() {
+        // The control for the guard above: it must key on `LocalPlayer`, not
+        // blanket-disable the replace/despawn paths that
+        // `a_respawned_id_replaces_the_previous_entity` and
+        // `a_removal_despawns_and_deindexes` depend on.
+        let (mut world, _local) = ingest_world_with_local_player();
+        feed(&mut world, login_event(7));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+        let pig = world.resource::<EntityIndex>().get(11).expect("indexed");
+        feed(&mut world, spawn_event(11, "minecraft:item"));
+        assert!(
+            world.get_entity(pig).is_err(),
+            "an ordinary reused id still replaces its previous holder"
+        );
+        feed(
+            &mut world,
+            ClientEvent::EntityRemoved {
+                entity_ids: vec![11],
+            },
+        );
+        assert!(world.resource::<EntityIndex>().get(11).is_none());
+    }
+
     // ---- the routing switch ----------------------------------------------
 
     #[test]
@@ -979,15 +1244,26 @@ mod tests {
         // entity's state actually changed, so the claim and the systems cannot
         // drift apart unnoticed.
         assert!(handles_event(&spawn_event(1, "minecraft:pig")));
+        assert!(handles_event(&login_event(1)));
         assert!(!handles_event(&ClientEvent::TimeChanged {
             world_age: 1,
             time_of_day: 2,
         }));
+        // Claimed by `crate::session`, not here: this module has no system for it.
         assert!(!handles_event(&ClientEvent::HealthChanged {
             health: 20.0,
             food: 20,
             saturation: 5.0,
         }));
+        assert!(
+            crate::session::handles_event(&ClientEvent::HealthChanged {
+                health: 20.0,
+                food: 20,
+                saturation: 5.0,
+            }),
+            "…and something must claim it, or it falls through to the scalar fold \
+             that no longer has an arm for it and is silently dropped"
+        );
     }
 
     #[test]
