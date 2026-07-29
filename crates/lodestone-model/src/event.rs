@@ -159,6 +159,70 @@ pub enum AnimationAction {
     Other(u8),
 }
 
+/// Whether an optional metadata field appeared in an update at all, distinct
+/// from whether it currently holds a value.
+///
+/// Several vanilla metadata fields are themselves nullable on the wire (the
+/// custom name, the displayed item stack): a packet can be silent about the
+/// field (nothing changed), or carry it with a value, or carry it explicitly
+/// cleared. Modelling that as `Option<Option<T>>` — as [`EntityMetadataUpdate`]
+/// and a few sibling types across the workspace still do — encodes exactly
+/// this, but positionally: nothing in the type says *which* `Option` means
+/// what, so every read site has to re-derive "outer is presence, inner is
+/// value" from a doc comment (or worse, from the surrounding code) rather
+/// than from the type itself. This enum names the two states instead.
+///
+/// `Unreported` must never overwrite a previously known value — a dropped
+/// item, for instance, names its item id **once** at spawn and sends
+/// item-free metadata forever after, so a consumer that treats "the field is
+/// absent from *this* update" the same as "the server cleared it" blanks the
+/// item's model one tick after it appears. `Reported(None)` is the actual
+/// clear.
+///
+/// # Not yet applied everywhere the shape exists
+///
+/// This type exists so the fields *in this file* can, in principle, name
+/// their two states instead of nesting `Option`. It is intentionally not
+/// wired onto [`EntityMetadataUpdate::custom_name`] or
+/// [`EntityMetadataUpdate::item`] yet: both are produced with literal nested
+/// `Option` values from `protocol/v770/src/packets/metadata.rs` (a different
+/// crate, out of scope for the change that added this type) and consumed the
+/// same way from `lodestone-client/src/state.rs` (owned by a different agent
+/// in-flight on this checkout) — retyping the field here without also
+/// updating both would not compile. See those fields' doc comments for the
+/// exact blocking lines. The `EntitySnapshot` sibling in
+/// `lodestone-shell/src/entities.rs` has the identical blocker one layer up,
+/// against `lodestone-shell/src/net.rs`'s `entity_snapshot()`. A follow-up
+/// that touches all of `protocol/v770`, `lodestone-client` and
+/// `lodestone-shell/src/net.rs` in one pass can finish the job; changing only
+/// the fields named in isolation cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Reported<T> {
+    /// The field was not present in this update. Must **not** overwrite a
+    /// previously known value.
+    Unreported,
+    /// The field was present. `None` means the server explicitly cleared it;
+    /// `Some(value)` is the value it now holds.
+    Reported(Option<T>),
+}
+
+impl<T> Reported<T> {
+    /// Whether the field was present in this update at all (either variant of
+    /// [`Reported::Reported`]), as the `Option<Option<T>>` shape's outer
+    /// `is_some()` used to answer.
+    #[must_use]
+    pub const fn is_reported(&self) -> bool {
+        matches!(self, Self::Reported(_))
+    }
+}
+
+impl<T> Default for Reported<T> {
+    /// The natural default for "this update did not mention the field".
+    fn default() -> Self {
+        Self::Unreported
+    }
+}
+
 /// An incremental, version-free update to an entity's metadata.
 ///
 /// Vanilla transmits metadata as a sparse `(index, value)` list applied
@@ -171,6 +235,8 @@ pub enum AnimationAction {
 /// The fields that are themselves optional on the wire — the custom name and
 /// the displayed item stack — use a nested `Option`: the outer `Option` is "did
 /// this packet include the field", the inner is "is a value currently set".
+/// That shape is exactly what [`Reported<T>`] exists to name instead; see its
+/// docs and the two fields below for why it is not applied here yet.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntityMetadataUpdate {
     /// The shared entity flags byte (on-fire / crouching / sprinting / swimming
@@ -178,6 +244,14 @@ pub struct EntityMetadataUpdate {
     /// stable across modern versions.
     pub flags: Option<u8>,
     /// The custom name, when the field was present. Inner `None` clears it.
+    ///
+    /// This should be [`Reported<String>`], not a nested `Option` — see that
+    /// type's docs for why, and for exactly why it is not yet: the producer
+    /// (`protocol/v770/src/packets/metadata.rs`, e.g. `md.custom_name =
+    /// Some(t)` and `Some(None)`) and a consumer
+    /// (`lodestone-client/src/state.rs`'s `if let Some(custom_name) =
+    /// &metadata.custom_name`) are both outside the scope that can retype
+    /// this field alone.
     pub custom_name: Option<Option<String>>,
     /// Whether the custom name renders above the entity, when present.
     pub custom_name_visible: Option<bool>,
@@ -204,6 +278,10 @@ pub struct EntityMetadataUpdate {
     /// Nested like [`custom_name`](Self::custom_name): the outer `Option` is
     /// "did this packet include the field", the inner is "is a stack currently
     /// set" — `Some(None)` is the empty stack, which vanilla draws as nothing.
+    /// Same [`Reported<T>`] candidate, same blocker: the producer
+    /// (`protocol/v770/src/packets/metadata.rs`'s `md.item = Some(stack)`) and
+    /// a consumer (`lodestone-client/src/state.rs`'s `if let Some(item) =
+    /// &metadata.item`) are both outside this change's scope.
     ///
     /// A stack whose wire form carried a data component this build does not
     /// model still arrives here with

@@ -42,6 +42,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), and
   the dependency edge that gave `lodestone-net`'s ping its first consumer.
+- [Tool mining speeds](./tool-mining.md) — how a held item's mining speed and
+  correct-tool-for-drops verdict are resolved from the vanilla `minecraft:tool`
+  census, the `correct_tool`/`requires_correct_tool` inversion trap, the
+  `block_type_name` registry-id bug it fixed along the way, and how the shell
+  resolves the held hotbar item through it.
 - [Bevy ECS migration](./bevy-migration.md) — the staged plan for moving state onto
   `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
   the two sources of truth that already exist, what must stay a plain library, and
