@@ -273,8 +273,13 @@ pub struct ActionQueue(pub Vec<ClientAction>);
 /// the current input as "already sent", and the first real change after
 /// connecting would then be suppressed as a redundant resend.
 ///
-/// Session phase itself is Stage 3's; when it moves onto the local player,
-/// this resource collapses into it.
+/// Stage 3 moved session phase onto the local player as
+/// [`crate::session::Phase`], and the note that used to sit here predicted this
+/// resource would collapse into it. It did not, and the reason is worth keeping:
+/// `in_world` *is* now derived from that component, but `live` is
+/// `vanilla_atlas.is_some() && net.is_some()` — whether the session is rendering
+/// a real server world with vanilla assets — which is an asset/config fact and
+/// not a phase. Two bits, two origins, one derived gate.
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Egress {
     /// The server has placed us in the world (`SessionPhase::Connected`), so a

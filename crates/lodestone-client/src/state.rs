@@ -22,14 +22,19 @@
 //! [`SharedState::is_chunk_loaded`], or take owned section snapshots via
 //! [`SharedState::section_at`] for meshing.
 
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
+use lodestone_ecs::ecs::entity::Entity;
+use lodestone_ecs::session::{
+    SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList,
+};
 use lodestone_ecs::{EcsHandle, WorldTime};
+use lodestone_game::bossbar::BossBarSet;
+use lodestone_game::scoreboard::Scoreboard;
+use lodestone_game::tablist::TabList;
 use lodestone_game::{
     click::{Click, PlayerCtx},
     menu::Menu,
-    menus::Menus,
 };
 use lodestone_model::{
     BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, EntityAttributeSnapshot,
@@ -39,8 +44,6 @@ use lodestone_model::{
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
 use tokio::sync::Notify;
 use uuid::Uuid;
-
-use crate::scoreboard::{BossBar, Scoreboard, apply_boss_bar};
 
 /// An immutable snapshot of the local player's state.
 ///
@@ -200,26 +203,27 @@ pub struct EntityView {
 /// The mutable scalar state behind the lock. Private; only ever touched under
 /// [`SharedState`]'s lock. World (chunk) state lives in a separate lock so a
 /// chunk write never contends with a scalar read.
-#[derive(Debug)]
+///
+/// # What is left in here, and why it is only this
+///
+/// Stage 3 of [`docs/bevy-migration.md`](../../../docs/bevy-migration.md)
+/// **deleted** `players`, `scoreboard`, `boss_bars` and `menus`: they are now
+/// [`SessionTabList`], [`SessionScoreboard`], [`SessionBossBars`] and
+/// [`SessionMenus`] components in [`SharedState::ecs`], folded by
+/// `lodestone_ecs::session`'s `NetIngest` systems. There is nowhere left in
+/// this struct for a second copy of any of them to live.
+///
+/// [`PlayerSnapshot`] stays, and its position/rotation/`on_ground` are the
+/// reason: they are not a fold of anything the server said, they are a **local
+/// echo** of our own outbound movement ([`SharedState::set_local_movement`]),
+/// which is what lets a bot's `look`/`walk` build on the latest local pose
+/// instead of waiting a round trip. Its *vitals* (`health`, `food`,
+/// `saturation`, `xp_*`, `entity_id`, `alive`) do still duplicate the shell's —
+/// see the Stage 3 doc for the measurement and why the residue is bounded by
+/// the §4.1 `World` unification rather than by this stage.
+#[derive(Debug, Default)]
 struct Inner {
     player: PlayerSnapshot,
-    players: HashMap<Uuid, PlayerListEntry>,
-    scoreboard: Scoreboard,
-    /// Boss bars in server insertion order (render order).
-    boss_bars: Vec<BossBar>,
-    menus: Menus,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            player: PlayerSnapshot::default(),
-            players: HashMap::new(),
-            scoreboard: Scoreboard::default(),
-            boss_bars: Vec::new(),
-            menus: Menus::new(),
-        }
-    }
 }
 
 /// A snapshot of the currently open non-player menu.
@@ -253,7 +257,19 @@ pub(crate) struct SharedState {
     /// `WindowApp`) owns on its own thread — deliberately: unifying them is a
     /// later stage (§4.1), and `CorePlugin` never inserts `WorldTime` itself
     /// so that split cannot silently become two diverging clocks.
+    ///
+    /// Since Stage 3 this `World` is also authoritative over the session
+    /// read-model — the scoreboard, tab list, boss bars and menus — as
+    /// components on [`Self::session`].
     ecs: EcsHandle,
+    /// The session entity in [`Self::ecs`], carrying `lodestone_ecs::session`'s
+    /// shared-fold component set.
+    ///
+    /// Stable for the life of the state. Held rather than looked up by query so
+    /// a read is a plain `World::get` under a *read* lock — a `Query` needs
+    /// `&mut World` (it caches its `QueryState`) and would contend with the net
+    /// thread's ingest writes for nothing at this scale.
+    session: Entity,
 }
 
 impl std::fmt::Debug for SharedState {
@@ -271,12 +287,20 @@ impl Default for SharedState {
         // explicitly rather than by a plugin — see `CorePlugin`'s docs on why
         // the clock's owner must be named at the call site.
         let ecs = lodestone_ecs::new_ingest_handle();
-        ecs.write().insert_resource(WorldTime::default());
+        // Stage 3: `new_ingest_handle` carries `SessionPlugin`'s `NetIngest`
+        // systems as well as `IngestPlugin`'s, so this `World` folds the session
+        // read-model too. It needs one entity to hang those components off.
+        let session = {
+            let mut world = ecs.write();
+            world.insert_resource(WorldTime::default());
+            lodestone_ecs::spawn_session(&mut world)
+        };
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
             world: Arc::new(RwLock::new(World::new())),
             notify: Arc::new(Notify::new()),
             ecs,
+            session,
         }
     }
 }
@@ -319,10 +343,11 @@ impl SharedState {
     /// Chunk data is written by the adapter through [`SharedState::world_write`]
     /// instead, so the heavy payload is never borrowed or cloned here.
     ///
-    /// [`ClientEvent::TimeChanged`] and every entity event are handled *here*
-    /// rather than inside [`Inner::apply`]: they live in this state's
-    /// [`EcsHandle`] (`self.ecs`), a sibling field `Inner::apply` has no access
-    /// to. Everything else still folds through `Inner::apply` unchanged.
+    /// [`ClientEvent::TimeChanged`], every entity event and (since Stage 3)
+    /// every session event are handled *here* rather than inside
+    /// [`Inner::apply`]: they live in this state's [`EcsHandle`] (`self.ecs`), a
+    /// sibling field `Inner::apply` has no access to. What is left in
+    /// `Inner::apply` is the local-player echo and nothing else.
     ///
     /// # Why entity events run a schedule instead of touching components
     ///
@@ -352,7 +377,9 @@ impl SharedState {
             let mut time = world.resource_mut::<WorldTime>();
             time.age = *world_age;
             time.time_of_day = *time_of_day;
-        } else if lodestone_ecs::ingest::handles_event(event) {
+        } else if lodestone_ecs::ingest::handles_event(event)
+            || lodestone_ecs::session::handles_event(event)
+        {
             let mut world = self.ecs.write();
             world
                 .resource_mut::<lodestone_ecs::ingest::IngestQueue>()
@@ -576,16 +603,43 @@ impl SharedState {
             .collect()
     }
 
-    /// Clones out the current player-list entries.
+    /// Clones out the current player-list entries as the model's flat wire
+    /// shape.
+    ///
+    /// **Derived, not stored** — the same one-directional intermediate Stage 1
+    /// established for [`EntityView`]: the [`SessionTabList`] component is the
+    /// only copy and this rebuilds the model struct for callers that still speak
+    /// it. Every field is `Some` because a folded entry *has* a value for each
+    /// (the `Option`s on the wire mean "this delta did not mention the field",
+    /// and the fold has already merged them).
     #[must_use]
     pub(crate) fn players(&self) -> Vec<PlayerListEntry> {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .players
-            .values()
-            .cloned()
+        self.tab_list()
+            .iter()
+            .map(|entry| PlayerListEntry {
+                uuid: entry.profile.id,
+                name: Some(entry.profile.name.clone()),
+                game_mode: Some(entry.game_mode),
+                latency: Some(entry.latency),
+                display_name: entry.display_name.clone(),
+                listed: Some(entry.listed),
+            })
             .collect()
+    }
+
+    /// Clones out the folded tab list — profiles, latency, game modes, display
+    /// names, header and footer.
+    ///
+    /// This is the richer shape [`Self::players`] is flattened from, and the one
+    /// the shell's tab overlay reads (it needs `ordered()`, which the flat list
+    /// cannot express).
+    #[must_use]
+    pub(crate) fn tab_list(&self) -> TabList {
+        self.ecs
+            .read()
+            .get::<SessionTabList>(self.session)
+            .map(|list| list.0.clone())
+            .unwrap_or_default()
     }
 
     /// Returns `(world_age, time_of_day)`, read from the [`WorldTime`]
@@ -598,63 +652,70 @@ impl SharedState {
         (time.age, time.time_of_day)
     }
 
-    /// Clones out the current folded scoreboard (objectives, scores, display
-    /// slots and teams).
+    /// Clones out the current folded scoreboard (objectives, scores, the
+    /// nineteen display slots and teams).
+    ///
+    /// The [`SessionScoreboard`] component is the only copy in the process since
+    /// Stage 3 — `lodestone_client::scoreboard::Scoreboard` and
+    /// `lodestone_shell::sim::Sim::scoreboard` are both gone.
     #[must_use]
     pub(crate) fn scoreboard(&self) -> Scoreboard {
-        self.inner
+        self.ecs
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .scoreboard
-            .clone()
+            .get::<SessionScoreboard>(self.session)
+            .map(|board| board.0.clone())
+            .unwrap_or_default()
     }
 
     /// Clones out the current boss bars in server insertion (render) order.
     #[must_use]
-    pub(crate) fn boss_bars(&self) -> Vec<BossBar> {
-        self.inner
+    pub(crate) fn boss_bars(&self) -> BossBarSet {
+        self.ecs
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .boss_bars
-            .clone()
+            .get::<SessionBossBars>(self.session)
+            .map(|bars| bars.0.clone())
+            .unwrap_or_default()
     }
 
     /// Clones out the player inventory menu (window 0) in menu-slot order.
     #[must_use]
     pub(crate) fn player_menu(&self) -> Menu {
-        self.inner
+        self.ecs
             .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .menus
-            .player()
-            .clone()
+            .get::<SessionMenus>(self.session)
+            .map_or_else(Menu::player, |menus| menus.0.player().clone())
     }
 
     /// Clones out the currently open non-player menu, if one is active.
     #[must_use]
     pub(crate) fn open_menu(&self) -> Option<OpenMenuSnapshot> {
-        let inner = self.inner.read().unwrap_or_else(|e| e.into_inner());
+        let world = self.ecs.read();
+        let menus = &world.get::<SessionMenus>(self.session)?.0;
         Some(OpenMenuSnapshot {
-            window_id: inner.menus.opened_window_id()?,
-            menu_type: inner.menus.opened_menu_type()?.clone(),
-            title: inner.menus.opened_title()?.clone(),
-            menu: inner.menus.opened()?.clone(),
+            window_id: menus.opened_window_id()?,
+            menu_type: menus.opened_menu_type()?.clone(),
+            title: menus.opened_title()?.clone(),
+            menu: menus.opened()?.clone(),
         })
     }
 
-    /// Predicts `click` against the live [`Menus`] session and returns the
+    /// Predicts `click` against the live menu session and returns the
     /// [`ClientAction`] to transmit.
     ///
     /// This **must** run here rather than on a snapshot: prediction mutates
-    /// the one authoritative [`Menus`] this state owns (slots, the carried
+    /// the one authoritative [`SessionMenus`] component (slots, the carried
     /// stack, the crafting grid), and [`open_menu`](Self::open_menu) /
     /// [`player_menu`](Self::player_menu) hand out *clones* with nowhere for
     /// that mutation to land. A caller holding only a snapshot cannot predict
     /// a click; it can only ask this state to do it.
     pub(crate) fn menu_click(&self, click: Click, ctx: PlayerCtx) -> ClientAction {
         let action = {
-            let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
-            inner.menus.click_action(click, ctx)
+            let mut world = self.ecs.write();
+            world
+                .get_mut::<SessionMenus>(self.session)
+                .expect("the session entity always carries SessionMenus")
+                .0
+                .click_action(click, ctx)
         };
         // The prediction just changed slot contents/the carried stack the UI
         // reads every frame; wake any `wait_for` waiter the same way every
@@ -666,11 +727,12 @@ impl SharedState {
 }
 
 impl Inner {
-    /// Folds one non-chunk event into the model.
+    /// Folds one non-chunk, non-entity, non-session event into the model.
+    ///
+    /// The `Menus::apply` early-return that used to head this method is gone
+    /// with the field: menus are folded by `lodestone_ecs::session::apply_menus`
+    /// now, and `SharedState::apply` routes them there before this is reached.
     fn apply(&mut self, event: &ClientEvent) {
-        if self.menus.apply(event) {
-            return;
-        }
         match event {
             ClientEvent::Login {
                 entity_id,
@@ -760,54 +822,6 @@ impl Inner {
                 self.player.xp_total = *total;
                 self.player.xp_known = true;
             }
-            ClientEvent::PlayerListUpdate { entries } => {
-                for entry in entries {
-                    self.players.insert(entry.uuid, entry.clone());
-                }
-            }
-            ClientEvent::ObjectiveUpdate {
-                name,
-                mode,
-                display_name,
-                render_type,
-                number_format,
-            } => {
-                self.scoreboard.apply_objective(
-                    name,
-                    *mode,
-                    display_name.clone(),
-                    *render_type,
-                    number_format.clone(),
-                );
-            }
-            ClientEvent::DisplayObjective { slot, objective } => {
-                self.scoreboard.apply_display(*slot, objective.as_deref());
-            }
-            ClientEvent::ScoreUpdate {
-                holder,
-                objective,
-                value,
-                display,
-                number_format,
-            } => {
-                self.scoreboard.apply_score(
-                    holder,
-                    objective,
-                    *value,
-                    display.clone(),
-                    number_format.clone(),
-                );
-            }
-            ClientEvent::ScoreReset { holder, objective } => {
-                self.scoreboard
-                    .apply_score_reset(holder, objective.as_deref());
-            }
-            ClientEvent::TeamUpdate { name, action } => {
-                self.scoreboard.apply_team(name, action);
-            }
-            ClientEvent::BossBarUpdate { id, action } => {
-                apply_boss_bar(&mut self.boss_bars, *id, action);
-            }
             // Every entity event is folded by `lodestone_ecs::ingest`'s
             // `NetIngest` systems instead and never reaches here —
             // `SharedState::apply` routes them by `lodestone_ecs::ingest::handles_event`
@@ -815,6 +829,17 @@ impl Inner {
             // movement, velocity, head rotation, removal, metadata, attributes,
             // equipment) plus the `apply_metadata` helper are *deleted*, not
             // mirrored: `Inner` has no `entities` map for a second copy to live in.
+            //
+            // Likewise, Stage 3 deleted the *session* arms — `PlayerListUpdate`,
+            // `ObjectiveUpdate`, `DisplayObjective`, `ScoreUpdate`, `ScoreReset`,
+            // `TeamUpdate`, `BossBarUpdate` and the whole `Menus` family — along
+            // with the `players` / `scoreboard` / `boss_bars` / `menus` fields
+            // they wrote and the crate-local `scoreboard` module they wrote into.
+            // `lodestone_ecs::session`'s systems are the only fold now, over
+            // `lodestone-game`'s aggregates. Note what the deleted
+            // `PlayerListUpdate` arm did *not* have: a `PlayerListRemove` arm, so
+            // a player who left the server never left this read-model.
+            // `lodestone_game::tablist::TabList::apply` handles both.
             //
             // Chat, KeepAlive, Disconnect carry no scalar read-model state.
             // ChunkLoaded / ChunkUnloaded are handled by the adapter through the

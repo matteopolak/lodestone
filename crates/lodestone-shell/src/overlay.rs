@@ -1,22 +1,26 @@
-//! Pure folding of live client state (scoreboard sidebar, boss bars) into flat,
-//! version-free view structs the HUD can draw.
+//! Pure folding of live client state (the scoreboard sidebar's *shape*, boss
+//! bars) into flat, version-free view structs the HUD can draw.
 //!
 //! Kept separate from [`crate::hud`] geometry and from the [`crate::net`] /
 //! [`crate::sim`] wiring so the *interpretation* of scoreboard/boss-bar state is
 //! unit-testable with no GPU and no server — which is where the "built, tested,
-//! wired to nothing" gap (§12.24) actually closes: these functions are the last
-//! mile between modelled game state and pixels, and they assert on the exact
+//! wired to nothing" gap (§12.24) actually closes: these types are the last mile
+//! between modelled game state and pixels, and their tests assert on the exact
 //! rows a player would read.
 //!
-//! The client's [`Scoreboard`] snapshot is read-only (its mutators are
-//! crate-private), so the reusable core here folds over the public
-//! [`ScoreEntry`] slice the client hands out; [`sidebar_from`] is a thin adapter
-//! that pulls that slice from a live snapshot.
+//! ## What Stage 3 removed from here
+//!
+//! This module used to carry a *second* sidebar projection, `sidebar_from` /
+//! `sidebar_view`, over the deleted `lodestone_client::Scoreboard`. It was
+//! reachable only through `NetClient::sidebar()`, which **nothing called** — the
+//! HUD has drawn [`crate::scoreboard::sidebar_from`] (over `lodestone-game`'s
+//! aggregate, with `translate` resolution) for as long as that function has
+//! existed. Two projections of one thing, one of them unreachable, was the same
+//! defect one layer up from the double fold `docs/bevy-migration.md` §1.1
+//! measured. [`Sidebar`] / [`SidebarLine`] stay here because they are the HUD's
+//! vocabulary, not the fold's.
 
-use lodestone_client::{BossBar, BossColor, DisplaySlot, ScoreEntry, Scoreboard, Text};
-
-/// Vanilla renders at most 15 sidebar entries below the title.
-const MAX_SIDEBAR_LINES: usize = 15;
+use lodestone_game::bossbar::{BossBarColor, BossBarSet};
 
 /// A ready-to-draw scoreboard sidebar: a title plus up to 15 rows, each a label
 /// and its score string.
@@ -37,48 +41,6 @@ pub struct SidebarLine {
     pub score: String,
 }
 
-/// Build a [`Sidebar`] from a title and the objective's score entries, which
-/// the caller supplies **already sorted** in render order (the client sorts by
-/// descending value then holder). This core does the shell's own work: apply
-/// the per-score display override, stringify the value, and clamp to the 15
-/// lines vanilla shows — and is pure, so it is tested directly.
-#[must_use]
-pub fn sidebar_view(title: &str, entries: &[ScoreEntry]) -> Sidebar {
-    let lines = entries
-        .iter()
-        .take(MAX_SIDEBAR_LINES)
-        .map(|e| SidebarLine {
-            label: e
-                .display
-                .as_ref()
-                .map_or_else(|| e.holder.clone(), Text::to_plain_string),
-            score: e.value.to_string(),
-        })
-        .collect();
-    Sidebar {
-        title: title.to_string(),
-        lines,
-    }
-}
-
-/// Fold a live scoreboard snapshot's sidebar slot into a [`Sidebar`], or `None`
-/// when no objective is displayed there.
-///
-/// The plain `sidebar` slot is used (team-colour sidebars need the player's own
-/// team, which the shell does not track), matching what a spectator sees.
-#[must_use]
-pub fn sidebar_from(sb: &Scoreboard) -> Option<Sidebar> {
-    let objective = sb.displayed(DisplaySlot::Sidebar)?;
-    let title = sb
-        .objective(objective)
-        .and_then(|o| o.display_name.as_ref().map(Text::to_plain_string))
-        .unwrap_or_else(|| objective.to_string());
-    Some(sidebar_view(
-        &title,
-        &sb.scores_in_slot(DisplaySlot::Sidebar),
-    ))
-}
-
 /// A ready-to-draw boss bar: a plain title, a clamped progress fraction, and an
 /// RGB tint derived from the bar colour.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,10 +55,15 @@ pub struct BossBarView {
 
 /// Fold the active boss bars into drawable views, preserving server (render)
 /// order. Progress is clamped defensively in case a server sends out of range.
+///
+/// Takes the folded [`BossBarSet`] — one of the three implementations of this
+/// event family that Stage 3 collapsed to one. `BossBarSet::iter` is what
+/// carries insertion order; a `HashMap` iteration would shuffle the stack every
+/// frame.
 #[must_use]
-pub fn boss_bars_from(bars: &[BossBar]) -> Vec<BossBarView> {
+pub fn boss_bars_from(bars: &BossBarSet) -> Vec<BossBarView> {
     bars.iter()
-        .map(|b| BossBarView {
+        .map(|(_, b)| BossBarView {
             title: b.title.to_plain_string(),
             progress: b.progress.clamp(0.0, 1.0),
             color: boss_color_rgb(b.color),
@@ -105,96 +72,58 @@ pub fn boss_bars_from(bars: &[BossBar]) -> Vec<BossBarView> {
 }
 
 /// Map a vanilla boss-bar colour to an approximate RGB tint.
-fn boss_color_rgb(color: BossColor) -> [f32; 3] {
+fn boss_color_rgb(color: BossBarColor) -> [f32; 3] {
     match color {
-        BossColor::Pink => [0.96, 0.40, 0.71],
-        BossColor::Blue => [0.30, 0.55, 0.95],
-        BossColor::Red => [0.90, 0.20, 0.20],
-        BossColor::Green => [0.35, 0.80, 0.30],
-        BossColor::Yellow => [0.95, 0.85, 0.25],
-        BossColor::Purple => [0.65, 0.35, 0.90],
-        BossColor::White => [0.92, 0.92, 0.92],
+        BossBarColor::Pink => [0.96, 0.40, 0.71],
+        BossBarColor::Blue => [0.30, 0.55, 0.95],
+        BossBarColor::Red => [0.90, 0.20, 0.20],
+        BossBarColor::Green => [0.35, 0.80, 0.30],
+        BossBarColor::Yellow => [0.95, 0.85, 0.25],
+        BossBarColor::Purple => [0.65, 0.35, 0.90],
+        BossBarColor::White => [0.92, 0.92, 0.92],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lodestone_client::{BossOverlay, NumberFormat};
+    use lodestone_game::bossbar::{BossBar, BossBarOverlay};
+    use lodestone_model::Text;
 
-    fn entry(holder: &str, value: i32, display: Option<&str>) -> ScoreEntry {
-        ScoreEntry {
-            holder: holder.to_string(),
-            objective: "obj".to_string(),
-            value,
-            display: display.map(Text::literal),
-            number_format: None::<NumberFormat>,
-        }
-    }
-
-    fn boss_bar(title: &str, progress: f32, color: BossColor) -> BossBar {
+    fn boss_bar(title: &str, progress: f32, color: BossBarColor) -> BossBar {
         BossBar {
-            id: uuid::Uuid::nil(),
             title: Text::literal(title),
+            // Deliberately assigned rather than via `set_progress`, which
+            // clamps: the clamp under test is this module's own defensive one,
+            // and going through the setter would make the assertion vacuous.
             progress,
             color,
-            overlay: BossOverlay::Progress,
-            darken: false,
-            music: false,
-            fog: false,
+            overlay: BossBarOverlay::Progress,
+            darken_screen: false,
+            play_music: false,
+            create_fog: false,
         }
     }
 
     #[test]
-    fn sidebar_view_formats_rows_and_honours_display_override() {
-        // Caller-sorted (desc value) entries; the middle one carries a display
-        // override that must win over its holder key.
-        let entries = [
-            entry("bob", 10, None),
-            entry("alice", 5, Some("Alice the Brave")),
-            entry("carol", 1, None),
-        ];
-        let side = sidebar_view("Stats", &entries);
-        assert_eq!(side.title, "Stats");
-        let rows: Vec<(&str, &str)> = side
-            .lines
-            .iter()
-            .map(|l| (l.label.as_str(), l.score.as_str()))
-            .collect();
-        assert_eq!(
-            rows,
-            vec![("bob", "10"), ("Alice the Brave", "5"), ("carol", "1")],
-            "labels use the display override when present; scores stringify"
+    fn boss_bars_fold_title_progress_and_clamp_in_insertion_order() {
+        let mut bars = BossBarSet::new();
+        bars.add(
+            uuid::Uuid::from_u128(1),
+            boss_bar("Ender Dragon", 0.5, BossBarColor::Purple),
         );
-    }
-
-    #[test]
-    fn sidebar_view_clamps_to_fifteen_lines() {
-        // 30 pre-sorted entries (30 down to 1); only the first 15 may survive.
-        let entries: Vec<ScoreEntry> = (0..30)
-            .map(|i| entry(&format!("p{i:02}"), 30 - i, None))
-            .collect();
-        let side = sidebar_view("Big", &entries);
-        assert_eq!(
-            side.lines.len(),
-            MAX_SIDEBAR_LINES,
-            "vanilla shows at most 15 sidebar rows, not all 30"
+        // Out of range on purpose.
+        bars.add(
+            uuid::Uuid::from_u128(2),
+            boss_bar("Overshoot", 2.0, BossBarColor::Red),
         );
-        assert_eq!(side.lines[0].score, "30", "the top (first) row is kept");
+
+        let views = boss_bars_from(&bars);
+        assert_eq!(views.len(), 2, "one view per active bar");
         assert_eq!(
-            side.lines[14].score, "16",
-            "the 15th row is kept; the 16th (score 15) is dropped"
+            views[0].title, "Ender Dragon",
+            "insertion order is render order"
         );
-    }
-
-    #[test]
-    fn boss_bars_fold_title_progress_and_clamp() {
-        let a = boss_bar("Ender Dragon", 0.5, BossColor::Purple);
-        let b = boss_bar("Overshoot", 2.0, BossColor::Red); // deliberately out of range
-
-        let views = boss_bars_from(&[a, b]);
-        assert_eq!(views.len(), 2, "one view per active bar, order preserved");
-        assert_eq!(views[0].title, "Ender Dragon");
         assert!((views[0].progress - 0.5).abs() < 1e-6);
         assert_eq!(views[1].title, "Overshoot");
         assert!(

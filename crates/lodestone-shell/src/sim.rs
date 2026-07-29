@@ -18,7 +18,12 @@ use lodestone_ecs::player::{
     MovementIntent, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
     reset_local_player, spawn_local_player,
 };
+use lodestone_ecs::session::{
+    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionHudPlugin,
+    TitleOverlay, Vitals, Xp, insert_hud_components,
+};
 use lodestone_ecs::{CorePlugin, GameTick};
+pub use lodestone_ecs::SessionPhase;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
@@ -519,53 +524,22 @@ pub struct Sim {
     /// `LEVEL_PARTICLES` packet ([`NetUpdate::Particles`]) — and drained once
     /// per frame into GPU instances.
     particles: Particles,
-    /// Coarse lifecycle of the live connection, driven by [`NetUpdate`]s. The
-    /// app maps this onto the menu state machine (Connecting → ready on
-    /// [`SessionPhase::Connected`], → failed on [`SessionPhase::Ended`]).
-    phase: SessionPhase,
     /// Received chat/system lines (bounded scrollback), rendered by the HUD.
+    ///
+    /// The one piece of session state still stored on `Sim` rather than as a
+    /// component, and for a reason that is not laziness: every push needs
+    /// [`Self::clock_secs`], which is `Sim`'s own frame clock, and every read
+    /// needs it again to compute an age. See the Stage 3 doc.
     chat_log: ChatLog,
-    /// Folded server tab-list state; rendered while Tab is held.
-    tab_list: lodestone_game::tablist::TabList,
-    /// Folded server scoreboard state; rendered as the right-edge sidebar.
-    scoreboard: lodestone_game::scoreboard::Scoreboard,
-    /// The local player's active status effects, folded from `update_mob_effect`
-    /// / `remove_mob_effect` and ticked down at 20 Hz; drawn by [`crate::effects`]
-    /// as the top-right HUD stack. Distinct from [`PlayerState::effects`], which
-    /// is the *physics* view (only motion-relevant effects); this is the full,
-    /// display-oriented set with durations and levels.
-    hud_effects: lodestone_game::effect::ActiveEffects,
-    /// Title/subtitle overlay, folded through the canonical
-    /// [`lodestone_game::player_state::TitleState`] and ticked at 20 Hz for the
-    /// vanilla fade. Empty (drawing nothing) until the server sends a title.
-    title: lodestone_game::player_state::TitleState,
-    /// Action-bar overlay (GameInfo messages), folded through
-    /// [`lodestone_game::player_state::ActionBar`]; self-clears after 60 ticks.
-    action_bar: lodestone_game::player_state::ActionBar,
     /// Monotonic wall-clock seconds since the sim started, accumulated from the
     /// real per-frame `dt` in [`Sim::step`]. Stamps chat arrivals so the HUD can
     /// age lines for the vanilla fade-out without reaching for a clock itself.
     clock_secs: f64,
-    /// Latest server-reported health in `0..=20`, `None` until the server sends
-    /// one (i.e. on the local dev world it stays `None` and no bar is drawn).
-    health: Option<f32>,
-    /// Latest server-reported food level in `0..=20`, `None` until reported.
-    food: Option<i32>,
-    /// Count of respawns observed (one per [`NetUpdate::Respawned`]). A diagnostic
-    /// the live death gate reads to confirm the client actually recovered rather
-    /// than merely never dying.
-    respawn_count: u64,
     /// Test seam (normal play: always `true`): when `false`, death is treated as
     /// the terminal `SessionPhase::Ended` it used to be, reproducing the "stuck
     /// on the death screen forever" bug as the live gate's negative control. Never
     /// flipped in real play.
     pub recover_from_death: bool,
-    /// Latest server-reported experience (progress toward next level, level,
-    /// total points), `None` until `set_experience` arrives. The HUD must not
-    /// substitute a locally-derived guess for this — there is no vanilla
-    /// leveling curve the shell could invert from partial data that would be
-    /// guaranteed to match the (possibly modded) server's own numbers.
-    experience: Option<(f32, i32, i32)>,
     /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
     /// render-rate transforms the entity pass draws. Empty off a live server.
     entity_interp: EntityInterpolator,
@@ -573,12 +547,6 @@ pub struct Sim {
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
     audio: Option<ShellAudio>,
-    /// The server-assigned entity id for the local player, set on
-    /// [`NetUpdate::LoggedIn`]. `None` off a live server (or before login
-    /// completes), in which case entity-scoped `NetUpdate`s that need to
-    /// distinguish "this is us" (e.g. mob effects) are not the local player's
-    /// and are ignored rather than misattributed.
-    local_entity_id: Option<i32>,
     /// The block-mining predictor (`START`/`STOP`/`ABORT` + swing), driven each
     /// tick while the attack button is held on a live server. Idle on the demo
     /// world, which edits blocks directly. Owns its own prediction-sequence
@@ -606,22 +574,6 @@ pub struct Sim {
     /// and lives on its own thread. Adapters are stateless value types, so a
     /// second one costs a `Box` and answers identically.
     version_data: Option<Box<dyn lodestone_model::VersionAdapter>>,
-}
-
-/// The coarse phase of the shell's session, distilled from [`NetUpdate`]s so the
-/// app can drive the [`crate::menu`] state machine without re-reading net wire
-/// details. Purely a read-model: it never affects physics or rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SessionPhase {
-    /// No live connection — the local dev world (worldgen stand-in).
-    LocalOnly,
-    /// A live connection is attached and still handshaking / logging in.
-    Connecting,
-    /// Logged in to the server.
-    Connected,
-    /// The session ended; carries the human-readable reason (disconnect,
-    /// net error, or death). Terminal until a new connection is attached.
-    Ended(String),
 }
 
 impl Sim {
@@ -771,11 +723,18 @@ impl Sim {
         // which is why nothing here ever calls `App::update`.
         //
         // `LocalPlayerPlugin` owns `TickSet::Physics`; `ControllerPlugin` owns
-        // `TickSet::Input` and `TickSet::Send`. Both are needed for a player that
-        // is driven *and* reported, and they are separate plugins so a harness can
-        // take one without the other.
+        // `TickSet::Input` and `TickSet::Send`; `SessionHudPlugin` owns
+        // `TickSet::Animate` (ageing the title/action-bar/effect overlays at the
+        // fixed 20 Hz their durations are counted in). All three are needed for a
+        // player that is driven, reported *and* drawn, and they are separate
+        // plugins so a harness can take one without the others.
         let mut app = lodestone_ecs::app::App::new();
-        app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin));
+        app.add_plugins((
+            CorePlugin,
+            LocalPlayerPlugin,
+            ControllerPlugin,
+            SessionHudPlugin,
+        ));
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
         // Physics-walk is the default everywhere, including live: the shell
@@ -784,6 +743,11 @@ impl Sim {
         // While a column is still streaming in, `PlayerCollision::Pending` holds
         // the player in place rather than letting them fall.
         let local = spawn_local_player(&mut ecs, player);
+        // Stage 3's session/HUD half goes on the same entity. Separate from
+        // `spawn_local_player` because the two component sets belong to different
+        // plugins, and a plugin a harness leaves out must not leave a component
+        // its systems never look at behind.
+        insert_hud_components(&mut ecs, local);
 
         Self {
             config,
@@ -811,22 +775,11 @@ impl Sim {
             collide_against_live_world: true,
             asset_banner: resources.banner,
             particles,
-            phase: SessionPhase::LocalOnly,
             chat_log: ChatLog::new(),
-            tab_list: lodestone_game::tablist::TabList::new(),
-            scoreboard: lodestone_game::scoreboard::Scoreboard::new(),
-            hud_effects: lodestone_game::effect::ActiveEffects::new(),
-            title: lodestone_game::player_state::TitleState::new(),
-            action_bar: lodestone_game::player_state::ActionBar::new(),
             clock_secs: 0.0,
-            health: None,
-            food: None,
-            respawn_count: 0,
             recover_from_death: true,
-            experience: None,
             entity_interp: EntityInterpolator::new(),
             audio: ShellAudio::from_env(),
-            local_entity_id: None,
             mining: Mining::new(),
             placement: Placement::new(),
             attacking: false,
@@ -1005,7 +958,7 @@ impl Sim {
     pub fn attach_net(&mut self, net: NetClient) {
         self.net = Some(net);
         self.status = "connecting…".into();
-        self.phase = SessionPhase::Connecting;
+        self.set_phase(SessionPhase::Connecting);
     }
 
     /// Tear down whatever live session is attached and reset every piece of
@@ -1027,13 +980,19 @@ impl Sim {
     ///   [`SessionPhase::Ended`] this would otherwise immediately re-fail the
     ///   *new* main-menu screen the moment
     ///   `crate::app::WindowApp::drive_ui_from_session` next runs.
-    /// - **Every read-model [`Sim::poll_net`] feeds**: chat log, tab list,
-    ///   scoreboard, the status-effect overlay, title/subtitle, action bar,
-    ///   health, food, experience, death/respawn state, the local entity id
-    ///   (stale, it would misattribute the *next* session's
+    /// - **Every read-model [`Sim::poll_net`] feeds**: the chat log and the
+    ///   teleport-count diagnostic directly, and everything else via
+    ///   `insert_hud_components` — the status-effect overlay, title/subtitle,
+    ///   action bar, health, food, experience, respawn count, the session phase,
+    ///   and the server-assigned entity id (stale, not merely wrong: left in
+    ///   place it would misattribute the *next* session's
     ///   `EffectApplied`/`EffectRemoved` to whichever entity the new server
-    ///   happens to assign that same id to first) and the teleport-count
-    ///   diagnostic.
+    ///   happens to assign that same id to first).
+    /// - **The tab list, scoreboard, boss bars and menus need no clearing at
+    ///   all**, and that is Stage 3 working rather than an omission: they are
+    ///   components in the *client's* `World`, so dropping `net` above drops the
+    ///   only route to them and every reader falls back to an empty default. A
+    ///   `Sim`-side reset here would imply a `Sim`-side copy.
     /// - **In-flight prediction state**: `mining` and `placement` are
     ///   replaced wholesale rather than merely stopped — both track a
     ///   monotonic sequence counter with no public reset, and `Mining` also
@@ -1075,20 +1034,9 @@ impl Sim {
         // so nothing below can race a still-running poll against state this
         // method is about to reset out from under it.
         self.net = None;
-        self.phase = SessionPhase::LocalOnly;
 
         self.chat_log = ChatLog::new();
-        self.tab_list = lodestone_game::tablist::TabList::new();
-        self.scoreboard = lodestone_game::scoreboard::Scoreboard::new();
-        self.hud_effects = lodestone_game::effect::ActiveEffects::new();
-        self.title = lodestone_game::player_state::TitleState::new();
-        self.action_bar = lodestone_game::player_state::ActionBar::new();
-        self.health = None;
-        self.food = None;
-        self.respawn_count = 0;
-        self.experience = None;
         self.entity_interp = EntityInterpolator::new();
-        self.local_entity_id = None;
         self.teleport_count = 0;
 
         self.mining = Mining::new();
@@ -1126,6 +1074,14 @@ impl Sim {
         // marker. Keeping that list in one place is what stops a component added
         // later from being silently missed here.
         reset_local_player(&mut self.ecs, self.local, player);
+        // The Stage-3 half of the same reset. `insert_hud_components` writes the
+        // whole set back to its just-spawned value — phase, vitals, xp, the two
+        // overlays, the effect stack, the respawn counter and the server entity
+        // id (which is *stale*, not merely wrong: left in place it would
+        // misattribute the next session's mob effects to whichever entity the
+        // new server happens to assign that id to first). One call rather than a
+        // field-by-field reset, for the same reason `reset_local_player` is one.
+        insert_hud_components(&mut self.ecs, self.local);
         self.target = None;
         self.input_mut().release_all();
 
@@ -1147,9 +1103,22 @@ impl Sim {
     }
 
     /// The coarse session phase, for the menu state machine.
+    ///
+    /// Reads the [`Phase`] component; `Sim` holds no phase field.
     #[must_use]
     pub fn session_phase(&self) -> &SessionPhase {
-        &self.phase
+        &self
+            .ecs
+            .get::<Phase>(self.local)
+            .expect("the local player always carries Phase")
+            .0
+    }
+
+    /// Record a new session phase.
+    fn set_phase(&mut self, phase: SessionPhase) {
+        if let Some(mut current) = self.ecs.get_mut::<Phase>(self.local) {
+            current.0 = phase;
+        }
     }
 
     /// Whether the local player is currently dead (awaiting the server-confirmed
@@ -1163,7 +1132,10 @@ impl Sim {
     /// live death gate reads to confirm the client recovered from a death.
     #[must_use]
     pub fn respawn_count(&self) -> u64 {
-        self.respawn_count
+        self.ecs
+            .get::<RespawnCount>(self.local)
+            .expect("the local player always carries RespawnCount")
+            .0
     }
 
     /// The most recent chat/system lines (oldest-first) for the HUD to draw,
@@ -1182,13 +1154,54 @@ impl Sim {
     /// Server-reported health in `0..=20`, or `None` off a live survival server.
     #[must_use]
     pub fn health(&self) -> Option<f32> {
-        self.health
+        self.vitals().health
     }
 
     /// Server-reported food level in `0..=20`, or `None` off a live server.
     #[must_use]
     pub fn food(&self) -> Option<i32> {
-        self.food
+        self.vitals().food
+    }
+
+    /// The [`Vitals`] component.
+    fn vitals(&self) -> Vitals {
+        *self
+            .ecs
+            .get::<Vitals>(self.local)
+            .expect("the local player always carries Vitals")
+    }
+
+    /// Record the server's latest `set_health`.
+    fn set_vitals(&mut self, vitals: Vitals) {
+        if let Some(mut current) = self.ecs.get_mut::<Vitals>(self.local) {
+            *current = vitals;
+        }
+    }
+
+    /// Record the server's latest `set_experience`.
+    fn set_xp(&mut self, xp: Option<(f32, i32, i32)>) {
+        if let Some(mut current) = self.ecs.get_mut::<Xp>(self.local) {
+            current.0 = xp;
+        }
+    }
+
+    /// The server-assigned entity id for the local player, `None` before login.
+    ///
+    /// Read by every entity-scoped update that has to decide "is this us" — mob
+    /// effects, most obviously, whose packet applies to any entity.
+    #[must_use]
+    fn server_entity_id(&self) -> Option<i32> {
+        self.ecs
+            .get::<ServerEntityId>(self.local)
+            .expect("the local player always carries ServerEntityId")
+            .0
+    }
+
+    /// Record the id the server assigned us at login.
+    fn set_server_entity_id(&mut self, entity_id: Option<i32>) {
+        if let Some(mut current) = self.ecs.get_mut::<ServerEntityId>(self.local) {
+            current.0 = entity_id;
+        }
     }
 
     /// Server-reported experience as `(progress, level, total)`, or `None`
@@ -1197,21 +1210,38 @@ impl Sim {
     /// the next level.
     #[must_use]
     pub fn experience(&self) -> Option<(f32, i32, i32)> {
-        self.experience
+        self.ecs
+            .get::<Xp>(self.local)
+            .expect("the local player always carries Xp")
+            .0
     }
 
     /// The current tab-list, formatted as `NAME  <latency>ms` rows sorted by
     /// vanilla display order. Empty until the server sends player-list data.
     #[must_use]
     pub fn player_rows(&self) -> Vec<String> {
-        crate::tablist::player_rows(&self.tab_list, self.translator().as_ref())
+        crate::tablist::player_rows(
+            &self
+                .net
+                .as_ref()
+                .map(NetClient::tab_list)
+                .unwrap_or_default(),
+            self.translator().as_ref(),
+        )
     }
 
     /// The scoreboard sidebar to draw, or `None` when none is displayed (or off
     /// a live server). Folded through [`lodestone_game::scoreboard::Scoreboard`].
     #[must_use]
     pub fn sidebar(&self) -> Option<Sidebar> {
-        crate::scoreboard::sidebar_from(&self.scoreboard, self.translator().as_ref())
+        crate::scoreboard::sidebar_from(
+            &self
+                .net
+                .as_ref()
+                .map(NetClient::scoreboard)
+                .unwrap_or_default(),
+            self.translator().as_ref(),
+        )
     }
 
     /// The active boss bars to draw, in render order. Empty off a live server.
@@ -1227,7 +1257,7 @@ impl Sim {
     /// [`Sim::experience`]; off a live server it stays `None` and no bar draws.
     #[must_use]
     pub fn xp(&self) -> Option<(i32, f32)> {
-        self.experience
+        self.experience()
             .map(|(progress, level, _total)| (level, progress))
     }
 
@@ -1236,13 +1266,18 @@ impl Sim {
     /// at read time, matching the chat path, so colour survives once decoded.
     #[must_use]
     pub fn title_overlay(&self) -> Option<(String, Option<String>, f32)> {
-        let title = self.title.title()?;
+        let state = &self
+            .ecs
+            .get::<TitleOverlay>(self.local)
+            .expect("the local player always carries TitleOverlay")
+            .0;
+        let title = state.title()?;
         Some((
             self.resolve_text(title).to_legacy_string(),
-            self.title
+            state
                 .subtitle()
                 .map(|s| self.resolve_text(s).to_legacy_string()),
-            self.title.alpha(),
+            state.alpha(),
         ))
     }
 
@@ -1250,18 +1285,24 @@ impl Sim {
     /// message is visible (fades over its final ticks).
     #[must_use]
     pub fn action_bar_overlay(&self) -> Option<(String, f32)> {
-        let text = self.action_bar.text()?;
-        Some((
-            self.resolve_text(text).to_legacy_string(),
-            self.action_bar.alpha(),
-        ))
+        let state = &self
+            .ecs
+            .get::<ActionBarOverlay>(self.local)
+            .expect("the local player always carries ActionBarOverlay")
+            .0;
+        let text = state.text()?;
+        Some((self.resolve_text(text).to_legacy_string(), state.alpha()))
     }
 
     /// The local player's active status effects, for the top-right HUD overlay.
     /// Empty until a server applies one; ticked down in [`Sim::step`].
     #[must_use]
     pub fn active_effects(&self) -> &lodestone_game::effect::ActiveEffects {
-        &self.hud_effects
+        &self
+            .ecs
+            .get::<HudEffects>(self.local)
+            .expect("the local player always carries HudEffects")
+            .0
     }
 
     /// The folded player inventory menu. Off a live connection this returns an
@@ -1521,7 +1562,7 @@ impl Sim {
         // inputs are frame-stable: `poll_net` is the only thing that changes the
         // phase and it runs after the loop.
         let egress = Egress {
-            in_world: self.phase == SessionPhase::Connected,
+            in_world: *self.session_phase() == SessionPhase::Connected,
             live: self.is_live(),
         };
         self.ecs.insert_resource(egress);
@@ -1538,13 +1579,12 @@ impl Sim {
             self.tick_count += 1;
             self.accumulator -= TICK_DT;
             self.tick_particles();
-            // Age the HUD status effects at the same fixed 20 Hz the server ticks
-            // them, so displayed timers count down in step with the world.
-            self.hud_effects.tick(1);
-            // Age the title/subtitle and action-bar overlays at the same 20 Hz
-            // so their vanilla fades run in step with the world.
-            self.title.tick(1);
-            self.action_bar.tick(1);
+            // The HUD status effects and the title/action-bar overlays used to be
+            // aged by three hand-written `tick(1)` calls right here. They are now
+            // `lodestone_ecs::session::tick_hud_overlays` in `TickSet::Animate`,
+            // which the `run_schedule(GameTick)` above already ran — same fixed
+            // 20 Hz, but a plugin can now order against it and the components are
+            // the only copy.
             // Drive live block interactions at the same fixed 20 Hz: the held
             // dig accumulates in step with the server's destroy timer, and the
             // sprint edge is resent on change. Demo sessions have no net, so this
@@ -1555,7 +1595,7 @@ impl Sim {
             // `version_data`, the live block store) that Stages 3 and 4 own.
             // Mirroring those into resources to make a system possible now is
             // exactly the second-source-of-truth the migration exists to delete.
-            if self.phase == SessionPhase::Connected && self.is_live() {
+            if *self.session_phase() == SessionPhase::Connected && self.is_live() {
                 self.drive_interaction();
             }
         }
@@ -1972,7 +2012,7 @@ impl Sim {
         if self.last_sprinting_sent() == Some(sprinting) {
             return;
         }
-        let Some(entity_id) = self.local_entity_id else {
+        let Some(entity_id) = self.server_entity_id() else {
             return;
         };
         self.set_last_sprinting_sent(sprinting);
@@ -2567,12 +2607,12 @@ impl Sim {
             match update {
                 NetUpdate::Connecting => {
                     self.status = "connecting…".into();
-                    self.phase = SessionPhase::Connecting;
+                    self.set_phase(SessionPhase::Connecting);
                 }
                 NetUpdate::LoggedIn { entity_id } => {
                     self.status = format!("connected (entity {entity_id})");
-                    self.phase = SessionPhase::Connected;
-                    self.local_entity_id = Some(entity_id);
+                    self.set_phase(SessionPhase::Connected);
+                    self.set_server_entity_id(Some(entity_id));
                 }
                 NetUpdate::Chunk { x, z } => {
                     // §12.24 dirty-region signal: no block data travels on the
@@ -2712,15 +2752,17 @@ impl Sim {
                     // death packet); health reaching zero is not itself a session
                     // event and — contrary to the old status line — does not
                     // unload chunks.
-                    self.health = Some(health);
-                    self.food = Some(food);
+                    self.set_vitals(Vitals {
+                        health: Some(health),
+                        food: Some(food),
+                    });
                 }
                 NetUpdate::Experience {
                     progress,
                     level,
                     total,
                 } => {
-                    self.experience = Some((progress, level, total));
+                    self.set_xp(Some((progress, level, total)));
                 }
                 NetUpdate::Death => {
                     // Death is a state the shell rides through, not the end of the
@@ -2739,7 +2781,7 @@ impl Sim {
                         // the pre-fix behaviour that declared the session over and
                         // stranded the client on the death screen forever.
                         self.status = "server: died".into();
-                        self.phase = SessionPhase::Ended("player died".into());
+                        self.set_phase(SessionPhase::Ended("player died".into()));
                     }
                 }
                 NetUpdate::Respawned => {
@@ -2751,7 +2793,9 @@ impl Sim {
                     // site across the world to the new spawn (the same class of
                     // bug as the original far-spawn camera gap).
                     self.set_dead(false);
-                    self.respawn_count += 1;
+                    if let Some(mut count) = self.ecs.get_mut::<RespawnCount>(self.local) {
+                        count.0 += 1;
+                    }
                     self.status = "respawned".into();
                 }
                 NetUpdate::Sound {
@@ -2795,52 +2839,58 @@ impl Sim {
                     ambient,
                     show_icon,
                 } => {
-                    if self.local_entity_id == Some(entity_id) {
+                    if self.server_entity_id() == Some(entity_id) {
                         self.player_mut().effects.apply(&effect, amplifier);
                         if let Ok(id) =
                             lodestone_model::Identifier::new("minecraft", effect.as_str())
+                            && let Some(mut effects) =
+                                self.ecs.get_mut::<HudEffects>(self.local)
                         {
-                            self.hud_effects
-                                .apply(lodestone_game::effect::StatusEffect {
-                                    id,
-                                    amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
-                                    duration_ticks,
-                                    ambient,
-                                    show_particles: true,
-                                    show_icon,
-                                });
+                            effects.0.apply(lodestone_game::effect::StatusEffect {
+                                id,
+                                amplifier: u8::try_from(amplifier).unwrap_or(u8::MAX),
+                                duration_ticks,
+                                ambient,
+                                show_particles: true,
+                                show_icon,
+                            });
                         }
                     }
                 }
                 NetUpdate::EffectRemoved { entity_id, effect } => {
-                    if self.local_entity_id == Some(entity_id) {
+                    if self.server_entity_id() == Some(entity_id) {
                         self.player_mut().effects.remove(&effect);
                         if let Ok(id) =
                             lodestone_model::Identifier::new("minecraft", effect.as_str())
+                            && let Some(mut effects) =
+                                self.ecs.get_mut::<HudEffects>(self.local)
                         {
-                            self.hud_effects.remove(&id);
+                            effects.0.remove(&id);
                         }
                     }
                 }
-                NetUpdate::TabListEvent(event) => {
-                    let _ = self.tab_list.apply(&event);
-                }
-                NetUpdate::ScoreboardEvent(event) => {
-                    let _ = self.scoreboard.apply(&event);
-                }
+                // The tab-list and scoreboard arms are *deleted*, not moved:
+                // `lodestone_ecs::session`'s systems fold them inside the
+                // client, and `Sim::sidebar`/`player_rows` read that one copy
+                // through `NetClient`. Keeping a fold here as well is precisely
+                // the two-sources-of-truth Stage 3 exists to remove.
                 NetUpdate::TitleEvent(event) => {
-                    let _ = self.title.apply(&event);
+                    if let Some(mut title) = self.ecs.get_mut::<TitleOverlay>(self.local) {
+                        let _ = title.0.apply(&event);
+                    }
                 }
                 NetUpdate::ActionBar(text) => {
-                    self.action_bar.set(text);
+                    if let Some(mut bar) = self.ecs.get_mut::<ActionBarOverlay>(self.local) {
+                        bar.0.set(text);
+                    }
                 }
                 NetUpdate::Disconnected(reason) => {
                     self.status = format!("disconnected: {reason}");
-                    self.phase = SessionPhase::Ended(format!("disconnected: {reason}"));
+                    self.set_phase(SessionPhase::Ended(format!("disconnected: {reason}")));
                 }
                 NetUpdate::Error(e) => {
                     self.status = format!("net error: {e}");
-                    self.phase = SessionPhase::Ended(format!("net error: {e}"));
+                    self.set_phase(SessionPhase::Ended(format!("net error: {e}")));
                 }
             }
         }
@@ -4239,7 +4289,11 @@ mod tests {
             "setup: chat must be populated before the teardown can be observed clearing it"
         );
         assert_eq!(sim.health(), Some(12.0), "setup: health must be populated");
-        assert_eq!(sim.local_entity_id, Some(7), "setup: entity id must be populated");
+        assert_eq!(
+            sim.server_entity_id(),
+            Some(7),
+            "setup: entity id must be populated"
+        );
 
         sim.end_session();
 
@@ -4248,7 +4302,11 @@ mod tests {
         assert!(sim.recent_chat(10).is_empty(), "chat log must clear");
         assert_eq!(sim.health(), None, "health must clear");
         assert_eq!(sim.food(), None, "food must clear");
-        assert_eq!(sim.local_entity_id, None, "the local entity id must clear");
+        assert_eq!(
+            sim.server_entity_id(),
+            None,
+            "the local entity id must clear"
+        );
 
         // The negative control this test exists for: a fresh connect
         // afterward must reach `Connected` and must not carry the old
@@ -4260,7 +4318,7 @@ mod tests {
         feed2.send(NetUpdate::LoggedIn { entity_id: 9 }).unwrap();
         sim.poll_net();
         assert_eq!(*sim.session_phase(), SessionPhase::Connected);
-        assert_eq!(sim.local_entity_id, Some(9));
+        assert_eq!(sim.server_entity_id(), Some(9));
         assert!(
             sim.recent_chat(10).is_empty(),
             "the new session must not inherit the old one's chat"
@@ -4443,62 +4501,85 @@ mod tests {
         );
     }
 
+    /// The read-through the shell now depends on: it folds nothing itself, so
+    /// the rows must come out of the **client's** one `SessionTabList`.
+    ///
+    /// `ingest_session_event` runs the same `lodestone_ecs::session` systems the
+    /// real net thread runs (see `NetClient::session`); what this pins is the
+    /// chain `component → NetClient::tab_list → Sim::player_rows`, which is
+    /// exactly what the deleted `NetUpdate::TabListEvent` fold used to short.
     #[test]
-    fn player_list_events_fold_into_tab_overlay_rows() {
-        use crate::net::NetUpdate;
+    fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
         use lodestone_model::{ClientEvent, GameMode, PlayerListEntry, Text};
         use uuid::Uuid;
 
-        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let (net, _actions, _feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
 
         let alice = Uuid::from_u128(1);
         let bob = Uuid::from_u128(2);
-        feed.send(NetUpdate::TabListEvent(ClientEvent::PlayerListUpdate {
-            entries: vec![
-                PlayerListEntry {
-                    uuid: bob,
-                    name: Some("Bob".into()),
-                    game_mode: Some(GameMode::Spectator),
-                    latency: Some(30),
-                    display_name: None,
-                    listed: Some(true),
-                },
-                PlayerListEntry {
-                    uuid: alice,
-                    name: Some("Alice".into()),
-                    game_mode: Some(GameMode::Survival),
-                    latency: Some(12),
-                    display_name: Some(Text::literal("Alice the Brave")),
-                    listed: Some(true),
-                },
-            ],
-        }))
-        .unwrap();
-        sim.poll_net();
+        let ingest = |sim: &Sim, event: ClientEvent| {
+            sim.net().expect("net attached").ingest_session_event(event);
+        };
+        ingest(
+            &sim,
+            ClientEvent::PlayerListUpdate {
+                entries: vec![
+                    PlayerListEntry {
+                        uuid: bob,
+                        name: Some("Bob".into()),
+                        game_mode: Some(GameMode::Spectator),
+                        latency: Some(30),
+                        display_name: None,
+                        listed: Some(true),
+                    },
+                    PlayerListEntry {
+                        uuid: alice,
+                        name: Some("Alice".into()),
+                        game_mode: Some(GameMode::Survival),
+                        latency: Some(12),
+                        display_name: Some(Text::literal("Alice the Brave")),
+                        listed: Some(true),
+                    },
+                ],
+            },
+        );
 
         assert_eq!(
             sim.player_rows(),
             vec!["Alice the Brave  12ms".to_string(), "Bob  30ms".to_string(),],
-            "tab overlay rows must come from lodestone-game's folded TabList state"
+            "tab overlay rows must come from the client's folded TabList state"
         );
 
-        feed.send(NetUpdate::TabListEvent(ClientEvent::PlayerListRemove {
-            profile_ids: vec![alice],
-        }))
-        .unwrap();
-        sim.poll_net();
+        ingest(
+            &sim,
+            ClientEvent::PlayerListRemove {
+                profile_ids: vec![alice],
+            },
+        );
         assert_eq!(sim.player_rows(), vec!["Bob  30ms".to_string()]);
     }
 
+    /// The negative control for the pair above: with no connection there is no
+    /// session `World` to read, so both projections must be empty rather than
+    /// falling back to some shell-local copy — which is the assertion that
+    /// `Sim` really holds neither aggregate any more.
     #[test]
-    fn scoreboard_events_fold_into_sidebar_view() {
-        use crate::net::NetUpdate;
+    fn without_a_connection_the_shell_has_no_session_state_of_its_own() {
+        let sim = Sim::new(test_config());
+        assert!(sim.player_rows().is_empty());
+        assert!(sim.sidebar().is_none());
+        assert!(sim.boss_bars().is_empty());
+    }
+
+    /// The scoreboard twin of the tab-list read-through above.
+    #[test]
+    fn sidebar_rows_read_the_clients_one_folded_scoreboard() {
         use lodestone_model::event::{DisplaySlot, ObjectiveMode, ObjectiveRenderType};
         use lodestone_model::{ClientEvent, Text};
 
-        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let (net, _actions, _feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
 
@@ -4529,9 +4610,10 @@ mod tests {
                 number_format: None,
             },
         ] {
-            feed.send(NetUpdate::ScoreboardEvent(event)).unwrap();
+            sim.net()
+                .expect("net attached")
+                .ingest_session_event(event);
         }
-        sim.poll_net();
 
         let sidebar = sim.sidebar().expect("sidebar objective should be visible");
         assert_eq!(sidebar.title, "Kills");
@@ -4543,7 +4625,7 @@ mod tests {
         assert_eq!(
             rows,
             vec![("Alice the Brave", "7"), ("Bob", "3")],
-            "sidebar rows must come from lodestone-game's folded Scoreboard state"
+            "sidebar rows must come from the client's folded Scoreboard state"
         );
     }
 

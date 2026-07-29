@@ -2043,6 +2043,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "lodestone-game",
  "lodestone-model",
  "lodestone-physics",
  "parking_lot",

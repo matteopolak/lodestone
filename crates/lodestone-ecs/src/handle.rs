@@ -29,9 +29,15 @@ pub fn new_handle() -> EcsHandle {
 }
 
 /// An [`EcsHandle`] onto a `World` that carries [`crate::CorePlugin`]'s
-/// schedules and [`crate::ingest::IngestPlugin`]'s entity-ingest systems —
-/// i.e. a `World` that is *authoritative* over entity state and can be handed
+/// schedules, [`crate::ingest::IngestPlugin`]'s entity-ingest systems and
+/// [`crate::SessionPlugin`]'s session folds — i.e. a `World` that is
+/// *authoritative* over the network read-model and can be handed
 /// `ClientEvent`s.
+///
+/// The caller still has to [`crate::spawn_session`] the entity the session
+/// components hang off: a plugin registers *behaviour*, and which entity is
+/// "this client" is the owner's decision, exactly as
+/// [`crate::spawn_local_player`] is not done by `LocalPlayerPlugin`.
 ///
 /// The `App` is built only to run the plugins' `build` (which is the only way
 /// to register schedules and systems) and is then discarded, keeping the
@@ -48,6 +54,6 @@ pub fn new_handle() -> EcsHandle {
 #[must_use]
 pub fn new_ingest_handle() -> EcsHandle {
     let mut app = bevy_app::App::new();
-    app.add_plugins(crate::ingest::IngestPlugin);
+    app.add_plugins((crate::ingest::IngestPlugin, crate::SessionPlugin));
     Arc::new(RwLock::new(std::mem::take(app.world_mut())))
 }

@@ -103,13 +103,15 @@ use lodestone_client::{
     ServerAddress, Vec3, WorldDimensions,
 };
 use lodestone_game::menu::Menu;
+use lodestone_game::scoreboard::Scoreboard;
+use lodestone_game::tablist::TabList;
 use lodestone_model::Vec3f;
 use lodestone_model::event::SoundCategory;
 
 pub use lodestone_testsupport::unique_username;
 
 use crate::entities::EntitySnapshot;
-use crate::overlay::{BossBarView, Sidebar, boss_bars_from, sidebar_from};
+use crate::overlay::{BossBarView, boss_bars_from};
 
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
@@ -303,12 +305,6 @@ pub enum NetUpdate {
         /// Canonical effect id, namespace stripped.
         effect: String,
     },
-    /// A tab-list delta for the shell-owned [`lodestone_game::tablist::TabList`]
-    /// fold.
-    TabListEvent(ClientEvent),
-    /// A scoreboard delta for the shell-owned
-    /// [`lodestone_game::scoreboard::Scoreboard`] fold.
-    ScoreboardEvent(ClientEvent),
     /// A title/subtitle delta for the shell-owned
     /// [`lodestone_game::player_state::TitleState`] fold.
     TitleEvent(ClientEvent),
@@ -351,6 +347,16 @@ pub struct NetClient {
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
     handle: SharedHandle,
+    /// A stand-in for the client's session `World`, used only by this crate's
+    /// hermetic tests.
+    ///
+    /// It carries the **same** `lodestone_ecs::session` systems the real client
+    /// folds with, so a test can exercise the whole read path — `Sim::sidebar()`
+    /// → [`Self::scoreboard`] → the folded component — with no server. A test
+    /// *double*, not a second fold: there is one implementation of the fold and
+    /// this runs it. Compiled out of every production build.
+    #[cfg(test)]
+    session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 }
 
 impl NetClient {
@@ -386,6 +392,8 @@ impl NetClient {
             stop,
             thread: Some(thread),
             handle,
+            #[cfg(test)]
+            session: None,
         }
     }
 
@@ -498,19 +506,50 @@ impl NetClient {
         })
     }
 
-    /// The scoreboard sidebar to draw, folded from the live snapshot, or `None`
-    /// when no objective occupies the sidebar slot (or before login).
+    /// The folded scoreboard — the one copy in the process since Stage 3.
+    ///
+    /// Empty off a live connection, which draws no sidebar. The shell used to
+    /// keep its own `lodestone_game::scoreboard::Scoreboard` and fold
+    /// `NetUpdate::ScoreboardEvent` into it; that field and that `NetUpdate`
+    /// variant are gone, so this read is the only route to the state.
     #[must_use]
-    pub fn sidebar(&self) -> Option<Sidebar> {
-        self.handle
-            .get()
-            .and_then(|h| sidebar_from(&h.scoreboard()))
+    pub fn scoreboard(&self) -> Scoreboard {
+        #[cfg(test)]
+        if let Some((ecs, entity)) = &self.session {
+            return ecs
+                .read()
+                .get::<lodestone_ecs::SessionScoreboard>(*entity)
+                .map(|board| board.0.clone())
+                .unwrap_or_default();
+        }
+        self.handle.get().map(|h| h.scoreboard()).unwrap_or_default()
+    }
+
+    /// The folded tab list — likewise the one copy. Empty off a live connection.
+    #[must_use]
+    pub fn tab_list(&self) -> TabList {
+        #[cfg(test)]
+        if let Some((ecs, entity)) = &self.session {
+            return ecs
+                .read()
+                .get::<lodestone_ecs::SessionTabList>(*entity)
+                .map(|list| list.0.clone())
+                .unwrap_or_default();
+        }
+        self.handle.get().map(|h| h.tab_list()).unwrap_or_default()
     }
 
     /// The active boss bars to draw, folded from the live snapshot, in server
     /// render order. Empty when none are shown (or before login).
     #[must_use]
     pub fn boss_bars(&self) -> Vec<BossBarView> {
+        #[cfg(test)]
+        if let Some((ecs, entity)) = &self.session {
+            return ecs
+                .read()
+                .get::<lodestone_ecs::SessionBossBars>(*entity)
+                .map_or_else(Vec::new, |bars| boss_bars_from(&bars.0));
+        }
         self.handle
             .get()
             .map_or_else(Vec::new, |h| boss_bars_from(&h.boss_bars()))
@@ -564,8 +603,26 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            session: Some(test_session_world()),
         };
         (client, action_rx)
+    }
+
+    /// Fold one `ClientEvent` through the session systems of the test-only
+    /// stand-in `World`, exactly as the net thread's `SharedState::apply` does.
+    ///
+    /// One event per schedule run, deliberately — the same rule the real ingest
+    /// follows, so a test's cross-family ordering matches production's.
+    #[cfg(test)]
+    pub(crate) fn ingest_session_event(&self, event: ClientEvent) {
+        let Some((ecs, _)) = &self.session else {
+            return;
+        };
+        let mut world = ecs.write();
+        world
+            .resource_mut::<lodestone_ecs::ingest::IngestQueue>()
+            .push(event);
+        world.run_schedule(lodestone_ecs::NetIngest);
     }
 
     /// Like [`loopback`](Self::loopback) but also hands back the inbound
@@ -583,9 +640,19 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
+            session: Some(test_session_world()),
         };
         (client, action_rx, tx)
     }
+}
+
+/// A `World` carrying `SessionPlugin`'s folds plus one session entity — the
+/// net thread's shape, minus the net thread. See [`NetClient::session`].
+#[cfg(test)]
+fn test_session_world() -> (lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity) {
+    let ecs = lodestone_ecs::new_ingest_handle();
+    let entity = lodestone_ecs::spawn_session(&mut ecs.write());
+    (ecs, entity)
 }
 
 impl Drop for NetClient {
@@ -863,14 +930,12 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             entity_id,
             effect: effect.path().to_string(),
         },
-        event @ (ClientEvent::PlayerListUpdate { .. } | ClientEvent::PlayerListRemove { .. }) => {
-            NetUpdate::TabListEvent(event)
-        }
-        event @ (ClientEvent::ObjectiveUpdate { .. }
-        | ClientEvent::DisplayObjective { .. }
-        | ClientEvent::ScoreUpdate { .. }
-        | ClientEvent::ScoreReset { .. }
-        | ClientEvent::TeamUpdate { .. }) => NetUpdate::ScoreboardEvent(event),
+        // The tab-list and scoreboard families used to be forwarded here as
+        // `NetUpdate::{TabListEvent, ScoreboardEvent}` for the shell to fold a
+        // *second* time. Since Stage 3 of `docs/bevy-migration.md` the client's
+        // own `NetIngest` systems are the only fold and the shell reads the
+        // result through `NetClient::{scoreboard, tab_list}`, so forwarding them
+        // would be re-creating the duplicate this stage deleted.
         event @ (ClientEvent::TitleText { .. }
         | ClientEvent::SubtitleText { .. }
         | ClientEvent::TitlesAnimation { .. }
