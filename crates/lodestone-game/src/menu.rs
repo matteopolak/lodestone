@@ -82,6 +82,9 @@ impl CraftLayout {
 
 /// Native size of the player inventory container (hotbar+main+armour+offhand).
 pub const PLAYER_NATIVE_SIZE: usize = 41;
+/// Menu index of the 2×2 crafting result on the player's own inventory screen
+/// (vanilla `InventoryMenu.RESULT_SLOT`).
+pub const PLAYER_RESULT_SLOT: usize = 0;
 /// Native index of the off-hand slot within the player inventory.
 pub const OFFHAND_NATIVE: usize = 40;
 /// Sentinel slot index for a click outside any slot (drop).
@@ -461,9 +464,32 @@ impl Menu {
 
     /// Moves a stack into the `[start, end)` menu-slot range, merging into
     /// matching stacks first then filling empties, mirroring vanilla
-    /// `AbstractContainerMenu.moveItemStackTo`.
+    /// `AbstractContainerMenu.moveItemStackTo`
+    /// (`AbstractContainerMenu.java:636-697`).
     ///
     /// `moving` is drained in place. Returns whether anything changed.
+    ///
+    /// Three details are transcribed deliberately and all three look like bugs:
+    ///
+    /// * **The merge pass does not consult `mayPlace`; only the empty-slot pass
+    ///   does.** Compare `AbstractContainerMenu.java:647` (no check) with `:682`
+    ///   (`target.isEmpty() && slot.mayPlace(itemStack)`). So a shift-click may
+    ///   *top up* an existing stack in a slot that would refuse the same item
+    ///   arriving into an empty cell. Adding the symmetric check "for
+    ///   consistency" changes observable behaviour and desynchronises from the
+    ///   server.
+    /// * **The merge pass is gated on `moving.isStackable()`** (`:645`), not on
+    ///   the per-slot cap. An unstackable item skips merging entirely and goes
+    ///   straight to the first empty slot.
+    /// * **The merge cap is measured against the stack already in the slot**
+    ///   (`slot.getMaxStackSize(target)`, `:650`), while the empty-slot cap is
+    ///   measured against the incoming stack (`slot.getMaxStackSize(itemStack)`,
+    ///   `:683`). They agree whenever the two are the same item, which the merge
+    ///   pass has already established, so this is only a difference in what the
+    ///   code *says* — but it is what the source says.
+    ///
+    /// The empty-slot pass stops after **one** placement (`break` at `:687`),
+    /// which is why a caller that must move more than one stack's worth loops.
     pub fn move_item_stack_to(
         &mut self,
         moving: &mut ItemStack,
@@ -563,6 +589,26 @@ impl Menu {
         Some(template)
     }
 
+    /// Quick-move for a plain container, mirroring vanilla `ChestMenu`
+    /// (`ChestMenu.java:94-109`): container slots go out to the player
+    /// inventory **backwards** (hotbar first), player slots come in forwards.
+    ///
+    /// This one order covers more of the game than its name suggests.
+    /// `HopperMenu.java:36-58` and `DispenserMenu.java:45-70` are the same
+    /// three lines with a different constant, and `ShulkerBoxMenu.java:40-62`
+    /// likewise — so chests, barrels, ender chests, every `generic_9xN`,
+    /// hoppers, dispensers, droppers and shulker boxes all share it.
+    ///
+    /// What it does **not** cover is the menus that route by *item kind* rather
+    /// than by region: `AbstractFurnaceMenu.java:87-133` sends smeltables to
+    /// slot 0 and fuel to slot 1 before falling back to the main↔hotbar hop,
+    /// and `BrewingStandMenu.java:63-99` does the same for blaze powder,
+    /// ingredients and potions. Neither is modelled: both need a data table we
+    /// do not have (the fuel-value registry and the cooking-recipe input set),
+    /// and inventing one would be a guess. A furnace therefore predicts a
+    /// shift-click into container slot 0 where vanilla would have picked slot 1
+    /// or done nothing, and the server corrects it one round trip later. See
+    /// [`crate::menus::Menus`] for where the layout would be selected.
     fn quick_move_generic(
         &mut self,
         menu_index: usize,
@@ -579,17 +625,26 @@ impl Menu {
         }
     }
 
-    /// Quick-move for a crafting-table menu, mirroring vanilla `CraftingMenu`:
+    /// Quick-move for a crafting-table menu, mirroring vanilla `CraftingMenu`
+    /// (`CraftingMenu.java:107-152`):
     ///
     /// * result slot → player inventory, **filling from the back**;
     /// * grid cell → player inventory, forwards;
-    /// * player inventory → the **grid** (`first_input..`), never the result.
+    /// * player inventory → the **grid** (`first_input..`), never the result;
+    ///   and only if the grid is full does it fall back to the main↔hotbar hop.
     ///
-    /// Note the last case: the destination is the grid range, not the whole
+    /// Note the third case: the destination is the grid range, not the whole
     /// container range. Routing it through [`quick_move_generic`] would aim at
     /// `0..container_size`, which includes the result slot — harmless only
     /// because `Slot::may_place` rejects an [`Output`](SlotKind::Output) slot,
     /// and silently wrong the moment that slot kind is lost.
+    ///
+    /// This is where a crafting table and the player's own 2×2 genuinely
+    /// diverge, and the difference is not cosmetic: `CraftingMenu` tries the
+    /// grid first (`CraftingMenu.java:123`), so shift-clicking planks in a
+    /// crafting table *loads the grid*. `InventoryMenu` has no such branch —
+    /// shift-clicking in the player screen never fills the 2×2 — so
+    /// [`quick_move_player`](Self::quick_move_player) must not grow one.
     fn quick_move_crafting(
         &mut self,
         menu_index: usize,
@@ -617,35 +672,95 @@ impl Menu {
         }
     }
 
+    /// Quick-move for the player's own inventory screen, mirroring vanilla
+    /// `InventoryMenu.quickMoveStack` (`InventoryMenu.java:100-152`).
+    ///
+    /// The branch **chain** is the specification, not the region list, and its
+    /// order is the part that is easy to get wrong. Vanilla's chain is:
+    ///
+    /// | # | condition | destination |
+    /// |---|-----------|-------------|
+    /// | 1 | `slotIndex == 0` (result) | `9..45` **backwards** |
+    /// | 2 | `1..5` (craft grid) | `9..45` forwards |
+    /// | 3 | `5..9` (armour) | `9..45` forwards |
+    /// | 4 | item is humanoid armour **and** its armour slot is empty | that one slot |
+    /// | 5 | item is off-hand equipment **and** slot 45 is empty | slot 45 |
+    /// | 6 | `9..36` (main storage) | `36..45` (hotbar) |
+    /// | 7 | `36..45` (hotbar) | `9..36` (main storage) |
+    /// | 8 | anything else (slot 45) | `9..45` forwards |
+    ///
+    /// Two orderings here are load-bearing:
+    ///
+    /// * **The auto-equip branches (4, 5) come *before* the main/hotbar hop.**
+    ///   Shift-clicking a helmet out of main storage equips it; it does *not*
+    ///   go to the hotbar. Putting the hop first is the plausible-looking
+    ///   arrangement and is wrong.
+    /// * **They are reached from *every* source slot at or after 9**, which
+    ///   includes menu slot 45, the off-hand. A helmet sitting in the off-hand
+    ///   slot shift-clicks up onto the head, not down into storage. The
+    ///   previous shape of this function tested for an equip target only inside
+    ///   the `9..36` and `36..45` arms, so slot 45 fell through to branch 8 —
+    ///   a real divergence, and the reason this reads as vanilla's chain rather
+    ///   than as a `match` over regions.
+    ///
+    /// Only slot 0's `player.drop(stack, false)` tail is not modelled; see
+    /// [`quick_move`](Self::quick_move) for why.
     fn quick_move_player(&mut self, menu_index: usize, stack: &mut ItemStack) -> bool {
-        // Regions: 9..=35 main (menu 9..36 hotbar? no) — the *menu* layout is
-        // result0, craft1-4, armour5-8, main9-35, hotbar36-44, offhand45.
+        // 1 — the result slot empties towards the hotbar first.
+        if menu_index == PLAYER_RESULT_SLOT {
+            return self.move_item_stack_to(stack, 9, 45, true);
+        }
+        // 2, 3 — crafting grid (1..5) and armour (5..9) fall out into storage.
+        if menu_index < 9 {
+            return self.move_item_stack_to(stack, 9, 45, false);
+        }
+        // 4, 5 — auto-equip, from any source at or after 9 including slot 45.
+        if let Some(target) = self.empty_equip_target(stack) {
+            return self.move_item_stack_to(stack, target, target + 1, false);
+        }
+        // 6, 7, 8 — the main-storage <-> hotbar hop, off-hand out to storage.
         match menu_index {
-            0 => self.move_item_stack_to(stack, 9, 45, true), // result -> inv, reversed
-            1..=8 => self.move_item_stack_to(stack, 9, 45, false), // craft/armour -> inv
-            9..=35 => {
-                // main storage: try armour/offhand auto-equip first, else hotbar
-                if let Some(target_menu) = self.empty_equip_target(stack) {
-                    self.move_item_stack_to(stack, target_menu, target_menu + 1, false)
-                } else {
-                    self.move_item_stack_to(stack, 36, 45, false)
-                }
-            }
-            36..=44 => {
-                if let Some(target_menu) = self.empty_equip_target(stack) {
-                    self.move_item_stack_to(stack, target_menu, target_menu + 1, false)
-                } else {
-                    self.move_item_stack_to(stack, 9, 36, false)
-                }
-            }
+            9..36 => self.move_item_stack_to(stack, 36, 45, false),
+            36..45 => self.move_item_stack_to(stack, 9, 36, false),
             _ => self.move_item_stack_to(stack, 9, 45, false),
         }
     }
 
     /// Returns the menu-slot index of the empty armour/off-hand slot a stack
-    /// should auto-equip into, based on its `minecraft:equippable` component.
-    /// Returns the menu-slot index of the empty armour/off-hand slot a stack
-    /// should auto-equip into, based on its `minecraft:equippable` component.
+    /// should auto-equip into, i.e. vanilla's branches 4 and 5 of
+    /// `InventoryMenu.quickMoveStack` (`InventoryMenu.java:120-128`).
+    ///
+    /// Vanilla derives the position from `player.getEquipmentSlotForItem`, which
+    /// is `itemStack.get(DataComponents.EQUIPPABLE).slot()`
+    /// (`LivingEntity.java:3881-3884`), and maps it to a menu index as
+    /// `8 - eqSlot.getIndex()` — head 3 → 5, chest 2 → 6, legs 1 → 7, feet 0 → 8
+    /// — with the off-hand at 45. That is the mapping below.
+    ///
+    /// One caveat for whoever wires the census: vanilla gates branch 4 on
+    /// `eqSlot.getType() == EquipmentSlot.Type.HUMANOID_ARMOR`
+    /// (`InventoryMenu.java:120`), which excludes `BODY` — wolf and horse
+    /// armour. [`crate::container::EquipmentSlot::from_name`] currently folds
+    /// `"body"` into [`Chest`](EquipmentSlot::Chest), so once the component is
+    /// populated a wolf-armour shift-click would try to equip a chestplate slot.
+    /// `"body"` needs its own variant (or to map to `None`) before that happens.
+    ///
+    /// # This is currently unreachable in live play
+    ///
+    /// `minecraft:equippable` is a **prototype** component: like
+    /// `minecraft:tool` (see [`lodestone_model::ToolPatch`]'s docs and
+    /// `docs/tool-mining.md`), vanilla puts it in the item's built-in component
+    /// map, so a clientbound stack — which carries only the *patch* — never
+    /// mentions it. Nothing in the tree writes it, so
+    /// [`crate::container::equippable_slot`] returns `None` for every stack that
+    /// came off the wire and this function always returns `None`.
+    ///
+    /// The same absence disables [`Slot::may_place`] for an
+    /// [`Armor`](SlotKind::Armor) slot outright, so no click of any kind can
+    /// currently put armour on. The fix is an item→equippable census in the
+    /// version crate, exactly like `generated/tools.rs`; it is not a change to
+    /// the wire decoder, because the wire never carries the component. Until it
+    /// lands, both this branch and armour placement are dead code and the
+    /// tests below build the component by hand to exercise them.
     fn empty_equip_target(&self, stack: &ItemStack) -> Option<usize> {
         let eq = crate::container::equippable_slot(stack)?;
         let menu_index = match eq {
@@ -684,12 +799,27 @@ impl Menu {
         &self.quick_craft_slots
     }
 
+    /// Records a slot painted by an in-progress drag, **de-duplicating**.
+    ///
+    /// Vanilla's accumulator is `Set<Slot> quickcraftSlots = Sets.newHashSet()`
+    /// (`AbstractContainerMenu.java:62`) and the paint site is a bare
+    /// `.add(slot)` (`:358`), so dragging back and forth across one slot records
+    /// it once. That set's `size()` is then the divisor for an even split
+    /// (`:386`), so a `Vec` that pushed duplicates would divide by too large a
+    /// number and under-fill every slot — the classic off-by-N. The order is
+    /// kept insertion-stable here where vanilla's is a hash order; that is safe
+    /// because the per-slot amount is `count / size`, a constant, and the loop
+    /// never mutates the cursor it reads (`:378`), so no ordering is observable.
     pub(crate) fn push_quick_craft_slot(&mut self, menu_index: usize) {
         if !self.quick_craft_slots.contains(&menu_index) {
             self.quick_craft_slots.push(menu_index);
         }
     }
 
+    /// Vanilla `resetQuickCraft` (`AbstractContainerMenu.java:718-721`): clears
+    /// the status and the painted set, but deliberately **not**
+    /// `quick_craft_type`, which the single-slot degradation path reads back
+    /// after the reset (`:364-365`).
     pub(crate) fn reset_quick_craft(&mut self) {
         self.quick_craft_status = 0;
         self.quick_craft_slots.clear();
@@ -714,4 +844,645 @@ fn order(start: usize, end: usize, backwards: bool) -> Vec<usize> {
 
 fn normalize_opt(stack: Option<ItemStack>) -> Option<ItemStack> {
     stack.and_then(crate::item::normalize)
+}
+
+/// Negative controls for the container click semantics.
+///
+/// The positive cases live in `tests/click_machine.rs`. What is here is the
+/// other half that `CLAUDE.md`'s evidence standard demands: *"assertions of an
+/// absence need a control proving the detector works"*. Every test below that
+/// asserts nothing happened is paired with a **control** which differs by the
+/// one thing the rule turns on and which must observably succeed — so a
+/// regression that makes the mechanism fire always, or never, is caught either
+/// way rather than being satisfied vacuously by a menu that simply refuses
+/// everything.
+///
+/// Every expected value is hand-derived from the 26.2 decompile under
+/// `.cache/mc/26.2/src/net/minecraft/world/inventory/`, cited per test. None is
+/// derived by running our own implementation.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::click::{
+        Click, ContainerInput, PlayerCtx, drag_header, drag_type, quick_craft_mask,
+    };
+    use crate::item::{ComponentValue, ItemComponents};
+    use lodestone_model::{Identifier, Text};
+
+    fn id(name: &str) -> Identifier {
+        name.parse().expect("valid identifier")
+    }
+
+    fn stack(name: &str, count: i32) -> ItemStack {
+        ItemStack::new(id(name), count)
+    }
+
+    /// The same item carrying a `minecraft:custom_name`, i.e. same item,
+    /// *different* components — the pair vanilla `isSameItemSameComponents` must
+    /// refuse to merge. The payload shape matches what
+    /// [`ItemStack::from`] produces for a wire stack that carried a custom name,
+    /// so these are the components an adapter would really hand us.
+    fn named(name: &str, count: i32, label: &str) -> ItemStack {
+        let mut components = ItemComponents::new();
+        components.insert(
+            id("minecraft:custom_name"),
+            ComponentValue::Text(Text::literal(label)),
+        );
+        ItemStack::with_components(id(name), count, components)
+    }
+
+    /// A stack whose `minecraft:equippable` names an armour position. Hand-built
+    /// because nothing populates this component from the wire yet — see
+    /// [`Menu::empty_equip_target`].
+    fn equippable(name: &str, slot: &str) -> ItemStack {
+        let mut components = ItemComponents::new();
+        components.insert(
+            id("minecraft:equippable"),
+            ComponentValue::Str(slot.to_string()),
+        );
+        ItemStack::with_components(id(name), 1, components)
+    }
+
+    fn count_at(menu: &Menu, index: usize) -> Option<i32> {
+        menu.slot_item(index).map(ItemStack::count)
+    }
+
+    fn carried_count(menu: &Menu) -> Option<i32> {
+        menu.carried().map(ItemStack::count)
+    }
+
+    fn drag(slot: i32, header: i32, kind: i32) -> Click {
+        Click {
+            slot,
+            button: quick_craft_mask(header, kind),
+            input: ContainerInput::QuickCraft,
+        }
+    }
+
+    /// Total item count across every menu slot plus the cursor. A drag must
+    /// conserve it exactly; an off-by-one in the even split shows up here even
+    /// when every individual slot assertion is written to match the bug.
+    fn total_items(menu: &Menu) -> i32 {
+        (0..menu.slot_count())
+            .filter_map(|i| menu.slot_item(i))
+            .map(ItemStack::count)
+            .sum::<i32>()
+            + menu.carried().map_or(0, ItemStack::count)
+    }
+
+    // --- QUICK_CRAFT: drags that must reset and commit nothing ---
+
+    /// `AbstractContainerMenu.java:337-339`. The header sequence is checked
+    /// against the *previous* status: `(expected != 1 || header != 2) &&
+    /// expected != header` resets. A bare `END` arrives with `expected == 0` and
+    /// `header == 2`, so `(true || false) && (0 != 2)` holds and the drag is
+    /// reset — nothing is placed and the cursor is untouched.
+    #[test]
+    fn bare_drag_end_without_start_commits_nothing() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 9)));
+
+        // No START, no ADD: just the commit packet.
+        drag(OUTSIDE_SLOT, drag_header::END, drag_type::EVEN)
+            .apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(count_at(&menu, 0), None, "no slot may be written");
+        assert_eq!(
+            carried_count(&menu),
+            Some(9),
+            "the cursor must be returned whole"
+        );
+    }
+
+    /// The control for [`bare_drag_end_without_start_commits_nothing`]: the same
+    /// three slots, the same cursor, but a well-formed START/ADD…/END sequence
+    /// must place. Without this, a `Menu` that had lost the ability to commit a
+    /// drag at all would pass the negative test.
+    #[test]
+    fn control_well_formed_drag_does_commit() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 9)));
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 2], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), Some(3));
+        assert_eq!(count_at(&menu, 1), Some(3));
+        assert_eq!(count_at(&menu, 2), Some(3));
+        assert_eq!(carried_count(&menu), None);
+    }
+
+    /// `AbstractContainerMenu.java:400-401`: *any* non-`QUICK_CRAFT` click while
+    /// a drag is armed takes the `else if (this.quickcraftStatus != 0)` branch,
+    /// which resets and falls out of `doClick` entirely. So the interrupting
+    /// click is **also** swallowed — it does not pick anything up — and the
+    /// subsequent `END` finds an empty painted set.
+    #[test]
+    fn ordinary_click_mid_drag_resets_and_is_itself_swallowed() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(5, Some(stack("minecraft:dirt", 8)));
+        menu.set_carried(Some(stack("minecraft:stone", 9)));
+        let ctx = PlayerCtx::survival();
+
+        drag(OUTSIDE_SLOT, drag_header::START, drag_type::EVEN).apply(&mut menu, ctx);
+        drag(0, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx);
+        drag(1, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx);
+
+        // The interrupt. A left-click on an occupied slot would normally swap.
+        Click::left(5).apply(&mut menu, ctx);
+        assert_eq!(
+            count_at(&menu, 5),
+            Some(8),
+            "the interrupting click must be swallowed, not applied"
+        );
+        assert_eq!(carried_count(&menu), Some(9));
+
+        // And the commit that follows has nothing left to commit.
+        drag(OUTSIDE_SLOT, drag_header::END, drag_type::EVEN).apply(&mut menu, ctx);
+        assert_eq!(count_at(&menu, 0), None);
+        assert_eq!(count_at(&menu, 1), None);
+        assert_eq!(carried_count(&menu), Some(9));
+    }
+
+    /// The control for the interrupt: with the drag *not* armed, the identical
+    /// left-click on slot 5 does swap cursor and slot. This is what proves the
+    /// assertion above is observing the reset rather than a menu where clicking
+    /// never worked.
+    #[test]
+    fn control_same_click_applies_when_no_drag_is_armed() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(5, Some(stack("minecraft:dirt", 8)));
+        menu.set_carried(Some(stack("minecraft:stone", 9)));
+        Click::left(5).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(
+            menu.slot_item(5).map(|s| s.item().path().to_string()),
+            Some("stone".into())
+        );
+        assert_eq!(carried_count(&menu), Some(8));
+    }
+
+    /// `AbstractContainerMenu.java:341-342`: an empty cursor at any stage resets
+    /// the drag. The paint stage therefore cannot record slots against nothing,
+    /// and the commit cannot invent items.
+    #[test]
+    fn drag_with_empty_cursor_commits_nothing() {
+        let mut menu = Menu::generic(27);
+        // Cursor deliberately empty.
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 2], PlayerCtx::survival());
+        assert_eq!(total_items(&menu), 0);
+    }
+
+    /// `AbstractContainerMenu.java:356` (paint) and `:382` (commit). The paint
+    /// guard is `carried.getCount() > quickcraftSlots.size()` — strictly greater
+    /// — so a cursor of 2 can only ever paint 2 slots: the third `ADD` sees
+    /// `2 > 2` and is dropped. The even split is then over 2, not 3.
+    ///
+    /// This is the off-by-one the parent task called the classic bug, stated as
+    /// an assertion: a naive implementation paints all three and divides 2 by 3,
+    /// placing zero everywhere.
+    #[test]
+    fn paint_stops_when_the_cursor_runs_out_of_items() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 2)));
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 2], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), Some(1));
+        assert_eq!(count_at(&menu, 1), Some(1));
+        assert_eq!(count_at(&menu, 2), None, "the third slot is never painted");
+        assert_eq!(carried_count(&menu), None);
+        assert_eq!(total_items(&menu), 2, "a drag conserves items exactly");
+    }
+
+    /// `AbstractContainerMenu.java:386`. The per-slot amount is clamped by
+    /// `min(source.getMaxStackSize(), slot.getMaxStackSize(source))` **after**
+    /// adding what the slot already holds, and the shortfall stays on the
+    /// cursor. Slot 0 starts at 62 of a 64 cap, so it can only take 2 of its
+    /// nominal 5; the other 3 must come back.
+    #[test]
+    fn even_split_clamps_at_the_slot_cap_and_returns_the_remainder() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 62)));
+        menu.set_carried(Some(stack("minecraft:stone", 10)));
+        menu.perform_drag(drag_type::EVEN, &[0, 1], PlayerCtx::survival());
+        // place count = 10 / 2 = 5. Slot 0: min(5 + 62, 64) = 64, so +2.
+        assert_eq!(count_at(&menu, 0), Some(64));
+        // Slot 1: min(5 + 0, 64) = 5.
+        assert_eq!(count_at(&menu, 1), Some(5));
+        // 10 - 2 - 5 = 3 back on the cursor.
+        assert_eq!(carried_count(&menu), Some(3));
+        assert_eq!(total_items(&menu), 72);
+    }
+
+    /// `AbstractContainerMenu.java:62` — the painted accumulator is a
+    /// `HashSet`, so a slot dragged over twice counts once. With `[0, 1, 0, 1]`
+    /// the divisor must be 2, not 4: 8 items becomes 4 each, not 2 each.
+    #[test]
+    fn repainting_a_slot_does_not_inflate_the_divisor() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 8)));
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 0, 1], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), Some(4));
+        assert_eq!(count_at(&menu, 1), Some(4));
+        assert_eq!(carried_count(&menu), None);
+    }
+
+    /// `AbstractContainerMenu.java:345` → `isValidQuickcraftType`
+    /// (`:715-716`): type 2 requires `player.hasInfiniteMaterials()`, so a
+    /// middle-drag in survival resets at the START stage and commits nothing.
+    #[test]
+    fn clone_drag_resets_in_survival() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 64)));
+        menu.perform_drag(drag_type::CLONE, &[0, 1], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), None);
+        assert_eq!(count_at(&menu, 1), None);
+        assert_eq!(carried_count(&menu), Some(64));
+    }
+
+    /// The control: the identical sequence with infinite materials places a full
+    /// stack per slot (`getQuickCraftPlaceCount` case 2, `:733`).
+    #[test]
+    fn control_clone_drag_commits_in_creative() {
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stack("minecraft:stone", 64)));
+        menu.perform_drag(drag_type::CLONE, &[0, 1], PlayerCtx::creative());
+        assert_eq!(count_at(&menu, 0), Some(64));
+        assert_eq!(count_at(&menu, 1), Some(64));
+    }
+
+    /// `canItemQuickReplace` (`AbstractContainerMenu.java:722-727`) is applied at
+    /// both the paint and commit stages, and it refuses an occupied slot holding
+    /// a different item. Slot 1 holds dirt, so it is never painted and the split
+    /// is over the two remaining slots.
+    #[test]
+    fn drag_skips_a_slot_holding_a_different_item() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(1, Some(stack("minecraft:dirt", 1)));
+        menu.set_carried(Some(stack("minecraft:stone", 9)));
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 2], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), Some(4));
+        assert_eq!(
+            menu.slot_item(1).map(|s| s.item().path().to_string()),
+            Some("dirt".into()),
+            "the foreign stack must be untouched"
+        );
+        assert_eq!(count_at(&menu, 2), Some(4));
+        assert_eq!(carried_count(&menu), Some(1));
+    }
+
+    /// The result slot rejects placement (`ResultSlot.mayPlace` returns `false`,
+    /// `ResultSlot.java:24-27`), and both drag stages test `slot.mayPlace`
+    /// (`:355`, `:381`). A drag across a crafting grid that clips the result
+    /// slot must skip it and divide over the grid cells only.
+    #[test]
+    fn drag_never_paints_the_result_slot() {
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_carried(Some(stack("minecraft:stone", 4)));
+        // Slot 0 is the result; 1 and 2 are grid cells.
+        menu.perform_drag(drag_type::EVEN, &[0, 1, 2], PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), None, "the result slot is take-only");
+        assert_eq!(count_at(&menu, 1), Some(2));
+        assert_eq!(count_at(&menu, 2), Some(2));
+        assert_eq!(carried_count(&menu), None);
+    }
+
+    // --- Merging: refused for differing components ---
+
+    /// `AbstractContainerMenu.java:452` gates the deposit on
+    /// `ItemStack.isSameItemSameComponents(clicked, carried)`. Two stacks of the
+    /// same item with different components must **swap**, not merge — the
+    /// `:455` branch — so neither count changes and the identities exchange.
+    #[test]
+    fn pickup_refuses_to_merge_stacks_with_differing_components() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(named("minecraft:diamond_sword", 1, "Excalibur")));
+        menu.set_carried(Some(stack("minecraft:diamond_sword", 1)));
+
+        Click::left(0).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(count_at(&menu, 0), Some(1), "no merge to 2");
+        assert_eq!(carried_count(&menu), Some(1), "no merge to 0");
+        assert!(
+            menu.slot_item(0).unwrap().components().is_empty(),
+            "the plain stack is now in the slot: this was a swap"
+        );
+        assert!(
+            !menu.carried().unwrap().components().is_empty(),
+            "the named stack is now on the cursor"
+        );
+    }
+
+    /// The control: identical components *do* merge, on the `:452-454` branch.
+    /// Without it the test above passes for a `Menu` that never merges at all.
+    #[test]
+    fn control_pickup_merges_stacks_with_identical_components() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(named("minecraft:stone", 1, "Rock")));
+        menu.set_carried(Some(named("minecraft:stone", 1, "Rock")));
+        Click::left(0).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 0), Some(2));
+        assert_eq!(carried_count(&menu), None);
+    }
+
+    /// `moveItemStackTo`'s merge pass tests the same predicate
+    /// (`AbstractContainerMenu.java:648`), so a shift-click must not stack a
+    /// named item onto a plain one either. It falls through to the empty-slot
+    /// pass and lands in the first free cell instead.
+    #[test]
+    fn quick_move_refuses_to_merge_differing_components() {
+        let mut menu = Menu::generic(27);
+        // Container slot 0 holds the named stack to be shift-moved out.
+        menu.set_slot_item(0, Some(named("minecraft:stone", 4, "Rock")));
+        // A plain stack of the same item sits in the *last* player slot, which is
+        // where a backwards merge pass would reach first.
+        let last = menu.slot_count() - 1;
+        menu.set_slot_item(last, Some(stack("minecraft:stone", 10)));
+
+        Click::shift(0).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(
+            count_at(&menu, last),
+            Some(10),
+            "the plain stack must not absorb the named one"
+        );
+        assert_eq!(
+            count_at(&menu, last - 1),
+            Some(4),
+            "the named stack takes the next empty slot instead"
+        );
+    }
+
+    /// The control: make the destination stack's components match and the same
+    /// shift-click merges into it rather than taking a fresh slot.
+    #[test]
+    fn control_quick_move_merges_identical_components() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(named("minecraft:stone", 4, "Rock")));
+        let last = menu.slot_count() - 1;
+        menu.set_slot_item(last, Some(named("minecraft:stone", 10, "Rock")));
+
+        Click::shift(0).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(count_at(&menu, last), Some(14));
+        assert_eq!(count_at(&menu, last - 1), None);
+    }
+
+    // --- PICKUP_ALL: the maxed-slot skip ---
+
+    /// `AbstractContainerMenu.java:541-548`. The gather runs **two** passes over
+    /// the slot list, and pass 0 skips any slot whose stack is already at its
+    /// own max (`itemStack.getCount() != itemStack.getMaxStackSize()`). So a
+    /// full stack is only drawn from once every partial one has been consumed.
+    ///
+    /// Cursor 4 + partials 30 and 20 = 54; the remaining 10 then comes off the
+    /// full 64, leaving 54 behind. An implementation with a single pass would
+    /// hit the full stack first and leave the partials untouched.
+    #[test]
+    fn pickup_all_defers_a_maxed_slot_to_the_second_pass() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 64))); // maxed, first in order
+        menu.set_slot_item(1, Some(stack("minecraft:stone", 30)));
+        menu.set_slot_item(2, Some(stack("minecraft:stone", 20)));
+        menu.set_carried(Some(stack("minecraft:stone", 4)));
+
+        // Gather is triggered on an empty slot (slot 3), as the real double-click
+        // does once the first click has lifted the stack onto the cursor.
+        Click::double(3).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(carried_count(&menu), Some(64));
+        assert_eq!(count_at(&menu, 1), None, "partials are drained first");
+        assert_eq!(count_at(&menu, 2), None);
+        assert_eq!(
+            count_at(&menu, 0),
+            Some(54),
+            "the maxed slot is only tapped in pass 1, for the shortfall"
+        );
+    }
+
+    /// The control for the skip: one item short of max, the *same* slot is drawn
+    /// from in pass 0. This is what makes the assertion above about ordering
+    /// meaningful rather than a statement that slot 0 is never touched.
+    #[test]
+    fn control_pickup_all_takes_a_near_max_slot_in_the_first_pass() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 63))); // one short of max
+        menu.set_slot_item(1, Some(stack("minecraft:stone", 30)));
+        menu.set_carried(Some(stack("minecraft:stone", 4)));
+
+        Click::double(3).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(carried_count(&menu), Some(64));
+        assert_eq!(
+            count_at(&menu, 0),
+            Some(3),
+            "pass 0 drained 60 of the 63 before reaching slot 1"
+        );
+        assert_eq!(count_at(&menu, 1), Some(30), "slot 1 was never needed");
+    }
+
+    /// `AbstractContainerMenu.java:544` requires
+    /// `this.canTakeItemForPickAll(carried, target)`, which every result-bearing
+    /// menu overrides to exclude its own result container — `CraftingMenu.java:156`,
+    /// `InventoryMenu.java:164`, `SmithingMenu.java:129`, `StonecutterMenu.java:175`
+    /// and `CartographyTableMenu.java:144` all carry the identical
+    /// `target.container != this.resultSlots` line.
+    ///
+    /// Vacuuming the result slot would craft an item the player never asked for
+    /// *and* silently charge the grid for it, because taking from the result runs
+    /// `ResultSlot.onTake` (`ResultSlot.java:87`).
+    #[test]
+    fn pickup_all_never_drains_the_crafting_result() {
+        let mut menu = Menu::crafting(3, 3);
+        // A result the server has pushed, and a matching stack in the inventory.
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 8)));
+        let last = menu.slot_count() - 1;
+        menu.set_slot_item(last, Some(stack("minecraft:stone", 5)));
+        // Grid cells that on_take would decrement if the result were taken.
+        menu.set_slot_item(1, Some(stack("minecraft:cobblestone", 3)));
+        menu.set_carried(Some(stack("minecraft:stone", 1)));
+
+        Click::double(last - 1).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(
+            count_at(&menu, 0),
+            Some(8),
+            "the result slot must not be a gather source"
+        );
+        assert_eq!(
+            count_at(&menu, 1),
+            Some(3),
+            "and so the grid must not be charged"
+        );
+        assert_eq!(
+            carried_count(&menu),
+            Some(6),
+            "only the ordinary inventory stack was gathered"
+        );
+    }
+
+    // --- QUICK_MOVE ordering, per menu ---
+
+    /// `ChestMenu.java:99` moves container contents out with `backwards = true`,
+    /// so a chest empties into the **hotbar** (the tail of the menu slot list)
+    /// before the main storage rows. Getting the flag wrong is invisible in an
+    /// empty inventory and obvious to a player.
+    #[test]
+    fn chest_to_player_fills_the_hotbar_first() {
+        let mut menu = Menu::generic(27);
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 10)));
+        Click::shift(0).apply(&mut menu, PlayerCtx::survival());
+        let last = menu.slot_count() - 1;
+        assert_eq!(count_at(&menu, last), Some(10));
+        assert_eq!(count_at(&menu, 27), None, "main storage is untouched");
+    }
+
+    /// `CraftingMenu.java:123`: a shift-click from the player rows of a crafting
+    /// table tries the **grid** (`1..10`) first, and only falls back to the
+    /// main↔hotbar hop if the grid takes nothing.
+    #[test]
+    fn crafting_table_shift_click_loads_the_grid_first() {
+        let mut menu = Menu::crafting(3, 3);
+        let hotbar = menu.slot_count() - 9;
+        menu.set_slot_item(hotbar, Some(stack("minecraft:oak_planks", 1)));
+        Click::shift(hotbar).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 1), Some(1), "into the first grid cell");
+        assert_eq!(count_at(&menu, hotbar), None);
+    }
+
+    /// `InventoryMenu` has **no** such branch: its chain
+    /// (`InventoryMenu.java:100-152`) never targets the 2×2 grid, so the same
+    /// gesture on the player's own screen does the main↔hotbar hop instead.
+    /// This is the negative control for the test above — the two menus must not
+    /// share one implementation.
+    #[test]
+    fn player_screen_shift_click_never_loads_the_two_by_two_grid() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(36, Some(stack("minecraft:oak_planks", 1))); // hotbar[0]
+        Click::shift(36).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 1), None, "grid cell 1 must stay empty");
+        assert_eq!(count_at(&menu, 9), Some(1), "it goes to main storage");
+    }
+
+    /// Branches 4 and 5 of `InventoryMenu.quickMoveStack`
+    /// (`InventoryMenu.java:120-128`) precede the main↔hotbar hop, so a helmet
+    /// in main storage equips rather than moving to the hotbar.
+    #[test]
+    fn shift_click_equips_armour_before_trying_the_hotbar() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(9, Some(equippable("minecraft:diamond_helmet", "head")));
+        Click::shift(9).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 5), Some(1), "menu slot 5 is the head slot");
+        assert_eq!(count_at(&menu, 9), None);
+        assert_eq!(count_at(&menu, 36), None, "not the hotbar");
+    }
+
+    /// The regression this change fixes. Vanilla reaches the auto-equip branches
+    /// from *every* source slot at or after 9, which includes menu slot 45, the
+    /// off-hand: a helmet stashed in the off-hand shift-clicks up onto the head.
+    /// Testing for an equip target only inside the `9..36` / `36..45` arms let
+    /// slot 45 fall through to branch 8 and dump it into storage.
+    #[test]
+    fn shift_click_equips_armour_out_of_the_offhand_slot() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(45, Some(equippable("minecraft:diamond_helmet", "head")));
+        Click::shift(45).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 5), Some(1), "equipped onto the head");
+        assert_eq!(count_at(&menu, 45), None);
+        assert_eq!(count_at(&menu, 9), None, "not dumped into main storage");
+    }
+
+    /// The control for the branch order: with the head slot already **occupied**,
+    /// branch 4's `!slots.get(8 - index).hasItem()` fails and the item takes the
+    /// ordinary path out of the off-hand into storage (branch 8, `9..45`
+    /// forwards). Without this, the test above would pass for an implementation
+    /// that equips unconditionally and overwrites worn armour.
+    #[test]
+    fn control_shift_click_falls_through_when_the_armour_slot_is_taken() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(5, Some(equippable("minecraft:iron_helmet", "head")));
+        menu.set_slot_item(45, Some(equippable("minecraft:diamond_helmet", "head")));
+        Click::shift(45).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(
+            menu.slot_item(5).map(|s| s.item().path().to_string()),
+            Some("iron_helmet".into()),
+            "worn armour must not be displaced"
+        );
+        assert_eq!(
+            count_at(&menu, 9),
+            Some(1),
+            "the diamond helmet goes to storage"
+        );
+        assert_eq!(count_at(&menu, 45), None);
+    }
+
+    /// `Slot.mayPlace` for an armour slot is
+    /// `owner.isEquippableInSlot(stack, slot)` (`ArmorSlot.java:44-47`), which is
+    /// `slot == equippable.slot()` (`LivingEntity.java:3886-3891`). A chestplate
+    /// must not enter the head slot, by any route — here the direct place.
+    #[test]
+    fn armour_slot_refuses_the_wrong_equipment_position() {
+        let mut menu = Menu::player();
+        menu.set_carried(Some(equippable("minecraft:diamond_chestplate", "chest")));
+        Click::left(5).apply(&mut menu, PlayerCtx::survival()); // 5 = head
+        assert_eq!(count_at(&menu, 5), None);
+        assert_eq!(carried_count(&menu), Some(1), "the cursor keeps it");
+    }
+
+    /// The control: the matching position accepts. Together with the test above
+    /// this pins `may_place` to the *position*, not to "armour slots reject
+    /// everything" — which is, today, exactly what happens for any stack that
+    /// came off the wire, because nothing populates `minecraft:equippable`. See
+    /// [`Menu::empty_equip_target`].
+    #[test]
+    fn control_armour_slot_accepts_the_matching_position() {
+        let mut menu = Menu::player();
+        menu.set_carried(Some(equippable("minecraft:diamond_helmet", "head")));
+        Click::left(5).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 5), Some(1));
+        assert_eq!(carried_count(&menu), None);
+    }
+
+    /// Live-play canary for the two prototype components nothing populates.
+    ///
+    /// `minecraft:equippable` and `minecraft:max_stack_size` live in vanilla's
+    /// **item prototype**, not in the clientbound component patch, so no wire
+    /// decoder will ever produce them — they need an item census in the version
+    /// crate, exactly like `generated/tools.rs` does for `minecraft:tool`.
+    /// Until that lands, a stack built the way an adapter builds one cannot be
+    /// equipped and reports a max stack size of 64 whatever the item is.
+    ///
+    /// This asserts the *current, wrong* state on purpose: when the census
+    /// lands, this test fails, and that failure is the reminder to delete it and
+    /// re-point the armour and per-item-cap gates at real wire stacks.
+    #[test]
+    fn canary_wire_stacks_carry_no_prototype_components() {
+        let wire = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:diamond_helmet"),
+            count: 1,
+            components: lodestone_model::ItemComponents::default(),
+        });
+        assert_eq!(
+            crate::container::equippable_slot(&wire),
+            None,
+            "if this now resolves, the equippable census landed"
+        );
+
+        let bucket = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:water_bucket"),
+            count: 1,
+            components: lodestone_model::ItemComponents::default(),
+        });
+        assert_eq!(
+            bucket.max_stack_size(),
+            64,
+            "a water bucket really stacks to 1; if this is now 1, the cap census landed"
+        );
+
+        // And the consequence, stated so it is not a surprise: armour cannot be
+        // worn via any click while the component is absent.
+        let mut menu = Menu::player();
+        menu.set_carried(Some(wire));
+        Click::left(5).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(
+            count_at(&menu, 5),
+            None,
+            "armour placement is dead until the census lands"
+        );
+    }
 }
