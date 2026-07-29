@@ -141,6 +141,30 @@ impl BlockResources {
     }
 }
 
+/// Opens `<root>/client.jar` as a [`ResourceManager`], warning and returning
+/// `None` on either failure — the fail-open jar discovery every loader in this
+/// module shares below [`BlockResources::try_vanilla`], whose own errors must
+/// propagate as a fallback-banner reason instead of a log line, so it opens
+/// the jar itself rather than going through this helper.
+fn open_client_jar(root: &Path) -> Option<ResourceManager> {
+    let jar = root.join("client.jar");
+    let bytes = match std::fs::read(&jar) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let zip = match ZipSource::from_bytes(bytes) {
+        Ok(z) => z,
+        Err(e) => {
+            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
+            return None;
+        }
+    };
+    Some(ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]))
+}
+
 /// Load real per-mob entity textures from `client.jar`, keyed by the render
 /// crate's model name (`"pig"`, `"zombie"`, …). Version-free and **fail-open**:
 /// returns an empty map when no pack is found or the jar can't be opened, so the
@@ -160,22 +184,9 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
     let Some(root) = asset_root() else {
         return out;
     };
-    let jar = root.join("client.jar");
-    let bytes = match std::fs::read(&jar) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
-            return out;
-        }
+    let Some(manager) = open_client_jar(&root) else {
+        return out;
     };
-    let zip = match ZipSource::from_bytes(bytes) {
-        Ok(z) => z,
-        Err(e) => {
-            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
-            return out;
-        }
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
 
     for (name, _mesh) in EntityModelSet::load().iter() {
         for path in entity_texture_candidates(name) {
@@ -210,22 +221,7 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
 #[must_use]
 pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let root = asset_root()?;
-    let jar = root.join("client.jar");
-    let bytes = match std::fs::read(&jar) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let zip = match ZipSource::from_bytes(bytes) {
-        Ok(z) => z,
-        Err(e) => {
-            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    let manager = open_client_jar(&root)?;
     match GuiAtlas::build(&manager) {
         Ok(atlas) => {
             tracing::info!(
@@ -242,14 +238,6 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
-/// Builds the flat item-sprite [`ItemAtlas`] from the vanilla `client.jar`,
-/// version-free, using the same pack discovery as [`load_gui_atlas`]. The atlas
-/// turns each item id into a flat GUI sprite (the `item/generated` case, the
-/// overwhelming majority); block-model and code-driven `special` items resolve
-/// to no flat sprite and are reported, not treated as failures. Returns `None`
-/// when no pack is found so the HUD simply draws empty wells rather than
-/// panicking.
-#[must_use]
 /// Stitch the vanilla particle atlas from `client.jar`.
 ///
 /// Mirrors [`load_item_atlas`] exactly, including its fail-open contract:
@@ -264,24 +252,10 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
 /// them. Vanilla ships no pre-baked `particles.png` — 26.2 has 289 loose PNGs
 /// under `textures/particle/` that the client stitches at runtime, exactly as
 /// it does for blocks and items.
+#[must_use]
 pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
     let root = asset_root()?;
-    let jar = root.join("client.jar");
-    let bytes = match std::fs::read(&jar) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let zip = match ZipSource::from_bytes(bytes) {
-        Ok(z) => z,
-        Err(e) => {
-            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    let manager = open_client_jar(&root)?;
     let (atlas, report) = match ParticleAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
@@ -300,24 +274,17 @@ pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
     Some(Arc::new(atlas))
 }
 
+/// Builds the flat item-sprite [`ItemAtlas`] from the vanilla `client.jar`,
+/// version-free, using the same pack discovery as [`load_gui_atlas`]. The atlas
+/// turns each item id into a flat GUI sprite (the `item/generated` case, the
+/// overwhelming majority); block-model and code-driven `special` items resolve
+/// to no flat sprite and are reported, not treated as failures. Returns `None`
+/// when no pack is found so the HUD simply draws empty wells rather than
+/// panicking.
+#[must_use]
 pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
     let root = asset_root()?;
-    let jar = root.join("client.jar");
-    let bytes = match std::fs::read(&jar) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let zip = match ZipSource::from_bytes(bytes) {
-        Ok(z) => z,
-        Err(e) => {
-            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    let manager = open_client_jar(&root)?;
     let (atlas, report) = match ItemAtlas::build_reported(&manager) {
         Ok(pair) => pair,
         Err(e) => {
@@ -362,22 +329,7 @@ pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
     use lodestone_game::recipe_json::CorpusBuilder;
 
     let root = asset_root()?;
-    let jar = root.join("client.jar");
-    let bytes = match std::fs::read(&jar) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let zip = match ZipSource::from_bytes(bytes) {
-        Ok(z) => z,
-        Err(e) => {
-            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
-            return None;
-        }
-    };
-    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    let manager = open_client_jar(&root)?;
 
     let mut builder = CorpusBuilder::new();
     for path in manager.list("data/") {

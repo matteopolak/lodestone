@@ -908,14 +908,6 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
     row_y
 }
 
-/// Pixel width of `s` in the **fixed-advance** HUD font at `scale`. Only correct
-/// when no vanilla font is attached — every layout site goes through
-/// [`Builder::text_width`], which picks this or the proportional measure to match
-/// whichever font [`Builder::text`] will actually draw with.
-fn text_w(s: &str, scale: f32) -> f32 {
-    item_icon::text_w(s, scale)
-}
-
 /// A chat line is fully lit for most of its life, then fades over its last
 /// [`CHAT_FADE_SECS`] before disappearing at [`CHAT_VISIBLE_SECS`] — matching
 /// vanilla's "recent messages fade out when the box is closed" behaviour. Only
@@ -1029,7 +1021,7 @@ impl<'a> Builder<'a> {
     fn text_width(&self, s: &str, scale: f32) -> f32 {
         match self.font {
             Some(f) => f.width(s, scale),
-            None => text_w(s, scale),
+            None => item_icon::text_w(s, scale),
         }
     }
 
@@ -1037,7 +1029,7 @@ impl<'a> Builder<'a> {
     fn legacy_width(&self, s: &str, scale: f32) -> f32 {
         match self.font {
             Some(f) => f.legacy_width(s, scale),
-            None => text_w(&strip_legacy(s), scale),
+            None => item_icon::text_w(&strip_legacy(s), scale),
         }
     }
 
