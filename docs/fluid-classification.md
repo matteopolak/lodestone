@@ -29,6 +29,20 @@ lodestone_render::BlockModels::fluid(state_id) -> Option<FluidCell>   ← the ru
                                             → swim path, fog, overlay, ambient sounds
 ```
 
+`is_water`'s consumers are the swim path, fog, the underwater overlay and the
+ambient sounds — **not** the pick ray. `Sim::update_target` (the crosshair
+target used for both mining and placement) asks a genuinely different
+question — "does the outline shape here make this cell targetable at all,
+with fluid shapes switched off" — answered by its own predicate,
+`LiveCollision::is_pickable`, not by negating `is_water`. The two were
+conflated once: `update_target` used `!is_water(cell)` as shorthand for "this
+cell holds something breakable", which broke the moment `is_water` correctly
+grew to include kelp, seagrass and waterlogged stairs — kelp became
+untargetable, because it could no longer be told apart from open water. See
+the "…but 'is this cell fluid' is not 'can I break what is in it'" section of
+`crates/lodestone-shell/src/collision.rs`'s module doc comment for the full
+account; this paragraph only summarises it.
+
 The rule itself lives in one function, `classify_fluid` in
 `crates/lodestone-render/src/block_models.rs`, evaluated once per state at asset-load
 time and stored in `BlockModels::fluids`. It covers three cases a block-id match

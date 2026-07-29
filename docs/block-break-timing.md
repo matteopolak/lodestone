@@ -25,8 +25,12 @@ Once per physics tick, while the attack button is held on a live server,
    `BlockHardness { hardness, requires_correct_tool }`. The adapter is resolved
    once in `Sim::new` via `lodestone_registry::adapter_for_protocol(config.protocol)`,
    so the shell still names no version crate.
-3. `bare_hand_break_inputs` turns that census entry plus the player's own state
-   into `BreakInputs`.
+3. The selected hotbar slot is resolved to a `ToolMining { speed, correct_tool,
+   damage_per_block }` via `VersionAdapter::tool_mining` (falling back to
+   `bare_handed_tool_mining` when nothing is held or the version has nothing for
+   this state — see [`tool-mining.md`](./tool-mining.md)), and `dig_break_inputs`
+   turns that plus the hardness census entry plus the player's own state into
+   `BreakInputs`.
 4. `Mining::continue_` accumulates `progress_per_tick` and emits
    `STOP_DESTROY_BLOCK` on the tick its progress reaches `1.0`.
 
@@ -59,7 +63,11 @@ and reintroduces the exact defect the seam exists to fix:
 | bedrock  | -1.0     | false                   | never            | never         |
 
 `sim.rs`'s `bare_hand_correct_tool_is_the_negation_of_the_blocks_requirement`
-pins both columns, so a "simplification" back to the naive form fails.
+pins both columns, so a "simplification" back to the naive form fails. This
+table is the bare-hand case; with a held tool `correct_tool` instead comes
+straight from `ToolMining::correct_tool`, which is already folded the right
+way round (see [`tool-mining.md`](./tool-mining.md)'s Gotcha 1) — the same
+trap, one level up, for whoever wires a caller of `tool_mining` next.
 
 ### Trap 2 — `submerged` is `eye_in_water`, not `under_water()`
 
@@ -119,22 +127,27 @@ Delayed-destroy survives as the safety net in the other direction.
 - **Per-block data** is version-owned: `crates/protocol/v770/src/hardness.rs`,
   generated from a headless server dump. A new version family implements
   `VersionAdapter::block_hardness` and the shell needs no edit.
-- **The input builder** is `bare_hand_break_inputs` in
-  `crates/lodestone-shell/src/sim.rs`. Both traps above are documented on it and
-  pinned by unit tests in the same file.
-- **Held tools are not modelled yet.** `tool_speed`, `mining_efficiency`,
-  `haste_amplifier`, `mining_fatigue` and `block_break_speed` are left at
-  `BreakInputs::default()`, because `minecraft:tool` is not among the modelled
-  item components (only `custom_name`, `damage`, `enchantments`). Digging
-  therefore always times as an empty hand, even with a diamond pickaxe selected —
-  a pickaxe currently makes stone no faster. That is vanilla-correct *for an empty
-  hand*, but it means hard, tool-gated blocks are effectively unmineable in
-  practice: obsidian is 5000 ticks (~4 min 10 s) of unbroken holding, where a
-  diamond pickaxe would be seconds. Closing this needs the `tool`
-  component decoded in the version crate first; `tool_inputs_stay_at_bare_hand_defaults`
-  is the reminder in `sim.rs`.
+- **The input builder** is `dig_break_inputs` in
+  `crates/lodestone-shell/src/sim.rs`, fed by `Sim::drive_mining`'s resolution of
+  the held item through `tool_mining_item` and `VersionAdapter::tool_mining`.
+  Both traps above are documented on it and pinned by unit tests in the same
+  file.
+- **Held tools are modelled**, as of this session (see
+  [`tool-mining.md`](./tool-mining.md) for the full data/evaluation seam,
+  landed as an island in `875f452` and wired into `sim.rs` afterward). `Sim::drive_mining`
+  reads the selected hotbar slot (`self.selected_slot`) off `self.player_menu()`,
+  lifts it through `tool_mining_item`, and resolves it via
+  `VersionAdapter::tool_mining(held, state_id)` — falling back to
+  `bare_handed_tool_mining(entry)` only when nothing is held or the version
+  adapter has nothing for that state. `tool_speed` and `correct_tool` in
+  `BreakInputs` now come from that result, not from `BreakInputs::default()`.
+  `mining_efficiency`, `haste_amplifier`, `mining_fatigue` and
+  `block_break_speed` are still left at `BreakInputs::default()` — no
+  enchantment, potion or attribute inputs are modelled yet, only the tool
+  census. See `dig_break_inputs`'s doc comment in `crates/lodestone-shell/src/sim.rs`
+  for the current, precise list of what is and isn't modelled.
 - Haste/Mining Fatigue are separately available from `Sim::hud_effects` and could
-  be wired ahead of tools, but were left alone here to keep one seam per change.
+  be wired next, but were left alone here to keep one seam per change.
 
 ## Configuration
 

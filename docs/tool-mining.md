@@ -15,16 +15,18 @@ unbroken holding regardless of what was in hand.
 
 **This doc covers the data/evaluation seam** —
 `crates/protocol/v770/src/tool.rs`, `lodestone_model::VersionAdapter::tool_mining`,
-and the generated tables. As of `875f452`, `crates/lodestone-shell/src/sim.rs`
-does **not** call this seam yet — `bare_hand_break_inputs` still hard-codes
-`BreakInputs::default()` for `tool_speed`/`mining_efficiency`/etc. and never
-reads the player's held item. Grepping the whole tree for `tool_mining(`
-outside its own trait/impl definitions turns up nothing. The wiring described
-here is real, tested, and reachable through `VersionAdapter`, but as of this
-commit it is not yet *consumed* by the running client — see CLAUDE.md's note
-on "islands." Wiring it into `sim.rs` is the natural next step and should
-replace `bare_hand_break_inputs`'s doc comment (which still says "Tool speed
-… left at `BreakInputs::default`") once done.
+and the generated tables — plus, as of the session that followed `875f452`, its
+consumer. `crates/lodestone-shell/src/sim.rs`'s `Sim::drive_mining` now resolves
+the selected hotbar slot (`self.player_menu().player_native(self.selected_slot)`)
+through `tool_mining_item`, calls `VersionAdapter::tool_mining(held, state_id)`,
+and feeds the result's `speed`/`correct_tool` into `dig_break_inputs`, falling
+back to `bare_handed_tool_mining` when nothing is held or the version has no
+entry for the state. This closed the island noted below: `tool_mining` briefly
+existed fully implemented and tested but called from nowhere in the shell — a
+diamond pickaxe mined at bare-hand speed. It no longer does.
+`mining_efficiency`/`haste_amplifier`/`mining_fatigue`/`block_break_speed`
+remain unmodelled (no enchantment/potion/attribute inputs yet); see
+[`block-break-timing.md`](./block-break-timing.md)'s "How to change it".
 
 ## How it works
 
@@ -322,15 +324,18 @@ external source (here, the registry-order dump) disagrees.
   mines at the vanilla rate on this client. When `update_tags` is decoded,
   override at `block_tag_members` — it is the single lookup every rule match
   goes through.
-- **Not yet wired into the shell.** `crates/lodestone-shell/src/sim.rs`'s
-  `bare_hand_break_inputs` does not call `tool_mining` and does not read the
-  player's selected hotbar slot / held item for mining purposes at all. Wiring
-  this is the natural next step: resolve the held `ItemStack` for
-  `selected_slot()`, call `adapter.tool_mining(held, state_id)`, and feed
-  `speed`/`correct_tool`/`damage_per_block` into `BreakInputs` instead of the
-  bare-hand constants. Until that lands, a diamond pickaxe in the running
-  client still mines at bare-hand speed — the data and evaluation exist and
-  are tested, but nothing in the shell calls them yet.
+- **Wired into the shell.** `crates/lodestone-shell/src/sim.rs`'s
+  `Sim::drive_mining` resolves the held `ItemStack` for `self.selected_slot`
+  through `tool_mining_item`, calls `adapter.tool_mining(held, state_id)`, and
+  feeds `speed`/`correct_tool` into `dig_break_inputs` in place of the
+  bare-hand constants (`damage_per_block` is not yet consumed — durability
+  damage isn't modelled on this path). `bare_handed_tool_mining` is the
+  fallback for no held item or an unresolvable state, kept in exactly one
+  place so Gotcha 1's inversion isn't restated at the call site. A diamond
+  pickaxe in the running client now mines at pickaxe speed, not bare-hand
+  speed. `tool_inputs_stay_at_bare_hand_defaults` (`sim.rs`) is the unit test
+  that pins what stays default (efficiency/haste/fatigue) versus what now
+  varies with the held item.
 
 ## Configuration
 
