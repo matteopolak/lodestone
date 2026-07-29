@@ -1311,6 +1311,61 @@ mod tests {
             })
     }
 
+    /// The colour of the *last* (i.e. topmost-painted) quad covering NDC
+    /// point `(nx, ny)`, or `None` if only the background is there.
+    ///
+    /// Unlike `covered`, which only answers "is anything here", this can
+    /// tell a row's own fill (`ROW_BG`/`ROW_SEL`) apart from a border drawn
+    /// on top of it in a different colour — necessary because the fill
+    /// quad already covers every pixel the border does, so presence alone
+    /// cannot distinguish "outlined" from "an ordinary row". Quads are
+    /// pushed in paint order, so the last one in the buffer that covers the
+    /// point is the one actually visible there.
+    fn colour_at(verts: &[f32], nx: f32, ny: f32) -> Option<[f32; 4]> {
+        verts
+            .chunks_exact(STRIDE * 6)
+            .skip(1) // vertex 0..6 is the background clear rect
+            .filter(|q| {
+                let (x0, y0) = (q[0], q[1]);
+                let (x1, y1) = (q[STRIDE * 4], q[STRIDE * 4 + 1]);
+                let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
+                let (lo_y, hi_y) = (y0.min(y1), y0.max(y1));
+                nx >= lo_x && nx <= hi_x && ny >= lo_y && ny <= hi_y
+            })
+            .last()
+            .map(|q| [q[2], q[3], q[4], q[5]])
+    }
+
+    /// Fraction of sample points inside `(x, y, w, h)` whose topmost quad is
+    /// (approximately) `colour` — see `colour_at`. Where `coverage`'s
+    /// colour-blind "is anything here" cannot separate a highlight border
+    /// from the row fill it is painted over, this can.
+    fn coverage_of(
+        verts: &[f32],
+        w: f32,
+        h: f32,
+        rect: (f32, f32, f32, f32),
+        colour: [f32; 4],
+    ) -> f32 {
+        let (rx, ry, rw, rh) = rect;
+        const N: usize = 24;
+        let mut hit = 0usize;
+        for iy in 0..N {
+            for ix in 0..N {
+                let px = rx + rw * (ix as f32 + 0.5) / N as f32;
+                let py = ry + rh * (iy as f32 + 0.5) / N as f32;
+                let nx = 2.0 * px / w - 1.0;
+                let ny = 1.0 - 2.0 * py / h;
+                let matches = colour_at(verts, nx, ny)
+                    .is_some_and(|c| c.iter().zip(colour).all(|(a, b)| (a - b).abs() < 0.01));
+                if matches {
+                    hit += 1;
+                }
+            }
+        }
+        hit as f32 / (N * N) as f32
+    }
+
     #[test]
     fn every_vertex_lands_inside_the_viewport() {
         // The island's favourite disguise: geometry that exists and is drawn
@@ -1334,7 +1389,11 @@ mod tests {
     #[test]
     fn the_selected_row_is_visibly_different_from_its_neighbours() {
         // Reading only the vertex count cannot tell a highlight from a no-op.
-        // This compares the *fill colour emitted at the row's own rect*.
+        // This compares the *border colour actually painted at the row's own
+        // rect*, not merely whether anything is there — the row's own fill
+        // (`ROW_BG`/`ROW_SEL`) already covers those pixels regardless of
+        // selection, so a colour-blind `coverage` check cannot tell
+        // "outlined" from "an ordinary row" (see `coverage_of`'s docs).
         let rows = vec![button("ONE"), button("TWO"), button("THREE")];
         let (w, h) = (1280.0, 720.0);
         let sel = geometry(&frame_with(rows.clone(), 1), w, h);
@@ -1348,13 +1407,14 @@ mod tests {
         // The selection border is 2 px inside the row; sample its top edge.
         let border = (rect.0 + 4.0, rect.1, rect.2 - 8.0, 2.0);
         assert!(
-            coverage(&sel, w, h, border) > 0.9,
-            "the highlighted row should be outlined: {:?}",
-            coverage(&sel, w, h, border)
+            coverage_of(&sel, w, h, border, FG) > 0.9,
+            "the highlighted row should be outlined in FG: {:?}",
+            coverage_of(&sel, w, h, border, FG)
         );
         assert!(
-            coverage(&unsel, w, h, border) < 0.5,
-            "an unhighlighted row must not be outlined"
+            coverage_of(&unsel, w, h, border, FG) < 0.05,
+            "an unhighlighted row must not be outlined: {:?}",
+            coverage_of(&unsel, w, h, border, FG)
         );
     }
 

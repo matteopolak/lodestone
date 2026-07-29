@@ -245,7 +245,20 @@ fn server_sent_mob_reaches_pixels_through_shell() {
             if x >= w / 4 && x < 3 * w / 4 && y >= h / 4 && y < 3 * h / 4 {
                 centre_px += 1;
             }
-            if (x < w / 8 || x >= 7 * w / 8) && (y < h / 8 || y >= 7 * h / 8) {
+            // The **bottom-right** corner is excluded on purpose, mirroring
+            // `gpu.rs`'s `entity_renders_to_pixels_through_shell_path` (and its
+            // `off_hue_fraction`'s left-half restriction): that is where the
+            // unconditional first-person arm lives
+            // (`prepare_first_person_arm` → `first_person_arm_pose`,
+            // camera-space, roughly the right-hand 30% and bottom 30% of the
+            // frame). This assertion is about the *pig*, and folding the arm's
+            // own legitimate pixels into it would turn a working feature into
+            // a red gate. The other three corners still have to stay sky, so
+            // the "mob smeared across the whole frame" defect this guards
+            // against is still caught.
+            let bottom_right = x >= w / 2 && y >= h / 2;
+            let corner = (x < w / 8 || x >= 7 * w / 8) && (y < h / 8 || y >= 7 * h / 8);
+            if corner && !bottom_right {
                 corner_px += 1;
             }
         }
@@ -282,7 +295,8 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     );
     assert_eq!(
         corner_px, 0,
-        "the frame corners should stay sky (no terrain uploaded), but {corner_px} corner px read as mob"
+        "the frame's three non-arm corners should stay sky (no terrain uploaded), \
+         but {corner_px} corner px read as mob"
     );
 
     drop(net);
