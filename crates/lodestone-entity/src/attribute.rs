@@ -23,7 +23,7 @@
 //! modifier `lodestone-physics` already models, so the two crates agree on the
 //! convention by construction.
 
-use lodestone_model::Identifier;
+use lodestone_model::{EntityAttributeSnapshot, Identifier};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -414,6 +414,72 @@ pub fn known_attribute_paths() -> &'static [&'static str] {
     ]
 }
 
+/// The canonical id of vanilla's `water_movement_efficiency` attribute — the
+/// attribute Depth Strider modifies, and the one this module's wire-fold
+/// ([`instance_from_snapshot`]/[`attribute_value`]) exists to make reachable.
+/// A small convenience so a per-tick caller (e.g. the physics-tick system
+/// that feeds [`PlayerState::with_water_movement_efficiency`](
+/// https://docs.rs/lodestone-physics) — see `docs/swimming.md`) doesn't have
+/// to hand-parse the literal every tick.
+#[must_use]
+pub fn water_movement_efficiency_key() -> Identifier {
+    Identifier::from_str("minecraft:water_movement_efficiency").expect("valid built-in identifier")
+}
+
+/// Builds a foldable [`AttributeInstance`] from a wire-shaped
+/// [`EntityAttributeSnapshot`] — the shape `ClientboundUpdateAttributesPacket`
+/// decodes to (see `read_update_attributes`,
+/// `crates/protocol/v770/src/packets/metadata.rs:485`).
+///
+/// The wire snapshot carries only `base` and `modifiers`; it has no min/max
+/// range (vanilla never sends `RangedAttribute`'s bounds over the network —
+/// the client is expected to already know them from its own registry). Those
+/// clamp bounds are filled in from [`default_def`], falling back to an
+/// unranged definition for an attribute id this crate's table does not know
+/// (an unknown-but-syncable attribute from a future version should still
+/// fold to *something* rather than being unrepresentable).
+///
+/// A modifier whose wire `operation` byte is not `0`/`1`/`2` is dropped
+/// rather than rejecting the whole snapshot, matching the adapter's
+/// per-packet error tolerance one layer down
+/// (`v770::adapter::handle_update_attributes`'s "swallow and skip" policy) —
+/// there is no such id in a real 26.2 server, but a malformed one should not
+/// panic a client that already decoded the packet successfully.
+#[must_use]
+pub fn instance_from_snapshot(snapshot: &EntityAttributeSnapshot) -> AttributeInstance {
+    let def = default_def(&snapshot.attribute).unwrap_or(AttributeDef::new(0.0, f64::MIN, f64::MAX));
+    let mut instance = AttributeInstance::new(def);
+    instance.set_base_value(snapshot.base);
+    for modifier in &snapshot.modifiers {
+        if let Some(operation) = Operation::from_id(modifier.operation) {
+            instance.add_or_update(Modifier::new(modifier.id.clone(), modifier.amount, operation));
+        }
+    }
+    instance
+}
+
+/// Folds a wire-reported attribute list ([`EntityView::attributes`](
+/// https://docs.rs/lodestone-client) / `NetClient::local_player_attributes`'s
+/// return shape) down to one attribute's computed value, per vanilla's
+/// three-stage `AttributeInstance.calculateValue`
+/// ([`AttributeInstance::value`]).
+///
+/// Falls back to the registry default when `key` is absent from `snapshots`
+/// — the server only ever sends an attribute once something makes it worth
+/// syncing (a base override, or a modifier), so a fresh entity with no
+/// enchantments and no effects legitimately never gets an explicit
+/// `water_movement_efficiency` entry. Absence must read as "still the
+/// default", not "zero forever" or "unknown". Returns `0.0` if `key` has no
+/// known default either (an attribute this crate's registry table has never
+/// heard of).
+#[must_use]
+pub fn attribute_value(snapshots: &[EntityAttributeSnapshot], key: &Identifier) -> f64 {
+    match snapshots.iter().find(|s| &s.attribute == key) {
+        Some(snapshot) => instance_from_snapshot(snapshot).value(),
+        None => default_def(key).map_or(0.0, |d| d.default),
+    }
+}
+
 /// The base-class attribute template a concrete entity type is built on,
 /// mirroring vanilla's `createLivingAttributes` → `createMobAttributes` →
 /// `createMonsterAttributes` / `createAnimalAttributes` chain.
@@ -746,5 +812,137 @@ mod tests {
     fn unknown_type_has_no_supplier() {
         assert!(default_attributes(&id("minecraft:item")).is_none());
         assert!(default_attributes(&id("modded:thing")).is_none());
+    }
+
+    /// The Depth Strider path, end to end through the wire-shaped conversion:
+    /// a `water_movement_efficiency` snapshot carrying a `Depth Strider III`
+    /// -style `AddValue` modifier (`+1.0`, from three stacked
+    /// `0.33333334`-per-level modifiers, matching
+    /// `data/minecraft/enchantment/depth_strider.json`'s
+    /// `per_level_above_first` — see `.cache/mc/26.2/src`) alongside a
+    /// multiplied-base and a multiplied-total modifier, chosen so the two
+    /// multiplicative stages cannot coincide (two `AddMultipliedBase`
+    /// modifiers whose amounts have a nonzero product against one
+    /// `AddMultipliedTotal`, per the task's evidence standard: a single
+    /// modifier in each multiplicative stage is a genuine trap here, because
+    /// `base*(1+a)*(1+b)` is the same product regardless of which stage `a`
+    /// and `b` are assigned to).
+    ///
+    /// Hand-computed (also cross-checked in Python, not just by inspection):
+    /// `base = 0.0 + 0.33333334 + 0.1 = 0.43333334` (the second `add_value`
+    /// modifier is a synthetic stand-in for some other effect that also
+    /// touches this attribute, not a real vanilla source — its only job is
+    /// to make `base` an odd enough number that a stage-order bug cannot
+    /// hide behind a round one).
+    /// `mulbase stage: 0.43333334 * (1 + 0.5 + 0.25) = 0.43333334 * 1.75
+    /// = 0.7583333450`.
+    /// `multotal stage: 0.7583333450 * 1.2 = 0.9100000140`.
+    ///
+    /// A build that assigns the wire operation bytes to the wrong enum
+    /// variant (e.g. `from_id` swapping `1`/`2`) would instead run the one
+    /// `AddMultipliedTotal`-intended modifier through the mulbase stage and
+    /// the two `AddMultipliedBase`-intended modifiers through the multotal
+    /// stage: `0.43333334 * 1.2 = 0.5200000080`, then
+    /// `* 1.5 * 1.25 = 0.9750000150` — a different, still-in-range number
+    /// (`0.975` vs `0.910`), so this test can tell the two apart.
+    #[test]
+    fn water_movement_efficiency_folds_through_the_wire_snapshot() {
+        use lodestone_model::EntityAttributeModifier;
+
+        let snapshot = EntityAttributeSnapshot {
+            attribute: id("minecraft:water_movement_efficiency"),
+            base: 0.0,
+            modifiers: vec![
+                // Depth Strider III: three `+0.33333334` AddValue stacks.
+                EntityAttributeModifier {
+                    id: id("minecraft:enchantment.depth_strider"),
+                    amount: 0.33333334,
+                    operation: Operation::AddValue.id(),
+                },
+                // Synthetic second add_value so `base` isn't a round number
+                // a stage-order bug could coincidentally still match.
+                EntityAttributeModifier {
+                    id: id("test:synthetic_add"),
+                    amount: 0.1,
+                    operation: Operation::AddValue.id(),
+                },
+                EntityAttributeModifier {
+                    id: id("test:mulbase1"),
+                    amount: 0.5,
+                    operation: Operation::AddMultipliedBase.id(),
+                },
+                EntityAttributeModifier {
+                    id: id("test:mulbase2"),
+                    amount: 0.25,
+                    operation: Operation::AddMultipliedBase.id(),
+                },
+                EntityAttributeModifier {
+                    id: id("test:multotal"),
+                    amount: 0.2,
+                    operation: Operation::AddMultipliedTotal.id(),
+                },
+            ],
+        };
+
+        let v = attribute_value(&[snapshot], &id("minecraft:water_movement_efficiency"));
+        assert!((v - 0.9100000140).abs() < 1e-6, "got {v}");
+        // The would-be-swapped-order value must not be what we got.
+        assert!((v - 0.9750000150).abs() > 1e-3, "got {v}, indistinguishable from the swapped-order bug");
+    }
+
+    #[test]
+    fn attribute_value_falls_back_to_registry_default_when_absent() {
+        // No boots, no enchantment: the server has never sent an explicit
+        // `water_movement_efficiency` snapshot for this entity, and absence
+        // must read as "still the default", matching `RangedAttribute`'s own
+        // default (`Attributes.java:108-109`), not as a hard zero baked into
+        // the caller.
+        let v = attribute_value(&[], &id("minecraft:water_movement_efficiency"));
+        assert_eq!(v, 0.0);
+
+        // An unknown attribute id has no registry default either.
+        let v = attribute_value(&[], &id("minecraft:not_a_real_attribute"));
+        assert_eq!(v, 0.0);
+    }
+
+    #[test]
+    fn instance_from_snapshot_drops_unrecognized_operation_bytes() {
+        use lodestone_model::EntityAttributeModifier;
+
+        let snapshot = EntityAttributeSnapshot {
+            attribute: id("minecraft:water_movement_efficiency"),
+            base: 0.2,
+            modifiers: vec![EntityAttributeModifier {
+                id: id("test:garbage"),
+                amount: 99.0,
+                operation: 200,
+            }],
+        };
+        // Doesn't panic, and the unrecognized modifier contributes nothing.
+        let instance = instance_from_snapshot(&snapshot);
+        assert_eq!(instance.value(), 0.2);
+    }
+
+    #[test]
+    fn water_movement_efficiency_key_matches_the_registry_id() {
+        assert_eq!(
+            water_movement_efficiency_key(),
+            id("minecraft:water_movement_efficiency")
+        );
+        assert!(default_def(&water_movement_efficiency_key()).is_some());
+    }
+
+    #[test]
+    fn instance_from_snapshot_uses_the_reported_base_not_the_registry_default() {
+        use lodestone_model::EntityAttributeModifier;
+
+        // The wire base (0.5) must win over the registry default (0.0) —
+        // the snapshot is authoritative once the server has sent one.
+        let snapshot = EntityAttributeSnapshot {
+            attribute: id("minecraft:water_movement_efficiency"),
+            base: 0.5,
+            modifiers: Vec::<EntityAttributeModifier>::new(),
+        };
+        assert_eq!(instance_from_snapshot(&snapshot).value(), 0.5);
     }
 }
