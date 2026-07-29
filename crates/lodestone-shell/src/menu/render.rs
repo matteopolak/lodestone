@@ -88,6 +88,12 @@ pub const MOSAIC: usize = 16;
 
 /// Background colour of a menu screen (the vanilla dirt backdrop's dark tone).
 const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
+/// Full-screen backdrop for an [`MenuFrame::overlay`] frame — translucent, so
+/// the world it is drawn over (still ticking, still rendering) stays visible
+/// through it, unlike [`BG`]'s opaque fill for a screen that owns the whole
+/// frame. Alpha is well short of 1.0 for exactly this reason; a test asserts
+/// that rather than trusting the constant.
+const OVERLAY_BG: [f32; 4] = [0.02, 0.02, 0.03, 0.55];
 /// Fill of an unselected row.
 const ROW_BG: [f32; 4] = [0.22, 0.22, 0.26, 1.0];
 /// Fill of the highlighted row.
@@ -208,6 +214,14 @@ pub struct MenuFrame<'a> {
     /// [`MenuRenderer::render`] so that call site (owned by `app.rs`) does not
     /// need to change. See [`logical_canvas`].
     pub gui_scale: u32,
+    /// Whether this frame is drawn **over** an already-rendered scene rather
+    /// than replacing it — [`Screen::Paused`](super::Screen::Paused)'s pause
+    /// menu, via [`pause_frame`] and
+    /// [`MenuRenderer::render_overlay`]. Changes only how [`geometry`] paints
+    /// the full-screen backdrop (translucent instead of opaque, so the world
+    /// stays visible behind the buttons); every other screen leaves this
+    /// `false` via `..Default::default()`.
+    pub overlay: bool,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
@@ -264,6 +278,16 @@ impl FaviconCache {
 /// Kept beside `frame_for` with a test asserting the two agree for every screen:
 /// a predicate that drifts from the builder gives either a screen drawn twice or
 /// one drawn not at all.
+///
+/// [`Screen::Paused`] is **deliberately excluded**, even though it has its own
+/// button rows and keyboard navigation (see [`pause_frame`] and
+/// [`super::nav::MenuNav`]'s `key_paused`): this set governs the Clear pass
+/// that replaces the whole frame, and the pause menu is drawn as an overlay
+/// over the world instead (see [`MenuRenderer::render_overlay`]) — the world
+/// keeps rendering (and, on a live server, keeps ticking) behind it. Adding
+/// `Screen::Paused` here would stop the world rendering for as long as the
+/// game is paused, which is exactly the regression [`super::Screen::Paused`]'s
+/// own doc comment warns against.
 #[must_use]
 pub fn owns_frame(screen: super::Screen) -> bool {
     use super::Screen;
@@ -271,6 +295,39 @@ pub fn owns_frame(screen: super::Screen) -> bool {
         screen,
         Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings | Screen::Error
     )
+}
+
+/// Builds the pause menu's overlay frame: three rows (Back to Game, Options,
+/// Quit to Title — see [`super::nav::PauseButton`]) with the highlight
+/// tracking [`super::nav::MenuNav::pause_index`].
+///
+/// Unlike [`frame_for`], this is not gated by [`owns_frame`] and takes no
+/// `UiState`/`StatusCache`/`FaviconCache` — the pause menu has no server list
+/// or connection status to show, just the nav's own selection. Callers draw it
+/// with [`MenuRenderer::render_overlay`], not [`MenuRenderer::render`], every
+/// frame the game is paused, over whatever the world/HUD/container passes
+/// already drew — see the [`super::Screen::Paused`] doc comment for why that
+/// split exists.
+#[must_use]
+pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
+    use super::nav::PAUSE_BUTTONS;
+    MenuFrame {
+        title: "GAME MENU",
+        subtitle: "",
+        rows: PAUSE_BUTTONS
+            .iter()
+            .map(|b| MenuRow {
+                label: b.label().to_string(),
+                enabled: true,
+                ..Default::default()
+            })
+            .collect(),
+        selected: nav.pause_index(),
+        footer: vec!["UP/DOWN SELECT   ENTER CONFIRM   ESC BACK".to_string()],
+        message: None,
+        gui_scale: nav.gui_scale(),
+        overlay: true,
+    }
 }
 
 /// Builds the frame for whichever menu screen `ui` is on.
@@ -536,7 +593,8 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
 #[must_use]
 pub fn geometry(frame: &MenuFrame<'_>, width: f32, height: f32) -> Vec<f32> {
     let mut b = Quads::new(width, height);
-    b.rect(0.0, 0.0, width, height, BG);
+    let backdrop = if frame.overlay { OVERLAY_BG } else { BG };
+    b.rect(0.0, 0.0, width, height, backdrop);
 
     // Title block.
     let tw = text_px(frame.title, TITLE_SCALE);
@@ -806,7 +864,10 @@ impl MenuRenderer {
         }
     }
 
-    /// Draws one menu frame, clearing the target first.
+    /// Draws one menu frame, clearing the target first. For a screen owning
+    /// the whole frame (see [`owns_frame`]) — nothing renders behind a menu,
+    /// so clearing rather than loading is what keeps the last world frame
+    /// from showing through.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -815,6 +876,65 @@ impl MenuRenderer {
         frame: &MenuFrame<'_>,
         width: u32,
         height: u32,
+    ) {
+        self.draw(
+            device,
+            queue,
+            view,
+            frame,
+            width,
+            height,
+            wgpu::LoadOp::Clear(wgpu::Color {
+                r: f64::from(BG[0]),
+                g: f64::from(BG[1]),
+                b: f64::from(BG[2]),
+                a: 1.0,
+            }),
+        );
+    }
+
+    /// Draws one frame **over** whatever `view` already holds instead of
+    /// clearing it first — for the pause menu (see [`pause_frame`]), which
+    /// sits on top of the world, HUD and container passes the caller already
+    /// ran this frame rather than replacing them (mirrors
+    /// [`crate::effects::EffectsRenderer`]'s own Load-pass overlay). Every
+    /// other detail — buffer growth, the vertex layout, the pipeline — is
+    /// identical to [`render`](Self::render); only the load op differs, so a
+    /// caller must never invoke both in the same frame — `Screen::Paused` is
+    /// not an [`owns_frame`] screen for exactly this reason: [`render`] and
+    /// `render_overlay` are alternatives, not a pair meant to compose.
+    pub fn render_overlay(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        frame: &MenuFrame<'_>,
+        width: u32,
+        height: u32,
+    ) {
+        self.draw(
+            device,
+            queue,
+            view,
+            frame,
+            width,
+            height,
+            wgpu::LoadOp::Load,
+        );
+    }
+
+    /// Shared body of [`render`](Self::render) and
+    /// [`render_overlay`](Self::render_overlay); only the pass's load op
+    /// differs between them.
+    fn draw(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        frame: &MenuFrame<'_>,
+        width: u32,
+        height: u32,
+        load: wgpu::LoadOp<wgpu::Color>,
     ) {
         let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
         let verts = geometry(frame, logical_w, logical_h);
@@ -841,14 +961,7 @@ impl MenuRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Nothing renders behind a menu, so clear rather than
-                        // load — otherwise the last world frame shows through.
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: f64::from(BG[0]),
-                            g: f64::from(BG[1]),
-                            b: f64::from(BG[2]),
-                            a: 1.0,
-                        }),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -1145,6 +1258,7 @@ mod tests {
             footer: vec![],
             message: None,
             gui_scale: 0,
+            overlay: false,
         }
     }
 
@@ -1363,6 +1477,90 @@ mod tests {
             coverage(&v, w, h, outside),
             0.0,
             "text overran the row's right edge"
+        );
+    }
+
+    #[test]
+    fn owns_frame_excludes_paused_so_the_pause_menu_never_replaces_the_world() {
+        // The specific regression this module's docs warn about: adding
+        // `Screen::Paused` to `owns_frame` would make `app.rs`'s `draw_menu`
+        // return `true` for it, skipping the world/HUD/container render path
+        // entirely — the pause menu would work, but the game behind it would
+        // stop rendering for as long as it was up.
+        assert!(!owns_frame(Screen::Paused));
+    }
+
+    #[test]
+    fn pause_frame_builds_the_three_buttons_in_order_and_tracks_the_highlight() {
+        use crate::menu::nav::PauseButton;
+
+        let mut nav = test_nav("pause-frame");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        nav.hover(&ui, 1);
+
+        let f = pause_frame(&nav);
+        assert!(f.overlay, "the pause menu must draw as an overlay");
+        assert_eq!(f.rows.len(), 3);
+        assert_eq!(f.rows[0].label, PauseButton::BackToGame.label());
+        assert_eq!(f.rows[1].label, PauseButton::Options.label());
+        assert_eq!(f.rows[2].label, PauseButton::QuitToTitle.label());
+        assert_eq!(f.selected, 1, "selection follows the nav's pause_index");
+        assert!(!geometry(&f, 1280.0, 720.0).is_empty());
+    }
+
+    #[test]
+    fn an_overlay_frames_backdrop_is_translucent_unlike_an_ordinary_menus() {
+        // The whole point of `MenuFrame::overlay`: the paused world underneath
+        // must stay visible, which only holds if the backdrop quad's alpha is
+        // measurably below opaque. A negative control (an ordinary, non-overlay
+        // frame) proves the opaque case still exists and this isn't just
+        // measuring `geometry`'s general output.
+        let nav = test_nav("pause-overlay-alpha");
+        let overlay = pause_frame(&nav);
+        let v = geometry(&overlay, 1280.0, 720.0);
+        // The backdrop is the very first quad emitted (vertex 0..6); alpha is
+        // the 4th of the 6 floats per vertex ([x, y, r, g, b, a]).
+        let backdrop_alpha = v[5];
+        assert!(
+            backdrop_alpha < 0.9,
+            "an overlay backdrop must let the world show through: alpha={backdrop_alpha}"
+        );
+
+        let ordinary = frame_with(vec![button("QUIT")], 0);
+        let v2 = geometry(&ordinary, 1280.0, 720.0);
+        assert!(
+            (v2[5] - 1.0).abs() < f32::EPSILON,
+            "a non-overlay menu's backdrop must stay opaque: alpha={}",
+            v2[5]
+        );
+    }
+
+    #[test]
+    fn the_highlighted_pause_button_is_visibly_different_from_its_neighbours() {
+        let mut nav = test_nav("pause-highlight");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+
+        nav.hover(&ui, 1);
+        let sel = geometry(&pause_frame(&nav), 1280.0, 720.0);
+        // Force an out-of-range highlight to get an unselected render for
+        // comparison, mirroring `the_selected_row_is_visibly_different_*`
+        // above — build the frame by hand since `pause_frame` always reflects
+        // a real (in-range) nav selection.
+        let mut unsel = pause_frame(&nav);
+        unsel.selected = 99;
+        let unsel = geometry(&unsel, 1280.0, 720.0);
+        assert_ne!(sel, unsel, "selecting a pause row must change the geometry");
+
+        let rows = pause_frame(&nav).rows;
+        let rect = row_rect(&rows, 1, 1280.0, 720.0).expect("row 1 exists");
+        let border = (rect.0 + 4.0, rect.1, rect.2 - 8.0, 2.0);
+        assert!(
+            coverage(&sel, 1280.0, 720.0, border) > 0.9,
+            "the highlighted pause row should be outlined"
         );
     }
 

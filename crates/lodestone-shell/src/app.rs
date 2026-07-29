@@ -21,7 +21,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
 use crate::container::{
-    ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuInput, hit_test,
+    ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuInput, hit_test_with_scale,
 };
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
@@ -36,6 +36,7 @@ use lodestone_assets::ResourceLocation;
 use lodestone_controller::Action;
 use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
+use lodestone_game::recipe::RecipeBook;
 
 /// Entry point: dispatch on the configured mode.
 ///
@@ -426,6 +427,12 @@ struct WindowApp {
     /// (which owns `WorldTime`) — unifying the two is a later stage; see the
     /// two-`World`s note in `docs/bevy-migration.md`'s Stage 0 report.
     ecs: lodestone_ecs::app::App,
+    /// The local crafting-recipe corpus (`crate::resources::load_recipe_book`),
+    /// loaded once at GPU bring-up. `None` on a jar-less run or before it has
+    /// loaded. Used only for the container screen's ghost-preview draw and the
+    /// debug-overlay counter — the crafting result slot itself is always the
+    /// server's, never a local match (see `docs/crafting.md`).
+    recipe_book: Option<RecipeBook>,
 }
 
 impl WindowApp {
@@ -464,6 +471,7 @@ impl WindowApp {
             last_log: Instant::now(),
             applied_fog,
             ecs,
+            recipe_book: None,
         }
     }
 
@@ -670,22 +678,55 @@ impl WindowApp {
                 // now in the list (idempotent, so this costs nothing per frame).
                 self.statuses.refresh(self.nav.list().entries());
             }
+            MenuAction::QuitToTitle => {
+                // `UiState` has already moved to `MainMenu` — `nav.rs`'s
+                // `key_paused` calls `ui.quit_to_title()` before returning this
+                // action. What is left is tearing down whatever live session is
+                // attached to `Sim` so a fresh connect afterward starts clean;
+                // see `Sim::end_session` for exactly what resets vs. persists.
+                self.sim.end_session();
+                // The pause screen already released the pointer on entry, so
+                // this is normally a no-op; cheap insurance against a future
+                // caller reaching `QuitToTitle` some other way.
+                self.set_grab(false);
+            }
         }
     }
 
     /// Route a mouse position (physical pixels) to a menu row, if it is over one.
+    ///
+    /// `Screen::Paused` gets its frame from [`crate::menu::render::pause_frame`]
+    /// directly rather than [`crate::menu::render::frame_for`], which returns
+    /// `None` for it by design (see that function's doc on why the pause
+    /// overlay is not an `owns_frame` screen).
+    ///
+    /// Both branches convert the physical framebuffer size and cursor down to
+    /// the same logical canvas [`MenuRenderer::render`]/`render_overlay`
+    /// actually draw into (via [`crate::menu::render::logical_canvas`]) before
+    /// calling [`crate::menu::render::row_rect`] — mirroring
+    /// `container::hit_test_with_scale`'s own `x / scale` pattern. Skipping
+    /// this (as this function used to) is exactly the "clicks land one slot
+    /// off, invisible in any screenshot" bug that module warns about: it is
+    /// only invisible at `gui_scale == 1`, which is why it went unnoticed.
     fn menu_row_at(&mut self, x: f32, y: f32) -> Option<usize> {
-        let frame = crate::menu::render::frame_for(
-            &self.ui,
-            &self.nav,
-            &self.statuses,
-            &mut self.favicons,
-        )?;
-        let (w, h) = self.target.as_ref().map(RenderTarget::size)?;
+        let frame = if self.ui.is_paused() {
+            crate::menu::render::pause_frame(&self.nav)
+        } else {
+            crate::menu::render::frame_for(
+                &self.ui,
+                &self.nav,
+                &self.statuses,
+                &mut self.favicons,
+            )?
+        };
+        let (fb_w, fb_h) = self.target.as_ref().map(RenderTarget::size)?;
+        let (w, h) = crate::menu::render::logical_canvas(frame.gui_scale, fb_w, fb_h);
+        let scale = crate::config::calculate_gui_scale(frame.gui_scale, fb_w, fb_h).max(1) as f32;
+        let (lx, ly) = (x / scale, y / scale);
         (0..frame.rows.len()).find(|&i| {
-            crate::menu::render::row_rect(&frame.rows, i, w as f32, h as f32)
+            crate::menu::render::row_rect(&frame.rows, i, w, h)
                 .is_some_and(|(rx, ry, rw, rh)| {
-                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+                    lx >= rx && lx <= rx + rw && ly >= ry && ly <= ry + rh
                 })
         })
     }
@@ -912,8 +953,17 @@ impl WindowApp {
             // use (see the `cursor` field). Without this the stack is built but
             // never positioned, and nothing draws.
             let container_frame = ContainerFrame::new(container_menu, &container_title)
-                .with_cursor(Some([self.cursor.0, self.cursor.1]));
-            container_renderer.render(device, queue, frame.view(), &container_frame, w, h);
+                .with_cursor(Some([self.cursor.0, self.cursor.1]))
+                .with_recipe_book(self.recipe_book.as_ref());
+            container_renderer.render_scaled(
+                device,
+                queue,
+                frame.view(),
+                &container_frame,
+                self.nav.gui_scale(),
+                w,
+                h,
+            );
         }
 
         // Assemble the HUD frame: debug overlay, chat log + prompt, tab list,
@@ -983,6 +1033,10 @@ impl WindowApp {
         hud_frame.xp = self.sim.xp();
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
+        hud_frame.recipe_stats = self
+            .recipe_book
+            .as_ref()
+            .map(|book| (book.len(), book.tags().len()));
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
@@ -994,12 +1048,26 @@ impl WindowApp {
             Some(render.depth_view()),
             &hud_frame,
             item_models,
+            self.nav.gui_scale(),
             w,
             h,
         );
         // Status-effect overlay, composited over the HUD in its own Load pass.
         if let Some(effects) = self.effects.as_mut() {
             effects.render(device, queue, frame.view(), self.sim.active_effects(), w, h);
+        }
+
+        // The pause overlay draws *over* the world/HUD/container passes above
+        // rather than replacing them — see `Screen::Paused`'s doc comment and
+        // `menu::render::owns_frame`'s, which is deliberately why `Paused` is
+        // not in that set: adding it there would route this screen through
+        // `draw_menu`'s `Clear` pass instead and stop the world rendering
+        // behind it for as long as the game is paused.
+        if self.ui.is_paused()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            let pause_frame = crate::menu::render::pause_frame(&self.nav);
+            menu.render_overlay(device, queue, frame.view(), &pause_frame, w, h);
         }
 
         if let Some(window) = &self.window {
@@ -1060,6 +1128,10 @@ impl ApplicationHandler for WindowApp {
         if let Some(gui) = crate::resources::load_gui_atlas() {
             hud.attach_gui(gpu.device(), gpu.queue(), format, gui);
         }
+        // Load the real crafting-recipe corpus from `client.jar`, once. Feeds
+        // the container screen's ghost-preview draw and the debug-overlay
+        // counter; a jar-less run leaves this `None` and neither draws.
+        self.recipe_book = crate::resources::load_recipe_book();
         // Attach the flat item-sprite atlas so hotbar/container slots draw real
         // item icons; jar-less runs leave this `None` and slots stay empty wells.
         // Loaded once and shared: the container screen needs the same atlas, and
@@ -1222,9 +1294,12 @@ impl ApplicationHandler for WindowApp {
                 self.pacer.set_occluded(occluded);
             }
             // Hovering a menu row highlights it, so the mouse and the keyboard
-            // drive one selection rather than two.
+            // drive one selection rather than two. `Screen::Paused` shares this
+            // arm too even though it is not `owns_frame` — see `menu_row_at`'s
+            // doc — because it has its own row navigation to hover just like
+            // every screen this renderer owns.
             WindowEvent::CursorMoved { position, .. }
-                if crate::menu::render::owns_frame(self.ui.screen()) =>
+                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() =>
             {
                 self.cursor = (position.x as f32, position.y as f32);
                 if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
@@ -1232,7 +1307,7 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
-                if crate::menu::render::owns_frame(self.ui.screen()) =>
+                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() =>
             {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     // Only a click *on a row* activates: clicking the backdrop
@@ -1241,6 +1316,18 @@ impl ApplicationHandler for WindowApp {
                         self.nav.hover(&self.ui, row);
                         self.handle_menu_key(MenuKey::Enter);
                     }
+                }
+                // Every `owns_frame` action handles its own grab (each of them
+                // either stays on a menu screen, which never grabs, or moves to
+                // Playing through a path that already calls `set_grab`).
+                // `PauseButton::BackToGame` does not — `handle_menu_key` only
+                // calls `MenuNav::key`, which flips `UiState` to `Playing` and
+                // returns, with nothing here to notice. Without this a click on
+                // Back to Game resumes play with the pointer still released:
+                // visible but unusable.
+                let want = self.ui.wants_cursor_grab();
+                if want != self.grabbed {
+                    self.set_grab(want);
                 }
             }
             // Track the cursor and, mid-drag, the slots it paints while a
@@ -1254,7 +1341,14 @@ impl ApplicationHandler for WindowApp {
                         self.active_container_menu(),
                         self.target.as_ref().map(RenderTarget::size),
                     ) {
-                        let hit = hit_test(&menu, w, h, self.cursor.0, self.cursor.1);
+                        let hit = hit_test_with_scale(
+                            &menu,
+                            self.nav.gui_scale(),
+                            w,
+                            h,
+                            self.cursor.0,
+                            self.cursor.1,
+                        );
                         self.menu_input.dragged(hit);
                     }
                 }
@@ -1266,7 +1360,14 @@ impl ApplicationHandler for WindowApp {
                         self.target.as_ref().map(RenderTarget::size),
                     )
                 {
-                    let hit = hit_test(&menu, w, h, self.cursor.0, self.cursor.1);
+                    let hit = hit_test_with_scale(
+                        &menu,
+                        self.nav.gui_scale(),
+                        w,
+                        h,
+                        self.cursor.0,
+                        self.cursor.1,
+                    );
                     let ctx = MenuContext {
                         cursor_loaded: menu.carried().is_some(),
                         // No game-mode plumbing exists on `Sim` to source this
@@ -1295,14 +1396,11 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if self.ui.is_paused() {
-                    // First click on the paused world resumes and re-grabs; it
-                    // is consumed by the resume, not passed on as an attack.
-                    if state == ElementState::Pressed && button == MouseButton::Left {
-                        self.ui.resume();
-                        self.set_grab(true);
-                    }
-                } else if self.grabbed {
+                // `Screen::Paused` no longer reaches this catch-all at all — the
+                // `owns_frame(...) || self.ui.is_paused()` arm above now handles
+                // every click while paused (hover + activate the highlighted
+                // pause-menu row, including Back to Game via `MenuKey::Enter`).
+                if self.grabbed {
                     // Left mines (hold-to-mine on live; one-shot break on demo),
                     // right uses/places against the targeted face.
                     match (button, state) {
@@ -1347,7 +1445,12 @@ impl ApplicationHandler for WindowApp {
 
                 // A menu screen captures every key: the edit form needs the
                 // whole keyboard, and no gameplay binding may fire behind it.
-                if crate::menu::render::owns_frame(self.ui.screen()) {
+                // `Screen::Paused` shares this arm too — it is not `owns_frame`
+                // (see that function's doc), but it has its own keyboard
+                // navigation (`MenuNav::key_paused`) that needs exactly the same
+                // routing, including the grab re-sync just below for Back to
+                // Game.
+                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() {
                     if pressed {
                         if let Some(key) = Self::menu_key_for(&event) {
                             self.handle_menu_key(key);
@@ -1370,9 +1473,6 @@ impl ApplicationHandler for WindowApp {
                         }
                         self.ui.on_escape();
                         self.set_grab(self.ui.wants_cursor_grab());
-                    } else if code == KeyCode::KeyQ && pressed && self.ui.is_paused() {
-                        // A quit affordance from the (text-less) pause screen.
-                        self.ui.request_quit();
                     } else if self.ui.is_container_open() && pressed {
                         match code {
                             KeyCode::Escape | KeyCode::KeyE => {
