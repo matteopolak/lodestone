@@ -215,7 +215,7 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
 fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
     let mut sim = Sim::new(live_config());
     sim.collide_against_live_world = collide_live;
-    let demo_spawn = sim.player.position;
+    let demo_spawn = sim.player().position;
     sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
 
     // Phase 1: drive until the server has placed us (teleport moved us off the
@@ -229,7 +229,7 @@ fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
         if let Some(net) = sim.net()
             && net.world_dimensions().is_some()
             && !net.loaded_chunks().is_empty()
-            && sim.player.position != demo_spawn
+            && sim.player().position != demo_spawn
         {
             placed = true;
             break;
@@ -251,7 +251,7 @@ fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
         let _ = sim.drain_removals();
         std::thread::sleep(Duration::from_millis(20));
     }
-    let y_placed = sim.player.position.y;
+    let y_placed = sim.player().position.y;
 
     // Phase 2: observe. No movement input — pure gravity vs. collision. Time the
     // steps so the gate also reports the per-tick cost of the live-collision
@@ -267,9 +267,9 @@ fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
         step_time += t0.elapsed();
         let _ = sim.drain_meshes();
         let _ = sim.drain_removals();
-        y_final = sim.player.position.y;
+        y_final = sim.player().position.y;
         y_min = y_min.min(y_final);
-        on_ground_final = sim.player.on_ground;
+        on_ground_final = sim.player().on_ground;
         if on_ground_final {
             on_ground_hits += 1;
         }
@@ -285,8 +285,8 @@ fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
 
     let loaded = sim.net().map_or(0, |n| n.loaded_chunks().len());
     let mesh_drops = sim.stats.mesh_drops;
-    let pcx = (sim.player.position.x.floor() as i32).div_euclid(16);
-    let pcz = (sim.player.position.z.floor() as i32).div_euclid(16);
+    let pcx = (sim.player().position.x.floor() as i32).div_euclid(16);
+    let pcz = (sim.player().position.z.floor() as i32).div_euclid(16);
     let player_chunk_loaded = sim
         .net()
         .map(|n| n.loaded_chunks())
@@ -333,25 +333,25 @@ const JUMP_TICKS: usize = 40;
 /// `ground_y` is sampled at the moment of launch, so this is meaningful on both
 /// the live (on-ground) session and the demo negative control (mid-fall).
 fn observe_jump(sim: &mut Sim) -> JumpArc {
-    let ground_y = sim.player.position.y;
+    let ground_y = sim.player().position.y;
     let tp_before = sim.teleport_count;
 
     // Vanilla jump is edge-triggered on a grounded tick: hold Space for exactly
     // one tick, then release so the arc is a single clean parabola rather than a
     // repeated bunny-hop.
-    sim.input.set(Action::Jump, true);
+    sim.input_mut().set(Action::Jump, true);
     sim.step(1.0 / 20.0);
     let _ = sim.drain_meshes();
     let _ = sim.drain_removals();
-    sim.input.set(Action::Jump, false);
+    sim.input_mut().set(Action::Jump, false);
 
-    let mut apex_y = sim.player.position.y.max(ground_y);
-    let mut min_y = sim.player.position.y.min(ground_y);
+    let mut apex_y = sim.player().position.y.max(ground_y);
+    let mut min_y = sim.player().position.y.min(ground_y);
     for _ in 0..JUMP_TICKS {
         sim.step(1.0 / 20.0);
         let _ = sim.drain_meshes();
         let _ = sim.drain_removals();
-        let y = sim.player.position.y;
+        let y = sim.player().position.y;
         apex_y = apex_y.max(y);
         min_y = min_y.min(y);
         std::thread::sleep(Duration::from_millis(20));
@@ -361,8 +361,8 @@ fn observe_jump(sim: &mut Sim) -> JumpArc {
         ground_y,
         apex_y,
         min_y,
-        final_y: sim.player.position.y,
-        on_ground_final: sim.player.on_ground,
+        final_y: sim.player().position.y,
+        on_ground_final: sim.player().on_ground,
         teleports_during: (sim.teleport_count - tp_before) as usize,
     }
 }

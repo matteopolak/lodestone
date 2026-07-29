@@ -183,7 +183,7 @@ fn a_server_kill_is_survived_respawned_and_keeps_streaming() {
 fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
     let mut sim = Sim::new(live_config());
     sim.recover_from_death = recover;
-    let demo_spawn = sim.player.position;
+    let demo_spawn = sim.player().position;
     sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
 
     // Phase 1: drive until the server has placed us and chunks are streaming.
@@ -196,7 +196,7 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
         if let Some(net) = sim.net()
             && net.world_dimensions().is_some()
             && !net.loaded_chunks().is_empty()
-            && sim.player.position != demo_spawn
+            && sim.player().position != demo_spawn
         {
             placed = true;
             break;
@@ -260,8 +260,8 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
     eprintln!("[watch] saw_dead flag at some tick = {saw_dead}");
 
     let loaded = sim.net().map_or(0, |n| n.loaded_chunks().len());
-    let pcx = (sim.player.position.x.floor() as i32).div_euclid(16);
-    let pcz = (sim.player.position.z.floor() as i32).div_euclid(16);
+    let pcx = (sim.player().position.x.floor() as i32).div_euclid(16);
+    let pcz = (sim.player().position.z.floor() as i32).div_euclid(16);
     let player_chunk_loaded = sim
         .net()
         .map(|n| n.loaded_chunks())

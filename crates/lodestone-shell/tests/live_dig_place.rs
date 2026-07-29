@@ -83,7 +83,7 @@ fn dig_and_place_reach_the_server() {
     );
 
     let mut sim = Sim::new(live_config());
-    let demo_spawn = sim.player.position;
+    let demo_spawn = sim.player().position;
     sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
 
     // Drive the real join path until the server has placed us and chunks stream.
@@ -94,7 +94,7 @@ fn dig_and_place_reach_the_server() {
         if let Some(net) = sim.net()
             && net.world_dimensions().is_some()
             && !net.loaded_chunks().is_empty()
-            && sim.player.position != demo_spawn
+            && sim.player().position != demo_spawn
         {
             placed = true;
             break;
@@ -140,9 +140,9 @@ fn dig_and_place_reach_the_server() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    let px = sim.player.position.x.floor() as i32;
-    let py = sim.player.position.y.floor() as i32;
-    let pz = sim.player.position.z.floor() as i32;
+    let px = sim.player().position.x.floor() as i32;
+    let py = sim.player().position.y.floor() as i32;
+    let pz = sim.player().position.z.floor() as i32;
     // Keep the working area active so RCON `execute if block` sees live state.
     rcon.cmd(&format!(
         "forceload add {} {} {} {}",
@@ -361,16 +361,16 @@ fn settle_target(sim: &mut Sim) {
 /// vanilla's forward-vector convention (yaw 0 = south/+Z, pitch 90 = down).
 fn aim_at(sim: &mut Sim, point: [f64; 3]) {
     let eye = [
-        sim.player.position.x,
-        sim.player.position.y + 1.62,
-        sim.player.position.z,
+        sim.player().position.x,
+        sim.player().position.y + 1.62,
+        sim.player().position.z,
     ];
     let dx = point[0] - eye[0];
     let dy = point[1] - eye[1];
     let dz = point[2] - eye[2];
     let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-    sim.player.yaw = (-dx).atan2(dz).to_degrees() as f32;
-    sim.player.pitch = (-dy / len).asin().to_degrees() as f32;
+    sim.player_mut().yaw = (-dx).atan2(dz).to_degrees() as f32;
+    sim.player_mut().pitch = (-dy / len).asin().to_degrees() as f32;
 }
 
 /// Whether the server reports `block` exactly at `pos` (`execute if block`).
