@@ -28,7 +28,7 @@
 //! in [`EntityDimensions`], a per-call input, and the profile keeps only what
 //! genuinely varies by version (gravity, drag, friction curves, the input model).
 
-use crate::collision::{CollisionView, collide};
+use crate::collision::{CollisionView, collide_among_entities};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth;
 use crate::player::{
@@ -194,6 +194,34 @@ pub fn move_entity(
     profile: &PhysicsProfile,
     ctx: MoveContext,
 ) {
+    move_entity_among_entities(motion, dims, view, profile, ctx, &[]);
+}
+
+/// [`move_entity`] with the entity half of `Entity.collide` wired: the sweep sees
+/// `entity_colliders` in addition to block geometry.
+///
+/// `entity_colliders` comes from [`crate::push::entity_collision_boxes`] over
+/// `dims.bounding_box(motion.position).expand_towards(velocity)`. Passing `&[]` is
+/// exactly [`move_entity`], bit for bit — see [`collide_among_entities`].
+///
+/// **This is a second entry point rather than a field on [`MoveContext`] on
+/// purpose.** `MoveContext` is a `Copy` value type of plain scalars, threaded
+/// through [`travel_in_air`] and constructed by callers outside this crate; a
+/// borrowed slice would give it a lifetime parameter and take `Copy` with it. It
+/// also already lost its `Eq` when it gained an `f64` — the bar for adding to it is
+/// high, and "a per-tick world snapshot" is not the kind of thing it holds.
+///
+/// The soft **push** is *not* here. It is not part of `Entity.move` at all;
+/// vanilla applies it at the end of `aiStep`, after the move, via
+/// [`crate::push::apply_entity_push`].
+pub fn move_entity_among_entities(
+    motion: &mut EntityMotion,
+    dims: EntityDimensions,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    ctx: MoveContext,
+    entity_colliders: &[Aabb],
+) {
     // `deltaMovement` at the top of `Entity.move`.
     let delta = motion.velocity;
 
@@ -239,7 +267,14 @@ pub fn move_entity(
         view,
     );
 
-    let resolved = collide(view, move_delta, bb, motion.on_ground, dims.step_height);
+    let resolved = collide_among_entities(
+        view,
+        move_delta,
+        bb,
+        motion.on_ground,
+        dims.step_height,
+        entity_colliders,
+    );
 
     let x_collision = !mth_equal(move_delta.x, resolved.x);
     let z_collision = !mth_equal(move_delta.z, resolved.z);

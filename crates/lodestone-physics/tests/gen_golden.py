@@ -972,6 +972,84 @@ def tick(world, s, forward, strafe, jump, sneak, sprint):
         tick_air(world, s, forward, strafe, jump, sneak, sprint)
 
 
+MIN_SEPARATION = float(f32(0.01))   # `dd >= 0.01F`, widened: 0.009999999776482582
+PUSH_SCALE = float(f32(0.05))       # `xa *= 0.05F`, widened: 0.05000000074505806
+
+
+class Neighbour:
+    """A nearby entity, as LivingEntity.pushEntities sees it.
+
+    Only the fields the push rule reads: position (Entity.getX/getZ), the bounding
+    box (the pair test), Entity.isPushable() and Entity.isVehicle(). Stationary --
+    this oracle does not simulate the neighbour's own motion, matching a NoAI lure
+    on a live server.
+    """
+
+    def __init__(self, x, y, z, width=0.6, height=1.8, pushable=True, vehicle=False):
+        self.pos = [x, y, z]
+        half = width / 2.0
+        self.box = (x - half, y, z - half, x + half, y + height, z + half)
+        self.pushable = pushable
+        self.vehicle = vehicle
+
+
+def boxes_intersect(a, b):
+    """AABB.intersects (AABB.java:245-247): strict, so flush contact is not overlap.
+
+    Note there is NO epsilon inflation here. getEntityCollisions inflates its query
+    by 1e-7; Level.getEntities (which getPushableEntities uses) does not.
+    """
+    return (a[0] < b[3] and a[3] > b[0]
+            and a[1] < b[4] and a[4] > b[1]
+            and a[2] < b[5] and a[5] > b[2])
+
+
+def abs_max(a, b):
+    """Mth.absMax(double,double) = max(|a|, |b|) -- the larger COMPONENT, not the
+    length of the vector. Entity.push normalises by sqrt of this."""
+    return max(abs(a), abs(b))
+
+
+def push_entities(s, neighbours, pushable_self=True, self_vehicle=False):
+    """LivingEntity.pushEntities (:3222) -> Entity.push(Entity) (Entity.java:1882).
+
+    Runs at the END of aiStep, after travel, so it only affects the next tick.
+    Symmetric in vanilla; this oracle applies the receive half to the player, which
+    is the only half a client owns. No cap on the number of pushers: MAX_ENTITY_
+    CRAMMING deals damage on the server, it does not clamp movement.
+    """
+    bb = bounding_box(s)
+    for n in neighbours:
+        if not boxes_intersect(bb, n.box):
+            continue
+        if not pushable_self:
+            continue
+        xa = n.pos[0] - s.pos[0]
+        za = n.pos[2] - s.pos[2]
+        dd = abs_max(xa, za)
+        if not (dd >= MIN_SEPARATION):
+            continue
+        dd = math.sqrt(dd)
+        xa /= dd
+        za /= dd
+        pow_ = 1.0 / dd
+        if pow_ > 1.0:
+            pow_ = 1.0
+        xa *= pow_
+        za *= pow_
+        xa *= PUSH_SCALE
+        za *= PUSH_SCALE
+        if not self_vehicle and pushable_self:
+            s.vel[0] += -xa
+            s.vel[2] += -za
+
+
+def tick_with_push(world, s, forward, strafe, jump, sneak, sprint, neighbours,
+                   pushable_self=True):
+    tick(world, s, forward, strafe, jump, sneak, sprint)
+    push_entities(s, neighbours, pushable_self=pushable_self)
+
+
 def flat_floor(y=0, r=4):
     w = World()
     for x in range(-r, r + 1):
@@ -1451,6 +1529,82 @@ def scenario_sneak_edge_diagonal():
     return w, trace
 
 
+def scenario_entity_push_shove():
+    # One stationary pushable neighbour overlapping the player, both horizontal
+    # axes live (dx = 0.15, dz = 0.08). absMax = 0.15 < 1.0, so `pow` is clamped to
+    # 1.0 and the effective scale is 0.05f/absMax -- and because the normaliser is
+    # sqrt(absMax) rather than the vector length, a "normalise the separation"
+    # reading of the source lands 6% off on both axes from tick 1.
+    #
+    # The push runs at the END of the tick (aiStep :3163, after travel :3130), so
+    # the impulse is integrated on the following tick. The player slides away, the
+    # separation grows, and the push cuts out the moment the boxes stop strictly
+    # overlapping -- so the trace contains the gate opening AND closing, plus the
+    # ground friction decay afterwards.
+    w = flat_floor()
+    s = State(0.5, 1.0, 0.5, 0.0)
+    s.on_ground = True
+    others = [Neighbour(0.65, 1.0, 0.58)]
+    trace = []
+    for _ in range(120):
+        tick_with_push(w, s, 0.0, 0.0, False, False, False, others)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_entity_push_wide_plateau():
+    # The un-clamped `pow = 1/sqrt(absMax)` branch, which two 0.6-wide bodies cannot
+    # reach: they stop overlapping at dx = 0.6, and `pow > 1.0` is clamped for every
+    # absMax below 1.0. It needs a *wide* neighbour -- a happy ghast is 4.0 x 4.0 --
+    # so that dx > 1.0 while the boxes still overlap deeply.
+    #
+    # dx = 1.05, dz = 0.4 => absMax = 1.05, pow = 1/sqrt(1.05) = 0.9759... < 1.0.
+    # In this branch the two sqrt(absMax) terms cancel and the impulse is the
+    # Chebyshev-normalised direction times a flat 0.05f -- so the first tick is
+    # exactly (-0.05f, -0.05f*0.4/1.05). There is NO distance falloff: as the player
+    # is shoved away the magnitude stays put and only the direction rotates. That is
+    # the opposite of what the source's `pow` variable name suggests, and this trace
+    # is what pins it.
+    w = flat_floor(r=6)
+    s = State(1.0, 1.0, 1.0, 0.0)
+    s.on_ground = True
+    others = [Neighbour(2.05, 1.0, 1.4, width=4.0, height=4.0)]
+    trace = []
+    for _ in range(160):
+        tick_with_push(w, s, 0.0, 0.0, False, False, False, others)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_entity_push_flush_control():
+    # WORLD CONTROL for the two above. Same flat floor, same neighbour size, placed
+    # so its -X face lands *exactly* on the player's +X face. AABB.intersects is
+    # strict `min < max`, so a flush contact is not an overlap and
+    # getPushableEntities returns nothing -- the player must not move at all, on any
+    # axis, for 120 ticks.
+    #
+    # The flush X is derived, not written down, and that is not fussiness: the
+    # player's half-width is f32(0.6)/2 = 0.300000011920929, so the "obvious"
+    # neighbour at x = 1.1 overlaps by 1.2e-8 and pushes -- which is what the first
+    # draft of this scenario did.
+    #
+    # If this trace shows motion, the pair test has acquired an epsilon it must not
+    # have: getEntityCollisions inflates its query by 1e-7, the push pair test does
+    # not, and mixing them up is the easy mistake here. If the two scenarios above
+    # ALSO showed no motion, the fixture would be dead -- which is what makes this
+    # a control rather than a duplicate.
+    w = flat_floor()
+    s = State(0.5, 1.0, 0.5, 0.0)
+    s.on_ground = True
+    flush_x = 0.5 + f32(P.width) / 2.0 + 0.6 / 2.0
+    others = [Neighbour(flush_x, 1.0, 0.5)]
+    trace = []
+    for _ in range(120):
+        tick_with_push(w, s, 0.0, 0.0, False, False, False, others)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
 SCENARIOS = [
     ("free_fall", scenario_free_fall),
     ("walk_flat", scenario_walk_flat),
@@ -1481,6 +1635,9 @@ SCENARIOS = [
     ("sneak_edge_stop", scenario_sneak_edge_stop),
     ("sneak_edge_walk_off", scenario_sneak_edge_walk_off),
     ("sneak_edge_diagonal", scenario_sneak_edge_diagonal),
+    ("entity_push_shove", scenario_entity_push_shove),
+    ("entity_push_wide_plateau", scenario_entity_push_wide_plateau),
+    ("entity_push_flush_control", scenario_entity_push_flush_control),
 ]
 
 

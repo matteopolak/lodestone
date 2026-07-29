@@ -240,6 +240,48 @@ impl Aabb {
             self.min_x, min_y, self.min_z, self.max_x, self.max_y, self.max_z,
         )
     }
+
+    /// `AABB.inflate(double)` — grow by `d` on all six faces (`deflate` is
+    /// `inflate(-d)`, which vanilla spells that way and so do we).
+    ///
+    /// Note vanilla does **not** clamp a deflation that inverts the box; it
+    /// constructs the inverted box and every `intersects`/`collide` test then
+    /// reports no overlap. Reproduced by not clamping here either.
+    #[must_use]
+    pub fn inflate(&self, d: f64) -> Self {
+        Self::new(
+            self.min_x - d,
+            self.min_y - d,
+            self.min_z - d,
+            self.max_x + d,
+            self.max_y + d,
+            self.max_z + d,
+        )
+    }
+
+    /// `AABB.intersects(AABB)` (`AABB.java:245-247`) — strict `min < max` on all
+    /// three axes, so a **flush** contact is *not* an intersection.
+    #[must_use]
+    pub fn intersects(&self, o: &Self) -> bool {
+        self.min_x < o.max_x
+            && self.max_x > o.min_x
+            && self.min_y < o.max_y
+            && self.max_y > o.min_y
+            && self.min_z < o.max_z
+            && self.max_z > o.min_z
+    }
+
+    /// `AABB.getSize()` (`AABB.java:267-272`) — the **mean** of the three edge
+    /// lengths, `(xs + ys + zs) / 3.0`. Not a volume and not a diagonal; it is the
+    /// quantity `EntityGetter.getEntityCollisions` compares against `1.0E-7` to
+    /// reject a degenerate query box.
+    #[must_use]
+    pub fn size(&self) -> f64 {
+        let xs = self.max_x - self.min_x;
+        let ys = self.max_y - self.min_y;
+        let zs = self.max_z - self.min_z;
+        (xs + ys + zs) / 3.0
+    }
 }
 
 #[cfg(test)]

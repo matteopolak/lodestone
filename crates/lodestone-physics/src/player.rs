@@ -1593,6 +1593,40 @@ pub fn tick(
     update_stuck_multiplier(state, view, profile);
 }
 
+/// [`tick`] followed by one pass of `LivingEntity.pushEntities` against `nearby`.
+///
+/// This is the whole of `LivingEntity.aiStep`'s ordering for entity interaction:
+/// `travel` first (`LivingEntity.java:3130`), the crowd push last (`:3163`). So the
+/// impulse a neighbour delivers this tick is integrated on the **next** one, and
+/// this tick's collision sweep never sees it.
+///
+/// Passing an empty `nearby` is bit-for-bit [`tick`] — [`crate::push::apply_entity_push`]
+/// returns immediately, and the hard-collision half is not reached at all (see the
+/// note below). That is what makes this addition provably inert for existing
+/// callers.
+///
+/// **What this does not do, and cannot do without a producer.** The *hard*
+/// collision half — `Entity.collide`'s entity colliders — is not threaded through
+/// here. Doing so means widening `tick`/`tick_air`/`tick_water`/`tick_lava`/
+/// `tick_elytra`/`travel_in_air`/`move_entity`, all of which are public and called
+/// from crates this change may not touch, for a case that currently has **no**
+/// producer: `getEntityCollisions` filters on `canBeCollidedWith`, which only boats,
+/// shulkers and happy ghasts satisfy. The capability exists and is tested as
+/// [`crate::collision::collide_among_entities`] /
+/// [`crate::entity::move_entity_among_entities`]; wiring it into the player
+/// pipeline is a signature change to make when a caller can supply boats.
+pub fn tick_among_entities(
+    state: &mut PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+    nearby: &[crate::push::NearbyEntity],
+    self_flags: crate::push::PushSelf,
+) {
+    tick(state, input, view, profile);
+    crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
+}
+
 /// `Entity.updateSwimming()` (`Entity.java:1644-1652`) — the sprint-swimming pose
 /// state machine.
 ///
