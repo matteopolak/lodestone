@@ -54,10 +54,28 @@
 //! branches per read site on which world it means. `Sim`'s `world` and
 //! `demo_collision` fields are **deleted**.
 //!
-//! Still where it was: `Sim` itself, and the *bevy* `World` split — the net
-//! thread's, the entity interpolator's and the driver's are still three, which
-//! is why [`CorePlugin`] still refuses to insert [`WorldTime`]. See
-//! `docs/chunk-world-resource.md`.
+//! # Stage 5
+//!
+//! [`FrameClock`] (the *driver's* clock, as opposed to [`WorldTime`]'s server
+//! clock), [`VersionData`] (§4.3) and [`session::SessionChat`]. The clock and the
+//! chat log arrive together deliberately: Stage 3 deferred the log precisely
+//! because every push and every read needs a monotonic client clock, so a
+//! component here while the clock stayed a `Sim` field would have been a second
+//! clock. `lodestone_shell::sim::Sim`'s `clock_secs`, `accumulator`,
+//! `interp_alpha`, `tick_count`, `frame_count`, `chat_log`, `version_data`,
+//! `target`, `particles`, `mining`, `placement`, `attacking` and `last_step` are
+//! **deleted** — 28 fields down to 15.
+//!
+//! `Sim` itself is **not** deleted, and `docs/sim-dissolution.md` records why field
+//! by field. The short version: two of the fifteen survivors are `ecs` (this
+//! crate's `World`, which cannot be a resource in itself) and `entity_interp`
+//! (which holds a second `World`), so "one owner, one `App`" is §4.1(c).
+//!
+//! Still where it was: the *bevy* `World` split — the net thread's, the entity
+//! interpolator's and the driver's are still three, which is why [`CorePlugin`]
+//! still refuses to insert [`WorldTime`], and why there are still **two 20 Hz
+//! accumulators** driving two `GameTick` schedules on two different catch-up
+//! policies. See `docs/chunk-world-resource.md` and `docs/sim-dissolution.md`.
 //!
 //! # What this crate depends on
 //!
@@ -103,11 +121,11 @@ pub use player::{
     Profile, SelectedSlot, SprintKeyHeld, Submersion, reset_local_player, spawn_local_player,
 };
 pub use plugin::CorePlugin;
-pub use resources::WorldTime;
+pub use resources::{FrameClock, VersionData, WorldTime};
 pub use session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionBossBars,
-    SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard, SessionSet,
-    SessionTabList, TitleOverlay, Vitals, Xp, insert_hud_components, spawn_session,
+    SessionChat, SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard,
+    SessionSet, SessionTabList, TitleOverlay, Vitals, Xp, insert_hud_components, spawn_session,
 };
 pub use runner::Runner;
 pub use schedules::{Extract, GameTick, NetIngest, Update};

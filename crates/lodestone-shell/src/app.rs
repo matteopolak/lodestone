@@ -916,7 +916,7 @@ impl WindowApp {
         // player hears is spatialised to match what they see. No-op when audio
         // is disabled.
         self.sim.set_audio_listener(&camera);
-        let outline = self.sim.target.map(|hit| hit.block);
+        let outline = self.sim.target().map(|hit| hit.block);
         let entity_draws = self.sim.entity_draws();
         // Extraction lives in `Sim` because resolving each particle's light
         // needs the world; doing it here would hand out two borrows of `Sim`.

@@ -35,6 +35,7 @@ pub mod effects;
 pub mod entities;
 pub mod gpu;
 pub mod hud;
+pub mod interact;
 pub mod menu;
 pub mod mesher;
 pub mod net;

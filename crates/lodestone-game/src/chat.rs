@@ -365,3 +365,185 @@ impl ChatFeed {
         self.entries.clear();
     }
 }
+
+/// The display component of a feed entry, regardless of variant.
+fn entry_display(entry: &ChatEntry) -> &Text {
+    match entry {
+        ChatEntry::Player { display, .. } => display,
+        ChatEntry::System { content } => content,
+    }
+}
+
+/// A [`ChatFeed`] plus each entry's **arrival time**, which is what a renderer
+/// needs to fade a line out.
+///
+/// The message *content* model — bounding, ordering, trust, the 100-line cap —
+/// is [`ChatFeed`]; this adds only the monotonic arrival time of each entry,
+/// which drives the vanilla fade-out (a client-renderer detail vanilla itself
+/// keeps in `ChatComponent`, not in server state). The two structures are pushed
+/// and evicted in lockstep so index *i* of one matches the other.
+///
+/// Times are plain `f64` seconds supplied by the caller, so this type stays free
+/// of any clock (and thus wasm-safe and unit-testable without a real time
+/// source). In the shell that clock is
+/// `lodestone_ecs::FrameClock` — see `docs/sim-dissolution.md` on why the log
+/// and the clock had to move together.
+///
+/// # Why this lives in `lodestone-game` rather than the shell
+///
+/// It used to be `lodestone_shell::chat::ChatLog`. `docs/bevy-migration.md`
+/// Stage 5 makes it the payload of a `lodestone_ecs::SessionChat` component, and
+/// `lodestone-ecs` cannot depend on `lodestone-shell` (the dependency runs the
+/// other way). It sits beside the feed it wraps for the same reason every other
+/// session aggregate does (§8: "`lodestone-game`'s folds stay plain functions
+/// the ECS calls").
+#[derive(Debug, Clone, Default)]
+pub struct ChatLog {
+    feed: ChatFeed,
+    times: VecDeque<f64>,
+}
+
+impl ChatLog {
+    /// A fresh, empty log.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the entry's arrival time, evicting the oldest in lockstep with the
+    /// feed so the two stay index-aligned.
+    fn stamp(&mut self, at: f64) {
+        if self.times.len() == self.feed.capacity() {
+            self.times.pop_front();
+        }
+        self.times.push_back(at);
+    }
+
+    /// Append a decorated player/disguised message (its `display` component is
+    /// already the server-decorated `<sender> body`), stamped with the caller's
+    /// monotonic clock (`at`, in seconds).
+    pub fn push_player(&mut self, display: Text, trust: MessageTrust, at: f64) {
+        self.feed.push_player(display, trust);
+        self.stamp(at);
+    }
+
+    /// Append a system message, stamped with the caller's monotonic clock.
+    pub fn push_system(&mut self, content: Text, at: f64) {
+        self.feed.push_system(content);
+        self.stamp(at);
+    }
+
+    /// The most recent `n` lines, oldest-first (render order, top to bottom),
+    /// each flattened to a legacy `§`-code string at read time (colour survives
+    /// once the adapter preserves it) and paired with its arrival timestamp.
+    #[must_use]
+    pub fn recent(&self, n: usize) -> Vec<(String, f64)> {
+        let start = self.feed.len().saturating_sub(n);
+        self.feed
+            .iter()
+            .zip(self.times.iter())
+            .skip(start)
+            .map(|(entry, at)| (entry_display(entry).to_legacy_string(), *at))
+            .collect()
+    }
+
+    /// The most recent `n` lines paired with their **age** in seconds relative to
+    /// `now`, which is the shape the HUD's fade-out consumes.
+    ///
+    /// A line stamped in the future (only reachable if a caller passes a clock
+    /// that went backwards) reads as age `0.0` rather than negative.
+    #[must_use]
+    pub fn recent_ages(&self, n: usize, now: f64) -> Vec<(String, f32)> {
+        self.recent(n)
+            .into_iter()
+            .map(|(line, at)| (line, (now - at).max(0.0) as f32))
+            .collect()
+    }
+
+    /// Total retained lines.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.feed.len()
+    }
+
+    /// Whether the log is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.feed.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::*;
+
+    #[test]
+    fn log_keeps_newest_and_bounds_length() {
+        let mut log = ChatLog::new();
+        for i in 0..(DEFAULT_CHAT_CAPACITY + 10) {
+            log.push_system(Text::literal(format!("line {i}")), i as f64);
+        }
+        assert_eq!(
+            log.len(),
+            DEFAULT_CHAT_CAPACITY,
+            "log must evict oldest at capacity"
+        );
+        let recent: Vec<String> = log.recent(3).into_iter().map(|(line, _)| line).collect();
+        // The three newest survive, oldest-first.
+        assert_eq!(
+            recent,
+            [
+                format!("line {}", DEFAULT_CHAT_CAPACITY + 7),
+                format!("line {}", DEFAULT_CHAT_CAPACITY + 8),
+                format!("line {}", DEFAULT_CHAT_CAPACITY + 9),
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_handles_asking_for_more_than_exist() {
+        let mut log = ChatLog::new();
+        log.push_system(Text::literal("only"), 0.0);
+        assert_eq!(
+            log.recent(10)
+                .into_iter()
+                .map(|(l, _)| l)
+                .collect::<Vec<_>>(),
+            vec!["only".to_string()]
+        );
+        assert!(ChatLog::new().recent(5).is_empty());
+    }
+
+    #[test]
+    fn recent_carries_arrival_timestamps() {
+        let mut log = ChatLog::new();
+        log.push_system(Text::literal("first"), 1.5);
+        log.push_system(Text::literal("second"), 4.25);
+        assert_eq!(
+            log.recent(2),
+            vec![("first".to_string(), 1.5), ("second".to_string(), 4.25)]
+        );
+    }
+
+    /// The age projection is what the HUD actually reads, so it gets its own
+    /// assertion rather than being assumed to follow from `recent`.
+    #[test]
+    fn recent_ages_subtracts_the_supplied_clock() {
+        let mut log = ChatLog::new();
+        log.push_system(Text::literal("old"), 1.0);
+        log.push_system(Text::literal("new"), 9.0);
+        assert_eq!(
+            log.recent_ages(2, 10.0),
+            vec![("old".to_string(), 9.0), ("new".to_string(), 1.0)]
+        );
+    }
+
+    /// A clock that went backwards must not produce a negative age — the HUD
+    /// feeds it straight into a fade curve.
+    #[test]
+    fn a_line_stamped_in_the_future_reads_as_age_zero() {
+        let mut log = ChatLog::new();
+        log.push_system(Text::literal("ahead"), 5.0);
+        assert_eq!(log.recent_ages(1, 1.0), vec![("ahead".to_string(), 0.0)]);
+    }
+}

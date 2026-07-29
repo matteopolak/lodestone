@@ -332,6 +332,23 @@ pub struct RespawnCount(pub u64);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerEntityId(pub Option<i32>);
 
+/// The received chat/system scrollback, with each line's arrival time.
+///
+/// # Why this arrives in Stage 5 and not Stage 3
+///
+/// Stage 3 moved every other session aggregate and deferred this one explicitly:
+/// every push needs a monotonic client clock and every read needs it again to age
+/// the line for the vanilla fade-out, so a component here while the clock stayed
+/// a `Sim` field would have put a *second* clock in the process — the exact
+/// failure the authority test exists to catch. The clock is now
+/// [`crate::FrameClock`] and they moved together.
+///
+/// The driver's ingest stamps each line with `FrameClock::secs` and the HUD reads
+/// `ChatLog::recent_ages(n, FrameClock::secs)`. Nothing in this crate reads the
+/// clock for it: which frame a line belongs to is the driver's fact, not a fold's.
+#[derive(Component, Debug, Clone, Default)]
+pub struct SessionChat(pub lodestone_game::chat::ChatLog);
+
 /// `TickSet::Animate`: age the three self-expiring HUD overlays one tick.
 ///
 /// **Must stay in the fixed 20 Hz schedule.** Every duration here is counted in
@@ -365,6 +382,11 @@ pub fn insert_hud_components(world: &mut World, entity: bevy_ecs::entity::Entity
             HudEffects::default(),
             RespawnCount::default(),
             ServerEntityId::default(),
+            // Stage 5. Reset with the rest rather than by hand in the driver's
+            // teardown: the old `Sim::end_session` cleared `chat_log` on its own
+            // line, which is exactly the shape that gets missed when a component
+            // is added later.
+            SessionChat::default(),
         ));
     }
 }
