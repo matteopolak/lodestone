@@ -15,6 +15,14 @@ path = "src/main.rs"
 # One global allocator per binary, selected at compile time by exactly one of
 # these features. `alloc-system` is the implicit default (no crate pulled in).
 # Enabling more than one non-system allocator is a compile error (see main.rs).
+#
+# Consequence: `cargo check -p lodestone-allocbench --all-features` (and any
+# workspace-wide `--all-features` check) is EXPECTED to fail here with that
+# compile_error!, not a bug to chase. `bench.sh` builds each allocator as its
+# own binary via `--no-default-features --features alloc-<name>`, one at a
+# time — that is the only supported feature combination. Exclude this crate
+# from any `--all-features` sweep (e.g. `--exclude lodestone-allocbench`)
+# rather than relaxing the mutual exclusion.
 [features]
 default = ["alloc-system"]
 alloc-system = []
