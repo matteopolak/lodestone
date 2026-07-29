@@ -80,7 +80,14 @@ fn cube(origin: [f32; 3], size: [f32; 3], tex: [f32; 2]) -> CubeDef {
 /// The shared humanoid mesh (`HumanoidModel.createMesh(g, yOffset=0)`): head with
 /// a hat overlay, body, two arms and two legs, on the standard box layout. `g` is
 /// the uniform cube deformation (`0.0` for the base layer).
-fn humanoid_root(g: f32) -> PartDef {
+///
+/// Visible to the crate because [`crate::equipment`] builds the armour layers
+/// from the *same* function at `g = 0.5` / `g = 1.0`. Vanilla does exactly that
+/// — `HumanoidModel.createBaseArmorMesh` calls `createMesh(g, 0.0F)` — and
+/// sharing it is what keeps an armour piece's pivots identical to the wearer's,
+/// which is the precondition for posing a piece off the wearer's own part
+/// matrix.
+pub(crate) fn humanoid_root(g: f32) -> PartDef {
     let head = PartDef::new(PartPose::offset(0.0, 0.0, 0.0))
         .with_cube(cube([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]).grown(g))
         .with_child(

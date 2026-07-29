@@ -45,6 +45,7 @@
 use glam::{Mat4, Vec3};
 use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
+use lodestone_assets::equipment::{ArmourLayer, ArmourSlot, armour_item, humanoid_armour_model};
 use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
 
 use crate::camera::Frustum;
@@ -387,58 +388,13 @@ impl EntityMesh {
             // themselves stay part-local so the animator can rotate the joint.
             let rest_m = rest[part_index];
             for quad in &part.quads {
-                let base = vertices.len() as u32;
-                for i in 0..4 {
-                    let p = quad.positions[i];
-                    let pos = Vec3::from(p);
-                    let posed = rest_m.transform_point3(pos);
+                for p in &quad.positions {
+                    let posed = rest_m.transform_point3(Vec3::from(*p));
                     local_min = local_min.min(posed);
                     local_max = local_max.max(posed);
-                    vertices.push(ModelVertex {
-                        position: p,
-                        uv: quad.uvs[i],
-                        ao: 1.0,
-                        // The entity shader does **not** read this byte: entity
-                        // light is per *instance* (one lightmap sample per mob,
-                        // as vanilla does), so it arrives on the instance
-                        // buffer, not here. The field is filled anyway because
-                        // the vertex layout is shared with terrain, and a
-                        // full-bright value keeps a mis-wired reader honest
-                        // rather than rendering every mob black.
-                        light: ENTITY_FULLBRIGHT,
-                        tint: 255,
-                        anim: 0,
-                        _pad: 0,
-                    });
-                }
-                // Wind the two triangles so the geometric normal agrees with the
-                // baked outward normal; otherwise back-face culling would drop
-                // the visible side.
-                let n = Vec3::from(quad.normal);
-                let p0 = Vec3::from(quad.positions[0]);
-                let p1 = Vec3::from(quad.positions[1]);
-                let p2 = Vec3::from(quad.positions[2]);
-                let facing = (p1 - p0).cross(p2 - p0).dot(n);
-                if facing >= 0.0 {
-                    indices.extend_from_slice(&[
-                        base,
-                        base + 1,
-                        base + 2,
-                        base,
-                        base + 2,
-                        base + 3,
-                    ]);
-                } else {
-                    indices.extend_from_slice(&[
-                        base,
-                        base + 2,
-                        base + 1,
-                        base,
-                        base + 3,
-                        base + 2,
-                    ]);
                 }
             }
+            push_part_quads(&part.quads, &mut vertices, &mut indices);
             parts.push(PartRange {
                 index_start,
                 index_count: indices.len() as u32 - index_start,
@@ -467,6 +423,55 @@ impl EntityMesh {
     #[must_use]
     pub fn quad_count(&self) -> usize {
         self.indices.len() / 6
+    }
+}
+
+/// Append one part's baked quads to a shared vertex/index buffer as
+/// **part-local** geometry, winding each triangle pair from the quad's own baked
+/// outward normal.
+///
+/// The one implementation of that winding rule, shared by [`EntityMesh`] and
+/// [`ArmourMesh`]. It has to be shared rather than copied: an armour layer whose
+/// winding disagreed with the mob it sits on would be invisible from exactly the
+/// half of the angles the mob is visible from, and only once back-face culling is
+/// eventually turned on — a defect that cannot be seen today and would land
+/// later, on somebody else's change.
+fn push_part_quads(
+    quads: &[lodestone_assets::entity::EntityQuad],
+    vertices: &mut Vec<ModelVertex>,
+    indices: &mut Vec<u32>,
+) {
+    for quad in quads {
+        let base = vertices.len() as u32;
+        for i in 0..4 {
+            vertices.push(ModelVertex {
+                position: quad.positions[i],
+                uv: quad.uvs[i],
+                ao: 1.0,
+                // The entity shader does **not** read this byte: entity light is
+                // per *instance* (one lightmap sample per mob, as vanilla does),
+                // so it arrives on the instance buffer, not here. The field is
+                // filled anyway because the vertex layout is shared with
+                // terrain, and a full-bright value keeps a mis-wired reader
+                // honest rather than rendering every mob black.
+                light: ENTITY_FULLBRIGHT,
+                tint: 255,
+                anim: 0,
+                _pad: 0,
+            });
+        }
+        // Wind the two triangles so the geometric normal agrees with the baked
+        // outward normal; otherwise back-face culling would drop the visible
+        // side.
+        let n = Vec3::from(quad.normal);
+        let p0 = Vec3::from(quad.positions[0]);
+        let p1 = Vec3::from(quad.positions[1]);
+        let p2 = Vec3::from(quad.positions[2]);
+        if (p1 - p0).cross(p2 - p0).dot(n) >= 0.0 {
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        } else {
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
     }
 }
 
@@ -856,6 +861,242 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
     }
 
     EntityFrame { batches, stats }
+}
+
+// ---------------------------------------------------------------------------
+// Humanoid armour
+// ---------------------------------------------------------------------------
+//
+// Armour is the one drawable in this module that is **not** an entity. It is a
+// layer over somebody else's rig, and the whole design follows from one
+// consequence of that:
+//
+// # Every armour piece is posed by the *wearer's* part matrix, never its own
+//
+// Vanilla does this too, and does it by a route we cannot copy: the armour
+// model is an instance of the wearer's own model *class*
+// (`AbstractZombieRenderer` builds an `ArmorModelSet<M extends ZombieModel>`),
+// and `submitModel` calls `setupAnim` on it with the wearer's render state. A
+// zombie's chestplate therefore reaches out in front with `animateZombieArms`,
+// because the chestplate ran the same animator.
+//
+// Here there is one animator per *mesh*, so the faithful equivalent is to skip
+// the second pose entirely and read the wearer's already-composed
+// `EntityInstance::part_transforms[i]` for the part of the same name. That is
+// exact, because [`ArmourMesh`]'s geometry is part-local and its pivots come
+// from the very same `humanoid_root` builder the wearer's rig does
+// (`lodestone_assets::equipment` shares it deliberately).
+//
+// **Reading, never mutating.** `EntityInstance::hand_transforms` exists because
+// folding a held item's pivot shift into `part_transforms` would have dragged
+// the mob's visible arm along with the item. The same discipline applies with
+// less effort here: an armour layer needs *exactly* the wearer's matrix with
+// nothing added, so there is nothing to fold in and nothing to copy — see
+// [`ArmourMesh::attach`], which hands back `(range, wearer part index)` pairs
+// and leaves the caller indexing the wearer's own slice.
+//
+// # Two measured deviations from vanilla, both sub-texel
+//
+// Reusing the wearer's pivot rather than the armour model's own means a rig
+// whose pivots differ from `HumanoidModel`'s gets its armour at *its* pivot,
+// not at vanilla's:
+//
+// * `skeleton`/`stray`/`wither_skeleton` put their legs at `x = ±2.0` where
+//   `HumanoidModel` has `±1.9`, so skeleton leg armour sits 0.1 texel
+//   (0.00625 blocks) further out than vanilla draws it.
+// * `player_slim`'s arms pivot 0.5 texel lower than the wide rig's, and vanilla
+//   bakes only *one* player armour set (`PlayerModel.createArmorMeshSet` takes
+//   no slim flag and adds only empty sleeve/pants/jacket nodes), so a slim
+//   player's sleeves get armour 0.5 texel (0.03 blocks) low.
+//
+// Both are deliberate: following the visible limb is worth more than matching
+// vanilla's pivot to a thirtieth of a block, and the alternative — posing a
+// second skeleton — would reintroduce exactly the zombie-arm divergence vanilla
+// avoids by construction.
+
+/// One armour slot's baked mesh, in the shared part-local [`ModelVertex`]
+/// format, with its parts keyed by the **wearer's** part names.
+///
+/// One of these per [`ArmourSlot`], not per material: the geometry depends only
+/// on the slot's inflation, and every material paints the same four meshes with
+/// a different sheet.
+#[derive(Debug, Clone)]
+pub struct ArmourMesh {
+    /// Four vertices per quad, part-local (the part's own pose is *not* folded
+    /// in — the wearer's matrix supplies it).
+    pub vertices: Vec<ModelVertex>,
+    /// Six indices per quad, wound so front faces point outward.
+    pub indices: Vec<u32>,
+    /// `(wearer part name, index range)` for every part that actually carries
+    /// geometry, in bake order. Parts pruned by the slot's retention rule are
+    /// absent rather than present-and-empty, so a caller cannot accidentally
+    /// issue a zero-index draw.
+    pub parts: Vec<(&'static str, PartRange)>,
+}
+
+impl ArmourMesh {
+    /// Bake the mesh for one slot.
+    #[must_use]
+    pub fn for_slot(slot: ArmourSlot) -> Self {
+        let def = humanoid_armour_model(slot);
+        let baked = bake_entity_parts(&def);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut parts = Vec::new();
+        for part in &baked {
+            if part.quads.is_empty() {
+                continue;
+            }
+            // Resolve the baked name back to the `&'static str` the slot
+            // declares, so the pairing in `attach` is a pointer-cheap compare
+            // and a name this mesh carries but the slot does not is a bake bug
+            // that shows up here rather than as a missing draw.
+            let Some(name) = slot
+                .part_names()
+                .iter()
+                .find(|n| **n == part.name.as_str())
+                .copied()
+            else {
+                continue;
+            };
+            let index_start = indices.len() as u32;
+            let vertex_start = vertices.len() as u32;
+            push_part_quads(&part.quads, &mut vertices, &mut indices);
+            parts.push((
+                name,
+                PartRange {
+                    index_start,
+                    index_count: indices.len() as u32 - index_start,
+                    vertex_start,
+                    vertex_count: vertices.len() as u32 - vertex_start,
+                },
+            ));
+        }
+        ArmourMesh {
+            vertices,
+            indices,
+            parts,
+        }
+    }
+
+    /// Number of quads in the mesh.
+    #[must_use]
+    pub fn quad_count(&self) -> usize {
+        self.indices.len() / 6
+    }
+
+    /// Pair each of this mesh's parts with the index of the wearer's part of the
+    /// same name, dropping any part the wearer's rig does not have.
+    ///
+    /// The caller then reads `instance.part_transforms[wearer_index]` — the
+    /// wearer's own, already-animated, already-world-space matrix — and draws
+    /// `range` instanced over it. Nothing is written back: see this section's
+    /// header for why an armour layer must not touch `part_transforms`.
+    ///
+    /// A non-humanoid rig yields nothing — see [`wearer_carries_armour`], which
+    /// this enforces so a caller cannot forget it.
+    pub fn attach<'a>(
+        &'a self,
+        wearer: &'a Skeleton,
+    ) -> impl Iterator<Item = (PartRange, usize)> + 'a {
+        let humanoid = wearer_carries_armour(wearer);
+        self.parts
+            .iter()
+            .filter(move |_| humanoid)
+            .filter_map(|(name, range)| wearer.index_of(name).map(|i| (*range, i)))
+    }
+}
+
+/// Whether a rig wears humanoid armour at all.
+///
+/// Vanilla's real gate is which *renderer* owns a `HumanoidArmorLayer`
+/// (`HumanoidMobRenderer`, `AvatarRenderer`, `ArmorStandRenderer`, the piglin
+/// and zombie families), and the structural equivalent here is the animation
+/// family: [`AnimFamily::Humanoid`] is exactly "has both arms and both legs",
+/// which is what `HumanoidModel` means.
+///
+/// **Part names alone are not sufficient and that is the trap.** A pig has both
+/// `head` and `body`, so a chestplate keyed on part names would attach its
+/// `body` cube to a pig's torso and draw a floating breastplate on a farm
+/// animal — geometry that resolves perfectly and is completely wrong. Vanilla
+/// draws nothing there.
+#[must_use]
+pub fn wearer_carries_armour(wearer: &Skeleton) -> bool {
+    wearer.family() == crate::entity_anim::AnimFamily::Humanoid
+}
+
+/// The four baked humanoid armour meshes, one per [`ArmourSlot`].
+///
+/// Built once (CPU only, like [`EntityModelSet`]) and uploaded once; a mob's
+/// armour costs one instance matrix per drawn part, exactly as its own body
+/// does.
+#[derive(Debug, Clone)]
+pub struct ArmourModelSet {
+    meshes: Vec<(ArmourSlot, ArmourMesh)>,
+}
+
+impl Default for ArmourModelSet {
+    fn default() -> Self {
+        Self::load()
+    }
+}
+
+impl ArmourModelSet {
+    /// Bake all four slot meshes, in [`ArmourSlot::ALL`] order — which is
+    /// `HumanoidArmorLayer.submit`'s own submit order, so a caller that walks
+    /// [`iter`](Self::iter) draws in vanilla's sequence.
+    #[must_use]
+    pub fn load() -> Self {
+        Self {
+            meshes: ArmourSlot::ALL
+                .into_iter()
+                .map(|slot| (slot, ArmourMesh::for_slot(slot)))
+                .collect(),
+        }
+    }
+
+    /// The baked mesh for a slot.
+    #[must_use]
+    pub fn get(&self, slot: ArmourSlot) -> Option<&ArmourMesh> {
+        self.meshes
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, m)| m)
+    }
+
+    /// Every `(slot, mesh)` pair, in submit order (for uploading each once).
+    pub fn iter(&self) -> impl Iterator<Item = (ArmourSlot, &ArmourMesh)> {
+        self.meshes.iter().map(|(s, m)| (*s, m))
+    }
+}
+
+/// The texture layers to draw for an item sitting in `slot`, in draw order —
+/// empty when this item is not humanoid armour, or is armour for a *different*
+/// slot, or its material declares no layers for this slot's layer type.
+///
+/// The slot equality check is `HumanoidArmorLayer.shouldRender`'s
+/// `equippable.slot() == slot` (`HumanoidArmorLayer.java:42-44`): a plugin can
+/// put a helmet in the boots slot, and vanilla draws nothing rather than
+/// drawing a helmet around the ankles.
+#[must_use]
+pub fn armour_layers(slot: ArmourSlot, item_path: &str) -> &'static [ArmourLayer] {
+    match armour_item(item_path) {
+        Some((item_slot, asset)) if item_slot == slot => asset.layers(slot.layer_type()),
+        _ => &[],
+    }
+}
+
+/// The gamma-space RGB a layer multiplies its texel by:
+/// `Dyeable.colorWhenUndyed` for a dyeable layer, white for any other.
+///
+/// This is `EquipmentLayerRenderer.getColorForLayer` with the stack's own
+/// `minecraft:dyed_color` **absent**, which is currently always: the wire
+/// component is dropped at the shell's `entity_snapshot` boundary, so no dye
+/// value can reach here. See `docs/armour-rendering.md` for the wiring that
+/// would change that; the only thing needed at this seam is a second argument.
+#[must_use]
+pub fn armour_layer_tint(layer: &ArmourLayer) -> [u8; 3] {
+    layer.dye.unwrap_or([255, 255, 255])
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,6 +1749,174 @@ mod tests {
 
     fn pig_mesh() -> EntityMesh {
         EntityMesh::from_model(&lodestone_assets::entity_models::pig_model())
+    }
+
+    // -----------------------------------------------------------------------
+    // Humanoid armour
+    // -----------------------------------------------------------------------
+
+    /// Every armour slot must bake real geometry, and every *load-bearing* part
+    /// it bakes must attach to a real part of the humanoid rigs that wear
+    /// armour. An armour mesh whose parts do not attach draws nothing at all —
+    /// the island defect, with a green mesh test.
+    ///
+    /// `hat` is the one excusable miss: it is the helmet's outermost shell, it
+    /// unwraps onto a region measured empty in all nine of 26.2's humanoid
+    /// armour sheets, and the corpus `armor_stand` rig deliberately has no `hat`
+    /// part at all (vanilla forces `hat.visible = false` there). So it is
+    /// required to attach *only* where the wearer has one — which is itself an
+    /// assertion, not a shrug.
+    #[test]
+    fn every_armour_slot_attaches_to_every_humanoid_rig() {
+        let set = ArmourModelSet::load();
+        let models = EntityModelSet::load();
+        for wearer_name in [
+            "player_wide",
+            "player_slim",
+            "zombie",
+            "skeleton",
+            "armor_stand",
+        ] {
+            let wearer = models
+                .get(wearer_name)
+                .unwrap_or_else(|| panic!("{wearer_name} must be in the corpus"));
+            assert!(
+                wearer_carries_armour(&wearer.skeleton),
+                "{wearer_name} must classify as humanoid, or it wears nothing"
+            );
+            for (slot, mesh) in set.iter() {
+                assert!(mesh.quad_count() > 0, "{slot:?} baked no geometry at all");
+                let attached: Vec<&'static str> = mesh
+                    .attach(&wearer.skeleton)
+                    .map(|(range, wearer_index)| {
+                        assert!(range.index_count > 0, "{slot:?} attached an empty range");
+                        assert!(wearer_index < wearer.skeleton.len());
+                        mesh.parts
+                            .iter()
+                            .find(|(_, r)| *r == range)
+                            .map(|(n, _)| *n)
+                            .expect("range came from this mesh")
+                    })
+                    .collect();
+                let expected: Vec<&'static str> = mesh
+                    .parts
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .filter(|n| *n != "hat" || wearer.skeleton.index_of("hat").is_some())
+                    .collect();
+                assert_eq!(
+                    attached, expected,
+                    "{wearer_name} cannot carry every part of {slot:?}"
+                );
+            }
+        }
+    }
+
+    /// A non-humanoid rig carries no armour, and that is the correct answer
+    /// rather than a fallback: `HumanoidArmorLayer` is only attached to
+    /// renderers whose model is a `HumanoidModel`, so a pig handed a chestplate
+    /// by a plugin wears nothing in vanilla either.
+    ///
+    /// The negative control matters here: a pig **does** have `head` and
+    /// `body`, so a name-keyed attach would happily bolt a chestplate to it.
+    /// That is why the gate is the animation family, and why this asserts the
+    /// name lookup would otherwise have succeeded.
+    #[test]
+    fn a_pig_attaches_no_armour_despite_having_a_body_part() {
+        let set = ArmourModelSet::load();
+        let pig = pig_mesh();
+        assert!(!wearer_carries_armour(&pig.skeleton));
+        assert!(
+            pig.skeleton.index_of("body").is_some() && pig.skeleton.index_of("head").is_some(),
+            "control: the pig must have the parts a name-keyed attach would match"
+        );
+        for (_, mesh) in set.iter() {
+            assert_eq!(mesh.attach(&pig.skeleton).count(), 0);
+        }
+    }
+
+    /// The armour a wearer draws with is *its own* posed part matrix, so the
+    /// world-pose determinant invariant is inherited rather than re-derived:
+    /// every matrix an armour layer is drawn under has to be positive, because
+    /// `view_projection` left-multiplies and carries the negative sign.
+    ///
+    /// The reference sign comes from a real camera, not from an assumed
+    /// polarity — `CLAUDE.md`'s rule, applied to a world pose.
+    #[test]
+    fn armour_is_drawn_under_positive_determinant_wearer_matrices() {
+        let camera = crate::camera::Camera::default();
+        let view_proj_sign = camera.view_projection().determinant().signum();
+        assert_eq!(
+            view_proj_sign, -1.0,
+            "the reference camera must carry the negative sign, or this test is \
+             asserting a polarity instead of deriving one"
+        );
+
+        let set = ArmourModelSet::load();
+        let models = EntityModelSet::load();
+        let instance = models
+            .resolve("zombie", Vec3::new(3.0, 64.0, -7.0), 37.0, 1.0, &AnimInput {
+                head_yaw_deg: 12.0,
+                head_pitch_deg: -8.0,
+                limb_swing: 3.5,
+                limb_swing_amount: 0.9,
+                attack_anim: 0.4,
+                age_ticks: 42.0,
+                aggressive: false,
+            })
+            .expect("zombie resolves");
+        let mesh = models.get("zombie").expect("zombie mesh");
+        let mut checked = 0;
+        for (_, armour) in set.iter() {
+            for (_, wearer_index) in armour.attach(&mesh.skeleton) {
+                let m = instance.part_transforms[wearer_index];
+                assert!(
+                    m.determinant() > 0.0,
+                    "armour part matrix determinant must be positive, was {}",
+                    m.determinant()
+                );
+                // And the composed clip transform must then inherit the
+                // camera's sign, which is what actually decides facing.
+                assert_eq!((camera.view_projection() * m).determinant().signum(), view_proj_sign);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 8, "only {checked} armour parts checked");
+    }
+
+    /// Layer resolution: two coplanar layers for leather (base + overlay), one
+    /// for a plain material, none across slots, none for the head-slot items
+    /// vanilla draws through some other layer.
+    #[test]
+    fn armour_layer_resolution_follows_the_item_and_its_slot() {
+        assert_eq!(armour_layers(ArmourSlot::Chest, "leather_chestplate").len(), 2);
+        assert_eq!(armour_layers(ArmourSlot::Legs, "leather_leggings").len(), 2);
+        assert_eq!(armour_layers(ArmourSlot::Head, "diamond_helmet").len(), 1);
+        assert_eq!(armour_layers(ArmourSlot::Head, "turtle_helmet").len(), 1);
+        // A helmet forced into the boots slot draws nothing, as
+        // `shouldRender`'s slot equality demands.
+        assert!(armour_layers(ArmourSlot::Feet, "diamond_helmet").is_empty());
+        // Not armour at all.
+        assert!(armour_layers(ArmourSlot::Head, "carved_pumpkin").is_empty());
+        assert!(armour_layers(ArmourSlot::Chest, "elytra").is_empty());
+        assert!(armour_layers(ArmourSlot::Chest, "wolf_armor").is_empty());
+        assert!(armour_layers(ArmourSlot::Head, "stone").is_empty());
+    }
+
+    /// Only leather's base layer is tinted, and it is tinted to vanilla's
+    /// `color_when_undyed`. White for everything else — a tint of `[0,0,0]`
+    /// would be black armour and a tint applied to the overlay would recolour
+    /// the buckles.
+    #[test]
+    fn only_leathers_base_layer_carries_a_tint() {
+        let leather = armour_layers(ArmourSlot::Chest, "leather_chestplate");
+        assert_eq!(
+            armour_layer_tint(&leather[0]),
+            lodestone_assets::equipment::UNDYED_LEATHER_RGB
+        );
+        assert_eq!(armour_layer_tint(&leather[1]), [255, 255, 255]);
+        let diamond = armour_layers(ArmourSlot::Head, "diamond_helmet");
+        assert_eq!(armour_layer_tint(&diamond[0]), [255, 255, 255]);
     }
 
     /// The two vanilla anchor values, hand-derived from the decompiled curve
