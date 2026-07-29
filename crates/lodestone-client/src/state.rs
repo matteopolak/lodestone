@@ -425,18 +425,28 @@ impl SharedState {
             time_of_day,
         } = event
         {
-            let mut world = self.ecs.write();
-            let mut time = world.resource_mut::<WorldTime>();
-            time.age = *world_age;
-            time.time_of_day = *time_of_day;
+            // Through `hold_write` rather than `self.ecs.write()` so this hold
+            // joins the same `LockHolds` meter the driver's guards do. This is
+            // the guard that matters most: `apply` runs *inline in the driver
+            // task*, before `events.send(event).await`, so blocking here stops
+            // the socket being read — not merely delayed application.
+            lodestone_ecs::hold_write(&self.ecs, |world| {
+                let mut time = world.resource_mut::<WorldTime>();
+                time.age = *world_age;
+                time.time_of_day = *time_of_day;
+            });
         } else if lodestone_ecs::ingest::handles_event(event)
             || lodestone_ecs::session::handles_event(event)
         {
-            let mut world = self.ecs.write();
-            world
-                .resource_mut::<lodestone_ecs::ingest::IngestQueue>()
-                .push(event.clone());
-            world.run_schedule(lodestone_ecs::NetIngest);
+            // Metered for the same reason as the `TimeChanged` arm above: this
+            // hold spans a whole `NetIngest` run, so it is the realistic
+            // candidate for the longest ingest-side hold.
+            lodestone_ecs::hold_write(&self.ecs, |world| {
+                world
+                    .resource_mut::<lodestone_ecs::ingest::IngestQueue>()
+                    .push(event.clone());
+                world.run_schedule(lodestone_ecs::NetIngest);
+            });
         } else {
             let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
             inner.apply(event);

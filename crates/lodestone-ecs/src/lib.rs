@@ -84,6 +84,10 @@
 //!   five). `lodestone_shell::entities`'s `TickAccum` is deleted.
 //! - A plugin adding a `GameTick` system no longer has to pick which `App` or
 //!   which clock; there is one of each.
+//! - Every guard taken through [`hold_read`] / [`hold_write`] folds its own
+//!   duration into the [`LockHolds`] resource, so the "no guard spans a frame"
+//!   bound the whole discipline rests on is **measured** rather than counted off
+//!   the code.
 //!
 //! See `docs/world-unification.md` for the lock discipline this buys and costs.
 //!
@@ -130,7 +134,9 @@ pub use bevy_ecs as ecs;
 pub use parking_lot;
 
 pub use chunks::{ChunkWorld, WorldExtent};
-pub use handle::{EcsHandle, new_handle, new_ingest_handle};
+pub use handle::{
+    EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
+};
 pub use player::{
     ActionQueue, CollisionSource, Dead, Egress, Flying, LastPlayerInput, LastSprintingSent,
     LocalPlayer, LocalPlayerPlugin, MovementIntent, PhysicsState, PlayerCollision, PrevPosition,

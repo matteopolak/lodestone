@@ -782,17 +782,45 @@ impl Sim {
     /// statement is the shape that deadlocks, because `parking_lot`'s `read()`
     /// blocks behind a queued writer even on a thread that already holds a read
     /// lock. This keeps every borrow inside a scope the compiler can see.
+    ///
+    /// Goes through [`lodestone_ecs::hold_read`], so this hold is *measured* —
+    /// see [`Self::lock_holds`].
     fn read<R>(&self, f: impl FnOnce(&EcsWorld) -> R) -> R {
-        f(&self.ecs.read())
+        lodestone_ecs::hold_read(&self.ecs, f)
     }
 
     /// Run `f` under a short **write** guard on the one `World`.
     ///
     /// `&mut self` even though the lock makes it unnecessary: it is the borrow
     /// checker, not the lock, that stops a caller from reaching another `Sim`
-    /// accessor (and so the same lock) from inside `f`.
+    /// accessor (and so the same lock) from inside `f`. Note that [`Self::read`]
+    /// takes `&self` and so does *not* get that protection — a `read` closure
+    /// that called another accessor would deadlock behind a queued writer, and the
+    /// only thing keeping that out is review.
     fn write<R>(&mut self, f: impl FnOnce(&mut EcsWorld) -> R) -> R {
-        f(&mut self.ecs.write())
+        lodestone_ecs::hold_write(&self.ecs, f)
+    }
+
+    /// This `World`'s measured guard-hold statistics.
+    ///
+    /// The bound `lodestone_ecs::EcsHandle`'s lock discipline rests on is a
+    /// *duration* one — a packet waits at most one guard hold — and §4.1(c)
+    /// shipped it as an argument from reading the code. This is the number.
+    /// `longest_ns` is the one that matters: it is how long an ingest write can be
+    /// kept waiting. Pair with [`Self::reset_lock_holds`] to measure one interval.
+    #[must_use]
+    pub fn lock_holds(&self) -> lodestone_ecs::HoldStats {
+        self.read(|w| w.resource::<lodestone_ecs::LockHolds>().snapshot())
+    }
+
+    /// Zero [`Self::lock_holds`], so a caller can attribute holds to one frame or
+    /// one call rather than to the whole session.
+    pub fn reset_lock_holds(&mut self) {
+        // Reset *and* snapshot nothing: `write` records its own hold after `f`
+        // returns, so the interval starts from one hold, not zero. That is why the
+        // measurements below compare against a wall-clock total rather than
+        // asserting an exact count.
+        self.write(|w| w.resource::<lodestone_ecs::LockHolds>().reset());
     }
 
     /// [`Self::write`], with the local player's `Entity` handed in.
@@ -804,7 +832,7 @@ impl Sim {
     /// captured.
     fn write_local<R>(&mut self, f: impl FnOnce(&mut EcsWorld, Entity) -> R) -> R {
         let local = self.local;
-        f(&mut self.ecs.write(), local)
+        lodestone_ecs::hold_write(&self.ecs, |w| f(w, local))
     }
 
     /// The local player's entity, for pairing with [`Self::ecs`].
@@ -870,9 +898,64 @@ impl Sim {
         self.write(|w| w.resource_mut::<RayTarget>().0 = hit);
     }
 
-    /// Mutate the particle simulation in place.
+    /// Mutate the particle simulation in place, under the guard.
+    ///
+    /// For `O(1)` work only — one emission, installing a fixture. Anything that
+    /// touches *every* particle must go through
+    /// [`Self::with_particles_unlocked`] instead.
     fn particles_mut<R>(&mut self, f: impl FnOnce(&mut Particles) -> R) -> R {
         self.write(|w| f(&mut w.resource_mut::<ParticleSim>().0))
+    }
+
+    /// Move the particle simulation **out** of the `World` under a short guard,
+    /// run `f` on it with **no guard held at all**, and move it back under a
+    /// second short guard.
+    ///
+    /// # Why the resource leaves the `World`
+    ///
+    /// Both per-frame particle passes are `O(live particles)` and one of them
+    /// (`extract`) calls out to the chunk store once per particle for light. Doing
+    /// either under the write guard makes the hold scale with particle volume —
+    /// during heavy rain or a mass block break, the two moments the number is
+    /// largest — and per `lodestone_ecs::EcsHandle`'s notes that hold is what an
+    /// ingest write waits behind, because `SharedState::apply` runs *inline in the
+    /// driver task* and blocking it stops the socket being read.
+    ///
+    /// This is the same move `Self::particle_instances` (owned `Vec`, not a mapped
+    /// guard) and `Self::drain_action_queue` (`mem::take`, then send) already make:
+    /// get the data out, then work. It is the only shape available here because
+    /// `Particles` is not `Clone` and `extract` needs `&mut`.
+    ///
+    /// # The absence window, and why it is safe
+    ///
+    /// Between the two guards the `World` has no `ParticleSim`. Nothing can
+    /// observe that: `&mut self` makes this exclusive on the driver thread, `f`
+    /// runs no schedule, and the only other reader of the resource is
+    /// `crate::interact::drive_mining` in `TickSet::Send` — a driver-thread
+    /// `GameTick` system, never concurrent with this. The net thread's
+    /// `NetIngest` systems live in `lodestone-ecs` and cannot name a
+    /// `lodestone-shell` resource at all. A panic inside `f` would leave the
+    /// resource missing, which the `expect` below names.
+    ///
+    /// # Lock order
+    ///
+    /// `f` is free to take the chunk lock (`tick_particles` does) because it holds
+    /// **no** `World` guard while it runs, so the two are never held together and
+    /// rule 3's `World → chunks` ordering has nothing to order. That is strictly
+    /// safer than the previous nesting, not a relaxation of it — but do not read
+    /// the trailing `write` as "chunks then `World`": the chunk guard is a
+    /// temporary inside `f` and is gone before it.
+    fn with_particles_unlocked<R>(&mut self, f: impl FnOnce(&mut Particles) -> R) -> R {
+        let mut sim = self.write(|w| {
+            w.remove_resource::<ParticleSim>().expect(
+                "ParticleSim is inserted by Sim::build and only ever removed by \
+                 with_particles_unlocked, which always puts it back — a missing one means a \
+                 previous particle pass panicked",
+            )
+        });
+        let out = f(&mut sim.0);
+        self.write(|w| w.insert_resource(sim));
+        out
     }
 
     /// Read the live mining predictor.
@@ -2386,19 +2469,24 @@ impl Sim {
     fn tick_particles(&mut self) {
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             if let Some(view) = self.live_collision() {
-                self.particles_mut(|p| p.tick(&view));
+                // `O(live particles)`, so the emitter comes out of the `World`
+                // first — the same reason `extract_particles` does it.
+                self.with_particles_unlocked(|p| p.tick(&view));
                 return;
             }
         }
-        // `World` lock outside, chunk lock inside — `EcsHandle`'s rule 3. Written
-        // this way round deliberately: the obvious spelling (take the chunk read
-        // guard, then reach for the emitter) is `chunks → World`, the one order that
-        // can ABBA against the net thread.
+        // The chunk guard is taken *inside* `f`, i.e. with no `World` guard held,
+        // so the two are never held simultaneously and there is no order to get
+        // wrong. This used to be written inside-out (`World` guard outside, chunk
+        // guard inside) to obey `EcsHandle`'s rule 3, because the obvious spelling
+        // — take the chunk read guard, then reach for the emitter — was
+        // `chunks → World`, the one order that can ABBA against the net thread.
+        // Holding neither across the other retires that hazard rather than
+        // navigating it.
         let store = self.chunk_world();
-        self.write(|w| {
+        self.with_particles_unlocked(|p| {
             let world = store.read();
-            let view = WorldCollision::new(&world);
-            w.resource_mut::<ParticleSim>().0.tick(&view);
+            p.tick(&WorldCollision::new(&world));
         });
     }
 
@@ -2416,6 +2504,13 @@ impl Sim {
         let light: Box<dyn Fn(i32, i32, i32) -> Option<u32>> = match self.net.as_ref() {
             Some(net) => {
                 let dims = net.world_dimensions();
+                // An **owned** `SharedHandle` (an `Arc<OnceLock<_>>`), not a borrow
+                // of `self.net`. That is what lets the whole extract go through
+                // `with_particles_unlocked`: a closure borrowing `self` cannot be
+                // passed to a `&mut self` method, which is exactly why this
+                // function used to take the write guard by hand and hold it across
+                // every per-particle light lookup.
+                let handle = net.shared_handle();
                 Box::new(move |x, y, z| {
                     let dims = dims?;
                     let section = (y - dims.min_y).div_euclid(16);
@@ -2432,8 +2527,9 @@ impl Sim {
                     // Light section `i` covers block section `i-1`, so a caller
                     // for block section `n` asks for light section `n+1`. This
                     // offset is deliberate, not a bug to "align".
-                    let got =
-                        net.sections_and_light_at(&[(pos, section as usize, section as usize + 1)]);
+                    let got = handle
+                        .get()?
+                        .sections_and_light_at(&[(pos, section as usize, section as usize + 1)]);
                     let (_, light) = got.into_iter().next()?;
                     let light = light?;
                     let ly = (y - dims.min_y).rem_euclid(16) as usize;
@@ -2448,16 +2544,22 @@ impl Sim {
             }
             None => Box::new(|_, _, _| None),
         };
-        // `light` above borrows `self.net`, so this cannot go through the
-        // `&mut self` accessor. It takes the `World` guard directly instead —
-        // and note `light` is a *closure*: it reads chunk light through
-        // `ClientHandle` when called, i.e. `World → chunks`, which is the
-        // permitted order (`EcsHandle` rule 3) and not the reverse.
-        let mut world = self.ecs.write();
-        world
-            .resource_mut::<ParticleSim>()
-            .0
-            .extract(camera, partial, &light)
+        // **This used to be the longest `World` guard hold in the process.** It
+        // took the write guard by hand and held it across the whole extract *and*
+        // every per-particle invocation of `light` above — one chunk-store lock
+        // acquisition per live particle, with the `World` write-locked throughout.
+        // That was order-legal (`World → chunks`, rule 3) and unbounded: the hold
+        // grew with particle volume, i.e. precisely during rain and mass block
+        // breaks, and per `lodestone_ecs::EcsHandle` an ingest write waits behind
+        // it while the driver task that owns the socket is blocked.
+        //
+        // Now the emitter leaves the `World` first, so `light` is called with no
+        // guard held and the hold is two resource moves regardless of particle
+        // count. Measured, not argued —
+        // `extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work`
+        // bounds it against the call's own wall time, and its negative control
+        // reproduces the shape above and fails that bound.
+        self.with_particles_unlocked(|p| p.extract(camera, partial, &light))
     }
 
     /// This frame's particle instances, ready for upload.
@@ -4364,6 +4466,169 @@ mod tests {
             "flame is a sheet-sourced type with an installed atlas entry"
         );
         assert_eq!(frame.drawn, 9);
+    }
+
+    /// How many particles the two hold measurements below run over. High enough
+    /// that the per-particle work dominates two resource moves by orders of
+    /// magnitude, well under `ParticleEngine::DEFAULT_CAPACITY` (16 384) so the
+    /// engine does not silently drop the tail.
+    const HOLD_MEASUREMENT_PARTICLES: i32 = 4_000;
+
+    /// Spawns [`HOLD_MEASUREMENT_PARTICLES`] live particles around the player and
+    /// returns the `Sim` and a camera to extract them with.
+    fn sim_with_many_particles() -> (Sim, Camera) {
+        let mut sim = Sim::new(test_config());
+        let origin = sim.player().position;
+        sim.particles_mut(|p| {
+            p.spawn_particles(
+                "smoke",
+                [origin.x, origin.y, origin.z],
+                [0.5, 0.5, 0.5],
+                0.02,
+                HOLD_MEASUREMENT_PARTICLES,
+            );
+        });
+        let camera = sim.camera(1.0);
+        (sim, camera)
+    }
+
+    /// **The measurement §4.1(c) could not make.**
+    ///
+    /// `Sim::extract_particles` was the longest `World` guard hold in the process:
+    /// it took the write guard by hand and held it across the whole extract *and*
+    /// one chunk-store lookup per live particle for light. `docs/world-unification.md`
+    /// bounded that structurally — "no guard spans a frame" — and said so out loud:
+    /// *treat the bound as structural, not measured*. A duration claim with nothing
+    /// measuring the duration is the species of vacuous test `CLAUDE.md` names, so
+    /// this is the number.
+    ///
+    /// The assertion is a **ratio against the call's own wall time**, not an
+    /// absolute nanosecond ceiling: an absolute bound is a statement about this
+    /// machine and fails on a slower one (or under a loaded CI), whereas both sides
+    /// of a ratio are measured in the same run on the same core. Expected value is
+    /// a fraction of a percent; the threshold is 25%, i.e. two orders of margin.
+    ///
+    /// Its negative control is
+    /// [`the_pre_fix_shape_of_extract_particles_fails_the_hold_bound`], which
+    /// reproduces the old shape and must fail this same bound.
+    #[test]
+    fn extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work() {
+        let (mut sim, camera) = sim_with_many_particles();
+
+        sim.reset_lock_holds();
+        let started = std::time::Instant::now();
+        let frame = sim.extract_particles(&camera);
+        let wall = started.elapsed();
+        let holds = sim.lock_holds();
+
+        // The *world*-species guard: the flaw in a vacuous duration test lives in
+        // the input, not the assert. An extract over an empty engine would satisfy
+        // the ratio below trivially and prove nothing, so assert the volume first.
+        assert!(
+            frame.alive >= HOLD_MEASUREMENT_PARTICLES as usize,
+            "the measurement is only meaningful over real particle volume; alive={}",
+            frame.alive
+        );
+        eprintln!(
+            "extract_particles over {} particles: wall {:?}, guarded {} ns across {} holds \
+             (longest {} ns)",
+            frame.alive, wall, holds.total_ns, holds.holds, holds.longest_ns
+        );
+        assert!(
+            u128::from(holds.total_ns) * 4 < wall.as_nanos(),
+            "the `World` guard must not span the per-particle work: guarded {} ns of a {} ns \
+             call over {} particles",
+            holds.total_ns,
+            wall.as_nanos(),
+            frame.alive
+        );
+    }
+
+    /// The negative control for the bound above, and the reason it is evidence
+    /// rather than decoration: the *pre-fix shape* — extract run inside the write
+    /// guard — must fail the same assertion, measured by the same counter.
+    ///
+    /// This is deliberately hand-written rather than a switch on `Sim`: a test
+    /// switch would have to survive in production code, and what needs proving is
+    /// that the detector distinguishes two shapes, not that a flag works.
+    #[test]
+    fn the_pre_fix_shape_of_extract_particles_fails_the_hold_bound() {
+        let (mut sim, camera) = sim_with_many_particles();
+
+        sim.reset_lock_holds();
+        let started = std::time::Instant::now();
+        // Exactly what `extract_particles` used to do. `light` is the offline arm
+        // (`self.net == None`), so this control *understates* the old hold — the
+        // live arm additionally took a chunk-store lock per particle inside it.
+        let frame = lodestone_ecs::hold_write(sim.ecs(), |w| {
+            w.resource_mut::<ParticleSim>()
+                .0
+                .extract(&camera, 0.0, &|_, _, _| None)
+        });
+        let wall = started.elapsed();
+        let holds = sim.lock_holds();
+
+        assert!(
+            frame.alive >= HOLD_MEASUREMENT_PARTICLES as usize,
+            "same input volume as the positive case; alive={}",
+            frame.alive
+        );
+        eprintln!(
+            "pre-fix shape over {} particles: wall {:?}, guarded {} ns across {} holds \
+             (longest {} ns)",
+            frame.alive, wall, holds.total_ns, holds.holds, holds.longest_ns
+        );
+        assert!(
+            u128::from(holds.total_ns) * 4 >= wall.as_nanos(),
+            "the detector must fire on the shape it exists to reject; it reported only {} ns \
+             guarded of a {} ns call, so the bound in \
+             `extract_particles_does_not_hold_the_world_guard_across_the_per_particle_work` \
+             is not discriminating",
+            holds.total_ns,
+            wall.as_nanos()
+        );
+    }
+
+    /// The frame-level claim, also measured: `Sim::step` takes **many short
+    /// guards**, not one long one.
+    ///
+    /// `docs/world-unification.md` said "counted from the code it takes on the
+    /// order of 15 short guards plus ~8 per catch-up tick". This counts them, so a
+    /// future refactor that coalesced the frame into one long guard — which would
+    /// read as a tidy-up and would stall ingest for a whole frame — fails here.
+    /// The control for the mechanism is `lodestone_ecs`'s
+    /// `the_hold_meter_reports_a_deliberately_long_hold`.
+    #[test]
+    fn a_frame_takes_many_short_world_guards_and_no_long_one() {
+        let mut sim = Sim::with_demo_world(test_config());
+        // One frame long enough to run at least one catch-up tick.
+        sim.step(0.1);
+
+        sim.reset_lock_holds();
+        let started = std::time::Instant::now();
+        sim.step(0.1);
+        let wall = started.elapsed();
+        let holds = sim.lock_holds();
+
+        eprintln!(
+            "Sim::step(0.1): wall {:?}, {} holds totalling {} ns, longest {} ns",
+            wall, holds.holds, holds.total_ns, holds.longest_ns
+        );
+        assert!(
+            holds.holds >= 15,
+            "a frame must be many short guards rather than one long one; counted {}",
+            holds.holds
+        );
+        // A ceiling, not a target: 25 ms is "no single guard spans a 40 fps frame".
+        // Absolute rather than a ratio here because a whole `step` legitimately
+        // *is* mostly its two `run_schedule` holds, so a ratio would assert
+        // nothing. Loose enough to survive a preempted CI core; the control above
+        // shows a 30 ms hold is visible, so this ceiling can actually be crossed.
+        assert!(
+            holds.longest_ns < 25_000_000,
+            "no single `World` guard in a frame may approach a frame: longest was {} ns",
+            holds.longest_ns
+        );
     }
 
     /// Vanilla's render cutoff (`ClientLevel.doAddParticle`): a particle

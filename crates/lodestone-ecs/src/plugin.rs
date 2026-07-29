@@ -36,6 +36,12 @@ impl Plugin for CorePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<crate::WorldTime>();
         app.init_resource::<crate::FrameClock>();
+        // The guard-hold meter. Inserted here rather than by the driver because
+        // `EcsHandle`'s duration bound is a property of *every* holder of the
+        // handle, not of one of them — and because a `World` without it is
+        // silently unmeasured (`hold_read`/`hold_write` tolerate its absence),
+        // which is precisely how a counter stops being evidence.
+        app.init_resource::<crate::LockHolds>();
 
         app.init_schedule(NetIngest);
         app.configure_sets(
