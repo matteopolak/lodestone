@@ -45,11 +45,11 @@
 use glam::{Mat4, Vec3};
 use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
-use lodestone_assets::{BakedQuad, DisplayTransform, GuiLight};
+use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
 
 use crate::camera::Frustum;
 use crate::entity_anim::{AnimInput, HumanoidArms, Skeleton};
-use crate::item_render::display_matrix;
+use crate::item_render::{UNITS_PER_BLOCK, display_matrix, display_matrix_for_hand};
 use crate::models::{ModelMesh, ModelVertex, mesh_item_quads};
 
 /// The vanilla feet-to-model lift (`LivingEntityRenderer`'s
@@ -836,18 +836,21 @@ pub const ITEM_SPIN_TICKS_PER_RADIAN: f32 = 20.0;
 /// `display.ground` of `minecraft:block/block`, which **every** block item model
 /// inherits (verified against 26.2's `client.jar`).
 ///
-/// # Why this is a constant and not read from the model
+/// # This is now a *fallback*, not the only source
 ///
-/// It should be read from the model. It cannot be yet:
-/// [`IconPart::Model`](lodestone_assets::IconPart) keeps only the `gui` slot —
-/// `icon.rs` does `resolved.display.get("gui")` and drops the rest — so
-/// [`ItemGeometry::transform`](crate::ItemGeometry) carries the isometric
-/// inventory pose and nothing else. Posing a dropped item with the *gui*
-/// transform would tilt it 30°/225° and scale it 0.625 instead of 0.25: visibly
-/// a "3-D item is there", and wrong in both orientation and size. Until the
-/// asset layer carries the whole `display` map, naming the real vanilla numbers
-/// here is the honest stopgap — and it is exact for the block items, which are
-/// what a broken block actually drops.
+/// It used to be the only one: `icon.rs` did `resolved.display.get("gui")` and
+/// dropped every other slot, so [`ItemGeometry`](crate::ItemGeometry) carried
+/// the isometric inventory pose and nothing else. The asset layer now carries
+/// all nine slots ([`ItemGeometry::display`](crate::ItemGeometry::display)), and
+/// [`ground_transform`] reads the real declared `ground` in preference to this.
+///
+/// The constants stay because the *fallback still has to be right*: an item
+/// whose model chain declares no `ground` at all would otherwise be posed with
+/// the identity, i.e. a full-size 1×1×1 block lying in the grass. Being wrong by
+/// a factor of four in scale is the visible signature.
+///
+/// Verified against 26.2's `client.jar`: `models/block/block.json` declares
+/// `ground` as `translation [0, 3, 0]`, `scale 0.25`.
 pub const BLOCK_ITEM_GROUND: DisplayTransform = DisplayTransform {
     rotation: [0.0, 0.0, 0.0],
     translation: [0.0, 3.0, 0.0],
@@ -874,6 +877,34 @@ pub fn ground_transform_for(gui_light: GuiLight) -> DisplayTransform {
         GuiLight::Side => BLOCK_ITEM_GROUND,
         GuiLight::Front => GENERATED_ITEM_GROUND,
     }
+}
+
+/// The `display.ground` transform to pose a **dropped** item under: the one the
+/// item's own model chain declares, falling back to
+/// [`ground_transform_for`]`(gui_light)` when it declares none.
+///
+/// This is the accessor a drop should use.
+/// [`DisplayTransforms::declared`] rather than `get` is the whole point: `get`
+/// answers an undeclared slot with the identity, which for `ground` means a
+/// full-size block lying in the grass rather than vanilla's quarter-scale one.
+/// Distinguishing "the pack said identity" from "we found nothing" is what makes
+/// the [`GuiLight`]-keyed guess a fallback instead of dead code.
+///
+/// # How to change it
+///
+/// The other slots want exactly this shape — a `hand_transform(&DisplayTransforms,
+/// Arm, /* first person */ bool)` for held items, reading
+/// `thirdperson_righthand`/`firstperson_righthand` with
+/// [`DisplaySlot::left_hand_fallback`](lodestone_assets::DisplaySlot::left_hand_fallback)
+/// already handled inside `DisplayTransforms::get`. There is **no** sensible
+/// `GuiLight`-keyed fallback for those (`block/block` and `item/generated`
+/// disagree on far more than scale), so an undeclared hand slot should draw the
+/// identity and be counted, not guessed at.
+#[must_use]
+pub fn ground_transform(display: &DisplayTransforms, gui_light: GuiLight) -> DisplayTransform {
+    display
+        .declared(DisplaySlot::Ground)
+        .unwrap_or_else(|| ground_transform_for(gui_light))
 }
 
 /// A stable per-entity bob/spin phase in `[0, 2π)`, standing in for vanilla's
@@ -996,6 +1027,370 @@ pub fn dropped_item_mesh(
         vertex.light = light;
     }
     mesh
+}
+
+// ---------------------------------------------------------------------------
+// Held items, and the first-person arm
+// ---------------------------------------------------------------------------
+//
+// Both are *item/part geometry hung off an arm*, and both are transcribed from
+// the 26.2 client rather than tuned by eye. The two chains are deliberately kept
+// separate (`held_item_matrix` vs `first_person_arm_pose`) because vanilla's are:
+// one hangs off the third-person part hierarchy, the other replaces it entirely.
+
+/// Which arm of a humanoid rig something is attached to — vanilla's
+/// `HumanoidArm`.
+///
+/// A mob's `getMainArm()` is `RIGHT` for every `Mob` (only a `Player` can be
+/// left-handed), so the wire's `MainHand` maps to [`Arm::Right`] and `OffHand`
+/// to [`Arm::Left`]. That mapping belongs to the caller, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Arm {
+    /// The right arm — a mob's main hand.
+    Right,
+    /// The left arm — a mob's off hand.
+    Left,
+}
+
+impl Arm {
+    /// The `entity_models` part name for this arm.
+    #[must_use]
+    pub const fn part_name(self) -> &'static str {
+        match self {
+            Arm::Right => "right_arm",
+            Arm::Left => "left_arm",
+        }
+    }
+
+    /// The overlay ("sleeve") part parented to this arm at `PartPose::ZERO`, for
+    /// the models that have one (the two player rigs). It shares the arm's matrix
+    /// exactly — see [`first_person_arm_pose`].
+    #[must_use]
+    pub const fn sleeve_part_name(self) -> &'static str {
+        match self {
+            Arm::Right => "right_sleeve",
+            Arm::Left => "left_sleeve",
+        }
+    }
+
+    /// Whether this is a left-hand context, i.e. whether
+    /// [`display_matrix_for_hand`]'s mirror applies.
+    #[must_use]
+    pub const fn is_left(self) -> bool {
+        matches!(self, Arm::Left)
+    }
+
+    /// Vanilla's `invert`/`isLeftHand ? -1 : 1` sign, used for every mirrored
+    /// term in both chains below.
+    #[must_use]
+    pub const fn invert(self) -> f32 {
+        match self {
+            Arm::Right => 1.0,
+            Arm::Left => -1.0,
+        }
+    }
+
+    /// The `display` slot an item held in this arm is posed by.
+    #[must_use]
+    pub const fn display_slot(self, first_person: bool) -> DisplaySlot {
+        match (self, first_person) {
+            (Arm::Right, false) => DisplaySlot::ThirdPersonRightHand,
+            (Arm::Left, false) => DisplaySlot::ThirdPersonLeftHand,
+            (Arm::Right, true) => DisplaySlot::FirstPersonRightHand,
+            (Arm::Left, true) => DisplaySlot::FirstPersonLeftHand,
+        }
+    }
+}
+
+/// `ItemInHandLayer.submitArmWithItem`'s adult hand offset, in model texels
+/// (`offsetX`, `offsetY`, `offsetZ`). `x` is mirrored by [`Arm::invert`].
+///
+/// Read from 26.2's
+/// `client/renderer/entity/layers/ItemInHandLayer.java:45-48`, where the three
+/// values are `1.0F`, `2.0F` and `-10.0F` and the translate is
+/// `((isLeftHand ? -1 : 1) * offsetX / 16, offsetY / 16, offsetZ / 16)`.
+pub const HELD_ITEM_OFFSET_TEXELS: [f32; 3] = [1.0, 2.0, -10.0];
+
+/// The same offsets for a **baby** (`useBabyOffset`): `0.0`, `1.0`, `-4.5`.
+///
+/// Vanilla's predicate is `state.isBaby && state.entityType != ARMOR_STAND`; an
+/// armour stand is never a baby in the shell's data, so the caller's
+/// "is this mob drawn small?" test is sufficient.
+pub const HELD_ITEM_BABY_OFFSET_TEXELS: [f32; 3] = [0.0, 1.0, -4.5];
+
+/// The `display` transform to pose an item held in `arm` under.
+///
+/// Uses [`DisplayTransforms::get`] rather than `declared`, because unlike
+/// `ground` there is **no** sensible fallback constant for a hand slot:
+/// `block/block` and `item/generated` disagree on far more than scale, so an
+/// undeclared hand slot should get vanilla's own answer — the identity
+/// (`ItemTransform.NO_TRANSFORM`, which is only the `-0.5` centring) — and not a
+/// guess. `get` also applies
+/// [`DisplaySlot::left_hand_fallback`](lodestone_assets::DisplaySlot::left_hand_fallback),
+/// which matters in practice: neither `block/block` nor `item/generated` declares
+/// `thirdperson_lefthand`.
+#[must_use]
+pub fn hand_transform(
+    display: &DisplayTransforms,
+    arm: Arm,
+    first_person: bool,
+) -> DisplayTransform {
+    display.get(arm.display_slot(first_person))
+}
+
+/// The world placement matrix for an item held in a mob's hand, matching
+/// `ItemInHandLayer.submitArmWithItem`'s pose-stack order exactly:
+///
+/// ```text
+/// part_transforms[arm] · Rx(-90°) · Ry(180°) · T(±ox/16, oy/16, oz/16)
+///                      · display_matrix_for_hand(thirdperson_?hand, is_left)
+/// ```
+///
+/// `arm_transform` is the arm part's **entity→world** matrix, i.e.
+/// [`EntityInstance::part_transforms`]`[skeleton.index_of(arm.part_name())]`.
+/// That is vanilla's `translateToHand`, which for `HumanoidModel` is exactly
+/// `root.translateAndRotate(); getArm(arm).translateAndRotate();` — the arm's own
+/// parent chain, which our composed part matrix already is.
+///
+/// # Verified against source, and the three offsets are not the whole story
+///
+/// Read from the 26.2 decompile, not transcribed from a summary. Two things the
+/// short form hides:
+///
+/// * The item's own `display` transform is **not** applied by the layer — it
+///   happens one level down, inside `ItemStackRenderState.LayerRenderState.submit`
+///   → `applyTransform` → `itemTransform.apply(displayContext.leftHand(), pose)`.
+///   That is why the left-hand mirror lives in [`display_matrix_for_hand`] and is
+///   applied here even when the transform came from the right-hand fallback:
+///   `ItemDisplayContext.leftHand()` is a property of the *context*, not of where
+///   the numbers came from.
+/// * `submitArmWithItem` has two further pose steps this does not model, both
+///   gated on state the shell does not track: `SpearAnimations.thirdPersonAttackItem`
+///   (a `STAB` swing mid-attack) and `ArmPose.animateUseItem` (`ticksUsingItem != 0`,
+///   i.e. drawing a bow, eating, blocking with a shield). Both are the identity in
+///   the resting case this renders.
+///
+/// # How to change it: the per-model `translateToHand` overrides
+///
+/// `arm_transform` implements `HumanoidModel.translateToHand`, which is what
+/// `IllagerModel` and `ArmorStandModel` use too, and — because our part matrix
+/// composes the *whole* parent chain — also covers the models whose arms hang off
+/// `body` rather than `root` (`VexModel`, `CopperGolemModel` spell out
+/// `root · body · arm`). Five corpus models in 26.2 append or prepend more, and
+/// none of it is modelled here:
+///
+/// | model | override |
+/// |---|---|
+/// | `skeleton`, `stray`, `wither_skeleton` | pivot `x += ±1` texel *before* the arm's own matrix |
+/// | `player_slim` | pivot `x += ±0.5` texel, same position |
+/// | `vex` | then `scale(0.55)`, then `translate(±0.046875, -0.15625, 0.078125)` |
+/// | `allay` | a different chain entirely: `root · body`, then `T(0, 1/16, 3/16) · Rx(right_arm.xRot) · S(0.7) · T(1/16, 0, 0)` — the arm's matrix is never used |
+/// | `copper_golem` | not in the corpus |
+///
+/// The two *pivot-shift* rows cannot be expressed as a pre- or post-multiplication
+/// of `arm_transform`, because the shift goes between the parent chain and the
+/// arm's own rotation, which the composed matrix has already folded together.
+/// Fixing them belongs in the pose path (`entity_anim`), not here. The visible
+/// error is 1/16 block for a skeleton's bow and 1/32 for a slim player — small.
+/// `vex` and `allay` are the ones that look wrong (an item ~1.8× and ~1.4× too
+/// large respectively), and both are left visibly wrong rather than half-fixed.
+#[must_use]
+pub fn held_item_matrix(
+    arm_transform: Mat4,
+    arm: Arm,
+    baby: bool,
+    transform: &DisplayTransform,
+) -> Mat4 {
+    let [ox, oy, oz] = if baby {
+        HELD_ITEM_BABY_OFFSET_TEXELS
+    } else {
+        HELD_ITEM_OFFSET_TEXELS
+    };
+    arm_transform
+        * Mat4::from_rotation_x((-90.0f32).to_radians())
+        * Mat4::from_rotation_y(180.0f32.to_radians())
+        * Mat4::from_translation(Vec3::new(
+            arm.invert() * ox / UNITS_PER_BLOCK,
+            oy / UNITS_PER_BLOCK,
+            oz / UNITS_PER_BLOCK,
+        ))
+        * display_matrix_for_hand(transform, arm.is_left())
+}
+
+/// Mesh one held item's baked geometry into a world-space [`ModelMesh`], ready
+/// for the ordinary [`ModelPipeline`](crate::ModelPipeline) with a *world* camera
+/// uniform — the same treatment [`dropped_item_mesh`] gives a drop, and for the
+/// same reason (the pose is folded into vertex positions, so there is no
+/// per-instance matrix to batch on).
+///
+/// `light` is the holder's own packed sky/block sample: the geometry comes from
+/// [`mesh_item_quads`], which nails every vertex to
+/// [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) because an inventory slot is
+/// full-bright by definition, and a sword in a zombie's hand in a cave is not.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn held_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    arm_transform: Mat4,
+    arm: Arm,
+    baby: bool,
+    transform: &DisplayTransform,
+    light: u8,
+) -> ModelMesh {
+    let pose = held_item_matrix(arm_transform, arm, baby, transform);
+    let mut mesh = mesh_item_quads(quads, pose, gui_light);
+    for vertex in &mut mesh.vertices {
+        vertex.light = light;
+    }
+    mesh
+}
+
+/// The arm's forced `zRot` in `AvatarRenderer.renderHand`, in **radians**
+/// (`model.rightArm.zRot = 0.1F`, `model.leftArm.zRot = -0.1F`). Mirrored by
+/// [`Arm::invert`].
+pub const FIRST_PERSON_ARM_Z_ROT: f32 = 0.1;
+
+/// Vertical FOV the first-person arm is projected with, in degrees.
+///
+/// **Not the player's FOV.** `GameRenderer.renderLevel` sets a *separate*
+/// projection for the hand — `hudProjection.setupPerspective(0.05F, 100.0F,
+/// cameraState.hudFov, w, h)` — and `Camera.calculateHudFov` is a hard-coded
+/// `70.0F` passed through `modifyFovBasedOnDeathOrFluid`. So the arm keeps a
+/// constant apparent size while the world FOV changes (sprinting, the FOV
+/// slider), which is exactly the behaviour players expect and would be lost by
+/// reusing `Camera::projection_matrix`.
+pub const HAND_FOV_Y_DEGREES: f32 = 70.0;
+
+/// Near plane for [`hand_projection`] (vanilla's `0.05F`).
+pub const HAND_NEAR: f32 = 0.05;
+
+/// Far plane for [`hand_projection`] (vanilla's `100.0F` — *not* the world's
+/// render-distance-derived far plane).
+pub const HAND_FAR: f32 = 100.0;
+
+/// The projection the first-person arm is drawn with: vanilla's `hudProjection`.
+///
+/// This is the **whole** transform for the hand pass. `GameRenderer.renderItemInHand`
+/// does `poseStack.mulPose(modelViewMatrix.invert())` while pushing
+/// `modelViewStack.mul(modelViewMatrix)`, and the shader multiplies
+/// `Proj · ModelViewStack · PoseStack` — so the view rotation cancels exactly and
+/// the arm pose is already in **camera space**. `modelViewMatrix` there is
+/// `cameraState.viewRotationMatrix`, rotation-only, which is why nothing has to
+/// undo a camera translation either.
+///
+/// A view matrix is orthonormal-plus-translation, so `det(view) = +1` and
+/// `sign(det(hand_projection)) == sign(det(Camera::view_projection))`. The arm
+/// pose must therefore have a **positive** determinant, exactly like a world
+/// model matrix and unlike the GUI item pose — see
+/// `first_person_arm_pose_preserves_winding`.
+#[must_use]
+pub fn hand_projection(aspect: f32) -> Mat4 {
+    // The *same* constructor `Camera::projection_matrix` uses, so the two cannot
+    // disagree about depth range or handedness — `[0,1]` DirectX-style depth, and
+    // a negative determinant, which is where the winding invariant comes from.
+    glam::camera::rh::proj::directx::perspective(
+        HAND_FOV_Y_DEGREES.to_radians(),
+        if aspect.is_finite() && aspect > 0.0 {
+            aspect
+        } else {
+            1.0
+        },
+        HAND_NEAR,
+        HAND_FAR,
+    )
+}
+
+/// The camera-space chain `ItemInHandRenderer.renderPlayerArm` builds, with every
+/// attack/equip term at rest.
+///
+/// ```text
+/// T(i·0.64000005, -0.6, -0.71999997) · Ry(i·45°) · T(i·-1, 3.6, 3.5)
+///   · Rz(i·120°) · Rx(200°) · Ry(i·-135°) · T(i·5.6, 0, 0)
+/// ```
+///
+/// with `i` = [`Arm::invert`]. The dropped terms and why:
+///
+/// * `attackValue` (`Player.getAttackAnim`) drives `xSwingPosition`,
+///   `ySwingPosition`, `zSwingPosition`, `ySwingRotation` and `zSwingRotation`,
+///   all of which are `sin(0) = 0` at rest. The shell has no per-frame attack-anim
+///   clock, so the swing is absent, not wrong.
+/// * `inverseArmHeight` is `swapAnimationScale(item) * (1 - lerp(oHeight, height))`
+///   — vanilla's equip/swap raise. It contributes `-0.6 · inverseArmHeight` to `y`.
+///   The shell tracks neither the held stack's identity for the local player nor
+///   the two interpolated heights, so this is `0`: the arm sits permanently at its
+///   fully-equipped height and never dips on a hotbar change.
+/// * `submitHandsWithItems` prefixes `Rx((viewXRot - xBob) · 0.1°)` and
+///   `Ry((viewYRot - yBob) · 0.1°)`, and `renderItemInHand` prefixes `bobHurt` and
+///   `bobView`. All four need state the shell does not have (`xBob`/`yBob`, hurt
+///   time, walk distance); all four are the identity when standing still.
+///
+/// There is no `scale` anywhere in the chain, and that is not an omission — the
+/// large constants (`3.6`, `3.5`, `5.6`) are in blocks and largely cancel through
+/// the three rotations. The composed arm cube lands roughly `0.35..0.9` blocks
+/// right, `0.29..0.99` down and `0.44..1.19` forward of the eye, i.e. bottom-right
+/// of frame, which is what
+/// `the_first_person_arm_lands_in_the_bottom_right_of_frame` pins.
+#[must_use]
+pub fn first_person_arm_chain(arm: Arm) -> Mat4 {
+    let i = arm.invert();
+    Mat4::from_translation(Vec3::new(i * 0.640_000_05, -0.6, -0.719_999_97))
+        * Mat4::from_rotation_y((i * 45.0).to_radians())
+        * Mat4::from_translation(Vec3::new(i * -1.0, 3.6, 3.5))
+        * Mat4::from_rotation_z((i * 120.0).to_radians())
+        * Mat4::from_rotation_x(200.0f32.to_radians())
+        * Mat4::from_rotation_y((i * -135.0).to_radians())
+        * Mat4::from_translation(Vec3::new(i * 5.6, 0.0, 0.0))
+}
+
+/// The camera-space matrix to draw the first-person arm (and its sleeve) with, or
+/// `None` if `mesh` has no such arm part.
+///
+/// ```text
+/// first_person_arm_chain(arm) · rest_pose()[arm] · Rz(±0.1)
+/// ```
+///
+/// `AvatarRenderer.renderHand` calls `arm.resetPose()` and then forces
+/// `zRot = ±0.1F`, so the arm is drawn from its **authored rest pose** with one
+/// rotation replaced — never from the third-person `setupAnim` result. That is
+/// why this is a separate function from [`EntityInstance::part_transforms`] and
+/// must stay one: the deferred third-person player body needs the animated chain,
+/// and sharing a code path would silently give one of the two the other's pose.
+///
+/// `rest_pose()[arm] · Rz(0.1)` is *exact* rather than approximate because
+/// `player_wide`'s `right_arm` is `PartPose::offset(-5, 2, 0)` with **zero** rest
+/// rotation and hangs directly off an identity root — asserted by
+/// `the_player_arm_rest_pose_is_a_pure_translation`, not commented.
+///
+/// `right_sleeve` is a child of `right_arm` at `PartPose::ZERO`, so it shares this
+/// matrix exactly; [`first_person_arm_parts`] returns both indices for one matrix.
+#[must_use]
+pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm) -> Option<Mat4> {
+    let index = mesh.skeleton.index_of(arm.part_name())?;
+    let rest = mesh.skeleton.rest_pose();
+    let local = *rest.get(index)?;
+    Some(
+        first_person_arm_chain(arm)
+            * local
+            * Mat4::from_rotation_z(arm.invert() * FIRST_PERSON_ARM_Z_ROT),
+    )
+}
+
+/// The mesh part indices [`first_person_arm_pose`]'s matrix draws: the arm, and
+/// its sleeve overlay when the model has one.
+///
+/// Empty when the model has no such arm, so a caller can treat "no first-person
+/// arm for this rig" as "draw nothing" without a second lookup.
+#[must_use]
+pub fn first_person_arm_parts(mesh: &EntityMesh, arm: Arm) -> Vec<usize> {
+    let Some(index) = mesh.skeleton.index_of(arm.part_name()) else {
+        return Vec::new();
+    };
+    let mut parts = vec![index];
+    if let Some(sleeve) = mesh.skeleton.index_of(arm.sleeve_part_name()) {
+        parts.push(sleeve);
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -1794,5 +2189,372 @@ mod tests {
         const {
             assert!(GENERATED_ITEM_GROUND.scale[0] > BLOCK_ITEM_GROUND.scale[0]);
         }
+    }
+
+    /// The declared slot must **win**, and the fallback must still fire — the
+    /// second half is the control. Without it a `ground_transform` that ignored
+    /// its `display` argument entirely would pass on every vanilla item, because
+    /// the constants happen to equal what vanilla declares.
+    #[test]
+    fn a_declared_ground_slot_beats_the_gui_light_fallback() {
+        let odd = DisplayTransform {
+            rotation: [0.0, 17.0, 0.0],
+            translation: [0.0, 9.0, 0.0],
+            scale: [0.125, 0.125, 0.125],
+        };
+        let declared = DisplayTransforms::NONE.with(DisplaySlot::Ground, odd);
+        assert_eq!(
+            ground_transform(&declared, GuiLight::Side),
+            odd,
+            "the model's own display.ground must be used, not the constant"
+        );
+
+        // Control: a chain that declares nothing falls back, and the two
+        // fallbacks are still told apart by gui_light.
+        assert_eq!(
+            ground_transform(&DisplayTransforms::NONE, GuiLight::Side),
+            BLOCK_ITEM_GROUND
+        );
+        assert_eq!(
+            ground_transform(&DisplayTransforms::NONE, GuiLight::Front),
+            GENERATED_ITEM_GROUND
+        );
+
+        // And an *explicitly declared* identity is honoured rather than being
+        // mistaken for "absent" — the trap `DisplayTransforms::get` would fall
+        // into here, since `get` cannot tell the two apart.
+        let flat = DisplayTransforms::NONE.with(DisplaySlot::Ground, DisplayTransform::default());
+        assert_eq!(
+            ground_transform(&flat, GuiLight::Side),
+            DisplayTransform::default()
+        );
+    }
+
+    /// A left-hand slot with no left-hand data must mirror onto the right-hand
+    /// one, as vanilla's `ItemTransforms.Deserializer` does. `block/block` and
+    /// `item/generated` both declare `thirdperson_righthand` and no
+    /// `thirdperson_lefthand`, so without this every block in an off hand would
+    /// be posed with the identity.
+    // ---- held items, and the first-person arm ---------------------------
+
+    fn player_mesh() -> EntityMesh {
+        EntityMesh::from_named_model(
+            "player_wide",
+            &lodestone_assets::entity::player_model(false),
+        )
+    }
+
+    /// A plausible `thirdperson_righthand`: vanilla's `item/handheld` declares
+    /// `rotation [0, -90, 55]`, `translation [0, 4, 0.5]`, `scale [0.85, …]`.
+    fn handheld_third_person() -> DisplayTransform {
+        DisplayTransform {
+            rotation: [0.0, -90.0, 55.0],
+            translation: [0.0, 4.0, 0.5],
+            scale: [0.85, 0.85, 0.85],
+        }
+    }
+
+    #[test]
+    fn the_held_item_offsets_are_vanillas_two_triples() {
+        // Guard against a transposed or halved transcription of
+        // `ItemInHandLayer:45-48`, which is the whole content of this constant.
+        assert_eq!(HELD_ITEM_OFFSET_TEXELS, [1.0, 2.0, -10.0]);
+        assert_eq!(HELD_ITEM_BABY_OFFSET_TEXELS, [0.0, 1.0, -4.5]);
+    }
+
+    #[test]
+    fn the_held_item_x_offset_mirrors_between_hands_and_nothing_else_does() {
+        // The only asymmetry the layer itself introduces is `±offsetX`. Isolate
+        // it by handing both arms the *same* identity display transform and the
+        // same arm matrix, so any other difference would have to come from this
+        // function.
+        let flat = DisplayTransform::default();
+        let right = held_item_matrix(Mat4::IDENTITY, Arm::Right, false, &flat);
+        let left = held_item_matrix(Mat4::IDENTITY, Arm::Left, false, &flat);
+        let r = right.transform_point3(Vec3::splat(0.5));
+        let l = left.transform_point3(Vec3::splat(0.5));
+        // Rx(-90) then Ry(180) sends the +x offset to -x, so the sign is flipped
+        // once more than the naive reading — which is exactly why this is
+        // measured rather than asserted from the constant.
+        assert!((r.y - l.y).abs() < 1e-6, "y must not mirror: {r} vs {l}");
+        assert!((r.z - l.z).abs() < 1e-6, "z must not mirror: {r} vs {l}");
+        assert!(
+            (r.x + l.x).abs() < 1e-6 && r.x.abs() > 1e-3,
+            "x must mirror about zero and be non-zero: {r} vs {l}"
+        );
+    }
+
+    #[test]
+    fn a_baby_holds_its_item_closer_in() {
+        // The baby triple is smaller on every axis, so the item sits nearer the
+        // shoulder. A swapped adult/baby branch is the failure this catches.
+        let t = handheld_third_person();
+        let adult = held_item_matrix(Mat4::IDENTITY, Arm::Right, false, &t)
+            .transform_point3(Vec3::splat(0.5));
+        let baby =
+            held_item_matrix(Mat4::IDENTITY, Arm::Right, true, &t).transform_point3(Vec3::splat(0.5));
+        assert!(
+            baby.length() < adult.length(),
+            "the baby offset must be nearer the pivot: {baby} vs {adult}"
+        );
+    }
+
+    #[test]
+    fn the_held_item_pose_hangs_off_the_arm_matrix_it_is_given() {
+        // The seam that makes this non-island: the caller passes
+        // `part_transforms[arm]`, and translating that must translate the item
+        // by exactly the same amount.
+        let t = handheld_third_person();
+        let base = held_item_matrix(Mat4::IDENTITY, Arm::Right, false, &t);
+        let shift = Vec3::new(3.0, 64.0, -7.0);
+        let moved = held_item_matrix(
+            Mat4::from_translation(shift),
+            Arm::Right,
+            false,
+            &t,
+        );
+        let a = base.transform_point3(Vec3::splat(0.5));
+        let b = moved.transform_point3(Vec3::splat(0.5));
+        assert!((b - a - shift).length() < 1e-4, "{a} -> {b}, expected +{shift}");
+    }
+
+    #[test]
+    fn the_held_item_pose_preserves_winding_for_a_real_mob() {
+        // Same discipline as `dropped_item_pose_preserves_winding`: the whole
+        // chain is a *world* pose left-multiplied by `view_projection`, so its
+        // determinant must be POSITIVE and the composition must inherit the
+        // camera's negative sign. The GUI rule ("negative") applied here ships an
+        // item you see the inside of, which still looks like a sword.
+        let camera = crate::camera::Camera {
+            position: Vec3::new(0.5, 1.0, 4.0),
+            yaw: 180.0,
+            pitch: 0.0,
+            ..crate::camera::Camera::default()
+        };
+        let world = camera.view_projection();
+        let front_sign = screen_area(world, cube_face(Direction::South)).signum();
+        assert_eq!(
+            screen_area(world, cube_face(Direction::North)).signum(),
+            -front_sign,
+            "the reference camera must disagree about the far face"
+        );
+
+        let mesh = player_mesh();
+        let t = handheld_third_person();
+        for yaw in [0.0f32, 37.0, 180.0, 271.0] {
+            for (scale, baby) in [(1.0f32, false), (0.5, true)] {
+                let inst = EntityInstance::new(
+                    "player_wide",
+                    &mesh,
+                    Vec3::new(0.5, 0.0, 0.0),
+                    yaw,
+                    scale,
+                    &AnimInput::REST,
+                );
+                for hand in [Arm::Right, Arm::Left] {
+                    let hand_arm = mesh
+                        .skeleton
+                        .index_of(hand.part_name())
+                        .expect("player_wide has both arms");
+                    let pose =
+                        held_item_matrix(inst.part_transforms[hand_arm], hand, baby, &t);
+                    assert!(
+                        pose.determinant() > 0.0,
+                        "a world-space held-item pose must not flip handedness; det = {} \
+                         (yaw {yaw}, scale {scale}, {hand:?})",
+                        pose.determinant()
+                    );
+                    assert_eq!(
+                        (world * pose).determinant().signum(),
+                        world.determinant().signum(),
+                        "view_projection * pose must keep the camera's winding"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hand_transform_picks_the_slot_the_arm_and_person_name() {
+        let third = handheld_third_person();
+        let first = DisplayTransform {
+            rotation: [0.0, -90.0, 25.0],
+            translation: [1.13, 3.2, 1.13],
+            scale: [0.68, 0.68, 0.68],
+        };
+        let d = DisplayTransforms::NONE
+            .with(DisplaySlot::ThirdPersonRightHand, third)
+            .with(DisplaySlot::FirstPersonRightHand, first);
+        assert_eq!(hand_transform(&d, Arm::Right, false), third);
+        assert_eq!(hand_transform(&d, Arm::Right, true), first);
+        // Both left slots are undeclared, so both fall back to their right-hand
+        // partner — vanilla's deserializer rule, and the reason a block in an off
+        // hand is not identity-posed.
+        assert_eq!(hand_transform(&d, Arm::Left, false), third);
+        assert_eq!(hand_transform(&d, Arm::Left, true), first);
+        // ...and a model that declares nothing gets NO_TRANSFORM, not a guess.
+        assert_eq!(
+            hand_transform(&DisplayTransforms::NONE, Arm::Right, false),
+            DisplayTransform::default()
+        );
+    }
+
+    #[test]
+    fn the_player_arm_rest_pose_is_a_pure_translation() {
+        // What makes `rest_pose()[arm] * Rz(±0.1)` *exact* rather than an
+        // approximation of `arm.resetPose(); arm.zRot = ±0.1`: the authored rest
+        // rotation is zero and the root above it is the identity, so replacing
+        // zRot is the same as post-multiplying Rz. If a future corpus edit gave
+        // the player arm a rest rotation, this fails instead of silently drifting.
+        let mesh = player_mesh();
+        for arm in [Arm::Right, Arm::Left] {
+            let i = mesh.skeleton.index_of(arm.part_name()).expect("arm part");
+            let rest = mesh.skeleton.rest_pose()[i];
+            let expect = Mat4::from_translation(Vec3::new(
+                arm.invert() * -5.0 / 16.0,
+                2.0 / 16.0,
+                0.0,
+            ));
+            assert!(
+                (rest - expect).to_cols_array().iter().all(|v| v.abs() < 1e-6),
+                "{arm:?} rest pose must be PartPose::offset(∓5, 2, 0) with no rotation; got {rest}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sleeve_shares_the_arms_matrix_exactly() {
+        // `right_sleeve` is `PartPose::ZERO` under `right_arm`, so one uploaded
+        // matrix drives both parts. Drawing the sleeve with its own recomputed
+        // matrix would be the same number; drawing it with the *body's* would
+        // put a floating sleeve mid-screen.
+        let mesh = player_mesh();
+        let rest = mesh.skeleton.rest_pose();
+        for arm in [Arm::Right, Arm::Left] {
+            let a = mesh.skeleton.index_of(arm.part_name()).expect("arm");
+            let s = mesh
+                .skeleton
+                .index_of(arm.sleeve_part_name())
+                .expect("sleeve");
+            assert!(
+                (rest[a] - rest[s]).to_cols_array().iter().all(|v| v.abs() < 1e-6),
+                "{arm:?} sleeve must share the arm's matrix"
+            );
+            let parts = first_person_arm_parts(&mesh, arm);
+            assert_eq!(parts, vec![a, s], "both parts must be drawn, arm first");
+        }
+        // A rig with no sleeve yields just the arm, and a rig with no arm at all
+        // yields nothing — the control that keeps the `Vec` honest.
+        assert_eq!(
+            first_person_arm_parts(&pig_mesh(), Arm::Right),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn the_first_person_arm_lands_in_the_bottom_right_of_frame() {
+        // Hand-computed from `renderPlayerArm`'s chain with attack = 0 and
+        // inverseArmHeight = 0, in camera space (x right, y up, -z forward):
+        // the arm cube spans roughly x 0.33..0.91, y -0.99..-0.29, z -1.19..-0.44.
+        // The load-bearing claims are the *signs*: right of centre, below the
+        // eye, and in front of it. A missing rotation in the chain flips one.
+        let mesh = player_mesh();
+        let pose = first_person_arm_pose(&mesh, Arm::Right).expect("player_wide has a right arm");
+        // `player_wide`'s right arm cube: from [-3, -2, -2], size [4, 12, 4].
+        let corners: Vec<Vec3> = (0..8u32)
+            .map(|i| {
+                let x = if i & 1 == 0 { -3.0f32 } else { 1.0 };
+                let y = if i & 2 == 0 { -2.0f32 } else { 10.0 };
+                let z = if i & 4 == 0 { -2.0f32 } else { 2.0 };
+                pose.transform_point3(Vec3::new(x, y, z) / 16.0)
+            })
+            .collect();
+        let lo = corners.iter().copied().reduce(Vec3::min).unwrap();
+        let hi = corners.iter().copied().reduce(Vec3::max).unwrap();
+        assert!(lo.x > 0.2 && hi.x < 1.1, "x span {}..{}", lo.x, hi.x);
+        assert!(hi.y < -0.2 && lo.y > -1.2, "y span {}..{}", lo.y, hi.y);
+        assert!(hi.z < -0.3 && lo.z > -1.4, "z span {}..{}", lo.z, hi.z);
+        // Beyond the near plane, or the arm is clipped away entirely.
+        assert!(hi.z < -HAND_NEAR, "the arm must be past the near plane");
+
+        // The left arm is the mirror image about x, to within the zRot sign.
+        let left = first_person_arm_pose(&mesh, Arm::Left).expect("left arm");
+        let lc = left.transform_point3(Vec3::ZERO);
+        let rc = pose.transform_point3(Vec3::ZERO);
+        assert!((lc.x + rc.x).abs() < 1e-4, "left/right must mirror: {lc} vs {rc}");
+        assert!((lc.y - rc.y).abs() < 1e-4 && (lc.z - rc.z).abs() < 1e-4);
+    }
+
+    #[test]
+    fn first_person_arm_pose_preserves_winding() {
+        // The arm is drawn with the HUD projection alone, and a view matrix has
+        // determinant +1, so `sign(det(hand_projection))` equals
+        // `sign(det(view_projection))`. The arm pose must therefore be
+        // orientation-*preserving*, like a world model matrix — not
+        // orientation-reversing like the GUI item pose.
+        let camera = crate::camera::Camera::default();
+        let world = camera.view_projection();
+        assert!(
+            camera.view_matrix().determinant() > 0.0,
+            "a view matrix must have determinant +1; that is why the two signs agree"
+        );
+        let proj = hand_projection(16.0 / 9.0);
+        assert_eq!(
+            proj.determinant().signum(),
+            world.determinant().signum(),
+            "hand_projection must share view_projection's handedness \
+             (proj {}, world {})",
+            proj.determinant(),
+            world.determinant()
+        );
+
+        let mesh = player_mesh();
+        for arm in [Arm::Right, Arm::Left] {
+            let pose = first_person_arm_pose(&mesh, arm).expect("arm");
+            assert!(
+                pose.determinant() > 0.0,
+                "{arm:?} arm pose must not flip handedness; det = {}",
+                pose.determinant()
+            );
+            assert_eq!(
+                (proj * pose).determinant().signum(),
+                world.determinant().signum(),
+                "hand_projection * arm pose must keep the world's winding"
+            );
+        }
+    }
+
+    #[test]
+    fn hand_projection_is_a_fixed_seventy_degrees_and_survives_a_degenerate_aspect() {
+        // Vanilla's `calculateHudFov` is a constant 70, so the arm must NOT
+        // follow the world FOV. Anything reading `Camera::fov_y_degrees` here
+        // would make the arm balloon while sprinting.
+        assert!((HAND_FOV_Y_DEGREES - 70.0).abs() < 1e-6);
+        assert!((HAND_NEAR - 0.05).abs() < 1e-6);
+        assert!((HAND_FAR - 100.0).abs() < 1e-6);
+        assert!(hand_projection(0.0).to_cols_array().iter().all(|v| v.is_finite()));
+        assert!(hand_projection(f32::NAN).to_cols_array().iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn a_missing_left_hand_slot_falls_back_to_the_right_hand_one() {
+        let right = DisplayTransform {
+            rotation: [75.0, 45.0, 0.0],
+            translation: [0.0, 2.5, 0.0],
+            scale: [0.375, 0.375, 0.375],
+        };
+        let d = DisplayTransforms::NONE.with(DisplaySlot::ThirdPersonRightHand, right);
+        assert_eq!(d.get(DisplaySlot::ThirdPersonLeftHand), right);
+        assert_eq!(
+            d.declared(DisplaySlot::ThirdPersonLeftHand),
+            None,
+            "the fallback must not pretend the slot was declared"
+        );
+        // A slot with no fallback rule still reads as the identity.
+        assert_eq!(
+            d.get(DisplaySlot::Ground),
+            DisplayTransform::default(),
+            "an undeclared non-hand slot is vanilla's NO_TRANSFORM"
+        );
     }
 }

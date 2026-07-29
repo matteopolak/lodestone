@@ -127,8 +127,8 @@ pub use manager::ResourceManager;
 pub use meta::{PackDescription, PackMeta, PackVersion, VersionMeta};
 pub use mipmap::{MipStrategy, Transparency, generate_mip_levels, max_mip_level};
 pub use model::{
-    Axis, Direction, DisplayTransform, Element, ElementRotation, Face, GuiLight, ModelResolver,
-    RawModel, ResolvedModel, TextureBinding,
+    Axis, Direction, DisplaySlot, DisplayTransform, DisplayTransforms, Element, ElementRotation,
+    Face, GuiLight, ModelResolver, RawModel, ResolvedModel, TextureBinding,
 };
 pub use particle_atlas::{ParticleAtlas, ParticleAtlasReport};
 pub use profile::AssetProfile;

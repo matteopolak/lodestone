@@ -167,6 +167,167 @@ impl Default for DisplayTransform {
     }
 }
 
+/// One of vanilla's `display` slots — the *context* an item model is being drawn
+/// in, which selects which [`DisplayTransform`] poses it.
+///
+/// Mirrors `net.minecraft.world.item.ItemDisplayContext`, and
+/// [`json_name`](Self::json_name) is that enum's `getSerializedName()`. The
+/// `NONE` variant is deliberately absent: it has no `display` key and vanilla's
+/// `ItemTransforms.getTransform` answers it with `NO_TRANSFORM`, which is what
+/// [`DisplayTransforms::get`] returns for any undeclared slot anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DisplaySlot {
+    /// `thirdperson_lefthand` — held in another entity's left hand.
+    ThirdPersonLeftHand,
+    /// `thirdperson_righthand` — held in another entity's right hand.
+    ThirdPersonRightHand,
+    /// `firstperson_lefthand` — held in *our* left hand.
+    FirstPersonLeftHand,
+    /// `firstperson_righthand` — held in *our* right hand.
+    FirstPersonRightHand,
+    /// `head` — worn in the helmet slot.
+    Head,
+    /// `gui` — an inventory/hotbar slot.
+    Gui,
+    /// `ground` — a dropped item entity.
+    Ground,
+    /// `fixed` — an item frame.
+    Fixed,
+    /// `on_shelf` — 26.2's shelf block (vanilla's `fixedFromBottom`).
+    OnShelf,
+}
+
+impl DisplaySlot {
+    /// Every slot, in the order [`DisplayTransforms`] stores them.
+    pub const ALL: [DisplaySlot; 9] = [
+        DisplaySlot::ThirdPersonLeftHand,
+        DisplaySlot::ThirdPersonRightHand,
+        DisplaySlot::FirstPersonLeftHand,
+        DisplaySlot::FirstPersonRightHand,
+        DisplaySlot::Head,
+        DisplaySlot::Gui,
+        DisplaySlot::Ground,
+        DisplaySlot::Fixed,
+        DisplaySlot::OnShelf,
+    ];
+
+    /// The JSON key this slot appears under inside a model's `display` object.
+    #[must_use]
+    pub const fn json_name(self) -> &'static str {
+        match self {
+            DisplaySlot::ThirdPersonLeftHand => "thirdperson_lefthand",
+            DisplaySlot::ThirdPersonRightHand => "thirdperson_righthand",
+            DisplaySlot::FirstPersonLeftHand => "firstperson_lefthand",
+            DisplaySlot::FirstPersonRightHand => "firstperson_righthand",
+            DisplaySlot::Head => "head",
+            DisplaySlot::Gui => "gui",
+            DisplaySlot::Ground => "ground",
+            DisplaySlot::Fixed => "fixed",
+            DisplaySlot::OnShelf => "on_shelf",
+        }
+    }
+
+    /// The index this slot occupies in [`DisplaySlot::ALL`].
+    #[must_use]
+    const fn index(self) -> usize {
+        match self {
+            DisplaySlot::ThirdPersonLeftHand => 0,
+            DisplaySlot::ThirdPersonRightHand => 1,
+            DisplaySlot::FirstPersonLeftHand => 2,
+            DisplaySlot::FirstPersonRightHand => 3,
+            DisplaySlot::Head => 4,
+            DisplaySlot::Gui => 5,
+            DisplaySlot::Ground => 6,
+            DisplaySlot::Fixed => 7,
+            DisplaySlot::OnShelf => 8,
+        }
+    }
+
+    /// The right-hand slot a *left*-hand slot falls back to when the model
+    /// declares no left-hand variant, or `None` for a slot that is not a
+    /// left-hand one.
+    ///
+    /// This is vanilla's `ItemTransforms.Deserializer`, which does exactly this
+    /// substitution while reading one model's `display` object. It matters in
+    /// practice: neither `block/block` nor `item/generated` declares
+    /// `thirdperson_lefthand`, so without the fallback every block and every
+    /// flat item would be posed with the identity in an off hand.
+    #[must_use]
+    pub const fn left_hand_fallback(self) -> Option<DisplaySlot> {
+        match self {
+            DisplaySlot::ThirdPersonLeftHand => Some(DisplaySlot::ThirdPersonRightHand),
+            DisplaySlot::FirstPersonLeftHand => Some(DisplaySlot::FirstPersonRightHand),
+            _ => None,
+        }
+    }
+}
+
+/// Every `display` slot of a resolved model, so a renderer can pose the same
+/// baked geometry as an inventory icon, a dropped item, a held item or a hat.
+///
+/// # Why this exists rather than a bare `HashMap<String, _>`
+///
+/// [`ResolvedModel::display`] is that map, keyed by raw JSON slug. This type is
+/// the *interpreted* view of it, and it carries the one rule the map cannot: a
+/// missing left-hand slot resolves to the right-hand one
+/// ([`DisplaySlot::left_hand_fallback`]). Looking a slug up directly is how you
+/// get an identity-posed sword in an off hand.
+///
+/// # Declared versus resolved
+///
+/// [`declared`](Self::declared) reports only what the model's parent chain
+/// actually wrote down; [`get`](Self::get) applies the left-hand fallback and
+/// then defaults to the identity transform, mirroring vanilla's
+/// `ItemTransform.NO_TRANSFORM`. Prefer `get` for drawing and `declared` when
+/// you need to know whether the data was really there — for instance to decide
+/// whether a fallback constant is still being relied on.
+///
+/// Values are the **raw JSON numbers**, exactly as [`DisplayTransform`] stores
+/// them: the `/16` on translation and vanilla's `±5`/`±4` clamps belong to the
+/// renderer's matrix builder, not here.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DisplayTransforms([Option<DisplayTransform>; 9]);
+
+impl DisplayTransforms {
+    /// A model that declares no `display` block at all: every slot resolves to
+    /// the identity.
+    pub const NONE: DisplayTransforms = DisplayTransforms([None; 9]);
+
+    /// Interprets a raw slug-keyed `display` map (i.e. [`RawModel::display`] or
+    /// [`ResolvedModel::display`]). Unrecognised slugs are ignored.
+    #[must_use]
+    pub fn from_map(map: &HashMap<String, DisplayTransform>) -> Self {
+        let mut slots = [None; 9];
+        for slot in DisplaySlot::ALL {
+            slots[slot.index()] = map.get(slot.json_name()).copied();
+        }
+        DisplayTransforms(slots)
+    }
+
+    /// What the model's parent chain actually declared for `slot`, with no
+    /// fallback of any kind.
+    #[must_use]
+    pub fn declared(&self, slot: DisplaySlot) -> Option<DisplayTransform> {
+        self.0[slot.index()]
+    }
+
+    /// The transform to pose with in `slot`: the declared one, else the
+    /// right-hand mirror for a left-hand slot, else the identity.
+    #[must_use]
+    pub fn get(&self, slot: DisplaySlot) -> DisplayTransform {
+        self.declared(slot)
+            .or_else(|| slot.left_hand_fallback().and_then(|s| self.declared(s)))
+            .unwrap_or_default()
+    }
+
+    /// Overwrites one slot. Useful for building a fixture without a pack.
+    #[must_use]
+    pub fn with(mut self, slot: DisplaySlot, transform: DisplayTransform) -> Self {
+        self.0[slot.index()] = Some(transform);
+        self
+    }
+}
+
 /// The lighting model used to render the item form in a GUI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuiLight {
@@ -473,6 +634,21 @@ impl ResolvedModel {
             Some(TextureBinding::Resolved(loc)) => Some(loc),
             _ => None,
         }
+    }
+
+    /// The interpreted view of [`display`](Self::display): every vanilla slot,
+    /// with the left-hand fallback applied on lookup.
+    ///
+    /// [`display`](Self::display) is merged **per slot** down the parent chain
+    /// (child overrides parent), which is what vanilla's
+    /// `ResolvedModel.findTopTransform` does — it walks the chain once per slot
+    /// rather than taking one ancestor's whole `display` object. Getting that
+    /// wrong would give `item/handheld` (which declares only the four hand
+    /// slots) no `ground` transform at all, instead of inheriting
+    /// `item/generated`'s.
+    #[must_use]
+    pub fn display_transforms(&self) -> DisplayTransforms {
+        DisplayTransforms::from_map(&self.display)
     }
 
     /// Returns the names of texture variables that failed to resolve.

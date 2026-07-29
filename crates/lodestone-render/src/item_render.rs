@@ -88,13 +88,45 @@ pub const GUI_DEPTH_HALF_RANGE: f32 = 1000.0;
 /// The rotation is JOML `Quaternionf.rotationXYZ`, i.e. `Rx · Ry · Rz`.
 #[must_use]
 pub fn display_matrix(transform: &DisplayTransform) -> Mat4 {
-    let translation = (Vec3::from(transform.translation) / UNITS_PER_BLOCK).clamp(
+    display_matrix_for_hand(transform, false)
+}
+
+/// [`display_matrix`], with vanilla's **left-hand fix** optionally applied.
+///
+/// `ItemTransform.apply(applyLeftHandFix, pose)` (26.2,
+/// `client/resources/model/cuboid/ItemTransform.java`) negates exactly three
+/// numbers when the display context is a left-hand one: `translation.x`,
+/// `rotation.y` and `rotation.z`. Everything else is untouched.
+///
+/// # This is a *second*, independent rule from the slot fallback
+///
+/// [`DisplayTransforms::get`](lodestone_assets::DisplayTransforms::get) already
+/// answers an undeclared `thirdperson_lefthand` with the *right*-hand transform
+/// ([`DisplaySlot::left_hand_fallback`](lodestone_assets::DisplaySlot::left_hand_fallback)).
+/// It is tempting to read that as "the left hand is handled", but vanilla's
+/// `ItemDisplayContext.leftHand()` is `true` for **every** left-hand context,
+/// declared or not — so the mirror is applied on top of a *declared*
+/// `thirdperson_lefthand` too. Skipping it puts a sword through the back of an
+/// off hand rather than out of the front of it.
+///
+/// Negating two Euler angles is still a rotation, so this does **not** change the
+/// determinant's sign: an off-hand item winds exactly like a main-hand one.
+#[must_use]
+pub fn display_matrix_for_hand(transform: &DisplayTransform, left_hand: bool) -> Mat4 {
+    let [tx, ty, tz] = transform.translation;
+    let [rx, ry, rz] = transform.rotation;
+    let (tx, ry, rz) = if left_hand {
+        (-tx, -ry, -rz)
+    } else {
+        (tx, ry, rz)
+    };
+
+    let translation = (Vec3::new(tx, ty, tz) / UNITS_PER_BLOCK).clamp(
         Vec3::splat(-TRANSLATION_LIMIT),
         Vec3::splat(TRANSLATION_LIMIT),
     );
     let scale =
         Vec3::from(transform.scale).clamp(Vec3::splat(-SCALE_LIMIT), Vec3::splat(SCALE_LIMIT));
-    let [rx, ry, rz] = transform.rotation;
     let rotation = Mat4::from_rotation_x(rx.to_radians())
         * Mat4::from_rotation_y(ry.to_radians())
         * Mat4::from_rotation_z(rz.to_radians());
@@ -266,6 +298,60 @@ mod tests {
         assert!(
             (p - Vec3::new(2.0, -2.0, 0.0)).length() < 1e-5,
             "scale must clamp to ±4, got {p}"
+        );
+    }
+
+    // --- the left-hand fix ------------------------------------------------
+
+    #[test]
+    fn the_left_hand_fix_negates_exactly_translation_x_and_rotation_yz() {
+        // Hand-derived from `ItemTransform.apply`: with rotation [0, 90, 0] and
+        // translation [16, 32, 48] the right hand puts the cube centre at
+        // (1, 2, 3) blocks and the left hand at (-1, 2, 3) — only x flips.
+        let t = DisplayTransform {
+            rotation: [0.0, 90.0, 0.0],
+            translation: [16.0, 32.0, 48.0],
+            scale: [1.0, 1.0, 1.0],
+        };
+        let right = display_matrix_for_hand(&t, false).transform_point3(Vec3::splat(0.5));
+        let left = display_matrix_for_hand(&t, true).transform_point3(Vec3::splat(0.5));
+        assert!((right - Vec3::new(1.0, 2.0, 3.0)).length() < 1e-5, "{right}");
+        assert!((left - Vec3::new(-1.0, 2.0, 3.0)).length() < 1e-5, "{left}");
+
+        // Ry is negated, so model +X goes the other way about the pivot: right
+        // hand sends it to -Z, left hand to +Z.
+        let dir = |m: Mat4| m.transform_point3(Vec3::new(1.0, 0.5, 0.5)) - m.transform_point3(Vec3::splat(0.5));
+        assert!(dir(display_matrix_for_hand(&t, false)).z < -0.4);
+        assert!(dir(display_matrix_for_hand(&t, true)).z > 0.4);
+    }
+
+    #[test]
+    fn the_left_hand_fix_is_orientation_preserving() {
+        // Negating two Euler angles is a rotation, not a reflection: an off-hand
+        // item must wind exactly like a main-hand one, or every off-hand sword
+        // renders inside-out while still looking like a sword.
+        let t = DisplayTransform {
+            rotation: [0.0, 90.0, -55.0],
+            translation: [4.0, 8.0, -2.0],
+            scale: [0.68, 0.68, 0.68],
+        };
+        let r = display_matrix_for_hand(&t, false).determinant();
+        let l = display_matrix_for_hand(&t, true).determinant();
+        assert!((r - l).abs() < 1e-6, "right {r} vs left {l}");
+        assert!(r > 0.0, "a positive-scale display transform must not flip winding");
+    }
+
+    #[test]
+    fn display_matrix_is_the_right_hand_case() {
+        let t = DisplayTransform {
+            rotation: [10.0, 20.0, 30.0],
+            translation: [3.0, -4.0, 5.0],
+            scale: [0.5, 0.5, 0.5],
+        };
+        assert_eq!(
+            display_matrix(&t),
+            display_matrix_for_hand(&t, false),
+            "every existing caller must keep the unmirrored behaviour"
         );
     }
 
