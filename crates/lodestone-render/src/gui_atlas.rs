@@ -114,6 +114,31 @@ impl GuiAtlas {
     /// Fails closed: an empty sprite set is a [`GuiAtlasError::NoSprites`] so the
     /// caller falls back loudly rather than binding a blank atlas.
     pub fn build(manager: &ResourceManager) -> Result<Self, GuiAtlasError> {
+        Self::build_with_extras(manager, &[])
+    }
+
+    /// As [`GuiAtlas::build`], plus a list of `(id, in-pack path)` **loose**
+    /// textures stitched into the same atlas and looked up under `id`.
+    ///
+    /// This exists for the handful of GUI textures vanilla blits by raw path
+    /// rather than through the sprite atlas — the title screen's
+    /// `textures/gui/title/minecraft.png` logo and its `edition.png` companion.
+    /// They are outside `gui/sprites/**`, so [`GuiAtlas::build`] structurally
+    /// cannot see them, and the alternative for a consumer is a second texture,
+    /// a second bind group and a second pipeline for two quads.
+    ///
+    /// Extras are **fail-open and never override a real sprite**: a missing or
+    /// undecodable texture is skipped (the caller then draws nothing for that
+    /// id, exactly as for any unknown id), and an id already claimed by a
+    /// sprite is left alone. One absent loose texture must not take the whole
+    /// pack's real HUD sprites down with it.
+    ///
+    /// Extras are always [`GuiScaling::Stretch`]: they have no `.mcmeta` and
+    /// vanilla blits them as one quad.
+    pub fn build_with_extras(
+        manager: &ResourceManager,
+        extras: &[(&str, &str)],
+    ) -> Result<Self, GuiAtlasError> {
         // Enumerate the whole asset tree once and filter to GUI sprite PNGs.
         // Namespace-general: we do not assume `minecraft`, we read it out of the
         // path, so a resource pack that adds sprites under its own namespace is
@@ -177,6 +202,31 @@ impl GuiAtlas {
 
             builder.add_texture(location.clone(), image, None);
             sprites.insert(id.to_string(), SpriteEntry { location, scaling });
+        }
+
+        for (id, path) in extras {
+            if sprites.contains_key(*id) {
+                continue;
+            }
+            let Some(bytes) = manager.read(path) else {
+                continue;
+            };
+            let Ok(image) = Image::decode_png(&bytes) else {
+                continue;
+            };
+            // A namespace of its own so a loose texture can never collide with
+            // a real sprite's synthetic location.
+            let Ok(location) = ResourceLocation::new("lodestone", format!("gui/loose/{id}")) else {
+                continue;
+            };
+            builder.add_texture(location.clone(), image, None);
+            sprites.insert(
+                (*id).to_string(),
+                SpriteEntry {
+                    location,
+                    scaling: GuiScaling::Stretch,
+                },
+            );
         }
 
         let atlas = builder.build()?;
@@ -440,6 +490,46 @@ mod tests {
             assert!(q.uv_min[0] >= u0 - 1e-6 && q.uv_max[0] <= u1 + 1e-6);
             assert!(q.uv_min[1] >= v0 - 1e-6 && q.uv_max[1] <= v1 + 1e-6);
         }
+    }
+
+    #[test]
+    fn extras_stitch_loose_textures_and_never_clobber_a_real_sprite() {
+        // The title screen's logo lives at `textures/gui/title/minecraft.png`,
+        // outside `gui/sprites/**` — `build` structurally cannot see it, which
+        // is the whole reason `build_with_extras` exists. The synthetic pack
+        // above already contains exactly that path.
+        let plain = GuiAtlas::build(&synthetic_manager()).expect("atlas builds");
+        assert!(
+            !plain.contains("title/minecraft"),
+            "the negative control: `build` must not see a loose texture"
+        );
+
+        let with = GuiAtlas::build_with_extras(
+            &synthetic_manager(),
+            &[
+                (
+                    "title/minecraft",
+                    "assets/minecraft/textures/gui/title/minecraft.png",
+                ),
+                // Absent from the pack: must be skipped, not fail the build.
+                ("title/nope", "assets/minecraft/textures/gui/title/nope.png"),
+                // Collides with a real sprite: the sprite must win.
+                ("hud/heart/full", "assets/minecraft/textures/gui/title/minecraft.png"),
+            ],
+        )
+        .expect("atlas builds with extras");
+        assert!(with.contains("title/minecraft"));
+        assert_eq!(with.native_size("title/minecraft"), Some((2, 2)));
+        assert!(!with.contains("title/nope"), "a missing extra is skipped");
+        assert_eq!(
+            with.native_size("hud/heart/full"),
+            Some((9, 9)),
+            "an extra must not override the real sprite of the same id"
+        );
+        // And it is drawable: one stretched quad over the requested rect.
+        let quads = with.geometry("title/minecraft", 4.0, 8.0, 256.0, 64.0);
+        assert_eq!(quads.len(), 1);
+        assert_eq!(quads[0].dst, [4.0, 8.0, 256.0, 64.0]);
     }
 
     #[test]

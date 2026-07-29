@@ -17,6 +17,129 @@ It lives entirely under [`crates/lodestone-shell/src/menu/`](../crates/lodestone
 | `menu/servers.rs` | `ServerEntry` / `ServerList` and the on-disk JSON |
 | `menu/status.rs` | background status pings and their cache |
 
+## The title screen is vanilla's layout, from vanilla's source
+
+`Screen::MainMenu` reproduces `TitleScreen` — the same widgets, in the same
+places, drawn with the pack's own `widget/button*` art. Every number came out of
+`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/TitleScreen.java`,
+not from memory, and lives in `render::title_slot` with the source line beside
+it.
+
+`topPos = height / 4 + 48` (`TitleScreen.java:113`), rows every 24 px:
+
+| # | widget | rect (logical px) | state |
+|---|---|---|---|
+| 0 | Singleplayer | `W/2-100, topPos, 200×20` | live |
+| 1 | Multiplayer | `W/2-100, topPos+24, 200×20` | live |
+| 2 | Minecraft Realms | `W/2-100, topPos+48, 200×20` | **disabled** |
+| 3 | Friends (icon) | `W/2-34, topPos+72, 20×20` | **disabled** |
+| 4 | Language (icon) | `W/2-10, topPos+72, 20×20` | **disabled** |
+| 5 | Accessibility (icon) | `W/2+14, topPos+72, 20×20` | **disabled** |
+| 6 | Options… | `W/2-100, topPos+96, 98×20` | live |
+| 7 | Quit Game | `W/2+2, topPos+96, 98×20` | live |
+
+Plus `LogoRenderer`'s wordmark at `W/2-128, 30` (256×44) with the edition strip
+at `W/2-64, 67` (128×14), the version string at `2, H-10` and the copyright line
+right-aligned at `W-2, H-10` (`LogoRenderer.java:35-43`,
+`TitleScreen.java:110-111,323`).
+
+Two details worth naming because a remembered layout gets them wrong:
+
+- the icon row's x comes from `getHorizontalPosition(n, 3, 20)`
+  (`TitleScreen.java:170-173`): `totalWidth = 3*20 + 2*4 = 68`, so
+  `W/2 - 34 + (n-1)*24`;
+- the Options/Quit pair has a **4 px** gutter (98 at `W/2-100`, 98 at `W/2+2`).
+  The pause screen's equivalent pair has an **8 px** one. They are not the same
+  layout — see [`pause-menu.md`](./pause-menu.md).
+
+### Why four buttons are present and disabled
+
+Because the alternative reads worse. A button missing from its vanilla position
+moves everything below it and the screen stops looking like vanilla's; a
+greyed-out button in the right position looks exactly like vanilla with the
+feature unavailable, which is a state vanilla itself ships (it disables
+Multiplayer and Realms for a banned account, `TitleScreen.java:189-203`).
+
+Each disabled one needs a subsystem this client does not have: Realms is a paid
+Mojang-hosted service with an authenticated HTTP API; Friends needs a
+Microsoft-account social graph; Language needs a language-selection screen (the
+shell loads exactly one table, `en_us.json`); Accessibility needs an
+accessibility options screen.
+
+The look is vanilla's own, not invented: `MainButton::enabled() == false` selects
+`widget/button_disabled` and recolours the label to `0xFF_A0_A0_A0` — vanilla's
+`-6250336` from `AbstractWidget.WithInactiveMessage` (`AbstractWidget.java:318`).
+
+### Disabled buttons and the keyboard, the mouse, and clicks
+
+One index space (`MAIN_BUTTONS` / `PAUSE_BUTTONS`) serves keyboard selection,
+mouse hover, hit-testing and the renderer, so they cannot drift. Three rules,
+all of them vanilla's:
+
+- **Arrow keys step over a disabled row** (`nav::step_enabled`). Vanilla's
+  `AbstractWidget::nextFocusPath` returns `null` for an inactive widget
+  (`AbstractWidget.java:152-158`), so Tab never lands on one either.
+- **The mouse still hovers one.** Vanilla sets `isHovered` from geometry alone
+  and never consults `active` (`AbstractWidget.java:56-62`), and
+  `WidgetSprites::get(active, focused)` returns the *disabled* sprite whichever
+  way `focused` went (`WidgetSprites.java:19-25`) — so it looks greyed out, not
+  highlighted.
+- **Enter/click on a disabled row does nothing.** This one is load-bearing rather
+  than cosmetic: `app.rs` turns a click into `hover(row)` then `MenuKey::Enter`,
+  so if `hover` had *refused* the disabled row the Enter would have activated
+  whatever was highlighted before — clicking greyed-out Advancements would have
+  disconnected you. `nav::a_disabled_button_is_hoverable_but_cannot_be_activated`
+  gates exactly that, with the enabled case as its positive control.
+
+### Buttons are real nine-slice sprites
+
+`widget/button`, `widget/button_highlighted` and `widget/button_disabled` are
+sprite-scaling sprites: their sibling `.png.mcmeta` declares `nine_slice` with a
+border, and only the middle stretches. **The borders are read from the pack**, by
+`GuiAtlas::geometry` → `GuiScaling::geometry`, and are not hardcoded anywhere in
+the shell. That matters concretely: in the real 26.2 pack `button` and
+`button_highlighted` declare `border: 3` and `button_disabled` declares
+`border: 1`. A single hardcoded 3 would draw the disabled button's corners three
+times too large at every size.
+
+`render::nine_slice_borders_come_from_the_mcmeta_not_a_constant` pins the 3-vs-1
+split against a synthetic pack that repeats those two values.
+
+### Where the textures come from
+
+`resources::load_menu_gui_atlas` stitches `gui/sprites/**` plus the two **loose**
+title textures, via the new `GuiAtlas::build_with_extras`. The logo lives at
+`textures/gui/title/minecraft.png`, outside the sprite tree, so plain
+`GuiAtlas::build` structurally cannot see it.
+
+Both title textures are hi-res in 26.2 (1024×256 and 512×64) while vanilla
+declares them as 256×64 / 128×16 and blits only the top 44 / 14 rows. Everything
+below those cuts was **measured fully transparent** (max alpha 0), so drawing the
+whole sprite into a 256×64 / 128×16 rect is pixel-identical to vanilla's sub-rect
+blit — which is why no sub-rect blit primitive was needed.
+
+`MenuRenderer` binds the atlas **lazily, on its first draw** (`ensure_gui`),
+because the upload needs a `Queue` and `MenuRenderer::new`'s call site in
+`app.rs` passes only a `Device`. `attach_gui` is public so `app.rs` can hand in a
+shared atlas instead; today that means the menu's atlas is a **second stitch**
+alongside the HUD's (a few MB), which is the one known duplication here.
+
+### What is *not* reproduced
+
+Named plainly rather than half-done:
+
+- **No panorama.** Vanilla's title background is the rotating `Panorama` cubemap
+  plus `PANORAMA_OVERLAY` (`TitleScreen.java:307`, and note
+  `TitleScreen.extractBackground` is empty — the panorama *is* the background).
+  Ours is a flat dark fill. This needs a cubemap sampler, six textures and a
+  spin, and rushing it would look worse than a clean flat colour.
+- **No splash text** (the yellow rotating line). `SplashManager` reads
+  `texts/splashes.txt` and vanilla draws it rotated ~20°; no rotation exists in
+  this pipeline yet.
+- **No fade-in**, no tooltips on the disabled buttons, no Realms notification
+  overlay, no `TW` test-world button (that one is `IS_RUNNING_IN_IDE`-only
+  anyway).
+
 ## How it works
 
 ### State machine
@@ -159,19 +282,38 @@ inflate every visible server's PNG **every frame**.
   agreement test will tell you if you forget the last one.
 - **Adding an action:** a `MenuAction` variant. The `match` in
   `WindowApp::apply_menu_action` is exhaustive on purpose.
-- **Sizes in `render.rs` are physical pixels.** There is no DPI scaling, so on a
-  2× display the menu draws at half the apparent size of the equivalent vanilla
-  screen.
-- **Text is upper-case only** — that is what the HUD's bitmap font has glyphs for.
-  `glyph_rows` up-cases internally, so mixed case is harmless but pointless.
+- **Sizes in `render.rs` are *logical* GUI pixels**, the same units vanilla's
+  `Screen.width`/`height` are in: `MenuRenderer::draw` divides the framebuffer by
+  `config::calculate_gui_scale` through `render::logical_canvas` before laying
+  anything out. That is why a vanilla constant can be transcribed verbatim.
+- **Adding or moving a vanilla widget** is one arm in `render::title_slot` (or
+  `pause_slot`) plus a variant in `nav::MainButton`/`PauseButton`. `row_rect`
+  resolves the slot, and `app.rs`'s `menu_row_at` calls `row_rect` — so the draw,
+  the hover and the click hit-test all move together by construction. Do not add
+  a second placement function.
+- **Text on the two vanilla screens is mixed-case vanilla text**, through
+  `hud::VanillaFont` (real glyphs, proportional advances, the 1 px 25 %-brightness
+  shadow). On the remaining row-stack screens text is still **upper-case only** —
+  that is what the HUD's 5×7 bitmap font has glyphs for. `glyph_rows` up-cases
+  internally, so mixed case there is harmless but pointless.
+- **Measure with `Quads::text_width`, never `text_px`, inside a vanilla screen.**
+  It picks the proportional or the fixed measure to match whichever font
+  `Quads::text` will actually draw with. A centred label measured against the
+  other font is off-centre by a factor of ~1.2 and looks like a layout bug.
 
 ### Left for polish
 
-Functional first; none of these block use.
+Functional first; none of these block use. Items 1 and 2 applied to *every*
+screen when this was written; the **title screen** and the **pause screen** now
+draw real GUI textures and real vanilla text at a DPI-correct scale (see the
+sections at the top of this file), so 1 and 2 are now specifically about the
+server list, the edit form, Options and the error screen.
 
-1. **No dirt/panorama backdrop, no button textures, no rounded frames.** Flat
-   coloured rectangles and a bitmap font.
-2. **No DPI scaling.** Physical pixels throughout; small on a Retina display.
+1. **No dirt/panorama backdrop; no button textures on the list/form/options
+   screens.** Flat coloured rectangles and the 5×7 bitmap font there.
+2. ~~**No DPI scaling.**~~ Fixed: layout happens in a `logical_canvas` divided
+   from the framebuffer by `config::calculate_gui_scale`, and `hit_test` divides
+   the incoming cursor by the same factor.
 3. **No scrolling in the server list.** Rows are laid out centred and unbounded, so
    past roughly a dozen servers they run off the viewport. Row rects are already
    computed by one function (`row_rect`), which is where a scroll offset goes.
@@ -202,6 +344,36 @@ Functional first; none of these block use.
     every script and gate actually uses.
 13. **No keyboard focus ring or hover cursor change**, and no sound on
     select/confirm.
+
+## Verification
+
+```bash
+cargo test -p lodestone-shell --lib menu:: --no-fail-fast
+cargo test -p lodestone-shell --lib every_sprite_id -- --ignored --nocapture
+cargo test -p lodestone-shell --test menu_button_pixels -- --ignored --nocapture
+```
+
+The layout gates are pure (`title_slot`/`pause_slot` asserted against rects
+derived by hand from the Java source, not read back out of themselves).
+`every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack` is the island
+check for the hardcoded sprite ids — a mistyped id draws *nothing*, and every
+synthetic-pack test still passes because it writes the same string it reads.
+
+`tests/menu_button_pixels.rs` is the on-screen gate: it drives the real
+`MenuRenderer` through the same `frame_for` → `render` calls `app.rs` makes and
+measures the framebuffer. Three orthogonal discriminators off the source art —
+`widget/button`'s **bevel** (top row / bottom row), `button_disabled`'s
+flatness and 2.5× darkness, and `button_highlighted`'s **white** outer border row
+against the other two sprites' black one — plus an executed negative control
+(`MenuRenderer::detach_gui`, which must fail the bevel assertion).
+
+> **The readback is in *linear* space, not the file's sRGB.** `GpuAtlas` uploads
+> `Rgba8UnormSrgb`, so `textureSample` linearises. `widget/button`'s bevel is
+> `167.4 / 84.8 = 1.97` in the file and **4.29** after linearisation — measured
+> 4.33. The first version of that gate compared against 1.97 and would have
+> accepted a much flatter button. On the real window (an sRGB surface) the values
+> are re-encoded on write and display correctly; this is the same path the HUD's
+> hearts take, so it is established behaviour, not a bug here.
 
 ## Configuration
 
