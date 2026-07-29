@@ -80,16 +80,65 @@ list rather than leaving them to be rediscovered:
 - **`WATER_MOVEMENT_EFFICIENCY` has no reachable value.** The field defaults
   to `0.0` and the formula that consumes it (halved when airborne, lerps
   between the water slowdown and normal speed) is fully wired at the point
-  of use in `player.rs`. What's missing is upstream: nothing in the shell
-  can currently reach the local player's attribute set to compute a
-  non-default value (`EntitySnapshot` drops `attributes`; there is no
-  `NetClient` accessor for the local player's own attributes), and the
-  three-stage vanilla `calculateValue()` attribute fold (base → add →
-  multiply) isn't implemented. Practically: Depth Strider currently changes
+  of use in `player.rs`. Practically: Depth Strider currently changes
   nothing, because there is no path from "the enchantment is on the boots"
-  to this field. The doc comment on the field itself frames this as "closer
-  than it looks... a missing accessor, not missing data" — the arithmetic
-  side is done, only the plumbing to a real value is not.
+  to this field.
+
+  **Correction (2026-07-29):** an earlier version of this doc said the
+  three-stage vanilla `calculateValue()` fold "isn't implemented." That was
+  wrong even when written — `lodestone_entity::attribute::AttributeInstance
+  ::value()` has done exactly this fold (`AddValue` → `AddMultipliedBase` →
+  `AddMultipliedTotal`, matching `AttributeInstance.calculateValue`,
+  `.cache/mc/26.2/src/.../AttributeInstance.java:148-166`) since the initial
+  commit. `minecraft:water_movement_efficiency` also already has a real
+  registry default/range (`0.0, 0.0, 1.0`, matching `Attributes.java:108-109`
+  exactly) in `attribute::default_def`. Neither piece was ever missing.
+
+  What *was* missing, and is now closed on the `lodestone-entity` side:
+  `attribute::instance_from_snapshot`/`attribute::attribute_value` convert
+  the **wire-shaped** `EntityAttributeSnapshot` (`base` + `modifiers`, no
+  min/max — the shape `read_update_attributes`,
+  `crates/protocol/v770/src/packets/metadata.rs:485`, decodes to) into a
+  foldable `AttributeInstance` and read it back through the same `value()`.
+  `attribute::water_movement_efficiency_key()` names the attribute id so a
+  per-tick caller doesn't hand-parse the literal. See
+  `crates/lodestone-entity/src/attribute.rs`'s tests for a Depth-Strider-
+  shaped worked example (base `AddValue` + two `AddMultipliedBase` +
+  one `AddMultipliedTotal`, chosen so the two multiplicative stages can't
+  coincide if swapped).
+
+  What is genuinely still missing, upstream of that fold, in crates this doc
+  cannot edit (`lodestone-shell`, `lodestone-client`, `lodestone-ecs`):
+
+  1. **No `NetClient` accessor surfaces the local player's own attributes.**
+     `net.rs`'s `entity_snapshots()`/`entity_snapshot()` build
+     `crate::entities::EntitySnapshot` (render/interpolation shape, no
+     `attributes` field, and not the relevant gap) — the actual missing
+     piece is a new method entirely, `NetClient::local_player_attributes()`,
+     since nothing currently reads a *specific* entity's `EntityView` by id
+     for this purpose.
+  2. **The deeper blocker: `lodestone_ecs::ingest`'s `EntityIndex` never
+     gets an entry for the local player's own id**, so even a correct
+     `local_player_attributes()` accessor would return empty forever.
+     `EntityIndex` is populated **only** by `apply_entity_spawn`
+     (`crates/lodestone-ecs/src/ingest.rs:138-181`), driven only by
+     `ClientEvent::EntitySpawned` — and vanilla never sends an `AddEntity`
+     for yourself, only `Login`. `apply_entity_attributes`
+     (`ingest.rs:347-377`) silently drops any `EntityAttributesUpdated` for
+     an id `EntityIndex` doesn't know, via its `index.get(*entity_id) else
+     { continue; }` guard (`ingest.rs:360-362`) — so the server's own
+     `update_attributes` packet for the local player is folded into nothing,
+     regardless of what `net.rs` exposes. No system in `ingest.rs` handles
+     `ClientEvent::Login` at all today (`lodestone_client::state::Inner
+     ::apply`'s `Login` arm, `state.rs:758-767`, only sets the scalar
+     `PlayerSnapshot::entity_id` — nothing seeds the ECS side). Fixing this
+     needs the local player's own entity registered in `EntityIndex` at
+     `Login`, without breaking that existing scalar arm (`ClientEvent::Login`
+     is not currently in `lodestone_ecs::ingest::handles_event`'s match, and
+     `SharedState::apply`'s if/else‑if/else, `state.rs:376-397`, routes an
+     event to *either* the ECS schedule *or* `Inner::apply`, never both — so
+     naively adding `Login` to `handles_event` would silently stop the
+     scalar arm from running).
 - **Bubble columns are not implemented.** `docs/fluid-classification.md`
   already documents that `bubble_column` is one of the five classes
   hardcoded to read as water for classification purposes
@@ -133,12 +182,28 @@ does on land.
   "Not modelled" doc list is the authoritative gap inventory; update it
   alongside any fix so the list doesn't go stale the way `docs/in-flight.md`
   did.
-- **Wiring `WATER_MOVEMENT_EFFICIENCY` for real**: needs (1) the local
-  player's attribute set reachable from the shell (widen `EntitySnapshot` or
-  add a `NetClient` accessor) and (2) the vanilla three-stage attribute fold.
-  Neither exists yet; don't hardcode a Depth Strider constant as a
-  shortcut — that reintroduces exactly the "guessed number instead of real
-  data" pattern `CLAUDE.md` warns against elsewhere in this repo.
+- **Wiring `WATER_MOVEMENT_EFFICIENCY` for real**: the fold and the wire-to-
+  fold conversion both exist now (`lodestone_entity::attribute` —
+  `AttributeInstance::value`, `instance_from_snapshot`, `attribute_value`,
+  `water_movement_efficiency_key`). What's left is entirely in
+  `lodestone-shell`/`lodestone-client`/`lodestone-ecs`:
+  1. Seed the local player's own id into `lodestone_ecs::ingest::EntityIndex`
+     at `Login` (nothing does today — see the "still missing" list above for
+     the exact hazard with `handles_event`/`SharedState::apply`'s routing).
+  2. Add `NetClient::local_player_attributes(&self) -> Vec<EntityAttributeSnapshot>`
+     in `net.rs`, e.g. `self.handle.get()?.player().entity_id` then
+     `.entity(id).map(|v| v.attributes)`.
+  3. Each physics tick, fold that through `attribute::attribute_value` and
+     write the `f32` result into a new per-player component (mirroring how
+     `sim.rs` already writes `Flying`/`MovementIntent` straight into the ECS
+     `World`), then have `lodestone-ecs`'s `player_physics`
+     (`crates/lodestone-ecs/src/player.rs:395-452`) call
+     `*player = player.with_water_movement_efficiency(value)` beside the
+     existing `with_movement_speed` call at line 434 — `sim.rs` no longer
+     owns this call site directly; Stage 5 moved it here.
+  Don't hardcode a Depth Strider constant as a shortcut — that reintroduces
+  exactly the "guessed number instead of real data" pattern `CLAUDE.md` warns
+  against elsewhere in this repo.
 - **Bubble columns**: would need a `BubbleColumnBlock`-equivalent impulse in
   `tick_water`, gated on the block's `drag_direction`/`drag` blockstate
   property (not yet decoded anywhere in this tree, as far as this doc's
@@ -153,6 +218,12 @@ matching vanilla's default, not a runtime option.
 
 - `lodestone-physics::player` — `tick_water`, `PlayerState::eye_height`,
   `WATER_MOVEMENT_EFFICIENCY`.
+- `lodestone-entity::attribute` — `AttributeInstance::value` (the vanilla
+  three-stage fold), `instance_from_snapshot`/`attribute_value` (the
+  wire-shaped `EntityAttributeSnapshot` → fold conversion),
+  `water_movement_efficiency_key`. This is what makes Depth Strider's
+  arithmetic computable at all; see the "still missing" list above for what
+  is left to actually reach it from a live connection.
 - `lodestone-controller::input` — `InputState`, double-tap detection.
 - `crates/lodestone-shell/src/sim.rs` — `Sim::drive_interaction`,
   `send_is_sprinting_if_needed`, `send_player_input`, `update_pose`,
