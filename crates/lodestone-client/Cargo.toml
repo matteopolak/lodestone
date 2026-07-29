@@ -11,6 +11,10 @@ workspace = true
 lodestone-core = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-net = { workspace = true }
+# The bevy_ecs-backed World that owns WorldTime (docs/bevy-migration.md, Stage
+# 0): SharedState holds an EcsHandle so this crate can be the authoritative
+# owner of world_age/time_of_day without also touching spawn.rs/net.rs.
+lodestone-ecs = { workspace = true }
 # The read-model stores decoded chunk columns that arrive on
 # `ClientEvent::ChunkLoaded`; this is the same version-free `ChunkColumn` type
 # the model exposes, not any protocol-version knowledge.

@@ -99,6 +99,11 @@ CRATES=(
   "lodestone-v770"
   "lodestone-v47"
   "lodestone-net|--features ws-web"
+  # docs/bevy-migration.md Stage 0's single biggest go/no-go: bevy_ecs must be
+  # wasm32-clean, or the whole migration stops here. Placed after
+  # lodestone-client (which now depends on it via EcsHandle/WorldTime) so a
+  # failure here is unambiguous rather than only surfacing transitively.
+  "lodestone-ecs"
   "lodestone-client"
   "lodestone-controller"
   # Added once the tokio target-split landed (impl-worldgen) and the crate was

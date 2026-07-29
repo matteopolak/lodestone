@@ -391,6 +391,13 @@ impl ClientHandle {
     }
 
     /// Returns `(world_age, time_of_day)` as last reported by the server.
+    ///
+    /// Backed by the `bevy_ecs` [`WorldTime`](lodestone_ecs::WorldTime)
+    /// resource since Stage 0 of `docs/bevy-migration.md` (previously two
+    /// scalar fields on the read-model's private `Inner`, now deleted rather
+    /// than mirrored — the migration's authority test). The shape stays
+    /// `(i64, i64)`, not `WorldTime`, so this signature is unaffected by the
+    /// cutover.
     #[must_use]
     pub fn world_time(&self) -> (i64, i64) {
         self.state.time()

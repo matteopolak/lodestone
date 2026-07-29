@@ -1,0 +1,19 @@
+[package]
+name = "lodestone-ecs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `default-features = false, features = ["std"]` per docs/bevy-migration.md §3:
+# `bevy_reflect` (default-on) is heavyweight and unneeded, and `multi_threaded`
+# does not even compile on wasm32 with no threads (§3.1) — left off on every
+# target so native and wasm run the same executor and the same system order.
+bevy_app = { workspace = true }
+bevy_ecs = { workspace = true }
+# The `Arc<RwLock<World>>` handle a driver hands to async/bot callers and, later,
+# net-thread ingest. `parking_lot` per §11 (azalea uses it for the same purpose).
+parking_lot = { workspace = true }
