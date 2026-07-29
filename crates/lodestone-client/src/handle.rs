@@ -274,6 +274,26 @@ impl ClientHandle {
         self.state.block_at(pos)
     }
 
+    /// The client-owned chunk store, as the ECS `Resource` handle
+    /// (`docs/bevy-migration.md` §4.1(d), `docs/chunk-world-resource.md`).
+    ///
+    /// A **handle onto the one store**, not a snapshot: clones share the `World`
+    /// the net thread writes decoded columns into, and the same handle is already
+    /// installed as a resource in this client's own ECS `World`. A driver adopts
+    /// this instead of keeping a world of its own — which is what makes "there is
+    /// one chunk store in the process" a checkable property (`ChunkWorld::is_same_store`)
+    /// rather than an aspiration.
+    ///
+    /// Prefer the narrow accessors ([`block_at`](Self::block_at),
+    /// [`section_at`](Self::section_at), [`sections_and_light_at`](Self::sections_and_light_at))
+    /// for one-off reads: they take the lock for exactly as long as the read.
+    /// Reach for this when you need the store itself — to install it as a
+    /// resource, or to build a `'static` closure over it.
+    #[must_use]
+    pub fn chunk_world(&self) -> lodestone_ecs::ChunkWorld {
+        self.state.chunk_world()
+    }
+
     /// Returns whether the chunk at `pos` is currently loaded.
     #[must_use]
     pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {

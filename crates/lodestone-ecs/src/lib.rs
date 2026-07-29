@@ -44,7 +44,20 @@
 //! `respawn_count` and `local_entity_id` are **deleted**. `lodestone-game`'s
 //! aggregates are the storage; one system per fold calls them.
 //!
-//! Still where it was: the chunk world, `Sim` itself.
+//! # Stage 4
+//!
+//! [`chunks`] holds [`ChunkWorld`] — the chunk store as a `Resource`, per
+//! §4.1(d). Chunks are still not entities and the mesher is still a worker pool;
+//! what changed is that there is now **one** `lodestone_world::World` in the
+//! process instead of two (`lodestone_shell::sim::Sim`'s offline one and
+//! `lodestone_client::state::SharedState`'s live one), so the shell no longer
+//! branches per read site on which world it means. `Sim`'s `world` and
+//! `demo_collision` fields are **deleted**.
+//!
+//! Still where it was: `Sim` itself, and the *bevy* `World` split — the net
+//! thread's, the entity interpolator's and the driver's are still three, which
+//! is why [`CorePlugin`] still refuses to insert [`WorldTime`]. See
+//! `docs/chunk-world-resource.md`.
 //!
 //! # What this crate depends on
 //!
@@ -63,6 +76,7 @@
 //! once a shipped binary root actually depends on it — never something to
 //! suppress.
 
+pub mod chunks;
 pub mod entity;
 mod handle;
 pub mod ingest;
@@ -81,6 +95,7 @@ pub use bevy_app as app;
 /// hand.
 pub use bevy_ecs as ecs;
 
+pub use chunks::{ChunkWorld, WorldExtent};
 pub use handle::{EcsHandle, new_handle, new_ingest_handle};
 pub use player::{
     ActionQueue, CollisionSource, Dead, Egress, Flying, LastPlayerInput, LastSprintingSent,

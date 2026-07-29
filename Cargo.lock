@@ -2046,6 +2046,7 @@ dependencies = [
  "lodestone-game",
  "lodestone-model",
  "lodestone-physics",
+ "lodestone-world",
  "parking_lot",
  "uuid",
 ]

@@ -528,10 +528,30 @@ impl WindowApp {
     /// launch path or silently do nothing, this drives the honest failure path:
     /// the menu shows an Error explaining the feature is staged. Kept here so the
     /// wiring is a one-call swap once the seam lands.
+    /// Install the block-outline source, which needs a live `Sim` — it reads the
+    /// version adapter's per-state outline census through the shared handle.
+    ///
+    /// Must run *after* `attach_net`: `Sim::outline_shape_source` returns `None`
+    /// without a net client. Until this is installed the selection box falls back
+    /// to a unit cube, which is wrong for roughly nine block states in ten — only
+    /// 3,328 of 32,366 have a full-cube outline.
+    ///
+    /// Note the outline census is deliberately *not* the collision census: they
+    /// are different vanilla shape families and disagree for over half of all
+    /// states, so a slab's box and a slab's collider are not the same box.
+    fn install_outline_source(&mut self) {
+        if let (Some(render), Some(f)) = (self.render.as_mut(), self.sim.outline_shape_source()) {
+            render.set_outline_shape_source(f);
+        }
+    }
+
     fn begin_singleplayer(&mut self) {
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
         match launch_singleplayer() {
-            Ok(net) => self.sim.attach_net(net),
+            Ok(net) => {
+                self.sim.attach_net(net);
+                self.install_outline_source();
+            }
             Err(e) => self.ui.session_failed(e.to_string()),
         }
     }
@@ -566,6 +586,7 @@ impl WindowApp {
             });
         }
         self.sim.attach_net(net);
+        self.install_outline_source();
     }
 
     /// The menu currently drawn as the container screen — the open non-player
@@ -1246,6 +1267,9 @@ impl ApplicationHandler for WindowApp {
         self.gpu = Some(gpu);
         self.target = Some(target);
         self.render = Some(render);
+        // Now that `self.render` exists and `attach_net` has already run above,
+        // the outline source can be installed on this path too.
+        self.install_outline_source();
         self.hud = Some(hud);
         self.effects = Some(effects);
         self.container = Some(container);
@@ -1653,7 +1677,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     sim.stats.frame_ms = frame_ms as f32;
 
     println!("=== lodestone headless render ===");
-    println!("world chunks      = {}", sim.world.len());
+    println!("world chunks      = {}", sim.chunk_count());
     println!("sections meshed   = {}", meshes.len());
     println!("sections drawn    = {}", stats.sections_drawn);
     println!("quads (meshed)    = {meshed_quads}");

@@ -4,7 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -22,7 +22,7 @@ use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionHudPlugin,
     TitleOverlay, Vitals, Xp, insert_hud_components,
 };
-use lodestone_ecs::{CorePlugin, GameTick};
+use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, Update};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
@@ -43,7 +43,7 @@ use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
-use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section, snapshot_section_live};
+use crate::mesher::{MeshPolicy, MeshScheduler, Meshed, SectionKey, TerrainMesh, TerrainPlugin};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
 use crate::particles::{ParticleFrame, ParticleInstance, Particles};
@@ -194,12 +194,6 @@ fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::
         },
     }
 }
-
-/// How many stale-boundary columns to re-mesh per frame. Chunk arrivals already
-/// mesh their own column immediately, so this only paces the *seam* repair; at
-/// 60 fps it heals ~240 columns/second, which outruns any vanilla chunk stream
-/// while keeping a load burst off a single frame.
-const DIRTY_COLUMN_BUDGET: usize = 4;
 
 /// Distance fog for a render distance of `render_distance` chunks.
 ///
@@ -354,13 +348,24 @@ fn face_center_cursor(normal: [i32; 3]) -> Vec3f {
     Vec3f::new(coord(normal[0]), coord(normal[1]), coord(normal[2]))
 }
 
-/// An owned snapshot of the **offline demo world**, adapted to the ECS's
-/// [`CollisionSource`].
+/// The [`ChunkWorld`] store, adapted to the ECS's [`CollisionSource`].
 ///
 /// The indirection exists because [`WorldCollision`] borrows its world, and a
 /// `bevy_ecs` `Resource` must be `'static`. Handing the view out through a
 /// callback (rather than storing one) is what lets a borrowed adapter reach a
-/// scheduled system at all — see [`CollisionSource`]'s docs.
+/// scheduled system at all — see [`CollisionSource`]'s docs. `ChunkWorld` is an
+/// `Arc` handle, so this is `'static` while still reading the live store.
+///
+/// # What Stage 4 deleted here
+///
+/// This replaced `DemoCollision(World)`, an **owned clone** of the whole offline
+/// world rebuilt lazily whenever it went stale. The clone existed only because
+/// there was no `Arc` to hold, and it came with a hazard recorded in
+/// `docs/local-player-components.md`: *"anything that mutates `Sim.world` must
+/// clear `Sim.demo_collision`"*, a missed invalidation reading as "I mined the
+/// block but still cannot walk through it". With one shared store there is
+/// nothing to invalidate and no `O(loaded columns)` clone per block edit — the
+/// rule is retired rather than merely followed.
 ///
 /// Deliberately *not* a hand-written `impl CollisionView` that re-delegates
 /// [`WorldCollision`]'s thirteen methods: a method later added to
@@ -368,20 +373,20 @@ fn face_center_cursor(normal: [i32; 3]) -> Vec3f {
 /// back to the trait default here, which is exactly the "two adapters, one of
 /// them subtly wrong" failure [`crate::collision`]'s module docs warn about.
 /// This constructs the real adapter and asks it.
-struct DemoCollision(World);
+struct ChunkWorldCollision(ChunkWorld);
 
-impl std::fmt::Debug for DemoCollision {
+impl std::fmt::Debug for ChunkWorldCollision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never dump a whole world; the useful scalar is how much of one this is.
-        f.debug_struct("DemoCollision")
+        f.debug_struct("ChunkWorldCollision")
             .field("columns", &self.0.len())
             .finish_non_exhaustive()
     }
 }
 
-impl CollisionSource for DemoCollision {
+impl CollisionSource for ChunkWorldCollision {
     fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
-        f(&WorldCollision::new(&self.0));
+        f(&WorldCollision::new(&self.0.read()));
     }
 }
 
@@ -410,43 +415,42 @@ impl CollisionSource for LiveCollisionSource {
 pub struct Sim {
     /// Parsed configuration.
     pub config: Config,
-    /// The world being rendered (locally generated for now).
-    pub world: World,
     /// Latest debug stats (the app fills in FPS/frame-time/GPU counters).
     pub stats: DebugStats,
     /// The block the view ray is currently pointing at (for outline + edits).
     pub target: Option<RayHit>,
     /// The `World` the **local player** lives in as components, plus the
     /// `GameTick` systems that advance it (`docs/bevy-migration.md` Stage 2,
-    /// `docs/local-player-components.md`).
+    /// `docs/local-player-components.md`), and since Stage 4 the
+    /// [`ChunkWorld`] store and all terrain-meshing state
+    /// (`docs/chunk-world-resource.md`).
     ///
     /// `Sim` holds **no** `PlayerState`, `InputState`, `PhysicsProfile`,
     /// `FluidState`, hotbar slot, fly flag, death flag or wire edge-tracker of
-    /// its own: this is the sole store, reached through the accessors below.
-    /// That is the stage's authority test — a second copy here would make a
-    /// plugin's write to a component a write to nothing.
+    /// its own, and since Stage 4 **no `lodestone_world::World`, no mesh
+    /// scheduler and no mesh queues** either: this is the sole store, reached
+    /// through the accessors below. That is the stage's authority test — a second
+    /// copy here would make a plugin's write to a component a write to nothing.
     ///
-    /// This is the **third** `World` in the process (the net thread's, the
-    /// entity interpolator's, and this one), and that is temporary — see the
-    /// doc for why unifying them belongs in `docs/bevy-migration.md` §4.1 and
-    /// not here.
+    /// This is still the **third** *bevy* `World` in the process (the net
+    /// thread's, the entity interpolator's, and this one). Stage 4 unified the two
+    /// `lodestone_world::World`s, which is a different §4.1 clause — see
+    /// `docs/chunk-world-resource.md` on why the bevy split needs `net.rs` and so
+    /// could not close here.
     ecs: EcsWorld,
     /// The local player's entity in [`Self::ecs`]. Stable for the lifetime of
     /// the `Sim`, including across [`Sim::end_session`], because the driver and
     /// (later) plugins hold it.
     local: Entity,
-    /// Cached owned snapshot of [`Self::world`] for the offline collision path,
-    /// rebuilt lazily.
-    ///
-    /// `None` means "stale, rebuild on next use". **Anything that mutates
-    /// [`Self::world`] must clear this** — today that is only
-    /// [`Sim::set_block_world`], which is the one write path after
-    /// construction (live terrain lives in the net client's world, not here).
-    /// A missed invalidation is a player colliding against pre-edit geometry,
-    /// which reads as "I mined the block but still cannot walk through it".
-    demo_collision: Option<Arc<DemoCollision>>,
-    scheduler: MeshScheduler,
     net: Option<NetClient>,
+    /// Whether the [`ChunkWorld`] resource in [`Self::ecs`] is the *client's*
+    /// store rather than this `Sim`'s own offline one.
+    ///
+    /// Not a second copy of anything: it records **which** store the one resource
+    /// currently names, which nothing else can answer once `net` is dropped. It is
+    /// what lets [`Sim::end_session`] release a server's terrain while leaving the
+    /// `with_demo_world` fixture's terrain alone.
+    adopted_live_world: bool,
     accumulator: f64,
     last_step: Instant,
     status: String,
@@ -456,21 +460,6 @@ pub struct Sim {
     tick_count: u64,
     /// Total frames (calls to [`Sim::step`]) since start.
     frame_count: u64,
-    /// Sections whose geometry vanished (all-air after an edit) and must be
-    /// dropped from the GPU. Drained by the app each frame.
-    pending_removals: Vec<SectionKey>,
-    /// Every `SectionKey` this session has handed to the app for GPU upload
-    /// (via [`Sim::drain_meshes`]/[`Sim::drain_all_meshes`]) and that has not
-    /// yet come back out through [`Sim::drain_removals`].
-    ///
-    /// `RenderState`'s GPU-side section map (`gpu.rs`) has no session id in
-    /// its key, so without tracking this, a quit-to-title followed by a
-    /// reconnect would leave the *previous* server's terrain rendered until
-    /// a new chunk happened to land on the exact same key. [`Sim::end_session`]
-    /// drains this set straight into `pending_removals` so the app's
-    /// existing per-frame drain walks it clean through the ordinary path,
-    /// with no new plumbing on the render side.
-    uploaded_sections: HashSet<SectionKey>,
     /// The stitched vanilla atlas for the live world, or `None` when running on
     /// the demo palette. Its presence is the single discriminant for "render the
     /// live server world with the vanilla atlas" vs "mesh the demo world": the
@@ -484,25 +473,6 @@ pub struct Sim {
     /// `fallback`/key — never a raw error. Loaded once with the atlas from the
     /// same pack, so it shares the atlas's ownership and lifetime.
     language: Option<Arc<Language>>,
-    /// Count of live columns that failed to mesh (guard rejected or all-air
-    /// centre on a column the server reports loaded). Surfaced in the debug HUD
-    /// next to `live_cols` so this defect class is a one-line diagnosis instead
-    /// of a play-test archaeology session. Should stay `0` in a healthy session.
-    mesh_drops: u64,
-    /// Loaded columns whose *boundary* geometry is stale because a horizontal
-    /// neighbour arrived after they were meshed. Drained on a small per-frame
-    /// budget by [`Sim::drain_dirty_columns`].
-    ///
-    /// A section's mesh depends on its whole 3×3×3 neighbourhood (face culling,
-    /// AO, and — most visibly — fluid corner heights and flow faces), so loading
-    /// column P invalidates the boundary of P's eight horizontal neighbours too.
-    /// Meshing only P leaves every already-meshed neighbour believing there is
-    /// air across the seam: water grows a falling "wall" at each chunk border and
-    /// cross-chunk AO stays wrong. Re-meshing the eight neighbours *eagerly* on
-    /// every arrival would be 9× the work, so they are coalesced into this set —
-    /// during a spiral load the same column is named by several arrivals and is
-    /// re-meshed once.
-    dirty_columns: BTreeSet<(i32, i32)>,
     /// Count of server `TeleportPlayer` corrections adopted since start. At rest
     /// on settled ground this stays flat; a burst *during* a jump is the
     /// signature of the server rejecting the ascent and snapping the camera down
@@ -510,10 +480,19 @@ pub struct Sim {
     /// distinguish a clean vanilla arc from a server-corrected one.
     pub teleport_count: u64,
     /// Diagnostic switch (normal play: always `true`): when `false`, the live
-    /// path collides against the offline demo world instead of the server
-    /// terrain. This exists to reproduce the pre-collision "fall through absent
-    /// ground / rubber-band" behaviour as a negative control in the live gate;
-    /// it is never flipped in real play.
+    /// path collides against **an empty world** instead of the server terrain.
+    /// This exists to reproduce the pre-collision "fall through absent ground /
+    /// rubber-band" behaviour as a negative control in the live gate; it is never
+    /// flipped in real play.
+    ///
+    /// "An empty world" is what this always *meant*: the pre-live-collision shell
+    /// collided a live session against its own offline world, and a client session
+    /// has none, so at a far spawn there was nothing under the player. Stage 4
+    /// made that explicit rather than incidental — with one chunk store, "the
+    /// offline world" and "the server's world" are the same handle, so falling
+    /// back to it would have quietly started colliding the control against real
+    /// live terrain under the *demo* classifier and the control would have stopped
+    /// failing. See [`Sim::tick_collision`].
     pub collide_against_live_world: bool,
     /// Debug-overlay line set when vanilla assets failed to load and the session
     /// fell back to the demo palette.
@@ -654,7 +633,8 @@ impl Sim {
         // silently.
         let resources = BlockResources::load(!demo_world);
         let render_live = resources.vanilla_atlas.is_some();
-        let mut scheduler = MeshScheduler::new(workers, resources.classifier);
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(workers, resources.classifier));
+        let chunk_world = ChunkWorld::new(world);
 
         // `BlockResources::load(false)` always yields the demo palette, so this
         // never schedules demo ids under the vanilla atlas.
@@ -663,18 +643,13 @@ impl Sim {
             "the demo world must never be meshed with the vanilla classifier"
         );
         if demo_world {
-            for (pos, chunk) in world_sections(&world) {
-                for si in 0..chunk {
-                    let key = SectionKey {
-                        cx: pos.0,
-                        cz: pos.1,
-                        si,
-                        min_y: worldgen::MIN_Y,
-                    };
-                    if let Some(snap) = snapshot_section(&world, key) {
-                        scheduler.submit(snap);
-                    }
-                }
+            for (cx, cz) in chunk_world
+                .read()
+                .iter()
+                .map(|(pos, _)| (pos.x, pos.z))
+                .collect::<Vec<_>>()
+            {
+                terrain.mesh_column(&chunk_world, cx, cz);
             }
         }
 
@@ -689,7 +664,7 @@ impl Sim {
             status: status.clone(),
             ..Default::default()
         };
-        stats.chunk_count = world.len();
+        stats.chunk_count = chunk_world.len();
 
         // The particle sprite table is indexed by whatever id the emitter will
         // be handed, so it must be built from the *same* palette the world uses.
@@ -734,9 +709,19 @@ impl Sim {
             LocalPlayerPlugin,
             ControllerPlugin,
             SessionHudPlugin,
+            // Stage 4: the chunk store and the terrain-mesh queues become
+            // resources, and `heal_dirty_columns` becomes an `Update` system in
+            // `FrameSet::Terrain`.
+            TerrainPlugin,
         ));
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
+        // `TerrainPlugin` inserts a *default* (empty) store; this replaces it with
+        // the one this session actually meshes. The worker pool cannot come from a
+        // plugin at all: it has to be built with the classifier for whichever
+        // block-id space that store holds.
+        ecs.insert_resource(chunk_world);
+        ecs.insert_resource(terrain);
         // Physics-walk is the default everywhere, including live: the shell
         // collides against the live client-owned world (see `LiveCollision` /
         // `Sim::tick_collision`), so the player stands on the server's ground.
@@ -749,28 +734,22 @@ impl Sim {
         // its systems never look at behind.
         insert_hud_components(&mut ecs, local);
 
-        Self {
+        let mut sim = Self {
             config,
-            world,
             stats,
             target: None,
             ecs,
             local,
-            demo_collision: None,
-            scheduler,
             net: None,
+            adopted_live_world: false,
             accumulator: 0.0,
             last_step: Instant::now(),
             status,
             interp_alpha: 0.0,
             tick_count: 0,
             frame_count: 0,
-            pending_removals: Vec::new(),
-            uploaded_sections: HashSet::new(),
             vanilla_atlas: resources.vanilla_atlas,
             language: resources.language,
-            mesh_drops: 0,
-            dirty_columns: BTreeSet::new(),
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
@@ -784,7 +763,9 @@ impl Sim {
             placement: Placement::new(),
             attacking: false,
             version_data,
-        }
+        };
+        sim.refresh_mesh_policy();
+        sim
     }
 
     // -----------------------------------------------------------------------
@@ -811,6 +792,113 @@ impl Sim {
     #[must_use]
     pub fn local_player(&self) -> Entity {
         self.local
+    }
+
+    // -----------------------------------------------------------------------
+    // The chunk world and terrain meshing, which live in `self.ecs` (Stage 4)
+    // -----------------------------------------------------------------------
+
+    /// The **one** chunk store this session meshes, collides against and edits.
+    ///
+    /// A handle, cheap to clone, onto the same `lodestone_world::World` the net
+    /// thread writes decoded columns into once
+    /// [`adopt_live_world`](Self::adopt_live_world) has run. Before Stage 4 there
+    /// were two of these — `Sim`'s offline one and the client's live one — and
+    /// every read site branched on which it meant.
+    #[must_use]
+    pub fn chunk_world(&self) -> ChunkWorld {
+        self.ecs.resource::<ChunkWorld>().clone()
+    }
+
+    /// Loaded column count in [`Self::chunk_world`]. The debug overlay's
+    /// `world chunks` line.
+    #[must_use]
+    pub fn chunk_count(&self) -> usize {
+        self.ecs.resource::<ChunkWorld>().len()
+    }
+
+    /// Terrain-meshing state (worker pool, dirty set, removal queue, drop count).
+    #[must_use]
+    fn terrain(&self) -> &TerrainMesh {
+        self.ecs.resource::<TerrainMesh>()
+    }
+
+    /// The mutable form of [`Self::terrain`].
+    fn terrain_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, TerrainMesh> {
+        self.ecs.resource_mut::<TerrainMesh>()
+    }
+
+    /// Read the chunk store and the terrain state together — the shape every
+    /// mesh-scheduling call site needs, and the reason [`TerrainMesh`] is one
+    /// resource rather than five.
+    fn terrain_and_world(&mut self) -> (ChunkWorld, bevy_ecs::change_detection::Mut<'_, TerrainMesh>) {
+        let store = self.ecs.resource::<ChunkWorld>().clone();
+        (store, self.ecs.resource_mut::<TerrainMesh>())
+    }
+
+    /// Recompute the two session facts terrain meshing cannot read off the store.
+    ///
+    /// Called once per frame (and at construction): the connected dimension
+    /// changes on a portal trip, and the id-space agreement changes the moment a
+    /// session attaches.
+    fn refresh_mesh_policy(&mut self) {
+        let sky_default = match &self.net {
+            Some(net) => crate::mesher::sky_default_for_dimension(
+                net.shared_handle()
+                    .get()
+                    .and_then(|h| h.player().dimension)
+                    .as_ref(),
+            ),
+            // The offline fixture world is the overworld.
+            None => lodestone_render::SkyDefault::Full,
+        };
+        // The worker pool's classifier was chosen at construction from
+        // `!demo_world`, so "the atlas we have" *is* "the id space the pool
+        // meshes". A live session with no vanilla atlas (jar-less run, demo-palette
+        // fallback) therefore cannot mesh the server's ids, and that is the case
+        // this bit exists to make loud rather than silent.
+        let id_spaces_agree = if self.net.is_some() {
+            self.vanilla_atlas.is_some()
+        } else {
+            self.vanilla_atlas.is_none()
+        };
+        let policy = MeshPolicy {
+            sky_default,
+            id_spaces_agree,
+        };
+        let mut terrain = self.terrain_mut();
+        if terrain.policy != policy {
+            terrain.policy = policy;
+        }
+    }
+
+    /// Adopt the client's chunk store as ours, once the net thread has published
+    /// a handle.
+    ///
+    /// This is where "there is one chunk store in the process" actually happens,
+    /// and it is deferred rather than done in [`Sim::attach_net`] because
+    /// `NetClient::connect` publishes its `ClientHandle` asynchronously — there is
+    /// no store to adopt until login. Idempotent: once the two are the same `Arc`,
+    /// this is a pointer comparison.
+    ///
+    /// **A session that has offline terrain of its own keeps it.** That is the
+    /// `Sim::with_demo_world` fixture attaching a loopback feed: its store is
+    /// non-empty, the server sends no chunks, and its uploaded sections must stay
+    /// resident (there is a control test for exactly that). A real client session's
+    /// store is empty at this point, which is what makes the emptiness test the
+    /// right discriminant rather than a proxy for one.
+    fn adopt_live_world(&mut self) {
+        let Some(net) = &self.net else { return };
+        let Some(handle) = net.shared_handle().get().cloned() else {
+            return;
+        };
+        let live = handle.chunk_world();
+        let mine = self.ecs.resource::<ChunkWorld>();
+        if mine.is_same_store(&live) || !mine.is_empty() {
+            return;
+        }
+        self.ecs.insert_resource(live);
+        self.adopted_live_world = true;
     }
 
     /// The player's bit-exact physics state.
@@ -959,6 +1047,12 @@ impl Sim {
         self.net = Some(net);
         self.status = "connecting…".into();
         self.set_phase(SessionPhase::Connecting);
+        // The store itself is adopted later, in `poll_net`: `NetClient::connect`
+        // publishes its `ClientHandle` from the net thread, so there is nothing to
+        // adopt until login. The *policy* changes immediately, though — a session
+        // with no vanilla atlas cannot mesh the server's ids and must start
+        // counting that rather than silently rendering nothing.
+        self.refresh_mesh_policy();
     }
 
     /// Tear down whatever live session is attached and reset every piece of
@@ -1045,21 +1139,25 @@ impl Sim {
 
         // Flush and discard mesh jobs still in flight for the old server's
         // chunks rather than letting them complete later and land silently
-        // in whatever session comes next.
-        let pending = self.scheduler.pending();
-        if pending > 0 {
-            let _ = self.scheduler.drain_blocking(pending);
+        // in whatever session comes next; clear the dirty set and the drop
+        // counter; and queue every section this session ever uploaded for removal
+        // through the app's ordinary drain path.
+        self.terrain_mut().end_session();
+
+        // Release the server's chunk store. A client session adopted the client's
+        // `World` at login (`adopt_live_world`); handing it back an empty store is
+        // both the teardown *and* what makes a later `attach_net` adopt again —
+        // adoption is gated on our store being empty. A `with_demo_world` fixture
+        // never adopted, so its terrain is not the live store and survives, which
+        // is the behaviour `resident_after_connect`'s control asserts.
+        if std::mem::take(&mut self.adopted_live_world) {
+            self.ecs.insert_resource(ChunkWorld::default());
         }
-        self.dirty_columns.clear();
-        self.mesh_drops = 0;
-        // Queue every section this session ever uploaded for removal through
-        // the app's ordinary drain path — see `uploaded_sections`'s doc.
-        self.pending_removals.extend(self.uploaded_sections.drain());
 
         // Back to whatever spawn this `Sim` was built around — the demo world's
         // surface for the fixture, the pre-session placeholder for a real client
         // (which has no offline world to return to).
-        let feet = if self.world.is_empty() {
+        let feet = if self.chunk_world().is_empty() {
             PRE_SESSION_FEET
         } else {
             worldgen::spawn_feet()
@@ -1395,35 +1493,26 @@ impl Sim {
     /// Number of meshing jobs still outstanding.
     #[must_use]
     pub fn pending_meshes(&self) -> usize {
-        self.scheduler.pending()
+        self.terrain().scheduler.pending()
     }
 
     /// Collect finished meshes for the caller to upload to the GPU.
     ///
-    /// Also records each key into [`Self::uploaded_sections`], which is how
+    /// Also records each key into `TerrainMesh::uploaded_sections`, which is how
     /// [`Sim::end_session`] later knows every section the GPU is holding for
     /// this session and can queue every one of them for removal.
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        let meshes = self.scheduler.drain();
-        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
-        meshes
+        self.terrain_mut().drain_meshes()
     }
 
     /// Block until every scheduled mesh is ready (used by headless runs/tests).
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
-        let n = self.scheduler.pending();
-        let meshes = self.scheduler.drain_blocking(n);
-        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
-        meshes
+        self.terrain_mut().drain_all_meshes()
     }
 
     /// Sections that became empty (drained by the app to remove GPU meshes).
     pub fn drain_removals(&mut self) -> Vec<SectionKey> {
-        let removed = std::mem::take(&mut self.pending_removals);
-        for key in &removed {
-            self.uploaded_sections.remove(key);
-        }
-        removed
+        self.terrain_mut().drain_removals()
     }
 
     /// Whether free-fly mode is active.
@@ -1483,18 +1572,28 @@ impl Sim {
     /// See [`CollisionSource`] for why the borrow could not cross that boundary
     /// directly.
     fn tick_collision(&mut self) -> PlayerCollision {
-        // No session and no offline world: there is nothing to stand on and
-        // nobody to be.
-        if self.net.is_none() && self.world.is_empty() {
+        // No session and no terrain: there is nothing to stand on and nobody to
+        // be.
+        if self.net.is_none() && self.chunk_world().is_empty() {
             return PlayerCollision::NoWorld;
         }
 
-        // Live path: collide against the server's terrain (client-owned world),
-        // not the offline demo world. This changes *where blocks come from*, not
-        // how collision resolves — `LiveCollision` fills the exact same
-        // `CollisionView` hooks `WorldCollision` does, so movement stays
-        // bit-exact.
-        if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
+        if self.vanilla_atlas.is_some() && self.net.is_some() {
+            if !self.collide_against_live_world {
+                // The negative control, and the one place Stage 4's single store
+                // must *not* be used. See `collide_against_live_world`'s doc: the
+                // pre-fix behaviour it reproduces is "collide against terrain we
+                // do not have", so it has to name an explicitly empty store.
+                // Falling through to `chunk_collision()` would collide against the
+                // server's real terrain through the demo classifier — where every
+                // non-air vanilla id happens to read as solid — and the control
+                // would silently stop failing.
+                return PlayerCollision::View(Arc::new(ChunkWorldCollision(ChunkWorld::default())));
+            }
+            // Live path: collide against the server's terrain. This changes
+            // *where blocks come from*, not how collision resolves —
+            // `LiveCollision` fills the exact same `CollisionView` hooks
+            // `WorldCollision` does, so movement stays bit-exact.
             return match self.live_collision() {
                 Some(view) => PlayerCollision::View(Arc::new(LiveCollisionSource(view))),
                 // The player's own column has not streamed in yet.
@@ -1502,22 +1601,91 @@ impl Sim {
             };
         }
 
-        PlayerCollision::View(self.demo_source())
+        PlayerCollision::View(self.chunk_collision())
     }
 
-    /// The cached owned snapshot of the offline demo world, rebuilt if stale.
+    /// A `'static` sampler of the **outline** boxes of the block at a world
+    /// position, for `RenderState::set_outline_shape_source`.
     ///
-    /// Rebuilt lazily rather than per tick because the clone is `O(loaded
-    /// columns)`: after construction the only writer is
-    /// [`Sim::set_block_world`], so a play session pays one clone per block
-    /// edit — which already costs a re-mesh — and nothing at all while merely
-    /// walking around. A test that lays a thousand blocks before stepping pays
-    /// exactly one.
-    fn demo_source(&mut self) -> Arc<DemoCollision> {
-        let source = self
-            .demo_collision
-            .get_or_insert_with(|| Arc::new(DemoCollision(self.world.clone())));
-        Arc::clone(source)
+    /// `None` when this session cannot answer: no live connection, no vanilla
+    /// atlas (the demo palette has no outline census and is all full cubes, which
+    /// is what an empty result already means), or no version family compiled in
+    /// for the configured protocol.
+    ///
+    /// # Why this is not `CollisionSource`, which is what the plan expected
+    ///
+    /// Stage 2's [`CollisionSource`] hands out a `CollisionView`, whose geometry
+    /// is the **collision** shape. The selection box needs the **outline** shape,
+    /// and those are a different vanilla shape family: kelp has an outline and no
+    /// collision, cobweb's outline is a full cube while its collision is empty, and
+    /// **half of all 26.2 block states have an outline that differs from their
+    /// collision shape** (`VersionAdapter::block_outline`'s docs). Wiring
+    /// `CollisionSource` here would replace one wrong box with a differently wrong
+    /// box in half of all cases, which is worse than a unit cube because it would
+    /// look right.
+    ///
+    /// # Why this did not need Stage 4 either
+    ///
+    /// The brief listed the selection box as blocked on the chunk-world
+    /// unification. It was not: everything the closure needs was already `'static`
+    /// and `Send + Sync` — `NetClient::shared_handle` is an
+    /// `Arc<OnceLock<Arc<ClientHandle>>>`, `ClientHandle::block_at` is public, and
+    /// `VersionAdapter` is declared `Send + Sync + Debug` at
+    /// `lodestone-model/src/adapter.rs:391`. Capturing the *handle* rather than the
+    /// store is also what makes this installable before login, when there is no
+    /// store to capture yet.
+    ///
+    /// A second boxed adapter is minted rather than sharing
+    /// [`Self::version_data`]: adapters are stateless value types, so the copy
+    /// costs a `Box` and answers identically — the same reasoning `version_data`'s
+    /// own doc records for why it is already a second instance.
+    #[must_use]
+    pub fn outline_shape_source(
+        &self,
+    ) -> Option<impl Fn([i32; 3]) -> Vec<lodestone_physics::Aabb> + Send + Sync + 'static> {
+        self.vanilla_atlas.as_ref()?;
+        let handle = self.net.as_ref()?.shared_handle();
+        let adapter = lodestone_registry::adapter_for_protocol(self.config.protocol)?;
+        Some(move |block: [i32; 3]| {
+            let Some(client) = handle.get() else {
+                return Vec::new();
+            };
+            let Some(state) = client.block_at(BlockPos {
+                x: block[0],
+                y: block[1],
+                z: block[2],
+            }) else {
+                return Vec::new();
+            };
+            let Some(boxes) = adapter.block_outline(state) else {
+                return Vec::new();
+            };
+            // The census is block-local `0..1`; the renderer wants world space.
+            boxes
+                .iter()
+                .map(|b| {
+                    lodestone_physics::Aabb::new(
+                        f64::from(block[0]) + f64::from(b.min[0]),
+                        f64::from(block[1]) + f64::from(b.min[1]),
+                        f64::from(block[2]) + f64::from(b.min[2]),
+                        f64::from(block[0]) + f64::from(b.max[0]),
+                        f64::from(block[1]) + f64::from(b.max[1]),
+                        f64::from(block[2]) + f64::from(b.max[2]),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The chunk store as a `'static` [`CollisionSource`].
+    ///
+    /// Cheap: an `Arc` refcount bump, with the read lock taken inside
+    /// `with_view` for exactly as long as the collision resolve. Before Stage 4
+    /// this was an `O(loaded columns)` clone of the whole offline world, cached on
+    /// `Sim` and invalidated by hand — see [`ChunkWorldCollision`] for what that
+    /// deleted.
+    fn chunk_collision(&self) -> Arc<ChunkWorldCollision> {
+        Arc::new(ChunkWorldCollision(self.chunk_world()))
     }
 
     /// Hand everything the `GameTick` systems queued to the socket, in order.
@@ -1603,9 +1771,12 @@ impl Sim {
         self.frame_count += 1;
 
         self.poll_net();
-        // Heal chunk seams whose neighbourhood changed since they were meshed.
-        // Budgeted so a load burst spreads over frames rather than stalling one.
-        self.drain_dirty_columns(DIRTY_COLUMN_BUDGET);
+        // `Update` / `FrameSet::Terrain`: heal chunk seams whose neighbourhood
+        // changed since they were meshed, on a per-frame budget so a load burst
+        // spreads over frames rather than stalling one. This is the shell's only
+        // `Update` system today; it enqueues snapshots onto the worker pool and
+        // returns, so it cannot make presentation gate simulation.
+        self.ecs.run_schedule(Update);
         self.update_entities(dt as f32);
         self.refresh_stats();
     }
@@ -1631,16 +1802,16 @@ impl Sim {
             .as_ref()
             .map_or_else(Vec::new, NetClient::entity_snapshots);
         let profile = self.profile().clone();
-        match self.live_collision() {
-            Some(view) => self
-                .entity_interp
-                .update_with_view(&snapshots, dt, &view, &profile),
-            None => {
-                let view = WorldCollision::new(&self.world);
-                self.entity_interp
-                    .update_with_view(&snapshots, dt, &view, &profile);
-            }
-        }
+        // Mirrors `Sim::tick_collision`'s own live/offline fallback, and for the
+        // same reason: item physics is a `GameTick`/`TickSet::Physics` system
+        // inside the interpolator's `World` now, so what it needs is a `'static`
+        // [`CollisionSource`] resource rather than a borrowed view.
+        let collision = match self.live_collision() {
+            Some(view) => PlayerCollision::View(Arc::new(LiveCollisionSource(view))),
+            None => PlayerCollision::View(self.chunk_collision()),
+        };
+        self.entity_interp
+            .update_with_view(&snapshots, dt, collision, &profile);
     }
 
     /// The interpolated entities to draw this frame, resolved by the renderer
@@ -1781,7 +1952,9 @@ impl Sim {
                 .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)));
             return;
         }
-        let view = WorldCollision::new(&self.world);
+        let store = self.chunk_world();
+        let world = store.read();
+        let view = WorldCollision::new(&world);
         self.target = raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z));
     }
 
@@ -2196,7 +2369,9 @@ impl Sim {
         let Some(hit) = self.target else { return false };
         let pos = hit.place_position();
         let cell_empty = {
-            let view = WorldCollision::new(&self.world);
+            let store = self.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
             view.block_at(pos[0], pos[1], pos[2]) == id::AIR
         };
         if !cell_empty || self.block_intersects_player(pos) {
@@ -2239,7 +2414,9 @@ impl Sim {
                 return;
             }
         }
-        let view = WorldCollision::new(&self.world);
+        let store = self.chunk_world();
+        let world = store.read();
+        let view = WorldCollision::new(&world);
         self.particles.tick(&view);
     }
 
@@ -2313,7 +2490,9 @@ impl Sim {
             x: block[0].div_euclid(16),
             z: block[2].div_euclid(16),
         };
-        let Some(chunk) = self.world.get(pos) else {
+        let store = self.chunk_world();
+        let world = store.read();
+        let Some(chunk) = world.get(pos) else {
             return id::AIR;
         };
         let col = &chunk.column;
@@ -2328,12 +2507,23 @@ impl Sim {
         )
     }
 
+    /// Write a block into the chunk store. Offline-world editing only: on a live
+    /// session the server is authoritative and the edit arrives as a block-update
+    /// packet.
+    ///
+    /// There is nothing to invalidate afterwards. Before Stage 4 this was the one
+    /// write path to `Sim.world` and therefore the one place the cached offline
+    /// collision clone had to be cleared by hand — a missed clear reading as "I
+    /// mined the block but still cannot walk through it". The collision source now
+    /// reads the store itself, so the rule is gone rather than merely obeyed.
     fn set_block_world(&mut self, block: [i32; 3], value: u32) -> bool {
         let pos = ChunkPos {
             x: block[0].div_euclid(16),
             z: block[2].div_euclid(16),
         };
-        let Some(chunk) = self.world.get_mut(pos) else {
+        let store = self.chunk_world();
+        let mut world = store.write();
+        let Some(chunk) = world.get_mut(pos) else {
             return false;
         };
         let col = &mut chunk.column;
@@ -2346,11 +2536,6 @@ impl Sim {
             block[2].rem_euclid(16) as usize,
             value,
         );
-        // This is the one write path to `self.world` after construction, so it is
-        // also the one place the offline collision snapshot has to be invalidated.
-        // Missing it means the player keeps colliding against the pre-edit
-        // geometry — "I mined the block but still cannot walk through it".
-        self.demo_collision = None;
         true
     }
 
@@ -2359,7 +2544,10 @@ impl Sim {
     /// section edge changes the neighbour's mesh via culling/AO). Sections that
     /// became all-air are queued for GPU removal instead.
     fn remesh_around(&mut self, block: [i32; 3]) {
-        let (min_y, section_count) = self.mesh_dimensions();
+        let Some(extent) = self.chunk_world().extent() else {
+            return;
+        };
+        let (min_y, section_count) = (extent.min_y, extent.section_count);
         let cx = block[0].div_euclid(16);
         let cz = block[2].div_euclid(16);
         let lx = block[0].rem_euclid(16);
@@ -2380,46 +2568,31 @@ impl Sim {
                         continue;
                     }
                     let nsi = si + dy;
-                    if nsi < 0 || section_count.is_some_and(|c| nsi as usize >= c) {
+                    if nsi < 0 || nsi as usize >= section_count {
                         continue;
                     }
-                    self.remesh_section(cx + dx, cz + dz, nsi as usize, min_y);
+                    self.remesh_section(cx + dx, cz + dz, nsi as usize, min_y, section_count);
                 }
             }
         }
     }
 
-    /// `(min_y, section_count)` of whichever world this session meshes. The
-    /// count is `None` for the demo world, whose columns carry their own height
-    /// and where an out-of-range section simply snapshots to nothing.
-    fn mesh_dimensions(&self) -> (i32, Option<usize>) {
-        if self.vanilla_atlas.is_some()
-            && let Some(net) = &self.net
-            && let Some(dims) = net.world_dimensions()
-        {
-            return (dims.min_y, Some(dims.section_count()));
-        }
-        (worldgen::MIN_Y, None)
-    }
-
-    /// Re-snapshot and re-schedule one section, reading from the live
-    /// client-owned world or the demo world exactly as
-    /// [`Sim::mark_column_dirty`] chooses. A section that snapshots to nothing
-    /// is queued for GPU removal rather than left showing stale geometry.
-    fn remesh_section(&mut self, cx: i32, cz: i32, si: usize, min_y: i32) {
+    /// Re-snapshot and re-schedule one section. A section that snapshots to
+    /// nothing is queued for GPU removal rather than left showing stale geometry.
+    ///
+    /// One path, not two: before Stage 4 this branched on `vanilla_atlas &&
+    /// net && world_dimensions` to pick which of the two `World`s to read.
+    fn remesh_section(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        si: usize,
+        min_y: i32,
+        section_count: usize,
+    ) {
         let key = SectionKey { cx, cz, si, min_y };
-        let snapshot = if self.vanilla_atlas.is_some()
-            && let Some(net) = &self.net
-            && let Some(dims) = net.world_dimensions()
-        {
-            snapshot_section_live(net, key, dims.section_count())
-        } else {
-            snapshot_section(&self.world, key)
-        };
-        match snapshot {
-            Some(snap) => self.scheduler.submit(snap),
-            None => self.pending_removals.push(key),
-        }
+        let (store, mut terrain) = self.terrain_and_world();
+        terrain.mesh_section(&store, key, section_count);
     }
 
     /// Re-mesh after a server-authoritative edit inside section
@@ -2435,14 +2608,22 @@ impl Sim {
     /// deduplicated first, so a 4096-cell update still submits at most 27
     /// snapshots.
     fn remesh_changed_blocks(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
-        let (min_y, section_count) = self.mesh_dimensions();
-        let base_si = min_y.div_euclid(16);
+        let Some(extent) = self.chunk_world().extent() else {
+            return;
+        };
+        let base_si = extent.min_y.div_euclid(16);
         for (nsx, nsy, nsz) in dirty_sections_for_blocks(sx, sy, sz, blocks) {
             let si = nsy - base_si;
-            if si < 0 || section_count.is_some_and(|count| si as usize >= count) {
+            if si < 0 || si as usize >= extent.section_count {
                 continue;
             }
-            self.remesh_section(nsx, nsz, si as usize, min_y);
+            self.remesh_section(
+                nsx,
+                nsz,
+                si as usize,
+                extent.min_y,
+                extent.section_count,
+            );
         }
     }
 
@@ -2460,138 +2641,31 @@ impl Sim {
     /// re-meshes neighbours.
     ///
     /// The centre column meshes immediately (load responsiveness); the eight
-    /// neighbours are coalesced into [`Sim::dirty_columns`] and drained on a
-    /// budget, so a spiral load re-meshes each column a small constant number of
-    /// times instead of nine.
+    /// neighbours are coalesced into `TerrainMesh::dirty_columns` and drained on a
+    /// budget by the `heal_dirty_columns` system, so a spiral load re-meshes each
+    /// column a small constant number of times instead of nine.
     fn on_column_arrived(&mut self, cx: i32, cz: i32) {
         self.mark_column_dirty(cx, cz);
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let (nx, nz) = (cx + dx, cz + dz);
-                if self.column_is_loaded(nx, nz) {
-                    self.dirty_columns.insert((nx, nz));
-                }
-            }
-        }
-    }
-
-    /// Whether `(cx, cz)` is present in whichever world this session meshes.
-    /// Queueing an absent column would mesh nothing and log a drop; it will be
-    /// queued for real by its own arrival.
-    fn column_is_loaded(&self, cx: i32, cz: i32) -> bool {
-        if self.vanilla_atlas.is_some() {
-            return self.net.as_ref().is_some_and(|net| {
-                net.is_chunk_loaded(lodestone_client::ChunkPos { x: cx, z: cz })
-            });
-        }
-        self.world.get(ChunkPos { x: cx, z: cz }).is_some()
-    }
-
-    /// Re-mesh up to `budget` columns whose boundary went stale. Called once per
-    /// frame; the budget bounds the cost of a chunk-load burst.
-    fn drain_dirty_columns(&mut self, budget: usize) {
-        for _ in 0..budget {
-            let Some((cx, cz)) = self.dirty_columns.pop_first() else {
-                return;
-            };
-            self.mark_column_dirty(cx, cz);
-        }
+        let (store, mut terrain) = self.terrain_and_world();
+        terrain.mark_neighbours_dirty(&store, cx, cz);
     }
 
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
     /// column at `(cx, cz)` changed, so re-mesh every section it holds.
     ///
-    /// Two paths, chosen by which block-id world the session is meshing:
-    ///
-    /// * **Live** (vanilla atlas active) — mesh the *client-owned* world via
-    ///   [`snapshot_section_live`], reading geometry from
-    ///   [`NetClient::world_dimensions`] and blocks + server-authoritative light
-    ///   from [`NetClient::sections_and_light_at`]. This never recomputes light
-    ///   (that would overwrite the server's seam-complete cross-chunk light — a
-    ///   divergence bug); multiplayer *consumes* light, singleplayer computes it.
-    /// * **Demo** (demo palette) — mesh the locally generated world, reading the
-    ///   column's own `min_y`/`section_count`.
+    /// **One path since Stage 4.** This used to be two, chosen by
+    /// `vanilla_atlas.is_some() && net.is_some() && world_dimensions().is_some()`:
+    /// one reading the client-owned world through `NetClient`, one reading `Sim`'s
+    /// own. With a single [`ChunkWorld`] store there is one world to read, and the
+    /// only thing the old guard genuinely encoded — *is the mesh classifier's
+    /// block-id space the store's?* — survives as `MeshPolicy::id_spaces_agree`.
+    /// Light stays server-authoritative on the live path: nothing here recomputes
+    /// it (that would overwrite the server's seam-complete cross-chunk light with a
+    /// partial result — a divergence bug). Multiplayer *consumes* light;
+    /// singleplayer computes it.
     fn mark_column_dirty(&mut self, cx: i32, cz: i32) {
-        // Live path: mesh the server world under the vanilla atlas. Snapshots are
-        // built first (borrowing `net`), then submitted (borrowing the scheduler),
-        // so the two borrows don't overlap.
-        if self.vanilla_atlas.is_some()
-            && let Some(net) = &self.net
-            && let Some(dims) = net.world_dimensions()
-        {
-            let count = dims.section_count();
-            let min_y = dims.min_y;
-            let jobs: Vec<Result<_, SectionKey>> = (0..count)
-                .map(|si| {
-                    let key = SectionKey { cx, cz, si, min_y };
-                    snapshot_section_live(net, key, count).ok_or(key)
-                })
-                .collect();
-            let mut meshed_any = false;
-            for job in jobs {
-                match job {
-                    Ok(snap) => {
-                        self.scheduler.submit(snap);
-                        meshed_any = true;
-                    }
-                    // A single empty section is routine (sky/void sections have no
-                    // geometry): drop it from the GPU, no alarm.
-                    Err(key) => self.pending_removals.push(key),
-                }
-            }
-            if !meshed_any {
-                // The whole column produced no geometry even though it was
-                // dirtied by a server chunk event — the "invisible blocks" defect
-                // class. Not silently dropped: make it loud and counted (surfaced
-                // in the HUD next to `live_cols`) so any recurrence is a one-line
-                // diagnosis, not a play-test hunt.
-                self.mesh_drops += 1;
-                tracing::warn!(
-                    cx,
-                    cz,
-                    branch = "live-all-air-column",
-                    "live column produced no geometry despite a chunk event"
-                );
-            }
-            return;
-        }
-
-        // Demo path: re-mesh the fixture's locally generated column. A *live*
-        // session reaching here has no such column, so this would drop it
-        // silently — count and log it loudly instead.
-        //
-        // `net.is_some()` is part of the guard, not just the atlas: a session
-        // whose vanilla load *failed* (jar-less run, demo-palette fallback) takes
-        // this branch for every arriving server chunk and used to return silently
-        // on the `world.get` miss below, rendering an empty world with a clean
-        // log. That is exactly the shape of the two-worlds report — make it
-        // observable in `drops=` instead.
-        if self.vanilla_atlas.is_some() || self.net.is_some() {
-            self.mesh_drops += 1;
-            tracing::warn!(
-                cx,
-                cz,
-                has_atlas = self.vanilla_atlas.is_some(),
-                branch = "live-guard-rejected",
-                "live column skipped: no vanilla atlas, or net/dimensions not ready at mesh time"
-            );
-            return;
-        }
-        let Some(chunk) = self.world.get(ChunkPos { x: cx, z: cz }) else {
-            return;
-        };
-        let min_y = chunk.column.min_y();
-        let count = chunk.column.section_count();
-        for si in 0..count {
-            let key = SectionKey { cx, cz, si, min_y };
-            match snapshot_section(&self.world, key) {
-                Some(snap) => self.scheduler.submit(snap),
-                None => self.pending_removals.push(key),
-            }
-        }
+        let (store, mut terrain) = self.terrain_and_world();
+        terrain.mesh_column(&store, cx, cz);
     }
 
     fn poll_net(&mut self) {
@@ -2599,6 +2673,15 @@ impl Sim {
         // ends before the loop — the sound arms need `&mut self.audio` and (for
         // entity sounds) a fresh read of `self.net` for positions, neither of
         // which can coexist with a borrow held across the loop.
+        // Adopt the client's chunk store the first frame a handle exists — this
+        // is where the process comes to have exactly one `lodestone_world::World`
+        // (`docs/chunk-world-resource.md`). Idempotent and a pointer compare
+        // thereafter.
+        self.adopt_live_world();
+        // The connected dimension (and therefore the absent-sky policy) can change
+        // mid-session on a portal trip, so the mesh policy is refreshed every poll
+        // rather than only at attach.
+        self.refresh_mesh_policy();
         let updates = match &self.net {
             Some(net) => net.poll(),
             None => return,
@@ -2928,10 +3011,11 @@ impl Sim {
         self.stats.position = [player.position.x, player.position.y, player.position.z];
         self.stats.yaw = player.yaw;
         self.stats.pitch = player.pitch;
-        self.stats.chunk_count = self.world.len();
+        let store = self.chunk_world();
+        self.stats.chunk_count = store.len();
         self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
-        self.stats.mesh_drops = self.mesh_drops;
-        self.stats.world_bytes = self.world.heap_bytes();
+        self.stats.mesh_drops = self.terrain().drops;
+        self.stats.world_bytes = store.read().heap_bytes();
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
         self.stats.flying = self.flying();
@@ -2974,20 +3058,6 @@ impl Sim {
     }
 }
 
-/// Enumerate `(chunk-x, chunk-z)` and section count for every loaded column.
-fn world_sections(world: &World) -> Vec<((i32, i32), usize)> {
-    let radius = MAX_WORLD_RADIUS;
-    let mut out = Vec::new();
-    for cz in -radius..=radius {
-        for cx in -radius..=radius {
-            if let Some(chunk) = world.get(lodestone_world::ChunkPos { x: cx, z: cz }) {
-                out.push(((cx, cz), chunk.column.section_count()));
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
@@ -3017,11 +3087,11 @@ mod tests {
 
     /// Sections the GPU is holding, counted the way `app::WindowApp::redraw`
     /// drives it: upload everything that has meshed, then apply the removals.
-    /// `uploaded_sections` is `Sim`'s own record of exactly that set.
+    /// `TerrainMesh::uploaded_sections` is the record of exactly that set.
     fn resident_sections(sim: &mut Sim) -> usize {
         let _ = sim.drain_all_meshes();
         let _ = sim.drain_removals();
-        sim.uploaded_sections.len()
+        sim.terrain().uploaded_sections.len()
     }
 
     /// Drive one loopback session to `Connected` and report what is resident.
@@ -3061,7 +3131,7 @@ mod tests {
         // it down, so the offline world must never be built or scheduled at all.
         let mut sim = Sim::new(client_config());
         assert!(
-            sim.world.is_empty(),
+            sim.chunk_world().is_empty(),
             "a client session must not generate an offline world"
         );
         assert_eq!(
@@ -3085,7 +3155,10 @@ mod tests {
         // reports zero, the gate above has stopped being able to fail and is
         // vacuous — it is not measuring residency any more.
         let mut fixture = Sim::with_demo_world(test_config());
-        assert!(!fixture.world.is_empty(), "the fixture must build a world");
+        assert!(
+            !fixture.chunk_world().is_empty(),
+            "the fixture must build a world"
+        );
         assert!(
             resident_sections(&mut fixture) > 0,
             "control: the fixture must actually upload offline sections"
@@ -3865,7 +3938,7 @@ mod tests {
     #[test]
     fn new_generates_world_and_schedules_meshes() {
         let sim = Sim::new(test_config());
-        assert!(!sim.world.is_empty(), "world should have chunks");
+        assert!(!sim.chunk_world().is_empty(), "world should have chunks");
         assert!(sim.pending_meshes() > 0, "sections should be scheduled");
     }
 
@@ -3943,7 +4016,7 @@ mod tests {
     #[test]
     fn both_collision_sources_are_send_sync_and_static() {
         fn assert_resource_shaped<T: CollisionSource>() {}
-        assert_resource_shaped::<DemoCollision>();
+        assert_resource_shaped::<ChunkWorldCollision>();
         assert_resource_shaped::<LiveCollisionSource>();
     }
 
@@ -4004,6 +4077,116 @@ mod tests {
         assert_eq!(
             lodestone_controller::movement_intent(&sim.ecs().resource::<RawInput>().0).forward,
             1.0
+        );
+    }
+
+    /// **Stage 4's authority test at the shell level.** The `ChunkWorld` resource
+    /// is the *only* chunk store, so a write through the handle a plugin would get
+    /// (`sim.chunk_world()`, or `sim.ecs().resource::<ChunkWorld>()`) is what the
+    /// sim collides against, raycasts into and meshes.
+    ///
+    /// If `Sim` still owned a `World` field, this would write into a store nobody
+    /// reads and `block_at_world` would report the pre-edit block.
+    #[test]
+    fn a_write_through_the_chunk_world_resource_is_what_the_sim_reads() {
+        let mut sim = Sim::new(test_config());
+        let feet = sim.player().position;
+        let (bx, bz) = (feet.x.floor() as i32 + 4, feet.z.floor() as i32 + 4);
+        let above = crate::worldgen::surface_height(bx, bz) + 4;
+
+        assert_eq!(
+            sim.block_at_world([bx, above, bz]),
+            id::AIR,
+            "the cell starts empty"
+        );
+
+        // The write goes through the resource handle, not through any `Sim` method.
+        {
+            let store = sim.chunk_world();
+            let mut world = store.write();
+            let chunk = world
+                .get_mut(ChunkPos {
+                    x: bx.div_euclid(16),
+                    z: bz.div_euclid(16),
+                })
+                .expect("the fixture holds this column");
+            chunk.column.set_block(
+                bx.rem_euclid(16) as usize,
+                above,
+                bz.rem_euclid(16) as usize,
+                PLACE_BLOCK,
+            );
+        }
+
+        assert_eq!(
+            sim.block_at_world([bx, above, bz]),
+            PLACE_BLOCK,
+            "the sim reads the store a plugin writes, with no propagation step"
+        );
+        // And collision sees it in the same instant — there is no cached clone to
+        // invalidate any more. Before Stage 4 this needed
+        // `Sim::set_block_world` to clear `demo_collision` by hand, and a missed
+        // clear read as "I mined the block but still cannot walk through it".
+        let source = sim.chunk_collision();
+        let mut solid = false;
+        source.with_view(&mut |view: &dyn CollisionView| {
+            let mut boxes = Vec::new();
+            view.collision_boxes(bx, above, bz, &mut boxes);
+            solid = !boxes.is_empty();
+        });
+        assert!(
+            solid,
+            "the collision source reads the same store, uncached — a plugin's edit \
+             is collidable on the next tick"
+        );
+    }
+
+    /// The control for the test above: the same probe against a cell nobody wrote
+    /// must report empty, so "solid" is a measurement rather than a constant.
+    #[test]
+    fn the_collision_source_reports_empty_where_nothing_was_written() {
+        let sim: Sim = Sim::new(test_config());
+        let feet = sim.player().position;
+        let (bx, bz) = (feet.x.floor() as i32 + 4, feet.z.floor() as i32 + 4);
+        let above = crate::worldgen::surface_height(bx, bz) + 4;
+
+        let source = sim.chunk_collision();
+        let mut solid = false;
+        source.with_view(&mut |view: &dyn CollisionView| {
+            let mut boxes = Vec::new();
+            view.collision_boxes(bx, above, bz, &mut boxes);
+            solid = !boxes.is_empty();
+        });
+        assert!(!solid, "control: an untouched air cell must not collide");
+    }
+
+    /// `heal_dirty_columns` must actually be registered in the `Update` schedule
+    /// `Sim::step` runs — the island check for Stage 4's one system. A dirtied
+    /// column that `run_schedule(Update)` does not drain is a chunk seam that
+    /// stays baked against air forever.
+    #[test]
+    fn the_update_schedule_drains_the_dirty_column_set() {
+        let mut sim = Sim::new(test_config());
+        let _ = sim.drain_all_meshes();
+        let pos = *sim
+            .chunk_world()
+            .read()
+            .iter()
+            .next()
+            .expect("the fixture holds a column")
+            .0;
+        sim.terrain_mut().dirty_columns.insert((pos.x, pos.z));
+        assert_eq!(sim.pending_meshes(), 0, "drained to a clean slate");
+
+        sim.ecs_mut().run_schedule(lodestone_ecs::Update);
+
+        assert!(
+            sim.terrain().dirty_columns.is_empty(),
+            "the Update schedule must drain the dirty set"
+        );
+        assert!(
+            sim.pending_meshes() > 0,
+            "and draining it must submit real mesh jobs, not just empty the set"
         );
     }
 
@@ -4949,7 +5132,13 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.drain_all_meshes();
         assert_eq!(sim.pending_meshes(), 0, "drained to a clean slate");
-        let (pos, _) = sim.world.iter().next().expect("local world has a column");
+        let pos = *sim
+            .chunk_world()
+            .read()
+            .iter()
+            .next()
+            .expect("local world has a column")
+            .0;
         let (cx, cz) = (pos.x, pos.z);
         sim.mark_column_dirty(cx, cz);
         assert!(
@@ -4966,14 +5155,20 @@ mod tests {
         // arrival signal must therefore dirty the eight loaded neighbours too.
         let mut sim = Sim::new(test_config());
         sim.drain_all_meshes();
-        let (pos, _) = sim.world.iter().next().expect("local world has a column");
+        let pos = *sim
+            .chunk_world()
+            .read()
+            .iter()
+            .next()
+            .expect("local world has a column")
+            .0;
         // Pick a column with at least one loaded horizontal neighbour.
         let (cx, cz) = (pos.x, pos.z);
         let neighbours: Vec<(i32, i32)> = (-1..=1)
             .flat_map(|dx| (-1..=1).map(move |dz| (dx, dz)))
             .filter(|&(dx, dz)| (dx, dz) != (0, 0))
             .map(|(dx, dz)| (cx + dx, cz + dz))
-            .filter(|&(nx, nz)| sim.column_is_loaded(nx, nz))
+            .filter(|&(nx, nz)| sim.chunk_world().contains_column(nx, nz))
             .collect();
         assert!(
             !neighbours.is_empty(),
@@ -4981,7 +5176,14 @@ mod tests {
         );
 
         sim.on_column_arrived(cx, cz);
-        sim.drain_dirty_columns(neighbours.len());
+        // `heal_dirty_columns` is an `Update` system now; run the schedule the way
+        // `Sim::step` does rather than calling a method. `DIRTY_COLUMN_BUDGET` is
+        // 4 and the fixture has up to 8 loaded neighbours, so drive it until the
+        // dirty set is empty.
+        while !sim.terrain().dirty_columns.is_empty() {
+            sim.ecs_mut().run_schedule(lodestone_ecs::Update);
+        }
+        let _ = neighbours.len();
         let meshed: HashSet<(i32, i32)> = sim
             .drain_all_meshes()
             .into_iter()
@@ -5008,7 +5210,7 @@ mod tests {
         sim.drain_all_meshes();
         sim.on_column_arrived(9999, 9999);
         assert!(
-            sim.dirty_columns.is_empty(),
+            sim.terrain().dirty_columns.is_empty(),
             "no neighbour of an out-of-world column is loaded, so none is queued"
         );
     }
@@ -5038,11 +5240,15 @@ mod tests {
             normal: [0, 1, 0],
         });
         {
-            let view = WorldCollision::new(&sim.world);
+            let store = sim.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
             assert_eq!(view.block_at(bx, s + 1, bz), id::AIR, "cell starts empty");
         }
         assert!(sim.place_block(), "should place onto the top face");
-        let view = WorldCollision::new(&sim.world);
+        let store = sim.chunk_world();
+        let world = store.read();
+        let view = WorldCollision::new(&world);
         assert_ne!(view.block_at(bx, s + 1, bz), id::AIR, "block now present");
     }
 

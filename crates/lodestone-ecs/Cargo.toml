@@ -40,6 +40,12 @@ lodestone-physics = { workspace = true }
 # the ECS calls). wasm-safe: `lodestone-client` already depends on it with
 # default features and is in `scripts/wasm-check.sh`'s crate list.
 lodestone-game = { workspace = true }
+# Stage 4: the chunk store. `ChunkWorld` is an `Arc<RwLock<lodestone_world::World>>`
+# exposed as a `Resource` (docs/bevy-migration.md §4.1(d)) — chunks are deliberately
+# *not* entities, matching azalea's `Worlds` resource (§2.3). wasm-safe:
+# `lodestone-client` already depends on it and is in `scripts/wasm-check.sh`'s
+# crate list.
+lodestone-world = { workspace = true }
 # `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
 # this adds no new type to the graph, only the name.
 uuid = { workspace = true }

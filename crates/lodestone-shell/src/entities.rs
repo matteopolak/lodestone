@@ -11,14 +11,18 @@
 //! | system | schedule / set |
 //! |---|---|
 //! | [`advance_interp_clocks`] | [`Update`] / `FrameSet::Interpolate` |
+//! | [`tick_item_physics`] | [`GameTick`] / `TickSet::Physics` |
 //! | [`tick_walk_animation`] | [`GameTick`] / `TickSet::Animate` |
 //! | [`extract_entity_draws`] | [`Extract`] / `ExtractSet::Entities` |
 //!
 //! [`EntityInterpolator`] is the driver for those schedules and nothing else: it
 //! owns the `World`, runs the schedules in order, and hands out the extracted
-//! [`EntityDraw`] list. Two pieces of the fold are deliberately **not** systems
-//! yet, and the reasons are recorded in [`fold_snapshots`] and
-//! [`tick_item_physics`] — read those before moving them.
+//! [`EntityDraw`] list. One piece of the fold is still deliberately **not** a
+//! system — [`fold_snapshots`], whose input is a borrowed
+//! `&[EntitySnapshot]` slice `sim.rs` owns; read its own docs before moving it.
+//! [`tick_item_physics`] used to be blocked on the same `'static`-resource
+//! problem, until [`lodestone_ecs::player::CollisionSource`] gave the
+//! collision borrow somewhere `'static` to live — see that system's docs.
 //!
 //! # Why the window is three ticks, not one
 //!
@@ -123,6 +127,7 @@
 //! component at all and the original pure position ease runs exactly as before.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy_ecs::prelude::{Component, Entity, IntoScheduleConfigs, Query, Res, ResMut, Resource};
 use bevy_ecs::world::World;
@@ -130,6 +135,7 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::MinecraftEntityId;
+use lodestone_ecs::player::{CollisionSource, PlayerCollision, Profile};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
 use lodestone_entity::pose::{
@@ -262,10 +268,20 @@ fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &P
 /// this — see [`EntityInterpolator::update_with_view`], which
 /// [`crate::sim::Sim`] drives with a real [`CollisionView`] built from the
 /// player's loaded chunks.
+#[derive(Debug)]
 struct OpenAir;
 
 impl CollisionView for OpenAir {
     fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+}
+
+/// [`OpenAir`] as a [`CollisionSource`]: it owns nothing, so the borrow
+/// [`CollisionSource::with_view`] hands out is trivially satisfied by lending
+/// back the same zero-sized value.
+impl CollisionSource for OpenAir {
+    fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+        f(self);
+    }
 }
 
 /// Converts an [`ItemMotion`]-space `f64` [`lodestone_model::Vec3`] back into
@@ -747,80 +763,64 @@ pub fn extract_entity_draws(
     }
 }
 
-/// One 20 Hz step of every dropped item's own ballistic physics, re-anchoring
-/// each one's render ease onto the freshly simulated point.
+/// `GameTick` / `TickSet::Physics`: one 20 Hz step of every dropped item's own
+/// ballistic physics, re-anchoring each one's render ease onto the freshly
+/// simulated point.
 ///
-/// # Why this is not a system
+/// # Why this took until now to become a system
 ///
-/// It wants to be one — `docs/bevy-migration.md` Stage 1 asks for "a `GameTick`
-/// system for the 20 Hz item-physics step" — and it cannot be, yet. A `bevy_ecs`
-/// system reads its inputs from `Resource`s, and a `Resource` must be
-/// `'static`; the collision geometry arrives here as a borrowed
-/// `&dyn CollisionView` whose owner is a local in `Sim::update_entities`
-/// (`WorldCollision::new(&self.world)` borrows the chunk world outright). There
-/// is no safe way to put a borrow in a resource, and the workspace denies
-/// `unsafe_code`.
+/// A `bevy_ecs` system reads its inputs from `Resource`s, and a `Resource`
+/// must be `'static`. Before
+/// [`lodestone_ecs::player::CollisionSource`] existed, the collision geometry
+/// reached this function as a borrowed `&dyn CollisionView` whose owner was a
+/// local in `Sim::update_entities` (`WorldCollision::new(&self.world)` borrows
+/// the chunk world outright) — there was no safe way to put that borrow in a
+/// resource, and the workspace denies `unsafe_code`.
 ///
-/// The collision source only becomes `'static` at the plan's §4.1(d) — the chunk
-/// world as an `Arc<RwLock<lodestone_world::World>>` **resource** — which is
-/// Stage 4. Until then this runs as a plain function called once per tick from
-/// [`EntityInterpolator::update_with_view`], immediately before the `GameTick`
-/// schedule, which puts it in the same position in the tick that
-/// `TickSet::Physics` would.
+/// `CollisionSource` inverts it: the *trait object* is `'static` because an
+/// implementor owns whatever it borrows from, and only the `&dyn
+/// CollisionView` handed to [`CollisionSource::with_view`]'s callback is
+/// short-lived. [`EntityInterpolator::update_with_view`] inserts a
+/// [`PlayerCollision`] (holding that `Arc<dyn CollisionSource>` in its `View`
+/// variant) as a resource before running the tick loop, which is what makes
+/// this reachable from `GameTick` at all.
 ///
-/// The behavioural consequence is nil (the same code runs at the same point in
-/// the same order); the *architectural* consequence is that a plugin cannot yet
-/// order a system against item physics. The two negative controls at the bottom
-/// of this file are unaffected either way: they discriminate on whether the
-/// physics *ran*, not on how it was scheduled.
-fn tick_item_physics(world: &mut World, view: &dyn CollisionView, profile: &PhysicsProfile) {
-    let tracked: Vec<Entity> = world.resource::<TrackIndex>().0.values().copied().collect();
-    for entity in tracked {
-        let Ok(mut entity) = world.get_entity_mut(entity) else {
-            continue;
-        };
-        // The absence of the component is the switch: only a dropped item has
-        // one, so every other entity type stays on the pure position ease.
-        let Some(mut physics) = entity.get::<ItemPhysics>().copied() else {
-            continue;
-        };
-        // Paused while the last *server* report says the item is resting; the
-        // floor within a tick is real collision, not a frozen flag.
-        if physics.grounded {
-            continue;
-        }
-        step_item_physics(&mut physics.sim, view, profile);
-        let simulated = to_glam_vec3(physics.sim.position);
-
-        // Re-anchor exactly like a fresh authoritative snapshot would: ease from
-        // wherever this frame is currently drawn toward the freshly simulated
-        // point, so the simulation reads as continuous motion rather than a
-        // series of per-tick snaps.
-        let drawn = {
-            let from = entity.get::<InterpFrom>().copied();
-            let to = entity.get::<InterpTo>().copied();
-            let clock = entity.get::<InterpClock>().copied();
-            match (from, to, clock) {
-                (Some(from), Some(to), Some(clock)) => render_feet(&from, &to, &clock),
-                // An `ItemPhysics` without an ease is not a state this module
-                // can produce (`spawn_track` inserts all four together), so
-                // there is nothing sensible to anchor from; leave it be.
-                _ => continue,
+/// The absence of [`ItemPhysics`] is still the switch that keeps every other
+/// entity type on the pure position ease — the query below only ever matches
+/// entities that have all four components, which [`spawn_track`] inserts
+/// atomically.
+pub fn tick_item_physics(
+    collision: Res<PlayerCollision>,
+    profile: Res<Profile>,
+    mut items: Query<(&mut ItemPhysics, &mut InterpFrom, &mut InterpTo, &mut InterpClock)>,
+) {
+    // `NoWorld`/`Pending` mean there is nothing to collide against yet — leave
+    // every item's simulation exactly where it was rather than free-falling it
+    // through geometry we cannot query.
+    let PlayerCollision::View(source) = &*collision else {
+        return;
+    };
+    let profile = &profile.0;
+    source.with_view(&mut |view| {
+        for (mut physics, mut from, mut to, mut clock) in &mut items {
+            // Paused while the last *server* report says the item is resting;
+            // the floor within a tick is real collision, not a frozen flag.
+            if physics.grounded {
+                continue;
             }
-        };
-        if let Some(mut item) = entity.get_mut::<ItemPhysics>() {
-            *item = physics;
-        }
-        if let Some(mut from) = entity.get_mut::<InterpFrom>() {
+            step_item_physics(&mut physics.sim, view, profile);
+            let simulated = to_glam_vec3(physics.sim.position);
+
+            // Re-anchor exactly like a fresh authoritative snapshot would: ease
+            // from wherever this frame is currently drawn toward the freshly
+            // simulated point, so the simulation reads as continuous motion
+            // rather than a series of per-tick snaps.
+            let drawn = render_feet(&from, &to, &clock);
             from.feet = drawn;
-        }
-        if let Some(mut to) = entity.get_mut::<InterpTo>() {
             to.feet = simulated;
-        }
-        if let Some(mut clock) = entity.get_mut::<InterpClock>() {
             clock.t = 0.0;
         }
-    }
+    });
 }
 
 /// Seeds a fresh [`ItemPhysics`] from an item entity's first-seen (or freshly
@@ -849,10 +849,12 @@ fn new_item_physics(snap: &EntitySnapshot) -> ItemPhysics {
 /// Two reasons, both of which the plan expects to disappear together with
 /// [`EntitySnapshot`]:
 ///
-/// 1. **Its input is a borrowed slice from `sim.rs`.** Same `'static` problem as
-///    [`tick_item_physics`]; the fix is the same one — ingest writes these
-///    components directly instead of round-tripping through a `Vec` the caller
-///    owns.
+/// 1. **Its input is a borrowed slice from `sim.rs`.** The same `'static`
+///    problem [`tick_item_physics`] used to have — but there is no
+///    `CollisionSource`-shaped fix available here, because the borrow is a
+///    `Vec` the caller owns, not a view an owned adapter could rebuild on
+///    demand. The real fix is ingest writing these components directly
+///    instead of round-tripping through that `Vec`.
 /// 2. **It runs *after* the tick loop, not before it.** The plan's schedule
 ///    order is `NetIngest` → `GameTick`; this module's order is clocks →
 ///    ticks → fold, and every numeric expectation in the ~25 tests below is
@@ -1055,7 +1057,20 @@ impl Plugin for EntityInterpPlugin {
         app.init_resource::<ItemStacks>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
+        // `PlayerCollision` and `Profile` are `lodestone_ecs::player`'s types,
+        // reused here rather than duplicated: this `World` is not the local
+        // player's, but a resource type carries no opinion about which
+        // `World` it lives in, and `tick_item_physics` wants exactly the same
+        // `CollisionSource` seam `player_physics` does.
+        app.init_resource::<PlayerCollision>();
+        app.init_resource::<Profile>();
         app.add_systems(Update, advance_interp_clocks.in_set(FrameSet::Interpolate));
+        app.add_systems(
+            GameTick,
+            tick_item_physics
+                .in_set(TickSet::Physics)
+                .before(tick_walk_animation),
+        );
         app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
         app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
     }
@@ -1162,16 +1177,22 @@ impl EntityInterpolator {
         self.world.resource::<ItemStacks>().0.get(&entity_id)
     }
 
-    /// [`Self::update_with_view`] against [`OpenAir`] and a default
-    /// [`PhysicsProfile`] — i.e. the pre-collision behaviour, kept as the
-    /// default entry point for tests and any caller with no world to query.
+    /// [`Self::update_with_view`] against [`OpenAir`] (as a [`PlayerCollision::View`])
+    /// and a default [`PhysicsProfile`] — i.e. the pre-collision behaviour,
+    /// kept as the default entry point for tests and any caller with no world
+    /// to query.
     ///
     /// **Not what the live path uses.** [`crate::sim::Sim`] calls
-    /// [`Self::update_with_view`] directly with a real [`CollisionView`], so a
+    /// [`Self::update_with_view`] with a real [`CollisionSource`], so a
     /// dropped item's fall actually stops at a floor — see that method's docs
     /// and the module docs on why an item needs its own physics at all.
     pub fn update(&mut self, snapshots: &[EntitySnapshot], dt: f32) {
-        self.update_with_view(snapshots, dt, &OpenAir, &PhysicsProfile::mc_1_21());
+        self.update_with_view(
+            snapshots,
+            dt,
+            PlayerCollision::View(Arc::new(OpenAir)),
+            &PhysicsProfile::mc_1_21(),
+        );
     }
 
     /// Advance every track by `dt` seconds, then fold in this frame's snapshots.
@@ -1182,38 +1203,45 @@ impl EntityInterpolator {
     /// 1. [`Update`] → [`advance_interp_clocks`]: every ease clock and age moves
     ///    on, so a snapshot that resets `t` this frame anchors from the pose
     ///    that was actually on screen.
-    /// 2. per 20 Hz tick: [`tick_item_physics`] then [`GameTick`] →
-    ///    [`tick_walk_animation`]. Both run on a fixed clock, not per frame.
+    /// 2. per 20 Hz tick: [`GameTick`] → [`tick_item_physics`] (`TickSet::Physics`)
+    ///    then [`tick_walk_animation`] (`TickSet::Animate`). Both run on a fixed
+    ///    clock, not per frame.
     /// 3. [`fold_snapshots`]: this frame's report, then the prune.
     /// 4. [`Extract`] → [`extract_entity_draws`], so [`Self::draws`] is a plain
     ///    read.
     ///
     /// Entities absent from `snapshots` are dropped (despawned/out of range).
     ///
-    /// `view`/`profile` feed only [`step_item_physics`] (every other entity is a
-    /// pure position ease and never touches either). `view` should cover wherever
-    /// a tracked item entity actually is — `Sim::live_collision`'s
-    /// 3×3-column-around-the-player snapshot is the intended source, so a drop
-    /// far outside that radius still free-falls with no floor until it re-enters
-    /// range, same as before this method existed.
+    /// `collision`/`profile` feed only [`tick_item_physics`] (every other
+    /// entity is a pure position ease and never touches either); they are
+    /// inserted as resources before the tick loop so that system can be a real
+    /// scheduled `Res` reader rather than a function this method calls by
+    /// hand. `collision`'s view should cover wherever a tracked item entity
+    /// actually is — `Sim::live_collision`'s 3×3-column-around-the-player
+    /// snapshot is the intended source, so a drop far outside that radius
+    /// still free-falls with no floor until it re-enters range, same as before
+    /// this method existed.
     pub fn update_with_view(
         &mut self,
         snapshots: &[EntitySnapshot],
         dt: f32,
-        view: &dyn CollisionView,
+        collision: PlayerCollision,
         profile: &PhysicsProfile,
     ) {
         self.world.insert_resource(FrameDelta(dt));
+        self.world.insert_resource(collision);
+        self.world.insert_resource(Profile(*profile));
         self.world.run_schedule(Update);
 
         let mut accum = self.world.resource::<TickAccum>().0 + dt;
         while accum >= TICK_SECONDS {
             accum -= TICK_SECONDS;
-            // Step a dropped item's own ballistic physics once per real tick —
-            // the server itself only *corrects* this roughly once a second
-            // (`ItemEntity`'s `updateInterval(20)`), so the arc has to come from
-            // here, not from easing toward a sparse packet.
-            tick_item_physics(&mut self.world, view, profile);
+            // `tick_item_physics` now runs as part of this schedule
+            // (`TickSet::Physics`, ordered before `tick_walk_animation`'s
+            // `TickSet::Animate`) — the server itself only *corrects* a
+            // dropped item's position roughly once a second (`ItemEntity`'s
+            // `updateInterval(20)`), so the arc has to come from here, not
+            // from easing toward a sparse packet.
             self.world.run_schedule(GameTick);
         }
         // The residual is also the partial tick `extract_entity_draws` reads, so
@@ -1917,6 +1945,7 @@ mod tests {
     /// through it. Reuses `lodestone_physics`'s own `Aabb`/`collide`, not a
     /// second collider: this only *describes* geometry, the sweep in
     /// `step_item_physics` (via `move_entity`) does the resolving.
+    #[derive(Debug)]
     struct FlatFloor {
         floor_y: i32,
     }
@@ -1936,6 +1965,12 @@ mod tests {
         }
     }
 
+    impl CollisionSource for FlatFloor {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
     /// The reported defect: an item popped above a floor must come to rest
     /// *on* that floor, not sink through it while waiting for the server's
     /// next once-a-second correction (which, in this test, never arrives —
@@ -1950,7 +1985,8 @@ mod tests {
     #[test]
     fn item_pop_stops_at_a_real_floor_instead_of_sinking_through_it() {
         let mut interp = EntityInterpolator::new();
-        let floor = FlatFloor { floor_y: 63 };
+        let floor_y = 63;
+        let floor: Arc<dyn CollisionSource> = Arc::new(FlatFloor { floor_y });
         let profile = PhysicsProfile::mc_1_21();
         let spawn = Vec3::new(0.5, 66.0, 0.5);
         // A real pop velocity (`ItemEntity`'s zero-arg constructor draws
@@ -1961,7 +1997,7 @@ mod tests {
         interp.update_with_view(
             &[item_snap_moving(9, spawn, Some(vel), false)],
             0.0,
-            &floor,
+            PlayerCollision::View(Arc::clone(&floor)),
             &profile,
         );
 
@@ -1978,7 +2014,7 @@ mod tests {
             interp.update_with_view(
                 &[item_snap_moving(9, spawn, Some(vel), false)],
                 TICK,
-                &floor,
+                PlayerCollision::View(Arc::clone(&floor)),
                 &profile,
             );
             min_y = min_y.min(interp.draws()[0].feet.y);
@@ -1986,13 +2022,13 @@ mod tests {
         let final_feet = interp.draws()[0].feet;
 
         assert!(
-            min_y >= floor.floor_y as f32 + 1.0 - 1.0e-3,
+            min_y >= floor_y as f32 + 1.0 - 1.0e-3,
             "the item's feet must never read below the floor's top surface \
              ({}), got a minimum of {min_y} — it sank through",
-            floor.floor_y + 1
+            floor_y + 1
         );
         assert!(
-            (final_feet.y - (floor.floor_y as f32 + 1.0)).abs() < 1.0e-2,
+            (final_feet.y - (floor_y as f32 + 1.0)).abs() < 1.0e-2,
             "the item must come to rest sitting on the floor, was {}",
             final_feet.y
         );

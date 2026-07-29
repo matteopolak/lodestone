@@ -48,7 +48,13 @@ impl Plugin for CorePlugin {
         // it does not, so this is safe even against `App::empty()`.
         app.configure_sets(
             Update,
-            (FrameSet::Input, FrameSet::Interpolate, FrameSet::Camera).chain(),
+            (
+                FrameSet::Input,
+                FrameSet::Interpolate,
+                FrameSet::Camera,
+                FrameSet::Terrain,
+            )
+                .chain(),
         );
 
         app.init_schedule(Extract);
