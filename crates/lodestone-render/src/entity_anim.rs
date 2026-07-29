@@ -56,7 +56,7 @@
 //! physics, so a sub-degree difference is invisible and unobservable. Anything
 //! that *is* transmitted must still use the parity table.
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use lodestone_assets::entity::{Affine, BakedPart, PartPose};
 
 /// Radians per degree.
@@ -80,6 +80,63 @@ pub enum HumanoidArms {
     Swinging,
     /// `AbstractZombieModel`: both arms held out in front, walk swing discarded.
     Zombie,
+}
+
+/// Which of vanilla's per-model overrides of `HumanoidModel.translateToHand`
+/// applies. Selected by the caller from the model name (see
+/// [`hand_pose_override_for`](crate::entity::hand_pose_override_for)), the same
+/// pattern [`HumanoidArms`] uses and for the same reason: a model class is not
+/// visible to us, only the parts it declares and the name it was ported under.
+///
+/// # Why this cannot be a correction applied to `part_transforms[arm]`
+///
+/// Every one of these overrides is scoped to `translateToHand` alone — the
+/// arm's *own* mesh keeps rendering through its unmodified pivot; only the
+/// point a held item hangs from moves. `part_transforms[arm]` is the matrix the
+/// whole-body instanced draw uses to place the arm's visible geometry
+/// ([`crate::entity::plan_entities`]), so folding an override in there would
+/// nudge the mob's visible forearm by the same amount it nudges the item — a
+/// new, real defect traded for the one being fixed. [`Skeleton::translate_to_hand`]
+/// therefore computes a *separate* matrix, never touching `part_transforms`.
+///
+/// The two pivot-shift cases below additionally cannot be expressed as a pre-
+/// or post-multiplication of the arm's *already-composed* matrix: vanilla
+/// shifts the arm's own pivot **before** its rotation is applied
+/// (`part.x += offset; part.translateAndRotate(poseStack); part.x -= offset;`),
+/// and `T(pivot) · R(rot)` does not commute, so the shift has to be folded in
+/// while the pivot and the rotation are still two separate values — i.e. from
+/// the posed [`PartPose`], not from the [`Mat4`] that already fused them.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum HandPoseOverride {
+    /// `HumanoidModel.translateToHand` / `IllagerModel` / `ArmorStandModel`:
+    /// `root.translateAndRotate(); getArm(arm).translateAndRotate();` — exactly
+    /// the ordinary composed chain, so this is the same value
+    /// `part_transforms[arm]` already holds. Also correct, unmodified, for a
+    /// model whose arms hang off `body` rather than `root` (`CopperGolemModel`)
+    /// — the composed chain already includes the whole parent hierarchy.
+    #[default]
+    Structural,
+    /// `SkeletonModel`/`StrayModel`/`WitherSkeletonModel.translateToHand`: the
+    /// arm's pivot `x` is shifted by `±1.0` texel before its own rotation
+    /// (`+1` for the right arm, `-1` for the left — vanilla's
+    /// `arm == RIGHT ? 1.0F : -1.0F`). `PlayerModel`'s slim variant is the
+    /// identical shift at `±0.5` texels. The `f32` is the magnitude in texels;
+    /// the sign is derived from the arm at call time.
+    PivotShiftTexels(f32),
+    /// `VexModel.translateToHand`: `root · body · arm`, then `scale(0.55)`,
+    /// then `translate(±0.046875, -0.15625, 0.078125)` (sign by arm). Vex's
+    /// arms hang off `body`, not `root`, which the ordinary chain already
+    /// handles — the override is the trailing scale-and-translate vanilla adds
+    /// *after* the arm's own transform.
+    Vex,
+    /// `AllayModel.translateToHand`: a wholly different chain that never calls
+    /// `getArm(arm).translateAndRotate()` at all — `root · body`, then
+    /// `T(0, 1/16, 3/16) · Rx(right_arm.xRot) · S(0.7) · T(1/16, 0, 0)`.
+    /// Vanilla does not branch on `arm` anywhere in this override, not even the
+    /// translate's sign, so an off-hand item on an allay is posed identically
+    /// to a main-hand one — read from source, not a guess: see
+    /// `AllayModel.java`'s `translateToHand`.
+    Allay,
 }
 
 /// `AnimationUtils.animateZombieArms`'s resting arm elevation,
@@ -507,9 +564,7 @@ impl Skeleton {
     /// visible.
     #[must_use]
     pub fn pose_swelling(&self, input: &AnimInput, swell: f32) -> Vec<Mat4> {
-        let mut poses: Vec<PartPose> = self.parts.iter().map(|p| p.rest).collect();
-        self.setup_anim(&mut poses, input);
-        self.compose_from(&poses, swell_root_affine(swell))
+        self.compose_from(&self.posed(input), swell_root_affine(swell))
     }
 
     /// The unanimated matrices — what a [`AnimFamily::Static`] model draws with,
@@ -518,6 +573,76 @@ impl Skeleton {
     pub fn rest_pose(&self) -> Vec<Mat4> {
         let poses: Vec<PartPose> = self.parts.iter().map(|p| p.rest).collect();
         self.compose(&poses)
+    }
+
+    /// The animated per-part poses `input` produces, *before* composing them
+    /// into a chain — i.e. what [`Self::setup_anim`] leaves in place. Shared by
+    /// [`Self::pose_swelling`] (which composes the whole chain) and
+    /// [`Self::translate_to_hand`] (which needs the arm's own pivot and
+    /// rotation kept separate, not yet fused into a matrix).
+    fn posed(&self, input: &AnimInput) -> Vec<PartPose> {
+        let mut poses: Vec<PartPose> = self.parts.iter().map(|p| p.rest).collect();
+        self.setup_anim(&mut poses, input);
+        poses
+    }
+
+    /// The model-space matrix for `HumanoidModel.translateToHand(arm)` (or the
+    /// model's own override — see [`HandPoseOverride`]), for the item this arm
+    /// is holding.
+    ///
+    /// `input` re-derives the same animated pose [`Self::pose`] would, so a
+    /// held item reflects the mob's current walk/attack state exactly as
+    /// vanilla does (it poses the whole model, then runs `translateToHand`
+    /// against the posed parts — never the rest pose). `left` selects the arm
+    /// vanilla reads from `HumanoidArm`.
+    ///
+    /// Returns `None` only when this skeleton has no `right_arm`/`left_arm`
+    /// slot at all — a family with no arms has nothing for a caller to fall
+    /// back to.
+    #[must_use]
+    pub fn translate_to_hand(
+        &self,
+        input: &AnimInput,
+        left: bool,
+        override_: HandPoseOverride,
+    ) -> Option<Mat4> {
+        let arm_slot = if left {
+            self.slots.left_arm
+        } else {
+            self.slots.right_arm
+        }?;
+        let poses = self.posed(input);
+        // Same basis `pose()`/`part_transforms` use (root at identity, no
+        // swell — only a creeper swells, and a creeper has no arms), so
+        // `HandPoseOverride::Structural` below is bit-for-bit the value
+        // `part_transforms[arm_slot]` already holds.
+        let world = self.compose(&poses);
+        let sign = if left { -1.0 } else { 1.0 };
+        match override_ {
+            HandPoseOverride::Structural => Some(world[arm_slot]),
+            HandPoseOverride::PivotShiftTexels(texels) => {
+                let parent_idx = self.parts[arm_slot].parent?;
+                let mut shifted = poses[arm_slot];
+                shifted.x += sign * texels;
+                Some(world[parent_idx] * affine_to_mat4(&Affine::of_pose(&shifted)))
+            }
+            HandPoseOverride::Vex => {
+                let body_idx = self.slots.body?;
+                let arm_local = affine_to_mat4(&Affine::of_pose(&poses[arm_slot]));
+                let scale = Mat4::from_scale(Vec3::splat(0.55));
+                let post = Mat4::from_translation(Vec3::new(sign * 0.046875, -0.15625, 0.078125));
+                Some(world[body_idx] * arm_local * scale * post)
+            }
+            HandPoseOverride::Allay => {
+                let body_idx = self.slots.body?;
+                let right_x_rot = poses[self.slots.right_arm?].x_rot;
+                let pre = Mat4::from_translation(Vec3::new(0.0, 1.0 / 16.0, 3.0 / 16.0));
+                let rot = Mat4::from_rotation_x(right_x_rot);
+                let scale = Mat4::from_scale(Vec3::splat(0.7));
+                let post = Mat4::from_translation(Vec3::new(1.0 / 16.0, 0.0, 0.0));
+                Some(world[body_idx] * pre * rot * scale * post)
+            }
+        }
     }
 
     /// Walks the hierarchy composing each part's transform onto its parent's.
@@ -1427,5 +1552,207 @@ mod tests {
             animated >= 60,
             "only {animated} of the corpus animates — classification is too narrow"
         );
+    }
+
+    /// [`HandPoseOverride::Structural`] must be the same value `pose()` already
+    /// puts at the arm's index — it exists so a caller can ask for "no
+    /// override" uniformly, not to compute anything different.
+    #[test]
+    fn structural_override_is_bit_for_bit_the_composed_arm_matrix() {
+        let skel = skeleton_for("zombie");
+        let input = AnimInput {
+            limb_swing: 4.0,
+            limb_swing_amount: 1.0,
+            ..AnimInput::REST
+        };
+        let composed = skel.pose(&input);
+        for (left, name) in [(false, "right_arm"), (true, "left_arm")] {
+            let i = skel.index_of(name).unwrap();
+            let got = skel
+                .translate_to_hand(&input, left, HandPoseOverride::Structural)
+                .unwrap();
+            assert_eq!(
+                got, composed[i],
+                "{name}: structural override drifted from pose()"
+            );
+        }
+    }
+
+    /// `skeleton`/`stray`/`wither_skeleton` and `player_slim` shift the arm's
+    /// pivot `x` *before* its own rotation, then restore it — vanilla's
+    /// `part.x += offset; part.translateAndRotate(); part.x -= offset;`.
+    ///
+    /// # Why the expected value here is not just this crate's own formula read back
+    ///
+    /// Because translations commute with each other
+    /// (`T(a)·T(b) = T(a+b) = T(b)·T(a)`), and both `skeleton` and `player_slim`
+    /// have an **identity** root pose (`PartPose::ZERO`, so their arm's parent
+    /// chain contributes no rotation), the whole "shift the pivot, rotate,
+    /// restore" dance algebraically collapses to one pure world-space
+    /// translation left-multiplied onto the ordinary structural pose:
+    ///
+    /// ```text
+    ///   shifted = parent · T(pivot + shift) · R(rot)
+    ///           = parent · T(shift) · T(pivot) · R(rot)      (T commutes with T)
+    ///           = [parent · T(shift) · parent⁻¹] · [parent · T(pivot) · R(rot)]
+    ///           = T(shift)                        · structural   (parent is a
+    ///                                                 pure translation, so it
+    ///                                                 conjugates a translation
+    ///                                                 to itself)
+    /// ```
+    ///
+    /// That derivation is independent of `translate_to_hand`'s own code path —
+    /// it only assumes what a pivot shift *means* geometrically — so agreement
+    /// is real evidence the implementation does the shift in the right place
+    /// (between the parent chain and the arm's rotation), not just evidence it
+    /// produces plausible-looking numbers.
+    #[test]
+    fn pivot_shift_is_a_pure_world_space_translation_of_the_structural_pose() {
+        for (model, texels) in [("skeleton", 1.0f32), ("player_slim", 0.5)] {
+            let skel = skeleton_for(model);
+            // A walk swing gives the arm a real rotation, so the shift has to
+            // interact with something other than the identity — the case that
+            // would be silently wrong if the shift were applied after
+            // composition instead of before the rotation.
+            let input = AnimInput {
+                limb_swing: 12.5,
+                limb_swing_amount: 1.0,
+                ..AnimInput::REST
+            };
+            for (left, sign) in [(false, 1.0f32), (true, -1.0f32)] {
+                let structural = skel
+                    .translate_to_hand(&input, left, HandPoseOverride::Structural)
+                    .unwrap();
+                let shifted = skel
+                    .translate_to_hand(&input, left, HandPoseOverride::PivotShiftTexels(texels))
+                    .unwrap();
+                let expected =
+                    Mat4::from_translation(Vec3::new(sign * texels / 16.0, 0.0, 0.0)) * structural;
+                for (a, b) in shifted
+                    .to_cols_array()
+                    .iter()
+                    .zip(expected.to_cols_array().iter())
+                {
+                    assert!(
+                        (a - b).abs() < 1e-4,
+                        "{model} {}: shifted {shifted:?} vs derived {expected:?}",
+                        if left { "left" } else { "right" }
+                    );
+                }
+            }
+        }
+    }
+
+    /// `VexModel.translateToHand`: `root · body · arm`, then `scale(0.55)`,
+    /// then a small arm-signed translate. Vex's arm rig never rotates in this
+    /// port (`AnimFamily::HeadOnly` runs no arm `setupAnim`, and the rest pose
+    /// authors no rotation either), so every step in the chain is a pure
+    /// translation or a uniform scale — cheap to hand-compute independently
+    /// and compare, with nothing shared with `translate_to_hand`'s own code.
+    #[test]
+    fn vex_hand_transform_transcribes_root_body_arm_scale_then_translate() {
+        let skel = skeleton_for("vex");
+        let body = skel.index_of("body").unwrap();
+        let world_body = skel.pose(&AnimInput::REST)[body];
+        // The arm's own baked pivot (`-1.75` for `right_arm`, `+1.75` for
+        // `left_arm` — see `vex_model` in `lodestone-assets`) is independent of
+        // vanilla's `mainArm` sign on the trailing translate, so the two are
+        // named separately rather than reused from one `sign`.
+        for (left, arm_x, post_sign, arm_name) in [
+            (false, -1.75f32, 1.0f32, "right_arm"),
+            (true, 1.75, -1.0, "left_arm"),
+        ] {
+            let arm_offset = Vec3::new(arm_x, 0.25, 0.0);
+            let expected = world_body
+                * Mat4::from_translation(arm_offset / 16.0)
+                * Mat4::from_scale(Vec3::splat(0.55))
+                * Mat4::from_translation(Vec3::new(post_sign * 0.046875, -0.15625, 0.078125));
+            let got = skel
+                .translate_to_hand(&AnimInput::REST, left, HandPoseOverride::Vex)
+                .unwrap();
+            for (a, b) in got
+                .to_cols_array()
+                .iter()
+                .zip(expected.to_cols_array().iter())
+            {
+                assert!(
+                    (a - b).abs() < 1e-4,
+                    "vex {arm_name}: {got:?} vs {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// `AllayModel.translateToHand` never calls `getArm(arm)` at all: it reads
+    /// `right_arm.xRot` and never mirrors by handedness (not even the
+    /// translate's sign) — so a main-hand and an off-hand item pose the same.
+    /// This is read from source (see [`HandPoseOverride::Allay`]'s doc
+    /// comment), not assumed, and this test pins both halves of that claim:
+    /// the transcribed chain, and the left/right symmetry.
+    #[test]
+    fn allay_hand_transform_transcribes_its_chain_and_ignores_which_arm() {
+        let skel = skeleton_for("allay");
+        let body = skel.index_of("body").unwrap();
+        let world_body = skel.pose(&AnimInput::REST)[body];
+        // Allay's arms never rotate in this port either (`HeadOnly` family, no
+        // arm `setupAnim`, zero authored rotation), so `right_arm.xRot` is
+        // exactly `0.0` here and `Rx(0)` is the identity — independently
+        // computable without reading any of this crate's own posed state.
+        let expected = world_body
+            * Mat4::from_translation(Vec3::new(0.0, 1.0 / 16.0, 3.0 / 16.0))
+            * Mat4::from_rotation_x(0.0)
+            * Mat4::from_scale(Vec3::splat(0.7))
+            * Mat4::from_translation(Vec3::new(1.0 / 16.0, 0.0, 0.0));
+        let right = skel
+            .translate_to_hand(&AnimInput::REST, false, HandPoseOverride::Allay)
+            .unwrap();
+        let left = skel
+            .translate_to_hand(&AnimInput::REST, true, HandPoseOverride::Allay)
+            .unwrap();
+        assert_eq!(right, left, "allay must not mirror by arm at all");
+        for (a, b) in right
+            .to_cols_array()
+            .iter()
+            .zip(expected.to_cols_array().iter())
+        {
+            assert!((a - b).abs() < 1e-4, "allay: {right:?} vs {expected:?}");
+        }
+    }
+
+    /// None of the four override kinds may flip handedness: every op involved
+    /// (translation, a proper rotation, a uniform positive scale) has a
+    /// positive determinant, so the sign a real camera would see must survive
+    /// unchanged from the plain structural chain. This is the same invariant
+    /// `entity::the_held_item_pose_preserves_winding_for_a_real_mob` pins one
+    /// layer up, checked here at the source of the four new code paths rather
+    /// than only downstream of them.
+    #[test]
+    fn no_override_flips_the_structural_determinant_sign() {
+        let cases: [(&str, HandPoseOverride); 4] = [
+            ("skeleton", HandPoseOverride::PivotShiftTexels(1.0)),
+            ("player_slim", HandPoseOverride::PivotShiftTexels(0.5)),
+            ("vex", HandPoseOverride::Vex),
+            ("allay", HandPoseOverride::Allay),
+        ];
+        for (model, override_) in cases {
+            let skel = skeleton_for(model);
+            let structural_sign = skel
+                .translate_to_hand(&AnimInput::REST, false, HandPoseOverride::Structural)
+                .unwrap()
+                .determinant()
+                .signum();
+            for left in [false, true] {
+                let got = skel
+                    .translate_to_hand(&AnimInput::REST, left, override_)
+                    .unwrap();
+                assert_eq!(
+                    got.determinant().signum(),
+                    structural_sign,
+                    "{model} {}: override flipped handedness (det = {})",
+                    if left { "left" } else { "right" },
+                    got.determinant()
+                );
+            }
+        }
     }
 }

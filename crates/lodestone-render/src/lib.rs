@@ -79,7 +79,20 @@ pub use block_models::{
     ItemGeometry, StateModel,
 };
 pub use block_resolver::{BlockAtlas, BlockAtlasError, MAX_SPRITES};
-pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry, blocks_json_registry};
+pub use blocks_json::{BlocksJsonError, BlocksJsonRegistry};
+// `blocks_json::blocks_json_registry` is itself gated (it re-exports the
+// native-only disk loader in `blocks_json_native.rs`, confined there so
+// `std::fs` cannot leak onto the wasm path — see `blocks_json.rs`'s `mod
+// native`). This re-export has to carry the identical `cfg`, the same way
+// `frame::SystemClock` does a few lines down: a blanket `pub use` here would
+// try to name an item that does not exist under `--target wasm32-unknown-
+// unknown`, which is exactly the `unresolved import` this crate was failing
+// wasm-check.sh with. A loader that reads `std::fs` cannot exist on wasm
+// regardless, so gating the *symbol* is correct — the alternative, a stub
+// that silently returned an empty registry, would render an untextured
+// world with no error on the one platform that hit this path.
+#[cfg(not(target_arch = "wasm32"))]
+pub use blocks_json::blocks_json_registry;
 pub use camera::{Camera, Frustum, Intersection, Plane};
 pub use caps::{Backend, GpuCapabilities};
 pub use device::{GpuContext, GpuError};
