@@ -23,6 +23,7 @@ use golden_traces::{
     GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE, GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB,
     GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SINK, GOLDEN_LEVITATION, GOLDEN_SLAB_STEP,
     GOLDEN_SLIME_BOUNCE, GOLDEN_SLIME_BOUNCE_SNEAK, GOLDEN_SLOW_FALLING_WATER,
+    GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP, GOLDEN_SNEAK_EDGE_WALK_OFF,
     GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP, GOLDEN_SWIM_SPRINT, GOLDEN_WALK_FLAT,
     GOLDEN_WALK_INTO_WALL, GOLDEN_WATER_CURRENT_PUSH, GOLDEN_WATER_SINK, GoldenTick,
 };
@@ -786,4 +787,120 @@ fn elytra_diagonal_yaw_matches_golden() {
         "diagonal glide missing an axis (dx {dx}, dz {dz})"
     );
     assert!((dx - dz).abs() > 1.0, "diagonal glide was not asymmetric");
+}
+
+// ---------------------------------------------------------------------------
+// `Player.maybeBackOffFromEdge` — the sneak-at-a-ledge back-off.
+//
+// The three traces below come from the same independent Python oracle as every
+// other trace in this file, and are replayed bit-for-bit. See
+// `docs/edge-back-off.md` for the rule and `tests/edge_back_off.rs` for the
+// pure-rule control (the same delta run with the rule on and off).
+// ---------------------------------------------------------------------------
+
+/// A floor whose eastern edge is the `x = 1` plane: solid for `x <= 0` only.
+fn ledge_at_x1(r: i32) -> World {
+    let mut world = World::default();
+    for x in -r..=0 {
+        for z in -r..=r {
+            world.solid(x, 0, z);
+        }
+    }
+    world
+}
+
+#[test]
+fn sneak_edge_stop_matches_golden() {
+    let world = ledge_at_x1(6);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_trace(
+        "sneak_edge_stop",
+        &world,
+        state,
+        &GOLDEN_SNEAK_EDGE_STOP,
+        |_| MovementInput {
+            forward: 1.0,
+            sneak: true,
+            ..MovementInput::NONE
+        },
+    );
+
+    // Anti-vacuity, and the assertion the rule exists to make: the player must
+    // never leave y = 1.0. A single tick of descent means the back-off failed.
+    for (t, tick) in GOLDEN_SNEAK_EDGE_STOP.iter().enumerate() {
+        let y = f64::from_bits(tick.pos[1]);
+        assert_eq!(y, 1.0, "sneak_edge_stop fell at tick {t} (y = {y})");
+    }
+    // ... and they must actually have walked *up to* the edge, not stalled at the
+    // start. Support ends at x = 1.0 and the box half-width is 0.3, so the last
+    // standable centre is just under x = 1.3.
+    let last_x = f64::from_bits(GOLDEN_SNEAK_EDGE_STOP[GOLDEN_SNEAK_EDGE_STOP.len() - 1].pos[0]);
+    assert!(
+        last_x > 1.2 && last_x < 1.3,
+        "sneak_edge_stop did not reach the ledge (x = {last_x})"
+    );
+}
+
+#[test]
+fn sneak_edge_walk_off_is_the_world_control() {
+    // WORLD CONTROL. Same fixture, same inputs, shift released. This is the
+    // negative control that makes the test above non-vacuous: it proves the
+    // fixture really does have an edge you fall off, so `sneak_edge_stop`'s
+    // "y never changes" is a consequence of the rule and not of the geometry.
+    let world = ledge_at_x1(6);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_trace(
+        "sneak_edge_walk_off",
+        &world,
+        state,
+        &GOLDEN_SNEAK_EDGE_WALK_OFF,
+        |_| MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        },
+    );
+
+    let last = &GOLDEN_SNEAK_EDGE_WALK_OFF[GOLDEN_SNEAK_EDGE_WALK_OFF.len() - 1];
+    let y = f64::from_bits(last.pos[1]);
+    let x = f64::from_bits(last.pos[0]);
+    assert!(
+        y < 1.0 && x > 1.3,
+        "control never left the ledge (x = {x}, y = {y}) — the fixture has no edge \
+         and `sneak_edge_stop` proves nothing"
+    );
+}
+
+#[test]
+fn sneak_edge_diagonal_matches_golden() {
+    // An outside corner: the floor is missing wherever x >= 1 AND z >= 1, so
+    // neither the pure-X nor the pure-Z probe clears the support but the joint one
+    // does. This is the only scenario that enters the third loop.
+    let mut world = World::default();
+    for x in -6..=6 {
+        for z in -6..=6 {
+            if x >= 1 && z >= 1 {
+                continue;
+            }
+            world.solid(x, 0, z);
+        }
+    }
+    let mut state = grounded_facing(0.5, 1.0, 0.5, 0.0);
+    state.velocity = Vec3d::new(0.8, 0.0, 0.8);
+    assert_trace(
+        "sneak_edge_diagonal",
+        &world,
+        state,
+        &GOLDEN_SNEAK_EDGE_DIAGONAL,
+        |_| MovementInput {
+            sneak: true,
+            ..MovementInput::NONE
+        },
+    );
+}
+
+/// A grounded state facing `yaw` (yaw `-90` faces `+X`).
+fn grounded_facing(x: f64, y: f64, z: f64, yaw: f32) -> PlayerState {
+    let mut s = PlayerState::at(Vec3d::new(x, y, z), yaw);
+    s.on_ground = true;
+    s
 }

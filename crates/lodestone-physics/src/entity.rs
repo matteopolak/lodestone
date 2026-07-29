@@ -32,8 +32,9 @@ use crate::collision::{CollisionView, collide};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth;
 use crate::player::{
-    effective_gravity, friction_block, friction_influenced_speed_value, handle_on_climbable,
-    input_vector, mth_equal, restitute_movement_after_collisions,
+    EdgeBackOff, effective_gravity, friction_block, friction_influenced_speed_value,
+    handle_on_climbable, input_vector, maybe_back_off_from_edge, mth_equal,
+    restitute_movement_after_collisions,
 };
 use crate::profile::PhysicsProfile;
 
@@ -159,13 +160,17 @@ impl EntityMotion {
 /// in `getEffectiveGravity` and so affects the land-bounce branch of restitution.
 /// `suppress_bounce` is `isSuppressingBounce()` (true for a sneaking player),
 /// which both zeroes the base entity restitution and vetoes the slime/bed bounce.
-/// A plain mob passes `MoveContext::default()` (both `false`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// A plain mob passes `MoveContext::default()` (all inert).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MoveContext {
     /// Slow Falling is active (reduces descent gravity to `min(gravity, 0.01)`).
     pub slow_falling: bool,
     /// The entity is suppressing bounces (a sneaking player).
     pub suppress_bounce: bool,
+    /// Which `maybeBackOffFromEdge` override this entity has. Defaults to
+    /// [`EdgeBackOff::Entity`], the identity base implementation, so a mob or a
+    /// dropped item is inert by construction.
+    pub edge_back_off: EdgeBackOff,
 }
 
 /// `Entity.move(MoverType.SELF, deltaMovement)` restricted to the parts that
@@ -213,6 +218,27 @@ pub fn move_entity(
     }
 
     let bb = dims.bounding_box(motion.position);
+
+    // `delta = this.maybeBackOffFromEdge(delta, moverType);` (`Entity.java:743`) —
+    // **inside** the move, after the stuck multiplier is consumed and before
+    // `collide`. The position is unchanged at this point, so `bb` is vanilla's
+    // `getBoundingBox()`.
+    //
+    // Order is observable in two ways, both of which a "clamp the velocity before
+    // the tick" shortcut would get wrong. It runs *after* the stuck multiplier, so
+    // a cobweb-slowed delta is what gets probed and stepped. And it rewrites only
+    // this local candidate: `pre_collision_velocity` is deliberately left alone,
+    // because vanilla never calls `setDeltaMovement` here, so the velocity that
+    // `restituteMovementAfterCollisions` reads keeps its un-backed-off value.
+    move_delta = maybe_back_off_from_edge(
+        move_delta,
+        ctx.edge_back_off,
+        bb,
+        motion.on_ground,
+        dims.step_height,
+        view,
+    );
+
     let resolved = collide(view, move_delta, bb, motion.on_ground, dims.step_height);
 
     let x_collision = !mth_equal(move_delta.x, resolved.x);
@@ -305,6 +331,9 @@ pub struct AirTravelContext {
     /// `shouldDiscardFriction()` — when true vanilla skips the drag multiply
     /// entirely for this tick. False for players and ordinary mobs.
     pub discard_friction: bool,
+    /// Which `maybeBackOffFromEdge` override this entity has, forwarded to
+    /// [`MoveContext`]. Defaults to the inert [`EdgeBackOff::Entity`].
+    pub edge_back_off: EdgeBackOff,
 }
 
 /// `LivingEntity.travelInAir(Vec3)` (LivingEntity.java:2460) — the shared,
@@ -369,6 +398,7 @@ pub fn travel_in_air(
     let move_ctx = MoveContext {
         slow_falling: ctx.slow_falling,
         suppress_bounce: ctx.suppress_bounce,
+        edge_back_off: ctx.edge_back_off,
     };
     move_entity(motion, dims, view, profile, move_ctx);
 

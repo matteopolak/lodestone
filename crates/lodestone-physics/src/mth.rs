@@ -195,9 +195,37 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
     clamp_f32(1.0 - (1.0 - friction) * modifier, 0.0, 1.0)
 }
 
+/// `Math.signum(double)` — **not** Rust's [`f64::signum`].
+///
+/// The two disagree on zero, which is the whole reason this exists. Java returns
+/// *the argument itself* for `±0.0` (so `signum(0.0) == 0.0` and
+/// `signum(-0.0) == -0.0`), whereas Rust's `f64::signum` returns `1.0` for `0.0`
+/// and `-1.0` for `-0.0`. `Player.maybeBackOffFromEdge` computes its step as
+/// `Math.signum(deltaX) * 0.05`, so on a zero component Rust's version would
+/// manufacture a `±0.05` step out of nothing.
+///
+/// It happens to be harmless *there* — the step is only read inside a
+/// `while (deltaX != 0.0)` loop, which a zero component never enters — but the
+/// discrepancy is exactly the kind that survives review and then bites a later
+/// caller. NaN propagates in both.
+#[must_use]
+pub fn java_signum(v: f64) -> f64 {
+    if v == 0.0 || v.is_nan() { v } else { v.signum() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_signum_returns_the_argument_for_signed_zero() {
+        // Rust's `f64::signum` returns ±1.0 here; Java's `Math.signum` does not.
+        assert_eq!(java_signum(0.0).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(java_signum(-0.0).to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(java_signum(0.2), 1.0);
+        assert_eq!(java_signum(-0.2), -1.0);
+        assert!(java_signum(f64::NAN).is_nan());
+    }
 
     #[test]
     fn sin_table_matches_jvm_reference() {

@@ -456,6 +456,13 @@ class State:
         self.slow_falling = False
         self.dolphins_grace = False
         self.jump_boost = None   # None or amplifier (0-based)
+        # Entity.fallDistance (a double since 26.2). Read only by the airborne
+        # branch of Player.isAboveGround. Like the Rust port, this oracle does NOT
+        # maintain it: vanilla's accounting is spread over checkFallDamage, the
+        # clip-through reset in move(), the lava halving in baseTick,
+        # checkFallDistanceAccumulation and the water/vehicle/teleport resets. Both
+        # ports treat it as a caller-supplied input defaulting to 0.0.
+        self.fall_distance = 0.0
 
 
 def bounding_box(s):
@@ -546,8 +553,113 @@ def restitute(world, s, delta, resolved, xcol, zcol, vcol, vbelow, suppress_boun
     return [vx, vy, vz]
 
 
-def do_move(world, s, delta, suppress_bounce=False):
+def no_collision(world, box):
+    """CollisionGetter.noBlockCollision — the block half of noCollision(entity, box).
+
+    Strict min<max overlap, matching Shapes.joinIsNotEmpty(.., AND) for box shapes,
+    so a flush contact is not a collision. Entity and world-border collisions are
+    out of scope for both ports.
+    """
+    for sh in gather(world, box):
+        if (box[0] < sh[3] and box[3] > sh[0]
+                and box[1] < sh[4] and box[4] > sh[1]
+                and box[2] < sh[5] and box[5] > sh[2]):
+            return False
+    return True
+
+
+def can_fall_at_least(bb, delta_x, delta_z, min_height, world):
+    """Player.canFallAtLeast (Player.java:935-950).
+
+    X/Z are inset by 1e-7; the bottom is pushed 1e-7 *down* and the top sits
+    exactly at the feet plane. Association is left-to-right as in the source.
+    """
+    probe = (
+        bb[0] + 1.0e-7 + delta_x,
+        bb[1] - min_height - 1.0e-7,
+        bb[2] + 1.0e-7 + delta_z,
+        bb[3] - 1.0e-7 + delta_x,
+        bb[1],
+        bb[5] - 1.0e-7 + delta_z,
+    )
+    return no_collision(world, probe)
+
+
+def is_above_ground(bb, on_ground, fall_distance, max_down_step, world):
+    """Player.isAboveGround (Player.java:931-933)."""
+    return on_ground or (
+        fall_distance < max_down_step
+        and not can_fall_at_least(bb, 0.0, 0.0, max_down_step - fall_distance, world)
+    )
+
+
+def java_signum(v):
+    """Math.signum: returns the argument itself for +-0.0 and NaN."""
+    if v == 0.0 or math.isnan(v):
+        return v
+    return 1.0 if v > 0.0 else -1.0
+
+
+def maybe_back_off_from_edge(world, s, delta, staying_on_ground_surface):
+    """Player.maybeBackOffFromEdge (Player.java:880-927).
+
+    maxDownStep is maxUpStep() -- the resolved STEP_HEIGHT attribute (default
+    0.6), not a literal. The `!abilities.flying` and mover-type conjuncts hold by
+    construction: this oracle has no creative flight and no piston mover.
+    """
     bb = bounding_box(s)
+    max_down_step = float(P.step_height)
+    if not (not (delta[1] > 0.0)
+            and staying_on_ground_surface
+            and is_above_ground(bb, s.on_ground, s.fall_distance, max_down_step, world)):
+        return delta
+
+    delta_x = delta[0]
+    delta_z = delta[2]
+    step_x = java_signum(delta_x) * 0.05
+    step_z = java_signum(delta_z) * 0.05
+
+    # Loop 1: X alone.
+    while delta_x != 0.0 and can_fall_at_least(bb, delta_x, 0.0, max_down_step, world):
+        if abs(delta_x) <= 0.05:
+            delta_x = 0.0
+            break
+        delta_x -= step_x
+
+    # Loop 2: Z alone, from the original delta.z.
+    while delta_z != 0.0 and can_fall_at_least(bb, 0.0, delta_z, max_down_step, world):
+        if abs(delta_z) <= 0.05:
+            delta_z = 0.0
+            break
+        delta_z -= step_z
+
+    # Loop 3: both together (the outside-corner case). No break.
+    while (delta_x != 0.0 and delta_z != 0.0
+           and can_fall_at_least(bb, delta_x, delta_z, max_down_step, world)):
+        if abs(delta_x) <= 0.05:
+            delta_x = 0.0
+        else:
+            delta_x -= step_x
+        if abs(delta_z) <= 0.05:
+            delta_z = 0.0
+        else:
+            delta_z -= step_z
+
+    return [delta_x, delta[1], delta_z]
+
+
+def do_move(world, s, delta, suppress_bounce=False, staying_on_ground_surface=False):
+    bb = bounding_box(s)
+    # Entity.java:743 -- inside move(), after the stuck multiplier and before
+    # collide(). It rewrites the *local* candidate delta only: vanilla never calls
+    # setDeltaMovement here, so the deltaMovement field keeps its un-backed-off
+    # value. restituteMovementAfterCollisions reads that field
+    # (Entity.java:808-810), and when restitution does not run the field is simply
+    # left alone -- so `pre` below, not `delta`, is the velocity that survives.
+    # The collision flags and the position-commit guard DO use the backed-off delta
+    # (Entity.java:766-767, :746).
+    pre = list(delta)
+    delta = maybe_back_off_from_edge(world, s, list(delta), staying_on_ground_surface)
     resolved = collide(world, tuple(delta), bb, s.on_ground, float(P.step_height))
     xcol = abs(delta[0] - resolved[0]) >= float(f32(1.0e-5))
     zcol = abs(delta[2] - resolved[2]) >= float(f32(1.0e-5))
@@ -565,9 +677,9 @@ def do_move(world, s, delta, suppress_bounce=False):
     # deltaMovement stays == delta through collide; restitute rewrites it
     # (zeroing a blocked axis or bouncing off a bouncy block).
     if (moved_vert and vcol) or s.hcol:
-        s.vel = restitute(world, s, delta, resolved, xcol, zcol, vcol, vbelow, suppress_bounce)
+        s.vel = restitute(world, s, pre, resolved, xcol, zcol, vcol, vbelow, suppress_bounce)
     else:
-        s.vel = [delta[0], delta[1], delta[2]]
+        s.vel = [pre[0], pre[1], pre[2]]
     # block speed factor (soul sand / honey), applied last as in move().
     # blockPosition() (floor of feet) first; fall to the block below only if 1.0.
     bx, by, bz = mth_floor(s.pos[0]), mth_floor(s.pos[1]), mth_floor(s.pos[2])
@@ -663,7 +775,7 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
     climbing = world.is_climbable(math.floor(s.pos[0]), math.floor(s.pos[1]), math.floor(s.pos[2]))
     if climbing:
         s.vel = handle_on_climbable(s.vel, sneak)
-    do_move(world, s, s.vel, sneak)
+    do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
     mvx, mvy, mvz = s.vel
     if (s.hcol or jump) and climbing:
         mvy = 0.2
@@ -742,7 +854,7 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[0] += ax
     s.vel[1] += ay
     s.vel[2] += az
-    do_move(world, s, s.vel, sneak)
+    do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
     mv = (
         s.vel[0] * float(slow_down),
         s.vel[1] * float(f32(0.8)),
@@ -789,7 +901,7 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[0] += ax
     s.vel[1] += ay
     s.vel[2] += az
-    do_move(world, s, s.vel, sneak)
+    do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
     # deep-lava branch: scale(0.5) then -baseGravity/4
     s.vel = [s.vel[0] * 0.5, s.vel[1] * 0.5, s.vel[2] * 0.5]
     if base_gravity != 0.0:
@@ -835,7 +947,7 @@ def update_fall_flying_movement(s, mx, my, mz):
     return [mx * float(f32(0.99)), my * float(f32(0.98)), mz * float(f32(0.99))]
 
 
-def tick_elytra(world, s):
+def tick_elytra(world, s, sneak=False):
     # travelFallFlying client path: aiStep velocity collapse, elytra update,
     # then move() with collision. WASD input is ignored during elytra flight.
     if s.no_jump_delay > 0:
@@ -847,7 +959,8 @@ def tick_elytra(world, s):
     if abs(s.vel[1]) < 0.003:
         dy = 0.0
     s.vel = update_fall_flying_movement(s, dx, dy, dz)
-    do_move(world, s, list(s.vel), suppress_bounce=False)
+    do_move(world, s, list(s.vel), suppress_bounce=False,
+            staying_on_ground_surface=sneak)
 
 
 def tick(world, s, forward, strafe, jump, sneak, sprint):
@@ -1274,6 +1387,70 @@ def scenario_water_current_push():
     return w, trace
 
 
+def ledge_at_x1(r=6):
+    """A floor whose eastern edge is the x=1 plane: solid for x <= 0 only.
+
+    A player standing at x=0.5 has box [0.2, 0.8]; support ends at x=1.0, so the
+    inset probe of canFallAtLeast first clears the support exactly when the move
+    would leave the block -- which is what makes the back-off fire on that tick and
+    not before.
+    """
+    w = World()
+    for x in range(-r, 1):
+        for z in range(-r, r + 1):
+            w.add_solid(x, 0, z)
+    return w
+
+
+def scenario_sneak_edge_stop():
+    # Sneak-walk east into the ledge. yaw -90 faces +X, and the sine LUT leaves a
+    # small +Z component, so both horizontal axes are live.
+    w = ledge_at_x1()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(120):
+        tick_air(w, s, 1.0, 0.0, False, True, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_sneak_edge_walk_off():
+    # WORLD CONTROL for scenario_sneak_edge_stop: identical fixture, shift released.
+    # If this one does not leave the ledge and fall, the fixture has no edge and the
+    # stop assertion above is vacuous.
+    w = ledge_at_x1()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(120):
+        tick_air(w, s, 1.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_sneak_edge_diagonal():
+    # An *outside corner*: the floor is missing wherever x >= 1 and z >= 1, so
+    # neither a pure-X nor a pure-Z probe clears the support but the diagonal one
+    # does. Reaching that state needs a single-tick delta near the 0.6 box width, so
+    # the player is launched with velocity (0.8, 0, 0.8) rather than walked: this is
+    # the only scenario that enters the third (joint X/Z) loop.
+    w = World()
+    for x in range(-6, 7):
+        for z in range(-6, 7):
+            if x >= 1 and z >= 1:
+                continue
+            w.add_solid(x, 0, z)
+    s = State(0.5, 1.0, 0.5, 0.0)
+    s.on_ground = True
+    s.vel = [0.8, 0.0, 0.8]
+    trace = []
+    for _ in range(40):
+        tick_air(w, s, 0.0, 0.0, False, True, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
 SCENARIOS = [
     ("free_fall", scenario_free_fall),
     ("walk_flat", scenario_walk_flat),
@@ -1301,6 +1478,9 @@ SCENARIOS = [
     ("elytra_climb", scenario_elytra_climb),
     ("elytra_diagonal_yaw", scenario_elytra_diagonal_yaw),
     ("water_current_push", scenario_water_current_push),
+    ("sneak_edge_stop", scenario_sneak_edge_stop),
+    ("sneak_edge_walk_off", scenario_sneak_edge_walk_off),
+    ("sneak_edge_diagonal", scenario_sneak_edge_diagonal),
 ]
 
 
