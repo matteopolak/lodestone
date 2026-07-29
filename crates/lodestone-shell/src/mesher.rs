@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     mpsc::{self, Receiver, Sender},
 };
 use std::thread::{self, JoinHandle};
@@ -76,7 +76,18 @@ impl SectionKey {
 pub struct SectionSnapshot {
     /// Which section this is.
     pub key: SectionKey,
-    sections: Vec<ChunkSection>,
+    /// One `Arc` per neighbour, each a clone of the handle
+    /// [`lodestone_world::World::section`] already hands back — i.e. a
+    /// refcount bump, never a copy of the section's palette data. This used
+    /// to store owned `ChunkSection`s, deep-cloning every populated neighbour
+    /// (its paletted-container `Vec`s included) on every snapshot regardless
+    /// of whether the world ever edits it — which is exactly the cost
+    /// `Arc<ChunkSection>` and copy-on-write exist to avoid: see
+    /// `docs/chunk-world-resource.md` on "never hold the chunk read lock
+    /// across a mesh" for the same rule applied one layer up. An edit to a
+    /// section this snapshot still references now forks *there*, on write,
+    /// only if a write actually happens — not unconditionally, here, on read.
+    sections: Vec<Arc<ChunkSection>>,
     /// Per-neighbour light, indexed identically to `sections`
     /// (`[dx+1][dy+1][dz+1]`). `None` where the neighbour column or light
     /// section is absent (edge of world / below the world). Those slots fall
@@ -95,7 +106,7 @@ pub struct SectionSnapshot {
 impl SectionSnapshot {
     fn at(&self, dx: i32, dy: i32, dz: i32) -> &ChunkSection {
         let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-        &self.sections[i]
+        self.sections[i].as_ref()
     }
 
     fn light_at(&self, dx: i32, dy: i32, dz: i32) -> Option<&SectionLightData> {
@@ -137,6 +148,20 @@ fn air_section() -> ChunkSection {
         id::AIR,
         0,
     )
+}
+
+/// A process-wide shared handle to one all-air section, for the "absent
+/// neighbour" slots [`snapshot_section_in`] fills a 27-neighbourhood with.
+///
+/// `air_section()` is already cheap to construct (its `PalettedContainer`s
+/// are `Storage::Single`, so building one allocates nothing), but a missing
+/// neighbour is common — every section at the edge of a loaded 3×3 column
+/// footprint has one — and there is no reason for even the small `Arc` box
+/// allocation to happen per slot when every slot's content is identical.
+/// Cloning this `Arc` is a refcount bump.
+fn air_section_arc() -> Arc<ChunkSection> {
+    static AIR: OnceLock<Arc<ChunkSection>> = OnceLock::new();
+    AIR.get_or_init(|| Arc::new(air_section())).clone()
 }
 
 /// Clone the 27-section neighbourhood around `key` out of the world, if the
@@ -207,38 +232,54 @@ pub fn snapshot_section_in(
         return None;
     }
 
-    let mut sections = Vec::with_capacity(27);
-    let mut lights = Vec::with_capacity(27);
+    // Pre-sized and index-assigned rather than push()ed in `(dx, dy, dz)`
+    // order, so the loop below can be reordered to `(dx, dz, dy)` — grouping
+    // the three `dy` neighbours that share one `pos` — without disturbing the
+    // `[dx+1][dy+1][dz+1]` layout `SectionSnapshot::at`/`light_at` index into.
+    // Every slot defaults to shared air (see `air_section_arc`); a present,
+    // in-range section or light overwrites it below.
+    let mut sections: Vec<Arc<ChunkSection>> = vec![air_section_arc(); 27];
+    let mut lights: Vec<Option<SectionLightData>> = vec![None; 27];
     for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                let pos = ChunkPos::new(key.cx + dx, key.cz + dz);
+        for dz in -1..=1 {
+            let pos = ChunkPos::new(key.cx + dx, key.cz + dz);
+            // `dy` never changes `pos`, so one `world.get` here serves all
+            // three `dy` neighbours below — both the block and the light
+            // lookup used to probe `self.chunks` (a `HashMap<ChunkPos, _>`)
+            // independently, once each per `dy`, for up to 27 + 27 = 54
+            // probes per `snapshot_section_in` call. This is 9.
+            let chunk = world.get(pos);
+            for dy in -1..=1 {
+                let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
                 let si = key.si as i32 + dy;
-                // `World::section` hands back an owned `Arc<ChunkSection>`, so
-                // the clone that makes the snapshot `Send` happens here and the
-                // world is never locked while meshing. An absent or elided
-                // neighbour becomes lit air rather than an unlit void.
-                let section = if in_range(si) {
-                    world.section(pos, si as usize)
-                } else {
-                    None
-                };
-                sections.push(section.map_or_else(air_section, |s| (*s).clone()));
 
-                // Light is LIGHT-section indexed: block section `si` reads light
-                // section `si + 1` (light section 0 is the boundary *below* the
-                // world). This is an off-by-one *by design*, not a bug — do not
-                // "correct" it. Deliberately not gated on `in_range`: the two
-                // boundary light sections exist precisely so the top and bottom
-                // block sections can sample into them. `section_light` returns
-                // `None` for an absent column or a genuinely out-of-range light
-                // section; those slots keep the bridge in `mesh_snapshot`.
-                let light = if si + 1 < 0 {
+                // `ChunkColumn::section_arc` hands back a clone of the
+                // section's `Arc` — a refcount bump, not a copy of its
+                // palette data (see `SectionSnapshot::sections`'s docs). An
+                // absent or elided neighbour keeps this slot's default: lit
+                // air rather than an unlit void.
+                if in_range(si)
+                    && let Some(section) = chunk.and_then(|c| c.column.section_arc(si as usize))
+                {
+                    sections[i] = section;
+                }
+
+                // Light is LIGHT-section indexed: block section `si` reads
+                // light section `si + 1` (light section 0 is the boundary
+                // *below* the world). This is an off-by-one *by design*, not
+                // a bug — do not "correct" it. Deliberately not gated on
+                // `in_range`: the two boundary light sections exist precisely
+                // so the top and bottom block sections can sample into them.
+                // `None` here (absent column, or a genuinely out-of-range
+                // light section) keeps the bridge in `mesh_snapshot`.
+                lights[i] = if si + 1 < 0 {
                     None
                 } else {
-                    world.section_light(pos, (si + 1) as usize)
+                    let li = (si + 1) as usize;
+                    chunk.and_then(|c| {
+                        (li < c.light.light_section_count()).then(|| c.light.section_light(li))
+                    })
                 };
-                lights.push(light);
             }
         }
     }
@@ -333,19 +374,20 @@ pub fn sky_default_for_dimension(dimension: Option<&lodestone_client::DimensionI
     }
 }
 
+/// Whether `section` holds nothing but air, i.e. nothing for the mesher to
+/// draw.
+///
+/// This used to be a 4096-cell scan calling `get_block` for every `(x, y, z)`
+/// — once per section, i.e. once per `snapshot_section_in` call, i.e.
+/// `section_count` times (≈24) per column remesh. `ChunkSection` already
+/// maintains `non_air_count` incrementally on every write (see
+/// `lodestone-world/src/section.rs`), and every `ChunkSection` in this crate
+/// is constructed with `air_id == id::AIR` (`air_section` here,
+/// `worldgen::generate_column`'s demo columns, and every version crate's
+/// chunk-packet decoder all pass `0`), so `is_air_only` — an `O(1)` field read
+/// — answers exactly the same question this scan did.
 fn is_all_air(section: &ChunkSection) -> bool {
-    // A cheap proxy: scan is unnecessary because ChunkSection tracks non-air.
-    // We conservatively mesh any section that has at least one non-air block.
-    for x in 0..16 {
-        for y in 0..16 {
-            for z in 0..16 {
-                if section.get_block(x, y, z) != id::AIR {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+    section.is_air_only()
 }
 
 /// A section's light source for the mesh pass: either the world's real light
@@ -1302,7 +1344,7 @@ mod tests {
                             }
                         }
                     }
-                    sections.push(sec);
+                    sections.push(Arc::new(sec));
                     lights.push(if lights_present {
                         Some(SectionLightData {
                             sky: LightData::Uniform(sky),
@@ -1651,9 +1693,9 @@ mod tests {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     sections.push(if (dx, dy, dz) == (0, 0, 0) {
-                        centre.clone()
+                        Arc::new(centre.clone())
                     } else {
-                        air_section()
+                        air_section_arc()
                     });
                     // Every slot carries real light, so the absent-neighbour
                     // bridge cannot leak full-bright into this measurement.
