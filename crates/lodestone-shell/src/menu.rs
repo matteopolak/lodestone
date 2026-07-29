@@ -58,6 +58,10 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
+    /// The settings screen (currently just GUI scale). Reached from
+    /// [`Screen::MainMenu`]; Escape returns there. Changes persist immediately
+    /// (see [`crate::config::Options`]), not on exit.
+    Settings,
     /// A session is being established — integrated-server startup and/or the
     /// connect handshake. Nothing is playable yet; the pointer is free so the
     /// user can still cancel (quit) while it loads.
@@ -170,13 +174,19 @@ impl UiState {
         self.screen == Screen::ServerEdit
     }
 
+    /// Whether the settings screen is showing.
+    #[must_use]
+    pub fn is_settings(&self) -> bool {
+        self.screen == Screen::Settings
+    }
+
     /// Whether the shell is on any pre-session menu screen, i.e. no world is
     /// loaded and the menu renderer owns the frame.
     #[must_use]
     pub fn is_menu(&self) -> bool {
         matches!(
             self.screen,
-            Screen::MainMenu | Screen::ServerList | Screen::ServerEdit
+            Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings
         )
     }
 
@@ -289,6 +299,22 @@ impl UiState {
         }
     }
 
+    /// Open the settings screen. Only from the title screen, matching
+    /// [`open_server_list`](Self::open_server_list)'s reasoning: a stray call
+    /// must never pull the player out of a world.
+    pub fn open_settings(&mut self) {
+        if self.screen == Screen::MainMenu {
+            self.screen = Screen::Settings;
+        }
+    }
+
+    /// Back to the title screen from settings.
+    pub fn close_settings(&mut self) {
+        if self.screen == Screen::Settings {
+            self.screen = Screen::MainMenu;
+        }
+    }
+
     // -- input-driven transitions ----------------------------------------
 
     /// Open the chat box over the world. Only from [`Screen::Playing`]; opening
@@ -328,6 +354,7 @@ impl UiState {
     /// - Error → back to the menu (dismiss)
     /// - ServerEdit → ServerList (cancel the edit)
     /// - ServerList → MainMenu
+    /// - Settings → MainMenu
     /// - MainMenu → request a clean quit (Escape on the title exits)
     /// - Connecting → no-op (can't pause mid-connect; the app offers quit-to-cancel)
     ///
@@ -341,6 +368,7 @@ impl UiState {
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
+            Screen::Settings => self.screen = Screen::MainMenu,
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
         }
@@ -612,7 +640,12 @@ mod tests {
 
     #[test]
     fn menu_screens_never_grab_the_cursor_or_take_gameplay_input() {
-        for screen in [Screen::MainMenu, Screen::ServerList, Screen::ServerEdit] {
+        for screen in [
+            Screen::MainMenu,
+            Screen::ServerList,
+            Screen::ServerEdit,
+            Screen::Settings,
+        ] {
             let mut ui = UiState::new();
             match screen {
                 Screen::ServerList => ui.open_server_list(),
@@ -620,6 +653,7 @@ mod tests {
                     ui.open_server_list();
                     ui.open_server_edit();
                 }
+                Screen::Settings => ui.open_settings(),
                 _ => {}
             }
             assert_eq!(ui.screen(), screen);
@@ -682,5 +716,39 @@ mod tests {
         check(&ui); // Paused
         ui.session_failed("end");
         check(&ui); // Error
+    }
+
+    #[test]
+    fn settings_opens_from_the_title_and_escape_returns_to_it() {
+        let mut ui = UiState::new();
+        ui.open_settings();
+        assert_eq!(ui.screen(), Screen::Settings);
+        assert!(ui.is_settings() && ui.is_menu());
+        assert!(!ui.wants_cursor_grab());
+        assert!(!ui.accepts_gameplay_input());
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu, "escape unwinds to the title");
+    }
+
+    #[test]
+    fn settings_only_opens_from_the_title_screen() {
+        // A stray call must never pull the player out of a world, matching the
+        // server list's own guard.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.open_settings();
+        assert_eq!(ui.screen(), Screen::Playing);
+
+        ui.pause();
+        ui.open_settings();
+        assert_eq!(ui.screen(), Screen::Paused);
+    }
+
+    #[test]
+    fn close_settings_is_a_no_op_off_screen() {
+        let mut ui = UiState::new();
+        ui.close_settings();
+        assert_eq!(ui.screen(), Screen::MainMenu, "nothing to close");
     }
 }

@@ -32,6 +32,7 @@
 
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
 use super::{Screen, SessionKind, UiState};
+use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
 
 /// Longest accepted address string in the edit form, in characters. A hostname
 /// is capped at 253 by DNS; the extra room is for `:port`.
@@ -190,14 +191,17 @@ pub enum MainButton {
     Singleplayer,
     /// Open the server list.
     Multiplayer,
+    /// Open the settings screen.
+    Options,
     /// Quit the game.
     Quit,
 }
 
 /// Every main-menu button, in display order.
-pub const MAIN_BUTTONS: [MainButton; 3] = [
+pub const MAIN_BUTTONS: [MainButton; 4] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
+    MainButton::Options,
     MainButton::Quit,
 ];
 
@@ -208,6 +212,7 @@ impl MainButton {
         match self {
             MainButton::Singleplayer => "SINGLEPLAYER",
             MainButton::Multiplayer => "MULTIPLAYER",
+            MainButton::Options => "OPTIONS",
             MainButton::Quit => "QUIT GAME",
         }
     }
@@ -226,6 +231,13 @@ pub struct MenuNav {
     /// The last save error, surfaced on the list screen. A silent write failure
     /// is how a player loses an entry and never learns why.
     save_error: Option<String>,
+    /// The persisted user options (currently just GUI scale).
+    options: Options,
+    /// Where `options` is persisted. Held separately from `path` so tests can
+    /// point each file at its own temporary location.
+    options_path: std::path::PathBuf,
+    /// The last options-save error, surfaced on the settings screen.
+    options_save_error: Option<String>,
 }
 
 impl Default for MenuNav {
@@ -235,15 +247,30 @@ impl Default for MenuNav {
 }
 
 impl MenuNav {
-    /// Loads the saved server list from its real location.
+    /// Loads the saved server list and options from their real locations.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_path(servers_path())
+        Self::with_paths(servers_path(), crate::config::options_path())
     }
 
     /// Loads the server list from `path`. Missing or corrupt is an empty list.
+    /// The options file is derived from the same directory (`options.json`
+    /// beside it) so existing callers of this constructor keep working
+    /// unchanged — see [`MenuNav::with_paths`] to point both explicitly.
     #[must_use]
     pub fn with_path(path: std::path::PathBuf) -> Self {
+        let options_path = path
+            .parent()
+            .map(|d| d.join("options.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("options.json"));
+        Self::with_paths(path, options_path)
+    }
+
+    /// Loads the server list from `path` and the options from `options_path`.
+    /// Missing or corrupt is an empty list / the default options respectively,
+    /// never an error — a corrupt file must not stop the game from launching.
+    #[must_use]
+    pub fn with_paths(path: std::path::PathBuf, options_path: std::path::PathBuf) -> Self {
         Self {
             main: 0,
             server: 0,
@@ -251,6 +278,9 @@ impl MenuNav {
             list: ServerList::load_from(&path),
             path,
             save_error: None,
+            options: Options::load_from(&options_path),
+            options_path,
+            options_save_error: None,
         }
     }
 
@@ -258,6 +288,20 @@ impl MenuNav {
     #[must_use]
     pub fn list(&self) -> &ServerList {
         &self.list
+    }
+
+    /// The persisted `gui_scale` option ([`crate::config::AUTO_GUI_SCALE`] or
+    /// an explicit ceiling) — never a pixel count, see
+    /// [`crate::config::calculate_gui_scale`].
+    #[must_use]
+    pub fn gui_scale(&self) -> u32 {
+        self.options.gui_scale
+    }
+
+    /// The last options-save failure, if any.
+    #[must_use]
+    pub fn options_save_error(&self) -> Option<&str> {
+        self.options_save_error.as_deref()
     }
 
     /// The highlighted main-menu button.
@@ -316,6 +360,7 @@ impl MenuNav {
             Screen::MainMenu => self.key_main(ui, key),
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
+            Screen::Settings => self.key_settings(ui, key),
             // The error screen has exactly one affordance — go back — reachable
             // with Escape or by activating its single row.
             Screen::Error if matches!(key, MenuKey::Escape | MenuKey::Enter) => {
@@ -352,6 +397,10 @@ impl MenuNav {
                     ui.open_server_list();
                     self.clamp_server();
                     MenuAction::Reprobe(None)
+                }
+                MainButton::Options => {
+                    ui.open_settings();
+                    MenuAction::None
                 }
                 MainButton::Quit => {
                     ui.request_quit();
@@ -470,6 +519,54 @@ impl MenuNav {
             }
             MenuKey::Delete => MenuAction::None,
         }
+    }
+
+    /// The settings screen has one interactive control today (GUI scale), so
+    /// Up/Down step its value directly rather than moving a highlight between
+    /// rows — there is nothing else to highlight yet.
+    fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.cycle_gui_scale(1);
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.cycle_gui_scale(-1);
+                MenuAction::None
+            }
+            MenuKey::Escape => {
+                ui.on_escape();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// Steps the persisted `gui_scale` option by `delta`, wrapping between
+    /// `crate::config::AUTO_GUI_SCALE` and [`MAX_MANUAL_GUI_SCALE`] inclusive,
+    /// and saves immediately — the same eager-persistence rule as the server
+    /// list (see the module docs): there is no guaranteed clean-shutdown hook,
+    /// so a setting that only saved on exit would be the setting a crash loses.
+    fn cycle_gui_scale(&mut self, delta: i32) {
+        // The cycle is `AUTO_GUI_SCALE..=MAX_MANUAL_GUI_SCALE`; `AUTO_GUI_SCALE`
+        // is `0`, so `rem_euclid` already lands there without naming it.
+        let span = MAX_MANUAL_GUI_SCALE as i32 + 1;
+        let current = self.options.gui_scale as i32;
+        let next = (current + delta).rem_euclid(span);
+        self.options.gui_scale = next as u32;
+        self.persist_options();
+    }
+
+    /// Writes the options to disk, recording (not swallowing) any failure —
+    /// mirrors [`MenuNav::persist`].
+    fn persist_options(&mut self) {
+        self.options_save_error = match self.options.save_to(&self.options_path) {
+            Ok(()) => None,
+            Err(e) => Some(format!(
+                "could not save {}: {e}",
+                self.options_path.display()
+            )),
+        };
     }
 
     fn delete_selected(&mut self) -> MenuAction {
@@ -839,6 +936,99 @@ mod tests {
         assert!(!ui.quit_requested());
         assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::Quit);
         assert!(ui.quit_requested());
+    }
+
+    #[test]
+    fn options_button_sits_between_multiplayer_and_quit_and_opens_settings() {
+        let (mut nav, _) = nav("options-button");
+        let mut ui = UiState::new();
+        // Singleplayer, Multiplayer, Options, Quit, in that order — inserting
+        // Options must not disturb Multiplayer's index (existing wrap tests
+        // rely on it staying at 1) or Quit's position as the last button.
+        assert_eq!(nav.main_button(), MainButton::Singleplayer);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Multiplayer);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Options);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.main_button(), MainButton::Quit);
+
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Options);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Settings);
+    }
+
+    #[test]
+    fn settings_up_down_cycles_the_gui_scale_and_persists_through_a_real_file() {
+        let (mut nav, path) = nav("settings-cycle");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        assert_eq!(nav.gui_scale(), 0, "starts at auto");
+
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.gui_scale(), 1);
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.gui_scale(), 2);
+        assert_eq!(nav.options_save_error(), None);
+
+        // It is on disk *now*, not at exit.
+        let options_path = path.parent().unwrap().join("options.json");
+        assert_eq!(
+            crate::config::Options::load_from(&options_path).gui_scale,
+            2
+        );
+
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.gui_scale(), 1, "down steps back");
+
+        // Down from auto wraps to the top, and up from the top wraps back to
+        // auto — this is what makes the control a *cycle*, not a clamp.
+        // `nav` is shadowed by the `MenuNav` local above (functions and
+        // locals share Rust's value namespace), so reach the helper through
+        // its module path instead of renaming the well-established `nav`
+        // binding used throughout this test.
+        let (mut wrap_nav, _) = self::nav("settings-cycle-wrap");
+        let mut wrap_ui = UiState::new();
+        wrap_ui.open_settings();
+        assert_eq!(wrap_nav.gui_scale(), 0);
+        wrap_nav.key(&mut wrap_ui, MenuKey::Down);
+        assert_eq!(
+            wrap_nav.gui_scale(),
+            crate::config::MAX_MANUAL_GUI_SCALE,
+            "down from auto wraps to the top"
+        );
+        wrap_nav.key(&mut wrap_ui, MenuKey::Up);
+        assert_eq!(wrap_nav.gui_scale(), 0, "up from the top wraps back to auto");
+    }
+
+    #[test]
+    fn escape_from_settings_returns_to_the_main_menu_without_quitting() {
+        let (mut nav, _) = nav("settings-escape");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(!ui.quit_requested());
+    }
+
+    #[test]
+    fn a_settings_save_failure_is_reported_rather_than_swallowed() {
+        let mut nav = MenuNav::with_paths(
+            std::env::temp_dir().join(format!(
+                "lodestone-nav-{}-settingsfail/servers.json",
+                std::process::id()
+            )),
+            std::path::PathBuf::from("/dev/null/nope/options.json"),
+        );
+        let mut ui = UiState::new();
+        ui.open_settings();
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.gui_scale(), 1, "the in-memory option still updates");
+        let err = nav
+            .options_save_error()
+            .expect("a failed write must be reported");
+        assert!(err.contains("options.json"), "unhelpful message: {err}");
     }
 
     #[test]

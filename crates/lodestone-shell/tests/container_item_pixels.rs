@@ -63,6 +63,7 @@
 //! cargo test -p lodestone-shell --test container_item_pixels -- --ignored --nocapture
 //! ```
 
+use lodestone::config::{calculate_gui_scale, AUTO_GUI_SCALE};
 use lodestone::container::{ContainerFrame, ContainerGeometry, ContainerRenderer, slot_layout};
 use lodestone::gpu::RenderState;
 use lodestone::resources::{BlockResources, load_item_atlas};
@@ -71,8 +72,22 @@ use lodestone_game::{item::ItemStack, menu::Menu};
 use lodestone_model::Identifier;
 use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
 
-const W: u32 = 640;
-const H: u32 = 480;
+/// `ContainerGeometry::build_inner` divides the physical framebuffer down to
+/// a **logical** GUI canvas before laying out the panel and its slots (see
+/// `ContainerGeometry::widget_rect`'s doc comment), then the render pass
+/// stretches that canvas back out to fill the physical target. This gate's
+/// pixel-area math (`EXPECTED_LIT`, the top/bottom band rows) is derived for
+/// an exact 16x16 physical cell, which only holds if that divide is a no-op.
+/// `(480, 320)` is `hud.rs`'s own `hud_vitals_draw_the_real_heart_sprite`
+/// gate's fixture, chosen for exactly this reason:
+/// `calculate_gui_scale(AUTO, 480, 320) == 1`. `slot_rect` below still
+/// performs the physical<->logical conversion explicitly rather than assuming
+/// it away, so this file stays correct if `W`/`H` ever change; a scale > 1
+/// case is preserved elsewhere in the suite —
+/// `container_screen.rs`'s `hit_test_and_drawn_geometry_share_one_panel_origin`
+/// runs the equivalent panel-origin math at 1920x1080 (scale 4).
+const W: u32 = 480;
+const H: u32 = 320;
 
 /// A full opaque cube whose faces are all one sprite, so the silhouette is
 /// exactly the analytic figure with no cutout texels to argue about.
@@ -97,6 +112,17 @@ fn id(path: &str) -> Identifier {
 
 /// The `(x, y, 16, 16)` screen rect of a menu slot: the widget's own origin plus
 /// the slot's local offset, both straight from the module under test.
+///
+/// `widget_rect` and every slot offset in `layout` are in the **logical** GUI
+/// canvas `ContainerGeometry::build_inner` lays its fixed pixel constants into
+/// (see `ContainerGeometry::widget_rect`'s doc comment) — not the physical
+/// framebuffer this test reads back. The render pass stretches that logical
+/// canvas to fill the physical target, so the logical rect is scaled *up* by
+/// the effective GUI scale here before being handed back as a physical pixel
+/// rect — the mirror of what `hit_test` does to an incoming physical cursor
+/// position. At `W`x`H` this multiplication is a verified no-op (see the
+/// module-level comment), but it is written generally rather than assumed
+/// away, so this function stays correct even if that ever changes.
 fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize) -> [u32; 4] {
     let widget = ContainerGeometry::build(frame, W, H)
         .widget_rect
@@ -107,11 +133,12 @@ fn slot_rect(menu: &Menu, frame: &ContainerFrame<'_>, menu_index: usize) -> [u32
         .iter()
         .find(|s| s.menu_index == menu_index)
         .expect("menu index must be laid out");
+    let scale = calculate_gui_scale(AUTO_GUI_SCALE, W, H).max(1) as f32;
     [
-        (widget.x + slot.x) as u32,
-        (widget.y + slot.y) as u32,
-        slot.w as u32,
-        slot.h as u32,
+        ((widget.x + slot.x) * scale) as u32,
+        ((widget.y + slot.y) * scale) as u32,
+        (slot.w * scale) as u32,
+        (slot.h * scale) as u32,
     ]
 }
 
@@ -195,6 +222,20 @@ fn band_mean(
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn container_slots_draw_real_item_icons() {
+    // `EXPECTED_LIT` and the top/bottom band rows below are derived for an
+    // exact 16x16 *physical* cell, which only holds while `slot_rect`'s
+    // logical->physical multiplication is a no-op. Assert the precondition
+    // rather than silently trusting it — a future change to `W`/`H` that
+    // broke this would otherwise sample a scaled cell against unscaled area
+    // expectations and either false-fail or false-pass by accident.
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "the pixel-area math below assumes W x H divides to itself under the \
+         GUI scale; if this fails, EXPECTED_LIT and the band row ranges must \
+         be re-derived for the scaled cell size"
+    );
+
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
          run on a host with a GPU — do NOT treat a skip as a pass",

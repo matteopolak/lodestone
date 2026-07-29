@@ -39,6 +39,7 @@
 
 use std::sync::Arc;
 
+use lodestone_assets::font::metrics as font_metrics;
 use lodestone_assets::{IconPart, ItemAtlas, ResourceLocation};
 use lodestone_render::{
     BlockModels, CameraUniform, GpuAtlas, GuiSpriteQuad, ModelCameraUniform, ModelPipeline,
@@ -46,6 +47,7 @@ use lodestone_render::{
 };
 
 use super::font;
+use super::vanilla_font::{self, VanillaFont};
 use super::{FLOATS_PER_VERTEX, HUD_SPRITE_WGSL, SPRITE_FLOATS_PER_VERTEX};
 
 /// One occupied slot's drawable state, resolved shell-side from a
@@ -98,9 +100,13 @@ pub(crate) struct IconSink<'o> {
 
 /// Draw one slot's icon into the `size`×`size` rect at `(x, y)`: the icon
 /// itself, its durability bar, and its stack count. `view` is the target
-/// viewport in pixels, which is all the NDC conversion needs.
+/// viewport in pixels, which is all the NDC conversion needs. `font` is the
+/// vanilla proportional font the stack count draws with; `None` falls back to
+/// the fixed-advance 5×7 debug font, exactly as every other piece of text in
+/// this crate degrades on a jar-less run.
 ///
 /// See the [module docs](self) for which icon kind reaches which stream.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_item_icon(
     sink: &mut IconSink<'_>,
     assets: &IconAssets<'_>,
@@ -109,6 +115,7 @@ pub(crate) fn draw_item_icon(
     x: f32,
     y: f32,
     size: f32,
+    font: Option<&VanillaFont>,
 ) {
     let (vw, vh) = view;
     let scale = size / 16.0;
@@ -168,17 +175,39 @@ pub(crate) fn draw_item_icon(
             .rect(bx, by, (bw * remaining).max(1.0 * scale), bh, col);
     }
 
-    // Stack count, bottom-right, on the colour stream so it lands on top of the
-    // icon. A 1px drop shadow mirrors vanilla's number rendering.
+    // Stack count, bottom-right, on the colour stream so it lands on top of
+    // the icon.
+    //
+    // `scale` (`size / 16.0`) is the same factor the icon itself is drawn at,
+    // so text sized at `scale` sits in the same GUI-pixel convention as
+    // everything else in the slot — which is what makes it look right once a
+    // real `gui_scale` multiplies every one of these sizes uniformly. The
+    // previous fixed-font fallback instead scaled the digits by an extra 2x
+    // on top of that, which is what actually produced the "too big" bug: the
+    // count ballooned relative to the icon it sits on, not just relative to
+    // the slot.
     if slot.count > 1 {
         let s = slot.count.to_string();
-        let tscale = scale * 2.0;
-        let tw = text_w(&s, tscale);
-        let tx = x + size - tw;
-        let ty = y + size - font::GLYPH_H as f32 * tscale;
-        sink.colour
-            .text(&s, tx + tscale, ty + tscale, tscale, [0.0, 0.0, 0.0, 1.0]);
-        sink.colour.text(&s, tx, ty, tscale, [1.0, 1.0, 1.0, 1.0]);
+        match font {
+            // Vanilla text: real glyph widths and vanilla's own 1px / 25%
+            // brightness drop shadow, both handled by `VanillaFont::draw`.
+            Some(f) => {
+                let tw = f.width(&s, scale);
+                let tx = x + size - tw;
+                let ty = y + size - font_metrics::LINE_HEIGHT * scale;
+                f.draw(&mut sink.colour, &s, tx, ty, scale, [1.0, 1.0, 1.0, 1.0]);
+            }
+            // Jar-less fallback: the fixed-advance 5x7 debug font, with the
+            // same vanilla shadow colour rather than a pure black one.
+            None => {
+                let tw = text_w(&s, scale);
+                let tx = x + size - tw;
+                let ty = y + size - font::GLYPH_H as f32 * scale;
+                let shadow = vanilla_font::shadow_of([1.0, 1.0, 1.0, 1.0]);
+                sink.colour.text(&s, tx + scale, ty + scale, scale, shadow);
+                sink.colour.text(&s, tx, ty, scale, [1.0, 1.0, 1.0, 1.0]);
+            }
+        }
     }
 }
 
@@ -619,6 +648,16 @@ impl IconRenderer {
     /// are already posed into GUI pixel space, the section origin is zero (they
     /// are not section-local), and fog is disabled (an inventory slot is not in
     /// the world).
+    ///
+    /// `width`/`height` must be the same **GUI pixel space** the caller posed
+    /// those vertices into — the *logical* canvas (physical framebuffer divided
+    /// by the effective GUI scale), not necessarily the physical render target
+    /// size. Both call sites (`HudRenderer::render_with_item_models`,
+    /// `ContainerRenderer::render_with_icons`) pass the logical size for exactly
+    /// this reason; passing the raw physical size back here while the CPU pose
+    /// used the logical one would make the model pass disagree with the flat
+    /// sprite/colour passes it shares a frame with about how big a "GUI pixel"
+    /// is.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn upload(
         &mut self,

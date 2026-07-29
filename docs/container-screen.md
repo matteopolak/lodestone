@@ -81,6 +81,27 @@ split. `render_with_icons` draws it as two ranges of one buffer with the icon
 passes in between. Emitting a stack count in the wells loop would bury it under
 its own icon.
 
+### The carried stack
+
+`Menu::carried()` — the stack the player has picked up and is dragging — draws
+**last**, after every slot, through the same `Builder::draw_stack` helper the
+per-slot loop uses (real icon if an atlas resolves it, else the hash-derived
+swatch fallback). "Last" matters: it is appended after the per-slot loop on all
+three streams, and every pass draws its stream in append order, so the carried
+stack lands on top of whatever slot the cursor happens to be over.
+
+It only draws when `ContainerFrame::cursor` is `Some([x, y])` — viewport
+pixels, the same space `hit_test` takes, **not** local widget coordinates.
+`ContainerFrame::new` leaves it `None`, so an unmodified caller (every existing
+one, including `app.rs`'s current call site) draws exactly as before; a caller
+that wants the carried stack to actually appear must chain
+`.with_cursor(Some([x, y]))`. See "Wiring it into the live app" below for the
+one line `app.rs` needs.
+
+There is no tooltip yet, so "below the tooltip" (vanilla's actual third layer)
+is currently moot — the carried stack is simply the topmost thing this screen
+draws.
+
 ## How to change it
 
 ### Wiring it into the live app (still outstanding)
@@ -118,6 +139,21 @@ where `item_models` is the same `self.sim.vanilla_atlas().and_then(|a| a.models(
 the HUD call already computes. Note the container overlay is drawn **before** the
 HUD in `WindowApp`, and both model passes clear depth, so the order is safe.
 
+Separately — and independent of the icon wiring above — the **carried stack**
+needs one more line to actually appear: `ContainerFrame` is built with
+`.with_cursor(Some([x, y]))` using the same `(f32, f32)` mouse position
+`WindowApp` already tracks for `hit_test`:
+
+```rust
+let container_frame = ContainerFrame::new(container_menu, &container_title)
+    .with_cursor(Some([self.cursor.0, self.cursor.1]));
+```
+
+Without this the geometry builds correctly (`ContainerGeometry::build_inner`
+checks `frame.cursor` before it checks `menu.carried()`) but the field stays at
+its `None` default, so a picked-up stack never draws — the same silent-nothing
+failure mode as not calling `attach_items`.
+
 ### Gotchas
 
 * **The fallback still exists and still matters.** With no item atlas attached,
@@ -142,6 +178,7 @@ None. The behavioural switches are all "is a thing attached":
 | `attach_item_models` not called | flat sprites draw; block items draw nothing |
 | no `depth` passed to `render_with_icons` | as above |
 | `ContainerFrame::menu` is `None` | nothing is drawn at all, and `widget_rect` is `None` |
+| `ContainerFrame::cursor` is `None` (the default) | `menu.carried()`, even if `Some`, draws nowhere |
 
 ## Dependencies
 
