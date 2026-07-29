@@ -28,6 +28,18 @@
 //! how a player ended up standing *visibly* underwater, unable to swim, with clear
 //! sky fog. One question, one answer.
 //!
+//! # …but "is this cell fluid" is not "can I break what is in it"
+//!
+//! Unifying the fluid answer immediately broke a *second* consumer that had been
+//! borrowing it: the pick ray in `Sim::update_target` used `!is_water(cell)` as
+//! shorthand for "this cell holds something breakable". Once `is_water` correctly
+//! included kelp, seagrass and every waterlogged stair, that shorthand started
+//! refusing all of them — **kelp could not be broken, because it could not be
+//! targeted**. Vanilla asks a genuinely different question there (the *outline*
+//! shape, with fluid shapes switched off), so the answer lives in its own
+//! predicate, [`LiveCollision::is_pickable`], not in a negation of `is_water`. One
+//! question one answer is right; the mistake was assuming there was one question.
+//!
 //! [`FluidState`]: lodestone_physics::FluidState
 
 use std::collections::HashMap;
@@ -74,6 +86,18 @@ impl<'a> WorldCollision<'a> {
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         let b = self.block_at(x, y, z);
         b != id::AIR && b != id::WATER
+    }
+
+    /// Whether the view ray can *target* this cell — the demo counterpart of
+    /// [`LiveCollision::is_pickable`], which carries the full explanation.
+    ///
+    /// The demo palette has no waterlogging, no plants sharing a cell with water
+    /// and no air variants, so here the question really does reduce to "not air and
+    /// not the water block".
+    #[must_use]
+    pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
+        let b = self.block_at(x, y, z);
+        b != id::AIR && demo_fluid(b).is_none()
     }
 }
 
@@ -138,7 +162,25 @@ pub struct LiveCollision {
     /// fluid oracle behind [`is_water`](CollisionView::is_water) /
     /// [`is_lava`](CollisionView::is_lava) — see [`vanilla_fluid`].
     atlas: Arc<BlockAtlas>,
+    /// Resolved state ids of the three air blocks (see [`AIR_BLOCKS`]), for
+    /// [`is_pickable`](Self::is_pickable). Small and fixed, so a linear scan beats
+    /// a set.
+    air_states: Vec<u32>,
 }
+
+/// The blocks whose **outline** shape is `Shapes.empty()` *and* whose cell holds
+/// no fluid, i.e. the ones `Entity.pick` must walk straight through without them
+/// being identifiable as "a fluid cell".
+///
+/// All three register as `AirBlock` (`Blocks.java:4273-4278`), whose `getShape`
+/// returns `Shapes.empty()` (`AirBlock.java:30-32`), so none of them is targetable
+/// in vanilla. This matters because **`minecraft:air` is not the only air**:
+/// `WorldCarver` writes `Blocks.CAVE_AIR` (`WorldCarver.java:36`), as do lakes,
+/// monster rooms and strongholds, and the end's void column is `void_air`. Each is
+/// a *distinct block-state id*, so a pick predicate written as `state_id != 0`
+/// targets the empty space one block in front of the player's face in any carved
+/// cave, in preference to whatever real block is behind it.
+const AIR_BLOCKS: [&str; 3] = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
 
 impl LiveCollision {
     /// Build a view from a pre-fetched section snapshot and the dimension geometry.
@@ -149,11 +191,28 @@ impl LiveCollision {
         section_count: usize,
         atlas: Arc<BlockAtlas>,
     ) -> Self {
+        // Three `state_id_of` lookups (a hash of a `(name, properties)` key each)
+        // per snapshot. The snapshot itself already clones ~200 `Arc<ChunkSection>`
+        // handles, so this is noise; resolving by *name* rather than hardcoding ids
+        // is what keeps the list checkable against the jar.
+        //
+        // `0` is seeded unconditionally: it is `minecraft:air`, and it is also what
+        // `block_at` returns for a cell outside the snapshot, so a missing name
+        // index must never make unloaded space targetable.
+        let mut air_states = vec![0u32];
+        for name in AIR_BLOCKS {
+            if let Some(id) = atlas.state_id_of(name)
+                && !air_states.contains(&id)
+            {
+                air_states.push(id);
+            }
+        }
         Self {
             sections,
             min_y,
             section_count,
             atlas,
+            air_states,
         }
     }
 
@@ -189,6 +248,76 @@ impl LiveCollision {
     #[must_use]
     fn fluid_kind(&self, x: i32, y: i32, z: i32) -> Option<FluidKind> {
         vanilla_fluid(&self.atlas, self.block_at(x, y, z))
+    }
+
+    /// Whether the view ray can **target** this cell — the client-side stand-in for
+    /// vanilla's `clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)`.
+    ///
+    /// # This is a different question from `is_water`, and conflating them is the bug
+    ///
+    /// Picking is *not* collision (a cross-plant has an empty collision shape and is
+    /// still breakable), and it is *not* "the cell has no fluid" either. Vanilla
+    /// walks the **outline** shape (`BlockStateBase.getShape`) with fluid shapes
+    /// switched off (`Fluid.NONE`, `Entity.pick`, `Entity.java:2012-2017`). So the
+    /// real question is *does the block in this cell have a non-empty outline*:
+    ///
+    /// * `LiquidBlock.getShape` → `Shapes.empty()` (`LiquidBlock.java:145-147`), so
+    ///   open water and lava are never targeted;
+    /// * `KelpBlock`'s is `Block.column(16, 0, 9)` (`KelpBlock.java:24`) and
+    ///   `SeagrassBlock`'s is `Block.column(12, 0, 12)` (`SeagrassBlock.java:29`) —
+    ///   **non-empty**, so kelp and seagrass are targeted and breakable, even though
+    ///   both hardcode `getFluidState` → `Fluids.WATER`.
+    ///
+    /// The pick used to be `is_solid(cell) || (state != AIR && !is_water && !is_lava)`.
+    /// That worked only for as long as `is_water` meant literally
+    /// `minecraft:water`. Fixing `is_water` to mean *"this cell has a fluid"* — the
+    /// correct answer for buoyancy, fog and the overlay, and the whole point of the
+    /// one-classifier rule in this module's docs — silently made `!is_water` false
+    /// for **kelp, seagrass, tall seagrass, bubble columns and every
+    /// `waterlogged=true` stair/slab/fence**. All of them are non-occluding, so
+    /// `is_solid` was false too: the ray passed straight through and `Sim::target`
+    /// stayed `None`, which makes `drive_mining` abort before it ever sends a
+    /// `START_DESTROY`. The dig was not slow or refused — the block was never
+    /// *selected*. One classifier, but **two** questions.
+    ///
+    /// # What this actually tests, and where it is coarse
+    ///
+    /// There is no outline-shape table in this repo (`collision_shapes` is a
+    /// collision-only oracle dump, and kelp's collision shape is empty too), so the
+    /// nearest available proxy for "has an outline" is *has baked model geometry*.
+    /// That coincidence is structural, not luck: fluids are the one thing vanilla
+    /// does **not** draw through the block-model pipeline — their blockstate models
+    /// are empty — which is exactly why `BlockModels::quads` is empty for a fluid
+    /// state and non-empty for kelp (see [`lodestone_render::FluidCell`]).
+    ///
+    /// A cell is pickable when it is:
+    /// 1. not one of the three air blocks ([`AIR_BLOCKS`]); **and**
+    /// 2. either it has baked quads (every real block, plant, slab, stair, and any
+    ///    waterlogged form of them), **or** it has no fluid — clause 2's second half
+    ///    keeps the geometry-less-but-real blocks targetable (`barrier`, `light`,
+    ///    `structure_void`, and anything whose model failed to bake), which is what
+    ///    the predicate this replaces already did.
+    ///
+    /// [`is_solid`](Self::is_solid) implies this, so it is not tested separately: an
+    /// occluding cube is `is_full_cube(quads) && layer == Solid`, which cannot hold
+    /// with no quads.
+    ///
+    /// Still coarse, unchanged from before: a picked cell is treated as a full unit
+    /// cube, so anything with a genuinely partial outline (a slab, a stair, kelp's
+    /// own 9/16 height) over-selects at its edges. The real fix is an
+    /// outline/interaction-shape oracle dump alongside the collision one.
+    #[must_use]
+    pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
+        let state = self.block_at(x, y, z);
+        if self.air_states.contains(&state) {
+            return false;
+        }
+        if let Some(models) = self.atlas.models()
+            && !models.quads(state).is_empty()
+        {
+            return true;
+        }
+        vanilla_fluid(&self.atlas, state).is_none()
     }
 }
 
@@ -384,6 +513,110 @@ mod tests {
                 "eye inside {name} must NOT read as under water, got {fs:?}"
             );
         }
+    }
+
+    /// **The kelp bug.** Every one of these `wet` states carries a water source, so
+    /// the pick predicate that asked `!is_water(cell)` refused all of them: kelp
+    /// could not be targeted, so it could not be broken, and neither could a
+    /// waterlogged stair or slab. None of them is a full cube either, so `is_solid`
+    /// did not save it. Vanilla targets all of them, because their **outline**
+    /// shapes are non-empty (`KelpBlock.java:24`, `SeagrassBlock.java:29`) and
+    /// `Entity.pick` runs with `ClipContext.Fluid.NONE`.
+    ///
+    /// The `dry` list is not decoration, it is the control: open water and lava must
+    /// stay un-targetable (else you would break the ocean instead of the sand under
+    /// it) and so must all three air blocks — including `cave_air`, which is what a
+    /// carved cave is full of and which any `state_id != 0` test wrongly targets.
+    /// Without those five failing, "kelp is pickable" would be satisfied by a
+    /// predicate that just returns `true`.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn submerged_plants_and_waterlogged_blocks_are_pickable_but_open_fluid_is_not() {
+        let atlas = vanilla_atlas();
+
+        let pickable = [
+            // The reported symptom.
+            "minecraft:kelp_plant",
+            "minecraft:kelp[age=0]",
+            "minecraft:seagrass",
+            "minecraft:tall_seagrass[half=lower]",
+            "minecraft:tall_seagrass[half=upper]",
+            // The same defect on blocks that carry water via `waterlogged`.
+            "minecraft:oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true]",
+            "minecraft:oak_slab[type=bottom,waterlogged=true]",
+            "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=true,west=false]",
+            // Already worked, kept so a regression the other way is visible: a dry
+            // shapeless plant and a plain full cube.
+            "minecraft:short_grass",
+            "minecraft:stone",
+            "minecraft:oak_slab[type=bottom,waterlogged=false]",
+        ];
+        for name in pickable {
+            let id = state_id(&atlas, name);
+            let view = live_column(Arc::clone(&atlas), id, 0..=15);
+            assert!(
+                view.is_pickable(0, 1, 0),
+                "{name} must be targetable by the view ray"
+            );
+        }
+
+        let not_pickable = [
+            "minecraft:water[level=0]",
+            "minecraft:water[level=3]",
+            "minecraft:lava[level=0]",
+            "minecraft:air",
+            "minecraft:cave_air",
+            "minecraft:void_air",
+        ];
+        for name in not_pickable {
+            let id = state_id(&atlas, name);
+            let view = live_column(Arc::clone(&atlas), id, 0..=15);
+            assert!(
+                !view.is_pickable(0, 1, 0),
+                "{name} must NOT be targetable by the view ray"
+            );
+        }
+    }
+
+    /// The pick predicate is only useful if the *ray* honours it, and the ray is
+    /// what `Sim::update_target` runs. Fire the real
+    /// [`crate::raycast::raycast`] through a kelp cell with a stone block behind it:
+    /// the near cell must win. Before the fix the ray skipped the kelp and reported
+    /// the stone — a targeting bug that reads on screen as "kelp cannot be broken".
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_view_ray_stops_at_kelp_rather_than_the_block_behind_it() {
+        let atlas = vanilla_atlas();
+        let kelp = state_id(&atlas, "minecraft:kelp_plant");
+        let stone = state_id(&atlas, "minecraft:stone");
+
+        // One section: kelp at y = 4, stone at y = 2, air between. Looking straight
+        // down from y = 6.5 the ray meets kelp first.
+        let mut section = ChunkSection::new(
+            PaletteKind::block_states_with_direct_bits(20),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        for x in 0..16 {
+            for z in 0..16 {
+                section.set_block(x, 4, z, kelp);
+                section.set_block(x, 2, z, stone);
+            }
+        }
+        let mut sections = HashMap::new();
+        sections.insert((0, 0, 0), Arc::new(section));
+        let view = LiveCollision::new(sections, 0, 1, Arc::clone(&atlas));
+
+        let hit = crate::raycast::raycast([0.5, 6.5, 0.5], [0.0, -1.0, 0.0], 4.0, |x, y, z| {
+            view.is_pickable(x, y, z)
+        })
+        .expect("the ray must hit something within 4 blocks");
+        assert_eq!(
+            hit.block,
+            [0, 4, 0],
+            "the ray must stop at the kelp, not tunnel through to the stone"
+        );
     }
 
     /// Lava is the same question with the other answer: the live view used to
