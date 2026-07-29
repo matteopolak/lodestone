@@ -585,10 +585,8 @@ impl Placement {
         server_block: Option<&Identifier>,
     ) -> PlaceReconciliation {
         let mut corrected = false;
-        let mut matched = false;
         self.pending.retain(|p| {
             if p.pos == pos {
-                matched = true;
                 if server_block != Some(&p.block) {
                     corrected = true;
                 }
@@ -597,7 +595,6 @@ impl Placement {
                 true
             }
         });
-        let _ = matched;
         PlaceReconciliation { corrected }
     }
 }

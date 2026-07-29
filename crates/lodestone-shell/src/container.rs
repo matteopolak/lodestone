@@ -411,6 +411,26 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
     }
 }
 
+/// Appends the 27-slot main inventory (9-wide rows starting at `base`) and the
+/// 9-slot hotbar 58px below the last main row — the standard vanilla
+/// arrangement shared by every screen that shows the player's own inventory
+/// below its container-specific slots. Returns the hotbar's y so callers can
+/// size their panel around it.
+fn append_main_inventory(slots: &mut Vec<SlotRect>, base: usize, main_y: f32) -> f32 {
+    for i in 0..27 {
+        slots.push(slot(
+            base + i,
+            8.0 + (i % 9) as f32 * SLOT,
+            main_y + (i / 9) as f32 * SLOT,
+        ));
+    }
+    let hotbar_y = main_y + 58.0;
+    for i in 0..9 {
+        slots.push(slot(base + 27 + i, 8.0 + i as f32 * SLOT, hotbar_y));
+    }
+    hotbar_y
+}
+
 fn player_layout() -> SlotLayout {
     let mut slots = Vec::with_capacity(46);
     slots.push(slot(0, 154.0, 28.0));
@@ -424,16 +444,7 @@ fn player_layout() -> SlotLayout {
     for i in 0..4 {
         slots.push(slot(5 + i, 8.0, 8.0 + i as f32 * SLOT));
     }
-    for i in 0..27 {
-        slots.push(slot(
-            9 + i,
-            8.0 + (i % 9) as f32 * SLOT,
-            84.0 + (i / 9) as f32 * SLOT,
-        ));
-    }
-    for i in 0..9 {
-        slots.push(slot(36 + i, 8.0 + i as f32 * SLOT, 142.0));
-    }
+    append_main_inventory(&mut slots, 9, 84.0);
     slots.push(slot(45, 77.0, 62.0));
     SlotLayout {
         width: 176.0,
@@ -454,21 +465,7 @@ fn generic_layout(container_size: usize) -> SlotLayout {
         ));
     }
     let main_y = 18.0 + rows as f32 * SLOT + 14.0;
-    for i in 0..27 {
-        slots.push(slot(
-            container_size + i,
-            8.0 + (i % 9) as f32 * SLOT,
-            main_y + (i / 9) as f32 * SLOT,
-        ));
-    }
-    let hotbar_y = main_y + 58.0;
-    for i in 0..9 {
-        slots.push(slot(
-            container_size + 27 + i,
-            8.0 + i as f32 * SLOT,
-            hotbar_y,
-        ));
-    }
+    let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
     SlotLayout {
         width: 176.0,
         height: hotbar_y + 24.0,
@@ -511,21 +508,7 @@ fn crafting_layout(craft: CraftLayout, container_size: usize) -> SlotLayout {
     }
 
     let main_y = (grid_y + rows as f32 * SLOT + 13.0).max(84.0);
-    for i in 0..27 {
-        slots.push(slot(
-            container_size + i,
-            8.0 + (i % 9) as f32 * SLOT,
-            main_y + (i / 9) as f32 * SLOT,
-        ));
-    }
-    let hotbar_y = main_y + 58.0;
-    for i in 0..9 {
-        slots.push(slot(
-            container_size + 27 + i,
-            8.0 + i as f32 * SLOT,
-            hotbar_y,
-        ));
-    }
+    let hotbar_y = append_main_inventory(&mut slots, container_size, main_y);
     SlotLayout {
         width: 176.0,
         height: hotbar_y + 24.0,

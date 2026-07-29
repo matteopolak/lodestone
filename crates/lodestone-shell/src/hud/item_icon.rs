@@ -244,10 +244,7 @@ fn push_item_model(
     };
     let pose = gui_item_pose([x, y, size, size], &geometry.transform);
     let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
-    out.reserve(mesh.indices.len());
-    for &i in &mesh.indices {
-        out.push(mesh.vertices[i as usize]);
-    }
+    out.extend(mesh.indices.iter().map(|&i| mesh.vertices[i as usize]));
 }
 
 /// Push one textured quad (two triangles) from an absolute-pixel destination
@@ -345,6 +342,9 @@ impl ColourStream<'_> {
 }
 
 /// Width in pixels of `s` at `scale` in the shell's fixed-width bitmap font.
+/// Only correct when no vanilla font is attached — every layout site goes
+/// through `Builder::text_width`, which picks this or the proportional
+/// measure to match whichever font `Builder::text` will actually draw with.
 pub(crate) fn text_w(s: &str, scale: f32) -> f32 {
     s.chars().count() as f32 * (font::GLYPH_W as f32 + 1.0) * scale
 }
