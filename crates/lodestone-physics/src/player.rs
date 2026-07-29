@@ -920,6 +920,51 @@ fn block_jump_factor(position: Vec3d, view: &dyn CollisionView) -> f32 {
     }
 }
 
+/// `LivingEntity.aiStep`'s `noJumpDelay` countdown, run at the top of every
+/// travel path before the velocity snap-to-zero.
+fn decrement_no_jump_delay(state: &mut PlayerState) {
+    if state.no_jump_delay > 0 {
+        state.no_jump_delay -= 1;
+    }
+}
+
+/// `aiStep`'s velocity snap-to-zero prologue: the horizontal components
+/// collapse to zero below `9.0e-6` (a squared distance) and the vertical
+/// component collapses below `0.003`. Byte-identical across every travel path
+/// (air, water, lava, elytra), so it is factored out once rather than
+/// reproduced per path.
+fn snap_small_velocity(v: Vec3d) -> Vec3d {
+    let mut dx = v.x;
+    let mut dy = v.y;
+    let mut dz = v.z;
+    if v.horizontal_distance_sqr() < 9.0e-6 {
+        dx = 0.0;
+        dz = 0.0;
+    }
+    if v.y.abs() < 0.003 {
+        dy = 0.0;
+    }
+    Vec3d::new(dx, dy, dz)
+}
+
+/// The sprint-flag write plus the client-side input transform shared by the
+/// air, water and lava travel paths: `state.sprinting = input.sprint` then
+/// `LocalPlayer.modifyInput`.
+fn set_sprint_and_modify_input(
+    state: &mut PlayerState,
+    input: MovementInput,
+    profile: &PhysicsProfile,
+) -> (f32, f32) {
+    state.sprinting = input.sprint;
+    modify_input(
+        profile.input_model,
+        input.strafe,
+        input.forward,
+        input.sneak,
+        profile.sneaking_speed,
+    )
+}
+
 /// Advances the player by exactly one tick of on-land (non-fluid) movement.
 ///
 /// Fluid, ladder, and elytra handling live in dedicated entry points; this is
@@ -931,32 +976,11 @@ pub fn tick_air(
     profile: &PhysicsProfile,
 ) {
     // --- aiStep prologue: velocity snap-to-zero -------------------------------
-    if state.no_jump_delay > 0 {
-        state.no_jump_delay -= 1;
-    }
-    let mut v = state.velocity;
-    let mut dx = v.x;
-    let mut dy = v.y;
-    let mut dz = v.z;
-    if v.horizontal_distance_sqr() < 9.0e-6 {
-        dx = 0.0;
-        dz = 0.0;
-    }
-    if v.y.abs() < 0.003 {
-        dy = 0.0;
-    }
-    v = Vec3d::new(dx, dy, dz);
-    state.velocity = v;
+    decrement_no_jump_delay(state);
+    state.velocity = snap_small_velocity(state.velocity);
 
     // --- input transformation (client-side) -----------------------------------
-    state.sprinting = input.sprint;
-    let (xxa, zza) = modify_input(
-        profile.input_model,
-        input.strafe,
-        input.forward,
-        input.sneak,
-        profile.sneaking_speed,
-    );
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
     // --- jump -----------------------------------------------------------------
     if input.jump && state.on_ground && state.no_jump_delay == 0 {
@@ -1254,29 +1278,10 @@ pub fn tick_water(
             .add(Vec3d::new(0.0, -f64::from(0.04f32), 0.0));
     }
     // --- aiStep prologue: velocity snap-to-zero (identical to the air path) ----
-    if state.no_jump_delay > 0 {
-        state.no_jump_delay -= 1;
-    }
-    let mut dx = state.velocity.x;
-    let mut dy = state.velocity.y;
-    let mut dz = state.velocity.z;
-    if state.velocity.horizontal_distance_sqr() < 9.0e-6 {
-        dx = 0.0;
-        dz = 0.0;
-    }
-    if state.velocity.y.abs() < 0.003 {
-        dy = 0.0;
-    }
-    state.velocity = Vec3d::new(dx, dy, dz);
+    decrement_no_jump_delay(state);
+    state.velocity = snap_small_velocity(state.velocity);
 
-    state.sprinting = input.sprint;
-    let (xxa, zza) = modify_input(
-        profile.input_model,
-        input.strafe,
-        input.forward,
-        input.sneak,
-        profile.sneaking_speed,
-    );
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
     // --- aiStep jump: shallow water jumps, deep water swims up -----------------
     apply_fluid_jump(state, input, fluid, view, profile);
@@ -1370,29 +1375,10 @@ pub fn tick_lava(
         profile.lava_push_scale,
         profile,
     );
-    if state.no_jump_delay > 0 {
-        state.no_jump_delay -= 1;
-    }
-    let mut dx = state.velocity.x;
-    let mut dy = state.velocity.y;
-    let mut dz = state.velocity.z;
-    if state.velocity.horizontal_distance_sqr() < 9.0e-6 {
-        dx = 0.0;
-        dz = 0.0;
-    }
-    if state.velocity.y.abs() < 0.003 {
-        dy = 0.0;
-    }
-    state.velocity = Vec3d::new(dx, dy, dz);
+    decrement_no_jump_delay(state);
+    state.velocity = snap_small_velocity(state.velocity);
 
-    state.sprinting = input.sprint;
-    let (xxa, zza) = modify_input(
-        profile.input_model,
-        input.strafe,
-        input.forward,
-        input.sneak,
-        profile.sneaking_speed,
-    );
+    let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
     // aiStep's jump block: in *shallow* lava while on the ground you jump out
     // normally; only deep lava gets `jumpInLiquid`'s +0.04 (see `apply_fluid_jump`).
@@ -1519,23 +1505,10 @@ pub fn tick_elytra(
         return;
     }
 
-    if state.no_jump_delay > 0 {
-        state.no_jump_delay -= 1;
-    }
+    decrement_no_jump_delay(state);
 
     // aiStep velocity collapse (players use the horizontal-distance test).
-    let v = state.velocity;
-    let mut dx = v.x;
-    let mut dy = v.y;
-    let mut dz = v.z;
-    if v.horizontal_distance_sqr() < 9.0e-6 {
-        dx = 0.0;
-        dz = 0.0;
-    }
-    if v.y.abs() < 0.003 {
-        dy = 0.0;
-    }
-    let collapsed = Vec3d::new(dx, dy, dz);
+    let collapsed = snap_small_velocity(state.velocity);
 
     state.velocity = update_fall_flying_movement(state, profile, collapsed);
     do_move(state, view, profile, false, input.sneak);
