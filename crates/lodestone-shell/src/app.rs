@@ -488,7 +488,7 @@ impl WindowApp {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.grabbed = false;
-            self.sim.input.release_all();
+            self.sim.input_mut().release_all();
             // Releasing the pointer also ends any held dig, so mining does not
             // continue while the player is in a menu or the window is unfocused.
             self.sim.end_attack();
@@ -1494,7 +1494,7 @@ impl ApplicationHandler for WindowApp {
                     {
                         // Open the chat prompt; `/` pre-fills the command prefix.
                         // Release held movement so we don't walk while typing.
-                        self.sim.input.release_all();
+                        self.sim.input_mut().release_all();
                         let _ = self.chat_input.take();
                         if code == KeyCode::Slash {
                             self.chat_input.push_char('/');
@@ -1503,7 +1503,7 @@ impl ApplicationHandler for WindowApp {
                         self.tab_held = false;
                         self.set_grab(false);
                     } else if code == KeyCode::KeyE && pressed && self.ui.accepts_gameplay_input() {
-                        self.sim.input.release_all();
+                        self.sim.input_mut().release_all();
                         self.ui.open_container();
                         self.tab_held = false;
                         self.set_grab(false);
@@ -1518,7 +1518,7 @@ impl ApplicationHandler for WindowApp {
                     } else if let Some(action) = action_for(code)
                         && self.ui.accepts_gameplay_input()
                     {
-                        self.sim.input.set(action, pressed);
+                        self.sim.input_mut().set(action, pressed);
                     }
                 }
             }
@@ -1542,7 +1542,7 @@ impl ApplicationHandler for WindowApp {
             && self.ui.is_playing()
             && self.grabbed
         {
-            self.sim.input.add_mouse(delta.0 as f32, delta.1 as f32);
+            self.sim.input_mut().add_mouse(delta.0 as f32, delta.1 as f32);
         }
     }
 
@@ -1605,7 +1605,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let camera = sim.camera(w as f32 / h as f32);
     // Outline the block directly under the settled player, as a visible probe.
     let outline = {
-        let p = sim.player.position;
+        let p = sim.player().position;
         Some([
             p.x.floor() as i32,
             p.y.floor() as i32 - 1,

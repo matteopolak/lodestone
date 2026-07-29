@@ -1,0 +1,532 @@
+//! The controller as `GameTick` systems: held keys → [`MovementIntent`], and
+//! the local player's two outbound movement packets.
+//!
+//! Stage 2 of `docs/bevy-migration.md`. The *components* live in
+//! `lodestone-ecs`; these systems live here because this is the crate the
+//! browser client shares, so putting the input→intent rule anywhere else would
+//! reopen the movement fork this crate exists to close. It is also the only
+//! direction the dependency graph permits: `lodestone-controller` →
+//! `lodestone-client` → `lodestone-ecs`, so `lodestone-ecs` can never depend on
+//! this crate.
+//!
+//! ```text
+//! GameTick
+//!   TickSet::Input     compute_movement_intent → tick_sprint_window
+//!   TickSet::Physics   lodestone_ecs::player::player_physics
+//!   TickSet::Send      send_move_action → send_player_input
+//! ```
+//!
+//! # Two orderings inside `TickSet::Input` that are behaviour, not style
+//!
+//! [`compute_movement_intent`] runs **before** [`tick_sprint_window`]. The
+//! pre-Stage-2 driver computed the intent, ran physics, and only then aged the
+//! double-tap window, so the tick's intent was read from the *un-aged* input.
+//! Swapping these would move the double-tap sprint window by one tick.
+//!
+//! [`tick_sprint_window`] must be in this fixed 20 Hz schedule and nowhere
+//! else. Vanilla's `sprintTriggerTime` is counted in *ticks* (default 7,
+//! [`SPRINT_TRIGGER_WINDOW_TICKS`]), so ageing it per frame instead would make
+//! the double-tap window frame-rate dependent — wider at 144 fps than at 30.
+
+use bevy_app::{App, Plugin};
+use bevy_ecs::prelude::{Query, Res, ResMut, With};
+use bevy_ecs::resource::Resource;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use lodestone_client::ClientAction;
+use lodestone_ecs::player::{
+    ActionQueue, Dead, Egress, LastPlayerInput, LocalPlayer, MovementIntent, PhysicsState,
+    SprintKeyHeld, Submersion,
+};
+use lodestone_ecs::{GameTick, TickSet};
+use lodestone_model::PlayerInput;
+use lodestone_physics::MovementInput;
+
+use crate::action::move_action;
+use crate::input::{Action, InputState, movement_intent};
+
+/// The platform's held keys and accumulated mouse motion.
+///
+/// A resource rather than a component on the local player: a keyboard is a
+/// property of the *process*, not of a player, and a swarm driver running
+/// several clients in one `World` would drive them from bot code rather than
+/// from one shared keyboard. The platform layer (winit in `lodestone-shell`,
+/// web-sys in the browser) writes it; nothing else does.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq)]
+pub struct RawInput(pub InputState);
+
+/// [`movement_intent`] plus the one water exception vanilla's sprint gate
+/// makes.
+///
+/// `movement_intent` vetoes sprint while sneaking, which is right on land
+/// (`isMovingSlowly()`). Underwater it is wrong:
+/// `LocalPlayer.canStartSprinting` is
+/// `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java:1137-1144`)
+/// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
+/// shift is held (`LocalPlayer.java:923-925`). Shift is how you steer downward
+/// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
+/// player cannot swim and descend at the same time — they stop dead.
+///
+/// Implemented by re-running the gate on a copy of the input with sneak
+/// cleared, rather than restating the gate: the two must not be able to drift
+/// apart. Only the sprint bit is taken; `sneak` itself stays set, so the sink
+/// impulse and the crouch pose still see it.
+#[must_use]
+pub fn swim_adjusted_intent(state: &InputState, submerged: bool) -> MovementInput {
+    let mut intent = movement_intent(state);
+    if !intent.sneak || !submerged {
+        return intent;
+    }
+    let mut without_sneak = *state;
+    without_sneak.set(Action::Sneak, false);
+    intent.sprint = movement_intent(&without_sneak).sprint;
+    intent
+}
+
+/// Write this tick's [`MovementIntent`] and [`SprintKeyHeld`] for every
+/// [`LocalPlayer`].
+///
+/// # What changed observably in Stage 2
+///
+/// This used to be computed **once per frame**, outside the driver's
+/// `while accumulator >= TICK_DT` loop, so a frame long enough to run several
+/// catch-up ticks reused one decision for all of them. As a per-tick system:
+///
+/// * a double-tap sprint window that expires part-way through a multi-tick
+///   frame now stops applying on the tick it expires, not at the end of the
+///   frame;
+/// * the submersion the swim exception reads is the previous *tick*'s, not the
+///   previous *frame*'s, so a player who submerges during a catch-up burst
+///   gains the swim-sprint exception a tick later rather than a frame later;
+/// * at any frame rate at or above 20 fps a frame runs at most one tick, so
+///   nothing changes at all. The difference is confined to stalls.
+///
+/// The one-tick lag on submersion is deliberate and is vanilla's own:
+/// `baseTick` computes submersion before `aiStep` reads it.
+pub fn compute_movement_intent(
+    input: Res<RawInput>,
+    mut players: Query<
+        (
+            &mut MovementIntent,
+            &mut SprintKeyHeld,
+            &PhysicsState,
+            &Submersion,
+            Option<&Dead>,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for (mut intent, mut sprint_key, state, submersion, dead) in &mut players {
+        sprint_key.0 = input.0.sprint_held();
+        intent.0 = if dead.is_some() {
+            // A corpse does not walk: ignore held keys while dead so the player
+            // holds still on the death screen until the respawn teleport lands.
+            MovementInput::NONE
+        } else {
+            swim_adjusted_intent(
+                &input.0,
+                submersion.0.under_water() || state.0.swimming,
+            )
+        };
+    }
+}
+
+/// Advance the double-tap-to-sprint window by one 20 Hz tick.
+///
+/// Ordered *after* [`compute_movement_intent`] — see this module's docs.
+pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
+    input.0.tick();
+}
+
+/// Queue the per-tick movement packet.
+///
+/// Vanilla emits one every tick (20 Hz); mirroring that is what keeps the
+/// server from ever having to correct us. Only once we are actually in the
+/// world — before the server places us, a version adapter (correctly) has no
+/// Play-state packet for a move, so sending earlier just produces
+/// dropped-action noise. While dead the vanilla client sends no movement (it
+/// is held on the death screen), so it is withheld until the respawn lands.
+pub fn send_move_action(
+    egress: Res<Egress>,
+    mut queue: ResMut<ActionQueue>,
+    players: Query<(&PhysicsState, Option<&Dead>), With<LocalPlayer>>,
+) {
+    if !egress.in_world {
+        return;
+    }
+    for (state, dead) in &players {
+        if dead.is_none() {
+            queue.0.push(move_action(&state.0));
+        }
+    }
+}
+
+/// Queue the edge-triggered [`PlayerInput`] packet when it changes.
+///
+/// Vanilla's player-input packet is the *only* way the server learns we are
+/// sneaking — it never infers shift from the movement packet. Without this a
+/// sneak-placement is treated as an interaction server-side (re-opening the
+/// chest you meant to place against).
+///
+/// # This now reports the same intent physics used
+///
+/// Before Stage 2 this recomputed `movement_intent(&input)` for itself, which
+/// deliberately vetoes sprint while sneaking — so a *submerged* player holding
+/// shift and sprint had physics swim-sprinting (via
+/// [`swim_adjusted_intent`]) while the wire said `sprint: false`. Reading the
+/// [`MovementIntent`] component instead removes that disagreement: there is one
+/// intent per tick and the server is told about the one that moved us.
+///
+/// [`Egress::live`] gates the latch, not just the send: a system that ran while
+/// disconnected would record the current input into [`LastPlayerInput`] as
+/// "already sent", and the first real change after connecting would then be
+/// suppressed as a redundant resend.
+pub fn send_player_input(
+    egress: Res<Egress>,
+    mut queue: ResMut<ActionQueue>,
+    mut players: Query<(&MovementIntent, &mut LastPlayerInput), With<LocalPlayer>>,
+) {
+    if !(egress.in_world && egress.live) {
+        return;
+    }
+    for (intent, mut last) in &mut players {
+        let intent = intent.0;
+        let next = PlayerInput {
+            forward: intent.forward > 0.0,
+            backward: intent.forward < 0.0,
+            left: intent.strafe > 0.0,
+            right: intent.strafe < 0.0,
+            jump: intent.jump,
+            shift: intent.sneak,
+            sprint: intent.sprint,
+        };
+        if last.0 == Some(next) {
+            continue;
+        }
+        last.0 = Some(next);
+        queue.0.push(ClientAction::SetPlayerInput(next));
+    }
+}
+
+/// The controller's half of the `GameTick`: [`TickSet::Input`] and
+/// [`TickSet::Send`].
+///
+/// Pairs with [`lodestone_ecs::player::LocalPlayerPlugin`], which owns
+/// `TickSet::Physics` and the components both halves read. Both are needed for
+/// a driven, reported player; either alone is deliberately usable on its own
+/// (physics-only for a headless movement harness, input-only for a replay).
+#[derive(Debug, Default)]
+pub struct ControllerPlugin;
+
+impl Plugin for ControllerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<RawInput>();
+        app.add_systems(
+            GameTick,
+            (compute_movement_intent, tick_sprint_window)
+                .chain()
+                .in_set(TickSet::Input),
+        );
+        app.add_systems(
+            GameTick,
+            (send_move_action, send_player_input)
+                .chain()
+                .in_set(TickSet::Send),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_ecs::player::{Flying, LocalPlayerPlugin, PlayerCollision, SelectedSlot};
+    use lodestone_ecs::{CorePlugin, spawn_local_player};
+    use lodestone_physics::{FluidState, PlayerState, Vec3d};
+
+    fn app() -> (App, bevy_ecs::entity::Entity) {
+        let mut app = App::new();
+        app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin));
+        // Nothing to stand on: these tests are about intent and egress, and a
+        // frozen player keeps the physics arithmetic out of the assertions.
+        app.insert_resource(PlayerCollision::NoWorld);
+        let entity = spawn_local_player(
+            app.world_mut(),
+            PlayerState::at(Vec3d::new(0.5, 64.0, 0.5), 0.0),
+        );
+        (app, entity)
+    }
+
+    fn press(app: &mut App, action: Action, held: bool) {
+        app.world_mut().resource_mut::<RawInput>().0.set(action, held);
+    }
+
+    fn tick(app: &mut App) {
+        app.world_mut().run_schedule(GameTick);
+    }
+
+    fn drain(app: &mut App) -> Vec<ClientAction> {
+        std::mem::take(&mut app.world_mut().resource_mut::<ActionQueue>().0)
+    }
+
+    /// The whole point of the stage: a `GameTick` run must turn held keys into
+    /// the intent the physics set reads, through the schedule.
+    #[test]
+    fn a_game_tick_turns_held_keys_into_the_intent_component() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        tick(&mut app);
+        assert_eq!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.forward,
+            1.0
+        );
+    }
+
+    /// Negative control for the above: no key held, no intent. Without it,
+    /// "forward == 1.0" could be satisfied by a default.
+    #[test]
+    fn no_key_held_yields_no_intent() {
+        let (mut app, entity) = app();
+        tick(&mut app);
+        assert_eq!(
+            app.world().get::<MovementIntent>(entity).unwrap().0,
+            MovementInput::NONE
+        );
+    }
+
+    /// The pre-existing per-*frame* intent meant several catch-up ticks in one
+    /// slow frame shared one decision. As a per-tick system, a double-tap
+    /// window that expires mid-burst stops applying on the tick it expires.
+    #[test]
+    fn the_double_tap_window_expires_mid_burst_rather_than_at_frame_end() {
+        let (mut app, entity) = app();
+        // Arm the window with one fresh press, then release. The window is
+        // `SPRINT_TRIGGER_WINDOW_TICKS` long and is aged once per tick by
+        // `tick_sprint_window`.
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Forward, false);
+        for _ in 0..crate::input::SPRINT_TRIGGER_WINDOW_TICKS {
+            tick(&mut app);
+        }
+        // The window has now expired inside the loop, so a second press does
+        // not latch sprint.
+        press(&mut app, Action::Forward, true);
+        tick(&mut app);
+        assert!(
+            !app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "a window aged tick-by-tick must be stale by now"
+        );
+    }
+
+    /// Sneak is how you swim downward, so the land-side "sneak vetoes sprint"
+    /// gate must not apply while submerged — otherwise holding shift underwater
+    /// stops the swim dead. The land case is the control.
+    #[test]
+    fn sneak_cancels_sprint_on_land_but_not_under_water() {
+        let mut state = InputState::default();
+        state.set(Action::Forward, true);
+        state.set(Action::Sprint, true);
+        state.set(Action::Sneak, true);
+
+        assert!(
+            !swim_adjusted_intent(&state, false).sprint,
+            "control: on land, sneaking still vetoes sprint"
+        );
+        let intent = swim_adjusted_intent(&state, true);
+        assert!(
+            intent.sprint,
+            "submerged, shift must not cancel a swim-sprint"
+        );
+        assert!(
+            intent.sneak,
+            "…and shift itself must survive, or the sink impulse is lost"
+        );
+    }
+
+    /// The swim exception has to reach the *system*, not just the free
+    /// function — the component read is what could silently be wired to the
+    /// wrong source.
+    #[test]
+    fn the_intent_system_reads_submersion_for_the_swim_exception() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        press(&mut app, Action::Sprint, true);
+        press(&mut app, Action::Sneak, true);
+        tick(&mut app);
+        assert!(
+            !app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "control: dry, sneak vetoes sprint"
+        );
+
+        app.world_mut().entity_mut(entity).insert(Submersion(FluidState {
+            water_height: 2.0,
+            eye_in_water: true,
+            ..FluidState::NONE
+        }));
+        tick(&mut app);
+        assert!(
+            app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "submerged, the same keys must swim-sprint"
+        );
+    }
+
+    /// Free-fly's speed doubling reads the *raw* sprint key, which the walking
+    /// gate would have vetoed here (no forward impulse).
+    #[test]
+    fn the_raw_sprint_key_survives_the_walking_gate_for_free_fly() {
+        let (mut app, entity) = app();
+        app.world_mut().entity_mut(entity).insert(Flying(true));
+        press(&mut app, Action::Sprint, true);
+        tick(&mut app);
+        assert!(
+            !app.world().get::<MovementIntent>(entity).unwrap().0.sprint,
+            "standing still, the gated sprint bit is false"
+        );
+        assert!(
+            app.world().get::<SprintKeyHeld>(entity).unwrap().0,
+            "…but free-fly still needs to see the key itself"
+        );
+    }
+
+    /// A dead player holds still and is not reported as moving.
+    #[test]
+    fn a_dead_player_neither_walks_nor_sends_movement() {
+        let (mut app, entity) = app();
+        app.world_mut().insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        press(&mut app, Action::Forward, true);
+        app.world_mut().entity_mut(entity).insert(Dead);
+        tick(&mut app);
+        assert_eq!(
+            app.world().get::<MovementIntent>(entity).unwrap().0,
+            MovementInput::NONE
+        );
+        assert!(
+            !drain(&mut app)
+                .iter()
+                .any(|a| matches!(a, ClientAction::Move { .. })),
+            "no movement packet from the death screen"
+        );
+    }
+
+    /// Nothing reaches the queue until the server has placed us — and the
+    /// edge-tracker must not latch either, or the first real input after
+    /// joining would be suppressed as a redundant resend.
+    #[test]
+    fn a_closed_session_queues_nothing_and_latches_nothing() {
+        let (mut app, entity) = app();
+        press(&mut app, Action::Forward, true);
+        tick(&mut app);
+        assert!(drain(&mut app).is_empty());
+        assert_eq!(
+            app.world().get::<LastPlayerInput>(entity).unwrap().0,
+            None,
+            "the edge-tracker must stay unlatched while disconnected"
+        );
+
+        // …and once connected, that very same held key is reported.
+        app.world_mut().insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        tick(&mut app);
+        let sent = drain(&mut app);
+        assert!(sent.iter().any(|a| matches!(
+            a,
+            ClientAction::SetPlayerInput(PlayerInput { forward: true, .. })
+        )));
+    }
+
+    /// One move per tick, and the input packet only on a change — the wire
+    /// contract `Sim`'s live gates measure.
+    #[test]
+    fn one_move_per_tick_and_an_edge_triggered_input_packet() {
+        let (mut app, _entity) = app();
+        app.world_mut().insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        press(&mut app, Action::Forward, true);
+        tick(&mut app);
+        let first = drain(&mut app);
+        assert_eq!(
+            first
+                .iter()
+                .filter(|a| matches!(a, ClientAction::Move { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            first
+                .iter()
+                .filter(|a| matches!(a, ClientAction::SetPlayerInput(_)))
+                .count(),
+            1
+        );
+
+        tick(&mut app);
+        let second = drain(&mut app);
+        assert_eq!(
+            second
+                .iter()
+                .filter(|a| matches!(a, ClientAction::Move { .. }))
+                .count(),
+            1,
+            "movement is unconditional every tick"
+        );
+        assert!(
+            !second
+                .iter()
+                .any(|a| matches!(a, ClientAction::SetPlayerInput(_))),
+            "…but the input packet is edge-triggered"
+        );
+    }
+
+    /// The move packet is queued *after* everything in `TickSet::Physics` has
+    /// run, which is what makes a plugin inserted between the two able to
+    /// change what the server is told this tick.
+    #[test]
+    fn a_plugin_between_physics_and_send_changes_what_is_reported() {
+        use bevy_ecs::prelude::Query;
+
+        let (mut app, _entity) = app();
+        app.world_mut().insert_resource(Egress {
+            in_world: true,
+            live: true,
+        });
+        app.add_systems(
+            GameTick,
+            (|mut q: Query<&mut PhysicsState>| {
+                for mut state in &mut q {
+                    state.0.position.y = 1234.0;
+                }
+            })
+            .after(TickSet::Physics)
+            .before(TickSet::Send),
+        );
+        tick(&mut app);
+        let moves: Vec<_> = drain(&mut app)
+            .into_iter()
+            .filter_map(|a| match a {
+                ClientAction::Move { pos, .. } => Some(pos.y),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            moves,
+            vec![1234.0],
+            "the plugin's write must be what reaches the wire"
+        );
+    }
+
+    /// The hotbar selection is not part of the movement tick and must survive
+    /// one — a cheap guard against `spawn_local_player`'s eager component set
+    /// being re-inserted by some system each tick.
+    #[test]
+    fn the_selected_slot_is_untouched_by_a_movement_tick() {
+        let (mut app, entity) = app();
+        app.world_mut().entity_mut(entity).insert(SelectedSlot(4));
+        tick(&mut app);
+        assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 4);
+    }
+}

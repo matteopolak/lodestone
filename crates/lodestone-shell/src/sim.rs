@@ -8,20 +8,25 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::Language;
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
-use lodestone_controller::{InputState, apply_look, move_action, movement_intent};
+use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
+use lodestone_ecs::player::{
+    ActionQueue, CollisionSource, Dead, Egress, Flying, LastSprintingSent, LocalPlayerPlugin,
+    MovementIntent, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
+    reset_local_player, spawn_local_player,
+};
+use lodestone_ecs::{CorePlugin, GameTick};
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
-use lodestone_model::{BlockFace, PlayerCommand, PlayerInput, Vec3f};
+use lodestone_model::{BlockFace, PlayerCommand, Vec3f};
 use lodestone_particle::emit as particle_emit;
-use lodestone_physics::{
-    CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
-    compute_fluid_state, tick,
-};
+use lodestone_physics::{CollisionView, FluidState, PhysicsProfile, PlayerState, Vec3d};
 use lodestone_render::{BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
 
@@ -61,18 +66,10 @@ const MAX_WORLD_RADIUS: i32 = 6;
 /// that samples the demo generator's noise, and the client no longer has a demo
 /// world for the answer to mean anything.
 const PRE_SESSION_FEET: [f64; 3] = [0.5, 71.0, 0.5];
-/// Horizontal free-fly speed in blocks per tick (sprint doubles it). The physics
-/// engine models no creative/spectator flight, so fly is a shell-side free-cam.
-const FLY_SPEED: f64 = 0.45;
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
-/// Eye height of `Pose.SWIMMING` — `EntityDimensions.scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
-/// (`Avatar.java:28`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
-const SWIMMING_EYE_HEIGHT: f32 = 0.4;
-/// Eye height of `Pose.CROUCHING` — `1.27F` (`Avatar.java:33`).
-const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 
 /// The live [`Mining`] predictor's [`BreakInputs`] for one dig tick, built from
 /// the version's block-state hardness census, the resolved held-item
@@ -151,25 +148,45 @@ fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_m
 /// [`lodestone_model::ItemStack`] shape
 /// [`lodestone_model::VersionAdapter::tool_mining`] expects.
 ///
-/// The shell's own inventory model ([`lodestone_game::item::ItemStack`], reached
-/// through [`Sim::player_menu`]) does not carry a `minecraft:tool` component —
-/// `lodestone_game::menus::model_item_to_game` folds only `custom_name`/
-/// `damage`/`enchantments` off the wire, dropping the rest of the model's
-/// component patch. That is not a loss here: an ordinary vanilla tool ships
-/// with an *empty* `minecraft:tool` patch regardless (the component lives in
-/// the item's built-in prototype, not the wire delta — see
-/// `docs/tool-mining.md`), so [`lodestone_model::ItemComponents::default`]'s
-/// `ToolPatch::Inherited` is the value a faithfully-decoded stack would carry
-/// too, and `tool_mining` resolves `Inherited` against the item id via the
-/// version's generated prototype table. The one case this cannot see is a
-/// server/datapack that overrides `minecraft:tool` explicitly on the wire
-/// (`/give …[minecraft:tool={…}]`) — the same class of known gap as the
-/// existing tag-only `update_tags` gap `docs/tool-mining.md` already documents.
+/// # The `minecraft:tool` patch is carried, not defaulted
+///
+/// This used to hand `tool_mining` a bare
+/// [`lodestone_model::ItemComponents::default`], i.e. `ToolPatch::Inherited`,
+/// on the grounds that the canonical stack could not carry a tool component
+/// anyway. That was true when it was written and is no longer: the
+/// `&lodestone_model::ItemStack → lodestone_game::item::ItemStack` conversion
+/// now folds the tool patch in (as [`ComponentValue::Tool`], and *only* when the
+/// wire patch was `Set` or `Removed` — `Inherited` is deliberately left absent
+/// so "no override" cannot be confused with "an empty override").
+///
+/// So the round trip is exact in both directions, and the case the old
+/// behaviour could not see now works: a server or datapack that overrides
+/// `minecraft:tool` explicitly on the wire (`/give …[minecraft:tool={…}]`).
+/// Before this, such an item resolved as if the *item default* applied — a
+/// custom-speed pickaxe dug at its vanilla rate.
+///
+/// An ordinary vanilla tool is unaffected: it ships an `Inherited` patch (the
+/// component lives in the item's built-in prototype, not the wire delta — see
+/// `docs/tool-mining.md`), so nothing is inserted, nothing is read back, and
+/// `tool_mining` resolves it against the item id via the version's generated
+/// prototype table exactly as before.
+///
+/// [`ComponentValue::Tool`]: lodestone_game::item::ComponentValue::Tool
 fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::ItemStack {
+    let tool = match held.components().get_str(lodestone_game::item::TOOL_COMPONENT) {
+        Some(lodestone_game::item::ComponentValue::Tool(patch)) => patch.clone(),
+        // Absent (the `Inherited` case) or — defensively — some other component
+        // value stored under the tool key: fall back to "no override", which is
+        // what `Inherited` means.
+        _ => lodestone_model::ToolPatch::Inherited,
+    };
     lodestone_model::ItemStack {
         item: held.item().clone(),
         count: u32::try_from(held.count()).unwrap_or(0),
-        components: lodestone_model::ItemComponents::default(),
+        components: lodestone_model::ItemComponents {
+            tool,
+            ..lodestone_model::ItemComponents::default()
+        },
     }
 }
 
@@ -332,6 +349,57 @@ fn face_center_cursor(normal: [i32; 3]) -> Vec3f {
     Vec3f::new(coord(normal[0]), coord(normal[1]), coord(normal[2]))
 }
 
+/// An owned snapshot of the **offline demo world**, adapted to the ECS's
+/// [`CollisionSource`].
+///
+/// The indirection exists because [`WorldCollision`] borrows its world, and a
+/// `bevy_ecs` `Resource` must be `'static`. Handing the view out through a
+/// callback (rather than storing one) is what lets a borrowed adapter reach a
+/// scheduled system at all — see [`CollisionSource`]'s docs.
+///
+/// Deliberately *not* a hand-written `impl CollisionView` that re-delegates
+/// [`WorldCollision`]'s thirteen methods: a method later added to
+/// `CollisionView` would be overridden by `WorldCollision` and silently fall
+/// back to the trait default here, which is exactly the "two adapters, one of
+/// them subtly wrong" failure [`crate::collision`]'s module docs warn about.
+/// This constructs the real adapter and asks it.
+struct DemoCollision(World);
+
+impl std::fmt::Debug for DemoCollision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never dump a whole world; the useful scalar is how much of one this is.
+        f.debug_struct("DemoCollision")
+            .field("columns", &self.0.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CollisionSource for DemoCollision {
+    fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+        f(&WorldCollision::new(&self.0));
+    }
+}
+
+/// The live server terrain around the player, as a [`CollisionSource`].
+///
+/// [`LiveCollision`] is already an owned snapshot (`Arc<ChunkSection>` handles
+/// plus the atlas), so this is pure plumbing — but it is the reason the whole
+/// seam works: `Sim::live_collision` returning owned data is what makes the
+/// live path expressible as a resource at all.
+struct LiveCollisionSource(LiveCollision);
+
+impl std::fmt::Debug for LiveCollisionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveCollisionSource").finish_non_exhaustive()
+    }
+}
+
+impl CollisionSource for LiveCollisionSource {
+    fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+        f(&self.0);
+    }
+}
+
 /// The whole non-graphical game state.
 #[derive(Debug)]
 pub struct Sim {
@@ -339,31 +407,50 @@ pub struct Sim {
     pub config: Config,
     /// The world being rendered (locally generated for now).
     pub world: World,
-    /// The player, advanced by the bit-exact physics engine.
-    pub player: PlayerState,
-    /// Held keys + accumulated mouse motion.
-    pub input: InputState,
     /// Latest debug stats (the app fills in FPS/frame-time/GPU counters).
     pub stats: DebugStats,
     /// The block the view ray is currently pointing at (for outline + edits).
     pub target: Option<RayHit>,
-    profile: PhysicsProfile,
+    /// The `World` the **local player** lives in as components, plus the
+    /// `GameTick` systems that advance it (`docs/bevy-migration.md` Stage 2,
+    /// `docs/local-player-components.md`).
+    ///
+    /// `Sim` holds **no** `PlayerState`, `InputState`, `PhysicsProfile`,
+    /// `FluidState`, hotbar slot, fly flag, death flag or wire edge-tracker of
+    /// its own: this is the sole store, reached through the accessors below.
+    /// That is the stage's authority test — a second copy here would make a
+    /// plugin's write to a component a write to nothing.
+    ///
+    /// This is the **third** `World` in the process (the net thread's, the
+    /// entity interpolator's, and this one), and that is temporary — see the
+    /// doc for why unifying them belongs in `docs/bevy-migration.md` §4.1 and
+    /// not here.
+    ecs: EcsWorld,
+    /// The local player's entity in [`Self::ecs`]. Stable for the lifetime of
+    /// the `Sim`, including across [`Sim::end_session`], because the driver and
+    /// (later) plugins hold it.
+    local: Entity,
+    /// Cached owned snapshot of [`Self::world`] for the offline collision path,
+    /// rebuilt lazily.
+    ///
+    /// `None` means "stale, rebuild on next use". **Anything that mutates
+    /// [`Self::world`] must clear this** — today that is only
+    /// [`Sim::set_block_world`], which is the one write path after
+    /// construction (live terrain lives in the net client's world, not here).
+    /// A missed invalidation is a player colliding against pre-edit geometry,
+    /// which reads as "I mined the block but still cannot walk through it".
+    demo_collision: Option<Arc<DemoCollision>>,
     scheduler: MeshScheduler,
     net: Option<NetClient>,
     accumulator: f64,
     last_step: Instant,
     status: String,
-    /// Player feet position at the start of the most recent physics tick, used
-    /// to interpolate the camera between fixed ticks.
-    prev_position: Vec3d,
     /// Fractional progress `[0,1)` from the last tick toward the next.
     interp_alpha: f32,
     /// Total physics ticks run since start.
     tick_count: u64,
     /// Total frames (calls to [`Sim::step`]) since start.
     frame_count: u64,
-    /// Whether free-fly (noclip) is active instead of physics-walk.
-    fly: bool,
     /// Sections whose geometry vanished (all-air after an edit) and must be
     /// dropped from the GPU. Drained by the app each frame.
     pending_removals: Vec<SectionKey>,
@@ -464,14 +551,6 @@ pub struct Sim {
     health: Option<f32>,
     /// Latest server-reported food level in `0..=20`, `None` until reported.
     food: Option<i32>,
-    /// Whether the local player is currently dead — set by [`NetUpdate::Death`]
-    /// and cleared by [`NetUpdate::Respawned`]. Death is a transient *state*, not
-    /// the end of the session: the client library's `RespawnPolicy::Automatic`
-    /// answers the death packet with a `Respawn` action, so the shell rides
-    /// through the death screen rather than tearing the session down. While dead
-    /// the corpse does not walk — [`Sim::step`] feeds [`MovementInput::NONE`] and
-    /// withholds movement packets until the post-respawn placement teleport lands.
-    dead: bool,
     /// Count of respawns observed (one per [`NetUpdate::Respawned`]). A diagnostic
     /// the live death gate reads to confirm the client actually recovered rather
     /// than merely never dying.
@@ -490,10 +569,6 @@ pub struct Sim {
     /// Per-entity interpolation, smoothing the 20 Hz snapshot stream into the
     /// render-rate transforms the entity pass draws. Empty off a live server.
     entity_interp: EntityInterpolator,
-    /// Selected hotbar slot in `0..9`. Owned locally: the selected slot is an
-    /// input the player drives (number keys / scroll), echoed to the server via
-    /// [`ClientAction::SetCarriedItem`]. Defaults to slot 0, matching vanilla.
-    selected_slot: usize,
     /// Live audio, or `None` when disabled (no asset root, no device — see
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
@@ -515,33 +590,6 @@ pub struct Sim {
     /// Whether the attack (left) button is currently held. Drives the live
     /// hold-to-mine loop; a demo-world break is a one-shot on press instead.
     attacking: bool,
-    /// The last [`PlayerInput`] sent to the server, so we only resend on change
-    /// (vanilla's player-input packet is edge-triggered). Critically, this is
-    /// how the server learns we are sneaking — it derives shift from the wire,
-    /// never from our local movement flags, so a placement against an
-    /// interactable block only suppresses the interaction if this was sent.
-    last_player_input: Option<PlayerInput>,
-    /// The last sprint state put on the wire as a
-    /// [`PlayerCommand::StartSprinting`]/[`StopSprinting`](PlayerCommand::StopSprinting),
-    /// mirroring vanilla's `wasSprinting` (`LocalPlayer.sendIsSprintingIfNeeded`,
-    /// `LocalPlayer.java:303-312`).
-    ///
-    /// This is a **separate packet from [`Self::last_player_input`]** and both are
-    /// needed. `ServerboundPlayerInputPacket` only stores its `sprint` bit as
-    /// `ServerPlayer.lastClientInput` (`ServerGamePacketListenerImpl.java:424`); the
-    /// thing that actually calls `player.setSprinting(...)` is
-    /// `handlePlayerCommand` (`:1719-1722`). So without this the server never
-    /// believes we are sprinting, which means its own
-    /// `Entity.baseTick` → `updateSwimming` can never put us in the swimming pose —
-    /// no swim animation for other players, and no server-side sprint speed.
-    last_sprinting_sent: Option<bool>,
-    /// The local player's water/lava submersion this tick, from the bit-exact
-    /// physics producer (`EntityFluidInteraction.update`). Recomputed once per
-    /// physics tick against the very view movement collided against, and read by
-    /// the shell to drive submerged fog (and, later, the underwater overlay,
-    /// ambient sounds and swim pose). The shell never invents its own submerged
-    /// boolean — those consumers share this one source of truth.
-    fluid_state: FluidState,
     /// The version adapter for [`Config::protocol`], held solely as the shell's
     /// route to per-block-state data — today [`VersionAdapter::block_hardness`],
     /// which the live mining predictor needs to time a break.
@@ -716,29 +764,43 @@ impl Sim {
         // second to perform it would not be.
         let version_data = lodestone_registry::adapter_for_protocol(config.protocol);
 
+        // The local player's `World`. Built through an `App` because `Plugin::build`
+        // is the only way to register schedules and systems, then the `World` is
+        // taken and the `App` dropped — azalea's own shape
+        // (`azalea-client/src/client.rs:143`), and `crate::entities` does the same,
+        // which is why nothing here ever calls `App::update`.
+        //
+        // `LocalPlayerPlugin` owns `TickSet::Physics`; `ControllerPlugin` owns
+        // `TickSet::Input` and `TickSet::Send`. Both are needed for a player that
+        // is driven *and* reported, and they are separate plugins so a harness can
+        // take one without the other.
+        let mut app = lodestone_ecs::app::App::new();
+        app.add_plugins((CorePlugin, LocalPlayerPlugin, ControllerPlugin));
+        let mut ecs = std::mem::take(app.world_mut());
+        ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
+        // Physics-walk is the default everywhere, including live: the shell
+        // collides against the live client-owned world (see `LiveCollision` /
+        // `Sim::tick_collision`), so the player stands on the server's ground.
+        // While a column is still streaming in, `PlayerCollision::Pending` holds
+        // the player in place rather than letting them fall.
+        let local = spawn_local_player(&mut ecs, player);
+
         Self {
             config,
             world,
-            player,
-            input: InputState::default(),
             stats,
             target: None,
-            profile: PhysicsProfile::mc_1_21(),
+            ecs,
+            local,
+            demo_collision: None,
             scheduler,
             net: None,
             accumulator: 0.0,
             last_step: Instant::now(),
             status,
-            prev_position: player.position,
             interp_alpha: 0.0,
             tick_count: 0,
             frame_count: 0,
-            // Physics-walk is the default everywhere, including live: the shell
-            // now collides against the live client-owned world (see
-            // `LiveCollision` / `physics_tick`), so the player stands on the
-            // server's ground. While a column is still streaming in, the live
-            // path holds the player in place rather than letting them fall.
-            fly: false,
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             vanilla_atlas: resources.vanilla_atlas,
@@ -759,24 +821,147 @@ impl Sim {
             clock_secs: 0.0,
             health: None,
             food: None,
-            dead: false,
             respawn_count: 0,
             recover_from_death: true,
             experience: None,
             entity_interp: EntityInterpolator::new(),
-            selected_slot: 0,
             audio: ShellAudio::from_env(),
             local_entity_id: None,
             mining: Mining::new(),
             placement: Placement::new(),
             attacking: false,
-            last_player_input: None,
-            // `Some(false)`, not `None`: vanilla's `wasSprinting` starts `false`, so a
-            // player who joins and does not sprint sends nothing at all rather than a
-            // redundant `STOP_SPRINTING` on the first tick.
-            last_sprinting_sent: Some(false),
-            fluid_state: FluidState::NONE,
             version_data,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The local player, which lives in `self.ecs` and nowhere else
+    // -----------------------------------------------------------------------
+
+    /// The local player's `World`, for a caller that wants to query or mutate
+    /// the components directly.
+    ///
+    /// This is the seam that keeps the component set from being an island: a
+    /// plugin (or a test) can write [`PhysicsState`] and the next tick — and
+    /// the next movement packet — reflect it.
+    #[must_use]
+    pub fn ecs(&self) -> &EcsWorld {
+        &self.ecs
+    }
+
+    /// The mutable form of [`Self::ecs`].
+    pub fn ecs_mut(&mut self) -> &mut EcsWorld {
+        &mut self.ecs
+    }
+
+    /// The local player's entity, for pairing with [`Self::ecs`].
+    #[must_use]
+    pub fn local_player(&self) -> Entity {
+        self.local
+    }
+
+    /// The player's bit-exact physics state.
+    ///
+    /// Panics only on a corrupted `World` — [`spawn_local_player`] inserts the
+    /// whole component set eagerly and nothing ever removes it, so a missing
+    /// component means someone despawned the local player, which is a bug in
+    /// the caller rather than a state a reader should have to handle.
+    #[must_use]
+    pub fn player(&self) -> &PlayerState {
+        &self
+            .ecs
+            .get::<PhysicsState>(self.local)
+            .expect("the local player always carries PhysicsState")
+            .0
+    }
+
+    /// The mutable form of [`Self::player`].
+    pub fn player_mut(&mut self) -> &mut PlayerState {
+        &mut self
+            .ecs
+            .get_mut::<PhysicsState>(self.local)
+            .expect("the local player always carries PhysicsState")
+            .into_inner()
+            .0
+    }
+
+    /// Held keys plus accumulated mouse motion. The platform layer
+    /// ([`crate::app`]) is the only writer.
+    #[must_use]
+    pub fn input(&self) -> &InputState {
+        &self.ecs.resource::<RawInput>().0
+    }
+
+    /// The mutable form of [`Self::input`].
+    pub fn input_mut(&mut self) -> &mut InputState {
+        &mut self.ecs.resource_mut::<RawInput>().into_inner().0
+    }
+
+    /// The physics tuning profile this world is simulated under.
+    #[must_use]
+    pub fn profile(&self) -> &PhysicsProfile {
+        &self.ecs.resource::<Profile>().0
+    }
+
+    /// Feet position at the start of the most recent physics tick — the camera's
+    /// interpolation anchor.
+    #[must_use]
+    fn prev_position(&self) -> Vec3d {
+        self.ecs
+            .get::<PrevPosition>(self.local)
+            .expect("the local player always carries PrevPosition")
+            .0
+    }
+
+    /// Overwrite the camera's interpolation anchor, for a discontinuity the
+    /// interpolator must not smear across (a server teleport).
+    fn set_prev_position(&mut self, position: Vec3d) {
+        if let Some(mut prev) = self.ecs.get_mut::<PrevPosition>(self.local) {
+            prev.0 = position;
+        }
+    }
+
+    /// This tick's movement intent, as computed in `TickSet::Input`.
+    #[must_use]
+    fn movement_intent(&self) -> lodestone_physics::MovementInput {
+        self.ecs
+            .get::<MovementIntent>(self.local)
+            .expect("the local player always carries MovementIntent")
+            .0
+    }
+
+    /// The last sprint state put on the wire (vanilla's `wasSprinting`).
+    #[must_use]
+    fn last_sprinting_sent(&self) -> Option<bool> {
+        self.ecs
+            .get::<LastSprintingSent>(self.local)
+            .expect("the local player always carries LastSprintingSent")
+            .0
+    }
+
+    /// Record the sprint state just put on the wire.
+    fn set_last_sprinting_sent(&mut self, sprinting: bool) {
+        if let Some(mut last) = self.ecs.get_mut::<LastSprintingSent>(self.local) {
+            last.0 = Some(sprinting);
+        }
+    }
+
+    /// Mark the local player dead (server death packet) or alive again (respawn).
+    ///
+    /// Death is a transient *state*, not the end of the session: the client
+    /// library's `RespawnPolicy::Automatic` answers the death packet with a
+    /// `Respawn` action, so the shell rides through the death screen rather
+    /// than tearing the session down. While it holds, the corpse does not walk
+    /// — the intent system forces `MovementInput::NONE` and the movement packet
+    /// is withheld until the post-respawn placement teleport lands.
+    fn set_dead(&mut self, dead: bool) {
+        let Ok(mut entity) = self.ecs.get_entity_mut(self.local) else {
+            return;
+        };
+        if dead {
+            entity.insert(Dead);
+        } else {
+            entity.remove::<Dead>();
         }
     }
 
@@ -900,7 +1085,6 @@ impl Sim {
         self.action_bar = lodestone_game::player_state::ActionBar::new();
         self.health = None;
         self.food = None;
-        self.dead = false;
         self.respawn_count = 0;
         self.experience = None;
         self.entity_interp = EntityInterpolator::new();
@@ -910,10 +1094,6 @@ impl Sim {
         self.mining = Mining::new();
         self.placement = Placement::new();
         self.attacking = false;
-        self.last_player_input = None;
-        self.last_sprinting_sent = Some(false);
-        self.fluid_state = FluidState::NONE;
-        self.selected_slot = 0;
 
         // Flush and discard mesh jobs still in flight for the old server's
         // chunks rather than letting them complete later and land silently
@@ -936,11 +1116,18 @@ impl Sim {
         } else {
             worldgen::spawn_feet()
         };
-        self.player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
-        self.player.pitch = 10.0;
-        self.fly = false;
+        let mut player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
+        player.pitch = 10.0;
+        // One call rather than a field-by-field reset: `reset_local_player` puts
+        // the whole component set back to what `spawn_local_player` produces —
+        // pose, camera anchor, submersion, intent, free-fly, hotbar slot, the two
+        // wire edge-trackers (to their `Sim::new` values, so the next session's
+        // first packet is not suppressed as a redundant resend), and the `Dead`
+        // marker. Keeping that list in one place is what stops a component added
+        // later from being silently missed here.
+        reset_local_player(&mut self.ecs, self.local, player);
         self.target = None;
-        self.input.release_all();
+        self.input_mut().release_all();
 
         self.status = if self.vanilla_atlas.is_some() {
             "live world (vanilla atlas)".to_string()
@@ -969,7 +1156,7 @@ impl Sim {
     /// respawn). Movement is frozen while this holds.
     #[must_use]
     pub fn is_dead(&self) -> bool {
-        self.dead
+        self.ecs.get::<Dead>(self.local).is_some()
     }
 
     /// Number of respawns observed since the session started — a diagnostic the
@@ -1122,7 +1309,10 @@ impl Sim {
     /// The currently selected hotbar slot, `0..9`.
     #[must_use]
     pub fn selected_slot(&self) -> usize {
-        self.selected_slot
+        self.ecs
+            .get::<SelectedSlot>(self.local)
+            .expect("the local player always carries SelectedSlot")
+            .0
     }
 
     /// Select hotbar slot `slot` (`0..9`); out-of-range values are ignored. When
@@ -1130,10 +1320,12 @@ impl Sim {
     /// [`ClientAction::SetCarriedItem`] so the held item stays in sync. No-op
     /// off a live connection beyond updating the local selection the HUD draws.
     pub fn select_slot(&mut self, slot: usize) {
-        if slot >= HOTBAR_SLOTS || slot == self.selected_slot {
+        if slot >= HOTBAR_SLOTS || slot == self.selected_slot() {
             return;
         }
-        self.selected_slot = slot;
+        if let Some(mut selected) = self.ecs.get_mut::<SelectedSlot>(self.local) {
+            selected.0 = slot;
+        }
         self.send_selected_slot();
     }
 
@@ -1145,7 +1337,7 @@ impl Sim {
             return;
         }
         let n = HOTBAR_SLOTS as i32;
-        let next = (self.selected_slot as i32 + delta).rem_euclid(n) as usize;
+        let next = (self.selected_slot() as i32 + delta).rem_euclid(n) as usize;
         self.select_slot(next);
     }
 
@@ -1154,7 +1346,7 @@ impl Sim {
     fn send_selected_slot(&self) {
         if let Some(net) = &self.net {
             net.send_action(ClientAction::SetCarriedItem {
-                slot: self.selected_slot as i32,
+                slot: self.selected_slot() as i32,
             });
         }
     }
@@ -1196,15 +1388,22 @@ impl Sim {
     /// Whether free-fly mode is active.
     #[must_use]
     pub fn flying(&self) -> bool {
-        self.fly
+        self.ecs
+            .get::<Flying>(self.local)
+            .expect("the local player always carries Flying")
+            .0
     }
 
     /// Toggle free-fly (noclip) mode. Entering fly zeroes velocity so the player
     /// doesn't keep any fall momentum.
     pub fn toggle_fly(&mut self) {
-        self.fly = !self.fly;
-        self.player.velocity = Vec3d::ZERO;
-        self.player.on_ground = false;
+        let flying = !self.flying();
+        if let Some(mut fly) = self.ecs.get_mut::<Flying>(self.local) {
+            fly.0 = flying;
+        }
+        let player = self.player_mut();
+        player.velocity = Vec3d::ZERO;
+        player.on_ground = false;
     }
 
     /// Frames rendered per physics tick since start (fixed-timestep health).
@@ -1218,51 +1417,127 @@ impl Sim {
     }
 
     /// Apply accumulated mouse motion to the view angles.
+    ///
+    /// Deliberately **not** a `GameTick` system: mouse-look is per-frame in
+    /// vanilla too (`MouseHandler.turnPlayer` runs off the render loop, not the
+    /// tick), so binding it to 20 Hz would make aiming feel stepped at high
+    /// frame rates.
     pub fn apply_mouse(&mut self) {
-        let (dx, dy) = self.input.take_mouse();
+        let (dx, dy) = self.input_mut().take_mouse();
         if dx != 0.0 || dy != 0.0 {
-            let (yaw, pitch) = apply_look(
-                self.player.yaw,
-                self.player.pitch,
-                dx,
-                dy,
-                self.config.sensitivity,
-            );
-            self.player.yaw = yaw;
-            self.player.pitch = pitch;
+            let sensitivity = self.config.sensitivity;
+            let player = self.player();
+            let (yaw, pitch) = apply_look(player.yaw, player.pitch, dx, dy, sensitivity);
+            let player = self.player_mut();
+            player.yaw = yaw;
+            player.pitch = pitch;
         }
     }
 
-    /// Advance the simulation by real elapsed time, running fixed 20 Hz physics
-    /// ticks through the real engine against the world's collision. Rendering
-    /// interpolates between ticks via [`Sim::interp_alpha`].
+    /// What this tick's physics collides against.
+    ///
+    /// The *decision* is the shell's — it needs the session, the atlas and the
+    /// diagnostic switch — but the geometry is handed to the ECS as an owned
+    /// [`PlayerCollision`] so `player_physics` can be a real scheduled system.
+    /// See [`CollisionSource`] for why the borrow could not cross that boundary
+    /// directly.
+    fn tick_collision(&mut self) -> PlayerCollision {
+        // No session and no offline world: there is nothing to stand on and
+        // nobody to be.
+        if self.net.is_none() && self.world.is_empty() {
+            return PlayerCollision::NoWorld;
+        }
+
+        // Live path: collide against the server's terrain (client-owned world),
+        // not the offline demo world. This changes *where blocks come from*, not
+        // how collision resolves — `LiveCollision` fills the exact same
+        // `CollisionView` hooks `WorldCollision` does, so movement stays
+        // bit-exact.
+        if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
+            return match self.live_collision() {
+                Some(view) => PlayerCollision::View(Arc::new(LiveCollisionSource(view))),
+                // The player's own column has not streamed in yet.
+                None => PlayerCollision::Pending,
+            };
+        }
+
+        PlayerCollision::View(self.demo_source())
+    }
+
+    /// The cached owned snapshot of the offline demo world, rebuilt if stale.
+    ///
+    /// Rebuilt lazily rather than per tick because the clone is `O(loaded
+    /// columns)`: after construction the only writer is
+    /// [`Sim::set_block_world`], so a play session pays one clone per block
+    /// edit — which already costs a re-mesh — and nothing at all while merely
+    /// walking around. A test that lays a thousand blocks before stepping pays
+    /// exactly one.
+    fn demo_source(&mut self) -> Arc<DemoCollision> {
+        let source = self
+            .demo_collision
+            .get_or_insert_with(|| Arc::new(DemoCollision(self.world.clone())));
+        Arc::clone(source)
+    }
+
+    /// Hand everything the `GameTick` systems queued to the socket, in order.
+    ///
+    /// The queue is drained (not read) even with no connection, so a
+    /// disconnected session cannot accumulate a session's worth of stale
+    /// actions to deliver on reconnect.
+    fn drain_action_queue(&mut self) {
+        let actions = std::mem::take(&mut self.ecs.resource_mut::<ActionQueue>().0);
+        if let Some(net) = &self.net {
+            for action in actions {
+                // Best-effort — a closed session just drops it.
+                net.send_action(action);
+            }
+        }
+    }
+
+    /// Advance the simulation by real elapsed time, running fixed 20 Hz `GameTick`
+    /// schedules against the world's collision. Rendering interpolates between
+    /// ticks via [`Sim::interp_alpha`].
+    ///
+    /// # What the tick loop is, since Stage 2
+    ///
+    /// Each iteration of the fixed-timestep loop resolves this tick's collision
+    /// geometry, runs one `GameTick` schedule (`TickSet::Input` →
+    /// `Physics` → `Send`), then hands whatever the systems queued to the
+    /// socket. Everything the schedule needs is a component or resource, so a
+    /// plugin can insert a system anywhere in that order.
+    ///
+    /// **Movement intent is now recomputed per tick, not per frame.** It used to
+    /// be computed once before the loop, so a frame long enough to run several
+    /// catch-up ticks reused one decision for all of them — see
+    /// `lodestone_controller::ecs::compute_movement_intent` for exactly what
+    /// that changes (nothing at all at 20 fps or better; the difference is
+    /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
         self.clock_secs += dt.max(0.0);
         self.accumulator += dt.clamp(0.0, 0.25);
 
-        let intent = if self.dead {
-            // A corpse does not walk: ignore held keys while dead so the player
-            // holds still on the death screen until the respawn teleport lands.
-            MovementInput::NONE
-        } else {
-            self.swim_adjusted_intent()
+        // The derived egress gate. Refreshed once per frame because both of its
+        // inputs are frame-stable: `poll_net` is the only thing that changes the
+        // phase and it runs after the loop.
+        let egress = Egress {
+            in_world: self.phase == SessionPhase::Connected,
+            live: self.is_live(),
         };
+        self.ecs.insert_resource(egress);
+
         while self.accumulator >= TICK_DT {
-            self.prev_position = self.player.position;
-            if self.fly {
-                self.fly_tick(intent);
-            } else {
-                self.physics_tick(intent);
-            }
+            let collision = self.tick_collision();
+            self.ecs.insert_resource(collision);
+            self.ecs.run_schedule(GameTick);
+            // Vanilla emits a movement packet every tick (20 Hz); mirror that so
+            // the server sees our authoritative position/rotation and never has
+            // to correct us. `TickSet::Send` produced it; this is where it and
+            // everything else the tick queued reach the socket, in order.
+            self.drain_action_queue();
             self.tick_count += 1;
             self.accumulator -= TICK_DT;
             self.tick_particles();
-            // Age the double-tap-to-sprint window here, inside the fixed 20 Hz loop:
-            // vanilla's `sprintTriggerTime` is counted in *ticks* (default 7), so
-            // ageing it per frame instead would make the double-tap window
-            // frame-rate dependent — wider at 144 fps than at 30.
-            self.input.tick();
             // Age the HUD status effects at the same fixed 20 Hz the server ticks
             // them, so displayed timers count down in step with the world.
             self.hud_effects.tick(1);
@@ -1270,24 +1545,16 @@ impl Sim {
             // so their vanilla fades run in step with the world.
             self.title.tick(1);
             self.action_bar.tick(1);
-            // Vanilla emits a movement packet every tick (20 Hz); mirror that so
-            // the server sees our authoritative position/rotation and never has
-            // to correct us. Only once we're actually in the world — before the
-            // server places us the adapter (correctly) has no Play-state packet
-            // for a Move, so sending earlier just produces dropped-action noise.
-            // While dead the vanilla client sends no movement (it is held on the
-            // death screen), so withhold it until the respawn lands.
-            // Best-effort — a closed session just drops it.
-            if !self.dead
-                && self.phase == SessionPhase::Connected
-                && let Some(net) = &self.net
-            {
-                net.send_action(move_action(&self.player));
-            }
             // Drive live block interactions at the same fixed 20 Hz: the held
             // dig accumulates in step with the server's destroy timer, and the
-            // sneak/sprint input is resent on change. Demo sessions have no net,
-            // so this is a cheap no-op there.
+            // sprint edge is resent on change. Demo sessions have no net, so this
+            // is a cheap no-op there.
+            //
+            // Not yet systems, and both for the same reason: they need session
+            // and world state (`local_entity_id`, the raycast target,
+            // `version_data`, the live block store) that Stages 3 and 4 own.
+            // Mirroring those into resources to make a system possible now is
+            // exactly the second-source-of-truth the migration exists to delete.
             if self.phase == SessionPhase::Connected && self.is_live() {
                 self.drive_interaction();
             }
@@ -1301,38 +1568,6 @@ impl Sim {
         self.drain_dirty_columns(DIRTY_COLUMN_BUDGET);
         self.update_entities(dt as f32);
         self.refresh_stats();
-    }
-
-    /// [`movement_intent`] plus the one water exception vanilla's sprint gate makes.
-    ///
-    /// `movement_intent` vetoes sprint while sneaking, which is right on land
-    /// (`isMovingSlowly()`). Underwater it is wrong: `LocalPlayer.canStartSprinting`
-    /// is `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java:1137-1144`)
-    /// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
-    /// shift is held (`LocalPlayer.java:923-925`). Shift is how you steer downward
-    /// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
-    /// player cannot swim and descend at the same time — they stop dead.
-    ///
-    /// Implemented by re-running the controller's own gate on a copy of the input
-    /// with sneak cleared, rather than restating the gate here: the two must not be
-    /// able to drift apart, and `movement_intent` lives in a crate this change does
-    /// not touch. Only the sprint bit is taken; `sneak` itself stays set, so the
-    /// sink impulse and the crouch pose still see it.
-    ///
-    /// Frame-granular, like the rest of `intent`: it is computed once per frame
-    /// outside the tick loop (pre-existing), so a frame long enough to run several
-    /// ticks reuses one decision. It also reads the *previous* tick's
-    /// [`Self::fluid_state`], which is the same one-tick lag vanilla has (`baseTick`
-    /// computes submersion before `aiStep` reads it).
-    fn swim_adjusted_intent(&self) -> MovementInput {
-        let mut intent = movement_intent(&self.input);
-        if !intent.sneak || !(self.fluid_state.under_water() || self.player.swimming) {
-            return intent;
-        }
-        let mut without_sneak = self.input;
-        without_sneak.set(lodestone_controller::Action::Sneak, false);
-        intent.sprint = movement_intent(&without_sneak).sprint;
-        intent
     }
 
     /// Fold this frame's entity snapshots into the interpolator so
@@ -1355,14 +1590,15 @@ impl Sim {
             .net
             .as_ref()
             .map_or_else(Vec::new, NetClient::entity_snapshots);
+        let profile = self.profile().clone();
         match self.live_collision() {
             Some(view) => self
                 .entity_interp
-                .update_with_view(&snapshots, dt, &view, &self.profile),
+                .update_with_view(&snapshots, dt, &view, &profile),
             None => {
                 let view = WorldCollision::new(&self.world);
                 self.entity_interp
-                    .update_with_view(&snapshots, dt, &view, &self.profile);
+                    .update_with_view(&snapshots, dt, &view, &profile);
             }
         }
     }
@@ -1374,124 +1610,33 @@ impl Sim {
         self.entity_interp.draws()
     }
 
-    /// One fixed physics tick through the real engine.
-    ///
-    /// The `MOVEMENT_SPEED` attribute is injected each tick via
-    /// [`PlayerState::with_movement_speed`] — exercising the attribute seam the
-    /// physics crate exposes from a *real* caller, not a test. When sprinting we
-    /// hand in `base·(1 + sprint_modifier)`; the engine then ignores its own
-    /// sprint speed maths (no double-count) while the sprint flag still drives
-    /// the sprint jump boost.
-    fn physics_tick(&mut self, intent: MovementInput) {
-        // No session and no offline world: there is nothing to stand on and
-        // nobody to be. `app::WindowApp::redraw` steps the sim on every frame
-        // including while a menu owns the screen, so without this the pre-session
-        // player free-falls through an empty world for as long as the title
-        // screen is up (terminal velocity ≈ 78 blocks/s) and then arrives at the
-        // login teleport carrying that velocity into its first tick.
-        if self.net.is_none() && self.world.is_empty() {
-            self.player.velocity = Vec3d::ZERO;
-            self.player.on_ground = true;
-            self.fluid_state = FluidState::NONE;
-            return;
-        }
-
-        let base = f64::from(self.profile.base_movement_speed);
-        let attr = if intent.sprint {
-            base * (1.0 + f64::from(self.profile.sprint_speed_modifier))
-        } else {
-            base
-        };
-        self.player = self.player.with_movement_speed(attr);
-
-        // Live path: collide against the server's terrain (client-owned world),
-        // not the offline demo world. This changes *where blocks come from*, not
-        // how collision resolves — `LiveCollision` fills the exact same
-        // `CollisionView` hooks `WorldCollision` does, so movement stays
-        // bit-exact. A `None` snapshot means the player's own column has not
-        // streamed in yet: hold in place (as vanilla waits for chunks) rather
-        // than falling through absent ground and rubber-banding against the
-        // server's corrective teleports.
-        if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
-            match self.live_collision() {
-                Some(view) => {
-                    tick(&mut self.player, intent, &view, &self.profile);
-                    // Same view movement collided against, so the submerged
-                    // summary is consistent with where the tick left the player.
-                    self.fluid_state = self.player_fluid_state(&view);
-                }
-                None => {
-                    self.player.velocity = Vec3d::ZERO;
-                    self.player.on_ground = true;
-                    // The player's column has not streamed in — we know nothing
-                    // about the fluid around them, so report "dry" rather than
-                    // stranding a stale submerged fog from before the reload.
-                    self.fluid_state = FluidState::NONE;
-                }
-            }
-            self.update_pose(intent);
-            return;
-        }
-
-        let view = WorldCollision::new(&self.world);
-        tick(&mut self.player, intent, &view, &self.profile);
-        self.fluid_state = self.player_fluid_state(&view);
-        self.update_pose(intent);
-    }
-
-    /// `Player.updatePlayerPose` / `getDesiredPose` (`Player.java:343-371`), reduced
-    /// to the one thing the physics engine takes as an input: the **eye height**.
-    ///
-    /// [`PlayerState::eye_height`] is documented as an input the *pose layer* owns,
-    /// and the shell is that layer. It has to be written, because nothing else does:
-    /// left at the standing `1.62` a swimmer's eye sits a metre above their body, so
-    /// `getFluidJumpThreshold` reads the wrong branch, the submerged fog and
-    /// underwater overlay flip a block early leaving the surface, and the camera
-    /// floats. Assigned *after* the tick so the next tick — which reads it at the
-    /// top of `LivingEntity.travel` — sees this tick's pose, exactly as vanilla's
-    /// `setPose` lands before the following tick's `baseTick`.
-    ///
-    /// Pose order is vanilla's `getDesiredPose`: swimming beats crouching beats
-    /// standing. Eye heights are `Avatar.java:22-36` — swimming `0.4`, crouching
-    /// `1.27`, standing `1.62` (`DEFAULT_EYE_HEIGHT`).
-    ///
-    /// **Not modelled:** the *hitbox* half of the pose. Vanilla's `Pose.SWIMMING` is
-    /// `0.6 × 0.6` and vanilla gates the pose on
-    /// `canPlayerFitWithinBlocksAndEntitiesWhen`; this engine keeps the standing
-    /// `0.6 × 1.8` box for every pose (see [`lodestone_physics::tick_water`]), so a
-    /// swimmer cannot fit through a one-block gap and the fit gate has nothing to
-    /// test. Changing the box changes collision, which is what the server re-derives
-    /// from our reported position, so it is deliberately a separate step.
-    fn update_pose(&mut self, intent: MovementInput) {
-        self.player.eye_height = if self.player.swimming {
-            SWIMMING_EYE_HEIGHT
-        } else if intent.sneak {
-            CROUCHING_EYE_HEIGHT
-        } else {
-            lodestone_physics::player::DEFAULT_EYE_HEIGHT
-        };
-    }
-
-    /// Vanilla `EntityFluidInteraction.update` for the local player against
-    /// `view`: the per-tick summary of how the box and eye sit in water and
-    /// lava, computed by the bit-exact physics producer from the player's box,
-    /// feet position and pose eye height.
-    fn player_fluid_state(&self, view: &dyn CollisionView) -> FluidState {
-        compute_fluid_state(
-            self.player.bounding_box(&self.profile),
-            self.player.position,
-            self.player.eye_height,
-            view,
-        )
-    }
-
     /// The local player's water/lava submersion this tick, for the shell's
     /// submerged-fog decision (and, later, the underwater overlay, ambient
     /// sounds and swim pose). Version-free and bit-exact — the shell reads this
     /// shared truth rather than deriving its own boolean.
+    ///
+    /// Written by `lodestone_ecs::player::player_physics` against the very view
+    /// movement collided against, so it is consistent with where the tick left
+    /// the player.
     #[must_use]
     pub fn fluid_state(&self) -> FluidState {
-        self.fluid_state
+        self.ecs
+            .get::<Submersion>(self.local)
+            .expect("the local player always carries Submersion")
+            .0
+    }
+
+    /// Overwrite the submersion summary.
+    ///
+    /// Only for a caller that needs to place the player in a fluid without
+    /// simulating one — i.e. a test. Real play never calls this: the value
+    /// belongs to the physics producer, and a shell-side write would be exactly
+    /// the "invents its own submerged boolean" this type exists to prevent.
+    #[cfg(test)]
+    fn set_fluid_state(&mut self, fluid: FluidState) {
+        if let Some(mut submersion) = self.ecs.get_mut::<Submersion>(self.local) {
+            submersion.0 = fluid;
+        }
     }
 
     /// Build a [`LiveCollision`] snapshot of the server terrain around the
@@ -1511,8 +1656,9 @@ impl Sim {
         let min_y = dims.min_y;
         let section_count = dims.section_count();
 
-        let pcx = (self.player.position.x.floor() as i32).div_euclid(16);
-        let pcz = (self.player.position.z.floor() as i32).div_euclid(16);
+        let position = self.player().position;
+        let pcx = (position.x.floor() as i32).div_euclid(16);
+        let pcz = (position.z.floor() as i32).div_euclid(16);
 
         // Hold the player until the ground under them is known. `sections_at`
         // elides all-air sections to `None`, so an absent section is *not* proof
@@ -1540,50 +1686,6 @@ impl Sim {
         }
 
         Some(LiveCollision::new(sections, min_y, section_count, atlas))
-    }
-
-    /// One free-fly tick: move horizontally relative to yaw, vertically with
-    /// jump/sneak, ignoring gravity and collision. This is a shell-side camera,
-    /// not a physics model — the engine has no flight (see the report).
-    fn fly_tick(&mut self, intent: MovementInput) {
-        let speed = if self.input.sprint_held() {
-            FLY_SPEED * 2.0
-        } else {
-            FLY_SPEED
-        };
-        let yaw = f64::from(self.player.yaw).to_radians();
-        let (sy, cy) = yaw.sin_cos();
-        let f = f64::from(intent.forward);
-        let s = f64::from(intent.strafe);
-        // vanilla getInputVector with pitch ignored: horizontal move only.
-        let mut dx = s * cy - f * sy;
-        let mut dz = f * cy + s * sy;
-        let len = (dx * dx + dz * dz).sqrt();
-        if len > 1.0 {
-            dx /= len;
-            dz /= len;
-        }
-        self.player.position.x += dx * speed;
-        self.player.position.z += dz * speed;
-        if intent.jump {
-            self.player.position.y += speed;
-        }
-        if intent.sneak {
-            self.player.position.y -= speed;
-        }
-        self.player.velocity = Vec3d::ZERO;
-        self.player.on_ground = false;
-        // Free-fly is a shell-side debug camera, not a physics pose, so it never
-        // drives submerged fog — noclipping through an ocean should not tint the
-        // whole view. Real submersion resumes the moment physics-walk does.
-        self.fluid_state = FluidState::NONE;
-        // `Player.updateSwimming` forces `setSwimming(false)` while `abilities.flying`
-        // (`Player.java:1433-1439`). Free-fly never calls `lodestone_physics::tick`,
-        // so nothing would otherwise clear a swim pose entered before taking off —
-        // the player would fly around with a 0.4 eye height. Clear it here, the way
-        // the physics crate's `update_swimming` docs require of a flying driver.
-        self.player.swimming = false;
-        self.player.eye_height = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
     }
 
     /// Convenience wrapper using the wall clock since the last call.
@@ -1653,9 +1755,10 @@ impl Sim {
     /// matching vanilla's lava-first submersion order.
     #[must_use]
     pub fn fog_settings(&self) -> lodestone_render::fog::FogSettings {
-        if self.fluid_state.under_lava() {
+        let fluid = self.fluid_state();
+        if fluid.under_lava() {
             lava_fog()
-        } else if self.fluid_state.under_water() {
+        } else if fluid.under_water() {
             water_fog(self.config.render_distance)
         } else {
             fog_for_render_distance(self.config.render_distance)
@@ -1782,21 +1885,26 @@ impl Sim {
     /// [`send_player_input`](Self::send_player_input)) for a sneak-placement
     /// against a chest/door to suppress the interaction.
     fn use_item_live(&mut self) {
-        if self.dead {
+        if self.is_dead() {
             return;
         }
         let Some(hit) = self.target else { return };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
         let cursor = face_center_cursor(hit.normal);
-        let sneaking = movement_intent(&self.input).sneak;
+        // The intent this tick's physics ran on — the same one
+        // `lodestone_controller::ecs::send_player_input` derived the wire's shift
+        // bit from, so the local decision and the server's cannot disagree. This
+        // used to re-read the keyboard, which was frame-granular; vanilla is
+        // tick-granular here too (`Minecraft.handleKeybinds` runs in the tick).
+        let sneaking = self.movement_intent().sneak;
         let ctx = UseOnContext {
             hand: Hand::Main,
             clicked,
             face,
             cursor,
             inside_block: false,
-            rotation: Rotation::new(self.player.yaw, self.player.pitch),
+            rotation: Rotation::new(self.player().yaw, self.player().pitch),
             sneaking,
             has_item_in_hand: true,
             placing: None,
@@ -1832,12 +1940,16 @@ impl Sim {
         self.version_data.as_ref()?.block_hardness(state_id)
     }
 
-    /// Advance the live block interactions one tick: the held-attack dig and the
-    /// edge-triggered sneak-input resend. Called once per physics tick from
-    /// [`step`](Self::step) while connected, so the dig accumulates at the same
-    /// 20 Hz the server ticks its own destroy timer.
+    /// Advance the live block interactions one tick: the sprint edge and the
+    /// held-attack dig. Called once per physics tick from [`step`](Self::step)
+    /// while connected, so the dig accumulates at the same 20 Hz the server
+    /// ticks its own destroy timer.
+    ///
+    /// The edge-triggered *player-input* packet used to be sent from here and is
+    /// now `lodestone_controller::ecs::send_player_input`, a `TickSet::Send`
+    /// system. Order on the wire is unchanged: that system runs (and is drained
+    /// into the socket) before this method is called.
     fn drive_interaction(&mut self) {
-        self.send_player_input();
         self.send_is_sprinting_if_needed();
         self.drive_mining();
     }
@@ -1856,14 +1968,14 @@ impl Sim {
     /// command is sent before the server has given us an entity id (the packet
     /// carries it).
     fn send_is_sprinting_if_needed(&mut self) {
-        let sprinting = self.player.sprinting && !self.dead && !self.fly;
-        if self.last_sprinting_sent == Some(sprinting) {
+        let sprinting = self.player().sprinting && !self.is_dead() && !self.flying();
+        if self.last_sprinting_sent() == Some(sprinting) {
             return;
         }
         let Some(entity_id) = self.local_entity_id else {
             return;
         };
-        self.last_sprinting_sent = Some(sprinting);
+        self.set_last_sprinting_sent(sprinting);
         if let Some(net) = &self.net {
             net.send_action(ClientAction::PlayerCommand {
                 entity_id,
@@ -1907,7 +2019,7 @@ impl Sim {
     /// still finishes on the server's timer), so both regimes break the block —
     /// this one just does it the way vanilla does.
     fn drive_mining(&mut self) {
-        let target = if self.attacking && !self.dead {
+        let target = if self.attacking && !self.is_dead() {
             self.target
         } else {
             None
@@ -1959,7 +2071,7 @@ impl Sim {
         // adapter's tool census has nothing for this state either.
         let held = self
             .player_menu()
-            .player_native(self.selected_slot)
+            .player_native(self.selected_slot())
             .map(tool_mining_item);
         let tool = self
             .version_data
@@ -1970,10 +2082,10 @@ impl Sim {
             entry,
             tool,
             id_value == id::AIR,
-            self.player.on_ground,
+            self.player().on_ground,
             // `eye_in_water`, not `under_water()` — see "Trap 2" on
             // `dig_break_inputs`.
-            self.fluid_state.eye_in_water,
+            self.fluid_state().eye_in_water,
         );
         // Vanilla's `ClientLevel.addBreakingBlockEffect` — the per-tick "chip"
         // that pops off the mined face — fires from `Minecraft.continueAttack`
@@ -2036,37 +2148,6 @@ impl Sim {
         }
     }
 
-    /// Resend the current [`PlayerInput`] to the server when it changes.
-    ///
-    /// Vanilla's player-input packet is edge-triggered and is the *only* way the
-    /// server learns we are sneaking/sprinting — it never infers shift from our
-    /// movement packet. Without this a sneak-placement is treated as an
-    /// interaction server-side (re-opening the chest you meant to place
-    /// against), so the shell must put the crouch state on the wire.
-    fn send_player_input(&mut self) {
-        let intent = if self.dead {
-            MovementInput::NONE
-        } else {
-            movement_intent(&self.input)
-        };
-        let next = PlayerInput {
-            forward: intent.forward > 0.0,
-            backward: intent.forward < 0.0,
-            left: intent.strafe > 0.0,
-            right: intent.strafe < 0.0,
-            jump: intent.jump,
-            shift: intent.sneak,
-            sprint: intent.sprint,
-        };
-        if self.last_player_input == Some(next) {
-            return;
-        }
-        self.last_player_input = Some(next);
-        if let Some(net) = &self.net {
-            net.send_action(ClientAction::SetPlayerInput(next));
-        }
-    }
-
     /// Place [`PLACE_BLOCK`] against the targeted face on the **demo world**, if
     /// the cell is empty and doesn't intersect the player. Returns whether a
     /// block was placed. The live path uses [`use_item`](Self::use_item) instead
@@ -2090,7 +2171,7 @@ impl Sim {
     }
 
     fn block_intersects_player(&self, block: [i32; 3]) -> bool {
-        let bb = self.player.bounding_box(&self.profile);
+        let bb = self.player().bounding_box(self.profile());
         let (x0, y0, z0) = (
             f64::from(block[0]),
             f64::from(block[1]),
@@ -2225,6 +2306,11 @@ impl Sim {
             block[2].rem_euclid(16) as usize,
             value,
         );
+        // This is the one write path to `self.world` after construction, so it is
+        // also the one place the offline collision snapshot has to be invalidated.
+        // Missing it means the player keeps colliding against the pre-edit
+        // geometry — "I mined the block but still cannot walk through it".
+        self.demo_collision = None;
         true
     }
 
@@ -2520,8 +2606,9 @@ impl Sim {
                     // of stranded over the unmeshed demo platform. `prev_position`
                     // is moved with it so the frame interpolator does not smear the
                     // camera across the teleport.
-                    let base = self.player.position;
-                    self.player.position = Vec3d::new(
+                    let player = self.player_mut();
+                    let base = player.position;
+                    player.position = Vec3d::new(
                         if flags.relative_x {
                             base.x + pos.x
                         } else {
@@ -2538,18 +2625,19 @@ impl Sim {
                             pos.z
                         },
                     );
-                    self.player.yaw = if flags.relative_yaw {
-                        self.player.yaw + rotation.yaw
+                    player.yaw = if flags.relative_yaw {
+                        player.yaw + rotation.yaw
                     } else {
                         rotation.yaw
                     };
-                    self.player.pitch = if flags.relative_pitch {
-                        self.player.pitch + rotation.pitch
+                    player.pitch = if flags.relative_pitch {
+                        player.pitch + rotation.pitch
                     } else {
                         rotation.pitch
                     };
-                    self.player.velocity = Vec3d::ZERO;
-                    self.prev_position = self.player.position;
+                    player.velocity = Vec3d::ZERO;
+                    let placed = player.position;
+                    self.set_prev_position(placed);
                     self.teleport_count += 1;
                 }
                 NetUpdate::Chat { text, player } => {
@@ -2602,9 +2690,10 @@ impl Sim {
                     // visible effect is "does this puff bother rendering,"
                     // and it is what the rest of the shell's render-adjacent
                     // logic already keys off.
-                    let dx = pos.x - self.player.position.x;
-                    let dy = pos.y - self.player.position.y;
-                    let dz = pos.z - self.player.position.z;
+                    let feet = self.player().position;
+                    let dx = pos.x - feet.x;
+                    let dy = pos.y - feet.y;
+                    let dz = pos.z - feet.z;
                     let within_cutoff =
                         long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
                     if within_cutoff {
@@ -2643,7 +2732,7 @@ impl Sim {
                     // position rides in on the placement teleport that follows
                     // `NetUpdate::Respawned`, whose arm snaps `prev_position` too.
                     if self.recover_from_death {
-                        self.dead = true;
+                        self.set_dead(true);
                         self.status = "you died — respawning…".into();
                     } else {
                         // Retained only as the live death gate's negative control:
@@ -2661,7 +2750,7 @@ impl Sim {
                     // frame interpolator never smears the camera from the death
                     // site across the world to the new spawn (the same class of
                     // bug as the original far-spawn camera gap).
-                    self.dead = false;
+                    self.set_dead(false);
                     self.respawn_count += 1;
                     self.status = "respawned".into();
                 }
@@ -2707,7 +2796,7 @@ impl Sim {
                     show_icon,
                 } => {
                     if self.local_entity_id == Some(entity_id) {
-                        self.player.effects.apply(&effect, amplifier);
+                        self.player_mut().effects.apply(&effect, amplifier);
                         if let Ok(id) =
                             lodestone_model::Identifier::new("minecraft", effect.as_str())
                         {
@@ -2725,7 +2814,7 @@ impl Sim {
                 }
                 NetUpdate::EffectRemoved { entity_id, effect } => {
                     if self.local_entity_id == Some(entity_id) {
-                        self.player.effects.remove(&effect);
+                        self.player_mut().effects.remove(&effect);
                         if let Ok(id) =
                             lodestone_model::Identifier::new("minecraft", effect.as_str())
                         {
@@ -2771,7 +2860,7 @@ impl Sim {
         {
             return snap.feet + glam::Vec3::new(0.0, 0.5, 0.0);
         }
-        let p = self.player.position;
+        let p = self.player().position;
         glam::Vec3::new(p.x as f32, p.y as f32, p.z as f32)
     }
 
@@ -2785,20 +2874,17 @@ impl Sim {
     }
 
     fn refresh_stats(&mut self) {
-        self.stats.position = [
-            self.player.position.x,
-            self.player.position.y,
-            self.player.position.z,
-        ];
-        self.stats.yaw = self.player.yaw;
-        self.stats.pitch = self.player.pitch;
+        let player = *self.player();
+        self.stats.position = [player.position.x, player.position.y, player.position.z];
+        self.stats.yaw = player.yaw;
+        self.stats.pitch = player.pitch;
         self.stats.chunk_count = self.world.len();
         self.stats.live_columns = self.net.as_ref().map_or(0, |n| n.loaded_chunks().len());
         self.stats.mesh_drops = self.mesh_drops;
         self.stats.world_bytes = self.world.heap_bytes();
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
-        self.stats.flying = self.fly;
+        self.stats.flying = self.flying();
         self.stats.target = self.target.map(|h| h.block);
         self.stats.status = self.status.clone();
     }
@@ -2826,13 +2912,13 @@ impl Sim {
     #[must_use]
     pub fn camera(&self, aspect: f32) -> Camera {
         let a = f64::from(self.interp_alpha);
-        let mut interp = self.player;
-        let eye_bias =
-            f64::from(self.player.eye_height - lodestone_render::camera::PLAYER_EYE_HEIGHT);
+        let mut interp = *self.player();
+        let prev = self.prev_position();
+        let eye_bias = f64::from(interp.eye_height - lodestone_render::camera::PLAYER_EYE_HEIGHT);
         interp.position = Vec3d::new(
-            self.prev_position.x + (self.player.position.x - self.prev_position.x) * a,
-            self.prev_position.y + (self.player.position.y - self.prev_position.y) * a + eye_bias,
-            self.prev_position.z + (self.player.position.z - self.prev_position.z) * a,
+            prev.x + (interp.position.x - prev.x) * a,
+            prev.y + (interp.position.y - prev.y) * a + eye_bias,
+            prev.z + (interp.position.z - prev.z) * a,
         );
         build_camera(&interp, aspect, self.config.render_distance)
     }
@@ -2858,6 +2944,7 @@ mod tests {
 
     use super::*;
     use crate::config::{Config, Mode};
+    use lodestone_ecs::player::SWIMMING_EYE_HEIGHT;
 
     fn test_config() -> Config {
         Config {
@@ -3031,12 +3118,12 @@ mod tests {
         assert_eq!(sim.fog_settings(), sky, "a dry eye keeps the sky fog");
 
         // Eye in water: shorter than, and a different colour from, the sky fog.
-        sim.fluid_state = FluidState {
+        sim.set_fluid_state(FluidState {
             water_height: 1.0,
             eye_in_water: true,
             ..FluidState::NONE
-        };
-        assert!(sim.fluid_state.under_water());
+        });
+        assert!(sim.fluid_state().under_water());
         let water = sim.fog_settings();
         assert_ne!(water, sky, "a submerged eye must not keep the sky fog");
         assert!(water.end <= sky.end, "water fog cannot reach past the sky edge");
@@ -3047,13 +3134,13 @@ mod tests {
         );
 
         // Eye in lava wins over water and is shorter still.
-        sim.fluid_state = FluidState {
+        sim.set_fluid_state(FluidState {
             water_height: 1.0,
             eye_in_water: true,
             lava_height: 1.0,
             eye_in_lava: true,
-        };
-        assert!(sim.fluid_state.under_lava());
+        });
+        assert!(sim.fluid_state().under_lava());
         assert!(
             sim.fog_settings().end < water.end,
             "lava blinds faster than water"
@@ -3166,12 +3253,11 @@ mod tests {
     fn tool_mining_item_lifts_the_hotbar_stacks_id_and_count_with_no_tool_override() {
         // `tool_mining_item` is what `drive_mining` feeds `VersionAdapter::tool_mining`
         // for the selected hotbar slot. It must carry the real item id and count
-        // across, and — since the shell's own inventory model does not decode
-        // `minecraft:tool` (see the function's own docs) — leave `components` at
-        // `ItemComponents::default()` so `tool_mining` takes the `Inherited`
-        // branch and resolves the item's *built-in* tool from the version's
-        // generated prototype table, rather than silently treating every held
-        // item as toolless.
+        // across, and leave `tool` at `Inherited` when the wire said nothing, so
+        // `tool_mining` resolves the item's *built-in* tool from the version's
+        // generated prototype table rather than silently treating every held item
+        // as toolless. This is the control for
+        // `an_explicit_wire_tool_override_survives_the_lift_to_the_version_seam`.
         let item_id: lodestone_model::Identifier =
             "minecraft:diamond_pickaxe".parse().expect("valid id");
         let held = lodestone_game::item::ItemStack::new(item_id.clone(), 1);
@@ -3183,6 +3269,55 @@ mod tests {
             lodestone_model::ToolPatch::Inherited,
             "no wire override means Inherited — the item id alone must resolve the tool"
         );
+    }
+
+    /// An explicit `minecraft:tool` from the wire (`/give
+    /// …[minecraft:tool={…}]`, or a datapack item) must survive the lift into the
+    /// version seam.
+    ///
+    /// It did not before: `tool_mining_item` built a fresh
+    /// `ItemComponents::default()`, i.e. `ToolPatch::Inherited`, so an overridden
+    /// tool resolved as if the *item default* applied — a custom-speed pickaxe
+    /// dug at its vanilla rate, and `[!minecraft:tool]` dug like a real pickaxe
+    /// instead of a bare hand. The canonical stack has carried the patch since
+    /// `67ff7c3`; this reads it back.
+    ///
+    /// Both directions are checked, because `Removed` is the one that fails
+    /// *unsafely*: an item that should mine like a bare hand mining at tool speed
+    /// makes the client predict a break the server will not grant.
+    #[test]
+    fn an_explicit_wire_tool_override_survives_the_lift_to_the_version_seam() {
+        use lodestone_game::item::{ComponentValue, ItemComponents, TOOL_COMPONENT};
+
+        let item_id: lodestone_model::Identifier =
+            "minecraft:diamond_pickaxe".parse().expect("valid id");
+        let key: lodestone_model::Identifier = TOOL_COMPONENT.parse().expect("valid id");
+
+        for patch in [
+            lodestone_model::ToolPatch::Removed,
+            // A rule-less tool with a distinctly non-vanilla speed: if the patch
+            // were dropped, `tool_mining` would answer with the diamond
+            // pickaxe's real table instead and the equality below would fail.
+            lodestone_model::ToolPatch::Set(lodestone_model::ItemTool::new(
+                Vec::new(),
+                12.5,
+                3,
+                true,
+            )),
+        ] {
+            let mut components = ItemComponents::new();
+            components.insert(key.clone(), ComponentValue::Tool(patch.clone()));
+            let held = lodestone_game::item::ItemStack::with_components(
+                item_id.clone(),
+                1,
+                components,
+            );
+            assert_eq!(
+                tool_mining_item(&held).components.tool,
+                patch,
+                "an explicit wire tool patch must reach `VersionAdapter::tool_mining`"
+            );
+        }
     }
 
     #[test]
@@ -3698,18 +3833,18 @@ mod tests {
         for _ in 0..60 {
             sim.step(1.0 / 20.0);
         }
-        assert!(sim.player.on_ground, "player should be standing on terrain");
-        assert_eq!(sim.stats.position[1], sim.player.position.y);
+        assert!(sim.player().on_ground, "player should be standing on terrain");
+        assert_eq!(sim.stats.position[1], sim.player().position.y);
     }
 
     #[test]
     fn mouse_look_updates_view_and_clears_delta() {
         let mut sim = Sim::new(test_config());
-        let yaw0 = sim.player.yaw;
-        sim.input.add_mouse(50.0, 0.0);
+        let yaw0 = sim.player().yaw;
+        sim.input_mut().add_mouse(50.0, 0.0);
         sim.apply_mouse();
-        assert_ne!(sim.player.yaw, yaw0);
-        assert_eq!(sim.input.mouse_dx, 0.0);
+        assert_ne!(sim.player().yaw, yaw0);
+        assert_eq!(sim.input().mouse_dx, 0.0);
     }
 
     #[test]
@@ -3746,6 +3881,82 @@ mod tests {
         assert_eq!(sent, 0, "no movement should be sent before login");
     }
 
+    /// Both [`CollisionSource`] implementors must actually be `Send + Sync +
+    /// 'static`, or they could not be held in a `Resource` at all.
+    ///
+    /// Asserted rather than reasoned about: the Stage 1 report recorded this as
+    /// "likely, unverified" for [`LiveCollision`] (which holds
+    /// `Arc<ChunkSection>`, `Arc<BlockAtlas>` and `Option<Arc<dyn
+    /// VersionAdapter>>`), and it is the single fact the whole Stage-2 collision
+    /// seam rests on. It compiles today because `Arc<dyn CollisionSource>` is
+    /// used; this pins it so the reason stays visible if it ever stops holding.
+    #[test]
+    fn both_collision_sources_are_send_sync_and_static() {
+        fn assert_resource_shaped<T: CollisionSource>() {}
+        assert_resource_shaped::<DemoCollision>();
+        assert_resource_shaped::<LiveCollisionSource>();
+    }
+
+    /// The authority test for the stage, at the shell level: the components are
+    /// the *only* store, so a write through the `World` — which is what a plugin
+    /// gets — changes what the server is told on the next tick.
+    ///
+    /// If `Sim` still held a `PlayerState` of its own, this would pass a write
+    /// into a field nobody reads and the wire would report the unmodified pose.
+    #[test]
+    fn a_write_through_the_world_reaches_the_wire() {
+        use crate::net::NetUpdate;
+        let (net, actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net();
+        while actions.try_recv().is_ok() {}
+
+        let local = sim.local_player();
+        sim.ecs_mut()
+            .get_mut::<PhysicsState>(local)
+            .expect("local player")
+            .0
+            .position = Vec3d::new(11.5, 200.0, -3.5);
+
+        sim.step(TICK_DT);
+        let moved: Vec<_> = std::iter::from_fn(|| actions.try_recv().ok())
+            .filter_map(|a| match a {
+                ClientAction::Move { pos, .. } => Some(pos),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moved.len(), 1, "one move per tick");
+        // No world to collide against in this fixture beyond the demo terrain far
+        // below, so the tick's only change is gravity — x and z are untouched.
+        assert!((moved[0].x - 11.5).abs() < 1e-9, "got {moved:?}");
+        assert!((moved[0].z + 3.5).abs() < 1e-9, "got {moved:?}");
+        // …and the accessor agrees with the wire, because there is one store.
+        assert!((sim.player().position.x - 11.5).abs() < 1e-9);
+    }
+
+    /// The other half of the authority test: `Sim`'s accessors are views onto the
+    /// same components, not onto a copy. A write through the accessor must be
+    /// visible in the `World` a plugin queries.
+    #[test]
+    fn the_accessors_and_the_world_are_the_same_store() {
+        let mut sim = Sim::new(test_config());
+        sim.player_mut().yaw = 42.0;
+        sim.input_mut()
+            .set(lodestone_controller::Action::Forward, true);
+
+        let local = sim.local_player();
+        assert_eq!(
+            sim.ecs().get::<PhysicsState>(local).expect("local").0.yaw,
+            42.0
+        );
+        assert_eq!(
+            lodestone_controller::movement_intent(&sim.ecs().resource::<RawInput>().0).forward,
+            1.0
+        );
+    }
+
     #[test]
     fn disconnected_sim_sends_nothing() {
         // Without a net attached, stepping must not attempt to send.
@@ -3762,7 +3973,7 @@ mod tests {
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
         sim.poll_net();
-        assert!(sim.player.effects.levitation.is_none());
+        assert!(sim.player().effects.levitation.is_none());
 
         feed.send(NetUpdate::EffectApplied {
             entity_id: 7,
@@ -3775,7 +3986,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert_eq!(
-            sim.player.effects.levitation,
+            sim.player().effects.levitation,
             Some(2),
             "the wire→StatusEffects seam must fold an effect for the local entity id"
         );
@@ -3791,7 +4002,7 @@ mod tests {
         })
         .unwrap();
         sim.poll_net();
-        assert!(sim.player.effects.levitation.is_none());
+        assert!(sim.player().effects.levitation.is_none());
         assert!(
             sim.active_effects().is_empty(),
             "removal must clear the HUD effect model as well"
@@ -3820,7 +4031,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert!(
-            sim.player.effects.levitation.is_none(),
+            sim.player().effects.levitation.is_none(),
             "a remote entity's effect must not leak into the local player's StatusEffects"
         );
         assert!(
@@ -3858,7 +4069,7 @@ mod tests {
 
         // Keep the particle origin within vanilla's 32-block render cutoff of
         // wherever `Sim::new` spawned the player.
-        let origin = sim.player.position;
+        let origin = sim.player().position;
         feed.send(NetUpdate::Particles {
             kind: "flame".into(),
             long_distance: false,
@@ -3910,7 +4121,7 @@ mod tests {
         )]));
 
         // Comfortably past the 32-block (sqrt(1024)) cutoff on every axis.
-        let origin = sim.player.position;
+        let origin = sim.player().position;
         let far = Vec3::new(origin.x + 1000.0, origin.y, origin.z);
 
         feed.send(NetUpdate::Particles {
@@ -4395,8 +4606,8 @@ mod tests {
         // Force a known prev/current split and a half-way alpha, then check the
         // camera eye sits between the two feet positions.
         let mut sim = Sim::new(test_config());
-        sim.prev_position = Vec3d::new(0.0, 64.0, 0.0);
-        sim.player.position = Vec3d::new(10.0, 64.0, 0.0);
+        sim.set_prev_position(Vec3d::new(0.0, 64.0, 0.0));
+        sim.player_mut().position = Vec3d::new(10.0, 64.0, 0.0);
         sim.interp_alpha = 0.5;
         let cam = sim.camera(1.0);
         assert!(
@@ -4435,7 +4646,7 @@ mod tests {
             // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180).
             // Lay a solid floor and clear head-room along -Z so the walk is
             // unobstructed regardless of the generated surface.
-            let feet_y = sim.player.position.y.floor() as i32;
+            let feet_y = sim.player().position.y.floor() as i32;
             for dz in -25..=1 {
                 for dx in -1..=1 {
                     sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
@@ -4448,13 +4659,13 @@ mod tests {
             for _ in 0..20 {
                 sim.step(1.0 / 20.0);
             }
-            let start = sim.player.position;
-            sim.input.set(lodestone_controller::Action::Forward, true);
-            sim.input.set(lodestone_controller::Action::Sprint, sprint);
+            let start = sim.player().position;
+            sim.input_mut().set(lodestone_controller::Action::Forward, true);
+            sim.input_mut().set(lodestone_controller::Action::Sprint, sprint);
             for _ in 0..20 {
                 sim.step(1.0 / 20.0);
             }
-            let d = sim.player.position.subtract(start);
+            let d = sim.player().position.subtract(start);
             (d.x * d.x + d.z * d.z).sqrt()
         }
         let walk = distance(false);
@@ -4476,7 +4687,7 @@ mod tests {
     #[test]
     fn sprinting_underwater_enters_the_swim_pose_and_drops_the_camera() {
         let mut sim = Sim::new(test_config());
-        let feet_y = sim.player.position.y.floor() as i32;
+        let feet_y = sim.player().position.y.floor() as i32;
         // A private pool: stone floor, water from the feet to well over the eye,
         // wide enough that a second of swimming (~1 block) stays inside it. Filling
         // the column with water is also what flattens the generated slope the player
@@ -4494,38 +4705,39 @@ mod tests {
             sim.step(1.0 / 20.0);
         }
         assert!(
-            sim.fluid_state.under_water(),
+            sim.fluid_state().under_water(),
             "the pool must actually submerge the eye, or this gate proves nothing"
         );
         assert!(
-            !sim.player.swimming,
+            !sim.player().swimming,
             "control: submerged but not sprinting is not swimming"
         );
         assert_eq!(
-            sim.player.eye_height,
+            sim.player().eye_height,
             lodestone_physics::player::DEFAULT_EYE_HEIGHT
         );
 
-        sim.input.set(lodestone_controller::Action::Forward, true);
-        sim.input.set(lodestone_controller::Action::Sprint, true);
+        sim.input_mut().set(lodestone_controller::Action::Forward, true);
+        sim.input_mut().set(lodestone_controller::Action::Sprint, true);
         for _ in 0..10 {
             sim.step(1.0 / 20.0);
         }
         assert!(
-            sim.player.swimming,
+            sim.player().swimming,
             "sprinting while submerged must enter the swim pose"
         );
         assert_eq!(
-            sim.player.eye_height, SWIMMING_EYE_HEIGHT,
+            sim.player().eye_height, SWIMMING_EYE_HEIGHT,
             "the shell owns the pose eye height; physics only reads it"
         );
 
         // Pin the interpolation so the camera assertion is about the pose and not
         // about where between two ticks we happen to be.
-        sim.prev_position = sim.player.position;
+        let settled = sim.player().position;
+        sim.set_prev_position(settled);
         sim.interp_alpha = 0.0;
         let cam = sim.camera(1.0);
-        let expected = sim.player.position.y as f32 + SWIMMING_EYE_HEIGHT;
+        let expected = sim.player().position.y as f32 + SWIMMING_EYE_HEIGHT;
         assert!(
             (cam.position.y - expected).abs() < 1e-4,
             "swim camera should sit {SWIMMING_EYE_HEIGHT} above the feet: got {} want {expected}",
@@ -4537,24 +4749,35 @@ mod tests {
     /// "sneaking cancels sprint" gate must not apply while submerged — otherwise
     /// holding shift underwater stops the swim dead. Control: the same shift+sprint
     /// on dry land still cancels sprint.
+    ///
+    /// The *rule* now lives in `lodestone_controller::swim_adjusted_intent` and
+    /// is tested there against the pure function, and in that crate's
+    /// `the_intent_system_reads_submersion_for_the_swim_exception` against the
+    /// system. This one is deliberately kept as well, and asserts something
+    /// neither of those can: that a `Sim::step` — the real driver, with the real
+    /// `RawInput` resource and the real `Submersion` component — reaches the
+    /// intent the physics set will read. Without it, `Sim` could stop feeding the
+    /// ECS entirely and both of the controller's tests would still pass.
     #[test]
     fn sneak_cancels_sprint_on_land_but_not_under_water() {
         let mut sim = Sim::new(test_config());
-        sim.input.set(lodestone_controller::Action::Forward, true);
-        sim.input.set(lodestone_controller::Action::Sprint, true);
-        sim.input.set(lodestone_controller::Action::Sneak, true);
+        sim.input_mut().set(lodestone_controller::Action::Forward, true);
+        sim.input_mut().set(lodestone_controller::Action::Sprint, true);
+        sim.input_mut().set(lodestone_controller::Action::Sneak, true);
 
+        sim.step(TICK_DT);
         assert!(
-            !sim.swim_adjusted_intent().sprint,
+            !sim.movement_intent().sprint,
             "control: on land, sneaking still vetoes sprint"
         );
 
-        sim.fluid_state = FluidState {
+        sim.set_fluid_state(FluidState {
             water_height: 2.0,
             eye_in_water: true,
             ..FluidState::NONE
-        };
-        let intent = sim.swim_adjusted_intent();
+        });
+        sim.step(TICK_DT);
+        let intent = sim.movement_intent();
         assert!(
             intent.sprint,
             "submerged, shift must not cancel a swim-sprint"
@@ -4591,7 +4814,7 @@ mod tests {
             "no sprint edge, no sprint packet"
         );
 
-        sim.player.sprinting = true;
+        sim.player_mut().sprinting = true;
         sim.send_is_sprinting_if_needed();
         assert_eq!(
             drain(&actions),
@@ -4606,7 +4829,7 @@ mod tests {
         sim.send_is_sprinting_if_needed();
         assert!(drain(&actions).is_empty(), "sprint is edge-triggered");
 
-        sim.player.sprinting = false;
+        sim.player_mut().sprinting = false;
         sim.send_is_sprinting_if_needed();
         assert_eq!(
             drain(&actions),
@@ -4622,7 +4845,7 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.drain_all_meshes();
         // Aim straight down at the block under the player's feet.
-        let feet = sim.player.position;
+        let feet = sim.player().position;
         sim.target = Some(crate::raycast::RayHit {
             block: [
                 feet.x.floor() as i32,
@@ -4722,7 +4945,7 @@ mod tests {
     fn placing_against_a_face_adds_a_block() {
         let mut sim = Sim::new(test_config());
         sim.drain_all_meshes();
-        let feet = sim.player.position;
+        let feet = sim.player().position;
         // Target a floor block a few blocks away (clear of the player AABB),
         // place on its top face.
         let bx = feet.x.floor() as i32 + 3;
@@ -4747,7 +4970,7 @@ mod tests {
         for _ in 0..20 {
             sim.step(1.0 / 20.0);
         }
-        let feet = sim.player.position;
+        let feet = sim.player().position;
         // Target the block under the feet, whose top face is where the player
         // stands — placing there would clip the player, so it must be refused.
         sim.target = Some(crate::raycast::RayHit {
@@ -4766,21 +4989,21 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.toggle_fly();
         assert!(sim.flying());
-        let y0 = sim.player.position.y;
+        let y0 = sim.player().position.y;
         // No vertical input: fly holds altitude (physics-walk would fall).
         for _ in 0..40 {
             sim.step(1.0 / 20.0);
         }
         assert!(
-            (sim.player.position.y - y0).abs() < 1e-9,
+            (sim.player().position.y - y0).abs() < 1e-9,
             "fly holds altitude"
         );
         // Jump ascends.
-        sim.input.set(lodestone_controller::Action::Jump, true);
+        sim.input_mut().set(lodestone_controller::Action::Jump, true);
         for _ in 0..20 {
             sim.step(1.0 / 20.0);
         }
-        assert!(sim.player.position.y > y0, "jump lifts in fly mode");
+        assert!(sim.player().position.y > y0, "jump lifts in fly mode");
     }
 
     #[test]

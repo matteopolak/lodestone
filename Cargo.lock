@@ -2021,7 +2021,11 @@ dependencies = [
 name = "lodestone-controller"
 version = "0.1.0"
 dependencies = [
+ "bevy_app",
+ "bevy_ecs",
  "lodestone-client",
+ "lodestone-ecs",
+ "lodestone-model",
  "lodestone-physics",
 ]
 
@@ -2040,6 +2044,7 @@ dependencies = [
  "bevy_app",
  "bevy_ecs",
  "lodestone-model",
+ "lodestone-physics",
  "parking_lot",
  "uuid",
 ]

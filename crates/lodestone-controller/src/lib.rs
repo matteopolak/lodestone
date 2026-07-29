@@ -5,12 +5,21 @@
 //!
 //! ```text
 //! platform key/mouse events            (winit  OR  web-sys — the only per-platform layer)
-//!   → InputState                       (this crate)
+//!   → RawInput(InputState)             (this crate, an ECS resource)
 //!   → movement_intent / apply_look     (this crate)
-//!   → lodestone_physics::tick          (bit-exact, shared)
-//!   → move_action → ClientAction::Move (this crate)
+//!   → MovementIntent component         (lodestone-ecs, written in TickSet::Input)
+//!   → lodestone_physics::tick          (bit-exact, shared; TickSet::Physics)
+//!   → move_action → ClientAction::Move (this crate, queued in TickSet::Send)
 //!   → ClientHandle::send_action        (lodestone-client, shared)
 //! ```
+//!
+//! Since Stage 2 of [`docs/bevy-migration.md`] that pipeline is *systems*, in
+//! [`ecs`]. The pure functions ([`movement_intent`], [`apply_look`],
+//! [`move_action`], [`swim_adjusted_intent`]) are unchanged and are what the
+//! systems call, so a caller with no `App` — the browser client today — can
+//! still drive movement directly.
+//!
+//! [`docs/bevy-migration.md`]: https://github.com/
 //!
 //! Two internally-consistent movement implementations is how bit-exact physics
 //! parity dies quietly — no test catches it, because each path agrees with
@@ -20,8 +29,11 @@
 //!
 //! ## wasm safety is enforced, not assumed
 //!
-//! This crate depends only on `lodestone-physics` and `lodestone-client`, both
-//! wasm-safe, and itself touches no clock, filesystem, socket, or thread API.
+//! This crate depends only on `lodestone-physics`, `lodestone-client`,
+//! `lodestone-ecs`, `lodestone-model` and `bevy_ecs`/`bevy_app` — all wasm-safe
+//! (`bevy_ecs` proven so by Stage 0's `scripts/wasm-check.sh` run, never
+//! `multi_threaded`, which does not compile on a threadless wasm target) — and
+//! itself touches no clock, filesystem, socket, or thread API.
 //! [`std::time::Instant::now`] and `SystemTime::now` *compile* on
 //! `wasm32-unknown-unknown` but **panic at runtime**, and a `cfg` cannot turn a
 //! fresh call to one into a compile error (§12.35), so the
@@ -33,10 +45,15 @@
 //! `performance.now()`) rather than letting this crate name a clock.
 
 mod action;
+pub mod ecs;
 mod input;
 
 pub use action::move_action;
-pub use input::{Action, InputState, PITCH_LIMIT, apply_look, movement_intent, sensitivity_factor};
+pub use ecs::{ControllerPlugin, RawInput, swim_adjusted_intent};
+pub use input::{
+    Action, InputState, PITCH_LIMIT, SPRINT_TRIGGER_WINDOW_TICKS, apply_look, movement_intent,
+    sensitivity_factor,
+};
 
 #[cfg(test)]
 mod guard {

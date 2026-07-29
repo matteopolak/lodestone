@@ -24,6 +24,13 @@ parking_lot = { workspace = true }
 # `lodestone-render` (§4.4 keeps the GPU layer bevy-free, which also means the
 # ECS must not reach into it).
 lodestone-model = { workspace = true }
+# Stage 2: the local player's components *are* `PlayerState`/`MovementInput`/
+# `FluidState`, and `player_physics` calls `lodestone_physics::tick`. The maths
+# stays here-adjacent, never inlined — it is bit-exact against a JVM oracle with
+# golden traces (docs/bevy-migration.md §8), so the ECS may only ever be its
+# caller. wasm-safe: `lodestone-controller` already depends on it and is in
+# `scripts/wasm-check.sh`'s crate list.
+lodestone-physics = { workspace = true }
 # `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
 # this adds no new type to the graph, only the name.
 uuid = { workspace = true }

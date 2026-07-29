@@ -65,6 +65,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every entity's state lives in, the three-state `Reported<T>` encoding that keeps
   "never reported" distinct from "explicitly cleared" (and a dropped item visible),
   and the two folds that cannot be systems until the chunk world is a resource.
+- [The local player as ECS components](./local-player-components.md) — the one entity
+  the driver *is*, why the input half lives in `lodestone-controller`, the
+  `CollisionSource` seam that lets a borrowed collision view reach a scheduled
+  system, and what changed when movement intent stopped being computed per frame.
 - [Bevy ECS migration](./bevy-migration.md) — the staged plan for moving state onto
   `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
   the two sources of truth that already exist, what must stay a plain library, and

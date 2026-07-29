@@ -1,0 +1,735 @@
+//! The **local player** as components on one entity, plus the `GameTick`
+//! systems that advance it — Stage 2 of `docs/bevy-migration.md`.
+//!
+//! # What lives here and what deliberately does not
+//!
+//! The state and the *scheduling* live here. The maths does not:
+//! [`lodestone_physics`] stays a plain library that [`player_physics`] calls,
+//! because it is bit-exact against a JVM oracle with golden traces and a
+//! system that re-derived the integration would be re-deriving the oracle from
+//! the code under test (`docs/bevy-migration.md` §8).
+//!
+//! The **input** half is one crate up, in `lodestone_controller::ecs`
+//! ([`RawInput`](lodestone_controller::ecs::RawInput) and the
+//! [`TickSet::Input`](crate::TickSet::Input) systems that write
+//! [`MovementIntent`]). That split is forced, not stylistic:
+//! `lodestone-controller` depends on `lodestone-client`, which depends on this
+//! crate, so a dependency the other way would be a cycle. It also happens to
+//! be the right place — the controller crate's whole purpose is that native and
+//! browser share one held-keys → [`MovementInput`] implementation.
+//!
+//! # The collision borrow, and why this is a `CollisionSource` not a view
+//!
+//! A `bevy_ecs` `Resource` must be `'static`, and the workspace denies
+//! `unsafe_code`, so a `&dyn CollisionView` cannot reach a scheduled system.
+//! The obvious fix — `Arc<dyn CollisionView + Send + Sync>` — works for the
+//! live path (`Sim::live_collision` already returns an owned snapshot) but
+//! *not* for the offline demo world, whose adapter (`WorldCollision`) borrows
+//! the world outright.
+//!
+//! [`CollisionSource`] solves both with one indirection: it hands a
+//! `&dyn CollisionView` to a callback rather than returning one, so an
+//! implementor may build a borrowed view over state it owns. That is strictly
+//! better than an `Arc<dyn CollisionView>` for a second reason — an owned
+//! *wrapper* around `WorldCollision` would have to re-delegate all thirteen
+//! `CollisionView` methods by hand, and a method added to the trait later would
+//! silently fall back to the trait default in the wrapper while
+//! `WorldCollision` overrode it. That is exactly the "two adapters, one of them
+//! subtly wrong" failure `lodestone_shell::collision`'s module docs warn about.
+//!
+//! # Ordering
+//!
+//! ```text
+//! GameTick
+//!   TickSet::Input     (controller) tick_sprint_window ← compute_movement_intent
+//!   TickSet::Physics   player_physics
+//!   TickSet::Send      (controller) send_move_action → send_player_input
+//! ```
+//!
+//! `Send` last is the point of the stage: a plugin adding a system
+//! `.after(TickSet::Physics).before(TickSet::Send)` changes what the server is
+//! told this tick.
+
+use std::sync::Arc;
+
+use bevy_app::{App, Plugin};
+use bevy_ecs::component::Component;
+use bevy_ecs::prelude::{Entity, Query, Res, With};
+use bevy_ecs::resource::Resource;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::world::World;
+use lodestone_model::{ClientAction, PlayerInput};
+use lodestone_physics::{
+    CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
+    compute_fluid_state, tick,
+};
+
+use crate::schedules::GameTick;
+use crate::sets::TickSet;
+
+/// Eye height of `Pose.SWIMMING` — `EntityDimensions.scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
+/// (`Avatar.java:28`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
+pub const SWIMMING_EYE_HEIGHT: f32 = 0.4;
+/// Eye height of `Pose.CROUCHING` — `1.27F` (`Avatar.java:33`).
+pub const CROUCHING_EYE_HEIGHT: f32 = 1.27;
+/// Horizontal free-fly speed in blocks per tick (the raw sprint key doubles
+/// it). The physics engine models no creative/spectator flight, so free-fly is
+/// a driver-side free-cam, not a physics mode.
+pub const FLY_SPEED: f64 = 0.45;
+
+// ---------------------------------------------------------------------------
+// Components
+// ---------------------------------------------------------------------------
+
+/// Marks the entity this client *is*, as opposed to the entities it observes.
+///
+/// A component and not a resource on purpose: everything on this entity is
+/// therefore per-client, which is what keeps a multi-client/swarm driver
+/// possible later without a retrofit (azalea's whole design rests on it — see
+/// `docs/bevy-migration.md` §2.2).
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LocalPlayer;
+
+/// The bit-exact physics state carried across ticks — position, velocity, view
+/// angles, `on_ground`, the swim pose, the pose eye height, status effects.
+///
+/// Authoritative. There is no second copy: `lodestone_shell::sim::Sim` reads
+/// and writes this component through accessors and holds no `PlayerState` of
+/// its own.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct PhysicsState(pub PlayerState);
+
+/// This tick's movement intent, written in [`TickSet::Input`] and read by
+/// [`TickSet::Physics`] and [`TickSet::Send`].
+///
+/// **One per tick, not one per frame.** Before Stage 2 this was computed once
+/// per *frame*, outside the fixed-timestep loop, so a frame long enough to run
+/// several catch-up ticks reused a single decision for all of them. See the
+/// crate docs on `lodestone_controller::ecs::compute_movement_intent` for what
+/// that changes observably.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct MovementIntent(pub MovementInput);
+
+/// The **raw** sprint key, ungated by the forward-only/sneak rules
+/// [`MovementIntent`] applies.
+///
+/// Only free-fly reads it: free-fly is a driver-side debug camera that is not
+/// subject to the walking sprint gate, so it cannot use
+/// [`MovementIntent`]'s already-gated `sprint` bit.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SprintKeyHeld(pub bool);
+
+/// How the player's box and eye sit in water and lava this tick, from the
+/// bit-exact producer (`EntityFluidInteraction.update`).
+///
+/// Named `Submersion` rather than `FluidState` so the component and
+/// [`lodestone_physics::FluidState`] it wraps are not two things with one name.
+/// Recomputed against the very view movement collided against, so the summary
+/// is consistent with where the tick left the player — the submerged fog, the
+/// underwater overlay and the mining `submerged` factor all read this one
+/// answer rather than inventing their own boolean.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Submersion(pub FluidState);
+
+/// Feet position at the **start** of the most recent tick, so a per-frame
+/// camera can interpolate across the fixed 20 Hz step.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct PrevPosition(pub Vec3d);
+
+/// Whether free-fly (noclip) is active instead of physics-walk.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Flying(pub bool);
+
+/// Selected hotbar slot in `0..9`.
+///
+/// Owned locally: the selection is an input the player drives (number keys,
+/// scroll wheel) and merely *echoed* to the server, so unlike health or
+/// experience there is no server-authoritative value to fold.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SelectedSlot(pub usize);
+
+/// The last [`PlayerInput`] put on the wire, so the edge-triggered
+/// player-input packet is only resent on change.
+///
+/// This is how the server learns we are sneaking — it derives shift from this
+/// packet, never from our movement packet — so a sneak-placement against an
+/// interactable block only suppresses the interaction if this was sent.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LastPlayerInput(pub Option<PlayerInput>);
+
+/// The last sprint state put on the wire as a
+/// `PlayerCommand::{StartSprinting, StopSprinting}`, mirroring vanilla's
+/// `wasSprinting` (`LocalPlayer.sendIsSprintingIfNeeded`,
+/// `LocalPlayer.java:303-312`).
+///
+/// A **separate packet** from [`LastPlayerInput`] and both are needed:
+/// `ServerboundPlayerInputPacket` only stores its `sprint` bit as
+/// `ServerPlayer.lastClientInput`, while the thing that actually calls
+/// `player.setSprinting(...)` is `handlePlayerCommand`. Without this the
+/// server never believes we are sprinting, so its own `updateSwimming` can
+/// never put us in the swimming pose.
+///
+/// Starts `Some(false)`, not `None`: vanilla's `wasSprinting` starts `false`,
+/// so a player who joins and does not sprint sends nothing at all rather than
+/// a redundant `STOP_SPRINTING` on the first tick.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastSprintingSent(pub Option<bool>);
+
+/// Present while the local player is dead and awaiting the server-confirmed
+/// respawn.
+///
+/// A marker, so "alive" is the absence of a component rather than a `false`
+/// nobody has to remember to clear. Death is a transient *state*, not the end
+/// of the session — the client answers the death packet with a respawn — but
+/// while it holds, the corpse does not walk: [`MovementIntent`] is forced to
+/// [`MovementInput::NONE`] and the movement packet is withheld until the
+/// post-respawn placement teleport lands.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dead;
+
+// ---------------------------------------------------------------------------
+// The collision seam
+// ---------------------------------------------------------------------------
+
+/// Somewhere a `&dyn CollisionView` can be *borrowed from*, rather than a view
+/// itself.
+///
+/// The inversion is what makes collision geometry reachable from a scheduled
+/// system at all — see this module's docs. Implementors own whatever the view
+/// borrows (a snapshot of the live server terrain, an owned copy of an offline
+/// world), which is why the trait is `Send + Sync + 'static`: those are
+/// `Resource`'s requirements, not physics's.
+///
+/// Implementations live in the driver (`lodestone-shell`), because the mapping
+/// from block ids to shapes is the driver's business and this crate must not
+/// depend on the renderer (`docs/bevy-migration.md` §4.4).
+pub trait CollisionSource: std::fmt::Debug + Send + Sync + 'static {
+    /// Build a view and hand it to `f`. Called once per physics tick.
+    fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView));
+}
+
+/// What this tick's physics collides against. Written by the driver once per
+/// tick, before `GameTick` runs.
+///
+/// The two non-`View` variants are both "hold the player still", and they
+/// differ in exactly one thing — whether the pose is still updated. That
+/// asymmetry is inherited verbatim from the pre-Stage-2 code and is preserved
+/// deliberately rather than tidied, because tidying it would change the eye
+/// height (and therefore the camera) on the title screen. It is a latent
+/// question, not a settled one.
+#[derive(Resource, Debug, Clone, Default)]
+pub enum PlayerCollision {
+    /// No session **and** no offline terrain: there is nothing to stand on and
+    /// nobody to be. Freeze, and do not even update the pose — a driver steps
+    /// the sim on every frame including while a menu owns the screen, so
+    /// without this the pre-session player free-falls through an empty world
+    /// for as long as the title screen is up and then carries that velocity
+    /// into the login teleport's first tick.
+    #[default]
+    NoWorld,
+    /// A live session whose player column has not streamed in yet. Freeze —
+    /// as vanilla waits for chunks — rather than falling through absent ground
+    /// and rubber-banding against the server's corrective teleports. Unlike
+    /// [`Self::NoWorld`] the pose *is* updated.
+    Pending,
+    /// Collide against this.
+    View(Arc<dyn CollisionSource>),
+}
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+/// The physics tuning profile (`PhysicsProfile::mc_1_21()` in practice).
+///
+/// A resource and not a component: it is a property of the *world's* rules,
+/// identical for every player in it, and a per-entity copy would invite two
+/// entities in one world to be simulated under different physics.
+#[derive(Resource, Debug, Clone)]
+pub struct Profile(pub PhysicsProfile);
+
+impl Default for Profile {
+    fn default() -> Self {
+        Self(PhysicsProfile::mc_1_21())
+    }
+}
+
+/// The one sanctioned egress: actions produced by systems this tick, drained
+/// by the driver and handed to the socket.
+///
+/// A plugin reaches the wire by pushing here from a `GameTick` system, never
+/// by touching a connection (`docs/bevy-migration.md` §6). Order is send
+/// order, so a system's position in [`TickSet::Send`] is observable on the
+/// wire.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct ActionQueue(pub Vec<ClientAction>);
+
+/// Whether this tick's outbound player packets are meaningful at all.
+///
+/// A *derived* gate the driver refreshes each frame from its own session state
+/// — not a second copy of that state. It exists because the edge-trackers
+/// ([`LastPlayerInput`], [`LastSprintingSent`]) must not latch a value that
+/// was never actually sent: a system that ran while disconnected would record
+/// the current input as "already sent", and the first real change after
+/// connecting would then be suppressed as a redundant resend.
+///
+/// Session phase itself is Stage 3's; when it moves onto the local player,
+/// this resource collapses into it.
+#[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Egress {
+    /// The server has placed us in the world (`SessionPhase::Connected`), so a
+    /// movement packet is meaningful.
+    pub in_world: bool,
+    /// …and this is a real live session, so the interaction/edge packets are
+    /// meaningful too.
+    pub live: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Systems
+// ---------------------------------------------------------------------------
+
+/// `Player.updatePlayerPose` / `getDesiredPose` (`Player.java:343-371`),
+/// reduced to the one thing the physics engine takes as an input: the **eye
+/// height**.
+///
+/// [`PlayerState::eye_height`] is documented as an input the *pose layer*
+/// owns, and this is that layer. It has to be written, because nothing else
+/// does: left at the standing `1.62` a swimmer's eye sits a metre above their
+/// body, so `getFluidJumpThreshold` reads the wrong branch, the submerged fog
+/// and underwater overlay flip a block early leaving the surface, and the
+/// camera floats.
+///
+/// Applied *after* the tick so the next tick — which reads it at the top of
+/// `LivingEntity.travel` — sees this tick's pose, exactly as vanilla's
+/// `setPose` lands before the following tick's `baseTick`.
+///
+/// Pose order is vanilla's `getDesiredPose`: swimming beats crouching beats
+/// standing.
+///
+/// **Not modelled:** the *hitbox* half of the pose. Vanilla's `Pose.SWIMMING`
+/// is `0.6 × 0.6` and is gated on `canPlayerFitWithinBlocksAndEntitiesWhen`;
+/// this engine keeps the standing `0.6 × 1.8` box for every pose, so a swimmer
+/// cannot fit through a one-block gap and the fit gate has nothing to test.
+/// Changing the box changes collision, which is what the server re-derives
+/// from our reported position, so it is deliberately a separate step.
+fn update_pose(player: &mut PlayerState, intent: MovementInput) {
+    player.eye_height = if player.swimming {
+        SWIMMING_EYE_HEIGHT
+    } else if intent.sneak {
+        CROUCHING_EYE_HEIGHT
+    } else {
+        lodestone_physics::player::DEFAULT_EYE_HEIGHT
+    };
+}
+
+/// One free-fly tick: move horizontally relative to yaw, vertically with
+/// jump/sneak, ignoring gravity and collision.
+///
+/// A driver-side camera, not a physics model — the engine has no flight.
+fn fly_step(player: &mut PlayerState, intent: MovementInput, sprint_key: bool, fluid: &mut FluidState) {
+    let speed = if sprint_key { FLY_SPEED * 2.0 } else { FLY_SPEED };
+    let yaw = f64::from(player.yaw).to_radians();
+    let (sy, cy) = yaw.sin_cos();
+    let f = f64::from(intent.forward);
+    let s = f64::from(intent.strafe);
+    // vanilla `getInputVector` with pitch ignored: horizontal move only.
+    let mut dx = s * cy - f * sy;
+    let mut dz = f * cy + s * sy;
+    let len = (dx * dx + dz * dz).sqrt();
+    if len > 1.0 {
+        dx /= len;
+        dz /= len;
+    }
+    player.position.x += dx * speed;
+    player.position.z += dz * speed;
+    if intent.jump {
+        player.position.y += speed;
+    }
+    if intent.sneak {
+        player.position.y -= speed;
+    }
+    player.velocity = Vec3d::ZERO;
+    player.on_ground = false;
+    // Free-fly is a debug camera, not a physics pose, so it never drives
+    // submerged fog — noclipping through an ocean should not tint the whole
+    // view. Real submersion resumes the moment physics-walk does.
+    *fluid = FluidState::NONE;
+    // `Player.updateSwimming` forces `setSwimming(false)` while
+    // `abilities.flying` (`Player.java:1433-1439`). Free-fly never calls
+    // `lodestone_physics::tick`, so nothing would otherwise clear a swim pose
+    // entered before taking off — the player would fly around with a 0.4 eye
+    // height.
+    player.swimming = false;
+    player.eye_height = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
+}
+
+/// Vanilla `EntityFluidInteraction.update` for the local player against
+/// `view`.
+fn player_fluid_state(player: &PlayerState, profile: &PhysicsProfile, view: &dyn CollisionView) -> FluidState {
+    compute_fluid_state(
+        player.bounding_box(profile),
+        player.position,
+        player.eye_height,
+        view,
+    )
+}
+
+/// One fixed physics tick for every [`LocalPlayer`], in [`TickSet::Physics`].
+///
+/// The `MOVEMENT_SPEED` attribute is injected each tick via
+/// [`PlayerState::with_movement_speed`] — exercising the attribute seam the
+/// physics crate exposes from a *real* caller, not a test. When sprinting we
+/// hand in `base·(1 + sprint_modifier)`; the engine then ignores its own
+/// sprint speed maths (no double-count) while the sprint flag still drives the
+/// sprint jump boost.
+///
+/// [`PrevPosition`] is captured here rather than by the driver so that a
+/// plugin adding a second `GameTick` system cannot desynchronise the camera's
+/// interpolation anchor from the tick that actually moved the player.
+pub fn player_physics(
+    collision: Res<PlayerCollision>,
+    profile: Res<Profile>,
+    mut players: Query<
+        (
+            &mut PhysicsState,
+            &mut Submersion,
+            &mut PrevPosition,
+            &MovementIntent,
+            &Flying,
+            &SprintKeyHeld,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    let profile = &profile.0;
+    for (mut state, mut fluid, mut prev, intent, flying, sprint_key) in &mut players {
+        prev.0 = state.0.position;
+        let player = &mut state.0;
+        let intent = intent.0;
+
+        if flying.0 {
+            fly_step(player, intent, sprint_key.0, &mut fluid.0);
+            continue;
+        }
+
+        if matches!(*collision, PlayerCollision::NoWorld) {
+            player.velocity = Vec3d::ZERO;
+            player.on_ground = true;
+            fluid.0 = FluidState::NONE;
+            continue;
+        }
+
+        let base = f64::from(profile.base_movement_speed);
+        let attr = if intent.sprint {
+            base * (1.0 + f64::from(profile.sprint_speed_modifier))
+        } else {
+            base
+        };
+        *player = player.with_movement_speed(attr);
+
+        if let PlayerCollision::View(source) = &*collision {
+            source.with_view(&mut |view| {
+                tick(player, intent, view, profile);
+                // The same view movement collided against, so the submerged
+                // summary is consistent with where the tick left the player.
+                fluid.0 = player_fluid_state(player, profile, view);
+            });
+        } else {
+            // `Pending`: we know nothing about the fluid around the player, so
+            // report "dry" rather than stranding a stale submerged fog from
+            // before the column went away.
+            player.velocity = Vec3d::ZERO;
+            player.on_ground = true;
+            fluid.0 = FluidState::NONE;
+        }
+        update_pose(player, intent);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Spawning
+// ---------------------------------------------------------------------------
+
+/// Spawn the [`LocalPlayer`] entity with every Stage-2 component present.
+///
+/// Every component is inserted eagerly here, unlike the *observed*-entity set
+/// in [`crate::entity`] where absence encodes "the server has never mentioned
+/// this". Nothing about the local player is server-reported in that sense —
+/// it is all locally owned — so there is no three-state encoding to preserve
+/// and a system may rely on the whole set existing. The one exception is
+/// [`Dead`], which is a marker precisely so that alive is the default.
+pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
+    world
+        .spawn((
+            LocalPlayer,
+            PhysicsState(state),
+            PrevPosition(state.position),
+            Submersion(FluidState::NONE),
+            MovementIntent(MovementInput::NONE),
+            SprintKeyHeld(false),
+            Flying(false),
+            SelectedSlot(0),
+            LastPlayerInput(None),
+            LastSprintingSent(Some(false)),
+        ))
+        .id()
+}
+
+/// Return `entity` to its just-spawned state around `state`, for a
+/// quit-to-title that must behave exactly like a first connection rather than
+/// starting with the previous session's leftovers.
+///
+/// Deliberately not `despawn` + [`spawn_local_player`]: the `Entity` id is
+/// held by the driver (and, later, by plugins), so it has to survive a session
+/// teardown.
+pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState) {
+    let Ok(mut entity) = world.get_entity_mut(entity) else {
+        return;
+    };
+    entity.insert((
+        PhysicsState(state),
+        PrevPosition(state.position),
+        Submersion(FluidState::NONE),
+        MovementIntent(MovementInput::NONE),
+        SprintKeyHeld(false),
+        Flying(false),
+        SelectedSlot(0),
+        LastPlayerInput(None),
+        LastSprintingSent(Some(false)),
+    ));
+    entity.remove::<Dead>();
+}
+
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
+
+/// Registers the local player's resources and its [`TickSet::Physics`] system.
+///
+/// Does **not** spawn the entity: which `World` the local player lives in, and
+/// with what initial pose, is the driver's decision (see
+/// [`spawn_local_player`]).
+///
+/// Pairs with `lodestone_controller::ecs::ControllerPlugin`, which owns the
+/// `Input` and `Send` halves of the same tick. Adding this one alone gives a
+/// player that is simulated but neither driven nor reported — useful for a
+/// headless physics harness, and the reason the two are separate plugins.
+#[derive(Debug, Default)]
+pub struct LocalPlayerPlugin;
+
+impl Plugin for LocalPlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<PlayerCollision>();
+        app.init_resource::<Profile>();
+        app.init_resource::<ActionQueue>();
+        app.init_resource::<Egress>();
+        app.add_systems(GameTick, player_physics.in_set(TickSet::Physics));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_physics::Aabb;
+
+    /// A floor at `y = 0` and nothing else, as an owned [`CollisionSource`].
+    #[derive(Debug)]
+    struct Floor;
+
+    impl CollisionView for Floor {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+            if y == 0 {
+                out.push(Aabb {
+                    min_x: f64::from(x),
+                    min_y: f64::from(y),
+                    min_z: f64::from(z),
+                    max_x: f64::from(x) + 1.0,
+                    max_y: f64::from(y) + 1.0,
+                    max_z: f64::from(z) + 1.0,
+                });
+            }
+        }
+    }
+
+    impl CollisionSource for Floor {
+        fn with_view(&self, f: &mut dyn FnMut(&dyn CollisionView)) {
+            f(self);
+        }
+    }
+
+    fn app_with_player(collision: PlayerCollision) -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((crate::CorePlugin, LocalPlayerPlugin));
+        app.insert_resource(collision);
+        let state = PlayerState::at(Vec3d::new(0.5, 4.0, 0.5), 0.0);
+        let entity = spawn_local_player(app.world_mut(), state);
+        (app, entity)
+    }
+
+    fn run_tick(app: &mut App) {
+        app.world_mut().run_schedule(GameTick);
+    }
+
+    /// The physics system must actually be reachable *through the schedule* —
+    /// a directly-called function would pass a unit test while the schedule
+    /// registration was missing, which is the island this migration's Stage 1
+    /// found nine times.
+    #[test]
+    fn a_game_tick_run_falls_the_player_toward_the_floor() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        let before = app.world().get::<PhysicsState>(entity).unwrap().0.position.y;
+        // Two ticks, not one: a player starting from rest does not move on the
+        // first tick, because `tick` runs `move()` *before* applying gravity
+        // (see `PlayerState::on_ground`'s docs on the one settle tick). One
+        // tick here asserts nothing.
+        run_tick(&mut app);
+        run_tick(&mut app);
+        let after = app.world().get::<PhysicsState>(entity).unwrap().0.position.y;
+        assert!(
+            after < before,
+            "gravity should have moved the player down: {before} → {after}"
+        );
+    }
+
+    /// The negative control for the above: with no collision source the same
+    /// schedule run must leave the player exactly where it was. Without this,
+    /// "the player moved" could be satisfied by any writer at all.
+    #[test]
+    fn no_world_freezes_the_player_instead_of_dropping_it() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        let before = app.world().get::<PhysicsState>(entity).unwrap().0.position;
+        for _ in 0..40 {
+            run_tick(&mut app);
+        }
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert_eq!(state.position, before, "a worldless player must not fall");
+        assert!(state.on_ground, "…and must report standing, not airborne");
+        assert_eq!(state.velocity, Vec3d::ZERO);
+    }
+
+    /// Enough ticks on a real floor must settle the player *on* it, which is
+    /// what proves the view reached the integrator rather than merely being
+    /// consulted.
+    #[test]
+    fn a_collision_source_actually_stops_the_fall_at_the_floor() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        for _ in 0..60 {
+            run_tick(&mut app);
+        }
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(
+            (state.position.y - 1.0).abs() < 1e-6,
+            "expected to settle on the y=0 floor's top face, got {}",
+            state.position.y
+        );
+        assert!(state.on_ground);
+    }
+
+    /// [`PrevPosition`] is the camera's interpolation anchor. It must be the
+    /// position at the *start* of the tick that just ran — not the end, and
+    /// not two ticks ago.
+    #[test]
+    fn prev_position_anchors_to_the_start_of_the_tick_that_just_ran() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        // Burn the settle tick (see `a_game_tick_run_falls_the_player_toward_the_floor`)
+        // so the tick under test genuinely moves the player — otherwise
+        // "prev == start of tick" is satisfied trivially by "nothing moved".
+        run_tick(&mut app);
+        let before = app.world().get::<PhysicsState>(entity).unwrap().0.position;
+        run_tick(&mut app);
+        let prev = app.world().get::<PrevPosition>(entity).unwrap().0;
+        let now = app.world().get::<PhysicsState>(entity).unwrap().0.position;
+        assert_eq!(prev, before);
+        assert_ne!(prev, now, "the tick has to have moved the player at all");
+    }
+
+    /// Free-fly is a driver camera: it ignores collision entirely and holds
+    /// the standing eye height even where physics-walk would be submerged.
+    #[test]
+    fn flying_ignores_the_floor_and_the_sneak_pose() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        app.world_mut().entity_mut(entity).insert((
+            Flying(true),
+            MovementIntent(MovementInput {
+                sneak: true,
+                ..MovementInput::NONE
+            }),
+        ));
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(
+            (state.position.y - (4.0 - FLY_SPEED)).abs() < 1e-9,
+            "sneak should descend at exactly the fly speed, got {}",
+            state.position.y
+        );
+        assert_eq!(
+            state.eye_height,
+            lodestone_physics::player::DEFAULT_EYE_HEIGHT,
+            "free-fly must not adopt the crouch eye height"
+        );
+    }
+
+    /// The sneak pose *is* adopted on the physics-walk path — the control for
+    /// the assertion above.
+    #[test]
+    fn walking_while_sneaking_adopts_the_crouch_eye_height() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        app.world_mut()
+            .entity_mut(entity)
+            .insert(MovementIntent(MovementInput {
+                sneak: true,
+                ..MovementInput::NONE
+            }));
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert_eq!(state.eye_height, CROUCHING_EYE_HEIGHT);
+    }
+
+    /// `Pending` and `NoWorld` both freeze, and differ only in the pose — the
+    /// one asymmetry [`PlayerCollision`]'s docs call out. Pinned so a future
+    /// tidy-up is a deliberate decision rather than an accident.
+    #[test]
+    fn pending_updates_the_pose_while_no_world_does_not() {
+        let sneaking = MovementIntent(MovementInput {
+            sneak: true,
+            ..MovementInput::NONE
+        });
+
+        let (mut app, entity) = app_with_player(PlayerCollision::Pending);
+        app.world_mut().entity_mut(entity).insert(sneaking);
+        run_tick(&mut app);
+        assert_eq!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.eye_height,
+            CROUCHING_EYE_HEIGHT
+        );
+
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut().entity_mut(entity).insert(sneaking);
+        run_tick(&mut app);
+        assert_eq!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.eye_height,
+            lodestone_physics::player::DEFAULT_EYE_HEIGHT
+        );
+    }
+
+    /// A session teardown must return the player to a first-connection state
+    /// while keeping its `Entity` id, which the driver and any plugin hold.
+    #[test]
+    fn reset_keeps_the_entity_id_and_clears_the_session_state() {
+        let (mut app, entity) = app_with_player(PlayerCollision::NoWorld);
+        app.world_mut()
+            .entity_mut(entity)
+            .insert((Dead, SelectedSlot(7), Flying(true)));
+        let spawn = PlayerState::at(Vec3d::new(0.5, 71.0, 0.5), 180.0);
+        reset_local_player(app.world_mut(), entity, spawn);
+
+        assert_eq!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.position,
+            spawn.position
+        );
+        assert_eq!(app.world().get::<SelectedSlot>(entity).unwrap().0, 0);
+        assert!(!app.world().get::<Flying>(entity).unwrap().0);
+        assert!(app.world().get::<Dead>(entity).is_none());
+    }
+}

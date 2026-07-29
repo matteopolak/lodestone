@@ -20,8 +20,18 @@
 //! `ClientHandle::entities()`, which is the plan's one sanctioned intermediate
 //! (components authoritative, struct derived — never the reverse).
 //!
-//! Still where it was: the local player, HUD/session state, the chunk world,
-//! `Sim` itself.
+//! # Stage 2
+//!
+//! [`player`] holds the local player's component set plus the
+//! [`TickSet::Physics`] system that advances it. `lodestone_shell::sim::Sim`'s
+//! `player`, `prev_position`, `fluid_state`, `fly`, `input`, `profile`,
+//! `selected_slot`, `last_player_input`, `last_sprinting_sent` and `dead`
+//! fields are **deleted**; `Sim` reads and writes components through
+//! accessors. The input and egress halves of the same tick live in
+//! `lodestone_controller::ecs`, which cannot be a dependency of this crate
+//! (`lodestone-controller` → `lodestone-client` → here would be a cycle).
+//!
+//! Still where it was: HUD/session state, the chunk world, `Sim` itself.
 //!
 //! # What this crate depends on
 //!
@@ -43,6 +53,7 @@
 pub mod entity;
 mod handle;
 pub mod ingest;
+pub mod player;
 mod plugin;
 mod resources;
 mod runner;
@@ -57,6 +68,11 @@ pub use bevy_app as app;
 pub use bevy_ecs as ecs;
 
 pub use handle::{EcsHandle, new_handle, new_ingest_handle};
+pub use player::{
+    ActionQueue, CollisionSource, Dead, Egress, Flying, LastPlayerInput, LastSprintingSent,
+    LocalPlayer, LocalPlayerPlugin, MovementIntent, PhysicsState, PlayerCollision, PrevPosition,
+    Profile, SelectedSlot, SprintKeyHeld, Submersion, reset_local_player, spawn_local_player,
+};
 pub use plugin::CorePlugin;
 pub use resources::WorldTime;
 pub use runner::Runner;

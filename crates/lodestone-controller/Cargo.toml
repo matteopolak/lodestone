@@ -19,3 +19,17 @@ workspace = true
 [dependencies]
 lodestone-physics = { path = "../lodestone-physics" }
 lodestone-client = { workspace = true }
+# Stage 2 of docs/bevy-migration.md: the local player's components live in
+# `lodestone-ecs` and this crate contributes the `TickSet::Input` /
+# `TickSet::Send` systems that read and write them. One-directional by
+# construction — `lodestone-client` already depends on `lodestone-ecs`, so the
+# reverse edge would be a cycle and `lodestone-ecs` can never name this crate.
+lodestone-ecs = { workspace = true }
+# `PlayerInput`, the version-free wire shape `send_player_input` queues.
+lodestone-model = { workspace = true }
+# Direct, in addition to `lodestone-ecs`'s re-export, because bevy's derive
+# macros emit absolute `bevy_ecs::` paths and therefore need the crate name in
+# scope here. Same `[workspace.dependencies]` pin, so there is only ever one
+# `bevy_ecs` in the graph.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }

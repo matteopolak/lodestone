@@ -543,6 +543,23 @@ dropped-item-goes-invisible defect. Port those two tests first.
 
 ### Stage 2 — the local player, and physics intent
 
+**Landed.** See [`local-player-components.md`](./local-player-components.md) for what the shipped
+shape is and why it differs from the plan below in three places:
+
+- **`Mining` / `Placement` did not move**, and the reason is the same one that blocked item physics
+  in Stage 1: their inputs (`Sim.target`, `version_data`, the live block store, the particle
+  emitter, direct demo-world edits) are Stage 3/4 residents, so a system now would need them
+  mirrored into resources — the exact failure the authority test forbids. `SelectedSlot`,
+  `LastPlayerInput` and `LastSprintingSent` *did* move.
+- **`PlayerSnapshot` did not move.** It is in `lodestone-client`, on the net thread, folding the
+  *server's* view of the player from `ClientEvent`s; the components are the driver thread's
+  *prediction*. Collapsing the two is the `World` unification of §4.1, not this stage.
+- **The collision borrow was solved, and not the way Stage 1's report expected.** `Arc<dyn
+  CollisionView + Send + Sync>` covers the live path but not the offline demo world, whose adapter
+  borrows. The shipped seam is `CollisionSource`, which hands a `&dyn CollisionView` to a callback
+  instead of returning one. `LiveCollision: Send + Sync` held. **This also unblocks
+  `tick_item_physics`**, which no longer has any reason not to be a `GameTick` system.
+
 **Moves:** `PlayerSnapshot` (`state.rs:49-81`) and `Sim.player: PlayerState` (`sim.rs:284`) →
 components on the `LocalPlayer` entity, plus `PhysicsState`, `MovementIntent`, `FluidState`
 (`sim.rs:459`), `Mining`, `Placement`, `SelectedSlot`, `LastPlayerInput` (`sim.rs:436-452`).
