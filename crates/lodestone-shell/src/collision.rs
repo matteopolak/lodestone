@@ -78,12 +78,16 @@
 //! predicate, [`LiveCollision::is_pickable`], not in a negation of `is_water`. One
 //! question one answer is right; the mistake was assuming there was one question.
 //!
-//! The same warning now applies to the collision census wired in here: **collision
+//! The same warning applies to the collision census wired in here: **collision
 //! shape is not outline shape**. A fluid has a full collision-less cell and an
 //! *empty* outline; kelp has an outline and no collision; soul sand collides to
-//! `y = 0.875` and outlines to `1.0`. Nothing in this module may be used to decide
-//! what the crosshair selects — that seam is `is_pickable`, and its real fix is an
-//! outline/interaction-shape census beside the collision one.
+//! `y = 0.875` and outlines to `1.0`. [`LiveCollision::shape_of`](BlockView::shape_of)
+//! (collision) must never be used to decide what the crosshair selects.
+//! [`LiveCollision::is_pickable`] now answers that question from the real
+//! per-state **outline** census (`VersionAdapter::block_outline`, dumped from
+//! `BlockStateBase.getShape`) rather than the "has baked model quads" proxy
+//! that shipped with the kelp fix — see that method's docs for what changed
+//! and the one deliberate behaviour change (`minecraft:light`).
 //!
 //! [`FluidState`]: lodestone_physics::FluidState
 //! [`demo_fluid`]: crate::blocks::demo_fluid
@@ -853,6 +857,90 @@ impl LiveCollision {
         vanilla_fluid(&self.atlas, self.block_at(x, y, z))
     }
 
+    /// The block-local **outline** boxes for a state — vanilla
+    /// `BlockStateBase.getShape(...).toAabbs()`, via
+    /// [`VersionAdapter::block_outline`] — or a degraded proxy when no version
+    /// census is available for this state.
+    ///
+    /// This is the shape [`is_pickable`](Self::is_pickable) tests for
+    /// emptiness, and it is also what a selection box should be drawn from:
+    /// unlike [`shape_of`](BlockView::shape_of) (collision), the outline is
+    /// what vanilla's crosshair and selection box actually use
+    /// (`ClipContext.Block.OUTLINE`).
+    ///
+    /// # Two fallback tiers, and why neither guesses a cube from nothing
+    ///
+    /// 1. **Real answer**: `self.version`'s `block_outline(state)` returns
+    ///    `Some(_)` — the common case for every state a live 26.2 session can
+    ///    produce. An empty slice here is a real, meaningful answer (open
+    ///    water, lava, air, `minecraft:light` — see below), not a data gap.
+    /// 2. **Degraded**: no version data at all, or a state id the census does
+    ///    not recognise (an out-of-range or corrupt palette entry, not a data
+    ///    gap). This reduces to the *pre-census* proxy this method replaces:
+    ///    baked model quads if the block has real geometry, else "no fluid in
+    ///    this cell". It exists so a build with no version family compiled in
+    ///    degrades the same way [`shape_of`](BlockView::shape_of) does —
+    ///    coarsely, loudly (see [`has_real_shapes`](Self::has_real_shapes)),
+    ///    but not by refusing to target anything at all.
+    ///
+    /// # `minecraft:light`: a deliberate behaviour change
+    ///
+    /// The pre-census proxy's second clause ("no fluid ⇒ pickable") kept
+    /// `light` targetable as a side effect of having no baked model geometry.
+    /// The real census says `LightBlock.getShape` is
+    /// `isHoldingItem(Items.LIGHT) ? block() : empty()`
+    /// (`LightBlock.java:66-68`), dumped with no item held — so light is now
+    /// **un**pickable, matching what vanilla does for every player who is not
+    /// holding a light item. This is the correct default-case answer, and
+    /// implementing the held-item exception would need the held stack
+    /// threaded down from `Sim::update_target` (out of this module's reach —
+    /// `sim.rs` is not in scope for this change); it is not implemented here.
+    /// `minecraft:barrier` is unaffected: its outline is a real,
+    /// context-free unit cube (`BarrierBlock` sets no shape override), so it
+    /// stays targetable exactly as before. Bake failures (a model that failed
+    /// to compile geometry) are also unaffected in the live case: the census
+    /// answers from the block's *state*, not its baked quads, so a failed
+    /// bake no longer has any bearing on pickability at all — it only still
+    /// matters in the degraded fallback tier above.
+    #[must_use]
+    fn outline_of(&self, state: u32) -> &'static [BlockAabb] {
+        if let Some(version) = &self.version
+            && let Some(shape) = version.block_outline(state)
+        {
+            return shape;
+        }
+        // Degraded fallback: exactly the proxy `is_pickable` used before the
+        // outline census existed. Reachable only with no version data, or an
+        // unrecognised state id — never as a substitute for a real outline
+        // that happens to be empty (open water, air, light).
+        if let Some(models) = self.atlas.models()
+            && !models.quads(state).is_empty()
+        {
+            return FULL_CUBE;
+        }
+        if vanilla_fluid(&self.atlas, state).is_none() {
+            FULL_CUBE
+        } else {
+            NO_COLLISION
+        }
+    }
+
+    /// Public read of [`outline_of`](Self::outline_of) at world coordinates —
+    /// block-local boxes translated to world space, for drawing the real
+    /// selection box shape (a half-height box on a slab, kelp's 9/16 column,
+    /// …) instead of a unit cube. Not yet consumed: the selection-box
+    /// wireframe is `gpu.rs`'s `OutlineRenderer::prepare`, which is out of
+    /// this module's file scope and still builds a hard-coded unit cube
+    /// around [`Sim::target`](crate::sim::Sim)'s block — see
+    /// `docs/block-outline-shapes.md` for the spec to wire this in.
+    #[must_use]
+    pub fn outline_boxes_at(&self, x: i32, y: i32, z: i32) -> Vec<Aabb> {
+        let state = self.block_at(x, y, z);
+        let mut out = Vec::new();
+        emit_world_boxes(self.outline_of(state), x, y, z, &mut out);
+        out
+    }
+
     /// Whether the view ray can **target** this cell — the client-side stand-in for
     /// vanilla's `clip(ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE)`.
     ///
@@ -883,48 +971,40 @@ impl LiveCollision {
     /// `START_DESTROY`. The dig was not slow or refused — the block was never
     /// *selected*. One classifier, but **two** questions.
     ///
-    /// # What this actually tests, and where it is coarse
+    /// # What this tests now: the real outline census, not a proxy
     ///
-    /// **The collision census now wired into this module is not the shape this
-    /// question wants**, and substituting it would be a regression, not a fix:
-    /// kelp's *collision* shape is empty (so kelp would stop being breakable
-    /// again), and a fluid's is empty too while its outline is also empty — the two
-    /// tables agree there by coincidence and disagree on the cases that matter.
-    /// Outline and interaction shapes need their own census beside the collision
-    /// one; until then the nearest available proxy for "has an outline" is *has
-    /// baked model geometry*. That coincidence is structural, not luck: fluids are
-    /// the one thing vanilla does **not** draw through the block-model pipeline —
-    /// their blockstate models are empty — which is exactly why
-    /// `BlockModels::quads` is empty for a fluid state and non-empty for kelp (see
-    /// [`lodestone_render::FluidCell`]).
+    /// This used to fall back to "has baked model quads, or has no fluid" — a
+    /// structurally sound proxy (fluids are the one thing vanilla does not draw
+    /// through the model pipeline) but a proxy, because outline and interaction
+    /// shapes had no census of their own yet. They do now
+    /// (`VersionAdapter::block_outline`, `docs/block-outline-shapes.md`), so this
+    /// asks the real question directly: [`outline_of`](Self::outline_of) is
+    /// non-empty. **`block_collision` must never be substituted here** — kelp's
+    /// collision shape is empty while its outline is not, and using collision
+    /// would re-break kelp breaking, the exact bug this predicate exists to fix.
     ///
     /// A cell is pickable when it is:
     /// 1. not one of the three air blocks ([`AIR_BLOCKS`]); **and**
-    /// 2. either it has baked quads (every real block, plant, slab, stair, and any
-    ///    waterlogged form of them), **or** it has no fluid — clause 2's second half
-    ///    keeps the geometry-less-but-real blocks targetable (`barrier`, `light`,
-    ///    `structure_void`, and anything whose model failed to bake), which is what
-    ///    the predicate this replaces already did.
+    /// 2. its outline shape ([`outline_of`](Self::outline_of)) is non-empty.
     ///
-    /// [`is_solid`](Self::is_solid) implies this, so it is not tested separately: an
-    /// occluding cube is `is_full_cube(quads) && layer == Solid`, which cannot hold
-    /// with no quads.
+    /// [`is_solid`](Self::is_solid) no longer implies this in general — occlusion
+    /// is collision-adjacent geometry, outline is a third, independent shape (see
+    /// the module docs) — so the two are tested independently now.
     ///
-    /// Still coarse, unchanged: a picked cell is treated as a full unit cube, so
-    /// anything with a genuinely partial outline (a slab, a stair, kelp's own 9/16
-    /// height) over-selects at its edges.
+    /// Still coarse in one respect: [`raycast`](crate::raycast::raycast) itself
+    /// still steps cell-by-cell and reports whichever cell the DDA enters first,
+    /// so a ray that grazes the *empty* corner of a genuinely partial outline (a
+    /// slab's top half, kelp's 9/16 column) can still register a hit at that
+    /// cell. The selection box now drawn from
+    /// [`outline_boxes_at`](Self::outline_boxes_at) is the real shape; the ray's
+    /// own geometry-aware clipping is unchanged by this fix.
     #[must_use]
     pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
         let state = self.block_at(x, y, z);
         if self.air_states.contains(&state) {
             return false;
         }
-        if let Some(models) = self.atlas.models()
-            && !models.quads(state).is_empty()
-        {
-            return true;
-        }
-        vanilla_fluid(&self.atlas, state).is_none()
+        !self.outline_of(state).is_empty()
     }
 }
 
@@ -1689,6 +1769,80 @@ mod tests {
                 "{name} must NOT be targetable by the view ray"
             );
         }
+    }
+
+    /// **The deliberate behaviour change.** The pre-census proxy's "no fluid ⇒
+    /// pickable" clause kept `minecraft:light` targetable as a side effect of it
+    /// having no baked model geometry. The real outline census says
+    /// `LightBlock.getShape` is `isHoldingItem(Items.LIGHT) ? block() : empty()`
+    /// (`LightBlock.java:66-68`), dumped with no item held, so vanilla itself does
+    /// not let you target a bare-handed light block — and now neither do we.
+    ///
+    /// `minecraft:barrier` is the control proving this is a real outline read and
+    /// not "everything with no rendered geometry is now unpickable": barrier's
+    /// shape is a context-free unit cube (`BarrierBlock` overrides no shape
+    /// getter), so it must stay targetable exactly as before, even though it also
+    /// has no baked model quads.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn light_is_not_pickable_without_a_held_item_but_barrier_still_is() {
+        let atlas = vanilla_atlas();
+
+        let light = state_id(&atlas, "minecraft:light[level=15,waterlogged=false]");
+        let light_view = live_column(Arc::clone(&atlas), light, 0..=15);
+        assert!(
+            !light_view.is_pickable(0, 1, 0),
+            "minecraft:light must not be targetable: its census outline is empty \
+             without a held light item"
+        );
+
+        let barrier = state_id(&atlas, "minecraft:barrier[waterlogged=false]");
+        let barrier_view = live_column(Arc::clone(&atlas), barrier, 0..=15);
+        assert!(
+            barrier_view.is_pickable(0, 1, 0),
+            "control: barrier's outline is a real, context-free unit cube, so it \
+             must stay targetable"
+        );
+    }
+
+    /// **The visible half of this change.** Before the outline census, every
+    /// pickable cell was drawn as a full unit-cube selection box; a bottom slab's
+    /// box should be a half-height box like its own collision shape
+    /// (`SlabBlock.java:35-36`: `SHAPE_BOTTOM = Block.column(16, 0, 8)`), not the
+    /// full cell.
+    ///
+    /// Stone is the control: a state whose outline genuinely *is* a full unit
+    /// cube must still report one, so "the outline boxes are always smaller now"
+    /// would fail here even though it would pass the slab assertion alone.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn a_slabs_selection_box_is_half_height_not_a_full_cube() {
+        let atlas = vanilla_atlas();
+
+        let slab = state_id(&atlas, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        let slab_view = live_column(Arc::clone(&atlas), slab, 4..=4);
+        let boxes = slab_view.outline_boxes_at(0, 4, 0);
+        assert_eq!(boxes.len(), 1, "a bottom slab has one outline box");
+        let b = boxes[0];
+        assert!(
+            (b.min_y - 4.0).abs() < 1e-6 && (b.max_y - 4.5).abs() < 1e-6,
+            "a bottom slab's outline top is 8/16, not the full cell: got y {}..{}",
+            b.min_y - 4.0,
+            b.max_y - 4.0
+        );
+
+        // Control: a genuine full cube must still report one, full height.
+        let stone = state_id(&atlas, "minecraft:stone");
+        let stone_view = live_column(Arc::clone(&atlas), stone, 4..=4);
+        let stone_boxes = stone_view.outline_boxes_at(0, 4, 0);
+        assert_eq!(stone_boxes.len(), 1, "stone has one outline box");
+        let s = stone_boxes[0];
+        assert!(
+            (s.min_y - 4.0).abs() < 1e-6 && (s.max_y - 5.0).abs() < 1e-6,
+            "control: stone's outline is a full unit cube, got y {}..{}",
+            s.min_y - 4.0,
+            s.max_y - 4.0
+        );
     }
 
     /// The pick predicate is only useful if the *ray* honours it, and the ray is

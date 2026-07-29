@@ -223,20 +223,64 @@ fn fs_main() -> @location(0) vec4<f32> {
     /// Upload the view-projection and the box vertices for `block` (slightly
     /// expanded so the lines sit just outside the block faces). Must be called
     /// before the render pass begins — buffers can't be written mid-pass.
-    fn prepare(&self, queue: &wgpu::Queue, view_proj: &[[f32; 4]; 4], block: [i32; 3]) {
+    /// `outline` is the block's real outline shape in world space, from
+    /// [`LiveCollision::outline_boxes_at`]. Pass an empty slice to fall back to a
+    /// unit cube — correct for the demo palette, which has no outline census and
+    /// is all full cubes anyway.
+    ///
+    /// Vanilla draws the *outline* shape here, which is a third thing distinct
+    /// from collision and from fluid presence: only 3,328 of 32,366 block states
+    /// have a full-cube outline, so a hardcoded cube is wrong for roughly nine
+    /// states in ten. A slab's box is half height and kelp's is a thin column,
+    /// and neither matches its collision shape — kelp has none at all.
+    ///
+    /// Multiple boxes are unioned into their bounds rather than drawn
+    /// separately. That is not vanilla-exact for multi-box shapes like a fence
+    /// (vanilla outlines each box), but it is a strict improvement on a unit cube
+    /// and needs no change to the line-list geometry below.
+    fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        view_proj: &[[f32; 4]; 4],
+        block: [i32; 3],
+        outline: &[lodestone_physics::Aabb],
+    ) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(view_proj));
 
         const PAD: f32 = 0.002;
-        let lo = [
-            block[0] as f32 - PAD,
-            block[1] as f32 - PAD,
-            block[2] as f32 - PAD,
-        ];
-        let hi = [
-            block[0] as f32 + 1.0 + PAD,
-            block[1] as f32 + 1.0 + PAD,
-            block[2] as f32 + 1.0 + PAD,
-        ];
+        let (mut lo, mut hi) = (
+            [
+                block[0] as f32 - PAD,
+                block[1] as f32 - PAD,
+                block[2] as f32 - PAD,
+            ],
+            [
+                block[0] as f32 + 1.0 + PAD,
+                block[1] as f32 + 1.0 + PAD,
+                block[2] as f32 + 1.0 + PAD,
+            ],
+        );
+        if let Some((first, rest)) = outline.split_first() {
+            let mut b = *first;
+            for o in rest {
+                b.min_x = b.min_x.min(o.min_x);
+                b.min_y = b.min_y.min(o.min_y);
+                b.min_z = b.min_z.min(o.min_z);
+                b.max_x = b.max_x.max(o.max_x);
+                b.max_y = b.max_y.max(o.max_y);
+                b.max_z = b.max_z.max(o.max_z);
+            }
+            lo = [
+                b.min_x as f32 - PAD,
+                b.min_y as f32 - PAD,
+                b.min_z as f32 - PAD,
+            ];
+            hi = [
+                b.max_x as f32 + PAD,
+                b.max_y as f32 + PAD,
+                b.max_z as f32 + PAD,
+            ];
+        }
         // Corner index bit layout: x = bit0, y = bit1, z = bit2.
         let corner = |i: usize| {
             [
@@ -869,6 +913,25 @@ impl ThirdPersonBodyState {
 /// behaviour before this existed: the first-person arm draws unconditionally
 /// and no extra entity is added to the frame. See
 /// [`RenderState::set_third_person_body_source`].
+/// Polled source for the targeted block's real outline shape, in world space.
+///
+/// Same idiom as [`ThirdPersonBodySource`]: the renderer cannot reach the
+/// collision view, and threading it through [`RenderState::render`] would touch
+/// every caller. Unset (the default) draws a unit cube, which is correct for the
+/// demo palette and for any adapter with no outline census.
+#[derive(Default)]
+pub struct OutlineShapeSource(
+    #[allow(clippy::type_complexity)]
+    Option<Box<dyn Fn([i32; 3]) -> Vec<lodestone_physics::Aabb> + Send + Sync>>,
+);
+
+impl OutlineShapeSource {
+    #[must_use]
+    fn sample(&self, block: [i32; 3]) -> Vec<lodestone_physics::Aabb> {
+        self.0.as_ref().map(|f| f(block)).unwrap_or_default()
+    }
+}
+
 #[derive(Default)]
 pub struct ThirdPersonBodySource(
     Option<Box<dyn Fn() -> Option<ThirdPersonBodyState> + Send + Sync>>,
@@ -878,6 +941,14 @@ impl ThirdPersonBodySource {
     #[must_use]
     fn sample(&self) -> Option<ThirdPersonBodyState> {
         self.0.as_ref().and_then(|f| f())
+    }
+}
+
+impl std::fmt::Debug for OutlineShapeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OutlineShapeSource")
+            .field(&if self.0.is_some() { "real-outline" } else { "unit-cube" })
+            .finish()
     }
 }
 
@@ -924,6 +995,7 @@ pub struct RenderState {
     /// third-person camera and a way to describe the local player's pose —
     /// see [`RenderState::set_third_person_body_source`].
     third_person_body: ThirdPersonBodySource,
+    outline_shape: OutlineShapeSource,
 }
 
 impl RenderState {
@@ -1076,6 +1148,7 @@ impl RenderState {
             // No third-person camera exists yet; see
             // `set_third_person_body_source`.
             third_person_body: ThirdPersonBodySource::default(),
+            outline_shape: OutlineShapeSource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -1211,6 +1284,17 @@ impl RenderState {
         f: impl Fn() -> Option<ThirdPersonBodyState> + Send + Sync + 'static,
     ) {
         self.third_person_body = ThirdPersonBodySource(Some(Box::new(f)));
+    }
+
+    /// Install the source for the targeted block's outline shape.
+    ///
+    /// Without this the selection box is a unit cube, which is wrong for roughly
+    /// nine block states in ten — only 3,328 of 32,366 have a full-cube outline.
+    pub fn set_outline_shape_source(
+        &mut self,
+        f: impl Fn([i32; 3]) -> Vec<lodestone_physics::Aabb> + Send + Sync + 'static,
+    ) {
+        self.outline_shape = OutlineShapeSource(Some(Box::new(f)));
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -1492,7 +1576,8 @@ impl RenderState {
 
         // Outline vertices/uniform must be written before the pass opens.
         if let Some(block) = outline {
-            self.outline.prepare(queue, &view_proj, block);
+            let boxes = self.outline_shape.sample(block);
+            self.outline.prepare(queue, &view_proj, block, &boxes);
         }
 
         let mut stats = RenderStats::default();
