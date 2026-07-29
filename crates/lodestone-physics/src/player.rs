@@ -176,10 +176,46 @@ pub struct PlayerState {
     pub eye_in_lava: bool,
     /// **Output.** `Entity.isSwimming()` after the last [`tick`]'s
     /// `updateSwimming`: sprint-swimming, entered when sprinting while submerged in
-    /// water and sustained while sprinting in water. This is a **pose the server
-    /// tracks**, so a driver must transmit it (via `SetPlayerInput`) — computing it
-    /// without sending it makes the server treat the action as a normal sprint.
+    /// water and sustained while sprinting in water.
+    ///
+    /// The server derives this **itself**, in its own `Entity.baseTick` →
+    /// `updateSwimming`, from `isSprinting()` and its own collision — there is no
+    /// swimming bit anywhere on the wire (`Input` is seven booleans:
+    /// forward/backward/left/right/jump/shift/sprint, `Input.java`). What a driver
+    /// must transmit is the **sprint** edge, via
+    /// `ServerboundPlayerCommandPacket(START_SPRINTING/STOP_SPRINTING)`
+    /// (`LocalPlayer.sendIsSprintingIfNeeded`, `LocalPlayer.java:303-312`) — the
+    /// `Input` packet's `sprint` flag is stored as `lastClientInput` and does *not*
+    /// call `setSprinting` (`ServerGamePacketListenerImpl.java:424` vs `:1719`).
+    /// Send only sprint and the server's swim pose follows; send the input packet
+    /// alone and it never does.
     pub swimming: bool,
+    /// `Attributes.WATER_MOVEMENT_EFFICIENCY` — the Depth Strider attribute, as an
+    /// **input** from the equipment layer (like [`Self::movement_speed`]).
+    ///
+    /// Vanilla's `travelInWater` reads `getAttributeValue(WATER_MOVEMENT_EFFICIENCY)`
+    /// (`LivingEntity.java:2509`), halves it when airborne, and then uses it to lerp
+    /// the horizontal slow-down toward `0.546_000_06` and the input speed toward
+    /// `getSpeed()`. Depth Strider contributes `0.33` per level via its enchantment
+    /// effect, so a level-III boot is `0.99`.
+    ///
+    /// **Default `0.0`, because no caller in this repo can reach the value yet — but
+    /// it is closer than it looks, and the gap is a missing accessor, not missing
+    /// data.** `lodestone-entity`'s attribute table already knows
+    /// `water_movement_efficiency` (default `0.0`, range `0..1`), `v770` has the
+    /// attribute type, and `lodestone-client` folds
+    /// `ClientEvent::EntityAttributesUpdated` into per-entity
+    /// `EntityAttributeSnapshot`s. What is absent is (a) any route from the shell to
+    /// the **local player's** attribute set — the shell's `EntitySnapshot` drops the
+    /// `attributes` field, and there is no `NetClient` accessor for it — and (b) the
+    /// three-stage `calculateValue()` fold from base + modifiers to an effective
+    /// value, which the shell also does not do for `MOVEMENT_SPEED` (it recomputes
+    /// that itself instead).
+    ///
+    /// The arithmetic lives in [`tick_water`] so that the value is the *only* missing
+    /// piece rather than the whole branch, and so nothing can silently substitute a
+    /// plausible number for it.
+    pub water_movement_efficiency: f32,
 }
 
 impl PlayerState {
@@ -203,7 +239,17 @@ impl PlayerState {
             eye_in_water: false,
             eye_in_lava: false,
             swimming: false,
+            water_movement_efficiency: 0.0,
         }
+    }
+
+    /// Returns a copy of this state with the
+    /// [`WATER_MOVEMENT_EFFICIENCY`](Self::water_movement_efficiency) attribute
+    /// value (Depth Strider) injected.
+    #[must_use]
+    pub fn with_water_movement_efficiency(mut self, value: f32) -> Self {
+        self.water_movement_efficiency = value;
+        self
     }
 
     /// Returns a copy of this state with the pose [`eye height`](Self::eye_height)
@@ -673,16 +719,149 @@ fn fluid_falling_adjusted_movement(
     }
 }
 
-/// One tick of in-water movement (`travel` → `travelInFluid` → `travelInWater`).
+/// `Entity.getFluidJumpThreshold()` (`Entity.java:3692-3694`) —
+/// `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
 ///
-/// Covers the common submerged cases: sinking, swimming under input, and holding
-/// jump to rise (`jumpInLiquid`, `+0.04`). It does **not** model the
-/// partial-submersion transition, fluid-push currents, bubble columns, depth
-/// strider (`WATER_MOVEMENT_EFFICIENCY`), or dolphin's grace — those need real
-/// per-block fluid height, which the [`CollisionView`] hook deliberately omits.
+/// The pose feeds back into movement here: the swimming pose's eye height is
+/// **exactly** `0.4` (`Avatar.java:28`), and `0.4 < 0.4` is false, so a swimming
+/// player keeps the `0.4` threshold. Only a pose shorter than that (no vanilla
+/// player pose is) collapses the threshold to zero.
+#[must_use]
+fn fluid_jump_threshold(eye_height: f32) -> f64 {
+    if eye_height < 0.4 { 0.0 } else { 0.4 }
+}
+
+/// `LivingEntity.onClimbable()` reduced to the block test this engine models: the
+/// CLIMBABLE tag on the block at the feet block position.
+fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
+    view.is_climbable(
+        mth::floor(state.position.x),
+        mth::floor(state.position.y),
+        mth::floor(state.position.z),
+    )
+}
+
+/// `LivingEntity.aiStep`'s **jump** block for an entity standing in fluid
+/// (`LivingEntity.java:3088-3113`).
+///
+/// This is the sinking-vs-swimming decision, and it is *not* "jump means `+0.04`
+/// in water". Vanilla compares the fluid's **height** against
+/// [`fluid_jump_threshold`]:
+///
+/// * shallow enough (`onGround && !(height > threshold)`, or not in water at all)
+///   ⇒ an ordinary `jumpFromGround()` — you jump out of a puddle normally;
+/// * otherwise ⇒ `jumpInLiquid()`, the `+0.04F` swim-up impulse.
+///
+/// Modelling this needs a real fluid height, which is why the summary is passed
+/// in rather than re-derived from the coarse presence booleans: with a
+/// [`CollisionView::fluid_at`]-capable world the height is exact, and without one
+/// a present cell reads as full (`1.0`), which is above the `0.4` threshold and so
+/// lands on the swim-up branch — the pre-existing behaviour.
+fn apply_fluid_jump(
+    state: &mut PlayerState,
+    input: MovementInput,
+    fluid: &FluidState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    if !input.jump {
+        state.no_jump_delay = 0;
+        return;
+    }
+    // `isInLava() ? getFluidHeight(LAVA) : getFluidHeight(WATER)`.
+    let in_lava = fluid.in_lava();
+    let fluid_height = if in_lava {
+        fluid.lava_height
+    } else {
+        fluid.water_height
+    };
+    let in_water_and_has_height = fluid.in_water() && fluid_height > 0.0;
+    let threshold = fluid_jump_threshold(state.eye_height);
+    // The outer test is vanilla's `!(fluidHeight > threshold)` and the two inner
+    // ones are its `<=` — transcribed as written rather than normalised, because the
+    // two forms differ on NaN and the source is the specification here.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
+    let not_above_threshold = !(fluid_height > threshold);
+    // `isInShallowFluid(LAVA)`.
+    let shallow_lava = fluid.lava_height <= threshold;
+    let jump_in_liquid = |state: &mut PlayerState| {
+        state.velocity = state.velocity.add(Vec3d::new(0.0, f64::from(0.04f32), 0.0));
+    };
+
+    if !in_water_and_has_height || (state.on_ground && not_above_threshold) {
+        if in_lava && !(state.on_ground && shallow_lava) {
+            jump_in_liquid(state);
+        } else if (state.on_ground || (in_water_and_has_height && fluid_height <= threshold))
+            && state.no_jump_delay == 0
+        {
+            jump_from_ground(state, view, profile);
+            state.no_jump_delay = 10;
+        }
+    } else {
+        jump_in_liquid(state);
+    }
+}
+
+/// `LivingEntity.jumpOutOfFluid(oldY)` (`LivingEntity.java:2556-2561`) — the hop
+/// that carries a swimmer *out* of the water onto the ledge they just swam into.
+///
+/// Runs at the end of both fluid travel branches. When the tick's move collided
+/// horizontally and the box would be **free of blocks and of liquid** if lifted to
+/// `movement.y + 0.6 - y + oldY`, vertical velocity is replaced by a flat `0.3F`.
+/// Without it a player pressed against a shoreline swims into the wall forever;
+/// this is the single most visible piece of water movement after buoyancy.
+///
+/// `isFree` is `noCollision(box) && !containsAnyLiquid(box)` (`Entity.java:664-670`)
+/// — the liquid half is what stops it firing repeatedly while still submerged.
+fn jump_out_of_fluid(
+    state: &mut PlayerState,
+    old_y: f64,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    if !state.horizontal_collision {
+        return;
+    }
+    let movement = state.velocity;
+    let lift = movement.y + f64::from(0.6f32) - state.position.y + old_y;
+    let probe = state
+        .bounding_box(profile)
+        .moved(movement.x, lift, movement.z);
+    let free = crate::collision::no_collision(view, probe)
+        && !crate::collision::contains_any_liquid(view, probe);
+    if free {
+        state.velocity = Vec3d::new(movement.x, f64::from(0.3f32), movement.z);
+    }
+}
+
+/// One tick of in-water movement (`travel` → `travelInFluid` → `travelInWater`,
+/// `LivingEntity.java:2494-2530`), plus the in-water parts of `aiStep` that
+/// precede it.
+///
+/// In order: the `baseTick` flow-current push, `LocalPlayer.aiStep`'s
+/// sneak-to-sink (`goDownInWater`, `-0.04F`), the velocity snap-to-zero prologue,
+/// the shallow-vs-deep jump decision ([`apply_fluid_jump`]), the
+/// slow-down/input-speed terms (sprint, Depth Strider, Dolphin's Grace), the
+/// collision move, the ladder clamp, the `multiply(slowDown, 0.8F, slowDown)`
+/// drag, buoyancy ([`fluid_falling_adjusted_movement`]) and finally
+/// [`jump_out_of_fluid`].
+///
+/// # Not modelled
+///
+/// * The **swimming hitbox**. Vanilla's `Pose.SWIMMING` is `0.6 × 0.6` with eye
+///   `0.4` (`Avatar.java:28`); this engine keeps [`EntityDimensions::PLAYER`] for
+///   every pose, so a swimmer cannot squeeze through a one-block gap. The *eye*
+///   height is modelled, because it is an explicit input
+///   ([`PlayerState::eye_height`]) that the pose layer sets, and it is what
+///   `getFluidJumpThreshold` and the eye-in-fluid tests read.
+/// * Bubble columns (`BubbleColumnBlock`'s own up/down impulses).
+/// * `WATER_MOVEMENT_EFFICIENCY` has no source in this repo — see
+///   [`PlayerState::water_movement_efficiency`]. The arithmetic is here; the value
+///   is `0.0`.
 pub fn tick_water(
     state: &mut PlayerState,
     input: MovementInput,
+    fluid: &FluidState,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
@@ -706,6 +885,19 @@ pub fn tick_water(
         profile.water_push_scale,
         profile,
     );
+    // --- LocalPlayer.aiStep: sneak to sink (`goDownInWater`, -0.04F) -----------
+    // `LocalPlayer.java:855-857` runs this *before* `super.aiStep()`, so it lands
+    // ahead of the snap-to-zero prologue below. (The placement is numerically
+    // inert at this magnitude — `0.04` clears the `0.003` collapse from either
+    // side — but it is where vanilla puts it, and a later `goDownInWater` variant
+    // with a smaller impulse would not be inert.) This is the deliberate-sink half
+    // of "sinking versus swimming": without it the only way down is to release
+    // jump and wait for buoyancy.
+    if input.sneak {
+        state.velocity = state
+            .velocity
+            .add(Vec3d::new(0.0, -f64::from(0.04f32), 0.0));
+    }
     // --- aiStep prologue: velocity snap-to-zero (identical to the air path) ----
     if state.no_jump_delay > 0 {
         state.no_jump_delay -= 1;
@@ -731,44 +923,61 @@ pub fn tick_water(
         profile.sneaking_speed,
     );
 
-    // --- water jump: hold jump to rise (`jumpInLiquid`, +0.04) -----------------
-    if input.jump {
-        state.velocity = state.velocity.add(Vec3d::new(0.0, f64::from(0.04f32), 0.0));
-    } else {
-        state.no_jump_delay = 0;
-    }
+    // --- aiStep jump: shallow water jumps, deep water swims up -----------------
+    apply_fluid_jump(state, input, fluid, view, profile);
 
     // --- travelInFluid / travelInWater ----------------------------------------
+    // `isFalling` and `oldY` are read at the top of `travelInFluid`, i.e. *after*
+    // the jump block above has already altered velocity.
     let is_falling = state.velocity.y <= 0.0;
+    let old_y = state.position.y;
     let base_gravity = effective_gravity(
         f64::from(profile.gravity),
         is_falling,
         state.effects.slow_falling,
     );
 
-    let slow_down = if state.effects.dolphins_grace {
-        // Dolphin's Grace overrides the sprint/walk slow-down entirely.
-        0.96f32
-    } else if state.sprinting {
+    // `LivingEntity.travelInWater`, in vanilla's order: the sprint/walk base, then
+    // the Depth Strider lerp, then Dolphin's Grace *overriding* the result. The
+    // order is observable — Grace wins outright, but the Strider term still moves
+    // `speed` even when Grace has flattened `slowDown`.
+    let mut slow_down = if state.sprinting {
         profile.water_sprint_slow_down
     } else {
         profile.water_slow_down
     };
-    // waterWalker (depth strider) == 0 in the common case, so its slowDown/speed
-    // adjustment block is skipped.
-    let speed = profile.fluid_input_speed;
+    let mut speed = profile.fluid_input_speed;
+    let mut water_walker = state.water_movement_efficiency;
+    if !state.on_ground {
+        water_walker *= 0.5f32;
+    }
+    if water_walker > 0.0 {
+        slow_down += (0.546_000_06f32 - slow_down) * water_walker;
+        speed += (effective_speed(profile, state) - speed) * water_walker;
+    }
+    if state.effects.dolphins_grace {
+        slow_down = 0.96f32;
+    }
 
     let accel = input_vector(xxa, zza, speed, state.yaw);
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak);
 
-    let movement = state.velocity.multiply_each(
+    // `if (horizontalCollision && onClimbable()) movement = (x, 0.2, z)` — a ladder
+    // still lifts you while submerged, and it does so *before* the water drag.
+    let mut movement = state.velocity;
+    if state.horizontal_collision && on_climbable(state, view) {
+        movement = Vec3d::new(movement.x, 0.2, movement.z);
+    }
+
+    let movement = movement.multiply_each(
         f64::from(slow_down),
         f64::from(0.8f32),
         f64::from(slow_down),
     );
     state.velocity =
         fluid_falling_adjusted_movement(base_gravity, is_falling, state.sprinting, movement);
+    jump_out_of_fluid(state, old_y, view, profile);
 }
 
 /// One tick of movement while submerged in **deep lava** (`travelInLava`).
@@ -776,13 +985,19 @@ pub fn tick_water(
 /// Lava is a *different branch* from water, not a retuned one: input speed is a
 /// flat `0.02F`, the post-move velocity is scaled by `0.5` (deep) rather than by
 /// the water slow-down, and gravity is applied as an extra `-baseGravity/4`
-/// term. The shallow-lava branch (`multiply(0.5, 0.8, 0.5)` +
-/// `getFluidFallingAdjustedMovement`) needs the fluid's height, which the coarse
-/// [`CollisionView`] hook does not expose, so this models the fully-submerged
-/// case — consistent with [`tick_water`]'s scope.
+/// term.
+///
+/// The shallow-lava branch (`isInShallowFluid(LAVA)` ⇒ `multiply(0.5, 0.8, 0.5)` +
+/// `getFluidFallingAdjustedMovement`, `LivingEntity.java:2538-2547`) is still
+/// **not** modelled: only the deep `scale(0.5)` arm is. Note that the old reason
+/// given here — "the coarse `CollisionView` hook does not expose the fluid height"
+/// — no longer holds: [`FluidState::lava_height`] is now passed in and
+/// [`apply_fluid_jump`] already uses it for the jump decision. What remains is
+/// simply unported work, not a missing input.
 pub fn tick_lava(
     state: &mut PlayerState,
     input: MovementInput,
+    fluid: &FluidState,
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
@@ -824,14 +1039,12 @@ pub fn tick_lava(
         profile.sneaking_speed,
     );
 
-    // aiStep jumpInLiquid (+0.04) applies in lava too.
-    if input.jump {
-        state.velocity = state.velocity.add(Vec3d::new(0.0, f64::from(0.04f32), 0.0));
-    } else {
-        state.no_jump_delay = 0;
-    }
+    // aiStep's jump block: in *shallow* lava while on the ground you jump out
+    // normally; only deep lava gets `jumpInLiquid`'s +0.04 (see `apply_fluid_jump`).
+    apply_fluid_jump(state, input, fluid, view, profile);
 
     let base_gravity = f64::from(profile.gravity);
+    let old_y = state.position.y;
 
     // moveRelative(0.02) → move → scale(0.5) [deep] → -baseGravity/4.
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
@@ -843,6 +1056,7 @@ pub fn tick_lava(
             .velocity
             .add(Vec3d::new(0.0, -base_gravity / 4.0, 0.0));
     }
+    jump_out_of_fluid(state, old_y, view, profile);
 }
 
 /// Advances the player by one tick, dispatching to the water, lava, or air path
@@ -1031,12 +1245,18 @@ pub fn tick(
     );
     state.eye_in_water = fluid.eye_in_water;
     state.eye_in_lava = fluid.eye_in_lava;
-    state.swimming = update_swimming(state.swimming, state.sprinting, &fluid, view, state.position);
+    state.swimming = update_swimming(
+        state.swimming,
+        state.sprinting,
+        &fluid,
+        view,
+        state.position,
+    );
 
     if fluid.in_water() {
-        tick_water(state, input, view, profile);
+        tick_water(state, input, &fluid, view, profile);
     } else if fluid.in_lava() {
-        tick_lava(state, input, view, profile);
+        tick_lava(state, input, &fluid, view, profile);
     } else if state.fall_flying {
         tick_elytra(state, input, view, profile);
     } else {
@@ -1045,13 +1265,20 @@ pub fn tick(
     update_stuck_multiplier(state, view, profile);
 }
 
-/// `Entity.updateSwimming()` — the sprint-swimming pose state machine.
+/// `Entity.updateSwimming()` (`Entity.java:1644-1652`) — the sprint-swimming pose
+/// state machine.
 ///
 /// Entering requires being **under water** (eye submerged) *and* the block at the
 /// feet holding water; once swimming, it is sustained merely by sprinting while
 /// **in** water (box touching water), so you keep swimming as you break the
 /// surface. Passenger/vehicle state is not modelled here (this engine has none),
 /// matching the `!isPassenger()` guard being vacuously true.
+///
+/// `Player.updateSwimming` (`Player.java:1433-1439`) adds one override: a *flying*
+/// player is never swimming. This engine has no flight, so a driver with a
+/// free-fly/creative-flight mode must clear [`PlayerState::swimming`] itself while
+/// flying rather than relying on this function — it is only reached from [`tick`],
+/// which a flying driver does not call.
 fn update_swimming(
     swimming: bool,
     sprinting: bool,
@@ -1203,6 +1430,241 @@ mod tests {
         fn is_lava(&self, _x: i32, _y: i32, _z: i32) -> bool {
             true
         }
+    }
+
+    /// A hand-built world: explicit solid cells, explicit water cells with a real
+    /// `getAmount()`, so the fluid **height** branches (jump threshold, hop-out)
+    /// are exercised rather than the coarse full-cell fallback.
+    #[derive(Default)]
+    struct Pool {
+        solid: std::collections::HashSet<(i32, i32, i32)>,
+        water: std::collections::HashMap<(i32, i32, i32), u8>,
+    }
+
+    impl Pool {
+        fn solid(&mut self, x: i32, y: i32, z: i32) -> &mut Self {
+            self.solid.insert((x, y, z));
+            self
+        }
+        fn water(&mut self, x: i32, y: i32, z: i32, amount: u8) -> &mut Self {
+            self.water.insert((x, y, z), amount);
+            self
+        }
+        fn floor(&mut self, y: i32) -> &mut Self {
+            for x in -2..=2 {
+                for z in -2..=2 {
+                    self.solid.insert((x, y, z));
+                }
+            }
+            self
+        }
+    }
+
+    impl CollisionView for Pool {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+            if self.solid.contains(&(x, y, z)) {
+                out.push(Aabb::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(z),
+                    f64::from(x) + 1.0,
+                    f64::from(y) + 1.0,
+                    f64::from(z) + 1.0,
+                ));
+            }
+        }
+        fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
+            self.water.contains_key(&(x, y, z))
+        }
+        fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<crate::fluid::FluidCell> {
+            self.water
+                .get(&(x, y, z))
+                .map(|&amount| crate::fluid::FluidCell {
+                    kind: crate::fluid::FluidKind::Water,
+                    amount,
+                    falling: false,
+                })
+        }
+        fn blocks_motion(&self, x: i32, y: i32, z: i32) -> bool {
+            self.solid.contains(&(x, y, z))
+        }
+    }
+
+    #[test]
+    fn fluid_jump_threshold_boundary_is_the_swimming_eye_height() {
+        // `Entity.getFluidJumpThreshold()` = `getEyeHeight() < 0.4 ? 0.0 : 0.4`
+        // (Entity.java:3692-3694). The swimming pose's eye height is *exactly*
+        // 0.4 (Avatar.java:28), so it sits on the false side of a strict `<` and
+        // keeps the 0.4 threshold. Coding this as `<=` would collapse a swimmer's
+        // threshold to zero and turn every swim-up into a standing jump.
+        assert_eq!(fluid_jump_threshold(DEFAULT_EYE_HEIGHT), 0.4);
+        assert_eq!(fluid_jump_threshold(0.4), 0.4);
+        assert_eq!(fluid_jump_threshold(0.399), 0.0);
+    }
+
+    #[test]
+    fn shallow_water_jumps_but_deep_water_swims_up() {
+        // The sinking-versus-swimming decision (`LivingEntity.aiStep`, the jump
+        // block at LivingEntity.java:3088-3113). Expected magnitudes come from
+        // vanilla constants, not from this port:
+        //   * shallow  -> jumpFromGround, JUMP_STRENGTH = 0.42F, then the water
+        //     tick's own `* 0.8F` vertical drag and `- gravity/16` buoyancy step
+        //     => 0.42*0.8 - 0.005 = 0.331
+        //   * deep     -> jumpInLiquid, +0.04F  => 0.04*0.8 - 0.005 = 0.027
+        // A single order of magnitude apart, so the branch cannot be mistaken.
+        let p = PhysicsProfile::mc_1_21();
+
+        // amount 3 => own height 3/9 = 0.333 < the 0.4 threshold: a puddle.
+        let mut shallow = Pool::default();
+        shallow.floor(0).water(0, 1, 0, 3);
+        let mut s = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        s.on_ground = true;
+        let jump = MovementInput {
+            jump: true,
+            ..MovementInput::NONE
+        };
+        tick(&mut s, jump, &shallow, &p);
+        assert!(
+            (s.velocity.y - (0.42 * 0.8 - 0.005)).abs() < 1.0e-6,
+            "shallow water must produce a real jump, got vy = {}",
+            s.velocity.y
+        );
+
+        // amount 8 => 8/9 = 0.888 > 0.4: deep enough to swim in.
+        let mut deep = Pool::default();
+        deep.floor(0).water(0, 1, 0, 8).water(0, 2, 0, 8);
+        let mut s = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
+        s.on_ground = true;
+        tick(&mut s, jump, &deep, &p);
+        assert!(
+            (s.velocity.y - (0.04 * 0.8 - 0.005)).abs() < 1.0e-6,
+            "deep water must swim up, not jump, got vy = {}",
+            s.velocity.y
+        );
+    }
+
+    #[test]
+    fn sneaking_sinks_and_not_sneaking_barely_does() {
+        // `LocalPlayer.aiStep` -> `goDownInWater()` (LivingEntity.java:2395-2397):
+        // shift while in water adds -0.04F. Expected values from vanilla constants:
+        // the tick's vertical drag is 0.8F and buoyancy is -gravity/16 = -0.005, so
+        //   no shift: 0.0  * 0.8 - 0.005 = -0.005
+        //   shift:   -0.04 * 0.8 - 0.005 = -0.037
+        // The pair is the point: without `goDownInWater` both read -0.005 and the
+        // only way down is to release jump and wait.
+        let p = PhysicsProfile::mc_1_21();
+        let view = WaterEverywhere;
+
+        let mut idle = PlayerState::at(Vec3d::new(0.5, 95.0, 0.5), 0.0);
+        tick(&mut idle, MovementInput::NONE, &view, &p);
+        assert!(
+            (idle.velocity.y - (-0.005)).abs() < 1.0e-8,
+            "idle sink vy = {}",
+            idle.velocity.y
+        );
+
+        let mut sinking = PlayerState::at(Vec3d::new(0.5, 95.0, 0.5), 0.0);
+        tick(
+            &mut sinking,
+            MovementInput {
+                sneak: true,
+                ..MovementInput::NONE
+            },
+            &view,
+            &p,
+        );
+        assert!(
+            (sinking.velocity.y - (-0.04 * 0.8 - 0.005)).abs() < 1.0e-8,
+            "shift-sink vy = {}",
+            sinking.velocity.y
+        );
+        assert!(
+            sinking.position.y < idle.position.y,
+            "shift must actually move the player down further"
+        );
+    }
+
+    #[test]
+    fn swimming_into_a_ledge_hops_out_of_the_water() {
+        // `LivingEntity.jumpOutOfFluid` (LivingEntity.java:2556-2561): a horizontal
+        // collision plus a lifted box that is free of blocks *and* of liquid
+        // replaces vertical velocity with a flat 0.3F. The expected value is that
+        // literal, straight from the source.
+        //
+        // Geometry: a one-deep pool (water only at y = 1) with a shore block at
+        // z = 1, and the player floating with its feet near the surface so the box
+        // still overlaps the shore block. Swimming +Z (yaw 0 faces +Z) presses into
+        // the shore.
+        let p = PhysicsProfile::mc_1_21();
+        let forward = MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        };
+
+        let mut pool = Pool::default();
+        pool.floor(0).water(0, 1, 0, 8).solid(0, 1, 1);
+        let mut s = PlayerState::at(Vec3d::new(0.5, 1.9, 0.5), 0.0);
+        let mut hopped = false;
+        for _ in 0..60 {
+            tick(&mut s, forward, &pool, &p);
+            if (s.velocity.y - f64::from(0.3f32)).abs() < 1.0e-12 {
+                hopped = true;
+                break;
+            }
+        }
+        assert!(hopped, "never hopped out; final state {s:?}");
+
+        // Control: the identical pool with no shore block. `jumpOutOfFluid` is
+        // gated on `horizontalCollision`, so with nothing to swim into the same
+        // detector must never fire — proving the assertion above is not just
+        // "0.3 appears sometimes".
+        let mut open = Pool::default();
+        open.floor(0).water(0, 1, 0, 8);
+        let mut s = PlayerState::at(Vec3d::new(0.5, 1.9, 0.5), 0.0);
+        for _ in 0..60 {
+            tick(&mut s, forward, &open, &p);
+            assert!(
+                (s.velocity.y - f64::from(0.3f32)).abs() > 1.0e-12,
+                "open water must never hop: vy = {}",
+                s.velocity.y
+            );
+        }
+    }
+
+    #[test]
+    fn depth_strider_attribute_speeds_up_swimming() {
+        // `travelInWater` lerps both the horizontal slow-down (toward 0.546_000_06)
+        // and the input speed (toward `getSpeed()`) by
+        // `getAttributeValue(WATER_MOVEMENT_EFFICIENCY)` (LivingEntity.java:2507-2517).
+        // No caller can reach that attribute value yet (see the field docs on
+        // `PlayerState::water_movement_efficiency` for exactly what is missing), so
+        // this drives it directly: the *arithmetic* is what is under test, and the
+        // direction it must move in (faster) is fixed by the source, not by this port.
+        //
+        // Note the halving when airborne (`if (!onGround()) waterWalker *= 0.5F`):
+        // a swimmer is airborne, so a level-III boot (0.99) acts as 0.495.
+        let p = PhysicsProfile::mc_1_21();
+        let view = WaterEverywhere;
+        let forward = MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        };
+
+        let travel = |efficiency: f32| {
+            let mut s = PlayerState::at(Vec3d::new(0.5, 95.0, 0.5), 0.0)
+                .with_water_movement_efficiency(efficiency);
+            for _ in 0..40 {
+                tick(&mut s, forward, &view, &p);
+            }
+            s.position.z - 0.5
+        };
+
+        let bare = travel(0.0);
+        let strider = travel(0.99);
+        assert!(
+            strider > bare * 1.5,
+            "Depth Strider must materially speed up swimming: {strider} vs {bare}"
+        );
     }
 
     #[test]
@@ -1400,7 +1862,7 @@ mod tests {
         let p = PhysicsProfile::mc_1_8();
         let view = WaterEverywhere;
         let mut s = PlayerState::at(Vec3d::new(0.5, 95.0, 0.5), 0.0);
-        tick_water(&mut s, MovementInput::NONE, &view, &p);
+        tick_water(&mut s, MovementInput::NONE, &FluidState::NONE, &view, &p);
     }
 
     #[test]

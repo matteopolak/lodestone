@@ -285,6 +285,61 @@ fn collide_bounding_box(view: &dyn CollisionView, movement: Vec3d, bounding_box:
     collide_with_shapes(movement, bounding_box, &shapes)
 }
 
+/// `CollisionGetter.noCollision(entity, box)` restricted to **block** shapes:
+/// whether `box` overlaps no block collider at all.
+///
+/// Entity-vs-entity collision is out of scope for this crate (it has no entity
+/// list), so this is the block half only, which is what the fluid hop-out check
+/// ([`crate::player::tick_water`]'s `jumpOutOfFluid`) needs. Overlap is the
+/// strict `min < max` test vanilla's `Shapes.joinIsNotEmpty(…, AND)` reduces to
+/// for box shapes — a flush contact does **not** count as a collision, so a
+/// player standing exactly on a ledge can still hop onto it.
+#[must_use]
+pub fn no_collision(view: &dyn CollisionView, box_: Aabb) -> bool {
+    let shapes = gather_colliders(view, box_);
+    !shapes.iter().any(|s| overlaps(&box_, s))
+}
+
+/// Strict AABB overlap (`Shapes.joinIsNotEmpty(a, b, BooleanOp.AND)` for boxes).
+fn overlaps(a: &Aabb, b: &Aabb) -> bool {
+    a.min_x < b.max_x
+        && a.max_x > b.min_x
+        && a.min_y < b.max_y
+        && a.max_y > b.min_y
+        && a.min_z < b.max_z
+        && a.max_z > b.min_z
+}
+
+/// `LevelReader.containsAnyLiquid(AABB)` — whether any cell the box spans holds a
+/// fluid (`!blockState.getFluidState().isEmpty()`).
+///
+/// The cell range is vanilla's **exclusive-max** `floor(min) ..< ceil(max)`
+/// (`LevelReader.java:140-155`), which is *not* the `..= ceil(max) - 1` range the
+/// fluid-height sweep uses — the two differ for a box whose max lands exactly on
+/// a cell boundary, and this one is deliberately the wider of the two.
+#[must_use]
+pub fn contains_any_liquid(view: &dyn CollisionView, box_: Aabb) -> bool {
+    let x0 = crate::mth::floor(box_.min_x);
+    let x1 = crate::mth::ceil(box_.max_x);
+    let y0 = crate::mth::floor(box_.min_y);
+    let y1 = crate::mth::ceil(box_.max_y);
+    let z0 = crate::mth::floor(box_.min_z);
+    let z1 = crate::mth::ceil(box_.max_z);
+    for x in x0..x1 {
+        for y in y0..y1 {
+            for z in z0..z1 {
+                if view.fluid_at(x, y, z).is_some()
+                    || view.is_water(x, y, z)
+                    || view.is_lava(x, y, z)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// `Entity.collide(Vec3)` including the auto-step mechanic.
 ///
 /// `on_ground` and `max_up_step` come from the entity; for a player on the
