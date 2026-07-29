@@ -682,6 +682,22 @@ impl Inner {
                 self.player.dimension = Some(dimension.clone());
                 self.player.alive = true;
             }
+            // `Respawned` is *also* how the server reports portal travel, not
+            // only death. Without this arm `dimension` froze at whatever the
+            // player logged into, so walking into the Nether left every
+            // dimension-conditioned rendering decision reading "overworld" —
+            // reintroducing the too-bright-Nether bug by traversal rather than
+            // by fresh login. `alive` is set here too because a respawn is
+            // exactly when the player stops being dead.
+            ClientEvent::Respawned {
+                dimension,
+                game_mode,
+                ..
+            } => {
+                self.player.dimension = Some(dimension.clone());
+                self.player.game_mode = Some(*game_mode);
+                self.player.alive = true;
+            }
             ClientEvent::TeleportPlayer {
                 pos,
                 rotation,

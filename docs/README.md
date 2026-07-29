@@ -13,6 +13,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   EFFICIENCY`, bubble columns).
 - [Item GUI geometry](./item-gui-geometry.md) — baking block items into 3-D
   inventory-slot geometry, and the pose/projection matrices that place them.
+- [Dimension visuals](./dimension-visuals.md) — what already renders differently in
+  the Nether/End (the sky-light default, now End-correct), what is still a hardcoded
+  overworld sky and fog colour, the fog presets built and waiting to wire, and the
+  stale-`player.dimension`-after-a-portal bug that undermined both.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob.
