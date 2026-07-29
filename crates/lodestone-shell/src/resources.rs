@@ -238,6 +238,65 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
+/// The **loose** GUI textures the title screen needs, as
+/// `(lookup id, in-pack path)` pairs for
+/// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).
+///
+/// Vanilla's `LogoRenderer` blits these two by raw path
+/// (`LogoRenderer.java:10-12`), not through the sprite atlas, so they live
+/// outside `textures/gui/sprites/**` and [`load_gui_atlas`] can never see them.
+///
+/// Both are **hi-res** in 26.2 — `minecraft.png` is 1024×256 and `edition.png`
+/// 512×64 — while vanilla declares them as 256×64 and 128×16 logical pixels and
+/// blits only the top 44 / 14 rows. Everything below those cuts was measured
+/// **fully transparent** (max alpha 0 over rows 176.. and 56.. of the real
+/// files), so drawing the whole sprite stretched into a 256×64 / 128×16 logical
+/// rect is pixel-identical to vanilla's sub-rect blit at the same origin — which
+/// is why the menu needs no sub-rect blit primitive.
+pub const TITLE_TEXTURES: &[(&str, &str)] = &[
+    (
+        "title/minecraft",
+        "assets/minecraft/textures/gui/title/minecraft.png",
+    ),
+    (
+        "title/edition",
+        "assets/minecraft/textures/gui/title/edition.png",
+    ),
+];
+
+/// As [`load_gui_atlas`], plus the [`TITLE_TEXTURES`] the title screen draws —
+/// the atlas the **menu** renderer binds.
+///
+/// Deliberately a second stitch rather than extras bolted onto
+/// [`load_gui_atlas`]: that atlas is the HUD's, its sprite set is pinned by the
+/// HUD's own pixel gates, and adding a 1024×256 logo to it would move every
+/// other sprite's packing for no benefit — the menu renderer owns its own
+/// pipeline and bind group anyway (see `menu/render.rs`), so it would not be
+/// sharing the upload even if the contents matched. The duplication is one
+/// extra GUI atlas (a few MB) and is noted in `docs/main-menu.md`; the tidier
+/// end state is one shared atlas built with the extras and handed to both
+/// renderers from `app.rs`.
+#[must_use]
+pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match GuiAtlas::build_with_extras(&manager, TITLE_TEXTURES) {
+        Ok(atlas) => {
+            tracing::info!(
+                target: "assets",
+                sprites = atlas.sprite_count(),
+                logo = atlas.contains("title/minecraft"),
+                "loaded vanilla GUI sprite atlas for the menu screens"
+            );
+            Some(Arc::new(atlas))
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "build menu GUI atlas from {}: {e}", root.display());
+            None
+        }
+    }
+}
+
 /// Stitch the vanilla particle atlas from `client.jar`.
 ///
 /// Mirrors [`load_item_atlas`] exactly, including its fail-open contract:

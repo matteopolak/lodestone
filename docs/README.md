@@ -42,6 +42,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob.
+- [Humanoid armour rendering](./armour-rendering.md) — the four slot meshes and
+  the **two inflations** they are baked at (the detail that makes leggings clip
+  when a port loses it), why every piece is posed off the wearer's own part
+  matrix rather than a second skeleton, the gamma-space leather dye, and why
+  trims are designed but deliberately not landed.
 - [Dropped items](./dropped-items.md) — rendering `minecraft:item` entities in the
   world (bob, spin, `display.ground`), the winding rule that inverts between the
   GUI and world paths, and the metadata decode that still keeps them invisible.

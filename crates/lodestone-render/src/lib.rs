@@ -98,14 +98,15 @@ pub use caps::{Backend, GpuCapabilities};
 pub use device::{GpuContext, GpuError};
 pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
-    ENTITY_FULLBRIGHT, EntityBatch, EntityCullStats, EntityFrame, EntityInstance, EntityMesh,
-    EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange, entity_model_matrix,
-    entity_texture_candidates, model_for_type, plan_entities,
+    ENTITY_FULLBRIGHT, ArmourMesh, ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame,
+    EntityInstance, EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange,
+    armour_layer_tint, armour_layers, entity_model_matrix, entity_texture_candidates,
+    model_for_type, plan_entities,
 };
 pub use entity_anim::{AnimFamily, AnimInput, Skeleton};
 pub use entity_pipeline::{
-    EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel, entity_camera_buffer,
-    upload_instances,
+    EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel, NO_TINT,
+    entity_camera_buffer, upload_instances, upload_instances_tinted,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use frame::SystemClock;

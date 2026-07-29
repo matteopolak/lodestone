@@ -52,9 +52,15 @@
 //! glyphs for; `glyph_rows` up-cases internally, so passing mixed case is
 //! harmless but pointless.
 
-use lodestone_assets::Image;
+use std::sync::Arc;
 
+use lodestone_assets::Image;
+use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
+
+use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
+use crate::hud::item_icon::{ColourStream, push_sprite_quad};
+use crate::menu::nav::{MainButton, PauseButton};
 
 /// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`
 /// returns seven 5-bit rows).
@@ -86,6 +92,101 @@ const PAD: f32 = 6.0;
 /// icon is two screen pixels each.
 pub const MOSAIC: usize = 16;
 
+// -- vanilla screen metrics --------------------------------------------------
+//
+// Every number below is transcribed from `.cache/mc/26.2/client-src`, with the
+// file and line named. They are *logical* GUI pixels: `logical_canvas` has
+// already divided the framebuffer by the effective GUI scale, so these are the
+// same units vanilla's `Screen.width`/`height` are in.
+
+/// A vanilla button's height — `Button.DEFAULT_HEIGHT` (`Button.java:15`).
+const WIDGET_H: f32 = 20.0;
+/// A vanilla wide button — `Button.BIG_WIDTH` (`Button.java:14`), used for the
+/// title screen's top three rows (`TitleScreen.java:178,196,199`).
+const WIDE_W: f32 = 200.0;
+/// The title screen's half-width button (`TitleScreen.java:146,148`). Note the
+/// pair is `[W/2-100, 98]` and `[W/2+2, 98]` — a **4 px** gutter, unlike the
+/// pause screen's 8 px one below.
+const TITLE_HALF_W: f32 = 98.0;
+/// Vertical pitch between the title screen's rows — `init`'s `spacing`
+/// (`TitleScreen.java:112`, passed at `:117`).
+const TITLE_PITCH: f32 = 24.0;
+/// Side of an icon-only button on either screen (`TitleScreen.java:130`,
+/// `PauseScreen.java:105`).
+const ICON_BTN: f32 = 20.0;
+/// The sprite drawn inside an icon button — 15×15 in every vanilla call site
+/// (`CommonButtons.java:10,21`, `PauseScreen.java:104,115,134`).
+const ICON_SPRITE: f32 = 15.0;
+
+/// Logo destination width — `LogoRenderer.LOGO_WIDTH` (`LogoRenderer.java:13`).
+const LOGO_W: f32 = 256.0;
+/// Logo destination height. Vanilla blits 44 rows out of a 256×**64** declared
+/// texture (`LogoRenderer.java:39`); the 20 rows below the cut are fully
+/// transparent (measured: max alpha 0), so drawing the whole sprite into a
+/// 256×64 rect is pixel-identical and needs no sub-rect blit. See
+/// [`crate::resources::TITLE_TEXTURES`].
+const LOGO_H: f32 = 64.0;
+/// `LogoRenderer.DEFAULT_HEIGHT_OFFSET` (`LogoRenderer.java:21`).
+const LOGO_Y: f32 = 30.0;
+/// Edition strip size — 128×14 of a declared 128×**16**
+/// (`LogoRenderer.java:17-20,43`); same all-transparent tail as the logo.
+const EDITION_W: f32 = 128.0;
+/// See [`EDITION_W`].
+const EDITION_H: f32 = 16.0;
+/// `heightOffset + LOGO_HEIGHT - EDITION_LOGO_OVERLAP` = `30 + 44 - 7`
+/// (`LogoRenderer.java:22,42`).
+const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
+
+/// Width of vanilla's arranged pause-screen `GridLayout`: the widest cell is the
+/// 204 px `BUTTON_WIDTH_FULL` (`PauseScreen.java:53`) plus the default cell's
+/// 4 px left and right padding (`PauseScreen.java:93`), split across two
+/// columns of 106 — so the grid is 212 wide and a *half*-width 98 px button
+/// sits 4 px into its 106 px column. That is where the pause screen's 8 px
+/// gutter comes from, and why its full-width buttons start at `W/2 - 102`
+/// rather than the title screen's `W/2 - 100`.
+pub const PAUSE_GRID_W: f32 = 212.0;
+/// Height of the same grid: row 0 is `20 + paddingTop(50)` = 70
+/// (`PauseScreen.java:98`) and rows 1..4 are `20 + 4` = 24 each, for
+/// `70 + 4 * 24`.
+pub const PAUSE_GRID_H: f32 = 166.0;
+/// Vanilla's font line height, used to centre a label in its widget
+/// (`ActiveTextCollector.java:73`).
+const LINE_H: f32 = 9.0;
+/// Vertical offset of the pause screen's title `StringWidget`
+/// (`PauseScreen.java:88`).
+const PAUSE_TITLE_Y: f32 = 40.0;
+/// Baseline of the title screen's two corner strings — vanilla draws both at
+/// `height - 10` (`TitleScreen.java:154,323`).
+const CORNER_TEXT_Y: f32 = -10.0;
+
+/// The three `widget/button*` sprites `AbstractButton.SPRITES` selects between
+/// (`AbstractButton.java:18-22`). All three are `nine_slice` in the pack; their
+/// border widths are read from the sibling `.png.mcmeta` by
+/// [`GuiAtlas`](lodestone_render::GuiAtlas), **not** hardcoded here — which
+/// matters, because `button_disabled`'s border is **1** while the other two are
+/// **3**.
+const SPRITE_BUTTON: &str = "widget/button";
+/// See [`SPRITE_BUTTON`]. Selected when enabled *and* hovered/focused.
+const SPRITE_BUTTON_HOVER: &str = "widget/button_highlighted";
+/// See [`SPRITE_BUTTON`]. Selected whenever the widget is inactive, hovered or
+/// not — `WidgetSprites::get` returns `disabledFocused == disabled` for the
+/// three-argument constructor (`WidgetSprites.java:15-25`).
+const SPRITE_BUTTON_OFF: &str = "widget/button_disabled";
+
+/// An active button's label colour: plain white, `ARGB.white(alpha)`
+/// (`AbstractButton.java:51` tints the sprite; the label itself is the
+/// component's own default).
+const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+/// An inactive button's label colour:
+/// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` merges
+/// `Style.withColor(-6250336)` (`AbstractWidget.java:318`), and
+/// `-6250336 as u32 == 0xFF_A0_A0_A0` — grey 160.
+const LABEL_OFF: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0];
+/// Tint applied to a disabled button's *icon sprite*. Vanilla passes
+/// `this.alpha` (1.0) and relies on the disabled background alone
+/// (`SpriteIconButton.java:81`), so this is white.
+const ICON_TINT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
 /// Background colour of a menu screen (the vanilla dirt backdrop's dark tone).
 const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 /// Full-screen backdrop for an [`MenuFrame::overlay`] frame — translucent, so
@@ -93,7 +194,22 @@ const BG: [f32; 4] = [0.10, 0.10, 0.12, 1.0];
 /// through it, unlike [`BG`]'s opaque fill for a screen that owns the whole
 /// frame. Alpha is well short of 1.0 for exactly this reason; a test asserts
 /// that rather than trusting the constant.
-const OVERLAY_BG: [f32; 4] = [0.02, 0.02, 0.03, 0.55];
+///
+/// This is now **vanilla's exact value**, not an eyeballed one. `Screen`'s
+/// in-world menu backdrop is `textures/gui/inworld_menu_background.png`
+/// tiled at 32 px (`Screen.java:405,418-419`), and that file was decoded
+/// straight out of `client.jar`: a 16×16 greyscale+alpha PNG in which **every
+/// pixel is grey 0, alpha 64** — i.e. flat black at 64/255. (`menu_background.png`,
+/// the out-of-world variant, is byte-for-byte the same.) So there is no dirt
+/// texture to reproduce and nothing lost by drawing one quad instead of tiling:
+/// a flat 25 %-black fill *is* the vanilla backdrop.
+///
+/// What is missing is the **blur** vanilla applies behind it when the pause
+/// screen is topmost (`Screen.java:389-394`, gated on the
+/// `menuBackgroundBlurriness` option, which vanilla lets the player set to 0).
+/// At blurriness 0 this is exactly vanilla; above it, vanilla's menu reads
+/// calmer over a busy world than ours does.
+const OVERLAY_BG: [f32; 4] = [0.0, 0.0, 0.0, 64.0 / 255.0];
 /// Fill of an unselected row.
 const ROW_BG: [f32; 4] = [0.22, 0.22, 0.26, 1.0];
 /// Fill of the highlighted row.
@@ -173,6 +289,196 @@ pub fn favicon_mosaic(png: &[u8]) -> Option<FaviconMosaic> {
     })
 }
 
+/// The anchor a [`Slot`] is measured from.
+///
+/// Vanilla never places a widget at a plain fraction of the canvas, so these are
+/// the actual expressions from the two screens' `init` methods rather than
+/// normalised alignments. Keeping them as named origins is what lets one `Slot`
+/// be resolved against any canvas size — which the layout has to be, because the
+/// logical canvas is only known at draw time (see [`logical_canvas`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// `(w / 2, 0)` — the top of the screen, for the logo band and the pause
+    /// screen's title.
+    ScreenTop,
+    /// `(w / 2, floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s `topPos`
+    /// (`TitleScreen.java:113`), the y every title-screen row is offset from.
+    /// `this.height / 4` is Java integer division, hence the `floor`.
+    TitleTop,
+    /// The top-left of vanilla `PauseScreen`'s **arranged** `GridLayout`:
+    /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
+    ///
+    /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
+    /// (`PauseScreen.java:181`), whose `alignInDimension` is
+    /// `(int) Mth.lerp(align, 0, length - widgetLength)`
+    /// (`FrameLayout.java:113-116`) — a truncating cast, hence the `floor`s —
+    /// with the grid's own size being [`PAUSE_GRID_W`]×[`PAUSE_GRID_H`].
+    PauseGrid,
+    /// `(0, h)` — bottom-left corner text (the title screen's version string).
+    BottomLeft,
+    /// `(w, h)` — bottom-right corner text (the copyright line).
+    BottomRight,
+}
+
+impl Origin {
+    /// The anchor point in logical pixels for a canvas of `width`×`height`.
+    #[must_use]
+    pub fn anchor(self, width: f32, height: f32) -> (f32, f32) {
+        match self {
+            Origin::ScreenTop => (width * 0.5, 0.0),
+            Origin::TitleTop => (width * 0.5, (height / 4.0).floor() + 48.0),
+            Origin::PauseGrid => (
+                ((width - PAUSE_GRID_W) * 0.5).floor(),
+                ((height - PAUSE_GRID_H) * 0.25).floor(),
+            ),
+            Origin::BottomLeft => (0.0, height),
+            Origin::BottomRight => (width, height),
+        }
+    }
+}
+
+/// Where one vanilla-laid-out widget sits: an [`Origin`], an offset from it, and
+/// a size. Pure — [`Slot::resolve`] turns it into a pixel rect for a given
+/// canvas, and that rect is the **single** definition the renderer, the mouse
+/// hover and the click hit-test all read (through [`row_rect`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Slot {
+    /// The anchor this slot is measured from.
+    pub origin: Origin,
+    /// Horizontal offset from the anchor, in logical pixels.
+    pub dx: f32,
+    /// Vertical offset from the anchor, in logical pixels.
+    pub dy: f32,
+    /// Widget width in logical pixels.
+    pub w: f32,
+    /// Widget height in logical pixels.
+    pub h: f32,
+}
+
+impl Slot {
+    /// The pixel rect `(x, y, w, h)` for a canvas of `width`×`height`.
+    #[must_use]
+    pub fn resolve(self, width: f32, height: f32) -> (f32, f32, f32, f32) {
+        let (ax, ay) = self.origin.anchor(width, height);
+        (ax + self.dx, ay + self.dy, self.w, self.h)
+    }
+}
+
+/// Vanilla's rect for one title-screen widget, from
+/// `TitleScreen.init`/`createNormalMenuOptions`
+/// (`TitleScreen.java:105-205`).
+///
+/// The three icon buttons use `getHorizontalPosition(n, 3, 20)`
+/// (`TitleScreen.java:170-173`): `totalWidth = 3 * 20 + 2 * 4 = 68`, so
+/// `x = W/2 - 34 + (n - 1) * 24` for `n` in `1..=3`.
+#[must_use]
+pub fn title_slot(button: MainButton) -> Slot {
+    let full = |dy: f32| Slot {
+        origin: Origin::TitleTop,
+        dx: -100.0,
+        dy,
+        w: WIDE_W,
+        h: WIDGET_H,
+    };
+    let icon = |dx: f32| Slot {
+        origin: Origin::TitleTop,
+        dx,
+        dy: TITLE_PITCH * 3.0,
+        w: ICON_BTN,
+        h: ICON_BTN,
+    };
+    let half = |dx: f32| Slot {
+        origin: Origin::TitleTop,
+        dx,
+        dy: TITLE_PITCH * 4.0,
+        w: TITLE_HALF_W,
+        h: WIDGET_H,
+    };
+    match button {
+        MainButton::Singleplayer => full(0.0),
+        MainButton::Multiplayer => full(TITLE_PITCH),
+        MainButton::Realms => full(TITLE_PITCH * 2.0),
+        MainButton::Friends => icon(-34.0),
+        MainButton::Language => icon(-10.0),
+        MainButton::Accessibility => icon(14.0),
+        MainButton::Options => half(-100.0),
+        MainButton::Quit => half(2.0),
+    }
+}
+
+/// Vanilla's rect for one pause-screen widget, from
+/// `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`), resolved by hand
+/// through `GridLayout.arrangeElements` (`GridLayout.java:25-89`) and
+/// `AbstractLayout.AbstractChildWrapper::setX`/`setY`
+/// (`AbstractLayout.java:73-85`).
+///
+/// The derivation, since none of it is a round number by accident:
+/// column widths are `[106, 106]` (the 204+8 full-width cell split over two
+/// columns by `Divisor`); row heights are `[70, 24, 24, 24, 24]`, so row y
+/// offsets are `[0, 70, 94, 118, 142]`. Each child's own offset inside its cell
+/// is its `paddingLeft`/`paddingTop` because the default `xAlignment` is 0 — and
+/// with `padding(4, 4, 4, 0)` a full-width button's `mostOffset` is also 4, so
+/// alignment could not move it anyway. The icon row is the one centred cell
+/// (`alignHorizontallyCenter`, `PauseScreen.java:154`):
+/// `lerp(0.5, 4, 212 - 92 - 4) = 60`, and its own `LinearLayout` spaces four
+/// 20 px children 4 px apart from there — 60, 84, 108, 132.
+#[must_use]
+pub fn pause_slot(button: PauseButton) -> Slot {
+    let cell = |dx: f32, dy: f32, w: f32, h: f32| Slot {
+        origin: Origin::PauseGrid,
+        dx,
+        dy,
+        w,
+        h,
+    };
+    match button {
+        PauseButton::BackToGame => cell(4.0, 50.0, 204.0, WIDGET_H),
+        PauseButton::Advancements => cell(4.0, 74.0, 98.0, WIDGET_H),
+        PauseButton::Statistics => cell(110.0, 74.0, 98.0, WIDGET_H),
+        PauseButton::ReportBugs => cell(60.0, 98.0, ICON_BTN, ICON_BTN),
+        PauseButton::Feedback => cell(84.0, 98.0, ICON_BTN, ICON_BTN),
+        PauseButton::Friends => cell(108.0, 98.0, ICON_BTN, ICON_BTN),
+        PauseButton::PlayerReporting => cell(132.0, 98.0, ICON_BTN, ICON_BTN),
+        // The full-width Options row is the `else` of vanilla's
+        // `hasSingleplayerServer()` fork (`PauseScreen.java:157-163`); this
+        // client has no integrated server, so that branch is the right one.
+        PauseButton::Options => cell(4.0, 122.0, 204.0, WIDGET_H),
+        PauseButton::QuitToTitle => cell(4.0, 146.0, 204.0, WIDGET_H),
+    }
+}
+
+/// Horizontal alignment of a [`MenuLabel`] about its anchored x.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    /// `x` is the text's left edge.
+    Left,
+    /// `x` is the text's centre.
+    Centre,
+    /// `x` is the text's right edge. The width is measured at draw time, which
+    /// is why this is an alignment and not a pre-computed offset: vanilla's own
+    /// `copyrightX = width - font.width(text) - 2` (`TitleScreen.java:110-111`)
+    /// depends on the font, and the font is not known until the draw.
+    Right,
+}
+
+/// A free-standing string a vanilla-laid-out screen draws, outside any widget.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuLabel {
+    /// The text.
+    pub text: String,
+    /// Anchor the position is measured from.
+    pub origin: Origin,
+    /// Horizontal offset from the anchor, before [`Self::align`] is applied.
+    pub dx: f32,
+    /// Vertical offset from the anchor — the **top** of the line.
+    pub dy: f32,
+    /// How `dx` relates to the text's own box.
+    pub align: Align,
+    /// RGBA, sRGB 0..1 written verbatim (the shell's convention — see
+    /// `docs/vanilla-hud-text.md`).
+    pub colour: [f32; 4],
+}
+
 /// One drawable row: a main-menu button, a server, or a form field.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MenuRow {
@@ -190,6 +496,16 @@ pub struct MenuRow {
     pub detail_is_error: bool,
     /// Draw the row as a text-entry field with a caret after `label`.
     pub field: bool,
+    /// Vanilla placement. `Some` puts the row at a rect derived from vanilla's
+    /// own arithmetic ([`title_slot`] / [`pause_slot`]) and draws it as a real
+    /// `widget/button*` nine-slice sprite; `None` keeps the centred row stack
+    /// the server list, the edit form, Options and the error screen use.
+    pub slot: Option<Slot>,
+    /// A GUI sprite id drawn centred in the widget **instead of** `label` —
+    /// vanilla's `SpriteIconButton.CenteredIcon`
+    /// (`SpriteIconButton.java:236-244`). `label` is still carried (it is the
+    /// tooltip/narration text in vanilla) but not drawn.
+    pub icon: Option<&'static str>,
 }
 
 /// Everything one menu screen draws.
@@ -222,6 +538,25 @@ pub struct MenuFrame<'a> {
     /// stays visible behind the buttons); every other screen leaves this
     /// `false` via `..Default::default()`.
     pub overlay: bool,
+    /// This frame reproduces one of **vanilla's own** screens: its rows carry
+    /// [`MenuRow::slot`]s, its buttons draw as `widget/button*` nine-slice
+    /// sprites, and the row-stack's centred title/subtitle/footer block is
+    /// suppressed in favour of [`Self::labels`].
+    ///
+    /// A flag rather than an inference from `rows[0].slot.is_some()`: the two
+    /// are different questions (a screen could gain one slotted row), and a
+    /// screen silently switching layout mode because of a row edit is exactly
+    /// the kind of drift this file's `owns_frame`/`frame_for` agreement test
+    /// exists to prevent.
+    pub vanilla: bool,
+    /// Draw vanilla's `title/minecraft` + `title/edition` logo pair at the top —
+    /// the title screen only. A no-op without a GUI atlas carrying those loose
+    /// textures (see [`crate::resources::TITLE_TEXTURES`]).
+    pub logo: bool,
+    /// Free-standing strings at vanilla-derived positions: the pause screen's
+    /// "Game Menu" heading, the title screen's version string and copyright
+    /// line.
+    pub labels: Vec<MenuLabel>,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
@@ -297,9 +632,28 @@ pub fn owns_frame(screen: super::Screen) -> bool {
     )
 }
 
-/// Builds the pause menu's overlay frame: three rows (Back to Game, Options,
-/// Quit to Title — see [`super::nav::PauseButton`]) with the highlight
-/// tracking [`super::nav::MenuNav::pause_index`].
+/// Vanilla's `title.credits` string (`en_us.json`), drawn bottom-right on the
+/// title screen exactly as `TitleScreen.init` does
+/// (`TitleScreen.java:49,110-111,150-160`). It refers to the Mojang GUI assets
+/// this screen is drawn with, which are genuinely Mojang's, so it is reproduced
+/// verbatim.
+const COPYRIGHT: &str = "Copyright Mojang AB. Do not distribute!";
+
+/// The bottom-left corner string, vanilla's
+/// `"Minecraft " + version.name()` (+ `menu.modded` for a modified client,
+/// `TitleScreen.java:314-323`).
+///
+/// A from-scratch reimplementation is about as "modified" as a client gets, so
+/// naming Lodestone and its version here is this line's honest equivalent —
+/// claiming to be plain `Minecraft 26.2` would be the dishonest option.
+fn version_line() -> String {
+    format!("Minecraft 26.2 (Lodestone {})", env!("CARGO_PKG_VERSION"))
+}
+
+/// Builds the pause menu's overlay frame: vanilla's **nine** widgets at
+/// vanilla's rects (see [`pause_slot`] and [`super::nav::PauseButton`]), six of
+/// them present-and-disabled, with the highlight tracking
+/// [`super::nav::MenuNav::pause_index`].
 ///
 /// Unlike [`frame_for`], this is not gated by [`owns_frame`] and takes no
 /// `UiState`/`StatusCache`/`FaviconCache` — the pause menu has no server list
@@ -312,21 +666,32 @@ pub fn owns_frame(screen: super::Screen) -> bool {
 pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
     use super::nav::PAUSE_BUTTONS;
     MenuFrame {
-        title: "GAME MENU",
-        subtitle: "",
         rows: PAUSE_BUTTONS
             .iter()
             .map(|b| MenuRow {
                 label: b.label().to_string(),
-                enabled: true,
+                enabled: b.enabled(),
+                slot: Some(pause_slot(*b)),
+                icon: b.icon(),
                 ..Default::default()
             })
             .collect(),
         selected: nav.pause_index(),
-        footer: vec!["UP/DOWN SELECT   ENTER CONFIRM   ESC BACK".to_string()],
-        message: None,
         gui_scale: nav.gui_scale(),
         overlay: true,
+        vanilla: true,
+        // `PauseScreen.init` adds a `StringWidget` with the screen title at
+        // y=40 when the pause menu is showing (`PauseScreen.java:87-88`); the
+        // title itself is `menu.game` == "Game Menu" (`PauseScreen.java:63,73`).
+        labels: vec![MenuLabel {
+            text: "Game Menu".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: PAUSE_TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+        }],
+        ..Default::default()
     }
 }
 
@@ -348,20 +713,42 @@ pub fn frame_for<'a>(
     use super::status::StatusSlot;
 
     let frame = match ui.screen() {
+        // Vanilla's `TitleScreen`: the logo pair, eight widgets at vanilla's
+        // rects (see `title_slot`) with four of them present-and-disabled, and
+        // the two corner strings. No big "LODESTONE" heading and no key-hint
+        // footer — the logo *is* the heading, and vanilla draws no footer.
         Screen::MainMenu => Some(MenuFrame {
-            title: "LODESTONE",
-            subtitle: "A MINECRAFT CLIENT",
             rows: MAIN_BUTTONS
                 .iter()
                 .map(|b| MenuRow {
                     label: b.label().to_string(),
-                    enabled: true,
+                    enabled: b.enabled(),
+                    slot: Some(title_slot(*b)),
+                    icon: b.icon(),
                     ..Default::default()
                 })
                 .collect(),
             selected: nav.main_index(),
-            footer: vec!["UP/DOWN SELECT   ENTER CONFIRM   ESC QUIT".to_string()],
-            message: None,
+            vanilla: true,
+            logo: true,
+            labels: vec![
+                MenuLabel {
+                    text: version_line(),
+                    origin: Origin::BottomLeft,
+                    dx: 2.0,
+                    dy: CORNER_TEXT_Y,
+                    align: Align::Left,
+                    colour: LABEL,
+                },
+                MenuLabel {
+                    text: COPYRIGHT.to_string(),
+                    origin: Origin::BottomRight,
+                    dx: -2.0,
+                    dy: CORNER_TEXT_Y,
+                    align: Align::Right,
+                    colour: LABEL,
+                },
+            ],
             ..Default::default()
         }),
         Screen::ServerList => {
@@ -406,6 +793,11 @@ pub fn frame_for<'a>(
                         enabled: true,
                         detail_is_error: is_error,
                         field: false,
+                        // The server list is not one of vanilla's own screens
+                        // (vanilla's is a scrolling `ObjectSelectionList`), so it
+                        // stays on the centred row stack.
+                        slot: None,
+                        icon: None,
                     }
                 })
                 .collect();
@@ -565,11 +957,21 @@ fn row_height(row: &MenuRow) -> f32 {
     }
 }
 
-/// The pixel rect of row `i`, given the viewport. Public so tests (and any
-/// future mouse hit-testing) share one definition of where a row actually is.
+/// The pixel rect of row `i`, given the viewport. Public so the renderer, the
+/// mouse hover and the click hit-test share one definition of where a row
+/// actually is — `app.rs`'s `menu_row_at` calls exactly this.
+///
+/// A row carrying a [`MenuRow::slot`] is placed by vanilla's arithmetic; every
+/// other row falls through to the centred stack. Keeping both behind this one
+/// signature is deliberate: it is what let the two vanilla screens change layout
+/// entirely without `app.rs`'s hit-test changing at all, so keyboard selection,
+/// hover and clicks could not drift apart from the draw.
 #[must_use]
 pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(f32, f32, f32, f32)> {
     let row = rows.get(i)?;
+    if let Some(slot) = row.slot {
+        return Some(slot.resolve(width, height));
+    }
     let total: f32 = rows
         .iter()
         .map(|r| row_height(r) + ROW_GAP)
@@ -587,30 +989,105 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     Some(((width - w) * 0.5, y, w, row_height(row)))
 }
 
-/// Builds the vertex data for one menu frame. Pure: no GPU, no state.
+/// Both vertex streams one menu frame produces.
 ///
-/// Returns interleaved `[x, y, r, g, b, a]` in NDC, two triangles per quad.
+/// Two streams because the buttons are **textured** (nine-slice sprites off the
+/// GUI atlas) while everything else — backdrops, row fills, text — is a flat
+/// coloured quad. They need different pipelines, so they cannot share a buffer.
+///
+/// `backdrop_floats` is the split the caller draws the sprite stream *between*:
+/// the full-screen backdrop first, then every sprite, then the rest of the
+/// colour stream. That ordering is load-bearing — a button's label is on the
+/// colour stream, so drawing all colour before all sprites would bury every
+/// label under the button it belongs to.
+#[derive(Debug, Clone, Default)]
+pub struct MenuGeometry {
+    /// Interleaved `[x, y, r, g, b, a]` in NDC, two triangles per quad.
+    pub colour: Vec<f32>,
+    /// How many floats at the head of [`Self::colour`] are the full-screen
+    /// backdrop quad.
+    pub backdrop_floats: usize,
+    /// Interleaved `[x, y, u, v, r, g, b, a]` in NDC + atlas UVs.
+    pub sprite: Vec<f32>,
+}
+
+/// Builds the coloured-quad stream for one menu frame with no atlas and no
+/// vanilla font — the jar-less path, and the shape every layout test uses.
+///
+/// Pure: no GPU, no state. Returns interleaved `[x, y, r, g, b, a]` in NDC.
 #[must_use]
 pub fn geometry(frame: &MenuFrame<'_>, width: f32, height: f32) -> Vec<f32> {
+    build(frame, None, None, width, height).colour
+}
+
+/// Builds both vertex streams for one menu frame.
+///
+/// `atlas` supplies the real `widget/button*` nine-slice sprites, the icon
+/// buttons' sprites and the title logo; `font` supplies vanilla's proportional
+/// text. Both are `Option` and both degrade the same way every other vanilla
+/// asset does in this crate: flat coloured button fills and the fixed-advance
+/// 5×7 debug font, which is what a jar-less or headless run gets. Pure — no GPU.
+#[must_use]
+pub fn build(
+    frame: &MenuFrame<'_>,
+    atlas: Option<&GuiAtlas>,
+    font: Option<&VanillaFont>,
+    width: f32,
+    height: f32,
+) -> MenuGeometry {
     let mut b = Quads::new(width, height);
+    b.atlas = atlas;
+    b.font = font;
     let backdrop = if frame.overlay { OVERLAY_BG } else { BG };
     b.rect(0.0, 0.0, width, height, backdrop);
+    let backdrop_floats = b.verts.len();
 
-    // Title block.
-    let tw = text_px(frame.title, TITLE_SCALE);
-    b.text(frame.title, (width - tw) * 0.5, 40.0, TITLE_SCALE, FG);
-    if !frame.subtitle.is_empty() {
-        let sw = text_px(frame.subtitle, TEXT_SCALE);
-        b.text(
-            frame.subtitle,
-            (width - sw) * 0.5,
-            40.0 + GLYPH_H as f32 * TITLE_SCALE + 8.0,
-            TEXT_SCALE,
-            FG_DIM,
+    if frame.logo {
+        // Vanilla's `LogoRenderer`: the wordmark centred at y=30, the edition
+        // strip centred under it overlapping by 7 px.
+        b.sprite("title/minecraft", (width * 0.5).floor() - 128.0, LOGO_Y, LOGO_W, LOGO_H, LABEL);
+        b.sprite(
+            "title/edition",
+            (width * 0.5).floor() - 64.0,
+            EDITION_Y,
+            EDITION_W,
+            EDITION_H,
+            LABEL,
         );
     }
 
+    if frame.vanilla {
+        for label in &frame.labels {
+            let (ax, ay) = label.origin.anchor(width, height);
+            let tw = b.text_width(&label.text, 1.0);
+            let x = match label.align {
+                Align::Left => ax + label.dx,
+                Align::Centre => (ax + label.dx - tw * 0.5).floor(),
+                Align::Right => ax + label.dx - tw,
+            };
+            b.text(&label.text, x, ay + label.dy, 1.0, label.colour);
+        }
+    } else {
+        // The row-stack screens' own centred title block.
+        let tw = text_px(frame.title, TITLE_SCALE);
+        b.text(frame.title, (width - tw) * 0.5, 40.0, TITLE_SCALE, FG);
+        if !frame.subtitle.is_empty() {
+            let sw = text_px(frame.subtitle, TEXT_SCALE);
+            b.text(
+                frame.subtitle,
+                (width - sw) * 0.5,
+                40.0 + GLYPH_H as f32 * TITLE_SCALE + 8.0,
+                TEXT_SCALE,
+                FG_DIM,
+            );
+        }
+    }
+
     for (i, row) in frame.rows.iter().enumerate() {
+        if row.slot.is_some() {
+            draw_widget(&mut b, &frame.rows, i, width, height, i == frame.selected);
+            continue;
+        }
         let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) else {
             continue;
         };
@@ -673,41 +1150,183 @@ pub fn geometry(frame: &MenuFrame<'_>, width: f32, height: f32) -> Vec<f32> {
         }
     }
 
-    // Message and footer, bottom-up.
-    let mut fy = height - 12.0 - GLYPH_H as f32 * SMALL_SCALE;
-    for line in frame.footer.iter().rev() {
-        let lw = text_px(line, SMALL_SCALE);
-        b.text(line, (width - lw) * 0.5, fy, SMALL_SCALE, FG_DIM);
-        fy -= GLYPH_H as f32 * SMALL_SCALE + 4.0;
-    }
-    if let Some(msg) = &frame.message {
-        let mw = text_px(msg, TEXT_SCALE);
-        b.text(
-            msg,
-            (width - mw) * 0.5,
-            fy - GLYPH_H as f32 * TEXT_SCALE,
-            TEXT_SCALE,
-            FG_BAD,
-        );
+    // Message and footer, bottom-up. Not on a vanilla screen: vanilla has no
+    // key-hint footer, and reproducing its layout means reproducing what it
+    // does *not* draw as well.
+    if !frame.vanilla {
+        let mut fy = height - 12.0 - GLYPH_H as f32 * SMALL_SCALE;
+        for line in frame.footer.iter().rev() {
+            let lw = text_px(line, SMALL_SCALE);
+            b.text(line, (width - lw) * 0.5, fy, SMALL_SCALE, FG_DIM);
+            fy -= GLYPH_H as f32 * SMALL_SCALE + 4.0;
+        }
+        if let Some(msg) = &frame.message {
+            let mw = text_px(msg, TEXT_SCALE);
+            b.text(
+                msg,
+                (width - mw) * 0.5,
+                fy - GLYPH_H as f32 * TEXT_SCALE,
+                TEXT_SCALE,
+                FG_BAD,
+            );
+        }
     }
 
-    b.verts
+    MenuGeometry {
+        colour: b.verts,
+        backdrop_floats,
+        sprite: b.sprites,
+    }
 }
 
-/// A pixel-space quad emitter to NDC, self-contained so this module borrows no
-/// private HUD types (mirrors [`crate::effects`]'s builder).
-struct Quads {
+/// Draws one vanilla widget: its `widget/button*` nine-slice background, then
+/// either its centred label or its centred 15×15 icon sprite.
+///
+/// Mirrors `AbstractButton.extractDefaultSprite` +
+/// `Button.Plain.extractContents` (`AbstractButton.java:43-53`,
+/// `Button.java:128-132`) and, for icons,
+/// `SpriteIconButton.CenteredIcon.extractContents`
+/// (`SpriteIconButton.java:236-244`).
+fn draw_widget(
+    b: &mut Quads<'_>,
+    rows: &[MenuRow],
+    i: usize,
+    width: f32,
+    height: f32,
+    selected: bool,
+) {
+    let Some(row) = rows.get(i) else { return };
+    let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
+        return;
+    };
+    // `WidgetSprites::get(enabled, focused)` (`WidgetSprites.java:19-25`) with
+    // `AbstractButton`'s three-argument sprite set: disabled wins over hovered,
+    // which is why a greyed-out button under the cursor still looks greyed out.
+    let sprite = if !row.enabled {
+        SPRITE_BUTTON_OFF
+    } else if selected {
+        SPRITE_BUTTON_HOVER
+    } else {
+        SPRITE_BUTTON
+    };
+    if b.has_sprite(sprite) {
+        b.sprite(sprite, x, y, w, h, LABEL);
+    } else {
+        // Jar-less fallback: the flat fills the menu has always used, so the
+        // layout is still legible and still testable without a pack.
+        let fill = if !row.enabled {
+            ROW_OFF
+        } else if selected {
+            ROW_SEL
+        } else {
+            ROW_BG
+        };
+        b.rect(x, y, w, h, fill);
+        if selected {
+            b.outline(x, y, w, h, 1.0, FG);
+        }
+    }
+
+    if let Some(icon) = row.icon {
+        // `spriteOffset` is zero at every call site, so this is a plain centre.
+        let ix = x + (w - ICON_SPRITE) * 0.5;
+        let iy = y + (h - ICON_SPRITE) * 0.5;
+        b.sprite(icon, ix.floor(), iy.floor(), ICON_SPRITE, ICON_SPRITE, ICON_TINT);
+        return;
+    }
+
+    let colour = if row.enabled { LABEL } else { LABEL_OFF };
+    // `extractScrollingStringOverContents(output, message, 2)` →
+    // `acceptScrollingWithDefaultCenter(msg, x+2, x+w-2, y, y+h)`
+    // (`AbstractButton.java:39-41`, `AbstractWidget.java:92-98`), whose centre
+    // is `(left + right) / 2` and whose top is
+    // `(top + bottom - lineHeight) / 2 + 1` (`ActiveTextCollector.java:59,73`).
+    let (left, right) = (x + 2.0, x + w - 2.0);
+    let tw = b.text_width(&row.label, 1.0);
+    let label = if tw > right - left {
+        // Vanilla scrolls an over-long label; we clip, which is the same static
+        // frame a scroll happens to be showing at t=0.
+        clip_measured(b, &row.label, right - left)
+    } else {
+        row.label.as_str()
+    };
+    let tw = b.text_width(label, 1.0);
+    let tx = ((left + right) * 0.5 - tw * 0.5).floor();
+    let ty = ((y + y + h - LINE_H) / 2.0).floor() + 1.0;
+    b.text(label, tx, ty, 1.0, colour);
+}
+
+/// Longest prefix of `s` that measures at most `max_px` in whatever font `b`
+/// draws with. Separate from [`clip`] because that one assumes the fixed
+/// advance; measurement and drawing must read the same font (see
+/// `docs/vanilla-hud-text.md`).
+fn clip_measured<'s>(b: &Quads<'_>, s: &'s str, max_px: f32) -> &'s str {
+    let mut fits = 0;
+    for (i, ch) in s.char_indices() {
+        let end = i + ch.len_utf8();
+        if b.text_width(&s[..end], 1.0) > max_px {
+            return &s[..fits];
+        }
+        fits = end;
+    }
+    s
+}
+
+/// A pixel-space quad emitter to NDC for both streams.
+///
+/// Self-contained for the colour stream (mirrors [`crate::effects`]'s builder)
+/// but it *does* borrow two `pub(crate)` HUD types now — `ColourStream` and
+/// `push_sprite_quad` — rather than re-deriving their NDC arithmetic. Both are
+/// read-only borrows of `hud/item_icon.rs`, which needed no change: the point of
+/// not folding this renderer into the HUD's pass stands, while duplicating the
+/// vertex maths would be a second definition that could silently drift.
+struct Quads<'a> {
     w: f32,
     h: f32,
     verts: Vec<f32>,
+    sprites: Vec<f32>,
+    atlas: Option<&'a GuiAtlas>,
+    font: Option<&'a VanillaFont>,
 }
 
-impl Quads {
+impl Quads<'_> {
     fn new(w: f32, h: f32) -> Self {
         Self {
             w,
             h,
             verts: Vec::new(),
+            sprites: Vec::new(),
+            atlas: None,
+            font: None,
+        }
+    }
+
+    /// Whether the bound atlas can draw `id` at all. Distinct from "did the
+    /// draw emit anything", which is what makes the jar-less fallback a choice
+    /// rather than a silent nothing.
+    fn has_sprite(&self, id: &str) -> bool {
+        self.atlas.is_some_and(|a| a.contains(id))
+    }
+
+    /// Emit a GUI sprite scaled into `(x, y, w, h)`, honouring its `.mcmeta`
+    /// scaling — nine-slice borders included, read from the pack by
+    /// [`GuiAtlas::geometry`]. A no-op with no atlas or an unknown id.
+    fn sprite(&mut self, id: &str, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
+        let quads: Vec<GuiSpriteQuad> = match self.atlas {
+            Some(a) => a.geometry(id, x, y, w, h),
+            None => return,
+        };
+        for q in quads {
+            push_sprite_quad(&mut self.sprites, self.w, self.h, q, c);
+        }
+    }
+
+    /// Width of `s` in the font this builder will actually *draw* with — the
+    /// proportional vanilla one when attached, the fixed 5×7 advance otherwise.
+    fn text_width(&self, s: &str, scale: f32) -> f32 {
+        match self.font {
+            Some(f) => f.width(s, scale),
+            None => text_px(s, scale),
         }
     }
 
@@ -738,9 +1357,31 @@ impl Quads {
         self.rect(x + w - t, y, t, h, c);
     }
 
-    /// One string at `(x, y)` (top-left of the first glyph), one `scale`×`scale`
-    /// quad per lit font pixel via the HUD's bitmap font.
+    /// One string at `(x, y)` (top-left of the first glyph).
+    ///
+    /// With a [`VanillaFont`] attached this is vanilla text — real glyphs, real
+    /// advances, and the 1 px 25 %-brightness drop shadow — through the exact
+    /// same code path the HUD uses. Without one it is the fixed-advance 5×7
+    /// debug bitmap, unshadowed, as before. Measurement goes through
+    /// [`Quads::text_width`], which picks whichever of the two this will draw
+    /// with, so a centred label can never be laid out against the other font.
     fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        if let Some(f) = self.font {
+            let (w, h) = (self.w, self.h);
+            f.draw(
+                &mut ColourStream {
+                    verts: &mut self.verts,
+                    w,
+                    h,
+                },
+                s,
+                x,
+                y,
+                scale,
+                c,
+            );
+            return;
+        }
         let mut cursor = x;
         for ch in s.chars() {
             if ch != ' ' {
@@ -779,17 +1420,53 @@ impl Quads {
     }
 }
 
-/// Number of `f32`s per vertex (`[x, y, r, g, b, a]`).
+/// Number of `f32`s per vertex on the colour stream (`[x, y, r, g, b, a]`).
 const FLOATS_PER_VERTEX: usize = 6;
+/// Number of `f32`s per vertex on the sprite stream
+/// (`[x, y, u, v, r, g, b, a]`). Matches `hud.rs`'s stride, because
+/// `item_icon::push_sprite_quad` writes both streams' vertices — but that
+/// constant is private to `hud`, so it is restated (and pinned by a test)
+/// rather than reached into.
+const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 
-/// GPU renderer for the menu screens: one coloured-quad pipeline and a growable
-/// dynamic vertex buffer, drawn in a `Clear` pass because nothing renders behind
-/// a menu.
+/// The uploaded GUI atlas and the textured pipeline that samples it: what turns
+/// a `widget/button` nine-slice into pixels. Absent on a jar-less run, where the
+/// menu falls back to flat coloured button fills.
+#[derive(Debug)]
+struct MenuSprites {
+    atlas: Arc<GuiAtlas>,
+    /// Kept alive because the bind group's texture view is derived from it.
+    #[allow(dead_code)]
+    gpu: GpuAtlas,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    capacity_floats: usize,
+}
+
+/// GPU renderer for the menu screens: a coloured-quad pipeline, a textured GUI
+/// sprite pipeline, and a growable dynamic vertex buffer for each. Drawn in a
+/// `Clear` pass for a screen that owns the frame and a `Load` pass for the pause
+/// overlay.
 #[derive(Debug)]
 pub struct MenuRenderer {
     pipeline: wgpu::RenderPipeline,
     buffer: wgpu::Buffer,
     capacity_floats: usize,
+    /// The target format, kept so the sprite pipeline can be built later —
+    /// [`MenuRenderer::new`] cannot build it, because uploading the atlas needs
+    /// a `Queue` and `new` is only given a `Device`.
+    color_format: wgpu::TextureFormat,
+    /// The GUI sprite half, attached lazily on the first draw (see
+    /// [`MenuRenderer::ensure_gui`]).
+    sprites: Option<MenuSprites>,
+    /// Whether the lazy load has already been tried. Without this a jar-less run
+    /// would re-stitch (and fail) an atlas every single frame.
+    gui_attempted: bool,
+    /// Vanilla's proportional font, resolved once per process from the same jar.
+    /// Needs no GPU resources, so it is resolved in `new` exactly as
+    /// `HudRenderer` does. `None` on a jar-less run.
+    font: Option<Arc<VanillaFont>>,
 }
 
 impl MenuRenderer {
@@ -861,6 +1538,181 @@ impl MenuRenderer {
             pipeline,
             buffer,
             capacity_floats,
+            color_format,
+            sprites: None,
+            gui_attempted: false,
+            font: VanillaFont::shared(),
+        }
+    }
+
+    /// Whether the real GUI sprite atlas is bound, i.e. whether the buttons draw
+    /// as vanilla's nine-slice `widget/button*` art rather than flat fills.
+    ///
+    /// A gate that means to measure vanilla button chrome **must assert this**:
+    /// without it a missing jar silently degrades to the coloured-rectangle
+    /// fallback and every "something drew in the button's rect" assertion still
+    /// passes. Same discipline as `HudRenderer::font_attached`.
+    #[must_use]
+    pub fn gui_attached(&self) -> bool {
+        self.sprites.is_some()
+    }
+
+    /// Whether vanilla text is in play. See [`Self::gui_attached`].
+    #[must_use]
+    pub fn font_attached(&self) -> bool {
+        self.font.is_some()
+    }
+
+    /// Bind a GUI sprite atlas: uploads it, builds the textured pipeline, and
+    /// binds it.
+    ///
+    /// The atlas must be one built with
+    /// [`crate::resources::TITLE_TEXTURES`](crate::resources::TITLE_TEXTURES)
+    /// for the title logo to draw; a plain [`GuiAtlas::build`] atlas gives
+    /// correct buttons and no logo, because the logo is not a `gui/sprites`
+    /// texture. Calling this replaces whatever was bound.
+    pub fn attach_gui(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: Arc<GuiAtlas>,
+    ) {
+        let gpu = GpuAtlas::from_atlas(device, queue, atlas.atlas());
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("menu-sprite-shader"),
+            source: wgpu::ShaderSource::Wgsl(MENU_SPRITE_WGSL.into()),
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("menu-sprite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("menu-sprite-layout"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("menu-sprite-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (SPRITE_FLOATS_PER_VERTEX * 4) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                    ],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: self.color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("menu-sprite-bind"),
+            layout: &bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&gpu.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                },
+            ],
+        });
+        let capacity_floats = 1 << 14;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("menu-sprite-verts"),
+            size: (capacity_floats * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.gui_attempted = true;
+        self.sprites = Some(MenuSprites {
+            atlas,
+            gpu,
+            pipeline,
+            bind_group,
+            buffer,
+            capacity_floats,
+        });
+    }
+
+    /// Drop back to the flat coloured-rectangle buttons. The executed negative
+    /// control for every "the real vanilla sprite drew here" assertion: with this
+    /// called, a gate claiming to see `widget/button` must fail.
+    pub fn detach_gui(&mut self) {
+        self.sprites = None;
+        // Deliberately leaves `gui_attempted` set, so `ensure_gui` does not
+        // helpfully undo the control on the next draw.
+        self.gui_attempted = true;
+    }
+
+    /// Load and bind the GUI atlas on first use.
+    ///
+    /// Lazy rather than an `attach_gui` call from `app.rs` for one reason: it
+    /// needs a `Queue`, which `MenuRenderer::new`'s call site has but does not
+    /// pass, and `app.rs` is not this change's to edit. Every draw path already
+    /// receives both a `Device` and a `Queue`, so this is the one place that has
+    /// what the upload needs. `attach_gui` stays public so `app.rs` can hand in a
+    /// shared atlas later and skip the second stitch.
+    fn ensure_gui(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.gui_attempted {
+            return;
+        }
+        self.gui_attempted = true;
+        if let Some(atlas) = crate::resources::load_menu_gui_atlas() {
+            self.attach_gui(device, queue, atlas);
         }
     }
 
@@ -936,10 +1788,17 @@ impl MenuRenderer {
         height: u32,
         load: wgpu::LoadOp<wgpu::Color>,
     ) {
+        self.ensure_gui(device, queue);
         let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
-        let verts = geometry(frame, logical_w, logical_h);
-        if verts.len() > self.capacity_floats {
-            self.capacity_floats = verts.len().next_power_of_two();
+        let geo = build(
+            frame,
+            self.sprites.as_ref().map(|s| s.atlas.as_ref()),
+            self.font.as_deref(),
+            logical_w,
+            logical_h,
+        );
+        if geo.colour.len() > self.capacity_floats {
+            self.capacity_floats = geo.colour.len().next_power_of_two();
             self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("menu-verts"),
                 size: (self.capacity_floats * 4) as wgpu::BufferAddress,
@@ -947,9 +1806,31 @@ impl MenuRenderer {
                 mapped_at_creation: false,
             });
         }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&verts));
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.colour));
 
-        let vertex_count = (verts.len() / FLOATS_PER_VERTEX) as u32;
+        if let Some(sprites) = self.sprites.as_mut()
+            && !geo.sprite.is_empty()
+        {
+            if geo.sprite.len() > sprites.capacity_floats {
+                sprites.capacity_floats = geo.sprite.len().next_power_of_two();
+                sprites.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("menu-sprite-verts"),
+                    size: (sprites.capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            queue.write_buffer(&sprites.buffer, 0, bytemuck::cast_slice(&geo.sprite));
+        }
+
+        // Three draws, one pass. The split is `MenuGeometry::backdrop_floats`:
+        // backdrop, then every GUI sprite, then the rest of the colour stream —
+        // so a button's label lands *on* its nine-slice background rather than
+        // under it. A render pass can rebind its pipeline, so this needs no
+        // extra pass (and must not have one: the load op is only correct once).
+        let backdrop_verts = (geo.backdrop_floats / FLOATS_PER_VERTEX) as u32;
+        let colour_verts = (geo.colour.len() / FLOATS_PER_VERTEX) as u32;
+        let sprite_verts = (geo.sprite.len() / SPRITE_FLOATS_PER_VERTEX) as u32;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("menu"),
         });
@@ -972,7 +1853,22 @@ impl MenuRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
-            pass.draw(0..vertex_count, 0..1);
+            if backdrop_verts > 0 {
+                pass.draw(0..backdrop_verts, 0..1);
+            }
+            if let Some(sprites) = self.sprites.as_ref()
+                && sprite_verts > 0
+            {
+                pass.set_pipeline(&sprites.pipeline);
+                pass.set_bind_group(0, &sprites.bind_group, &[]);
+                pass.set_vertex_buffer(0, sprites.buffer.slice(..));
+                pass.draw(0..sprite_verts, 0..1);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, self.buffer.slice(..));
+            }
+            if colour_verts > backdrop_verts {
+                pass.draw(backdrop_verts..colour_verts, 0..1);
+            }
         }
         queue.submit(std::iter::once(encoder.finish()));
     }
@@ -995,6 +1891,39 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
+}
+";
+
+// NOTE: no double quote may appear anywhere below, not even in a comment — this
+// is a Rust `r-string`, so a quote would end it and rustc would then parse the
+// English prose as code. Use backticks. See CLAUDE.md.
+const MENU_SPRITE_WGSL: &str = r"
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(1) var atlas_smp: sampler;
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+) -> VsOut {
+    var out: VsOut;
+    out.clip = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(atlas_tex, atlas_smp, in.uv);
+    return texel * in.color;
 }
 ";
 
@@ -1097,7 +2026,18 @@ mod tests {
             // And a frame it claims must actually be drawable.
             if built {
                 let f = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
-                assert!(!f.title.is_empty(), "{screen:?} has no title");
+                // A vanilla-laid-out screen has no centred heading string — its
+                // heading is the logo texture (title) or a positioned
+                // `MenuLabel` (pause), so requiring `title` would be requiring
+                // the *un*-vanilla layout. It must still say something.
+                if f.vanilla {
+                    assert!(
+                        f.logo || !f.labels.is_empty(),
+                        "{screen:?} is vanilla-laid-out but draws neither a logo nor a label"
+                    );
+                } else {
+                    assert!(!f.title.is_empty(), "{screen:?} has no title");
+                }
                 assert!(
                     !geometry(&f, 1280.0, 720.0).is_empty(),
                     "{screen:?} draws nothing"
@@ -1259,6 +2199,7 @@ mod tests {
             message: None,
             gui_scale: 0,
             overlay: false,
+            ..Default::default()
         }
     }
 
@@ -1551,23 +2492,178 @@ mod tests {
     }
 
     #[test]
-    fn pause_frame_builds_the_three_buttons_in_order_and_tracks_the_highlight() {
-        use crate::menu::nav::PauseButton;
+    fn pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight() {
+        use crate::menu::nav::{PAUSE_BUTTONS, PauseButton};
 
         let mut nav = test_nav("pause-frame");
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
-        nav.hover(&ui, 1);
+        // Index 8, not 1: this screen now reproduces vanilla's whole grid, so
+        // Disconnect is the ninth widget rather than the third. The old version
+        // of this test asserted a three-row stack.
+        nav.hover(&ui, PAUSE_BUTTONS.len() - 1);
 
         let f = pause_frame(&nav);
         assert!(f.overlay, "the pause menu must draw as an overlay");
-        assert_eq!(f.rows.len(), 3);
+        assert!(f.vanilla, "and it must be laid out from vanilla's arithmetic");
+        assert_eq!(f.rows.len(), 9, "vanilla's pause grid has nine widgets");
         assert_eq!(f.rows[0].label, PauseButton::BackToGame.label());
-        assert_eq!(f.rows[1].label, PauseButton::Options.label());
-        assert_eq!(f.rows[2].label, PauseButton::QuitToTitle.label());
-        assert_eq!(f.selected, 1, "selection follows the nav's pause_index");
+        assert_eq!(f.rows[1].label, PauseButton::Advancements.label());
+        assert_eq!(f.rows[2].label, PauseButton::Statistics.label());
+        assert_eq!(f.rows[7].label, PauseButton::Options.label());
+        assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
+        assert_eq!(f.selected, 8, "selection follows the nav's pause_index");
+        // Exactly three are live, and they are the three with actions.
+        let live: Vec<&str> = f
+            .rows
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(live, vec!["Back to Game", "Options...", "Disconnect"]);
+        // The four icon buttons carry a sprite instead of a label.
+        assert_eq!(f.rows.iter().filter(|r| r.icon.is_some()).count(), 4);
+        assert!(f.rows.iter().all(|r| r.slot.is_some()));
+        // And the heading is a positioned label, not the row stack's title.
+        assert!(f.title.is_empty());
+        assert_eq!(f.labels.len(), 1);
+        assert_eq!(f.labels[0].text, "Game Menu");
         assert!(!geometry(&f, 1280.0, 720.0).is_empty());
+    }
+
+    /// The canvas vanilla's own default window resolves to (854×480 at GUI
+    /// scale 1 is vanilla's canonical GUI size), so the expected rects below are
+    /// the numbers a vanilla screenshot at that size would show.
+    const V_W: f32 = 854.0;
+    /// See [`V_W`].
+    const V_H: f32 = 480.0;
+
+    #[test]
+    fn the_title_screen_rects_are_vanillas_own() {
+        use crate::menu::nav::MainButton as B;
+        // Hand-derived from `TitleScreen.init` / `createNormalMenuOptions`
+        // (`TitleScreen.java:105-205`) at 854×480, *not* read back out of
+        // `title_slot`: topPos = 480/4 + 48 = 168, rows every 24 px, the icon
+        // row from `getHorizontalPosition(n, 3, 20)` = 427 - 34 + (n-1)*24, and
+        // the Options/Quit pair at `W/2 - 100` / `W/2 + 2`, 98 wide.
+        let expected = [
+            (B::Singleplayer, (327.0, 168.0, 200.0, 20.0)),
+            (B::Multiplayer, (327.0, 192.0, 200.0, 20.0)),
+            (B::Realms, (327.0, 216.0, 200.0, 20.0)),
+            (B::Friends, (393.0, 240.0, 20.0, 20.0)),
+            (B::Language, (417.0, 240.0, 20.0, 20.0)),
+            (B::Accessibility, (441.0, 240.0, 20.0, 20.0)),
+            (B::Options, (327.0, 264.0, 98.0, 20.0)),
+            (B::Quit, (429.0, 264.0, 98.0, 20.0)),
+        ];
+        for (button, want) in expected {
+            assert_eq!(
+                title_slot(button).resolve(V_W, V_H),
+                want,
+                "{button:?} is not where vanilla puts it"
+            );
+        }
+        // The 4 px gutter between Options and Quit is the title screen's, and it
+        // is *not* the pause screen's 8 px one — a detail that is easy to
+        // conflate, so pin both.
+        let (ox, _, ow, _) = title_slot(B::Options).resolve(V_W, V_H);
+        let (qx, ..) = title_slot(B::Quit).resolve(V_W, V_H);
+        assert_eq!(qx - (ox + ow), 4.0, "title screen gutter");
+    }
+
+    #[test]
+    fn the_pause_screen_rects_are_vanillas_own() {
+        use crate::menu::nav::PauseButton as B;
+        // Hand-derived from `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`)
+        // through `GridLayout.arrangeElements`, at 854×480: the 212×166 grid is
+        // aligned (0.5, 0.25) so its origin is (321, 78); row y offsets inside it
+        // are [0, 70, 94, 118, 142] and each child sits at its own padding.
+        let gx = 321.0;
+        let gy = 78.0;
+        let expected = [
+            (B::BackToGame, (gx + 4.0, gy + 50.0, 204.0, 20.0)),
+            (B::Advancements, (gx + 4.0, gy + 74.0, 98.0, 20.0)),
+            (B::Statistics, (gx + 110.0, gy + 74.0, 98.0, 20.0)),
+            (B::ReportBugs, (gx + 60.0, gy + 98.0, 20.0, 20.0)),
+            (B::Feedback, (gx + 84.0, gy + 98.0, 20.0, 20.0)),
+            (B::Friends, (gx + 108.0, gy + 98.0, 20.0, 20.0)),
+            (B::PlayerReporting, (gx + 132.0, gy + 98.0, 20.0, 20.0)),
+            (B::Options, (gx + 4.0, gy + 122.0, 204.0, 20.0)),
+            (B::QuitToTitle, (gx + 4.0, gy + 146.0, 204.0, 20.0)),
+        ];
+        for (button, want) in expected {
+            assert_eq!(
+                pause_slot(button).resolve(V_W, V_H),
+                want,
+                "{button:?} is not where vanilla puts it"
+            );
+        }
+        // The grid origin itself, spelled out: 0.5/0.25 alignment of 212×166.
+        assert_eq!(Origin::PauseGrid.anchor(V_W, V_H), (gx, gy));
+        // A full-width pause button starts at `W/2 - 102`, not the title
+        // screen's `W/2 - 100`, and the half-width pair has an 8 px gutter, not
+        // 4 — both fall out of the 204+8 cell, and both are the details a
+        // remembered layout gets wrong.
+        assert_eq!(
+            pause_slot(B::BackToGame).resolve(V_W, V_H).0,
+            V_W / 2.0 - 102.0
+        );
+        let (ax, _, aw, _) = pause_slot(B::Advancements).resolve(V_W, V_H);
+        let (sx, ..) = pause_slot(B::Statistics).resolve(V_W, V_H);
+        assert_eq!(sx - (ax + aw), 8.0, "pause screen gutter");
+        assert_eq!(
+            (ax + aw + sx) / 2.0,
+            V_W / 2.0,
+            "the half-width pair straddles the centre line"
+        );
+    }
+
+    #[test]
+    fn every_vanilla_widget_is_on_screen_and_none_overlap() {
+        // The layout arithmetic has to hold at more than one canvas size, and a
+        // widget that lands on top of another is a hit-test that activates the
+        // wrong button.
+        let nav = test_nav("vanilla-rects");
+        let mut ui = UiState::new();
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        let title = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        ui.enter_dev_world();
+        ui.pause();
+        let pause = pause_frame(&nav);
+
+        for (name, frame) in [("title", &title), ("pause", &pause)] {
+            // 320×240 is the smallest canvas `calculate_gui_scale` will produce
+            // (see `config.rs`'s MIN_SCALED_*), so it is the real lower bound.
+            for (w, h) in [(320.0f32, 240.0f32), (V_W, V_H), (1280.0, 720.0)] {
+                let rects: Vec<(f32, f32, f32, f32)> = (0..frame.rows.len())
+                    .map(|i| row_rect(&frame.rows, i, w, h).expect("a slotted row has a rect"))
+                    .collect();
+                for (i, r) in rects.iter().enumerate() {
+                    assert!(
+                        r.0 >= 0.0 && r.0 + r.2 <= w,
+                        "{name} widget {i} off-screen horizontally at {w}x{h}: {r:?}"
+                    );
+                    assert!(
+                        r.1 >= 0.0 && r.1 + r.3 <= h,
+                        "{name} widget {i} off-screen vertically at {w}x{h}: {r:?}"
+                    );
+                }
+                for (i, a) in rects.iter().enumerate() {
+                    for (j, b) in rects.iter().enumerate().skip(i + 1) {
+                        let overlap = a.0 < b.0 + b.2
+                            && b.0 < a.0 + a.2
+                            && a.1 < b.1 + b.3
+                            && b.1 < a.1 + a.3;
+                        assert!(
+                            !overlap,
+                            "{name} widgets {i} and {j} overlap at {w}x{h}: {a:?} {b:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1599,29 +2695,519 @@ mod tests {
 
     #[test]
     fn the_highlighted_pause_button_is_visibly_different_from_its_neighbours() {
+        // Colour-aware, because the fill quad already covers every pixel a
+        // border would: `coverage`'s "is anything here" cannot separate the
+        // highlighted state from an ordinary row (see `coverage_of`'s docs).
+        //
+        // This is the *fallback* (no atlas) chrome — flat ROW_SEL / ROW_BG /
+        // ROW_OFF fills. The real `widget/button*` sprite selection is gated
+        // separately by `the_button_sprite_matches_vanillas_enabled_hovered_rule`.
         let mut nav = test_nav("pause-highlight");
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.pause();
 
-        nav.hover(&ui, 1);
-        let sel = geometry(&pause_frame(&nav), 1280.0, 720.0);
-        // Force an out-of-range highlight to get an unselected render for
-        // comparison, mirroring `the_selected_row_is_visibly_different_*`
-        // above — build the frame by hand since `pause_frame` always reflects
-        // a real (in-range) nav selection.
-        let mut unsel = pause_frame(&nav);
-        unsel.selected = 99;
-        let unsel = geometry(&unsel, 1280.0, 720.0);
+        // Options (index 7) is enabled, so it can actually be highlighted.
+        nav.hover(&ui, 7);
+        let (w, h) = (V_W, V_H);
+        let frame = pause_frame(&nav);
+        let sel = geometry(&frame, w, h);
+        let mut unsel_frame = pause_frame(&nav);
+        unsel_frame.selected = 99;
+        let unsel = geometry(&unsel_frame, w, h);
         assert_ne!(sel, unsel, "selecting a pause row must change the geometry");
 
-        let rows = pause_frame(&nav).rows;
-        let rect = row_rect(&rows, 1, 1280.0, 720.0).expect("row 1 exists");
-        let border = (rect.0 + 4.0, rect.1, rect.2 - 8.0, 2.0);
+        // A strip of the button's *interior above its label*: the label's top is
+        // `y + (h - 9)/2 + 1` == y+6 for a 20 px button, and the 1 px selection
+        // border ends at y+1. Sampling y+2..y+4 therefore measures the fill and
+        // only the fill — the first version of this test sampled the whole
+        // interior and failed on the disabled row, because `colour_at` returns
+        // the *topmost* quad and "Advancements" is dense enough in a 98 px button
+        // to push label ink into more than 10 % of the samples.
+        let inside = |i: usize| {
+            let (x, y, rw, _rh) = row_rect(&frame.rows, i, w, h).expect("a slotted row has a rect");
+            (x + 4.0, y + 2.0, rw - 8.0, 2.0)
+        };
         assert!(
-            coverage(&sel, 1280.0, 720.0, border) > 0.9,
-            "the highlighted pause row should be outlined"
+            coverage_of(&sel, w, h, inside(7), ROW_SEL) > 0.9,
+            "the highlighted row is not filled with ROW_SEL: {}",
+            coverage_of(&sel, w, h, inside(7), ROW_SEL)
         );
+        // Negative control 1: the same rect with nothing selected is ROW_BG, and
+        // carries no ROW_SEL at all.
+        assert!(
+            coverage_of(&unsel, w, h, inside(7), ROW_SEL) < 0.05,
+            "an unhighlighted row must not use the selected fill"
+        );
+        assert!(
+            coverage_of(&unsel, w, h, inside(7), ROW_BG) > 0.9,
+            "an unhighlighted enabled row should be filled with ROW_BG"
+        );
+        // Negative control 2: a *disabled* row is a third, distinct colour and
+        // never picks up the selected fill even when it is the selection —
+        // vanilla's `WidgetSprites::get` gives disabled priority over hovered.
+        let mut on_disabled = pause_frame(&nav);
+        on_disabled.selected = 1; // Advancements
+        let on_disabled = geometry(&on_disabled, w, h);
+        assert!(
+            coverage_of(&on_disabled, w, h, inside(1), ROW_OFF) > 0.9,
+            "a disabled row must keep the disabled fill even while highlighted: {}",
+            coverage_of(&on_disabled, w, h, inside(1), ROW_OFF)
+        );
+        assert!(
+            coverage_of(&on_disabled, w, h, inside(1), ROW_SEL) < 0.05,
+            "a disabled row must never draw the selected fill"
+        );
+        // And the three colours really are distinguishable, so the three
+        // assertions above are measurements and not the same one three times.
+        assert_ne!(ROW_SEL, ROW_BG);
+        assert_ne!(ROW_SEL, ROW_OFF);
+        assert_ne!(ROW_BG, ROW_OFF);
+    }
+
+    /// A synthetic pack carrying just the three `widget/button*` sprites, each a
+    /// different size so its atlas region is identifiable, and each with a
+    /// **different nine-slice border** in its `.mcmeta` — 3 / 3 / 1, exactly the
+    /// real 26.2 pack's values, which is what lets a test tell "border read from
+    /// the pack" apart from "border hardcoded to 3".
+    #[cfg(test)]
+    fn button_pack() -> lodestone_assets::ResourceManager {
+        use lodestone_assets::{MemorySource, ResourceSource};
+        let mut src = MemorySource::default();
+        for (id, border) in [
+            ("widget/button", 3u32),
+            ("widget/button_highlighted", 3),
+            ("widget/button_disabled", 1),
+        ] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png"),
+                solid_rgba_png(200, 20, [10, 20, 30, 255]),
+            );
+            src.insert(
+                format!("assets/minecraft/textures/gui/sprites/{id}.png.mcmeta"),
+                format!(
+                    r#"{{"gui":{{"scaling":{{"type":"nine_slice","width":200,"height":20,"border":{border}}}}}}}"#
+                )
+                .into_bytes(),
+            );
+        }
+        // A 15×15 icon, so the icon-button path has something to draw too.
+        src.insert(
+            "assets/minecraft/textures/gui/sprites/icon/language.png",
+            solid_rgba_png(15, 15, [90, 200, 90, 255]),
+        );
+        lodestone_assets::ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>])
+    }
+
+    /// The atlas rect of a sprite id, in normalised UVs — the ground truth a
+    /// "which sprite was sampled" assertion compares against.
+    fn sprite_uv_bounds(atlas: &GuiAtlas, id: &str) -> ([f32; 2], [f32; 2]) {
+        let loc: lodestone_assets::ResourceLocation =
+            format!("minecraft:gui/sprites/{id}").parse().expect("location");
+        let s = atlas.atlas().sprite(&loc).expect("sprite placed");
+        let (aw, ah) = (atlas.atlas().width as f32, atlas.atlas().height as f32);
+        (
+            [s.x as f32 / aw, s.y as f32 / ah],
+            [
+                (s.x + s.width) as f32 / aw,
+                (s.y + s.height) as f32 / ah,
+            ],
+        )
+    }
+
+    /// Whether every sprite-stream vertex's UV lies inside `(min, max)`.
+    fn all_uvs_within(sprite: &[f32], min: [f32; 2], max: [f32; 2]) -> bool {
+        !sprite.is_empty()
+            && sprite.chunks_exact(SPRITE_FLOATS_PER_VERTEX).all(|v| {
+                v[2] >= min[0] - 1e-6
+                    && v[2] <= max[0] + 1e-6
+                    && v[3] >= min[1] - 1e-6
+                    && v[3] <= max[1] + 1e-6
+            })
+    }
+
+    /// Whether **any** emitted quad's UV *centre* lies strictly inside
+    /// `(min, max)`.
+    ///
+    /// Centres, not vertices: the atlas packs sprites edge to edge, so a
+    /// neighbouring sprite's quad has vertices exactly *on* this region's
+    /// boundary. The first version of the icon test tested vertices and its
+    /// negative control failed — correctly — because a button-background quad
+    /// shares an edge with the icon's region.
+    fn any_quad_centre_in(sprite: &[f32], min: [f32; 2], max: [f32; 2]) -> bool {
+        sprite
+            .chunks_exact(SPRITE_FLOATS_PER_VERTEX * 6)
+            .any(|q| {
+                let (u0, v0) = (q[2], q[3]);
+                let (u1, v1) = (q[SPRITE_FLOATS_PER_VERTEX * 4 + 2], q[SPRITE_FLOATS_PER_VERTEX * 4 + 3]);
+                let (cu, cv) = ((u0 + u1) * 0.5, (v0 + v1) * 0.5);
+                cu > min[0] && cu < max[0] && cv > min[1] && cv < max[1]
+            })
+    }
+
+    #[test]
+    fn the_button_sprite_matches_vanillas_enabled_hovered_rule() {
+        // `WidgetSprites::get(enabled, focused)` with `AbstractButton`'s
+        // three-argument set (`AbstractButton.java:18-22`,
+        // `WidgetSprites.java:15-25`): enabled+hovered → highlighted,
+        // enabled → button, and **disabled wins over hovered** → disabled.
+        //
+        // The assertion is on *which atlas region the UVs sample*, not on "a
+        // quad appeared" — the three states all cover the same pixels, so
+        // presence alone cannot tell them apart.
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let one = |enabled: bool, selected: bool| {
+            let rows = vec![MenuRow {
+                label: "Options...".into(),
+                enabled,
+                slot: Some(Slot {
+                    origin: Origin::ScreenTop,
+                    dx: -100.0,
+                    dy: 40.0,
+                    w: 200.0,
+                    h: 20.0,
+                }),
+                ..Default::default()
+            }];
+            let mut f = frame_with(rows, if selected { 0 } else { 99 });
+            f.vanilla = true;
+            build(&f, Some(&atlas), None, V_W, V_H).sprite
+        };
+
+        let plain = sprite_uv_bounds(&atlas, "widget/button");
+        let hover = sprite_uv_bounds(&atlas, "widget/button_highlighted");
+        let off = sprite_uv_bounds(&atlas, "widget/button_disabled");
+        // The three regions must be disjoint, or "sampled inside X" proves
+        // nothing. Different sizes are not enough; check the packer actually
+        // separated them.
+        for (a, b) in [(plain, hover), (plain, off), (hover, off)] {
+            assert!(
+                a.1[0] <= b.0[0] || b.1[0] <= a.0[0] || a.1[1] <= b.0[1] || b.1[1] <= a.0[1],
+                "two button sprites share atlas space: {a:?} {b:?}"
+            );
+        }
+
+        assert!(
+            all_uvs_within(&one(true, false), plain.0, plain.1),
+            "an idle enabled button must sample widget/button"
+        );
+        assert!(
+            all_uvs_within(&one(true, true), hover.0, hover.1),
+            "a hovered enabled button must sample widget/button_highlighted"
+        );
+        assert!(
+            all_uvs_within(&one(false, true), off.0, off.1),
+            "a hovered DISABLED button must still sample widget/button_disabled"
+        );
+        // The control that makes the last one a real measurement: the same
+        // hovered flag on an *enabled* button does not sample the disabled
+        // sprite, so the assertion is not passing because everything does.
+        assert!(
+            !all_uvs_within(&one(true, true), off.0, off.1),
+            "the detector cannot tell the disabled sprite apart"
+        );
+        // And with no atlas there is no sprite stream at all — the jar-less
+        // path, which is why the flat-fill fallback exists.
+        let rows = vec![MenuRow {
+            label: "Options...".into(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: -100.0,
+                dy: 40.0,
+                w: 200.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        }];
+        let mut f = frame_with(rows, 0);
+        f.vanilla = true;
+        let bare = build(&f, None, None, V_W, V_H);
+        assert!(bare.sprite.is_empty(), "no atlas must mean no sprite quads");
+        assert!(
+            bare.colour.len() > bare.backdrop_floats,
+            "and the flat fallback must still draw the button"
+        );
+    }
+
+    #[test]
+    fn nine_slice_borders_come_from_the_mcmeta_not_a_constant() {
+        // `widget/button` declares `border: 3` and `widget/button_disabled`
+        // declares `border: 1` in the real 26.2 pack — read straight out of
+        // `client.jar`. A renderer that hardcoded one border would draw the
+        // disabled button's corners three times too large, which is exactly the
+        // subtle wrongness the brief warned about.
+        //
+        // The synthetic pack repeats those two values, so the corner quad's own
+        // destination size is the discriminator.
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let corner_size = |id: &str| {
+            // Drawn far wider than native so every nine-slice piece appears.
+            let quads = atlas.geometry(id, 0.0, 0.0, 400.0, 60.0);
+            assert!(quads.len() >= 9, "{id} did not decompose: {}", quads.len());
+            // The top-left piece is the one at the draw origin.
+            let tl = quads
+                .iter()
+                .find(|q| q.dst[0] == 0.0 && q.dst[1] == 0.0)
+                .expect("a nine-slice has a top-left corner");
+            (tl.dst[2], tl.dst[3])
+        };
+        assert_eq!(corner_size("widget/button"), (3.0, 3.0));
+        assert_eq!(
+            corner_size("widget/button_disabled"),
+            (1.0, 1.0),
+            "the disabled sprite's border must come from its own .mcmeta"
+        );
+    }
+
+    #[test]
+    fn a_disabled_label_is_drawn_in_vanillas_grey_and_an_enabled_one_in_white() {
+        // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` recolours
+        // an inactive widget's message to `-6250336` == `0xFFA0A0A0`
+        // (`AbstractWidget.java:314-335`). Assert the actual colour, with the
+        // enabled case as the control.
+        let slot = Slot {
+            origin: Origin::ScreenTop,
+            dx: -100.0,
+            dy: 40.0,
+            w: 200.0,
+            h: 20.0,
+        };
+        let render = |enabled: bool| {
+            let rows = vec![MenuRow {
+                label: "MMMM".into(),
+                enabled,
+                slot: Some(slot),
+                ..Default::default()
+            }];
+            let mut f = frame_with(rows, 99);
+            f.vanilla = true;
+            build(&f, None, None, V_W, V_H).colour
+        };
+        let (w, h) = (V_W, V_H);
+        let (x, y, rw, rh) = slot.resolve(w, h);
+        // Sample the label band across the middle of the button.
+        let band = (x + rw * 0.3, y + rh * 0.3, rw * 0.4, rh * 0.4);
+        let off = render(false);
+        let on = render(true);
+        assert!(
+            coverage_of(&off, w, h, band, LABEL_OFF) > 0.02,
+            "no grey label ink in a disabled button's rect: {}",
+            coverage_of(&off, w, h, band, LABEL_OFF)
+        );
+        assert_eq!(
+            coverage_of(&off, w, h, band, LABEL),
+            0.0,
+            "a disabled label must not be drawn in the enabled colour"
+        );
+        assert!(
+            coverage_of(&on, w, h, band, LABEL) > 0.02,
+            "no white label ink in an enabled button's rect: {}",
+            coverage_of(&on, w, h, band, LABEL)
+        );
+        assert_eq!(
+            coverage_of(&on, w, h, band, LABEL_OFF),
+            0.0,
+            "an enabled label must not be drawn grey"
+        );
+        assert_eq!(LABEL_OFF[0], 160.0 / 255.0, "vanilla's -6250336 is 0xFFA0A0A0");
+    }
+
+    #[test]
+    fn an_icon_button_draws_its_sprite_and_no_label() {
+        // Vanilla's `SpriteIconButton.CenteredIcon` draws the button background
+        // plus a 15×15 sprite centred in it, and no text
+        // (`SpriteIconButton.java:236-244`).
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let slot = Slot {
+            origin: Origin::ScreenTop,
+            dx: -10.0,
+            dy: 40.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let row = |icon: Option<&'static str>| MenuRow {
+            label: "Language...".into(),
+            enabled: false,
+            slot: Some(slot),
+            icon,
+            ..Default::default()
+        };
+        let render = |icon: Option<&'static str>| {
+            let mut f = frame_with(vec![row(icon)], 99);
+            f.vanilla = true;
+            build(&f, Some(&atlas), None, V_W, V_H)
+        };
+
+        let icon = render(Some("icon/language"));
+        let bare = render(None);
+        let icon_uv = sprite_uv_bounds(&atlas, "icon/language");
+        assert!(
+            any_quad_centre_in(&icon.sprite, icon_uv.0, icon_uv.1),
+            "the icon sprite never reached the sprite stream"
+        );
+        // The control: without the icon, nothing samples that atlas region.
+        assert!(
+            !any_quad_centre_in(&bare.sprite, icon_uv.0, icon_uv.1),
+            "the detector matches the button background too"
+        );
+        // And it is exactly one extra quad, drawn at the centred 15×15 rect —
+        // both variants draw the same nine-slice background.
+        assert_eq!(
+            icon.sprite.len() - bare.sprite.len(),
+            SPRITE_FLOATS_PER_VERTEX * 6,
+            "an icon button should add exactly one quad"
+        );
+        // And an icon button draws no label ink: with the icon set, the only
+        // colour quads are the backdrop.
+        assert_eq!(
+            icon.colour.len(),
+            icon.backdrop_floats,
+            "an icon button must draw no text"
+        );
+        assert!(
+            bare.colour.len() > bare.backdrop_floats,
+            "but the same row *with* a label does draw text"
+        );
+    }
+
+    #[test]
+    fn the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64() {
+        // `inworld_menu_background.png` decoded out of the real `client.jar` is
+        // 16×16 greyscale+alpha with every pixel grey 0 / alpha 64
+        // (`Screen.java:405,418-419` tiles it at 32 px). This pins the exact
+        // value rather than "translucent enough".
+        let nav = test_nav("overlay-exact");
+        let v = geometry(&pause_frame(&nav), V_W, V_H);
+        assert_eq!(&v[2..6], &[0.0, 0.0, 0.0, 64.0 / 255.0]);
+    }
+
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
+        use crate::menu::nav::{MAIN_BUTTONS, PAUSE_BUTTONS};
+
+        // The island this rules out: a mistyped sprite id draws *nothing*, and
+        // every layout assertion above still passes because they use a synthetic
+        // pack whose ids are the same strings the test itself wrote. Only the
+        // real jar can say whether `pause_menu/social_interactions` is spelled
+        // right.
+        let atlas = crate::resources::load_menu_gui_atlas().expect(
+            "no vanilla pack found; set LODESTONE_ASSETS to a root with client.jar",
+        );
+        for id in [SPRITE_BUTTON, SPRITE_BUTTON_HOVER, SPRITE_BUTTON_OFF] {
+            assert!(atlas.contains(id), "the pack has no {id}");
+            assert_eq!(
+                atlas.native_size(id),
+                Some((200, 20)),
+                "{id} is not the 200x20 its .mcmeta declares"
+            );
+        }
+        for icon in MAIN_BUTTONS
+            .iter()
+            .filter_map(|b| b.icon())
+            .chain(PAUSE_BUTTONS.iter().filter_map(|b| b.icon()))
+        {
+            assert!(atlas.contains(icon), "the pack has no icon sprite {icon}");
+            assert!(atlas.native_size(icon).is_some(), "{icon} was not placed");
+            // Deliberately *no* assertion on the native size, and this is a
+            // belief that was held and measured false. "Vanilla's icon-button
+            // sprites are 15×15" is true of every **blit** (`spriteWidth`/
+            // `spriteHeight` are 15 at each call site — `CommonButtons.java:10,21`,
+            // `FriendsButton.java:22`, `PauseScreen.java:104,115,134`) and true
+            // of almost none of the **files**. Measured out of the real 26.2 jar:
+            //
+            //   icon/language 15×15, icon/accessibility 15×15,
+            //   friends/friends 16×16, pause_menu/bug 13×13,
+            //   pause_menu/social_interactions 20×20,
+            //   pause_menu/player_reporting 15×14
+            //
+            // They are all `Stretch` (no `.mcmeta`), so vanilla scales each to
+            // 15×15 — including *up* from 13 and *down* from 20. Two successive
+            // versions of this gate asserted a native size and were failed by
+            // `friends/friends` and then `pause_menu/bug`. Drawing at
+            // [`ICON_SPRITE`] is what matches vanilla; the file size is not
+            // something to check against.
+        }
+        // The two loose title textures, and their *declared* (not native) size:
+        // 26.2 ships them at 4x, which is why the draw rect is 256x64 / 128x16.
+        assert_eq!(atlas.native_size("title/minecraft"), Some((1024, 256)));
+        assert_eq!(atlas.native_size("title/edition"), Some((512, 64)));
+
+        // The real pack's nine-slice borders, which is where the hardcoding trap
+        // is: 3 for button and button_highlighted, **1** for button_disabled.
+        let corner = |id: &str| {
+            let q = atlas.geometry(id, 0.0, 0.0, 400.0, 60.0);
+            let tl = q
+                .iter()
+                .find(|q| q.dst[0] == 0.0 && q.dst[1] == 0.0)
+                .expect("nine-slice top-left");
+            (tl.dst[2], tl.dst[3])
+        };
+        assert_eq!(corner(SPRITE_BUTTON), (3.0, 3.0));
+        assert_eq!(corner(SPRITE_BUTTON_HOVER), (3.0, 3.0));
+        assert_eq!(corner(SPRITE_BUTTON_OFF), (1.0, 1.0));
+
+        // And the whole title frame draws through it: every sprite the two
+        // screens ask for resolves to at least one quad.
+        let nav = test_nav("real-pack");
+        let mut ui = UiState::new();
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        let title = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
+        let geo = build(&title, Some(&atlas), None, V_W, V_H);
+        // 8 nine-slice backgrounds + 3 icons + 2 logo quads, so comfortably
+        // more than one quad per widget, and *nothing* on the flat-fill path.
+        assert!(
+            geo.sprite.len() / (SPRITE_FLOATS_PER_VERTEX * 6) > MAIN_BUTTONS.len(),
+            "only {} sprite quads for {} widgets plus the logo",
+            geo.sprite.len() / (SPRITE_FLOATS_PER_VERTEX * 6),
+            MAIN_BUTTONS.len()
+        );
+        assert_eq!(
+            geo.colour.len(),
+            geo.backdrop_floats
+                + geometry(&title, V_W, V_H).len()
+                - geometry_button_fill_floats(&title, V_W, V_H)
+                - geo.backdrop_floats,
+            "with a real atlas no button may fall back to a flat fill"
+        );
+
+        ui.enter_dev_world();
+        ui.pause();
+        let pause = build(&pause_frame(&nav), Some(&atlas), None, V_W, V_H);
+        assert!(
+            pause.sprite.len() / (SPRITE_FLOATS_PER_VERTEX * 6) > PAUSE_BUTTONS.len(),
+            "the pause screen's nine widgets did not all draw a sprite"
+        );
+    }
+
+    /// Floats the flat-fill fallback would contribute for `frame`'s slotted rows
+    /// (one quad each, plus a 4-quad outline for the selected one) — the term the
+    /// real-pack gate subtracts to say "no button fell back".
+    fn geometry_button_fill_floats(frame: &MenuFrame<'_>, _w: f32, _h: f32) -> usize {
+        let slotted = frame.rows.iter().filter(|r| r.slot.is_some()).count();
+        let selected = frame
+            .rows
+            .get(frame.selected)
+            .is_some_and(|r| r.slot.is_some()) as usize;
+        (slotted + selected * 4) * STRIDE * 6
+    }
+
+    /// A real single-colour PNG of arbitrary dimensions. `solid_png` below is
+    /// square-only and is what the favicon tests want; the button pack needs
+    /// 200×20.
+    fn solid_rgba_png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("write header");
+            let data: Vec<u8> = (0..w * h).flat_map(|_| rgba).collect();
+            writer.write_image_data(&data).expect("write image");
+        }
+        out
     }
 
     #[test]

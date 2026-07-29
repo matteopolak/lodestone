@@ -191,57 +191,165 @@ impl EditForm {
     }
 }
 
-/// The main menu's buttons, in display order.
+/// The title screen's widgets, in vanilla's own display order.
+///
+/// This is vanilla `TitleScreen.init`'s widget list
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/TitleScreen.java:105-168`),
+/// reproduced whole rather than trimmed to what this client implements.
+/// [`MainButton::enabled`] is what marks the rest **present but greyed out**,
+/// which is the faithful thing: a button missing from its vanilla position is a
+/// layout that reads wrong, while a disabled one in the right position reads
+/// exactly like vanilla with the feature unavailable (which is a state vanilla
+/// itself ships — `Multiplayer` and `Minecraft Realms` are disabled for a
+/// banned account, `TitleScreen.java:189-203`).
+///
+/// The three 20×20 icon buttons come from `CommonButtons`
+/// (`TitleScreen.java:123-140`); vanilla positions them with
+/// `getHorizontalPosition(i, 3, 20)` (`TitleScreen.java:170-173`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
     /// Enter the local world.
     Singleplayer,
     /// Open the server list.
     Multiplayer,
+    /// Vanilla's `menu.online` row. Present and disabled: Realms is a paid
+    /// Mojang-hosted service with its own authenticated HTTP API, none of which
+    /// exists here and none of which is on the roadmap.
+    Realms,
+    /// Vanilla's friends icon button (`CommonButtons.friends`). Present and
+    /// disabled: it needs a Microsoft-account social graph.
+    Friends,
+    /// Vanilla's language icon button. Present and disabled: the shell loads
+    /// exactly one language table (`en_us.json`, see `resources.rs`) and has no
+    /// language-selection screen.
+    Language,
+    /// Vanilla's accessibility icon button. Present and disabled: there is no
+    /// accessibility options screen.
+    Accessibility,
     /// Open the settings screen.
     Options,
     /// Quit the game.
     Quit,
 }
 
-/// Every main-menu button, in display order.
-pub const MAIN_BUTTONS: [MainButton; 4] = [
+/// Every title-screen widget, in vanilla's display order. Indices are the one
+/// index space shared by keyboard selection, mouse hover, hit-testing and the
+/// renderer — see [`super::render::title_slot`].
+pub const MAIN_BUTTONS: [MainButton; 8] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
+    MainButton::Realms,
+    MainButton::Friends,
+    MainButton::Language,
+    MainButton::Accessibility,
     MainButton::Options,
     MainButton::Quit,
 ];
 
 impl MainButton {
-    /// The label drawn on the button.
+    /// The label drawn on the button, or narrated for an icon-only one.
+    ///
+    /// Vanilla's own `en_us.json` strings, verbatim: `menu.singleplayer`,
+    /// `menu.multiplayer`, `menu.online`, `options.language`,
+    /// `options.accessibility`, `menu.options`, `menu.quit`. Mixed case now,
+    /// not upper — the title screen draws through the real vanilla font, which
+    /// has lower-case glyphs.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            MainButton::Singleplayer => "SINGLEPLAYER",
-            MainButton::Multiplayer => "MULTIPLAYER",
-            MainButton::Options => "OPTIONS",
-            MainButton::Quit => "QUIT GAME",
+            MainButton::Singleplayer => "Singleplayer",
+            MainButton::Multiplayer => "Multiplayer",
+            MainButton::Realms => "Minecraft Realms",
+            MainButton::Friends => "Friends",
+            MainButton::Language => "Language...",
+            MainButton::Accessibility => "Accessibility Settings...",
+            MainButton::Options => "Options...",
+            MainButton::Quit => "Quit Game",
+        }
+    }
+
+    /// Whether the button can be activated. A `false` here is what draws
+    /// vanilla's `widget/button_disabled` sprite with a dimmed label and makes
+    /// keyboard navigation step over the row — see [`MainButton`]'s docs for why
+    /// each disabled one is still present.
+    #[must_use]
+    pub fn enabled(self) -> bool {
+        matches!(
+            self,
+            MainButton::Singleplayer
+                | MainButton::Multiplayer
+                | MainButton::Options
+                | MainButton::Quit
+        )
+    }
+
+    /// The GUI sprite drawn centred in the button instead of a label —
+    /// vanilla's `SpriteIconButton.CenteredIcon`, 15×15 inside a 20×20 button
+    /// (`CommonButtons.java:10,21`, `FriendsButton.java:34`).
+    #[must_use]
+    pub fn icon(self) -> Option<&'static str> {
+        match self {
+            MainButton::Friends => Some("friends/friends"),
+            MainButton::Language => Some("icon/language"),
+            MainButton::Accessibility => Some("icon/accessibility"),
+            _ => None,
         }
     }
 }
 
-/// The pause menu's buttons, in display order.
+/// The pause screen's widgets, in vanilla's own display order.
 ///
-/// Vanilla's `PauseScreen` also has Advancements and Statistics; both are
-/// deliberately omitted rather than stubbed. Neither has a client-side
-/// subsystem here to open onto — there is no advancement tracking and no
-/// statistics decoder anywhere in this crate or `lodestone-game`, so either
-/// button would open nothing, which is exactly the "island" defect class this
-/// repo's rules single out. Vanilla also labels this button "Save and Quit to
-/// Title" in singleplayer and "Disconnect" in multiplayer; this client uses
-/// one label, "QUIT TO TITLE", for both, because [`SessionKind::Singleplayer`]
-/// is currently just the local dev world with no persistence to speak of (see
-/// the module docs) — "Save and Quit" would promise a save that does not
-/// happen.
+/// This is vanilla `PauseScreen.createPauseMenu`'s grid
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/PauseScreen.java:91-183`)
+/// reproduced whole, and it is **not** the three-button stack people remember:
+/// a full-width Back to Game, then a two-column Advancements / Statistics row,
+/// then a centred row of four 20×20 icon buttons, then Options, then
+/// Disconnect. The exact rects are in [`super::render::pause_slot`].
+///
+/// An earlier version of this file *omitted* Advancements and Statistics on the
+/// grounds that neither has a client-side subsystem to open onto, so either
+/// button would reach zero pixels. That reasoning still holds for the
+/// *action* — which is why they are [`PauseButton::enabled`]-`false` — but it
+/// does not hold for the *position*: a greyed-out button where vanilla puts one
+/// is faithful UI, and vanilla itself greys these out (`playerReportingButton`
+/// with no players to report, `PauseScreen.java:148-151`).
+///
+/// Which Options layout is reproduced is a real fork in vanilla:
+/// `minecraft.hasSingleplayerServer()` splits the row into Options + Open to LAN
+/// (`PauseScreen.java:157-159`), and only the `else` branch gives Options the
+/// full 204 px width (`PauseScreen.java:161-163`). This client has no integrated
+/// server at all (see the module docs), so `hasSingleplayerServer()` is
+/// unconditionally false for it and the full-width branch is the correct one.
+///
+/// Vanilla's last button is labelled by
+/// `CommonComponents.disconnectButtonLabel(isLocalServer)` — "Save and Quit to
+/// Title" locally, "Disconnect" remotely (`CommonComponents.java:53-55`). This
+/// client uses "Disconnect" for both, because [`SessionKind::Singleplayer`] is
+/// currently the local dev world with no persistence: "Save and Quit" would
+/// promise a save that does not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseButton {
-    /// Resume play. Equivalent to Escape.
+    /// Resume play. Equivalent to Escape. Vanilla's `menu.returnToGame`.
     BackToGame,
+    /// Vanilla's `gui.advancements`. Present and disabled: nothing in this
+    /// workspace decodes the `update_advancements` packet, so there is no
+    /// advancement tree to open.
+    Advancements,
+    /// Vanilla's `gui.stats`. Present and disabled: nothing decodes the
+    /// `award_stats` packet, so there are no statistics to show.
+    Statistics,
+    /// Vanilla's `menu.reportBugs` icon button. Present and disabled: it opens
+    /// an external Mojang bug tracker through a link-confirmation screen.
+    ReportBugs,
+    /// Vanilla's `menu.sendFeedback` icon button. Present and disabled: same,
+    /// an external Mojang link.
+    Feedback,
+    /// Vanilla's friends icon button. Present and disabled, as on the title
+    /// screen: it needs a Microsoft-account social graph.
+    Friends,
+    /// Vanilla's `menu.playerReporting` icon button. Present and disabled: it
+    /// needs the chat-signature reporting context.
+    PlayerReporting,
     /// Open the settings screen (reuses [`super::Screen::Settings`] — see
     /// [`super::UiState::open_settings_from_pause`]).
     Options,
@@ -249,21 +357,58 @@ pub enum PauseButton {
     QuitToTitle,
 }
 
-/// Every pause-menu button, in display order.
-pub const PAUSE_BUTTONS: [PauseButton; 3] = [
+/// Every pause-screen widget, in vanilla's display order. As with
+/// [`MAIN_BUTTONS`], these indices are the one index space keyboard selection,
+/// mouse hover, hit-testing and the renderer all share.
+pub const PAUSE_BUTTONS: [PauseButton; 9] = [
     PauseButton::BackToGame,
+    PauseButton::Advancements,
+    PauseButton::Statistics,
+    PauseButton::ReportBugs,
+    PauseButton::Feedback,
+    PauseButton::Friends,
+    PauseButton::PlayerReporting,
     PauseButton::Options,
     PauseButton::QuitToTitle,
 ];
 
 impl PauseButton {
-    /// The label drawn on the button.
+    /// The label drawn on the button, or narrated for an icon-only one.
+    /// Vanilla's `en_us.json` strings verbatim.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            PauseButton::BackToGame => "BACK TO GAME",
-            PauseButton::Options => "OPTIONS",
-            PauseButton::QuitToTitle => "QUIT TO TITLE",
+            PauseButton::BackToGame => "Back to Game",
+            PauseButton::Advancements => "Advancements",
+            PauseButton::Statistics => "Statistics",
+            PauseButton::ReportBugs => "Report Bugs",
+            PauseButton::Feedback => "Give Feedback",
+            PauseButton::Friends => "Friends",
+            PauseButton::PlayerReporting => "Player Reporting",
+            PauseButton::Options => "Options...",
+            PauseButton::QuitToTitle => "Disconnect",
+        }
+    }
+
+    /// Whether the button can be activated — see [`MainButton::enabled`].
+    #[must_use]
+    pub fn enabled(self) -> bool {
+        matches!(
+            self,
+            PauseButton::BackToGame | PauseButton::Options | PauseButton::QuitToTitle
+        )
+    }
+
+    /// The GUI sprite drawn centred in the button instead of a label, 15×15
+    /// inside a 20×20 button (`PauseScreen.java:104,115,134`).
+    #[must_use]
+    pub fn icon(self) -> Option<&'static str> {
+        match self {
+            PauseButton::ReportBugs => Some("pause_menu/bug"),
+            PauseButton::Feedback => Some("pause_menu/social_interactions"),
+            PauseButton::Friends => Some("friends/friends"),
+            PauseButton::PlayerReporting => Some("pause_menu/player_reporting"),
+            _ => None,
         }
     }
 }
@@ -403,6 +548,15 @@ impl MenuNav {
     /// would. Out-of-range rows are ignored rather than clamped: the caller
     /// hit-tests against the rendered rects, so "no row here" must not silently
     /// move the selection to a different one.
+    ///
+    /// A **disabled** row is still hovered, matching vanilla exactly:
+    /// `AbstractWidget::extractRenderState` sets `isHovered` from geometry alone
+    /// and never consults `active` (`AbstractWidget.java:56-62`), while
+    /// `WidgetSprites::get(active, focused)` returns `button_disabled` whichever
+    /// way `focused` went (`WidgetSprites.java:19-25`) — so a greyed-out button
+    /// under the cursor looks greyed-out, not highlighted. The half that matters
+    /// is the *click*: `key_main`/`key_paused` refuse Enter on a disabled button,
+    /// which is why moving the highlight onto one here is safe.
     pub fn hover(&mut self, ui: &UiState, row: usize) {
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
@@ -454,29 +608,54 @@ impl MenuNav {
     fn key_main(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
-                self.main = wrap_prev(self.main, MAIN_BUTTONS.len());
+                self.main = step_enabled(self.main, MAIN_BUTTONS.len(), false, &|i| {
+                    MAIN_BUTTONS[i].enabled()
+                });
                 MenuAction::None
             }
             MenuKey::Down => {
-                self.main = wrap_next(self.main, MAIN_BUTTONS.len());
+                self.main = step_enabled(self.main, MAIN_BUTTONS.len(), true, &|i| {
+                    MAIN_BUTTONS[i].enabled()
+                });
                 MenuAction::None
             }
-            MenuKey::Enter => match self.main_button() {
-                MainButton::Singleplayer => MenuAction::Singleplayer,
-                MainButton::Multiplayer => {
-                    ui.open_server_list();
-                    self.clamp_server();
-                    MenuAction::Reprobe(None)
+            MenuKey::Enter => {
+                let button = self.main_button();
+                if !button.enabled() {
+                    // A click landed on a present-but-disabled vanilla button
+                    // (the mouse *can* highlight one — see `hover` — even though
+                    // the keyboard steps over it). Vanilla's
+                    // `AbstractWidget.mouseClicked` returns false for an inactive
+                    // widget, so nothing happens. Returning here rather than
+                    // leaving the highlight where it was is what stops a click on
+                    // Advancements activating whatever *used* to be selected.
+                    return MenuAction::None;
                 }
-                MainButton::Options => {
-                    ui.open_settings();
-                    MenuAction::None
+                match button {
+                    MainButton::Singleplayer => MenuAction::Singleplayer,
+                    MainButton::Multiplayer => {
+                        ui.open_server_list();
+                        self.clamp_server();
+                        MenuAction::Reprobe(None)
+                    }
+                    MainButton::Options => {
+                        ui.open_settings();
+                        MenuAction::None
+                    }
+                    MainButton::Quit => {
+                        ui.request_quit();
+                        MenuAction::Quit
+                    }
+                    // Unreachable — every variant below is disabled above.
+                    // Spelled out instead of `_` so making one of them *enabled*
+                    // without giving it an action is a compile-visible mistake
+                    // rather than a silently dead button.
+                    MainButton::Realms
+                    | MainButton::Friends
+                    | MainButton::Language
+                    | MainButton::Accessibility => MenuAction::None,
                 }
-                MainButton::Quit => {
-                    ui.request_quit();
-                    MenuAction::Quit
-                }
-            },
+            }
             MenuKey::Escape => {
                 ui.on_escape();
                 MenuAction::Quit
@@ -619,27 +798,44 @@ impl MenuNav {
     fn key_paused(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
             MenuKey::Up => {
-                self.paused = wrap_prev(self.paused, PAUSE_BUTTONS.len());
+                self.paused = step_enabled(self.paused, PAUSE_BUTTONS.len(), false, &|i| {
+                    PAUSE_BUTTONS[i].enabled()
+                });
                 MenuAction::None
             }
             MenuKey::Down => {
-                self.paused = wrap_next(self.paused, PAUSE_BUTTONS.len());
+                self.paused = step_enabled(self.paused, PAUSE_BUTTONS.len(), true, &|i| {
+                    PAUSE_BUTTONS[i].enabled()
+                });
                 MenuAction::None
             }
-            MenuKey::Enter => match self.pause_button() {
-                PauseButton::BackToGame => {
-                    ui.resume();
-                    MenuAction::None
+            MenuKey::Enter => {
+                let button = self.pause_button();
+                if !button.enabled() {
+                    // See `key_main`'s equivalent guard.
+                    return MenuAction::None;
                 }
-                PauseButton::Options => {
-                    ui.open_settings_from_pause();
-                    MenuAction::None
+                match button {
+                    PauseButton::BackToGame => {
+                        ui.resume();
+                        MenuAction::None
+                    }
+                    PauseButton::Options => {
+                        ui.open_settings_from_pause();
+                        MenuAction::None
+                    }
+                    PauseButton::QuitToTitle => {
+                        ui.quit_to_title();
+                        MenuAction::QuitToTitle
+                    }
+                    PauseButton::Advancements
+                    | PauseButton::Statistics
+                    | PauseButton::ReportBugs
+                    | PauseButton::Feedback
+                    | PauseButton::Friends
+                    | PauseButton::PlayerReporting => MenuAction::None,
                 }
-                PauseButton::QuitToTitle => {
-                    ui.quit_to_title();
-                    MenuAction::QuitToTitle
-                }
-            },
+            }
             MenuKey::Escape => {
                 ui.on_escape();
                 MenuAction::None
@@ -700,6 +896,36 @@ impl MenuNav {
             Err(e) => Some(format!("could not save {}: {e}", self.path.display())),
         };
     }
+}
+
+/// Steps `i` one row in `forward`'s direction, wrapping, and keeps stepping
+/// while the row it lands on is disabled.
+///
+/// This is vanilla's own focus rule: `AbstractWidget::nextFocusPath` returns
+/// `null` for an inactive widget (`AbstractWidget.java:152-158`), so keyboard
+/// navigation never *lands* on a greyed-out button — which is what makes it safe
+/// to reproduce vanilla's full widget list with most of it disabled without the
+/// arrow keys walking through five dead rows.
+///
+/// Returns `i` unchanged when nothing in `0..len` is enabled. Neither real
+/// button set can be in that state, but the loop bound is what keeps a future
+/// all-disabled set from spinning forever rather than being a latent hang.
+fn step_enabled(i: usize, len: usize, forward: bool, enabled: &dyn Fn(usize) -> bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut next = i.min(len - 1);
+    for _ in 0..len {
+        next = if forward {
+            wrap_next(next, len)
+        } else {
+            wrap_prev(next, len)
+        };
+        if enabled(next) {
+            return next;
+        }
+    }
+    i
 }
 
 fn wrap_next(i: usize, len: usize) -> usize {
@@ -1254,11 +1480,126 @@ mod tests {
         ui.enter_dev_world();
         ui.pause();
         assert_eq!(nav.pause_index(), 0);
-        nav.hover(&ui, 2);
+        // Disconnect is the last of vanilla's nine pause widgets, not the third
+        // of three — this index moved when the screen gained vanilla's full
+        // structure (Advancements, Statistics and the four icon buttons).
+        let last = PAUSE_BUTTONS.len() - 1;
+        nav.hover(&ui, last);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
         // Out-of-range rows are ignored rather than clamped.
         nav.hover(&ui, 99);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+    }
+
+    #[test]
+    fn a_disabled_button_is_hoverable_but_cannot_be_activated() {
+        // The specific regression: `app.rs` turns a click into `hover(row)` then
+        // `MenuKey::Enter`. If `hover` refused a disabled row, the Enter would
+        // fall through and activate whatever was highlighted *before* — clicking
+        // the greyed-out Advancements button would disconnect you. And if Enter
+        // did not refuse, a disabled button would act.
+        let (mut nav, _) = nav("disabled-click");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+
+        // Select the real Disconnect button first, so a fall-through would be
+        // observable as a session teardown.
+        let last = PAUSE_BUTTONS.len() - 1;
+        nav.hover(&ui, last);
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+
+        // Now click Advancements (index 1, disabled).
+        nav.hover(&ui, 1);
+        assert_eq!(
+            nav.pause_button(),
+            PauseButton::Advancements,
+            "a disabled button is still hovered, exactly as in vanilla"
+        );
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert!(
+            ui.is_paused(),
+            "clicking a disabled button must neither act nor fall through to the \
+             previously highlighted one"
+        );
+
+        // The positive control: the same click sequence on an *enabled* button
+        // does act, so the assertion above is not passing because clicks are
+        // broken generally.
+        nav.hover(&ui, last);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::QuitToTitle);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn keyboard_navigation_steps_over_every_disabled_button() {
+        // Vanilla's own focus rule: arrow keys never land on a greyed-out
+        // widget. Both screens carry five/six disabled rows now, so without this
+        // the arrow keys would walk through dead rows.
+        let (mut nav, _) = nav("skip-disabled");
+        let mut ui = UiState::new();
+
+        // Title screen: Singleplayer, Multiplayer, Options, Quit — Realms and
+        // the three icon buttons are stepped over in both directions.
+        let mut seen = vec![nav.main_button()];
+        for _ in 0..3 {
+            nav.key(&mut ui, MenuKey::Down);
+            seen.push(nav.main_button());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                MainButton::Singleplayer,
+                MainButton::Multiplayer,
+                MainButton::Options,
+                MainButton::Quit
+            ]
+        );
+        for _ in 0..8 {
+            nav.key(&mut ui, MenuKey::Up);
+            assert!(
+                nav.main_button().enabled(),
+                "Up landed on {:?}, which is disabled",
+                nav.main_button()
+            );
+        }
+
+        // Pause screen: Back to Game, Options, Disconnect.
+        ui.enter_dev_world();
+        ui.pause();
+        let mut seen = vec![nav.pause_button()];
+        for _ in 0..2 {
+            nav.key(&mut ui, MenuKey::Down);
+            seen.push(nav.pause_button());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                PauseButton::BackToGame,
+                PauseButton::Options,
+                PauseButton::QuitToTitle
+            ]
+        );
+        for _ in 0..9 {
+            nav.key(&mut ui, MenuKey::Up);
+            assert!(
+                nav.pause_button().enabled(),
+                "Up landed on {:?}, which is disabled",
+                nav.pause_button()
+            );
+        }
+
+        // The negative control the two loops above need: the sets really do
+        // contain disabled buttons, so "every landing was enabled" is a
+        // measurement and not a tautology.
+        assert!(
+            MAIN_BUTTONS.iter().any(|b| !b.enabled()),
+            "no disabled title-screen button to step over"
+        );
+        assert!(
+            PAUSE_BUTTONS.iter().any(|b| !b.enabled()),
+            "no disabled pause-screen button to step over"
+        );
     }
 
     #[test]

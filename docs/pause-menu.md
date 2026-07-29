@@ -7,6 +7,108 @@ player leave a live session cleanly and start (or join) another one without
 carrying anything over. Landed in `c53d022` ("an in-game pause menu, and a
 way to leave a session on purpose").
 
+## The layout is vanilla's, and it is not the three-button stack
+
+`Screen::Paused` reproduces `PauseScreen.createPauseMenu`
+(`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/PauseScreen.java:91-183`)
+whole: **nine** widgets, of which three are live. The rects live in
+`render::pause_slot`.
+
+Vanilla builds it with a `GridLayout`, so the rects are not obvious. Working
+through `GridLayout.arrangeElements` (`GridLayout.java:25-89`) and
+`AbstractLayout.AbstractChildWrapper::setX/setY` (`AbstractLayout.java:73-85`):
+
+- two columns, `rowSpacing`/`columnSpacing` **0**, default cell padding
+  `(4, 4, 4, 0)` — left, top, right, bottom (`PauseScreen.java:93`);
+- the widest cell is the 204 px full-width button plus 4+4 padding = 212, split
+  by `Divisor` into columns of **106 each**, so the grid is **212 wide**;
+- row heights are `[70, 24, 24, 24, 24]` (row 0 carries `paddingTop(50)`,
+  `PauseScreen.java:98`), giving y offsets `[0, 70, 94, 118, 142]` and a grid
+  **166 tall**;
+- `FrameLayout.alignInRectangle(grid, 0, 0, W, H, 0.5F, 0.25F)`
+  (`PauseScreen.java:181`) puts the grid's origin at
+  `(floor((W-212)/2), floor((H-166)/4))` — the alignment is a truncating
+  `(int)` cast (`FrameLayout.java:113-116`), hence the floors.
+
+Grid-relative, therefore:
+
+| # | widget | offset from grid origin | size | state |
+|---|---|---|---|---|
+| 0 | Back to Game | `+4, +50` | 204×20 | live |
+| 1 | Advancements | `+4, +74` | 98×20 | **disabled** |
+| 2 | Statistics | `+110, +74` | 98×20 | **disabled** |
+| 3 | Report Bugs (icon) | `+60, +98` | 20×20 | **disabled** |
+| 4 | Give Feedback (icon) | `+84, +98` | 20×20 | **disabled** |
+| 5 | Friends (icon) | `+108, +98` | 20×20 | **disabled** |
+| 6 | Player Reporting (icon) | `+132, +98` | 20×20 | **disabled** |
+| 7 | Options… | `+4, +122` | 204×20 | live |
+| 8 | Disconnect | `+4, +146` | 204×20 | live |
+
+The "Game Menu" heading is a `StringWidget` at `W/2 - textWidth/2, 40`
+(`PauseScreen.java:87-88`), the title being `menu.game`.
+
+Three consequences that a layout built from memory gets wrong:
+
+- **A full-width pause button starts at `W/2 - 102`, not `W/2 - 100`** — it is
+  204 wide, not 200, because the 204 comes from `BUTTON_WIDTH_FULL`
+  (`PauseScreen.java:53`) rather than `Button.BIG_WIDTH`.
+- **The half-width pair has an 8 px gutter**, not the title screen's 4: each 98 px
+  button sits 4 px into its own 106 px column, so they land at `W/2-102` and
+  `W/2+4`. The title screen's pair is `W/2-100` / `W/2+2`.
+- **The icon row is centred inside its colspan-2 cell**, the only cell with
+  `alignHorizontallyCenter` (`PauseScreen.java:154`):
+  `lerp(0.5, 4, 212 - 92 - 4) = 60`, then its own `LinearLayout` spaces four 20 px
+  children 4 px apart — 60, 84, 108, 132.
+
+### Which Options row, and why
+
+Vanilla forks here. `minecraft.hasSingleplayerServer()` splits the row into
+Options + Open to LAN (`PauseScreen.java:157-159`); only the `else` branch gives
+Options the full 204 px (`PauseScreen.java:161-163`). This client has **no
+integrated server at all** (see [`main-menu.md`](./main-menu.md) and
+`menu.rs`'s module docs), so `hasSingleplayerServer()` is unconditionally false
+for it and the full-width branch is the correct one to reproduce. If an
+integrated server ever lands, this is one of the places that has to fork too.
+
+The last button is `CommonComponents.disconnectButtonLabel(isLocalServer)` in
+vanilla — "Save and Quit to Title" locally, "Disconnect" remotely
+(`CommonComponents.java:53-55`). We use "Disconnect" for both: singleplayer here
+is the local dev world with no persistence, so "Save and Quit" would promise a
+save that does not happen.
+
+### Advancements and Statistics: present, disabled — a reversal
+
+An earlier version of `nav.rs` **omitted** both, on the grounds that neither has
+a client-side subsystem to open onto, so either button would reach zero pixels —
+this repo's dominant defect class. That reasoning was right about the *action*
+and wrong about the *position*. They are now present and
+`PauseButton::enabled() == false`: nothing decodes `update_advancements` or
+`award_stats`, so there is nothing to open, but a greyed-out button where vanilla
+puts one is faithful UI rather than an island, and vanilla itself greys buttons
+out on this very screen (`playerReportingButton` with no players to report,
+`PauseScreen.java:148-151`).
+
+The greyed look is vanilla's own — `widget/button_disabled` plus a
+`0xFF_A0_A0_A0` label — not an invented one. See
+[`main-menu.md`](./main-menu.md) for the sprite-selection rule, the nine-slice
+borders, and the click-on-a-disabled-button trap.
+
+### The backdrop is vanilla's exact value now
+
+`Screen`'s in-world menu background is `textures/gui/inworld_menu_background.png`
+tiled at 32 px (`Screen.java:405,418-419`). That file, decoded straight out of
+`client.jar`, is a 16×16 greyscale+alpha PNG in which **every pixel is grey 0,
+alpha 64** — and `menu_background.png` (the out-of-world variant) is byte-for-byte
+identical. So there is no dirt texture to reproduce and nothing lost by drawing
+one quad instead of tiling: `render::OVERLAY_BG` is `[0, 0, 0, 64/255]`, and
+`the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64` pins the
+exact floats.
+
+What is missing is the **blur** vanilla applies behind it when the pause screen is
+topmost (`Screen.java:389-394`), gated on the `menuBackgroundBlurriness` option —
+which vanilla lets the player set to 0, in which case this is exactly vanilla.
+Above 0, vanilla's menu reads calmer over a busy world than ours does.
+
 ## How it works
 
 ### The Escape stack
@@ -138,10 +240,15 @@ actually took.
 - **Screen state machine** — `UiState` in `crates/lodestone-shell/src/menu.rs`
   (`on_escape`, `quit_to_title`, `open_settings`/`open_settings_from_pause`/
   `close_settings`, `settings_return`).
-- **Pause menu layout and input** — `crates/lodestone-shell/src/menu/nav.rs`
-  (`key_paused`, `PauseButton`).
+- **Pause menu input and the widget list** —
+  `crates/lodestone-shell/src/menu/nav.rs` (`key_paused`, `PauseButton`,
+  `PauseButton::{enabled, icon}`, `step_enabled`).
+- **Pause menu layout** — `crates/lodestone-shell/src/menu/render.rs`
+  (`pause_slot`, `Origin::PauseGrid`, `PAUSE_GRID_W`/`PAUSE_GRID_H`). Change a
+  rect here and nowhere else: `row_rect` resolves the slot and `app.rs`'s
+  `menu_row_at` calls `row_rect`, so the draw and the hit-test cannot disagree.
 - **Rendering** — `crates/lodestone-shell/src/menu/render.rs` (`owns_frame`,
-  `pause_frame`, `render_overlay` vs `render`). If you add a new screen that
+  `pause_frame`, `render_overlay` vs `render`, `build` vs `geometry`). If you add a new screen that
   should overlay the world instead of replacing it, follow `Paused`'s
   pattern — a second render entry point with `LoadOp::Load`, kept out of
   `owns_frame` — rather than adding a special case inside the `Clear` path.
@@ -178,7 +285,15 @@ Hermetic, `crates/lodestone-shell/src/sim.rs`:
 acceptance test above). `crates/lodestone-shell/src/menu.rs`:
 `quit_to_title_only_leaves_from_pause_and_clears_session_state`.
 `crates/lodestone-shell/src/menu/nav.rs`:
-`quit_to_title_from_the_pause_menu_leaves_for_the_main_menu`. 
+`quit_to_title_from_the_pause_menu_leaves_for_the_main_menu`,
+`a_disabled_button_is_hoverable_but_cannot_be_activated`,
+`keyboard_navigation_steps_over_every_disabled_button`.
 `crates/lodestone-shell/src/menu/render.rs`:
 `owns_frame_excludes_paused_so_the_pause_menu_never_replaces_the_world`,
-`pause_frame_builds_the_three_buttons_in_order_and_tracks_the_highlight`.
+`pause_frame_builds_vanillas_nine_widgets_in_order_and_tracks_the_highlight`,
+`the_pause_screen_rects_are_vanillas_own` (the hand-derived grid above, asserted
+against `pause_slot` rather than read out of it),
+`every_vanilla_widget_is_on_screen_and_none_overlap`,
+`the_button_sprite_matches_vanillas_enabled_hovered_rule`,
+`nine_slice_borders_come_from_the_mcmeta_not_a_constant`,
+`the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64`.
