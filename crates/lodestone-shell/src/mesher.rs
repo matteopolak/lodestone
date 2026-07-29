@@ -216,11 +216,17 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
 ///
 /// The returned snapshot's [`SkyDefault`] follows the **connected dimension**
 /// (read off [`NetClient::shared_handle`]'s player snapshot, since
-/// [`NetClient::world_dimensions`] carries only vertical extent): the
-/// overworld defaults absent sky to full daylight, everything else
-/// (Nether/End, and any non-`minecraft:overworld` dimension) defaults it to
-/// `0`. Getting this wrong is invisible in the overworld — measured 0 of 192
-/// sky sections `Missing` there — and renders the Nether full-bright.
+/// [`NetClient::world_dimensions`] carries only vertical extent): dimensions
+/// whose `dimension_type` sets `has_skylight: true` default absent sky to full
+/// daylight, everything else defaults it to `0`. That is `minecraft:overworld`
+/// **and `minecraft:the_end`** — the End's own dimension type
+/// (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/the_end.json`)
+/// carries `"has_skylight": true`, same as the overworld; only
+/// `minecraft:the_nether`'s does not. Getting this wrong is invisible in the
+/// overworld — measured 0 of 192 sky sections `Missing` there — and renders
+/// the Nether full-bright (the bug this match originally fixed) or, the other
+/// direction, would render the End's genuinely sky-lit terrain artificially
+/// dark at every unresolved-neighbour edge.
 #[must_use]
 pub fn snapshot_section_live(
     net: &NetClient,
@@ -272,28 +278,16 @@ pub fn snapshot_section_live(
         return None;
     }
 
-    // `SkyDefault` follows the *connected* dimension, not a hardcoded
-    // overworld assumption: the Nether and the End have no sky light, so a
-    // `Missing` sky sample there must resolve to `0`, not daylight. Overworld
-    // measured 0 of 192 sky sections `Missing`, which is exactly why this was
-    // invisible until now — the wrong default never got exercised.
-    //
     // `WorldDimensions` (the `section_count` parameter above) carries only
     // `min_y`/`height`, not dimension identity, so this reads the connected
     // dimension straight off the shared handle's player snapshot instead —
     // the cheapest place this crate can reach it without growing that struct.
-    let sky_default = match net
-        .shared_handle()
-        .get()
-        .and_then(|h| h.player().dimension)
-    {
-        // Dimension not yet known (pre-login): keep the previous default.
-        None => SkyDefault::Full,
-        Some(dim) if dim.namespace() == "minecraft" && dim.path() == "overworld" => {
-            SkyDefault::Full
-        }
-        Some(_) => SkyDefault::None,
-    };
+    let sky_default = sky_default_for_dimension(
+        net.shared_handle()
+            .get()
+            .and_then(|h| h.player().dimension)
+            .as_ref(),
+    );
 
     Some(SectionSnapshot {
         key,
@@ -301,6 +295,48 @@ pub fn snapshot_section_live(
         lights,
         sky_default,
     })
+}
+
+/// Resolves the [`SkyDefault`] a *missing* neighbour sky sample should use for
+/// the given connected dimension (`None` when the dimension is not yet known,
+/// i.e. pre-login).
+///
+/// This follows the dimension's `has_skylight`, not a hardcoded
+/// "overworld only" assumption: the Nether's dimension type sets
+/// `has_skylight: false`, so a `Missing` sky sample there must resolve to `0`,
+/// not daylight. Overworld measured 0 of 192 sky sections `Missing`, which is
+/// exactly why this was invisible until now — the wrong default never got
+/// exercised.
+///
+/// The End is *not* lumped in with the Nether here, even though both are "not
+/// the overworld": the End's own dimension type
+/// (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/the_end.json`)
+/// carries `"has_skylight": true`, identical to the overworld — its islands
+/// really are lit by real per-block sky exposure the server computes and
+/// sends the same way. Defaulting a `Missing` End neighbour to `0` would
+/// (rarely, at an unresolved chunk edge) render genuinely sky-lit End terrain
+/// artificially dark, the same class of bug this function exists to prevent —
+/// just aimed the other direction.
+///
+/// This client has no dimension-type *registry* decode (no `has_skylight`
+/// field is read off the wire at all — see `docs/dimension-visuals.md`), so
+/// the three built-in dimensions are matched by their well-known id instead of
+/// the registry entry vanilla actually keys this off; a custom datapack
+/// dimension falls back to `None`, same as it did before this function was
+/// extracted.
+#[must_use]
+fn sky_default_for_dimension(dimension: Option<&lodestone_client::DimensionId>) -> SkyDefault {
+    match dimension {
+        // Dimension not yet known (pre-login): keep the previous default.
+        None => SkyDefault::Full,
+        Some(dim) if dim.namespace() == "minecraft" && dim.path() == "overworld" => {
+            SkyDefault::Full
+        }
+        Some(dim) if dim.namespace() == "minecraft" && dim.path() == "the_end" => {
+            SkyDefault::Full
+        }
+        Some(_) => SkyDefault::None,
+    }
 }
 
 fn is_all_air(section: &ChunkSection) -> bool {
@@ -826,6 +862,35 @@ mod tests {
         // Compile-time proof that snapshots can cross to worker threads.
         assert_send::<SectionSnapshot>();
         assert_send::<Meshed>();
+    }
+
+    #[test]
+    fn sky_default_is_full_for_overworld_and_end_none_for_nether_and_unknown() {
+        use lodestone_client::DimensionId;
+
+        let overworld: DimensionId = "minecraft:overworld".parse().unwrap();
+        let the_nether: DimensionId = "minecraft:the_nether".parse().unwrap();
+        let the_end: DimensionId = "minecraft:the_end".parse().unwrap();
+        let custom: DimensionId = "somemod:cave_dimension".parse().unwrap();
+
+        assert_eq!(
+            sky_default_for_dimension(None),
+            SkyDefault::Full,
+            "pre-login: keep the full-bright default"
+        );
+        assert_eq!(
+            sky_default_for_dimension(Some(&overworld)),
+            SkyDefault::Full
+        );
+        // The falsifying case this function exists for: the End has real sky
+        // light (`has_skylight: true`) exactly like the overworld, and must
+        // not be defaulted to `0` just because it isn't the overworld.
+        assert_eq!(sky_default_for_dimension(Some(&the_end)), SkyDefault::Full);
+        assert_eq!(
+            sky_default_for_dimension(Some(&the_nether)),
+            SkyDefault::None
+        );
+        assert_eq!(sky_default_for_dimension(Some(&custom)), SkyDefault::None);
     }
 
     #[test]

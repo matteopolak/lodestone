@@ -51,6 +51,97 @@ impl FogSettings {
         let start = end * start_fraction.clamp(0.0, 1.0);
         Self { color, start, end }
     }
+
+    /// Dense, near, red-tinted Nether fog.
+    ///
+    /// Vanilla's Nether fog is not a render-distance edge fade like the
+    /// overworld's: `the_nether` dimension type fixes
+    /// `visual/fog_start_distance`/`visual/fog_end_distance` at `10.0`/`96.0`
+    /// blocks regardless of render distance (`AtmosphericFogEnvironment.setupFog`
+    /// reads those two attributes directly), so the haze is thick and close no
+    /// matter how far the player can see. The colour is the `nether_wastes`
+    /// biome's `visual/fog_color` (`#330808`) — the dimension type itself
+    /// carries no `fog_color` override, only the per-biome attribute does, and
+    /// every other Nether biome (crimson/warped forest, soul sand valley,
+    /// basalt deltas) has its own distinct value the shell cannot yet reach
+    /// (the biome the player is standing in is not threaded to this call) —
+    /// the same documented-fallback shape `lodestone-shell`'s `water_fog`
+    /// already uses for its one ocean default.
+    ///
+    /// `render_distance` (in chunks) is honoured only as an upper clamp: a
+    /// render distance shorter than 96 blocks (6 chunks) must not fog *past*
+    /// the loaded world, exactly like [`FogSettings::for_view_distance`]'s
+    /// `end`.
+    #[must_use]
+    pub fn nether(render_distance: u32) -> Self {
+        let end = 96.0_f32.min(render_distance as f32 * 16.0);
+        let start = 10.0_f32.min(end);
+        Self {
+            color: srgb_u8_to_linear(NETHER_FOG_SRGB),
+            start,
+            end,
+        }
+    }
+
+    /// The End's fog: a flat, near-black backdrop, since the dimension type
+    /// carries no `visual/fog_start_distance`/`visual/fog_end_distance`
+    /// override (so vanilla's environmental-fog attributes fall back to their
+    /// defaults, `0`/`1024` blocks — effectively never triggering inside any
+    /// normal render distance) and the visible darkening instead comes from
+    /// `visual/fog_color` (`#181318`) mixed with `visual/sky_color`
+    /// (`#000000`) at the render-distance edge, exactly the mechanism
+    /// [`FogSettings::for_view_distance`] already models for the overworld.
+    ///
+    /// This reuses that edge-fade shape with the End's colour rather than
+    /// vanilla's separate `sky_color`/`fog_color` blend curve
+    /// (`AtmosphericFogEnvironment.getBaseColor`'s `skyColorMixFactor`): with
+    /// no sky dome to blend into (the End draws its own starfield, which nothing
+    /// in this renderer attempts), a single flat colour is the closest
+    /// approximation reachable without a second bind-group slot or a new
+    /// uniform lane. `start_fraction` should be the same value the caller uses
+    /// for overworld fog (`crate::gpu::FOG_START_FRACTION` in the shell) so the
+    /// edge dissolves at the same fraction of view distance in every dimension.
+    #[must_use]
+    pub fn the_end(render_distance: u32, start_fraction: f32) -> Self {
+        Self::for_view_distance(
+            srgb_u8_to_linear(END_FOG_SRGB),
+            render_distance as f32 * 16.0,
+            start_fraction,
+        )
+    }
+}
+
+/// `nether_wastes`'s `minecraft:visual/fog_color`, sRGB (see
+/// `.cache/mc/26.2/client-src/data/minecraft/worldgen/biome/nether_wastes.json`).
+const NETHER_FOG_SRGB: [u8; 3] = [0x33, 0x08, 0x08];
+
+/// `the_end` dimension type's `minecraft:visual/fog_color`, sRGB (see
+/// `.cache/mc/26.2/client-src/data/minecraft/dimension_type/the_end.json`).
+const END_FOG_SRGB: [u8; 3] = [0x18, 0x13, 0x18];
+
+/// Converts one sRGB `0xRRGGBB`-space colour (bytes `0..=255`) to linear RGB
+/// (`0.0..=1.0`), using the accurate piecewise sRGB EOTF — the same formula
+/// the model/entity WGSL shaders' own `srgb_to_linear` implements (see
+/// `crate::model_pipeline`), so a CPU-computed dimension colour and a
+/// shader-computed one agree bit-for-bit in shape.
+///
+/// Every dimension-colour constant here is stored as its real sRGB hex (as
+/// authored in the decompiled data files) and converted through this function
+/// rather than hand-typed as a linear literal, unlike `lodestone-shell`'s
+/// `SKY_COLOR` — that constant's own doc comment records that a hand-typed
+/// linear value was once silently the *sRGB* value instead, washing the sky
+/// out. Computing it once, here, removes that whole class of transcription
+/// error for every dimension colour added after it.
+#[must_use]
+pub fn srgb_u8_to_linear(rgb: [u8; 3]) -> [f32; 3] {
+    rgb.map(|c| {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    })
 }
 
 /// The linear fog factor for a fragment `distance` world units from the eye:
@@ -187,5 +278,69 @@ mod tests {
     #[test]
     fn uniform_is_48_bytes_three_vec4s() {
         assert_eq!(std::mem::size_of::<FogUniform>(), 48);
+    }
+
+    #[test]
+    fn srgb_to_linear_hits_known_anchors() {
+        // Pure black and pure white round-trip exactly regardless of the
+        // piecewise toe.
+        assert_eq!(srgb_u8_to_linear([0, 0, 0]), [0.0, 0.0, 0.0]);
+        assert_eq!(srgb_u8_to_linear([255, 255, 255]), [1.0, 1.0, 1.0]);
+        // Mid-grey (0x80) is the textbook sRGB check value: linear ~0.2159,
+        // never the naive /255 = 0.502 an un-linearised read would give.
+        let [r, g, b] = srgb_u8_to_linear([0x80, 0x80, 0x80]);
+        for c in [r, g, b] {
+            assert!((c - 0.215_86).abs() < 1e-4, "got {c}");
+        }
+        // Below the 0.04045 toe threshold the curve is exactly linear (c/12.92),
+        // not the power curve — 0x0A/255 = 0.0392, under the threshold.
+        let [r, ..] = srgb_u8_to_linear([0x0A, 0, 0]);
+        assert!((r - (10.0 / 255.0 / 12.92)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn nether_fog_is_dense_red_and_clamped_to_render_distance() {
+        // Vanilla: fixed 10..96 block range, `nether_wastes`' `#330808` fog
+        // colour — red channel clearly dominant, green/blue near black.
+        let f = FogSettings::nether(32);
+        assert_eq!(f.start, 10.0);
+        assert_eq!(f.end, 96.0);
+        assert!(f.color[0] > f.color[1] * 4.0, "expected red-dominant fog");
+        assert!(f.color[0] > 0.0 && f.color[0] < 1.0);
+
+        // A render distance shorter than the vanilla range must not fog past
+        // the loaded world, exactly like `for_view_distance`'s `end` clamp.
+        let short = FogSettings::nether(2); // 32 blocks
+        assert_eq!(short.end, 32.0);
+        assert_eq!(short.start, 10.0);
+
+        // And a render distance so short even the *start* would fall outside
+        // the loaded world must not produce start > end (a degenerate,
+        // fog-disabling range would silently turn off Nether fog entirely).
+        let tiny = FogSettings::nether(0);
+        assert_eq!(tiny.end, 0.0);
+        assert_eq!(tiny.start, 0.0);
+        assert!(tiny.start <= tiny.end);
+    }
+
+    #[test]
+    fn the_end_fog_is_a_flat_near_black_edge_fade() {
+        let f = FogSettings::the_end(16, 0.75);
+        assert_eq!(f.end, 256.0);
+        assert_eq!(f.start, 192.0);
+        // `#181318` is dark and very slightly red/blue-leaning, but overall
+        // near-black — nothing like the overworld's saturated sky blue.
+        assert!(f.color.iter().all(|c| *c < 0.02), "expected near-black: {:?}", f.color);
+        assert_eq!(f.color[0], f.color[2], "R and B channels match (#18__18)");
+    }
+
+    #[test]
+    fn nether_and_end_fog_are_disjoint_from_the_overworld_sky() {
+        // A regression pin for the actual bug this module exists to fix: the
+        // Nether/End must not silently fall back to inheriting the caller's
+        // sky-blue constant just because a dimension branch was missed.
+        let overworld_sky = [0.242_867, 0.462_361, 0.827_571]; // gpu::SKY_COLOR
+        assert_ne!(FogSettings::nether(16).color, overworld_sky);
+        assert_ne!(FogSettings::the_end(16, 0.75).color, overworld_sky);
     }
 }

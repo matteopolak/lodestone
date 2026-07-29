@@ -1826,3 +1826,55 @@ async fn boss_bars_insertion_ordered_and_mutated() {
 
     drop(handle);
 }
+
+/// A portal trip updates the dimension, not just a death-and-respawn.
+///
+/// `Respawned` is how the server reports **both**. Before this was folded, only
+/// `Login` set `player.dimension`, so it froze at whatever the player logged
+/// into and every dimension-conditioned rendering decision — the sky-light
+/// default in the mesher above all — kept answering "overworld" after a walk
+/// into the Nether. That reintroduced the too-bright-Nether bug by traversal
+/// rather than by fresh login, which is why it survived the original fix.
+///
+/// The login assertion is the control: it proves the field is genuinely being
+/// rewritten rather than having happened to start out as the expected value.
+#[tokio::test]
+async fn respawning_into_another_dimension_updates_the_read_model() {
+    const TRIGGER: i32 = 1;
+    let adapter = FakeAdapter::new()
+        .begin(vec![Directive::SetState(ConnectionState::Play)])
+        .on(
+            ConnectionState::Play,
+            TRIGGER,
+            vec![
+                Directive::Emit(ClientEvent::Login {
+                    entity_id: 7,
+                    game_mode: GameMode::Survival,
+                    dimension: dim("overworld"),
+                }),
+                Directive::Emit(ClientEvent::Respawned {
+                    dimension: dim("the_nether"),
+                    game_mode: GameMode::Survival,
+                    previous_game_mode: Some(GameMode::Survival),
+                    last_death_location: None,
+                }),
+            ],
+        );
+
+    let (handle, mut events, mut peer) = start(adapter);
+    peer.write_packet(TRIGGER, &[]).await.unwrap();
+    for _ in 0..2 {
+        events.recv().await.unwrap();
+    }
+
+    let player = handle.player();
+    assert_eq!(
+        player.dimension,
+        Some(dim("the_nether")),
+        "a respawn/portal trip must move the read model's dimension"
+    );
+    assert!(
+        player.alive,
+        "a respawn is exactly when the player stops being dead"
+    );
+}

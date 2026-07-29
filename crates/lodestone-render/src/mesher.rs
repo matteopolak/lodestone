@@ -63,12 +63,14 @@
 //!   `+1` translation from block- to light-section index.
 //! * **Never default absent sky light to 15 blindly.** `sky_at` resolves a
 //!   `Missing` section to `0`; the vanilla *above-the-world* sky default of `15`
-//!   is dimension- and heightmap-dependent (there is no sky light in the
-//!   nether/end), so it is applied by whoever knows the dimension via an explicit
-//!   policy, never coerced in the mesher — coercing absent sky to 15 is the
-//!   too-bright-nether bug. The [`UniformLight`] `sky_light: 15` bridge is a
-//!   stand-in for *absent* data, not a claim about any dimension, and is dropped
-//!   once real light samples.
+//!   is dimension- and heightmap-dependent (a dimension type's `has_skylight` is
+//!   `false` in the Nether — no sky light there at all — but **`true`** in the
+//!   End, same as the overworld), so it is applied by whoever knows the
+//!   dimension via an explicit policy, never coerced in the mesher — coercing
+//!   absent sky to 15 in the Nether is the too-bright-nether bug, and coercing
+//!   it to 0 in the End would be the mirror-image too-dark-end bug. The
+//!   [`UniformLight`] `sky_light: 15` bridge is a stand-in for *absent* data,
+//!   not a claim about any dimension, and is dropped once real light samples.
 //! * **`None` means unloaded, not dark.** A `None` from `section_light` is an
 //!   unloaded chunk / out-of-range section (defer the seam, re-mesh on load),
 //!   distinct from a present-but-dark section.

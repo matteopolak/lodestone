@@ -116,9 +116,11 @@ impl SectionLight for UniformLight {
 
 /// How to resolve *absent* (`Missing`) sky light for a section — the one light
 /// value `lodestone-world` deliberately cannot decide, because it depends on the
-/// dimension (there is no sky light in the nether/end) and on whether the
-/// section sits above the heightmap. The renderer's caller, which tracks the
-/// dimension, chooses this policy; the mesher never coerces a default itself.
+/// dimension (a dimension type's `has_skylight` — `false` in the Nether, but
+/// **`true`** in the End, same as the overworld; see `docs/dimension-visuals.md`)
+/// and on whether the section sits above the heightmap. The renderer's caller,
+/// which tracks the dimension, chooses this policy; the mesher never coerces a
+/// default itself.
 ///
 /// It applies **only** to `Missing` sky data. A section that *stores* a sky
 /// value — including an all-air nether section stored as `0` — is real data and
@@ -126,12 +128,14 @@ impl SectionLight for UniformLight {
 /// bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkyDefault {
-    /// Absent sky light is full daylight (`15`): an overworld section above the
-    /// heightmap that carried no light data of its own.
+    /// Absent sky light is full daylight (`15`): a section above the heightmap
+    /// in a dimension whose type has `has_skylight: true` (the overworld and
+    /// the End) that carried no light data of its own.
     Full,
-    /// Absent sky light is `0`: the nether/end (no sky light at all), or a
-    /// section below the heightmap. The nether-safe choice — absent nether sky
-    /// must stay `0`, never default *up* to 15.
+    /// Absent sky light is `0`: a dimension whose type has `has_skylight:
+    /// false` (the Nether — no sky light at all there, ever), or a section
+    /// below the heightmap. The nether-safe choice — absent nether sky must
+    /// stay `0`, never default *up* to 15.
     None,
 }
 
