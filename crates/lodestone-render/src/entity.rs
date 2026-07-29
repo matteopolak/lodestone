@@ -1108,6 +1108,20 @@ pub fn dropped_item_mesh(
 ) -> ModelMesh {
     let lift = item_hover_lift(quads, ground);
     let pose = dropped_item_matrix(position, age_ticks, bob_offset, ground, lift);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
+/// [`mesh_item_quads`] followed by the world-light override both
+/// [`dropped_item_mesh`] and [`held_item_mesh`] need: the baked geometry nails
+/// every vertex to [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) (an inventory slot
+/// is full-bright by definition), and a world-placed item is not, so the caller's
+/// own world sample overwrites it here, in one place, after meshing.
+fn mesh_item_quads_with_light(
+    quads: &[BakedQuad],
+    pose: Mat4,
+    gui_light: GuiLight,
+    light: u8,
+) -> ModelMesh {
     let mut mesh = mesh_item_quads(quads, pose, gui_light);
     for vertex in &mut mesh.vertices {
         vertex.light = light;
@@ -1337,11 +1351,7 @@ pub fn held_item_mesh(
     light: u8,
 ) -> ModelMesh {
     let pose = held_item_matrix(arm_transform, arm, baby, transform);
-    let mut mesh = mesh_item_quads(quads, pose, gui_light);
-    for vertex in &mut mesh.vertices {
-        vertex.light = light;
-    }
-    mesh
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
 /// The arm's forced `zRot` in `AvatarRenderer.renderHand`, in **radians**
