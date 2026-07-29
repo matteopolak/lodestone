@@ -78,16 +78,33 @@
 //! and the same gravity/drag constants — the rare server correction just
 //! nudges the local simulation back onto the authoritative track. This module
 //! does the same for entities whose `type_path` is [`ITEM_ENTITY_TYPE_PATH`]:
-//! [`Track::item_physics`] runs [`lodestone_entity::item_entity::ItemMotion`]
-//! (gravity `0.04`, air drag `0.98` — the vanilla constants, not
-//! reimplemented) once per real 20 Hz tick, and the render ease ([`Track::t`]
-//! / [`INTERP_WINDOW`]) is re-anchored off *that* simulated position each tick
-//! rather than off the sparse network packet. A server correction (when one
-//! arrives) resets the simulated position/velocity to the authoritative value
-//! rather than fighting it. While the last-known snapshot reports the item at
-//! rest on the ground, the simulation is paused rather than left to tunnel
-//! through a floor this module has no way to query — see
+//! [`Track::item_physics`] runs [`step_item_physics`]
+//! (gravity `0.04`, air drag `0.98` — [`lodestone_entity::item_entity`]'s
+//! vanilla constants, not reimplemented) once per real 20 Hz tick, and the
+//! render ease ([`Track::t`] / [`INTERP_WINDOW`]) is re-anchored off *that*
+//! simulated position each tick rather than off the sparse network packet. A
+//! server correction (when one arrives) resets the simulated
+//! position/velocity to the authoritative value rather than fighting it.
+//! While the last-known snapshot reports the item at rest on the ground, the
+//! simulation is paused rather than resimulated needlessly — see
 //! [`EntitySnapshot::on_ground`].
+//!
+//! # Collision: falling through the floor between corrections
+//!
+//! [`step_item_physics`] moves the item through
+//! [`lodestone_physics::move_entity`] — the same shared collision core the
+//! player uses, not a second collider — rather than
+//! [`lodestone_entity::item_entity::ItemMotion::tick`]'s bare `position +=
+//! velocity`. Without a collision query an airborne item only had the
+//! server's once-a-second correction to keep it out of the ground, and
+//! visibly sank through blocks in between; [`EntityInterpolator::update`]
+//! (the default, used by tests and any caller with no world) still has no
+//! world to query and keeps the old free-fall behaviour, but
+//! [`EntityInterpolator::update_with_view`] — what [`crate::sim::Sim`]
+//! actually drives — resolves real collision every tick. This is bounded by
+//! the `view`'s own coverage (the live path's is the loaded-chunk radius
+//! around the player), not global: a drop far outside that radius still
+//! free-falls until it is back in range, same as before this existed.
 //!
 //! Every other entity type is unaffected: [`Track::item_physics`] stays `None`
 //! and the original pure position ease runs exactly as before.
@@ -96,10 +113,15 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
-use lodestone_entity::item_entity::ItemMotion;
+use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
 use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
+};
+use lodestone_model::event::EquipmentSlot;
+use lodestone_physics::{
+    CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
+    move_entity,
 };
 use lodestone_render::AnimInput;
 
@@ -107,6 +129,120 @@ use lodestone_render::AnimInput;
 /// [`ItemMotion`] is expressed in.
 fn to_model_vec3(v: Vec3) -> lodestone_model::Vec3 {
     lodestone_model::Vec3::new(f64::from(v.x), f64::from(v.y), f64::from(v.z))
+}
+
+/// Converts an [`ItemMotion`]-space `f64` [`lodestone_model::Vec3`] into the
+/// [`Vec3d`] [`lodestone_physics::move_entity`] is expressed in. Both are plain
+/// `{x, y, z}` `f64` triples from different crates — this is a field copy, not a
+/// unit conversion.
+fn to_physics_vec3d(v: lodestone_model::Vec3) -> Vec3d {
+    Vec3d::new(v.x, v.y, v.z)
+}
+
+/// The inverse of [`to_physics_vec3d`].
+fn from_physics_vec3d(v: Vec3d) -> lodestone_model::Vec3 {
+    lodestone_model::Vec3::new(v.x, v.y, v.z)
+}
+
+/// A dropped item's collision hitbox: `EntityTypes.ITEM` is `sized(0.25F,
+/// 0.25F)`, and `ItemEntity` (not a `LivingEntity`) never overrides
+/// `Entity.maxUpStep()`, whose base implementation returns `0.0F` — items do
+/// not auto-step at all.
+const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
+
+/// `ItemEntity.getBlockPosBelowThatAffectsMyMovement()` — the block an item
+/// reads ground friction from. This overrides the base entity's
+/// `getOnPos(0.500001F)` with `getOnPos(0.999999F)`: an item's 0.25-tall
+/// hitbox sits *inside* the block it rests on, not straddling the block
+/// below, so the friction sample has to reach almost a full block down, not
+/// half of one. Reproduced here (rather than reused from
+/// `lodestone_physics::player::friction_block`) because that helper is
+/// `pub(crate)` to the physics crate *and* bakes in the different,
+/// generic-entity `0.500001F` offset — the wrong constant for an item even if
+/// it were reachable.
+fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
+    (
+        mth::floor(position.x),
+        mth::floor(position.y - f64::from(0.999_999_f32)),
+        mth::floor(position.z),
+    )
+}
+
+/// One tick of a dropped item's *own* client-run physics, run against a real
+/// [`CollisionView`] instead of [`ItemMotion::tick`]'s bare `position +=
+/// velocity`. Without this an airborne item only ever gets a floor from the
+/// server's own once-a-second correction (`EntityTypes.ITEM`'s
+/// `updateInterval(20)`) and visibly sinks through terrain in between — the
+/// gap the module docs on [`ItemPhysics`] call out.
+///
+/// Mirrors `ItemEntity.tick()`'s real order, traced against
+/// `net/minecraft/world/entity/item/ItemEntity.java` in the 26.2 decompile:
+/// gravity is subtracted from `velocity.y` *before* the move
+/// (`applyGravity()`); [`move_entity`] is vanilla's own
+/// `Entity.move(MoverType.SELF, deltaMovement)` — the single shared collider
+/// this crate must not fork, per the module's own architecture note — and it
+/// both commits the collided position and derives this tick's authoritative
+/// `on_ground` (not last tick's stale server-reported value, which is what
+/// `on_ground` held before this fix); drag is then applied to the
+/// *post-collision* velocity exactly as `ItemEntity.tick()` re-reads
+/// `getDeltaMovement()` after `move()`, using the real block friction under
+/// the item via [`CollisionView::friction`] rather than [`ItemMotion`]'s
+/// unqueried constant; and the `-0.5` landing bounce follows drag, matching
+/// vanilla's tail end of the branch exactly.
+///
+/// `profile` supplies only the land-bounce threshold's gravity term inside
+/// [`move_entity`] (relevant solely if the item ever rests on a bouncy block
+/// like slime) — items have their own gravity/drag constants
+/// ([`ITEM_GRAVITY`]/[`ITEM_AIR_DRAG`]) applied explicitly here, so passing
+/// the player's [`PhysicsProfile`] does not mix the two up for the fall
+/// itself, only for that one rare edge case.
+fn step_item_physics(sim: &mut ItemMotion, view: &dyn CollisionView, profile: &PhysicsProfile) {
+    // `ItemEntity.applyGravity()`, before the move.
+    sim.velocity.y -= ITEM_GRAVITY;
+
+    let mut motion = EntityMotion {
+        position: to_physics_vec3d(sim.position),
+        velocity: to_physics_vec3d(sim.velocity),
+        on_ground: sim.on_ground,
+        horizontal_collision: false,
+        stuck_speed_multiplier: Vec3d::ZERO,
+    };
+    // The shared collision core, not a second one — `MoveContext::default()`
+    // matches an item: never Slow Falling, never bounce-suppressing (that
+    // flag is the sneaking-player case, `LivingEntity`-only).
+    move_entity(&mut motion, ITEM_DIMENSIONS, view, profile, MoveContext::default());
+
+    // Drag on the post-collision velocity, exactly as `ItemEntity.tick()`
+    // scales `getDeltaMovement()` after `move()` returns.
+    let mut ground_friction = ITEM_AIR_DRAG;
+    if motion.on_ground {
+        let (fx, fy, fz) = item_friction_block(motion.position);
+        ground_friction *= f64::from(view.friction(fx, fy, fz));
+    }
+    motion.velocity.x *= ground_friction;
+    motion.velocity.z *= ground_friction;
+    motion.velocity.y *= ITEM_AIR_DRAG;
+    if motion.on_ground && motion.velocity.y < 0.0 {
+        motion.velocity.y *= -0.5;
+    }
+
+    sim.position = from_physics_vec3d(motion.position);
+    sim.velocity = from_physics_vec3d(motion.velocity);
+    sim.on_ground = motion.on_ground;
+}
+
+/// A [`CollisionView`] with no collision boxes anywhere — open air forever.
+///
+/// Backs [`EntityInterpolator::update`]'s no-world-known default so every
+/// existing caller (tests, and any future offline/no-net path) keeps the
+/// pre-collision free-fall behaviour unchanged. The live path does not use
+/// this — see [`EntityInterpolator::update_with_view`], which
+/// [`crate::sim::Sim`] drives with a real [`CollisionView`] built from the
+/// player's loaded chunks.
+struct OpenAir;
+
+impl CollisionView for OpenAir {
+    fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
 }
 
 /// Converts an [`ItemMotion`]-space `f64` [`lodestone_model::Vec3`] back into
@@ -177,6 +313,18 @@ pub struct EntitySnapshot {
     /// *id* to pick a model. The stack's `count` and data components are dropped
     /// at the boundary that builds this (`net::entity_snapshot`) — see the note
     /// there, since count is visible in vanilla.
+    ///
+    /// This is a `Reported<T>`-shaped field
+    /// (`lodestone_model::event::Reported`) in every way but its actual type:
+    /// it should be `Reported<ResourceLocation>`, naming "never reported" vs
+    /// "explicitly cleared" instead of nesting `Option`, but retyping it here
+    /// alone does not compile. The producer is `net::entity_snapshot` in
+    /// `crates/lodestone-shell/src/net.rs` (outside this change's scope),
+    /// which builds the nested-`Option` `item` local by matching on
+    /// `EntityView::item` — itself `Option<Option<ItemStack>>` in
+    /// `lodestone-client`, one crate further out. A follow-up that touches
+    /// `net.rs` (and, to go all the way to the wire, `lodestone-client`) in
+    /// the same pass as this field can finish the conversion.
     pub item: Option<Option<ResourceLocation>>,
     /// The entity's last-reported velocity in blocks per tick
     /// (`set_entity_motion`/`add_entity`), when the server has ever sent one.
@@ -193,6 +341,25 @@ pub struct EntitySnapshot {
     /// because this module has no world/collision query to know *where* the
     /// ground is — see the module docs.
     pub on_ground: bool,
+    /// What this entity is wearing and holding, keyed by slot, as
+    /// `SET_EQUIPMENT` last reported it.
+    ///
+    /// The inner `Option` is the *slot's* nesting, not the field's: a slot
+    /// **absent** from this list is "the server has never mentioned it", while a
+    /// slot present with `None` is an explicit "this slot is empty". That is
+    /// [`EntityView::equipment`](lodestone_client::EntityView::equipment)'s
+    /// contract preserved verbatim, and it is why this is a list of pairs rather
+    /// than a fixed-size array of `Option`s.
+    ///
+    /// The whole list is *accumulated server-side of this type*
+    /// (`lodestone_client::state` merges each update into the view and never
+    /// clears), so every snapshot carries the complete current set and
+    /// [`EntityInterpolator::update_with_view`] replaces its record wholesale —
+    /// unlike [`Self::item`], which arrives once and must never be cleared by
+    /// silence.
+    ///
+    /// Only `MainHand`/`OffHand` reach a pixel today; see [`EntityDraw::equipment`].
+    pub equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
 }
 
 /// The entity-type path a **dropped item** reports (`minecraft:item`).
@@ -223,6 +390,25 @@ pub struct EntityDraw {
     /// [`EntityInterpolator::set_item_stack`] for why that is currently every
     /// one of them.
     pub item: Option<ResourceLocation>,
+    /// What this entity is holding/wearing, narrowed to the slots that actually
+    /// have something in them: an entry here means "there is an item in this
+    /// slot", so the renderer needs no second `Option` check.
+    ///
+    /// **Only `MainHand` and `OffHand` can reach a pixel.** The renderer poses
+    /// those off the arm part matrix
+    /// ([`lodestone_render::entity::held_item_matrix`]) and deliberately leaves
+    /// the six armour/`Body`/`Saddle` slots unhandled rather than faking them:
+    /// vanilla draws armour from a *separate humanoid mesh set* baked at two
+    /// inflations (`HumanoidArmorModel`'s inner/outer `CubeDeformation`), plus
+    /// trim overlays and leather dye tinting. The `entity_models` corpus has 81
+    /// models and no armour layer at all, so there is no geometry to hang a
+    /// helmet on — an armour slot needs new meshes, not new plumbing. Passing
+    /// them through here anyway keeps the *data* honest and makes the gap
+    /// visible at the point of use.
+    ///
+    /// Order follows [`EquipmentSlot::ALL`] only by accident of what the server
+    /// sent; treat it as an unordered set.
+    pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
     /// Interpolated feet position in world space.
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
@@ -271,6 +457,26 @@ struct Track {
     /// `None` for every other entity type, which keeps the original pure
     /// position ease. See the module docs for why items need this.
     item_physics: Option<ItemPhysics>,
+    /// The occupied equipment slots, narrowed from
+    /// [`EntitySnapshot::equipment`]. Lives on the track rather than in a side
+    /// map (as [`EntityInterpolator::item_stacks`] does) precisely *because* it
+    /// is replaced wholesale every poll: there is no "reported once, then
+    /// silence" hazard to guard against, so there is nothing for a separate
+    /// map's `retain` to protect, and hanging it here means a despawn prunes it
+    /// for free.
+    equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+}
+
+/// Narrows a snapshot's per-slot equipment to the slots that actually hold an
+/// item — dropping both the never-reported slots (absent already) and the
+/// explicitly-empty ones, which draw nothing either way.
+fn occupied_equipment(
+    equipment: &[(EquipmentSlot, Option<ResourceLocation>)],
+) -> Vec<(EquipmentSlot, ResourceLocation)> {
+    equipment
+        .iter()
+        .filter_map(|(slot, item)| item.clone().map(|id| (*slot, id)))
+        .collect()
 }
 
 /// A dropped item's client-run physics: the same gravity/drag
@@ -287,8 +493,10 @@ struct ItemPhysics {
     /// look like a fresh "moved" event every frame.
     last_reported: Vec3,
     /// Whether the last-reported snapshot said the item is resting. The
-    /// simulation is paused while `true` (see the module docs on why: no
-    /// world query here means no way to know where a new floor is).
+    /// simulation is paused while `true` — a resting item does not need
+    /// resimulating every tick, and this avoids any drift between the local
+    /// collision result and the server's own resting position. See
+    /// [`step_item_physics`] for the (now collision-aware) airborne case.
     grounded: bool,
 }
 
@@ -418,6 +626,18 @@ impl EntityInterpolator {
         self.item_stacks.get(&entity_id)
     }
 
+    /// [`Self::update_with_view`] against [`OpenAir`] and a default
+    /// [`PhysicsProfile`] — i.e. the pre-collision behaviour, kept as the
+    /// default entry point for tests and any caller with no world to query.
+    ///
+    /// **Not what the live path uses.** [`crate::sim::Sim`] calls
+    /// [`Self::update_with_view`] directly with a real [`CollisionView`], so a
+    /// dropped item's fall actually stops at a floor — see that method's docs
+    /// and the module docs on why an item needs its own physics at all.
+    pub fn update(&mut self, snapshots: &[EntitySnapshot], dt: f32) {
+        self.update_with_view(snapshots, dt, &OpenAir, &PhysicsProfile::mc_1_21());
+    }
+
     /// Advance every track by `dt` seconds, then fold in this frame's snapshots.
     ///
     /// Entities absent from `snapshots` are dropped (despawned/out of range).
@@ -425,7 +645,20 @@ impl EntityInterpolator {
     /// new interpolation *from the current render pose*, so the mob never jumps.
     /// A snapshot that matches the current target only lets the existing ease
     /// run to completion.
-    pub fn update(&mut self, snapshots: &[EntitySnapshot], dt: f32) {
+    ///
+    /// `view`/`profile` feed only [`step_item_physics`] (every other entity is
+    /// a pure position ease and never touches either). `view` should cover
+    /// wherever a tracked item entity actually is — `Sim::live_collision`'s
+    /// 3×3-column-around-the-player snapshot is the intended source, so a
+    /// drop far outside that radius still free-falls with no floor until it
+    /// re-enters range, same as before this method existed.
+    pub fn update_with_view(
+        &mut self,
+        snapshots: &[EntitySnapshot],
+        dt: f32,
+        view: &dyn CollisionView,
+        profile: &PhysicsProfile,
+    ) {
         // Advance existing clocks first, so a snapshot that resets `t` to 0 this
         // frame starts the new window from exactly its previous render pose.
         for track in self.tracks.values_mut() {
@@ -445,7 +678,11 @@ impl EntityInterpolator {
                 // second (`ItemEntity`'s `updateInterval(20)`), so the arc has
                 // to come from here, not from easing toward a sparse packet.
                 // See the module docs. Paused while the last report says the
-                // item is resting (no world query here to know the floor).
+                // item is resting (no world query here to know the floor) —
+                // once `step_item_physics` derives its own authoritative
+                // `on_ground` every tick, only the *server's* report still
+                // gates whether the sim runs at all; the floor within a tick
+                // is now real collision, not a frozen flag.
                 if track.item_physics.as_ref().is_some_and(|p| !p.grounded) {
                     // Scoped so the mutable borrow of `item_physics` ends
                     // before `render_pos()` below needs to borrow all of
@@ -456,7 +693,7 @@ impl EntityInterpolator {
                             .item_physics
                             .as_mut()
                             .expect("checked Some above");
-                        physics.sim.tick();
+                        step_item_physics(&mut physics.sim, view, profile);
                         physics.sim.position
                     };
                     // Re-anchor exactly like a fresh authoritative snapshot
@@ -524,12 +761,20 @@ impl EntityInterpolator {
                             walk_pos: snap.feet,
                             age: 0.0,
                             item_physics: is_item.then(|| new_item_physics(snap)),
+                            equipment: occupied_equipment(&snap.equipment),
                         },
                     );
                 }
                 Some(track) => {
                     track.type_path.clone_from(&snap.type_path);
                     track.scale = snap.scale;
+                    // **Outside** the `moved || turned` gate below, deliberately.
+                    // Equipment changes with no movement at all — a mob picking up
+                    // a dropped sword, a plugin swapping a villager's hat, the
+                    // player's own hotbar switch mirrored back — and gating this on
+                    // motion would leave a stationary mob holding whatever it was
+                    // holding when it last took a step.
+                    track.equipment = occupied_equipment(&snap.equipment);
                     // A dropped item's own simulation moves `curr` every real
                     // tick (see the physics step above), so comparing against
                     // `track.curr` here would read as "moved" every single
@@ -606,6 +851,7 @@ impl EntityInterpolator {
                 pitch: t.render_pitch(),
                 scale: t.scale,
                 anim: t.render_anim((self.tick_accum / TICK_SECONDS).clamp(0.0, 1.0)),
+                equipment: t.equipment.clone(),
             })
             .collect()
     }
@@ -655,6 +901,7 @@ mod tests {
             item: None,
             velocity: None,
             on_ground: false,
+            equipment: Vec::new(),
         }
     }
 
@@ -901,6 +1148,84 @@ mod tests {
         assert!(p.abs() < 1.0, "half the window from -30 to 30 is ~0, was {p}");
     }
 
+    // ---- equipment -------------------------------------------------------
+
+    fn sword() -> ResourceLocation {
+        "minecraft:diamond_sword".parse().expect("valid item id")
+    }
+
+    fn shield() -> ResourceLocation {
+        "minecraft:shield".parse().expect("valid item id")
+    }
+
+    #[test]
+    fn equipment_reaches_the_draw_and_drops_the_empty_slots() {
+        let mut s = snap(1, Vec3::ZERO, 0.0);
+        s.equipment = vec![
+            (EquipmentSlot::MainHand, Some(sword())),
+            (EquipmentSlot::OffHand, Some(shield())),
+            // Explicitly empty: reported, but there is nothing to draw, so the
+            // draw list must not carry it.
+            (EquipmentSlot::Head, None),
+        ];
+        let mut interp = EntityInterpolator::new();
+        interp.update(std::slice::from_ref(&s), 0.016);
+        let draws = interp.draws();
+        assert_eq!(draws.len(), 1);
+        let eq = &draws[0].equipment;
+        assert_eq!(eq.len(), 2, "only the occupied slots reach the draw: {eq:?}");
+        assert!(eq.contains(&(EquipmentSlot::MainHand, sword())));
+        assert!(eq.contains(&(EquipmentSlot::OffHand, shield())));
+        assert!(
+            eq.iter().all(|(slot, _)| *slot != EquipmentSlot::Head),
+            "an explicitly-empty slot must not reach the draw"
+        );
+    }
+
+    #[test]
+    fn equipment_updates_on_a_mob_that_has_not_moved() {
+        // The specific defect this rules out: `type_path`/`scale` are folded
+        // unconditionally while position/yaw only re-anchor when the mob actually
+        // moved. Putting equipment inside that gate would mean a stationary mob
+        // handed a sword keeps empty hands until it takes a step, which is the
+        // common case for a `/give`-style test and for any mob standing still.
+        let mut s = snap(1, Vec3::new(4.0, 64.0, 4.0), 90.0);
+        let mut interp = EntityInterpolator::new();
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert!(interp.draws()[0].equipment.is_empty());
+
+        // Identical pose, new equipment.
+        s.equipment = vec![(EquipmentSlot::MainHand, Some(sword()))];
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert_eq!(
+            interp.draws()[0].equipment,
+            vec![(EquipmentSlot::MainHand, sword())],
+            "equipment must not be gated on movement"
+        );
+
+        // ...and a wholesale replacement can take it away again, still without
+        // moving. This is safe precisely because `EntityView::equipment` is the
+        // accumulated set, never a delta.
+        s.equipment = vec![(EquipmentSlot::MainHand, None)];
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert!(
+            interp.draws()[0].equipment.is_empty(),
+            "an explicit clear must disarm the mob"
+        );
+    }
+
+    #[test]
+    fn a_despawned_mob_leaves_no_equipment_behind() {
+        let mut s = snap(1, Vec3::ZERO, 0.0);
+        s.equipment = vec![(EquipmentSlot::MainHand, Some(sword()))];
+        let mut interp = EntityInterpolator::new();
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert_eq!(interp.draws()[0].equipment.len(), 1);
+        interp.update(&[], 0.016);
+        assert!(interp.is_empty(), "the track itself must be pruned");
+        assert!(interp.draws().is_empty());
+    }
+
     // ---- dropped items ---------------------------------------------------
 
     /// An item entity whose stack the server has not (yet) reported, and
@@ -917,6 +1242,7 @@ mod tests {
             item: None,
             velocity: None,
             on_ground: false,
+            equipment: Vec::new(),
         }
     }
 
@@ -1178,9 +1504,10 @@ mod tests {
     #[test]
     fn item_physics_is_paused_while_the_server_reports_it_grounded() {
         // Once a snapshot says the item is resting, the simulation must not
-        // keep integrating gravity — this module has no world/collision query
-        // to know where the real floor is, so free-running would tunnel the
-        // item through it. A grounded item should simply hold still.
+        // keep integrating gravity — a resting item should simply hold still
+        // rather than be resimulated (and possibly drift) every tick. See
+        // `item_pop_stops_at_a_real_floor_instead_of_sinking_through_it` below
+        // for the airborne, collision-aware case this is deliberately not.
         let mut interp = EntityInterpolator::new();
         let resting = Vec3::new(2.0, 63.0, 4.0);
         interp.update(
@@ -1198,6 +1525,117 @@ mod tests {
             (feet.y - resting.y).abs() < 1.0e-3,
             "a grounded item must hold its reported height, was {}",
             feet.y
+        );
+    }
+
+    // ---- item collision (the second reported defect) ---------------------
+
+    /// A single-block-thick floor at `y == floor_y`, everywhere in X/Z, and
+    /// nothing else — the minimal [`CollisionView`] needed to prove
+    /// [`step_item_physics`] actually stops a fall instead of free-falling
+    /// through it. Reuses `lodestone_physics`'s own `Aabb`/`collide`, not a
+    /// second collider: this only *describes* geometry, the sweep in
+    /// `step_item_physics` (via `move_entity`) does the resolving.
+    struct FlatFloor {
+        floor_y: i32,
+    }
+
+    impl CollisionView for FlatFloor {
+        fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<lodestone_physics::Aabb>) {
+            if y == self.floor_y {
+                out.push(lodestone_physics::Aabb::new(
+                    f64::from(x),
+                    f64::from(y),
+                    f64::from(z),
+                    f64::from(x) + 1.0,
+                    f64::from(y) + 1.0,
+                    f64::from(z) + 1.0,
+                ));
+            }
+        }
+    }
+
+    /// The reported defect: an item popped above a floor must come to rest
+    /// *on* that floor, not sink through it while waiting for the server's
+    /// next once-a-second correction (which, in this test, never arrives —
+    /// exactly the sparse-correction reality the module docs describe).
+    ///
+    /// This is the discriminating case `item_pop_follows_a_ballistic_arc_not_a_flat_ease`
+    /// cannot cover: that test asserts an apex exists in open air, never
+    /// asserting anything about a floor, so a build that regressed
+    /// `step_item_physics` back to `ItemMotion::tick`'s bare `position +=
+    /// velocity` would still pass it while items fell through every floor in
+    /// the game.
+    #[test]
+    fn item_pop_stops_at_a_real_floor_instead_of_sinking_through_it() {
+        let mut interp = EntityInterpolator::new();
+        let floor = FlatFloor { floor_y: 63 };
+        let profile = PhysicsProfile::mc_1_21();
+        let spawn = Vec3::new(0.5, 66.0, 0.5);
+        // A real pop velocity (`ItemEntity`'s zero-arg constructor draws
+        // `vy = 0.2`, small horizontal jitter), reported once and never again
+        // — no further snapshot arrives for the rest of the test, matching
+        // `updateInterval(20)`'s roughly-one-correction-per-second reality.
+        let vel = Vec3::new(0.02, 0.2, 0.0);
+        interp.update_with_view(
+            &[item_snap_moving(9, spawn, Some(vel), false)],
+            0.0,
+            &floor,
+            &profile,
+        );
+
+        let mut min_y = interp.draws()[0].feet.y;
+        // Two seconds of real flight time at 20 Hz, well past both the apex
+        // and the moment gravity alone would have carried an unresolved item
+        // through `floor_y` and out the bottom of the world. Re-sending the
+        // same stale snapshot every tick (rather than a fresh one) is what
+        // "no further correction arrives" looks like here — the track must
+        // not be dropped for want of a snapshot, and `last_reported` staying
+        // put is exactly what lets the physics-driven `curr` keep moving
+        // without a spurious "server moved it" re-anchor each frame.
+        for _ in 0..40 {
+            interp.update_with_view(
+                &[item_snap_moving(9, spawn, Some(vel), false)],
+                TICK,
+                &floor,
+                &profile,
+            );
+            min_y = min_y.min(interp.draws()[0].feet.y);
+        }
+        let final_feet = interp.draws()[0].feet;
+
+        assert!(
+            min_y >= floor.floor_y as f32 + 1.0 - 1.0e-3,
+            "the item's feet must never read below the floor's top surface \
+             ({}), got a minimum of {min_y} — it sank through",
+            floor.floor_y + 1
+        );
+        assert!(
+            (final_feet.y - (floor.floor_y as f32 + 1.0)).abs() < 1.0e-2,
+            "the item must come to rest sitting on the floor, was {}",
+            final_feet.y
+        );
+    }
+
+    /// Negative control for the test above: with [`OpenAir`] (what plain
+    /// [`EntityInterpolator::update`] uses) instead of a real floor, the same
+    /// pop must fall straight through `floor_y` — proving the floor in the
+    /// positive test is actually doing the stopping, not some incidental
+    /// damping in `step_item_physics` itself.
+    #[test]
+    fn without_a_collision_view_the_same_pop_falls_through_the_floor_height() {
+        let mut interp = EntityInterpolator::new();
+        let spawn = Vec3::new(0.5, 66.0, 0.5);
+        let vel = Vec3::new(0.02, 0.2, 0.0);
+        interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], 0.0);
+        for _ in 0..40 {
+            interp.update(&[item_snap_moving(9, spawn, Some(vel), false)], TICK);
+        }
+        let final_y = interp.draws()[0].feet.y;
+        assert!(
+            final_y < 63.0,
+            "the control must actually fall past the floor height (63) to \
+             prove the positive test's floor is load-bearing; got {final_y}"
         );
     }
 }

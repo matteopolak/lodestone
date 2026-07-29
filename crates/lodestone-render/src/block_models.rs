@@ -69,7 +69,8 @@ use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::tint::vanilla_tint_kind;
 use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
-    BlockStates, Direction, DisplayTransform, Element, Face, FirstWeight, GuiItemContext, GuiLight,
+    BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
+    GuiItemContext, GuiLight,
     IconPart, ItemIconBuilder, ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
     ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
 };
@@ -349,7 +350,23 @@ pub struct ItemGeometry {
     /// The model's `display.gui` transform (the isometric pose), verbatim from
     /// the JSON — the `/16` and vanilla's clamps are applied by
     /// [`display_matrix`](crate::display_matrix), not here.
+    ///
+    /// The same value as `display.get(DisplaySlot::Gui)`; kept for the GUI
+    /// callers that predate `display` and want exactly this slot.
     pub transform: DisplayTransform,
+    /// **Every** `display` slot of the model, so the *same* baked quads can be
+    /// posed as an inventory icon, a dropped item, a held item or a hat.
+    ///
+    /// This is the field that made the in-world item forms possible: before it,
+    /// only `gui` survived the asset boundary, so
+    /// [`crate::entity::BLOCK_ITEM_GROUND`] and its sibling had to name
+    /// `block/block`'s and `item/generated`'s `ground` numbers as constants and
+    /// pick between them by [`GuiLight`]. Prefer
+    /// [`crate::entity::ground_transform`], which reads this and falls back to
+    /// those constants only when the pack declared nothing.
+    ///
+    /// Verbatim JSON numbers, like `transform`.
+    pub display: DisplayTransforms,
     /// The GUI lighting mode: [`GuiLight::Side`] keeps the per-face directional
     /// constants, [`GuiLight::Front`] flattens them.
     pub gui_light: GuiLight,
@@ -362,6 +379,7 @@ struct ItemModelPart {
     item: ResourceLocation,
     model: ResourceLocation,
     transform: DisplayTransform,
+    display: DisplayTransforms,
     gui_light: GuiLight,
 }
 
@@ -375,6 +393,7 @@ struct ItemModelPart {
 struct ItemSpritePart {
     item: ResourceLocation,
     layers: Vec<SpriteLayer>,
+    display: DisplayTransforms,
 }
 
 /// Resolve every item definition in the pack stack and keep the ones whose GUI
@@ -420,6 +439,12 @@ fn collect_item_model_parts(
                 item: id.clone(),
                 model: model.clone(),
                 transform: *transform,
+                // `ItemIcon`-level rather than per-part: see `ItemIcon::display`
+                // for why. It is the *first drawable part's* map, and this loop
+                // keeps the first model part, so the two agree in every case
+                // that reaches a pixel — including the composite items noted
+                // below, where only the first part is baked either way.
+                display: icon.display,
                 gui_light: *gui_light,
             }),
             _ => None,
@@ -447,6 +472,7 @@ fn collect_item_model_parts(
             sprites.push(ItemSpritePart {
                 item: id.clone(),
                 layers: layers.clone(),
+                display: icon.display,
             });
         }
     }
@@ -969,6 +995,7 @@ impl BlockModels {
                 ItemGeometry {
                     quads,
                     transform: part.transform,
+                    display: part.display,
                     gui_light: part.gui_light,
                 },
             );
@@ -997,6 +1024,12 @@ impl BlockModels {
                     // a flat inventory icon fills its cell edge to edge while a
                     // block item (scale 0.625) does not.
                     transform: DisplayTransform::default(),
+                    // The real slots off `item/generated` (and `item/handheld`
+                    // for the tools): `ground` [0,2,0]/0.5,
+                    // `thirdperson_righthand`, `firstperson_righthand`, `head`,
+                    // `fixed`. Notably **no** `gui`, which is why `transform`
+                    // above is the identity and not read from here.
+                    display: part.display,
                     // Vanilla `ItemModelGenerator.guiLight() == FRONT`, matching
                     // `item/generated`'s own `"gui_light": "front"`. This is also
                     // what routes the drop pass to `GENERATED_ITEM_GROUND`

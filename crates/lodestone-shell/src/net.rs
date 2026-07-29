@@ -939,6 +939,13 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 /// "explicitly empty". A key that somehow fails `ResourceLocation` validation
 /// degrades to "not reported" rather than to "empty", so a malformed id can
 /// never masquerade as the server clearing the stack.
+///
+/// [`EntityView::equipment`] goes through the same narrowing — `EquipmentSlot`
+/// is a `lodestone-model` type, which `EntitySnapshot` *does* depend on (it is a
+/// plain data enum with no wire or version knowledge), so only the `ItemStack` is
+/// reduced to its key. Same `count`/`components` losses apply, and they are
+/// currently invisible for equipment: nothing renders a stack size or a dye
+/// colour in a mob's hand.
 fn entity_snapshot(view: EntityView) -> EntitySnapshot {
     let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
     let item = match view.item {
@@ -953,6 +960,31 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
                 .map(Some)
         }
     };
+    // `EntityView::equipment` is the *accumulated* per-slot state
+    // (`lodestone_client::state` merges each `set_equipment` update into it and
+    // never clears), so every poll carries the complete current set and the
+    // consumer can replace wholesale. The nesting is preserved exactly as the
+    // view documents it: a slot **absent** from the list is "the server has
+    // never mentioned it", a slot present with `None` is an explicit "this slot
+    // is empty". Collapsing the two would make an armourless mob
+    // indistinguishable from one whose armour the server has confirmed gone.
+    //
+    // A key that fails `ResourceLocation` validation drops the whole *entry*
+    // rather than degrading to `Some(slot, None)` — same rule as `item` above:
+    // a malformed id must read as "not reported", never as the server clearing
+    // the slot.
+    let equipment = view
+        .equipment
+        .iter()
+        .filter_map(|eq| match &eq.item {
+            None => Some((eq.slot, None)),
+            Some(stack) => {
+                lodestone_assets::ResourceLocation::new(stack.item.namespace(), stack.item.path())
+                    .ok()
+                    .map(|id| (eq.slot, Some(id)))
+            }
+        })
+        .collect();
     EntitySnapshot {
         id: view.entity_id,
         type_path: view.entity_type.path().to_string(),
@@ -978,6 +1010,12 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
             glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32)
         }),
         on_ground: view.on_ground,
+        // The second half of the same gap the velocity note above describes:
+        // `SET_EQUIPMENT` already decoded into `EntityView::equipment` and it was
+        // simply never read past this boundary, so `EntityInterpolator` had no way
+        // to know a zombie was holding a sword even though the wire data was
+        // sitting right here. Nothing downstream of this function could see it.
+        equipment,
     }
 }
 
@@ -1206,6 +1244,66 @@ mod tests {
             "a never-reported velocity must stay None, not collapse to zero"
         );
         assert!(snap.on_ground);
+    }
+
+    /// The same shape of gap as the velocity fix above, one field over:
+    /// `SET_EQUIPMENT` already folded into `EntityView::equipment` (see
+    /// `lodestone_client::state`'s `EntityEquipmentUpdate` arm) and this function
+    /// dropped it, so `EntityInterpolator` could never learn that a mob was
+    /// holding anything. Before this change `EntitySnapshot` had no such field at
+    /// all, which is why nothing downstream reported an error.
+    #[test]
+    fn entity_snapshot_carries_equipment_through() {
+        use lodestone_model::ItemStack;
+        use lodestone_model::event::{EntityEquipment, EquipmentSlot};
+        use std::str::FromStr;
+
+        let mut view = bare_entity_view(None, true);
+        view.equipment = vec![
+            EntityEquipment {
+                slot: EquipmentSlot::MainHand,
+                item: Some(ItemStack::new(
+                    lodestone_client::ResourceKey::from_str("minecraft:diamond_sword").unwrap(),
+                    1,
+                )),
+            },
+            // An explicit clear: present in the list, empty in the slot. This
+            // must survive as `Some(slot, None)`, not vanish.
+            EntityEquipment {
+                slot: EquipmentSlot::Head,
+                item: None,
+            },
+        ];
+
+        let snap = entity_snapshot(view);
+        assert_eq!(
+            snap.equipment.len(),
+            2,
+            "both an occupied and an explicitly-cleared slot must cross the boundary"
+        );
+        let main = snap
+            .equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::MainHand)
+            .expect("main hand survived");
+        assert_eq!(
+            main.1.as_ref().map(ToString::to_string).as_deref(),
+            Some("minecraft:diamond_sword")
+        );
+        let head = snap
+            .equipment
+            .iter()
+            .find(|(slot, _)| *slot == EquipmentSlot::Head)
+            .expect("head slot survived");
+        assert_eq!(
+            head.1, None,
+            "an explicitly-empty slot must stay present-and-empty, not be dropped"
+        );
+
+        // Control: a mob the server has said nothing about carries nothing, so a
+        // consumer cannot mistake "no data" for "empty hands confirmed".
+        let bare = entity_snapshot(bare_entity_view(None, true));
+        assert!(bare.equipment.is_empty());
     }
 
     /// The hermetic half of the entity-light contract: before login, the

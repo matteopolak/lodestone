@@ -19,7 +19,10 @@ use lodestone_render::{
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
-    entity::{dropped_item_mesh, ground_transform_for, item_bob_offset},
+    entity::{
+        Arm, dropped_item_mesh, first_person_arm_parts, first_person_arm_pose, ground_transform,
+        hand_projection, hand_transform, held_item_mesh, item_bob_offset, model_for_type,
+    },
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
@@ -28,6 +31,8 @@ use lodestone_render::{
 };
 
 use glam::Vec3;
+
+use lodestone_model::event::EquipmentSlot;
 
 use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 use crate::mesher::{SectionGeometry, SectionKey};
@@ -281,6 +286,17 @@ pub struct RenderStats {
     /// appears there, so without this counter a frame full of drops is
     /// indistinguishable from an empty one.
     pub item_drops_drawn: usize,
+    /// Items drawn in a mob's hand this frame (a `MainHand`/`OffHand` equipment
+    /// slot with baked geometry, on an entity whose rig has that arm). Counted
+    /// separately from `item_drops_drawn` for the same reason that exists: a
+    /// held item goes through the *model* pipeline, so it never shows up in
+    /// `entities_drawn`, and a silently-broken equipment chain would otherwise
+    /// look exactly like a server that sent no equipment.
+    pub held_items_drawn: usize,
+    /// Whether the first-person arm was drawn this frame. `false` means the
+    /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
+    /// real defect, not a quiet frame, because this pass is unconditional.
+    pub first_person_arm_drawn: bool,
 }
 
 #[derive(Debug)]
@@ -424,6 +440,20 @@ struct EntityRenderer {
     textures: HashMap<&'static str, wgpu::BindGroup>,
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
+    /// A **second** group-0 uniform, for the first-person arm pass.
+    ///
+    /// The arm is drawn in *camera space* with the projection alone — vanilla's
+    /// `renderItemInHand` cancels the view matrix against the model-view stack
+    /// (see [`hand_projection`]) — so its `view_proj` is a different matrix from
+    /// the world one every frame, and the same buffer cannot serve both.
+    ///
+    /// This is a second bind *group* over the pipeline's **existing** group-0
+    /// layout, not a fifth bind group: the entity shader still spends exactly
+    /// two (camera + texture), and the model shader is untouched. Adding a fifth
+    /// group anywhere would compile here on an M5 (8 groups) and crash at
+    /// startup on any adapter at wgpu's 4-group floor.
+    hand_cam_buffer: wgpu::Buffer,
+    hand_cam_bind_group: wgpu::BindGroup,
 }
 
 impl EntityRenderer {
@@ -472,6 +502,25 @@ impl EntityRenderer {
         );
         let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
 
+        // The arm pass's own group-0 uniform (see the field docs). Fog is
+        // disabled rather than shared: the arm sits ~0.7 blocks from the eye and
+        // fog begins at 0.75× the render distance, so a shared fog block could
+        // only ever contribute rounding — and vanilla likewise does not fog the
+        // hand. The *sky darken* lane is still rewritten each frame, because a
+        // permanently noon-lit arm over a dark world is exactly the "mobs are
+        // super bright at night" defect in miniature.
+        let hand_cam_buffer = entity_camera_buffer(
+            device,
+            EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
+            },
+        );
+        let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
+
         Self {
             pipeline,
             models,
@@ -479,6 +528,8 @@ impl EntityRenderer {
             textures,
             cam_buffer,
             cam_bind_group,
+            hand_cam_buffer,
+            hand_cam_bind_group,
         }
     }
 }
@@ -1263,9 +1314,16 @@ impl RenderState {
         let mut stats = RenderStats::default();
         let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
 
-        // Dropped items, meshed and uploaded before the pass for the same reason
-        // as everything else here (no buffer creation mid-pass).
-        let item_drop_mesh = self.prepare_item_drops(device, queue, camera, entities, &mut stats);
+        // Dropped items *and* items in mobs' hands, meshed and uploaded before
+        // the pass for the same reason as everything else here (no buffer
+        // creation mid-pass). Both are item models through the model pipeline,
+        // so they share one buffer and one draw call.
+        let item_mesh = self.prepare_item_geometry(device, queue, camera, entities, &mut stats);
+
+        // The first-person arm. Prepared here, drawn in its own pass at the end
+        // of the frame — see the note there for why it needs a second pass.
+        let first_person_arm = self.prepare_first_person_arm(device, queue, camera);
+        stats.first_person_arm_drawn = first_person_arm.is_some();
 
         // Build the mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass). It follows the target block's real model geometry;
@@ -1404,7 +1462,7 @@ impl RenderState {
                 // placed block is. Opaque and depth-writing, drawn alongside the
                 // mobs and before translucent water for the same reason they
                 // are (see the entity note above).
-                if let Some(mesh) = &item_drop_mesh {
+                if let Some(mesh) = &item_mesh {
                     pass.set_pipeline(&model.pipeline.pipeline);
                     pass.set_bind_group(0, &model.drop_cam_bind_group, &[]);
                     pass.set_bind_group(1, &model.atlas_bind_group, &[]);
@@ -1464,30 +1522,97 @@ impl RenderState {
                 self.outline.draw(&mut pass);
             }
         }
+
+        // ------------------------------------------------------------------
+        // The first-person arm: its own pass, with the depth buffer cleared.
+        // ------------------------------------------------------------------
+        //
+        // Vanilla does exactly this, and it is not an optimisation detail:
+        // `GameRenderer.renderLevel` calls
+        // `clearDepthTexture(mainRenderTarget.getDepthTexture(), 0.0)`
+        // immediately before `renderItemInHand`. Vanilla's depth is reversed-Z,
+        // so its `0.0` is *far*; ours is `[0,1]` DirectX-style, so the equivalent
+        // clear value is `1.0`. (This is the sign flip `CLAUDE.md` warns about,
+        // applied to a clear rather than a comparison.)
+        //
+        // Without the clear the arm would be occluded by any block within ~0.75
+        // blocks of the eye — standing in a doorway, or facing the block you are
+        // mining — because the arm genuinely *is* inside that geometry. The colour
+        // attachment loads rather than clears, so the world stays.
+        if let Some(arm) = &first_person_arm {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("first-person arm pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.entities.pipeline.pipeline);
+            // The *hand* camera uniform: `hand_projection` alone, because the arm
+            // pose is already camera-space. Binding the world one here would leave
+            // the arm sitting at the world origin.
+            pass.set_bind_group(0, &self.entities.hand_cam_bind_group, &[]);
+            pass.set_bind_group(1, arm.texture, &[]);
+            pass.set_vertex_buffer(0, arm.model.vertices.slice(..));
+            pass.set_index_buffer(arm.model.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (range, buffer) in &arm.parts {
+                pass.set_vertex_buffer(1, buffer.slice(..));
+                let end = range.index_start + range.index_count;
+                pass.draw_indexed(range.index_start..end, 0, 0..1);
+                stats.draw_calls += 1;
+            }
+        }
+
         queue.submit(std::iter::once(encoder.finish()));
 
         stats.vram_bytes = vram_bytes(stats.total_quads);
         stats
     }
 
-    /// Mesh this frame's dropped items into one world-space [`GpuModelMesh`],
-    /// and rewrite the drop pass's camera uniform.
+    /// Mesh this frame's **world item geometry** — dropped items *and* items in
+    /// mobs' hands — into one world-space [`GpuModelMesh`], and rewrite the
+    /// pass's camera uniform.
     ///
     /// Returns `None` — and draws nothing — when there is no vanilla model pass,
-    /// when no tracked entity is an item, or when no item entity has both a
-    /// known stack and baked geometry. That last case is vanilla's own
-    /// behaviour: `ItemEntityRenderer.submit` returns immediately on an empty
-    /// stack.
+    /// or when nothing on screen resolves to baked item geometry. For a drop that
+    /// last case is vanilla's own behaviour: `ItemEntityRenderer.submit` returns
+    /// immediately on an empty stack, and so does `ItemInHandLayer` on an empty
+    /// hand.
     ///
-    /// # One mesh, not one per drop
+    /// # One mesh, not one per item
     ///
-    /// Each drop's bob and spin are folded into its **vertex positions** by
-    /// [`dropped_item_mesh`], so unlike the mobs there is no per-instance matrix
-    /// to batch on and no shared geometry between two drops of different items.
-    /// Concatenating them into a single buffer is therefore both the simplest
-    /// and the cheapest option: one upload and one draw call per frame however
-    /// many items are on the ground, versus one of each per drop.
-    fn prepare_item_drops(
+    /// Each item's placement (a drop's bob and spin, a held item's arm chain) is
+    /// folded into its **vertex positions** by [`dropped_item_mesh`] /
+    /// [`held_item_mesh`], so unlike the mobs there is no per-instance matrix to
+    /// batch on and no shared geometry between two different items. Concatenating
+    /// them into a single buffer is therefore both the simplest and the cheapest
+    /// option: one upload and one draw call per frame however many items exist,
+    /// versus one of each per item.
+    ///
+    /// # Why held items are here and not in the entity pass
+    ///
+    /// An item is an *item model* — the same baked quads a hotbar slot uses —
+    /// not a cuboid part rig, so it cannot go through [`EntityPipeline`] however
+    /// closely it is attached to one. The only thing the entity side contributes
+    /// is the arm's world matrix, which is why this reads `part_transforms` out
+    /// of a freshly resolved instance rather than the other way round.
+    fn prepare_item_geometry(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -1500,6 +1625,7 @@ impl RenderState {
         let mut combined = ModelMesh::default();
         for draw in entities {
             if draw.type_path != ITEM_ENTITY_TYPE_PATH {
+                self.merge_held_items(model, draw, &frustum, &mut combined, stats);
                 continue;
             }
             // No stack reported (today: all of them — see
@@ -1517,7 +1643,11 @@ impl RenderState {
             ) {
                 continue;
             }
-            let ground = ground_transform_for(geometry.gui_light);
+            // The item's **own** `display.ground`, now that the asset layer
+            // carries every slot and not just `gui`. `ground_transform` falls
+            // back to the `GuiLight`-keyed vanilla constants only for a model
+            // chain that declares no `ground` at all.
+            let ground = ground_transform(&geometry.display, geometry.gui_light);
             combined.merge(&dropped_item_mesh(
                 &geometry.quads,
                 geometry.gui_light,
@@ -1544,6 +1674,205 @@ impl RenderState {
             }),
         );
         Some(mesh)
+    }
+
+    /// Build this frame's first-person arm draw, or `None` if the `player_wide`
+    /// rig, its texture, its GPU upload or its arm part is missing.
+    ///
+    /// Also rewrites the arm pass's group-0 uniform. That uniform's `view_proj`
+    /// is [`hand_projection`] — **the projection alone** — because
+    /// `GameRenderer.renderItemInHand` multiplies the pose stack by
+    /// `modelViewMatrix.invert()` while pushing `modelViewStack.mul(modelViewMatrix)`,
+    /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
+    /// rotation cancels exactly, leaving a camera-space pose. Feeding
+    /// `Camera::view_projection` here instead would leave the arm parked at the
+    /// world origin, visible only when the player stands on it.
+    ///
+    /// # Unconditional, and why that is right rather than lazy
+    ///
+    /// This is not gated on anything. `RenderState::render` is only reached
+    /// in-world (`app.rs` returns early for every menu screen) and the shell has
+    /// no third-person camera, so "first person, in a world" is exactly when this
+    /// function runs. Making it opt-in would have needed a setter on `&mut self`
+    /// and therefore an `app.rs` call — i.e. it would have shipped as another
+    /// zero-pixel island.
+    ///
+    /// # The three fidelity gaps, all of them missing *shell state*, not code
+    ///
+    /// * **The arm is always drawn, even holding an item.** Vanilla's
+    ///   `submitArmWithItem` draws the bare arm only when the main hand is
+    ///   `isEmpty()`, and otherwise draws the *item* (via
+    ///   `applyItemArmTransform`) with no arm. Choosing between them needs the
+    ///   local player's held stack, which never reaches [`RenderState`] — `render`
+    ///   receives only `&[EntityDraw]`, and the local player is not in it. So this
+    ///   renders vanilla's empty-hand case permanently.
+    /// * **`bobView` / `bobHurt` and the `xBob`/`yBob` view lag are absent.** All
+    ///   need per-tick player state the shell does not track (walk distance, hurt
+    ///   time, the two smoothed view angles). All are the identity standing still.
+    /// * **`equipProgress` is absent**, so the arm never dips and rises on a
+    ///   hotbar change: `inverseArmHeight` is `swapAnimationScale(item) * (1 -
+    ///   lerp(oHeight, height))` and the shell tracks neither height.
+    ///
+    /// The rig is `player_wide` unconditionally — the shell has no skin-model
+    /// signal, and `canonical_model_name` already maps `"player"` to it.
+    fn prepare_first_person_arm<'a>(
+        &'a self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+    ) -> Option<FirstPersonArm<'a>> {
+        const ARM: Arm = Arm::Right;
+
+        let entry = model_for_type("player")?;
+        let mesh = self.entities.models.get(entry.name)?;
+        let gpu = self.entities.gpu_models.get(entry.name)?;
+        let texture = self.entities.textures.get(entry.name)?;
+        let pose = first_person_arm_pose(mesh, ARM)?;
+
+        // The arm's light is the player's own lightmap sample, exactly as
+        // `renderItemInHand` passes `getPackedLightCoords(minecraft.player, …)`.
+        // Sampled at the eye rather than the feet: it is what the player is
+        // looking through, and the two only differ standing in a doorway.
+        let light = u32::from(self.entity_light.sample(camera.position));
+
+        let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> =
+            first_person_arm_parts(mesh, ARM)
+                .into_iter()
+                .filter_map(|index| {
+                    let range = *gpu.parts.get(index)?;
+                    if range.index_count == 0 {
+                        return None;
+                    }
+                    // One instance, and the *same* matrix for arm and sleeve —
+                    // `right_sleeve` is a `PartPose::ZERO` child of `right_arm`,
+                    // so they share it exactly.
+                    let buffer = upload_instances(device, &[pose], &[light])?;
+                    Some((range, buffer))
+                })
+                .collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        queue.write_buffer(
+            &self.entities.hand_cam_buffer,
+            0,
+            bytemuck::bytes_of(
+                &EntityCameraUniform {
+                    camera: CameraUniform {
+                        // Projection only — see this method's docs.
+                        view_proj: hand_projection(camera.aspect).to_cols_array_2d(),
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    },
+                    // No fog on the hand (vanilla does not fog it either, and at
+                    // 0.7 blocks it could contribute nothing), but the sky-darken
+                    // lane is still live so the arm dims with the world at night.
+                    fog: FogUniform::disabled(),
+                }
+                .with_sky_darken(self.sky_darken.value()),
+            ),
+        );
+
+        Some(FirstPersonArm {
+            model: gpu,
+            texture,
+            parts,
+        })
+    }
+
+    /// Merge whatever `draw` is holding into `combined`, posed off its own arm.
+    ///
+    /// Called for every non-item entity, so the early returns are the common
+    /// path: most mobs carry no equipment at all, and `EntityDraw::equipment` is
+    /// then an empty `Vec` and this costs one branch.
+    ///
+    /// # What is deliberately not handled
+    ///
+    /// * **Armour, `Body` and `Saddle`.** Skipped with a counter-free `continue`,
+    ///   not silently: see [`EntityDraw::equipment`] for why (there is no armour
+    ///   mesh in the corpus — it needs a whole new humanoid set baked at two
+    ///   inflations, plus trim and dye, which is a mesh job and not a plumbing
+    ///   one). Faking it by posing an *item* model at a chest slot would draw a
+    ///   floating chestplate icon, which is worse than nothing.
+    /// * **Rigs with no arm.** A creeper with a `MainHand` item (a plugin can do
+    ///   this) resolves no `right_arm` part, so nothing is drawn. Vanilla agrees:
+    ///   `ItemInHandLayer` is only attached to renderers whose model implements
+    ///   `ArmedModel`.
+    fn merge_held_items(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        if draw.equipment.is_empty() {
+            return;
+        }
+        // Cull on the holder, before doing any pose work: a mob behind the
+        // camera cannot show its sword. Two blocks of slack around the feet
+        // covers a tall mob plus the item's own reach.
+        if !frustum.intersects_aabb(
+            draw.feet - glam::Vec3::new(1.0, 0.5, 1.0),
+            draw.feet + glam::Vec3::new(1.0, 2.5, 1.0),
+        ) {
+            return;
+        }
+        // The arm matrices come from the same resolver — and therefore the same
+        // `AnimInput` — that `prepare_entities` puts on screen, so a held item can
+        // never be posed off a different pose than the arm the player sees. An
+        // entity type with no ported model resolves to `None` and holds nothing,
+        // which is also what happens to the mob itself.
+        let Some(instance) = self.entities.models.resolve(
+            &draw.type_path,
+            draw.feet,
+            draw.yaw,
+            draw.scale,
+            &draw.anim,
+        ) else {
+            return;
+        };
+        let Some(mesh) = self.entities.models.get(instance.model) else {
+            return;
+        };
+        // `net::entity_snapshot` maps `baby` onto a 0.5 uniform scale, which is
+        // the only baby signal that reaches this layer — the same test
+        // `entities.rs` already uses to pick `BABY_LIMB_SCALE`.
+        let baby = draw.scale < 1.0;
+        let light = self.entity_light.sample(draw.feet);
+
+        for (slot, id) in &draw.equipment {
+            // Every `Mob` returns `HumanoidArm.RIGHT` from `getMainArm()` (only
+            // a `Player` can be left-handed, and the wire never tells us), so
+            // main hand → right arm, off hand → left arm.
+            let arm = match slot {
+                EquipmentSlot::MainHand => Arm::Right,
+                EquipmentSlot::OffHand => Arm::Left,
+                // Armour/body/saddle: see this method's docs. Left unhandled on
+                // purpose rather than approximated.
+                _ => continue,
+            };
+            let Some(geometry) = model.items.get(id) else {
+                continue;
+            };
+            let Some(part) = mesh.skeleton.index_of(arm.part_name()) else {
+                continue;
+            };
+            let Some(arm_transform) = instance.part_transforms.get(part) else {
+                continue;
+            };
+            let transform = hand_transform(&geometry.display, arm, false);
+            combined.merge(&held_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                *arm_transform,
+                arm,
+                baby,
+                &transform,
+                light,
+            ));
+            stats.held_items_drawn += 1;
+        }
     }
 
     /// Resolve each interpolated entity into a renderable instance, frustum-cull
@@ -1627,6 +1956,19 @@ impl RenderState {
             })
             .collect()
     }
+}
+
+/// The first-person arm's draw for one frame: the uploaded `player_wide` mesh and
+/// texture (borrowed — they are uploaded once at startup), plus one
+/// single-instance buffer per drawn part.
+///
+/// Only the arm and its sleeve are listed. Both carry the *same* matrix, so this
+/// is two draw calls over one pose and not a pose per part.
+#[derive(Debug)]
+struct FirstPersonArm<'a> {
+    model: &'a GpuEntityModel,
+    texture: &'a wgpu::BindGroup,
+    parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)>,
 }
 
 /// One model type's uploaded per-part instance buffers for a frame. `parts[p]`
@@ -2163,6 +2505,7 @@ mod tests {
                 pitch: 0.0,
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
+                equipment: Vec::new(),
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -2176,6 +2519,7 @@ mod tests {
                 pitch: 0.0,
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
+                equipment: Vec::new(),
             },
         ];
 
@@ -2209,6 +2553,7 @@ mod tests {
         let mut mob_px = 0usize;
         let mut centre_px = 0usize;
         let mut corner_px = 0usize;
+        let mut arm_px = 0usize;
         for (i, px) in pixels.chunks_exact(4).enumerate() {
             let x = (i as u32) % w;
             let y = (i as u32) / w;
@@ -2220,9 +2565,20 @@ mod tests {
             if cx && cy && is_mob(px) {
                 centre_px += 1;
             }
+            // The **bottom-right** corner is excluded on purpose: that is where
+            // the unconditional first-person arm lives (`prepare_first_person_arm`
+            // → `first_person_arm_pose`, camera-space, roughly the right-hand 30%
+            // and bottom 30% of frame). This assertion is about the *pig* being
+            // centred, and folding the arm into it would turn a working feature
+            // into a red gate. The other three corners still have to stay sky, so
+            // the "mob smeared across the whole frame" defect is still caught.
+            let bottom_right = x >= w / 2 && y >= h / 2;
             let corner = (x < w / 8 || x >= 7 * w / 8) && (y < h / 8 || y >= 7 * h / 8);
-            if corner && is_mob(px) {
+            if corner && !bottom_right && is_mob(px) {
                 corner_px += 1;
+            }
+            if bottom_right && is_mob(px) {
+                arm_px += 1;
             }
         }
         let coverage = mob_px as f64 / (w * h) as f64;
@@ -2233,6 +2589,8 @@ mod tests {
         eprintln!("mob coverage    = {:.2}%", coverage * 100.0);
         eprintln!("centre mob px   = {centre_px}");
         eprintln!("corner mob px   = {corner_px}");
+        eprintln!("arm px (bot-rt) = {arm_px}");
+        eprintln!("arm drawn       = {}", stats.first_person_arm_drawn);
 
         // Two-sided: the pig must reach pixels (not a blank frame) but not fill
         // the screen (a broken clear or a mob glued to the camera), and it must
@@ -2255,6 +2613,24 @@ mod tests {
         assert_eq!(
             corner_px, 0,
             "the frame corners should stay sky, but {corner_px} corner px read as mob"
+        );
+
+        // The first-person arm, on the same frame and for free: it is drawn
+        // unconditionally in its own pass, so it must reach pixels in the
+        // bottom-right quadrant. `first_person_arm_drawn` distinguishes "the pass
+        // never ran" (a missing mesh/texture/part — a plumbing defect) from "it
+        // ran and rasterised nothing" (a wrong pose or a winding flip), which look
+        // identical from the pixel count alone.
+        assert!(
+            stats.first_person_arm_drawn,
+            "the first-person arm pass must run: player_wide's mesh, texture and \
+             arm part are all expected to exist"
+        );
+        assert!(
+            arm_px > 500,
+            "the first-person arm should fill a chunk of the bottom-right quadrant, \
+             only {arm_px} non-sky px there — a wrong camera-space pose parks it at \
+             the world origin, and an inverted winding culls every face"
         );
     }
 
@@ -2310,19 +2686,33 @@ mod tests {
             pitch: 0.0,
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
+            equipment: Vec::new(),
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the
         // model's single flat placeholder tint. Brightness scaling (lighting)
         // leaves the direction unchanged, so under the placeholder this is ~0; a
         // real multi-hue sheet pushes it up.
+        //
+        // **Left half of the frame only.** The first-person arm is drawn
+        // unconditionally into the bottom-right (see
+        // `prepare_first_person_arm`), textured from `player_wide` — a *different*
+        // model, so a different `model_tint` under the synthetic control. Its
+        // pixels would land in `off` and blow the `off_syn < 0.05` control clean
+        // open, making the gate red for a working feature. The zombie is centred
+        // at `x = w/2` and vertically stratified (skin / shirt / legs), so its
+        // left half carries every hue this gate is looking for, while the arm
+        // starts around `x = 0.77·w` — a wide margin.
         let off_hue_fraction = |pixels: &[u8]| -> (usize, f64) {
             let sky = sky_clear_bytes().map(f32::from);
             let tint = model_tint("zombie");
             let tv = glam::Vec3::new(tint[0] as f32, tint[1] as f32, tint[2] as f32).normalize();
             let mut mob = 0usize;
             let mut off = 0usize;
-            for px in pixels.chunks_exact(4) {
+            for (i, px) in pixels.chunks_exact(4).enumerate() {
+                if (i as u32) % w >= w / 2 {
+                    continue;
+                }
                 let c = glam::Vec3::new(px[0] as f32, px[1] as f32, px[2] as f32);
                 let d = (c.x - sky[0]).abs() + (c.y - sky[1]).abs() + (c.z - sky[2]).abs();
                 if d <= 60.0 {

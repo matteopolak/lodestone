@@ -101,6 +101,9 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
             age_ticks,
             ..AnimInput::REST
         },
+        // A dropped item entity carries no equipment; this gate is about the
+        // item's own ground pose, not a held-item layer.
+        equipment: Vec::new(),
     }
 }
 
