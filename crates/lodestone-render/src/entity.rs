@@ -181,6 +181,37 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
     corpus_names().iter().copied().find(|n| *n == type_path)
 }
 
+/// The [`entity_models`] entry name for a player's own body, chosen by skin
+/// model rather than the `"player"`-type-path default [`canonical_model_name`]
+/// falls back to.
+///
+/// `AvatarRenderer` (26.2's player renderer) picks between `player_wide` and
+/// `player_slim` per skin — a player's uploaded skin reports which model it
+/// wants — so the choice is genuinely per-player data, not a constant. Both
+/// rigs are already first-class [`entity_models`] entries (`player_wide` and
+/// `player_slim` both appear as top-level corpus names, not just as
+/// `canonical_model_name`'s hidden alias target), so a caller that already
+/// knows which skin a player wears can pass this straight through as a
+/// `type_path` — [`canonical_model_name`] resolves a literal `"player_wide"`/
+/// `"player_slim"` via its corpus-name fallback with no extra plumbing.
+///
+/// `canonical_model_name("player")` deliberately keeps resolving to
+/// `player_wide` alone: it has no per-instance signal to read, and the other
+/// callers that go through it (the first-person arm, a remote player with no
+/// skin data yet) want exactly that default.
+///
+/// No caller in this codebase has real skin-model data yet — see
+/// `RenderState::prepare_first_person_arm`'s "the shell has no skin-model
+/// signal" note in `lodestone-shell`, which is still true here. This function
+/// exists so that the day that signal arrives (from the tab-list player-info
+/// packet, decoded in the network layer), selecting the right rig for the
+/// local player's own third-person body — or a remote one — is a one-line
+/// change at the call site rather than new plumbing in this crate.
+#[must_use]
+pub fn player_model_name(slim: bool) -> &'static str {
+    if slim { "player_slim" } else { "player_wide" }
+}
+
 /// Which humanoid arm rig a model animates with — the render-crate side of
 /// vanilla's `AbstractZombieModel` overriding `HumanoidModel`'s arm swing.
 ///
@@ -2616,6 +2647,108 @@ mod tests {
                 world.determinant().signum(),
                 "hand_projection * arm pose must keep the world's winding"
             );
+        }
+    }
+
+    // ---- the deferred third-person body: `EntityInstance::part_transforms`,
+    // not `first_person_arm_pose` -- see that function's doc comment for why
+    // sharing a code path would silently give one of the two the other's pose.
+
+    fn player_slim_mesh() -> EntityMesh {
+        EntityMesh::from_named_model("player_slim", &lodestone_assets::entity::player_model(true))
+    }
+
+    #[test]
+    fn player_model_name_selects_wide_or_slim() {
+        assert_eq!(player_model_name(false), "player_wide");
+        assert_eq!(player_model_name(true), "player_slim");
+        // Both names must be real corpus entries in their own right (not just
+        // `canonical_model_name`'s hidden alias target), since a caller with
+        // real skin data passes this straight through as a `type_path`.
+        assert_eq!(model_for_type("player_wide").unwrap().name, "player_wide");
+        assert_eq!(model_for_type("player_slim").unwrap().name, "player_slim");
+    }
+
+    /// Vanilla draws two layers per limb: the base skin cube, and a slightly
+    /// `grow`n overlay (`hat`/`jacket`/`right_sleeve`/`left_sleeve`/
+    /// `right_pants`/`left_pants`) parented to it at `PartPose::ZERO`.
+    /// Omitting the overlay looks like a missing-skin-layer bug, not a missing
+    /// feature, so this pins that every overlay part is (a) present in the
+    /// baked mesh and (b) posed *exactly* onto its base part by the animated
+    /// third-person chain -- not just at rest, where a `ZERO`-pose child would
+    /// trivially agree with its parent even if the composition were wrong.
+    #[test]
+    fn outer_layer_parts_follow_their_base_part_exactly() {
+        for (name, mesh) in [("player_wide", player_mesh()), ("player_slim", player_slim_mesh())] {
+            let anim = AnimInput {
+                head_yaw_deg: 25.0,
+                head_pitch_deg: -15.0,
+                limb_swing: 3.7,
+                limb_swing_amount: 1.0,
+                attack_anim: 0.0,
+                age_ticks: 40.0,
+                aggressive: false,
+            };
+            let instance =
+                EntityInstance::new(name, &mesh, Vec3::new(1.0, 0.0, 2.0), 37.0, 1.0, &anim);
+            let pairs = [
+                ("head", "hat"),
+                ("body", "jacket"),
+                ("right_arm", "right_sleeve"),
+                ("left_arm", "left_sleeve"),
+                ("right_leg", "right_pants"),
+                ("left_leg", "left_pants"),
+            ];
+            for (base, overlay) in pairs {
+                let bi = mesh.skeleton.index_of(base).unwrap_or_else(|| panic!("{name}.{base}"));
+                let oi =
+                    mesh.skeleton.index_of(overlay).unwrap_or_else(|| panic!("{name}.{overlay}"));
+                let b = instance.part_transforms[bi].to_cols_array();
+                let o = instance.part_transforms[oi].to_cols_array();
+                for i in 0..16 {
+                    assert!(
+                        (b[i] - o[i]).abs() < 1e-5,
+                        "{name}: {overlay} must be posed exactly onto {base} (a PartPose::ZERO \
+                         child), element {i} differs: {} vs {}",
+                        b[i],
+                        o[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The whole-body third-person chain is
+    /// `entity_model_matrix(feet, yaw, scale) * Skeleton::pose(anim)[part]`
+    /// (see [`EntityInstance::new`]) -- the *same* `scale(-1,-1,1)`-carrying
+    /// placement matrix the module doc already proves has determinant `+1` for
+    /// any rigid part chain, just exercised over every part of a real player
+    /// mesh (including the outer-layer overlays) instead of asserted once in
+    /// prose. A negative determinant here would mean a player rendered
+    /// inside-out the moment a third-person camera exists to look at one.
+    #[test]
+    fn third_person_body_part_transforms_preserve_winding() {
+        for (name, mesh) in [("player_wide", player_mesh()), ("player_slim", player_slim_mesh())] {
+            for yaw in [0.0, 47.0, 90.0, 181.0, 300.0] {
+                let anim = AnimInput {
+                    limb_swing: yaw * 0.1,
+                    limb_swing_amount: 1.0,
+                    ..AnimInput::REST
+                };
+                let instance =
+                    EntityInstance::new(name, &mesh, Vec3::new(3.0, 5.0, -2.0), yaw, 1.0, &anim);
+                assert!(
+                    !instance.part_transforms.is_empty(),
+                    "{name}: expected a non-empty part chain"
+                );
+                for (i, part) in instance.part_transforms.iter().enumerate() {
+                    assert!(
+                        part.determinant() > 0.0,
+                        "{name} part {i} at yaw {yaw}: determinant must be positive, was {}",
+                        part.determinant()
+                    );
+                }
+            }
         }
     }
 

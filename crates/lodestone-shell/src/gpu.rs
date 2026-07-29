@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{
-    AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer,
-    ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas,
+    AnimInput, AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT,
+    DepthBuffer, ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas,
     GpuEntityModel, GpuMesh, GpuModelMesh, ItemGeometry, Mesh, ModelCameraUniform, ModelMesh,
     ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
@@ -22,6 +22,7 @@ use lodestone_render::{
     entity::{
         Arm, dropped_item_mesh, first_person_arm_parts, first_person_arm_pose, ground_transform,
         hand_projection, hand_transform, held_item_mesh, item_bob_offset, model_for_type,
+        player_model_name,
     },
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
@@ -295,8 +296,19 @@ pub struct RenderStats {
     pub held_items_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
-    /// real defect, not a quiet frame, because this pass is unconditional.
+    /// real defect, not a quiet frame, because this pass is unconditional
+    /// whenever [`third_person_body_drawn`](Self::third_person_body_drawn) is
+    /// `false`.
     pub first_person_arm_drawn: bool,
+    /// Whether [`RenderState::set_third_person_body_source`]'s closure
+    /// returned a body this frame — i.e. whether the local player's own
+    /// third-person avatar was folded into this frame's entity list at all
+    /// (not whether it survived frustum culling, which
+    /// [`entities_drawn`](Self::entities_drawn)/
+    /// [`entities_culled`](Self::entities_culled) already cover generically).
+    /// `false` for every caller today: nothing in this shell installs the
+    /// source yet.
+    pub third_person_body_drawn: bool,
 }
 
 #[derive(Debug)]
@@ -752,6 +764,131 @@ impl std::fmt::Debug for SkyDarkenSource {
     }
 }
 
+/// The local player's own third-person body for one frame: everything
+/// [`EntityInstance::new`](lodestone_render::EntityInstance::new) (via
+/// [`RenderState::prepare_entities`]) needs to pose it, plus which skin rig to
+/// draw it with.
+///
+/// This is deliberately *not* an [`EntityDraw`] itself, even though
+/// [`Self::into_draw`] immediately turns it into one. The local player is not
+/// a tracked network entity — `EntityInterpolator` in `entities.rs` never
+/// sees it, on purpose, the same fact [`RenderState::prepare_first_person_arm`]
+/// already documents ("`render` receives only `&[EntityDraw]`, and the local
+/// player is not in it"). A caller building one of these supplies raw local
+/// state (feet, body yaw, an [`AnimInput`]) rather than pretending to be a
+/// server snapshot.
+///
+/// # Why this reuses `EntityDraw` at all, rather than a parallel draw path
+///
+/// The first-person arm needed a genuinely separate pose function
+/// ([`first_person_arm_pose`]) because vanilla draws it from the arm's
+/// *rest* pose with one hand-picked rotation replacing the swing — never the
+/// animated `setupAnim` result a third-person view needs. The body has no
+/// such divergence: vanilla's own third-person player renderer is just
+/// `PlayerModel`/`HumanoidModel.setupAnim`, exactly what
+/// [`lodestone_render::entity_anim::Skeleton::pose`] already computes for
+/// every other humanoid mob. Reusing [`EntityDraw`] means the local player's
+/// body goes through the *exact* resolve → cull → pose → upload path
+/// ([`RenderState::prepare_entities`]) and the *exact* held-item path
+/// ([`RenderState::merge_held_items`]) every zombie and every remote player
+/// already does, instead of a second copy of either.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThirdPersonBodyState {
+    /// Feet position in world space — the same quantity [`EntityDraw::feet`]
+    /// carries for a network entity.
+    pub feet: Vec3,
+    /// Body yaw in degrees (Minecraft convention: `0` faces `+Z`).
+    pub body_yaw_deg: f32,
+    /// Per-part animation drive: head look, walk cycle, idle age. Build this
+    /// the way `entities.rs`'s `Track::render_anim` builds it for a network
+    /// entity — `head_yaw_deg`/`head_pitch_deg` **relative to the body**
+    /// (matching [`AnimInput::head_yaw_deg`]'s contract), `limb_swing`/
+    /// `limb_swing_amount` from the local player's own per-tick travel
+    /// distance through the same `WalkAnimation` shape entities.rs already
+    /// has, so a walking self-avatar animates identically to a walking
+    /// remote one.
+    pub anim: AnimInput,
+    /// Uniform render scale. `1.0` for a normal adult.
+    pub scale: f32,
+    /// Which rig to draw: `true` for `player_slim` ("Alex" arms), `false` for
+    /// `player_wide` ("Steve" arms) — see [`player_model_name`]. Nothing in
+    /// this codebase decodes real skin-model data yet (the same gap
+    /// [`RenderState::prepare_first_person_arm`] already notes for the arm),
+    /// so every caller has to pick a value today; `false` reproduces the
+    /// arm's existing default.
+    pub slim: bool,
+    /// What the local player is holding/wearing, in the shape
+    /// [`EntityDraw::equipment`] carries. Only `MainHand`/`OffHand` reach a
+    /// pixel, for the same reason they do not for any other entity — see
+    /// that field's doc comment.
+    pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+}
+
+/// A reserved id for [`ThirdPersonBodyState::into_draw`]'s synthetic
+/// [`EntityDraw`]. Real entity ids are server-assigned and never negative
+/// (`v770`'s entity id is a non-negative `VarInt`), so this can never collide
+/// with a tracked network entity.
+const LOCAL_PLAYER_DRAW_ID: i32 = -1;
+
+impl ThirdPersonBodyState {
+    /// Bridge into the [`EntityDraw`] shape [`RenderState::prepare_entities`]
+    /// and [`RenderState::prepare_item_geometry`] already know how to
+    /// resolve, cull, pose, and (for equipment) hang an item off of.
+    /// `type_path` is [`player_model_name`]'s output — a literal
+    /// `"player_wide"`/`"player_slim"`, which
+    /// `lodestone_render::entity::canonical_model_name` resolves through its
+    /// corpus-name fallback with no new plumbing on the render side.
+    fn into_draw(self) -> EntityDraw {
+        EntityDraw {
+            id: LOCAL_PLAYER_DRAW_ID,
+            type_path: player_model_name(self.slim).to_string(),
+            item: None,
+            equipment: self.equipment,
+            feet: self.feet,
+            yaw: self.body_yaw_deg,
+            // Absolute head yaw, for API parity with a network `EntityDraw`
+            // (see that field's doc comment) — nothing in `gpu.rs` actually
+            // reads it back; only `anim.head_yaw_deg` (relative) feeds the
+            // pose.
+            head_yaw: self.body_yaw_deg + self.anim.head_yaw_deg,
+            pitch: self.anim.head_pitch_deg,
+            scale: self.scale,
+            anim: self.anim,
+        }
+    }
+}
+
+/// Where this frame's third-person self-body comes from, polled once per
+/// frame exactly like [`EntityLightSource`]/[`SkyDarkenSource`].
+///
+/// There is no separate "camera mode" enum here on purpose: `f` returning
+/// `None` **is** first person, and `Some` **is** third person, so the
+/// caller's own camera-mode state is the only source of truth and this
+/// module never has to be told about it directly. Unset — the default, and
+/// every frame until a caller installs a source — reproduces exactly the
+/// behaviour before this existed: the first-person arm draws unconditionally
+/// and no extra entity is added to the frame. See
+/// [`RenderState::set_third_person_body_source`].
+#[derive(Default)]
+pub struct ThirdPersonBodySource(
+    Option<Box<dyn Fn() -> Option<ThirdPersonBodyState> + Send + Sync>>,
+);
+
+impl ThirdPersonBodySource {
+    #[must_use]
+    fn sample(&self) -> Option<ThirdPersonBodyState> {
+        self.0.as_ref().and_then(|f| f())
+    }
+}
+
+impl std::fmt::Debug for ThirdPersonBodySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("ThirdPersonBodySource")
+            .field(&if self.0.is_some() { "set" } else { "first-person" })
+            .finish()
+    }
+}
+
 /// Owns all GPU resources needed to render the world.
 #[derive(Debug)]
 pub struct RenderState {
@@ -782,6 +919,11 @@ pub struct RenderState {
     /// How bright the sky is *right now*. Permanent noon until the shell wires a
     /// world clock in via [`RenderState::set_sky_darken_source`].
     sky_darken: SkyDarkenSource,
+    /// Where the local player's own third-person body comes from, if a
+    /// caller has wired one in. Unset until the shell has both a
+    /// third-person camera and a way to describe the local player's pose —
+    /// see [`RenderState::set_third_person_body_source`].
+    third_person_body: ThirdPersonBodySource,
 }
 
 impl RenderState {
@@ -931,6 +1073,9 @@ impl RenderState {
             // Permanent noon until the shell installs a world clock; see
             // `set_sky_darken_source`.
             sky_darken: SkyDarkenSource::default(),
+            // No third-person camera exists yet; see
+            // `set_third_person_body_source`.
+            third_person_body: ThirdPersonBodySource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -1023,6 +1168,49 @@ impl RenderState {
     #[must_use]
     pub fn sky_darken(&self) -> f32 {
         self.sky_darken.value()
+    }
+
+    /// Install the source for the local player's own third-person body (see
+    /// [`ThirdPersonBodyState`]). Unset — the default — `render`/
+    /// `render_with_crack` behave exactly as they did before this existed:
+    /// the first-person arm draws unconditionally and no extra entity is
+    /// added.
+    ///
+    /// `f` is polled once per frame, exactly like
+    /// [`set_entity_light_source`](Self::set_entity_light_source). There is
+    /// deliberately no separate "camera mode" setter: return `None` while the
+    /// camera is first-person and `Some` only in a third-person mode, once
+    /// one exists — that closure *is* the camera-mode toggle referred to
+    /// throughout this module's docs. When `f` returns `Some` for a frame:
+    ///
+    /// * the state is resolved into an [`EntityDraw`]
+    ///   ([`ThirdPersonBodyState::into_draw`]) and folded into that frame's
+    ///   entity list, so it is posed by the exact same animated
+    ///   `Skeleton::pose` chain every tracked mob uses — never
+    ///   [`first_person_arm_pose`]'s rest-pose-plus-fixed-rotation chain —
+    ///   and any equipment on it renders through the ordinary held-item path,
+    ///   for free.
+    /// * the first-person arm pass is skipped for that frame. The two must
+    ///   never draw together: the arm's pose has no world position at all
+    ///   (it is built directly in camera space), so if it drew while a
+    ///   third-person camera was active it would stay glued wherever the
+    ///   camera looks, pasted over the body it is supposed to be attached to.
+    ///
+    /// # What this alone does not solve
+    ///
+    /// This is the render-side half only — `f`'s closure needs a feet
+    /// position, body yaw and an [`AnimInput`] for the local player to hand
+    /// back, and this shell has none of that today: no third-person camera
+    /// mode, no camera offset, and no local-player pose separate from the
+    /// camera's own eye. Wiring `f` is `app.rs`/`sim.rs` work — see this
+    /// method's crate docs for the exact spec — and is deliberately not done
+    /// here, so a third-person body stays at zero pixels until it lands, per
+    /// this repo's "nothing is done until something on screen changes" rule.
+    pub fn set_third_person_body_source(
+        &mut self,
+        f: impl Fn() -> Option<ThirdPersonBodyState> + Send + Sync + 'static,
+    ) {
+        self.third_person_body = ThirdPersonBodySource(Some(Box::new(f)));
     }
 
     /// Upload this frame's particle instances. Must run before
@@ -1307,22 +1495,51 @@ impl RenderState {
             self.outline.prepare(queue, &view_proj, block);
         }
 
+        let mut stats = RenderStats::default();
+
+        // The local player's own third-person body, if a caller has wired one
+        // in (see `set_third_person_body_source`). `None` — true for every
+        // caller today, since no third-person camera exists — reproduces this
+        // function's behaviour before this existed exactly: `entities` passes
+        // straight through unmodified and the arm draws unconditionally
+        // below.
+        let body_state = self.third_person_body.sample();
+        stats.third_person_body_drawn = body_state.is_some();
+        let mut entities_with_body: Vec<EntityDraw>;
+        let entities: &[EntityDraw] = match body_state {
+            Some(state) => {
+                entities_with_body = entities.to_vec();
+                entities_with_body.push(state.into_draw());
+                &entities_with_body
+            }
+            None => entities,
+        };
+
         // Resolve, frustum-cull and upload entity instances *before* the pass —
         // buffers can't be created mid-pass, and the entity camera uniform (no
         // section origin; the world position lives in each instance matrix) must
         // be written first too.
-        let mut stats = RenderStats::default();
         let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
 
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
         // creation mid-pass). Both are item models through the model pipeline,
-        // so they share one buffer and one draw call.
+        // so they share one buffer and one draw call. This reads the same
+        // (possibly body-extended) `entities` slice above, so the local
+        // player's own held item renders through `merge_held_items` exactly
+        // like a mob's does, for free.
         let item_mesh = self.prepare_item_geometry(device, queue, camera, entities, &mut stats);
 
-        // The first-person arm. Prepared here, drawn in its own pass at the end
-        // of the frame — see the note there for why it needs a second pass.
-        let first_person_arm = self.prepare_first_person_arm(device, queue, camera);
+        // The first-person arm. Skipped whenever a third-person body drew this
+        // frame — see `set_third_person_body_source`'s doc for why the two
+        // must never draw together. Prepared here, drawn in its own pass at
+        // the end of the frame — see the note there for why it needs a
+        // second pass.
+        let first_person_arm = if stats.third_person_body_drawn {
+            None
+        } else {
+            self.prepare_first_person_arm(device, queue, camera)
+        };
         stats.first_person_arm_drawn = first_person_arm.is_some();
 
         // Build the mining-crack overlay mesh before the pass (buffers can't be
@@ -2017,6 +2234,68 @@ mod tests {
     #[test]
     fn sky_reference_tracks_the_clear_colour() {
         assert_eq!(sky_clear_bytes(), [62, 118, 211]);
+    }
+
+    /// Hermetic (no GPU, no device): [`ThirdPersonBodyState::into_draw`] must
+    /// hand back exactly the [`EntityDraw`] shape [`RenderState::render_inner`]
+    /// folds into a frame's entity list, and that draw must actually resolve
+    /// through the real model corpus — including the outer-layer overlay
+    /// parts and a positive-determinant pose for every part — for *both*
+    /// skin rigs. [`EntityModelSet::load`]/`resolve` are pure CPU (baking
+    /// happens once at load, not per frame), so this needs no wgpu adapter.
+    #[test]
+    fn third_person_body_state_resolves_through_the_real_corpus() {
+        let models = EntityModelSet::load();
+        for slim in [false, true] {
+            let state = ThirdPersonBodyState {
+                feet: Vec3::new(1.0, 2.0, 3.0),
+                body_yaw_deg: 123.0,
+                anim: AnimInput {
+                    head_yaw_deg: 10.0,
+                    head_pitch_deg: -5.0,
+                    limb_swing: 2.0,
+                    limb_swing_amount: 1.0,
+                    attack_anim: 0.0,
+                    age_ticks: 15.0,
+                    aggressive: false,
+                },
+                scale: 1.0,
+                slim,
+                equipment: Vec::new(),
+            };
+            let expected_model = if slim { "player_slim" } else { "player_wide" };
+            let draw = state.clone().into_draw();
+            assert_eq!(draw.id, LOCAL_PLAYER_DRAW_ID);
+            assert_eq!(draw.type_path, expected_model);
+            assert_eq!(draw.feet, state.feet);
+            assert_eq!(draw.yaw, state.body_yaw_deg);
+            assert_eq!(draw.scale, state.scale);
+            assert_eq!(draw.anim, state.anim);
+            assert!(draw.item.is_none());
+            assert!(draw.equipment.is_empty());
+
+            let instance = models
+                .resolve(&draw.type_path, draw.feet, draw.yaw, draw.scale, &draw.anim)
+                .unwrap_or_else(|| panic!("{expected_model} must resolve through the corpus"));
+            assert_eq!(instance.model, expected_model);
+            let mesh = models.get(expected_model).expect("mesh");
+            for overlay in ["hat", "jacket", "right_sleeve", "left_sleeve", "right_pants", "left_pants"]
+            {
+                assert!(
+                    mesh.skeleton.index_of(overlay).is_some(),
+                    "{expected_model} is missing its outer-layer part {overlay:?} — an \
+                     omitted overlay looks like a missing-skin-layer bug, not a missing \
+                     feature"
+                );
+            }
+            for (i, part) in instance.part_transforms.iter().enumerate() {
+                assert!(
+                    part.determinant() > 0.0,
+                    "{expected_model} part {i}: determinant must be positive, was {}",
+                    part.determinant()
+                );
+            }
+        }
     }
 
     /// Headless GPU test: generate a world, mesh + upload every section, render

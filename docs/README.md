@@ -61,6 +61,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   census, the `correct_tool`/`requires_correct_tool` inversion trap, the
   `block_type_name` registry-id bug it fixed along the way, and how the shell
   resolves the held hotbar item through it.
+- [Entity state as ECS components](./entity-components.md) — the one component set
+  every entity's state lives in, the three-state `Reported<T>` encoding that keeps
+  "never reported" distinct from "explicitly cleared" (and a dropped item visible),
+  and the two folds that cannot be systems until the chunk world is a resource.
 - [Bevy ECS migration](./bevy-migration.md) — the staged plan for moving state onto
   `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
   the two sources of truth that already exist, what must stay a plain library, and
