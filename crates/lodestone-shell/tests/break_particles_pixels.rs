@@ -52,7 +52,7 @@ fn settled_sim() -> Sim {
 /// that block's volume, so a downward view guarantees the particles are on
 /// screen rather than behind the camera.
 fn look_down(sim: &mut Sim) {
-    sim.player.pitch = 89.0;
+    sim.player_mut().pitch = 89.0;
     sim.update_target(W as f32 / H as f32);
 }
 

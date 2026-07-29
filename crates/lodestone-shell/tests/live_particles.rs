@@ -65,7 +65,7 @@ fn server_particles_reach_the_emitter() {
     });
 
     let mut sim = Sim::new(live_config());
-    let demo_spawn = sim.player.position;
+    let demo_spawn = sim.player().position;
     sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
 
     // Drive the real join path until the server has placed us and chunks stream.
@@ -76,7 +76,7 @@ fn server_particles_reach_the_emitter() {
         if let Some(net) = sim.net()
             && net.world_dimensions().is_some()
             && !net.loaded_chunks().is_empty()
-            && sim.player.position != demo_spawn
+            && sim.player().position != demo_spawn
         {
             placed = true;
             break;
@@ -112,9 +112,9 @@ fn server_particles_reach_the_emitter() {
     // Cause particles: three of the exact types the briefing drove over RCON
     // and observed doing nothing (`flame`, `smoke`, `crit`), at the player's
     // current position so they land well inside the render cutoff.
-    let px = sim.player.position.x;
-    let py = sim.player.position.y + 1.0;
-    let pz = sim.player.position.z;
+    let px = sim.player().position.x;
+    let py = sim.player().position.y + 1.0;
+    let pz = sim.player().position.z;
     for kind in ["minecraft:flame", "minecraft:smoke", "minecraft:crit"] {
         let reply = rcon.cmd(&format!(
             "particle {kind} {px} {py} {pz} 0.2 0.2 0.2 0.01 20 force"

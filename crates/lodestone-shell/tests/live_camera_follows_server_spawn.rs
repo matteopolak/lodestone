@@ -103,7 +103,7 @@ fn camera_sits_over_the_streamed_world_not_the_demo_spawn() {
 
     // Drive the *real* join path: exactly what the windowed app does each frame.
     let mut sim = Sim::new(live_config());
-    let demo_spawn = sim.player.position;
+    let demo_spawn = sim.player().position;
     sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
 
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -127,7 +127,7 @@ fn camera_sits_over_the_streamed_world_not_the_demo_spawn() {
         // Stop early once we have a healthy world *and* the camera has moved off
         // the demo spawn (the fix landed) — or keep going to the deadline so a
         // pre-fix run gathers a full chunk set for a meaningful diagnostic.
-        if loaded_seen && sim.player.position != demo_spawn {
+        if loaded_seen && sim.player().position != demo_spawn {
             // One more settle pass so the loaded set is representative.
             std::thread::sleep(Duration::from_millis(500));
             break;
@@ -153,12 +153,12 @@ fn camera_sits_over_the_streamed_world_not_the_demo_spawn() {
     let world_cx = ((minx + maxx) as f64 / 2.0) * 16.0;
     let world_cz = ((minz + maxz) as f64 / 2.0) * 16.0;
 
-    let cam = sim.player.position;
+    let cam = sim.player().position;
     let cam_chunk = (chunk_of(cam.x), chunk_of(cam.z));
     let gap = ((cam.x - world_cx).powi(2) + (cam.z - world_cz).powi(2)).sqrt();
 
     eprintln!("demo spawn (pre-sync camera) = {demo_spawn:?}");
-    eprintln!("camera (sim.player.position) = {cam:?}  → chunk {cam_chunk:?}");
+    eprintln!("camera (sim.player().position) = {cam:?}  → chunk {cam_chunk:?}");
     eprintln!(
         "loaded chunk X range [{minx}..{maxx}], Z range [{minz}..{maxz}] \
          (centre world ~({world_cx:.0}, {world_cz:.0}), {} columns)",
