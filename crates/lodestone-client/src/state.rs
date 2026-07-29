@@ -28,7 +28,7 @@ use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::session::{
     SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList,
 };
-use lodestone_ecs::{EcsHandle, WorldTime};
+use lodestone_ecs::{ChunkWorld, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::TabList;
@@ -290,14 +290,20 @@ impl Default for SharedState {
         // Stage 3: `new_ingest_handle` carries `SessionPlugin`'s `NetIngest`
         // systems as well as `IngestPlugin`'s, so this `World` folds the session
         // read-model too. It needs one entity to hang those components off.
+        let world = Arc::new(RwLock::new(World::new()));
         let session = {
-            let mut world = ecs.write();
-            world.insert_resource(WorldTime::default());
-            lodestone_ecs::spawn_session(&mut world)
+            let mut world_ecs = ecs.write();
+            world_ecs.insert_resource(WorldTime::default());
+            // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
+            // *same* store `world_write` hands the adapter — one `Arc`, two
+            // names. A system or plugin in this `World` can therefore read
+            // chunks without a second copy existing anywhere.
+            world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
+            lodestone_ecs::spawn_session(&mut world_ecs)
         };
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
-            world: Arc::new(RwLock::new(World::new())),
+            world,
             notify: Arc::new(Notify::new()),
             ecs,
             session,
@@ -398,6 +404,21 @@ impl SharedState {
     /// woken. Callers must not hold it across an `.await`.
     pub(crate) fn world_write(&self) -> RwLockWriteGuard<'_, World> {
         self.world.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The client-owned chunk store, as the `Resource` handle
+    /// `docs/bevy-migration.md` §4.1(d) calls for.
+    ///
+    /// This is a **handle onto the same `World`** [`Self::world_write`] writes
+    /// decoded columns into, not a copy — `Arc::ptr_eq`-identical, and
+    /// [`crate::state::SharedState::default`] installs the same handle as a
+    /// resource in [`Self::ecs`]. A driver that adopts this (the shell does, at
+    /// [`crate::ClientHandle::chunk_world`]) is therefore *naming* the client's
+    /// store rather than mirroring it, which is what makes the Stage 4 authority
+    /// test — one chunk store in the process — mean anything.
+    #[must_use]
+    pub(crate) fn chunk_world(&self) -> ChunkWorld {
+        ChunkWorld::from_shared(Arc::clone(&self.world))
     }
 
     /// Records the player's own outgoing movement so subsequent look/step
@@ -914,4 +935,51 @@ fn entity_view(entity: lodestone_ecs::ecs::world::EntityRef<'_>) -> Option<Entit
                 Reported::Reported(item.0.clone())
             }),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Stage 4's authority test, on the client side.** The `ChunkWorld`
+    /// resource in the client's ECS `World`, the handle `ClientHandle::chunk_world`
+    /// hands out, and the store the version adapter writes decoded columns into
+    /// through `world_write` must all be the *same* `Arc` — not three views that
+    /// happen to agree.
+    ///
+    /// Asserted by pointer identity rather than by data, deliberately: two stores
+    /// holding equal chunks would satisfy any content comparison and would still be
+    /// the two-worlds defect this stage exists to delete.
+    #[test]
+    fn the_chunk_world_resource_and_the_adapters_write_target_are_one_store() {
+        let state = SharedState::default();
+        let handed_out = state.chunk_world();
+
+        let resource_is_the_same = {
+            let ecs = state.ecs.read();
+            handed_out.is_same_store(ecs.resource::<ChunkWorld>())
+        };
+        assert!(
+            resource_is_the_same,
+            "the ECS resource must be the same store `chunk_world()` hands out"
+        );
+
+        // And that store is the one `world_write` borrows: writing through the
+        // guard is visible through the handle without any propagation step.
+        assert_eq!(handed_out.len(), 0);
+        assert!(state.world_write().is_empty());
+        assert!(
+            Arc::ptr_eq(handed_out.shared(), &state.world),
+            "`chunk_world()` must clone the `Arc` `world_write` locks, not a copy of it"
+        );
+    }
+
+    /// The control for the test above: `is_same_store` really can tell two stores
+    /// apart, so the assertion is discriminating rather than trivially true.
+    #[test]
+    fn two_independent_states_do_not_share_a_chunk_store() {
+        let a = SharedState::default();
+        let b = SharedState::default();
+        assert!(!a.chunk_world().is_same_store(&b.chunk_world()));
+    }
 }

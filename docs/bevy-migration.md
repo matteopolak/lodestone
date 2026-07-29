@@ -688,6 +688,45 @@ a second writer and observing the failure.
 
 ### Stage 4 — the chunk world and meshing
 
+**Landed.** See [`chunk-world-resource.md`](./chunk-world-resource.md) for the
+shipped shape. Five places where the plan (or the brief handed to the stage) was
+wrong:
+
+- **§4.1 has two independent `World` unifications and they were being read as one.**
+  Clause (c) is the *bevy* `World` behind `Arc<parking_lot::RwLock<bevy World>>`;
+  clause (d) is the *chunk* store behind `Arc<RwLock<lodestone_world::World>>`.
+  Stage 4 is (d). Everything Stages 1–3 deferred "to §4.1" — `PlayerSnapshot`'s
+  vitals, the `Dead`/`ServerEntityId` duplicates, "a plugin adding a `GameTick`
+  system has to pick which `App`" — is deferred to **(c)**, and (d) does not touch
+  it. (c) needs `Sim`'s `EcsHandle` threaded through `NetClient::connect` in
+  `lodestone-shell/src/net.rs`; the reverse direction is not an alternative,
+  because `Sim.local`'s stability across `end_session` is load-bearing and a
+  `World` that changes identity mid-session would invalidate it.
+- **`CorePlugin`'s refusal to insert `WorldTime` is therefore *not* obsolete.**
+  That guard exists to stop two bevy `World`s becoming two diverging clocks, and
+  after Stage 4 there are still three. It stays until (c).
+- **The duplication was not two stores holding the same data** — it was two
+  stores, *exactly one of them ever populated*, and a three-term branch
+  (`vanilla_atlas && net && world_dimensions`) at five read sites to pick. Those
+  five had also drifted apart in three ways, one of which (vertical boundary
+  light) was a latent Nether bug. Collapsing them deleted the branch; the only
+  thing it genuinely encoded survives as one bool, `MeshPolicy::id_spaces_agree`.
+- **One negative control had to be pinned *away* from the unified store.**
+  `collide_against_live_world = false` reproduced "a live session colliding
+  against the offline world it does not have". With one store that becomes "collide
+  against the server's real terrain through the demo classifier", where every
+  non-air vanilla id reads as solid — the control would have stopped failing while
+  still looking correct. It now names an explicitly empty store.
+- **The stage's *reported* blockers were mostly not blocked on it.** The block
+  selection box needed no chunk-store change at all (`SharedHandle` +
+  `ClientHandle::block_at` + a `VersionAdapter` were already `'static` and
+  `Send + Sync`), and `CollisionSource` was the wrong seam for it — outline and
+  collision are different vanilla shape families and half of all 26.2 states
+  disagree. Item physics was already unblocked by Stage 2, as
+  [`local-player-components.md`](./local-player-components.md) said. The one thing
+  Stage 4 does unblock outright is a `'static` spatial store for anything that
+  needs to read blocks off the frame thread.
+
 **Moves:** `Arc<RwLock<lodestone_world::World>>` → a `Resource` (§4.1(d)). `Sim.scheduler`
 (`MeshScheduler`), `dirty_columns` (`sim.rs:342`), `pending_removals` (`sim.rs:310`),
 `vanilla_atlas`, `mesh_drops` (`sim.rs:328`) → resources plus `Update` systems that enqueue and

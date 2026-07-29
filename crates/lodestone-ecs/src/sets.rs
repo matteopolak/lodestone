@@ -46,6 +46,16 @@ pub enum FrameSet {
     Interpolate,
     /// Recompute the camera from the interpolated state.
     Camera,
+    /// Terrain mesh scheduling: enqueue snapshots for whatever went stale and
+    /// collect what the worker pool finished (Stage 4).
+    ///
+    /// Last in the frame because it depends on nothing else in it and because
+    /// that is where the pre-ECS driver ran it — after the net poll, so a column
+    /// that arrived this frame is meshed this frame. **It only enqueues and
+    /// drains**: the meshing itself stays on the worker pool
+    /// (`lodestone_shell::mesher::MeshScheduler`), so nothing here can make
+    /// presentation gate simulation (`docs/frame-pacing.md`).
+    Terrain,
 }
 
 /// Ordering within [`crate::Extract`].

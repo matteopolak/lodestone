@@ -19,12 +19,18 @@
 //! coordinate in `{0,1}`, mapping exactly onto each sprite rect. (A texture-array
 //! atlas would let greedy back in — noted in the report.)
 
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Arc, Mutex,
     mpsc::{self, Receiver, Sender},
 };
 use std::thread::{self, JoinHandle};
 
+use bevy_ecs::resource::Resource;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::system::{Res, ResMut};
+use lodestone_ecs::app::{App, Plugin};
+use lodestone_ecs::{ChunkWorld, FrameSet, Update};
 use lodestone_render::{
     BlockClassifier, BlockModels, ChunkSectionView, FluidCell, FluidKind, FluidMeshes,
     FluidSectionView, FluidSprites, Mesh, ModelMesh, ModelSectionView, SectionLight,
@@ -136,15 +142,68 @@ fn air_section() -> ChunkSection {
 /// Clone the 27-section neighbourhood around `key` out of the world, if the
 /// centre section actually holds geometry. Returns `None` when the centre is
 /// absent or entirely air (nothing to mesh).
+///
+/// The unbounded-height, overworld-sky form of [`snapshot_section_in`]. Kept as
+/// its own entry point because `crate::gpu`'s hermetic mesh gates call it with
+/// nothing but a world and a key.
 #[must_use]
 pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapshot> {
-    let centre_col = world.get(ChunkPos {
-        x: key.cx,
-        z: key.cz,
-    })?;
-    // Skip empty centres so we don't schedule work that produces no geometry.
-    let centre = centre_col.column.section(key.si)?;
-    if is_all_air(centre) {
+    snapshot_section_in(world, key, None, SkyDefault::Full)
+}
+
+/// Clone the 27-section neighbourhood around `key` out of `world`.
+///
+/// **The one snapshot implementation**, and that is the point of it: before
+/// Stage 4 (`docs/bevy-migration.md` §4.1(d)) there were two — one reading the
+/// shell's offline world directly, one reading the live client-owned world
+/// through `NetClient::sections_and_light_at` — and they had drifted apart in
+/// three ways, only one of which was deliberate. With one
+/// [`lodestone_ecs::ChunkWorld`] store there is one world to read, so the two
+/// collapse and the remaining parameters are the two things that genuinely are
+/// per-session facts rather than per-store ones:
+///
+/// * `section_count` — the dimension's column height, from
+///   [`lodestone_ecs::ChunkWorld::extent`]. `None` means "unbounded": an
+///   out-of-range section simply snapshots to nothing. **Blocks** are gated on
+///   it; **light** deliberately is not, because vanilla lights one section below
+///   and one above the build range and a column's topmost/bottom-most section
+///   samples into exactly those (see below).
+/// * `sky_default` — how an *absent* sky sample resolves, which depends on the
+///   connected dimension's `has_skylight` and cannot be read off the store. See
+///   [`sky_default_for_dimension`].
+///
+/// # One behaviour change, stated because it is not a refactor
+///
+/// The live path used to gate light on the same in-range test as blocks, so the
+/// two vertical boundary slots (`si == -1` and `si == section_count`) kept the
+/// full-bright bridge instead of reading the real boundary light section that
+/// [`World::section_light`] serves for exactly this purpose. The offline path
+/// never did that. This function follows the offline path — the correct one, per
+/// `section_light`'s own docs — which means the *only* observable difference is
+/// in a dimension whose absent sky is `0`: the Nether's build ceiling now reads
+/// its real sky `0` rather than the bridge's `15`. That direction is a fix, and
+/// it is **unverified against a live Nether** (the overworld measures 0 of 192
+/// sky sections `Missing`, so no overworld gate can see it either way).
+#[must_use]
+pub fn snapshot_section_in(
+    world: &World,
+    key: SectionKey,
+    section_count: Option<usize>,
+    sky_default: SkyDefault,
+) -> Option<SectionSnapshot> {
+    // A section index is in range when it is inside the column at all. `None`
+    // leaves the top open, which is what the offline world wants: its columns
+    // carry their own height and an out-of-range lookup yields nothing anyway.
+    let in_range =
+        |si: i32| si >= 0 && section_count.is_none_or(|count| (si as usize) < count);
+
+    // Check the centre before the 26 neighbour lookups: scheduling a mesh for a
+    // section with no geometry is the work this early return exists to skip.
+    if !in_range(key.si as i32) {
+        return None;
+    }
+    let centre = world.section(ChunkPos::new(key.cx, key.cz), key.si)?;
+    if is_all_air(&centre) {
         return None;
     }
 
@@ -153,30 +212,27 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
-                let pos = ChunkPos {
-                    x: key.cx + dx,
-                    z: key.cz + dz,
-                };
-                let col = world.get(pos);
+                let pos = ChunkPos::new(key.cx + dx, key.cz + dz);
                 let si = key.si as i32 + dy;
-                // `World::get` now hands back an owned `Arc<LoadedChunk>`, so the
-                // section clone must happen while that Arc is still alive inside
-                // the closure — returning a `&ChunkSection` would dangle.
-                let section = col.and_then(|c| {
-                    if si < 0 {
-                        None
-                    } else {
-                        c.column.section(si as usize).cloned()
-                    }
-                });
-                sections.push(section.unwrap_or_else(air_section));
+                // `World::section` hands back an owned `Arc<ChunkSection>`, so
+                // the clone that makes the snapshot `Send` happens here and the
+                // world is never locked while meshing. An absent or elided
+                // neighbour becomes lit air rather than an unlit void.
+                let section = if in_range(si) {
+                    world.section(pos, si as usize)
+                } else {
+                    None
+                };
+                sections.push(section.map_or_else(air_section, |s| (*s).clone()));
 
                 // Light is LIGHT-section indexed: block section `si` reads light
-                // section `si + 1` (light section 0 is the boundary below the
+                // section `si + 1` (light section 0 is the boundary *below* the
                 // world). This is an off-by-one *by design*, not a bug — do not
-                // "correct" it. `section_light` returns `None` for an absent
-                // column or an out-of-range light section; those slots keep the
-                // bridge in `mesh_snapshot`.
+                // "correct" it. Deliberately not gated on `in_range`: the two
+                // boundary light sections exist precisely so the top and bottom
+                // block sections can sample into them. `section_light` returns
+                // `None` for an absent column or a genuinely out-of-range light
+                // section; those slots keep the bridge in `mesh_snapshot`.
                 let light = if si + 1 < 0 {
                     None
                 } else {
@@ -191,110 +247,48 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
         key,
         sections,
         lights,
-        // The local world is the overworld: absent sky light is full daylight.
-        sky_default: SkyDefault::Full,
+        sky_default,
     })
 }
 
-/// Build a [`SectionSnapshot`] for `key` from the **live client world**, reading
-/// blocks and light for the whole 27-section neighbourhood under one lock via
-/// [`NetClient::sections_and_light_at`]. Returns `None` when the centre section
-/// holds no geometry (unloaded or all-air), exactly like [`snapshot_section`].
+/// Build a [`SectionSnapshot`] for `key` from the **live client world**.
 ///
-/// `section_count` is the column's block-section count from
-/// [`NetClient::world_dimensions`]; `key.min_y` must be the dimension's `min_y`.
-/// Light is **server-authoritative**: this never recomputes it (recomputing on
-/// multiplayer would overwrite the server's seam-complete cross-chunk light with
-/// a partial result — a divergence bug). Light-section indexing is the
-/// off-by-one-by-design `(n, n + 1)` the handle documents.
+/// Since Stage 4 this is a thin adapter over [`snapshot_section_in`]: the live
+/// world and the shell's world are one [`lodestone_ecs::ChunkWorld`] store, so
+/// there is no second gathering loop and no `(pos, block_index, light_index)`
+/// request batch — the read lock is taken once, here, by `ChunkWorld::read`, and
+/// released before any meshing. Light stays **server-authoritative**: nothing on
+/// this path ever recomputes it (recomputing on multiplayer would overwrite the
+/// server's seam-complete cross-chunk light with a partial result — a divergence
+/// bug).
 ///
-/// Only vertically in-range neighbours (`0 <= si + dy < section_count`) are
-/// requested; a neighbour above the top or below the bottom of the world is an
-/// air section with the full-bright bridge for light (open sky above is bright
-/// anyway, and below-world is rarely visible) — the same absent-neighbour policy
-/// [`mesh_snapshot`] applies at horizontal world edges.
+/// `section_count` is the column's block-section count; `key.min_y` must be the
+/// dimension's `min_y`. Both come from [`lodestone_ecs::ChunkWorld::extent`] on
+/// the shell's own path — this signature survives only because
+/// `tests/live_world_mesh.rs` drives the live mesh straight off a `NetClient`,
+/// and that file is not this stage's to change.
 ///
-/// The returned snapshot's [`SkyDefault`] follows the **connected dimension**
-/// (read off [`NetClient::shared_handle`]'s player snapshot, since
-/// [`NetClient::world_dimensions`] carries only vertical extent): dimensions
-/// whose `dimension_type` sets `has_skylight: true` default absent sky to full
-/// daylight, everything else defaults it to `0`. That is `minecraft:overworld`
-/// **and `minecraft:the_end`** — the End's own dimension type
-/// (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/the_end.json`)
-/// carries `"has_skylight": true`, same as the overworld; only
-/// `minecraft:the_nether`'s does not. Getting this wrong is invisible in the
-/// overworld — measured 0 of 192 sky sections `Missing` there — and renders
-/// the Nether full-bright (the bug this match originally fixed) or, the other
-/// direction, would render the End's genuinely sky-lit terrain artificially
-/// dark at every unresolved-neighbour edge.
+/// Returns `None` before login (no client handle published yet), and `None` when
+/// the centre section holds no geometry, exactly like [`snapshot_section`].
+///
+/// The returned snapshot's [`SkyDefault`] follows the **connected dimension** —
+/// see [`sky_default_for_dimension`], which carries the End-vs-Nether
+/// measurement.
 #[must_use]
 pub fn snapshot_section_live(
     net: &NetClient,
     key: SectionKey,
     section_count: usize,
 ) -> Option<SectionSnapshot> {
-    let idx = |dx: i32, dy: i32, dz: i32| ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-
-    // Gather requests only for vertically in-range neighbours; remember which of
-    // the 27 slots each result belongs to so the snapshot stays aligned. The
-    // request key is the client's `ChunkPos` (the network world's id type), which
-    // is distinct from `lodestone_world::ChunkPos` used for the local world.
-    let mut reqs: Vec<(lodestone_client::ChunkPos, usize, usize)> = Vec::with_capacity(27);
-    let mut slot_of_req: Vec<usize> = Vec::with_capacity(27);
-    for dx in -1..=1 {
-        for dy in -1..=1 {
-            for dz in -1..=1 {
-                let bsec = key.si as i32 + dy;
-                if bsec >= 0 && (bsec as usize) < section_count {
-                    let pos = lodestone_client::ChunkPos {
-                        x: key.cx + dx,
-                        z: key.cz + dz,
-                    };
-                    // Block section `bsec` reads light section `bsec + 1`
-                    // (off-by-one BY DESIGN — do not "align" it).
-                    reqs.push((pos, bsec as usize, (bsec + 1) as usize));
-                    slot_of_req.push(idx(dx, dy, dz));
-                }
-            }
-        }
-    }
-
-    let results = net.sections_and_light_at(&reqs);
-
-    // Absent slots (out-of-range vertical neighbours) start as lit air + bridge.
-    let mut sections: Vec<ChunkSection> = (0..27).map(|_| air_section()).collect();
-    let mut lights: Vec<Option<SectionLightData>> = (0..27).map(|_| None).collect();
-    for ((block, light), &slot) in results.into_iter().zip(slot_of_req.iter()) {
-        if let Some(block) = block {
-            // Clone the section out of the shared Arc so the snapshot is owned and
-            // `Send`; the live world is never locked while meshing.
-            sections[slot] = (*block).clone();
-        }
-        lights[slot] = light;
-    }
-
-    // Nothing to mesh if the centre is unloaded / all-air.
-    if is_all_air(&sections[idx(0, 0, 0)]) {
-        return None;
-    }
-
-    // `WorldDimensions` (the `section_count` parameter above) carries only
-    // `min_y`/`height`, not dimension identity, so this reads the connected
-    // dimension straight off the shared handle's player snapshot instead —
-    // the cheapest place this crate can reach it without growing that struct.
-    let sky_default = sky_default_for_dimension(
-        net.shared_handle()
-            .get()
-            .and_then(|h| h.player().dimension)
-            .as_ref(),
-    );
-
-    Some(SectionSnapshot {
-        key,
-        sections,
-        lights,
-        sky_default,
-    })
+    let handle = net.shared_handle();
+    let handle = handle.get()?;
+    // `WorldDimensions` carries only `min_y`/`height`, not dimension identity, so
+    // the sky policy reads the connected dimension off the player snapshot — the
+    // cheapest place this crate can reach it without growing that struct.
+    let dimension = handle.player().dimension;
+    let sky_default = sky_default_for_dimension(dimension.as_ref());
+    let store = handle.chunk_world();
+    snapshot_section_in(&store.read(), key, Some(section_count), sky_default)
 }
 
 /// Resolves the [`SkyDefault`] a *missing* neighbour sky sample should use for
@@ -325,7 +319,7 @@ pub fn snapshot_section_live(
 /// dimension falls back to `None`, same as it did before this function was
 /// extracted.
 #[must_use]
-fn sky_default_for_dimension(dimension: Option<&lodestone_client::DimensionId>) -> SkyDefault {
+pub fn sky_default_for_dimension(dimension: Option<&lodestone_client::DimensionId>) -> SkyDefault {
     match dimension {
         // Dimension not yet known (pre-login): keep the previous default.
         None => SkyDefault::Full,
@@ -720,10 +714,36 @@ enum Job {
 }
 
 /// A fixed pool of worker threads that mesh snapshots off the main thread.
-#[derive(Debug)]
+///
+/// # Why this is a `Resource`, and why that does *not* put meshing on the frame
+/// thread
+///
+/// Stage 4 (`docs/bevy-migration.md`) moves this off `Sim` and into the ECS
+/// `World`, so the enqueue and drain steps can be ordinary systems a plugin
+/// orders against. What did **not** change is where the work happens: the pool
+/// is still `worker_count` OS threads, [`submit`](Self::submit) still only sends
+/// down a channel, and [`drain`](Self::drain) still only `try_recv`s. A slow
+/// frame therefore delays the *upload* of finished geometry, never the meshing
+/// and never the simulation — `docs/frame-pacing.md`'s rule that presentation
+/// must not gate simulation is untouched, and it must stay that way: a client the
+/// server considers stalled is sent no chunks at all.
+///
+/// [`drain_blocking`](Self::drain_blocking) is the one method that *does* block
+/// the caller. It has exactly two callers, both outside the frame loop — the
+/// headless/one-shot render path and `Sim::end_session`'s flush — and it must
+/// stay that way.
+///
+/// `result_rx` is wrapped in a `Mutex` purely to make the type `Sync`, which
+/// `bevy_ecs`'s `Resource: Send + Sync + 'static` bound requires: an `mpsc`
+/// `Receiver` is `Send` but not `Sync`. The lock is uncontended (only the driver
+/// drains) and is never held across a `recv` that could block for long — see
+/// `drain_blocking`, which holds it for the whole blocking wait *by design*,
+/// since two concurrent drains of one result queue would interleave meshes
+/// arbitrarily.
+#[derive(Debug, Resource)]
 pub struct MeshScheduler {
     job_tx: Sender<Job>,
-    result_rx: Receiver<Meshed>,
+    result_rx: Mutex<Receiver<Meshed>>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
 }
@@ -791,7 +811,7 @@ impl MeshScheduler {
 
         Self {
             job_tx,
-            result_rx,
+            result_rx: Mutex::new(result_rx),
             workers,
             pending: 0,
         }
@@ -815,10 +835,11 @@ impl MeshScheduler {
     /// Collect any finished meshes without blocking.
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = Vec::new();
-        while let Ok(meshed) = self.result_rx.try_recv() {
-            self.pending -= 1;
+        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
+        while let Ok(meshed) = rx.try_recv() {
             out.push(meshed);
         }
+        self.pending -= out.len();
         out
     }
 
@@ -826,15 +847,14 @@ impl MeshScheduler {
     /// returning everything collected. Used by tests and headless runs.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         let mut out = Vec::new();
-        while out.len() < n && self.pending > 0 {
-            match self.result_rx.recv() {
-                Ok(meshed) => {
-                    self.pending -= 1;
-                    out.push(meshed);
-                }
+        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
+        while out.len() < n && self.pending > out.len() {
+            match rx.recv() {
+                Ok(meshed) => out.push(meshed),
                 Err(_) => break,
             }
         }
+        self.pending -= out.len();
         out
     }
 }
@@ -847,6 +867,290 @@ impl Drop for MeshScheduler {
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terrain meshing as ECS state (Stage 4)
+// ---------------------------------------------------------------------------
+
+/// Budget for [`heal_dirty_columns`]: how many stale-boundary columns to re-mesh
+/// per frame. Bounds the cost of a chunk-load burst — during a spiral load the
+/// same column is named by several arrivals and coalesced into one re-mesh, so a
+/// small budget is enough to keep seams closed without stalling a frame.
+pub const DIRTY_COLUMN_BUDGET: usize = 4;
+
+/// The two facts terrain meshing needs that the [`ChunkWorld`] store cannot
+/// answer, because they are properties of the *session* rather than of the
+/// chunks.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshPolicy {
+    /// How an **absent** sky sample resolves — the connected dimension's
+    /// `has_skylight`. See [`sky_default_for_dimension`].
+    pub sky_default: SkyDefault,
+    /// Whether the id space the worker pool's classifier was built for is the id
+    /// space the store actually holds.
+    ///
+    /// The demo palette and the vanilla registry are disjoint block-id spaces, so
+    /// meshing one with the other's classifier does not fail — it draws garbage,
+    /// or nothing. `false` is the "vanilla assets failed to load but we joined a
+    /// server anyway" session, which used to `return` silently on a `world.get`
+    /// miss and render an empty world with a clean log. It now counts into
+    /// [`TerrainMesh::drops`] and warns.
+    pub id_spaces_agree: bool,
+}
+
+impl Default for MeshPolicy {
+    fn default() -> Self {
+        Self {
+            sky_default: SkyDefault::Full,
+            id_spaces_agree: true,
+        }
+    }
+}
+
+/// All terrain-meshing state, as one `Resource`.
+///
+/// Stage 4 of `docs/bevy-migration.md` moves `Sim`'s `scheduler`,
+/// `dirty_columns`, `pending_removals`, `uploaded_sections` and `mesh_drops`
+/// here. **One** resource rather than five because they are one subsystem's
+/// state and every operation touches several at once: a column that snapshots to
+/// nothing pushes a removal *and* may count a drop, and a drained mesh records an
+/// upload. Five `ResMut`s would be five borrows of one invariant.
+///
+/// The worker pool is still a worker pool ([`MeshScheduler`]'s docs say why that
+/// matters). Systems here only enqueue and drain.
+#[derive(Resource, Debug)]
+pub struct TerrainMesh {
+    /// The off-thread worker pool.
+    pub scheduler: MeshScheduler,
+    /// Loaded columns whose *boundary* geometry is stale because a horizontal
+    /// neighbour arrived after they were meshed, coalesced.
+    ///
+    /// A section's mesh depends on its whole 3×3×3 neighbourhood (face culling,
+    /// AO, and — most visibly — fluid corner heights and flow faces), so loading
+    /// column P invalidates the boundary of P's eight horizontal neighbours too.
+    /// Meshing only P leaves every already-meshed neighbour believing there is air
+    /// across the seam: **water grows a falling "wall" at each chunk border** and
+    /// cross-chunk AO stays wrong. Re-meshing the eight eagerly on every arrival
+    /// would be 9× the work, so they coalesce here and drain on a budget.
+    pub dirty_columns: BTreeSet<(i32, i32)>,
+    /// Sections whose geometry vanished (all-air after an edit, or a column that
+    /// unloaded) and must be dropped from the GPU. Drained by the app each frame.
+    pub pending_removals: Vec<SectionKey>,
+    /// Every `SectionKey` this session has handed out for GPU upload and that has
+    /// not yet come back out through a removal.
+    ///
+    /// `RenderState`'s GPU-side section map has no session id in its key, so
+    /// without tracking this a quit-to-title followed by a reconnect would leave
+    /// the *previous* server's terrain rendered until a new chunk happened to land
+    /// on the exact same key.
+    pub uploaded_sections: HashSet<SectionKey>,
+    /// Count of loaded columns that failed to mesh (id spaces disagreed, or an
+    /// all-air centre on a column the server reports loaded). Surfaced in the
+    /// debug HUD next to `live_cols` so this defect class is a one-line diagnosis
+    /// instead of a play-test archaeology session. Should stay `0` in a healthy
+    /// session.
+    pub drops: u64,
+    /// The session facts meshing cannot read off the store.
+    pub policy: MeshPolicy,
+}
+
+impl TerrainMesh {
+    /// Build the state around a freshly spawned worker pool.
+    #[must_use]
+    pub fn new(scheduler: MeshScheduler) -> Self {
+        Self {
+            scheduler,
+            dirty_columns: BTreeSet::new(),
+            pending_removals: Vec::new(),
+            uploaded_sections: HashSet::new(),
+            drops: 0,
+            policy: MeshPolicy::default(),
+        }
+    }
+
+    /// Re-snapshot and re-schedule every section of the column at `(cx, cz)`.
+    ///
+    /// One implementation for both worlds, which is the point of Stage 4: before
+    /// it, this branched on `vanilla_atlas.is_some() && net.is_some() &&
+    /// world_dimensions().is_some()` and read one of two `World`s. Now there is
+    /// one store, so there is one path.
+    ///
+    /// An **unloaded** column is a silent no-op: it will be queued for real by its
+    /// own arrival, and counting it would drown the drop counter in noise. A
+    /// *loaded* column that yields no geometry at all is the "invisible blocks"
+    /// defect class and is counted and logged loudly.
+    pub fn mesh_column(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+        if !self.policy.id_spaces_agree {
+            self.drops += 1;
+            tracing::warn!(
+                cx,
+                cz,
+                branch = "id-space-mismatch",
+                "column skipped: the mesh classifier's block-id space is not the store's \
+                 (vanilla assets missing on a live session, or the reverse)"
+            );
+            return;
+        }
+        if !store.contains_column(cx, cz) {
+            return;
+        }
+        let Some(extent) = store.extent() else {
+            return;
+        };
+
+        // One lock for the whole column — the snapshots are owned and `Send`, so
+        // the guard is dropped before anything is submitted and the world is
+        // never locked while meshing.
+        let mut jobs: Vec<Result<SectionSnapshot, SectionKey>> =
+            Vec::with_capacity(extent.section_count);
+        {
+            let world = store.read();
+            for si in 0..extent.section_count {
+                let key = SectionKey {
+                    cx,
+                    cz,
+                    si,
+                    min_y: extent.min_y,
+                };
+                jobs.push(
+                    snapshot_section_in(
+                        &world,
+                        key,
+                        Some(extent.section_count),
+                        self.policy.sky_default,
+                    )
+                    .ok_or(key),
+                );
+            }
+        }
+
+        let mut meshed_any = false;
+        for job in jobs {
+            match job {
+                Ok(snap) => {
+                    self.scheduler.submit(snap);
+                    meshed_any = true;
+                }
+                // A single empty section is routine (sky/void sections have no
+                // geometry): drop it from the GPU, no alarm.
+                Err(key) => self.pending_removals.push(key),
+            }
+        }
+        if !meshed_any {
+            self.drops += 1;
+            tracing::warn!(
+                cx,
+                cz,
+                branch = "all-air-loaded-column",
+                "loaded column produced no geometry despite a dirty signal"
+            );
+        }
+    }
+
+    /// Re-snapshot and re-schedule exactly one section. A section that snapshots
+    /// to nothing is queued for GPU removal rather than left showing stale
+    /// geometry.
+    pub fn mesh_section(&mut self, store: &ChunkWorld, key: SectionKey, section_count: usize) {
+        let snapshot = {
+            let world = store.read();
+            snapshot_section_in(&world, key, Some(section_count), self.policy.sky_default)
+        };
+        match snapshot {
+            Some(snap) => self.scheduler.submit(snap),
+            None => self.pending_removals.push(key),
+        }
+    }
+
+    /// Queue the eight **loaded** horizontal neighbours of `(cx, cz)` for a
+    /// boundary re-mesh. The centre is meshed by the caller, immediately, for load
+    /// responsiveness; the neighbours coalesce.
+    pub fn mark_neighbours_dirty(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dz == 0 {
+                    continue;
+                }
+                let (nx, nz) = (cx + dx, cz + dz);
+                if store.contains_column(nx, nz) {
+                    self.dirty_columns.insert((nx, nz));
+                }
+            }
+        }
+    }
+
+    /// Collect finished meshes for the caller to upload, recording each key into
+    /// [`Self::uploaded_sections`].
+    pub fn drain_meshes(&mut self) -> Vec<Meshed> {
+        let meshes = self.scheduler.drain();
+        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
+        meshes
+    }
+
+    /// Block until every scheduled mesh is ready. Headless runs and tests only —
+    /// never the frame loop.
+    pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
+        let n = self.scheduler.pending();
+        let meshes = self.scheduler.drain_blocking(n);
+        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
+        meshes
+    }
+
+    /// Sections the app should remove from the GPU.
+    pub fn drain_removals(&mut self) -> Vec<SectionKey> {
+        let removed = std::mem::take(&mut self.pending_removals);
+        for key in &removed {
+            self.uploaded_sections.remove(key);
+        }
+        removed
+    }
+
+    /// Session teardown: discard in-flight jobs rather than letting them land in
+    /// whatever session comes next, and queue every section this session uploaded
+    /// for removal through the app's ordinary drain path.
+    pub fn end_session(&mut self) {
+        let pending = self.scheduler.pending();
+        if pending > 0 {
+            let _ = self.scheduler.drain_blocking(pending);
+        }
+        self.dirty_columns.clear();
+        self.drops = 0;
+        self.pending_removals.extend(self.uploaded_sections.drain());
+    }
+}
+
+/// `Update` / [`FrameSet::Terrain`]: re-mesh up to [`DIRTY_COLUMN_BUDGET`]
+/// columns whose boundary went stale.
+///
+/// This is the coalescing drain — the thing that stops water growing a falling
+/// wall at every chunk border. It enqueues snapshots onto the worker pool and
+/// returns; it never meshes anything itself.
+pub fn heal_dirty_columns(store: Res<ChunkWorld>, mut terrain: ResMut<TerrainMesh>) {
+    for _ in 0..DIRTY_COLUMN_BUDGET {
+        let Some((cx, cz)) = terrain.dirty_columns.pop_first() else {
+            return;
+        };
+        terrain.mesh_column(&store, cx, cz);
+    }
+}
+
+/// Registers Stage 4's terrain state and its one `Update` system.
+///
+/// Deliberately does **not** insert [`TerrainMesh`] itself: the worker pool has
+/// to be built with the classifier for whichever id space this session meshes,
+/// and that is the session owner's decision — the same rule
+/// `lodestone_ecs::CorePlugin` follows for `WorldTime` and
+/// `LocalPlayerPlugin` for the local-player entity. It does insert a default
+/// [`ChunkWorld`], so a harness that installs only this plugin has a store to
+/// read.
+#[derive(Debug, Default)]
+pub struct TerrainPlugin;
+
+impl Plugin for TerrainPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ChunkWorld>();
+        app.add_systems(Update, heal_dirty_columns.in_set(FrameSet::Terrain));
     }
 }
 
@@ -1227,6 +1531,28 @@ mod tests {
                 }
             }
         }
+
+        /// **Do not delete this, and do not let it drift from
+        /// [`SnapshotModelView::corner_light_at`].**
+        ///
+        /// `mesh_models` grew per-vertex smooth lighting in `1b8e46b`, which added
+        /// a *fourth* light hook to [`ModelSectionView`] —
+        /// [`ModelSectionView::corner_light_at`], sampling the two edge-adjacent
+        /// cells and the diagonal around each quad corner. Its trait default is
+        /// **full-bright `0xF0`**, for views that model no neighbourhood at all
+        /// (GUI items). The shipped view implements it; this probe did not, so
+        /// every AO corner read `0xF0` and each measurement below came out as
+        /// `round((centre + 15 + 15 + 15) / 4)` — 11 where 0 was expected, which is
+        /// exactly the `176` these three tests reported for four commits.
+        ///
+        /// That is the **world** species of vacuous test from `CLAUDE.md`: the
+        /// assertions were exemplary and the fixture had stopped containing the
+        /// structure the code under test needs. A `ProbeView` that omits a light
+        /// hook does not measure the shipped resolver, it measures a trait default.
+        fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+            let (sky, block) = self.light.levels_at(x, y, z);
+            (sky << 4) | block
+        }
     }
 
     /// The packed light byte carried by the quad of block `b` facing `dir`,
@@ -1450,10 +1776,36 @@ mod tests {
 
     /// The negative control, run rather than described: with the pre-fix
     /// own-cell rule restored **and nothing else changed**, the same placement
-    /// renders full-bright against dark neighbours. If this ever stops failing
+    /// renders brighter than the terrain it sits on. If this ever stops failing
     /// the way it does here, the assertion above has gone vacuous.
+    ///
+    /// # Smooth lighting diluted this control, and the numbers say by how much
+    ///
+    /// When this test was written `mesh_models` was flat-lit, so an own-cell face
+    /// carried its cell's stored light outright: a solid cell reads `0`, and the
+    /// defect was a 15-vs-0 contrast. `1b8e46b` added per-vertex smooth lighting,
+    /// which averages the face cell with three corner neighbours — so the centre
+    /// contributes only **a quarter** of the result and an opaque cell's `0` is
+    /// pulled up by whatever surrounds it. Measured here:
+    ///
+    /// | face | own-cell rule | shipped rule |
+    /// |---|---|---|
+    /// | just-placed block, open sky | `0xF0` | `0xF0` |
+    /// | established terrain beside it | `0xB0` (`round(45/4) = 11`) | `0xF0` |
+    /// | sunlit platform top, no placement | `0xB0` | `0xF0` |
+    /// | roofed platform top | `0x08` (`round(33/4) = 8`) | `0x0B` |
+    ///
+    /// So the defect is still there and still visible — a seam between a placed
+    /// block and its neighbours — but it is sky 11 vs 15, not 0 vs 15. Two claims
+    /// this control used to make are now simply **false** and are replaced rather
+    /// than patched: "own-cell reads 0 inside every opaque block" (it reads the
+    /// smoothed average) and "own-cell cannot tell a sunlit face from a roofed
+    /// one" (the corner samples leak that distinction back in). What is asserted
+    /// instead is the *relationship between the two rules* at the same faces,
+    /// which cannot be satisfied by a constant and cannot be satisfied by the
+    /// shipped rule.
     #[test]
-    fn control_own_cell_light_makes_the_placed_block_full_bright() {
+    fn control_own_cell_light_makes_the_placed_block_brighter_than_its_neighbours() {
         let after = platform_snapshot(Some([12, 7, 12]));
         let mesh = probe(&after, LightRule::OwnCell);
 
@@ -1466,29 +1818,45 @@ mod tests {
              block replaced — full bright"
         );
         assert_eq!(
-            neighbour, 0x00,
-            "control: own-cell sampling reads 0 inside every opaque block, so the \
-             established terrain beside it is at the shader's dark floor"
+            neighbour, 0xB0,
+            "control: own-cell sampling reads 0 inside the opaque neighbour, \
+             smoothed against its three sky-15 corners"
         );
-        assert_ne!(
-            placed_top, neighbour,
+        assert!(
+            placed_top > neighbour,
             "control must reproduce the reported defect: a just-placed block \
              brighter than the terrain it sits on"
         );
 
         // The whole world, not just the placement: under the old rule *every*
-        // solid cell reads 0, sunlit and shadowed alike. Measured on the bare
-        // platform, where the sunlit top face is not covered by the placement.
-        let bare = probe(&platform_snapshot(None), LightRule::OwnCell);
+        // solid face is darker than it should be, sunlit and roofed alike, because
+        // its own unlit cell is a quarter of every corner average. Measured on the
+        // bare platform, where the sunlit top face is not covered by the placement,
+        // and compared against the shipped rule at the same two faces — a
+        // rule-versus-rule assertion the shipped rule cannot satisfy.
+        let bare_own = probe(&platform_snapshot(None), LightRule::OwnCell);
+        let bare_face = probe(&platform_snapshot(None), LightRule::FaceNeighbour);
+        for (block, label) in [([12usize, 6, 12], "sunlit"), ([2, 6, 2], "roofed")] {
+            let own = quad_light(&bare_own, block, Direction::Up)
+                .expect("control: the platform top face must exist");
+            let shipped = quad_light(&bare_face, block, Direction::Up)
+                .expect("the platform top face must exist");
+            assert!(
+                own < shipped,
+                "control: the {label} top face must read darker under own-cell \
+                 sampling ({own:#04x}) than under the shipped face-neighbour rule \
+                 ({shipped:#04x})"
+            );
+        }
         assert_eq!(
-            quad_light(&bare, [12, 6, 12], Direction::Up),
-            Some(0x00),
-            "control: a sunlit top face reads its own (solid, unlit) cell"
+            quad_light(&bare_own, [12, 6, 12], Direction::Up),
+            Some(0xB0),
+            "control: sunlit top face, own cell 0 smoothed against three sky-15 corners"
         );
         assert_eq!(
-            quad_light(&bare, [12, 6, 12], Direction::Up),
-            quad_light(&bare, [2, 6, 2], Direction::Up),
-            "control: own-cell sampling cannot tell a sunlit face from a roofed one"
+            quad_light(&bare_own, [2, 6, 2], Direction::Up),
+            Some(0x08),
+            "control: roofed top face, own cell 0 smoothed against three block-11 corners"
         );
     }
 }
