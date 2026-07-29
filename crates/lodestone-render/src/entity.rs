@@ -48,7 +48,7 @@ use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
 
 use crate::camera::Frustum;
-use crate::entity_anim::{AnimInput, HumanoidArms, Skeleton};
+use crate::entity_anim::{AnimInput, HandPoseOverride, HumanoidArms, Skeleton};
 use crate::item_render::{UNITS_PER_BLOCK, display_matrix, display_matrix_for_hand};
 use crate::models::{ModelMesh, ModelVertex, mesh_item_quads};
 
@@ -201,6 +201,21 @@ pub fn humanoid_arms_for(model_name: &str) -> HumanoidArms {
     }
 }
 
+/// Which [`HandPoseOverride`] a model's `translateToHand` needs, keyed by the
+/// same [`entity_models`] name [`humanoid_arms_for`] reads. The five corpus
+/// models with an override; see [`HandPoseOverride`] and
+/// `held_item_matrix`'s doc comment for the source table this was read from.
+#[must_use]
+pub fn hand_pose_override_for(model_name: &str) -> HandPoseOverride {
+    match model_name {
+        "skeleton" | "stray" | "wither_skeleton" => HandPoseOverride::PivotShiftTexels(1.0),
+        "player_slim" => HandPoseOverride::PivotShiftTexels(0.5),
+        "vex" => HandPoseOverride::Vex,
+        "allay" => HandPoseOverride::Allay,
+        _ => HandPoseOverride::Structural,
+    }
+}
+
 /// The in-jar sheet path for a corpus texture reference (`"entity/zombie/zombie"`
 /// → `"assets/minecraft/textures/entity/zombie/zombie.png"`).
 fn sheet_path(reference: &str) -> &'static str {
@@ -292,6 +307,11 @@ pub struct EntityMesh {
     pub local_min: Vec3,
     /// Local-space AABB maximum (model frame, blocks), at rest.
     pub local_max: Vec3,
+    /// This model's `translateToHand` override, if vanilla's subclass departs
+    /// from `HumanoidModel`'s. See [`HandPoseOverride`] and
+    /// [`hand_pose_override_for`]; consumed by [`EntityInstance::new`] to fill
+    /// [`EntityInstance::hand_transforms`].
+    pub hand_override: HandPoseOverride,
 }
 
 impl EntityMesh {
@@ -408,6 +428,7 @@ impl EntityMesh {
             skeleton,
             local_min,
             local_max,
+            hand_override: hand_pose_override_for(model_name),
         }
     }
 
@@ -448,6 +469,20 @@ pub struct EntityInstance {
     /// `transform * part_matrix`. Drawing part `p`'s index range instanced over
     /// `part_transforms[p]` is what makes a limb swing.
     pub part_transforms: Vec<Mat4>,
+    /// The `entity → world` `translateToHand` matrix for `[Arm::Right,
+    /// Arm::Left]`, honoring this model's [`HandPoseOverride`] — `None` for an
+    /// arm the model doesn't have.
+    ///
+    /// **Prefer this over indexing `part_transforms` by
+    /// `skeleton.index_of(arm.part_name())` when placing a held item.** For
+    /// [`HandPoseOverride::Structural`] the two are numerically identical, but
+    /// for the five corpus models with a real override they are not, and
+    /// cannot be made to be: the override is scoped to `translateToHand`
+    /// alone, while `part_transforms[arm]` is shared with the whole-body
+    /// instanced draw and also places the arm's own visible mesh. See
+    /// [`HandPoseOverride`]'s doc comment for why folding the override into
+    /// `part_transforms` would be a new bug, not a fix.
+    pub hand_transforms: [Option<Mat4>; 2],
     /// World-space AABB minimum.
     pub aabb_min: Vec3,
     /// World-space AABB maximum.
@@ -481,14 +516,34 @@ impl EntityInstance {
             .into_iter()
             .map(|part| transform * part)
             .collect();
+        // `false`/`true` here is `Arm::Right`/`Arm::Left`'s own `is_left()` —
+        // spelled out rather than iterating `[Arm::Right, Arm::Left]` because
+        // `Arm` is defined below this impl and `entity_anim::Skeleton` takes
+        // the mirror sign as a bare bool, not this crate's `Arm` type.
+        let hand_transforms = [false, true].map(|left| {
+            mesh.skeleton
+                .translate_to_hand(anim, left, mesh.hand_override)
+                .map(|local| transform * local)
+        });
         EntityInstance {
             model,
             transform,
             part_transforms,
+            hand_transforms,
             aabb_min,
             aabb_max,
             light: ENTITY_FULLBRIGHT,
         }
+    }
+
+    /// The `entity → world` `translateToHand` matrix for `arm`, honoring this
+    /// model's [`HandPoseOverride`]. `None` only if the model has no such arm
+    /// at all. See [`Self::hand_transforms`]'s doc for why this is not the
+    /// same value as `part_transforms[skeleton.index_of(arm.part_name())]` for
+    /// five corpus models.
+    #[must_use]
+    pub fn hand_transform(&self, arm: Arm) -> Option<Mat4> {
+        self.hand_transforms[if arm.is_left() { 1 } else { 0 }]
     }
 
     /// Set this instance's packed sky/block light (`sky << 4 | block`).
@@ -1146,11 +1201,11 @@ pub fn hand_transform(
 ///                      · display_matrix_for_hand(thirdperson_?hand, is_left)
 /// ```
 ///
-/// `arm_transform` is the arm part's **entity→world** matrix, i.e.
-/// [`EntityInstance::part_transforms`]`[skeleton.index_of(arm.part_name())]`.
-/// That is vanilla's `translateToHand`, which for `HumanoidModel` is exactly
-/// `root.translateAndRotate(); getArm(arm).translateAndRotate();` — the arm's own
-/// parent chain, which our composed part matrix already is.
+/// `arm_transform` is vanilla's `translateToHand(arm)` result, an
+/// **entity→world** matrix: [`EntityInstance::hand_transform`]`(arm)` — *not*
+/// `part_transforms[skeleton.index_of(arm.part_name())]`, which is the same
+/// value only for the models with no override (see the table below and
+/// [`HandPoseOverride`](crate::entity_anim::HandPoseOverride)).
 ///
 /// # Verified against source, and the three offsets are not the whole story
 ///
@@ -1172,12 +1227,14 @@ pub fn hand_transform(
 ///
 /// # How to change it: the per-model `translateToHand` overrides
 ///
-/// `arm_transform` implements `HumanoidModel.translateToHand`, which is what
-/// `IllagerModel` and `ArmorStandModel` use too, and — because our part matrix
-/// composes the *whole* parent chain — also covers the models whose arms hang off
-/// `body` rather than `root` (`VexModel`, `CopperGolemModel` spell out
+/// For most models `arm_transform` is `HumanoidModel.translateToHand`, which
+/// `IllagerModel` and `ArmorStandModel` use too, and — because the composed
+/// part matrix already carries the *whole* parent chain — also covers models
+/// whose arms hang off `body` rather than `root` (`CopperGolemModel` spells out
 /// `root · body · arm`). Five corpus models in 26.2 append or prepend more, and
-/// none of it is modelled here:
+/// [`Skeleton::translate_to_hand`](crate::entity_anim::Skeleton::translate_to_hand)
+/// now models every one of them, selected per model name by
+/// [`hand_pose_override_for`]:
 ///
 /// | model | override |
 /// |---|---|
@@ -1188,12 +1245,22 @@ pub fn hand_transform(
 /// | `copper_golem` | not in the corpus |
 ///
 /// The two *pivot-shift* rows cannot be expressed as a pre- or post-multiplication
-/// of `arm_transform`, because the shift goes between the parent chain and the
-/// arm's own rotation, which the composed matrix has already folded together.
-/// Fixing them belongs in the pose path (`entity_anim`), not here. The visible
-/// error is 1/16 block for a skeleton's bow and 1/32 for a slim player — small.
-/// `vex` and `allay` are the ones that look wrong (an item ~1.8× and ~1.4× too
-/// large respectively), and both are left visibly wrong rather than half-fixed.
+/// of the arm's already-composed matrix, because the shift goes between the
+/// parent chain and the arm's own rotation, which that matrix has already
+/// folded together. That is why the fix lives in `entity_anim`
+/// ([`Skeleton::translate_to_hand`](crate::entity_anim::Skeleton::translate_to_hand)),
+/// operating on the posed-but-not-yet-composed parts, rather than as a
+/// correction applied to `arm_transform` here.
+///
+/// **Not yet wired to a live server.** `lodestone-shell`'s `merge_held_items`
+/// (`crates/lodestone-shell/src/gpu.rs`) still builds `arm_transform` by
+/// indexing `instance.part_transforms[skeleton.index_of(arm.part_name())]`
+/// directly, which is exactly [`EntityInstance::hand_transform`]'s
+/// [`HandPoseOverride::Structural`](crate::entity_anim::HandPoseOverride::Structural)
+/// case and therefore still correct for every model but these five. Swapping
+/// that one lookup for `instance.hand_transform(arm)` is the remaining step —
+/// deliberately left undone here because this file's remit was
+/// `lodestone-render` only.
 #[must_use]
 pub fn held_item_matrix(
     arm_transform: Mat4,
@@ -2352,12 +2419,10 @@ mod tests {
                     &AnimInput::REST,
                 );
                 for hand in [Arm::Right, Arm::Left] {
-                    let hand_arm = mesh
-                        .skeleton
-                        .index_of(hand.part_name())
+                    let arm_transform = inst
+                        .hand_transform(hand)
                         .expect("player_wide has both arms");
-                    let pose =
-                        held_item_matrix(inst.part_transforms[hand_arm], hand, baby, &t);
+                    let pose = held_item_matrix(arm_transform, hand, baby, &t);
                     assert!(
                         pose.determinant() > 0.0,
                         "a world-space held-item pose must not flip handedness; det = {} \
@@ -2372,6 +2437,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The whole reason [`EntityInstance::hand_transform`] exists rather than
+    /// reusing `part_transforms[skeleton.index_of(arm.part_name())]`: for a
+    /// skeleton the two must actually differ (by the pivot shift), and the
+    /// arm's *own* body-mesh transform (`part_transforms`) must stay exactly
+    /// what it was — proof this crate's override never leaks into the
+    /// whole-body draw it shares an index with.
+    #[test]
+    fn a_skeletons_hand_transform_differs_from_its_arms_body_transform() {
+        let mesh = EntityMesh::from_named_model(
+            "skeleton",
+            &lodestone_assets::entity_models::skeleton_model(),
+        );
+        let inst = EntityInstance::new(
+            "skeleton",
+            &mesh,
+            Vec3::new(0.5, 0.0, 0.0),
+            0.0,
+            1.0,
+            &AnimInput::REST,
+        );
+        let arm_idx = mesh.skeleton.index_of("right_arm").unwrap();
+        let body_mesh_transform = inst.part_transforms[arm_idx];
+        let hand_transform = inst.hand_transform(Arm::Right).unwrap();
+        assert!(
+            (hand_transform.w_axis - body_mesh_transform.w_axis).length() > 1e-4,
+            "the pivot shift did not reach the hand transform: {hand_transform:?} vs \
+             {body_mesh_transform:?}"
+        );
     }
 
     #[test]

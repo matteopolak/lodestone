@@ -1855,17 +1855,24 @@ impl RenderState {
             let Some(geometry) = model.items.get(id) else {
                 continue;
             };
-            let Some(part) = mesh.skeleton.index_of(arm.part_name()) else {
-                continue;
-            };
-            let Some(arm_transform) = instance.part_transforms.get(part) else {
+            // Prefer the dedicated hand transform over `part_transforms[arm]`.
+            // Five models (skeleton/stray/wither_skeleton, player_slim, vex,
+            // allay) shift or scale the item's pivot relative to the arm, and
+            // that shift must *not* move the arm's own visible mesh — which is
+            // what `part_transforms` places. `hand_transform` is exactly the
+            // structural pose for every other model, so this is not a special
+            // case, it is the correct source.
+            let Some(arm_transform) = instance.hand_transform(arm).or_else(|| {
+                let part = mesh.skeleton.index_of(arm.part_name())?;
+                instance.part_transforms.get(part).copied()
+            }) else {
                 continue;
             };
             let transform = hand_transform(&geometry.display, arm, false);
             combined.merge(&held_item_mesh(
                 &geometry.quads,
                 geometry.gui_light,
-                *arm_transform,
+                arm_transform,
                 arm,
                 baby,
                 &transform,
