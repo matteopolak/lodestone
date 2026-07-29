@@ -4,7 +4,7 @@
 //! the interesting logic — stepping, meshing, camera derivation — be unit tested
 //! headlessly, with the windowed layer in [`crate::app`] staying a thin driver.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,7 +16,7 @@ use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
-use lodestone_model::{BlockFace, PlayerInput, Vec3f};
+use lodestone_model::{BlockFace, PlayerCommand, PlayerInput, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
@@ -58,6 +58,11 @@ const FLY_SPEED: f64 = 0.45;
 const PLACE_BLOCK: u32 = id::STONE;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
+/// Eye height of `Pose.SWIMMING` — `EntityDimensions.scalable(0.6F, 0.6F).withEyeHeight(0.4F)`
+/// (`Avatar.java:28`, shared with `FALL_FLYING` and `SPIN_ATTACK`).
+const SWIMMING_EYE_HEIGHT: f32 = 0.4;
+/// Eye height of `Pose.CROUCHING` — `1.27F` (`Avatar.java:33`).
+const CROUCHING_EYE_HEIGHT: f32 = 1.27;
 
 /// The live [`Mining`] predictor's [`BreakInputs`] for one dig tick, built from
 /// the version's block-state hardness census, the resolved held-item
@@ -352,6 +357,18 @@ pub struct Sim {
     /// Sections whose geometry vanished (all-air after an edit) and must be
     /// dropped from the GPU. Drained by the app each frame.
     pending_removals: Vec<SectionKey>,
+    /// Every `SectionKey` this session has handed to the app for GPU upload
+    /// (via [`Sim::drain_meshes`]/[`Sim::drain_all_meshes`]) and that has not
+    /// yet come back out through [`Sim::drain_removals`].
+    ///
+    /// `RenderState`'s GPU-side section map (`gpu.rs`) has no session id in
+    /// its key, so without tracking this, a quit-to-title followed by a
+    /// reconnect would leave the *previous* server's terrain rendered until
+    /// a new chunk happened to land on the exact same key. [`Sim::end_session`]
+    /// drains this set straight into `pending_removals` so the app's
+    /// existing per-frame drain walks it clean through the ordinary path,
+    /// with no new plumbing on the render side.
+    uploaded_sections: HashSet<SectionKey>,
     /// The stitched vanilla atlas for the live world, or `None` when running on
     /// the demo palette. Its presence is the single discriminant for "render the
     /// live server world with the vanilla atlas" vs "mesh the demo world": the
@@ -494,6 +511,20 @@ pub struct Sim {
     /// never from our local movement flags, so a placement against an
     /// interactable block only suppresses the interaction if this was sent.
     last_player_input: Option<PlayerInput>,
+    /// The last sprint state put on the wire as a
+    /// [`PlayerCommand::StartSprinting`]/[`StopSprinting`](PlayerCommand::StopSprinting),
+    /// mirroring vanilla's `wasSprinting` (`LocalPlayer.sendIsSprintingIfNeeded`,
+    /// `LocalPlayer.java:303-312`).
+    ///
+    /// This is a **separate packet from [`Self::last_player_input`]** and both are
+    /// needed. `ServerboundPlayerInputPacket` only stores its `sprint` bit as
+    /// `ServerPlayer.lastClientInput` (`ServerGamePacketListenerImpl.java:424`); the
+    /// thing that actually calls `player.setSprinting(...)` is
+    /// `handlePlayerCommand` (`:1719-1722`). So without this the server never
+    /// believes we are sprinting, which means its own
+    /// `Entity.baseTick` → `updateSwimming` can never put us in the swimming pose —
+    /// no swim animation for other players, and no server-side sprint speed.
+    last_sprinting_sent: Option<bool>,
     /// The local player's water/lava submersion this tick, from the bit-exact
     /// physics producer (`EntityFluidInteraction.update`). Recomputed once per
     /// physics tick against the very view movement collided against, and read by
@@ -641,6 +672,7 @@ impl Sim {
             // path holds the player in place rather than letting them fall.
             fly: false,
             pending_removals: Vec::new(),
+            uploaded_sections: HashSet::new(),
             vanilla_atlas: resources.vanilla_atlas,
             language: resources.language,
             mesh_drops: 0,
@@ -671,6 +703,10 @@ impl Sim {
             placement: Placement::new(),
             attacking: false,
             last_player_input: None,
+            // `Some(false)`, not `None`: vanilla's `wasSprinting` starts `false`, so a
+            // player who joins and does not sprint sends nothing at all rather than a
+            // redundant `STOP_SPRINTING` on the first tick.
+            last_sprinting_sent: Some(false),
             fluid_state: FluidState::NONE,
             version_data,
         }
@@ -717,6 +753,127 @@ impl Sim {
         self.net = Some(net);
         self.status = "connecting…".into();
         self.phase = SessionPhase::Connecting;
+    }
+
+    /// Tear down whatever live session is attached and reset every piece of
+    /// per-session state, so a later [`Sim::attach_net`] behaves exactly like
+    /// the very first connection rather than starting with leftovers from
+    /// the one that just ended.
+    ///
+    /// Driven by the pause menu's Quit to Title
+    /// (`crate::menu::nav::MenuAction::QuitToTitle`); `UiState` has already
+    /// left for the main menu by the time this runs, independent of this
+    /// teardown's own success.
+    ///
+    /// # What this resets
+    ///
+    /// - **The connection**: `net` is dropped — `NetClient`'s `Drop` signals
+    ///   its background thread to stop and joins it (see `net.rs`), so this
+    ///   cannot leak a thread — and [`Self::phase`] returns to
+    ///   [`SessionPhase::LocalOnly`]. Left at a stale
+    ///   [`SessionPhase::Ended`] this would otherwise immediately re-fail the
+    ///   *new* main-menu screen the moment
+    ///   `crate::app::WindowApp::drive_ui_from_session` next runs.
+    /// - **Every read-model [`Sim::poll_net`] feeds**: chat log, tab list,
+    ///   scoreboard, the status-effect overlay, title/subtitle, action bar,
+    ///   health, food, experience, death/respawn state, the local entity id
+    ///   (stale, it would misattribute the *next* session's
+    ///   `EffectApplied`/`EffectRemoved` to whichever entity the new server
+    ///   happens to assign that same id to first) and the teleport-count
+    ///   diagnostic.
+    /// - **In-flight prediction state**: `mining` and `placement` are
+    ///   replaced wholesale rather than merely stopped — both track a
+    ///   monotonic sequence counter with no public reset, and `Mining` also
+    ///   tracks a post-break cooldown `stop()` alone does not clear (see the
+    ///   report). `attacking` clears, and the last-sent player-input/sprint
+    ///   edge trackers reset to their [`Sim::new`] values so the next
+    ///   session's first packet is not suppressed as a redundant resend.
+    /// - **Meshing**: mesh jobs still in flight for the old server's chunks
+    ///   are flushed and discarded (not left to land silently in whatever
+    ///   session comes next), `dirty_columns`/`mesh_drops` clear, and every
+    ///   section this session ever uploaded is queued into
+    ///   `pending_removals` — the app's existing per-frame drain — per
+    ///   [`Self::uploaded_sections`]'s doc.
+    /// - **The player**: returned to the same spawn [`Sim::new`] uses, and
+    ///   free-fly clears. A live reconnect immediately overrides this with
+    ///   the new server's login teleport, but re-entering the offline dev
+    ///   world (Singleplayer from the title) has no teleport to correct it —
+    ///   leaving the old server's coordinates would spawn the player
+    ///   wherever they happened to quit, possibly deep underground in a
+    ///   world the offline generator never built.
+    /// - **`status`**: recomputed with the same rule [`Sim::new`] uses, so
+    ///   the debug overlay reads "local world"/"live world (vanilla atlas)"
+    ///   again instead of whatever the old session last wrote there (e.g.
+    ///   "connecting…" or a disconnect reason).
+    ///
+    /// # What this deliberately leaves alone
+    ///
+    /// GPU pipelines/buffers and loaded assets (`vanilla_atlas`, `language`,
+    /// `version_data`) are config- or asset-derived, not session state —
+    /// `Sim::new` never reloads them on `attach_net` either, so a teardown
+    /// should not either. `particles` is intentionally untouched: every
+    /// particle already expires within a couple of seconds on its own, and
+    /// nothing drives its `tick`/`extract` once the title screen stops
+    /// calling into the render path, so a leftover burst is inert rather
+    /// than a bug. See the report on this change for what is genuinely
+    /// unverified rather than merely reasoned about.
+    pub fn end_session(&mut self) {
+        // Drop first: `NetClient::drop` signals its net thread and joins it,
+        // so nothing below can race a still-running poll against state this
+        // method is about to reset out from under it.
+        self.net = None;
+        self.phase = SessionPhase::LocalOnly;
+
+        self.chat_log = ChatLog::new();
+        self.tab_list = lodestone_game::tablist::TabList::new();
+        self.scoreboard = lodestone_game::scoreboard::Scoreboard::new();
+        self.hud_effects = lodestone_game::effect::ActiveEffects::new();
+        self.title = lodestone_game::player_state::TitleState::new();
+        self.action_bar = lodestone_game::player_state::ActionBar::new();
+        self.health = None;
+        self.food = None;
+        self.dead = false;
+        self.respawn_count = 0;
+        self.experience = None;
+        self.entity_interp = EntityInterpolator::new();
+        self.local_entity_id = None;
+        self.teleport_count = 0;
+
+        self.mining = Mining::new();
+        self.placement = Placement::new();
+        self.attacking = false;
+        self.last_player_input = None;
+        self.last_sprinting_sent = Some(false);
+        self.fluid_state = FluidState::NONE;
+        self.selected_slot = 0;
+
+        // Flush and discard mesh jobs still in flight for the old server's
+        // chunks rather than letting them complete later and land silently
+        // in whatever session comes next.
+        let pending = self.scheduler.pending();
+        if pending > 0 {
+            let _ = self.scheduler.drain_blocking(pending);
+        }
+        self.dirty_columns.clear();
+        self.mesh_drops = 0;
+        // Queue every section this session ever uploaded for removal through
+        // the app's ordinary drain path — see `uploaded_sections`'s doc.
+        self.pending_removals.extend(self.uploaded_sections.drain());
+
+        let feet = worldgen::spawn_feet();
+        self.player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
+        self.player.pitch = 10.0;
+        self.fly = false;
+        self.target = None;
+        self.input.release_all();
+
+        self.status = if self.vanilla_atlas.is_some() {
+            "live world (vanilla atlas)".to_string()
+        } else if let Some(banner) = &self.asset_banner {
+            format!("demo palette — {banner}")
+        } else {
+            "local world".to_string()
+        };
     }
 
     /// The live connection, when one is attached. Lets a harness read the
@@ -934,19 +1091,31 @@ impl Sim {
     }
 
     /// Collect finished meshes for the caller to upload to the GPU.
+    ///
+    /// Also records each key into [`Self::uploaded_sections`], which is how
+    /// [`Sim::end_session`] later knows every section the GPU is holding for
+    /// this session and can queue every one of them for removal.
     pub fn drain_meshes(&mut self) -> Vec<Meshed> {
-        self.scheduler.drain()
+        let meshes = self.scheduler.drain();
+        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
+        meshes
     }
 
     /// Block until every scheduled mesh is ready (used by headless runs/tests).
     pub fn drain_all_meshes(&mut self) -> Vec<Meshed> {
         let n = self.scheduler.pending();
-        self.scheduler.drain_blocking(n)
+        let meshes = self.scheduler.drain_blocking(n);
+        self.uploaded_sections.extend(meshes.iter().map(|m| m.key));
+        meshes
     }
 
     /// Sections that became empty (drained by the app to remove GPU meshes).
     pub fn drain_removals(&mut self) -> Vec<SectionKey> {
-        std::mem::take(&mut self.pending_removals)
+        let removed = std::mem::take(&mut self.pending_removals);
+        for key in &removed {
+            self.uploaded_sections.remove(key);
+        }
+        removed
     }
 
     /// Whether free-fly mode is active.
@@ -1002,7 +1171,7 @@ impl Sim {
             // holds still on the death screen until the respawn teleport lands.
             MovementInput::NONE
         } else {
-            movement_intent(&self.input)
+            self.swim_adjusted_intent()
         };
         while self.accumulator >= TICK_DT {
             self.prev_position = self.player.position;
@@ -1057,6 +1226,38 @@ impl Sim {
         self.drain_dirty_columns(DIRTY_COLUMN_BUDGET);
         self.update_entities(dt as f32);
         self.refresh_stats();
+    }
+
+    /// [`movement_intent`] plus the one water exception vanilla's sprint gate makes.
+    ///
+    /// `movement_intent` vetoes sprint while sneaking, which is right on land
+    /// (`isMovingSlowly()`). Underwater it is wrong: `LocalPlayer.canStartSprinting`
+    /// is `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java:1137-1144`)
+    /// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
+    /// shift is held (`LocalPlayer.java:923-925`). Shift is how you steer downward
+    /// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
+    /// player cannot swim and descend at the same time — they stop dead.
+    ///
+    /// Implemented by re-running the controller's own gate on a copy of the input
+    /// with sneak cleared, rather than restating the gate here: the two must not be
+    /// able to drift apart, and `movement_intent` lives in a crate this change does
+    /// not touch. Only the sprint bit is taken; `sneak` itself stays set, so the
+    /// sink impulse and the crouch pose still see it.
+    ///
+    /// Frame-granular, like the rest of `intent`: it is computed once per frame
+    /// outside the tick loop (pre-existing), so a frame long enough to run several
+    /// ticks reuses one decision. It also reads the *previous* tick's
+    /// [`Self::fluid_state`], which is the same one-tick lag vanilla has (`baseTick`
+    /// computes submersion before `aiStep` reads it).
+    fn swim_adjusted_intent(&self) -> MovementInput {
+        let mut intent = movement_intent(&self.input);
+        if !intent.sneak || !(self.fluid_state.under_water() || self.player.swimming) {
+            return intent;
+        }
+        let mut without_sneak = self.input;
+        without_sneak.set(lodestone_controller::Action::Sneak, false);
+        intent.sprint = movement_intent(&without_sneak).sprint;
+        intent
     }
 
     /// Fold this frame's entity snapshots into the interpolator so
@@ -1140,12 +1341,47 @@ impl Sim {
                     self.fluid_state = FluidState::NONE;
                 }
             }
+            self.update_pose(intent);
             return;
         }
 
         let view = WorldCollision::new(&self.world);
         tick(&mut self.player, intent, &view, &self.profile);
         self.fluid_state = self.player_fluid_state(&view);
+        self.update_pose(intent);
+    }
+
+    /// `Player.updatePlayerPose` / `getDesiredPose` (`Player.java:343-371`), reduced
+    /// to the one thing the physics engine takes as an input: the **eye height**.
+    ///
+    /// [`PlayerState::eye_height`] is documented as an input the *pose layer* owns,
+    /// and the shell is that layer. It has to be written, because nothing else does:
+    /// left at the standing `1.62` a swimmer's eye sits a metre above their body, so
+    /// `getFluidJumpThreshold` reads the wrong branch, the submerged fog and
+    /// underwater overlay flip a block early leaving the surface, and the camera
+    /// floats. Assigned *after* the tick so the next tick — which reads it at the
+    /// top of `LivingEntity.travel` — sees this tick's pose, exactly as vanilla's
+    /// `setPose` lands before the following tick's `baseTick`.
+    ///
+    /// Pose order is vanilla's `getDesiredPose`: swimming beats crouching beats
+    /// standing. Eye heights are `Avatar.java:22-36` — swimming `0.4`, crouching
+    /// `1.27`, standing `1.62` (`DEFAULT_EYE_HEIGHT`).
+    ///
+    /// **Not modelled:** the *hitbox* half of the pose. Vanilla's `Pose.SWIMMING` is
+    /// `0.6 × 0.6` and vanilla gates the pose on
+    /// `canPlayerFitWithinBlocksAndEntitiesWhen`; this engine keeps the standing
+    /// `0.6 × 1.8` box for every pose (see [`lodestone_physics::tick_water`]), so a
+    /// swimmer cannot fit through a one-block gap and the fit gate has nothing to
+    /// test. Changing the box changes collision, which is what the server re-derives
+    /// from our reported position, so it is deliberately a separate step.
+    fn update_pose(&mut self, intent: MovementInput) {
+        self.player.eye_height = if self.player.swimming {
+            SWIMMING_EYE_HEIGHT
+        } else if intent.sneak {
+            CROUCHING_EYE_HEIGHT
+        } else {
+            lodestone_physics::player::DEFAULT_EYE_HEIGHT
+        };
     }
 
     /// Vanilla `EntityFluidInteraction.update` for the local player against
@@ -1253,6 +1489,13 @@ impl Sim {
         // drives submerged fog — noclipping through an ocean should not tint the
         // whole view. Real submersion resumes the moment physics-walk does.
         self.fluid_state = FluidState::NONE;
+        // `Player.updateSwimming` forces `setSwimming(false)` while `abilities.flying`
+        // (`Player.java:1433-1439`). Free-fly never calls `lodestone_physics::tick`,
+        // so nothing would otherwise clear a swim pose entered before taking off —
+        // the player would fly around with a 0.4 eye height. Clear it here, the way
+        // the physics crate's `update_swimming` docs require of a flying driver.
+        self.player.swimming = false;
+        self.player.eye_height = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
     }
 
     /// Convenience wrapper using the wall clock since the last call.
@@ -1274,22 +1517,20 @@ impl Sim {
     /// Recompute the targeted block by casting the view ray from the (already
     /// interpolated) camera. Call once per frame before rendering the outline.
     ///
-    /// The pick ray does **not** consult `is_solid` alone. `is_solid` is the
-    /// *collision* predicate (also fed to the physics engine), and vanilla
-    /// deliberately gives cross-plants (`short_grass`, ferns, flowers) an empty
-    /// collision shape — you walk through grass — while picking them still
-    /// works, because vanilla's `clip`/`clipWithInteractionOverride` walks a
-    /// *separate* outline/interaction shape (`BlockBehaviour.getShape` /
-    /// `getInteractionShape`), not the collision shape. We have no such table:
-    /// `protocol::v770::collision_shapes` is a *collision*-only oracle dump, and
-    /// building an outline dump is a separate JVM-oracle effort, out of scope
-    /// here. So this approximates: any non-air, non-fluid block is picked as a
-    /// full unit cube even when its collision shape is empty. That is exact for
-    /// full cubes (unchanged — `is_solid` already covers them) and over-selects
-    /// at the edges of anything with a genuinely partial shape (a short_grass's
-    /// real outline is roughly 0.8×0.8×0.8; a slab or stair also over-selects
-    /// until it gets a real outline table). The correct fix is an
-    /// outline/interaction-shape oracle dump alongside the collision one.
+    /// The pick ray does **not** consult `is_solid`. `is_solid` is the *collision*
+    /// predicate (also fed to the physics engine), and vanilla deliberately gives
+    /// cross-plants (`short_grass`, ferns, flowers, kelp) an empty collision shape —
+    /// you walk through grass — while picking them still works, because vanilla's
+    /// `clip`/`clipWithInteractionOverride` walks a *separate* outline/interaction
+    /// shape (`BlockBehaviour.getShape` / `getInteractionShape`), not the collision
+    /// shape.
+    ///
+    /// The whole question therefore lives in one place,
+    /// [`LiveCollision::is_pickable`] / [`WorldCollision::is_pickable`] — read its
+    /// docs, which record why an earlier inlined `!is_water(...)` here made **kelp
+    /// and every waterlogged block unbreakable**. Deliberately a single call and not
+    /// an `||` chain: the predicate the collision tests exercise has to be the exact
+    /// predicate the ray uses, or the gate proves nothing about the pick.
     pub fn update_target(&mut self, aspect: f32) {
         let cam = self.camera(aspect);
         let origin = [
@@ -1305,23 +1546,13 @@ impl Sim {
         // face at the edge of reach is always covered. A `None` snapshot means
         // the player's own column has not streamed in; nothing is targetable.
         if self.is_live() {
-            self.target = self.live_collision().and_then(|view| {
-                raycast(origin, dir, REACH, |x, y, z| {
-                    view.is_solid(x, y, z)
-                        || (view.block_at(x, y, z) != id::AIR
-                            && !view.is_water(x, y, z)
-                            && !view.is_lava(x, y, z))
-                })
-            });
+            self.target = self
+                .live_collision()
+                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)));
             return;
         }
         let view = WorldCollision::new(&self.world);
-        self.target = raycast(origin, dir, REACH, |x, y, z| {
-            view.is_solid(x, y, z)
-                || (view.block_at(x, y, z) != id::AIR
-                    && !view.is_water(x, y, z)
-                    && !view.is_lava(x, y, z))
-        });
+        self.target = raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z));
     }
 
     /// Distance fog for this frame: sized to the configured render distance
@@ -1519,7 +1750,42 @@ impl Sim {
     /// 20 Hz the server ticks its own destroy timer.
     fn drive_interaction(&mut self) {
         self.send_player_input();
+        self.send_is_sprinting_if_needed();
         self.drive_mining();
+    }
+
+    /// `LocalPlayer.sendIsSprintingIfNeeded` (`LocalPlayer.java:303-312`): put the
+    /// sprint **edge** on the wire as a `PlayerCommand`.
+    ///
+    /// The source of truth is [`PlayerState::sprinting`], which the physics tick
+    /// assigns from the movement intent — so what the server hears is what actually
+    /// drove this tick's movement, not a re-read of the keyboard. This is the packet
+    /// that makes the server set `isSprinting()`, and therefore the packet that makes
+    /// its `updateSwimming` agree with ours; see [`Self::last_sprinting_sent`].
+    ///
+    /// A dead player is not sprinting, nor is one in the shell's free-fly debug cam
+    /// (which never runs a physics tick, so `sprinting` would sit stale), and no
+    /// command is sent before the server has given us an entity id (the packet
+    /// carries it).
+    fn send_is_sprinting_if_needed(&mut self) {
+        let sprinting = self.player.sprinting && !self.dead && !self.fly;
+        if self.last_sprinting_sent == Some(sprinting) {
+            return;
+        }
+        let Some(entity_id) = self.local_entity_id else {
+            return;
+        };
+        self.last_sprinting_sent = Some(sprinting);
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::PlayerCommand {
+                entity_id,
+                command: if sprinting {
+                    PlayerCommand::StartSprinting
+                } else {
+                    PlayerCommand::StopSprinting
+                },
+            });
+        }
     }
 
     /// Drive the live mining predictor one tick from the held attack button and
@@ -2446,13 +2712,31 @@ impl Sim {
     /// feet position interpolated between the last two physics ticks so motion
     /// stays smooth even though physics runs at a fixed 20 Hz. View angles are
     /// current (mouse-look is per-frame, matching vanilla).
+    ///
+    /// # The pose eye height is folded into the feet position
+    ///
+    /// [`build_camera`] hardcodes the standing
+    /// [`PLAYER_EYE_HEIGHT`](lodestone_render::camera::PLAYER_EYE_HEIGHT), so the
+    /// only way to give the swimming pose its real `0.4` eye from here is to pre-bias
+    /// the feet Y by the difference. That is exactly equivalent — the camera consumes
+    /// `position` solely as the eye — but it does mean the value handed to
+    /// `build_camera` is not the player's feet while a non-standing pose is active.
+    /// The clean shape is an explicit `eye_height` parameter on `build_camera`; that
+    /// signature belongs to `camera_rig.rs`, which is out of this change's scope.
+    ///
+    /// This is also the ray origin for [`update_target`](Self::update_target), so the
+    /// pick sees the world from where the player actually is: a swimmer looking down
+    /// at a block a metre in front of them targets it rather than the block a metre
+    /// beyond.
     #[must_use]
     pub fn camera(&self, aspect: f32) -> Camera {
         let a = f64::from(self.interp_alpha);
         let mut interp = self.player;
+        let eye_bias =
+            f64::from(self.player.eye_height - lodestone_render::camera::PLAYER_EYE_HEIGHT);
         interp.position = Vec3d::new(
             self.prev_position.x + (self.player.position.x - self.prev_position.x) * a,
-            self.prev_position.y + (self.player.position.y - self.prev_position.y) * a,
+            self.prev_position.y + (self.player.position.y - self.prev_position.y) * a + eye_bias,
             self.prev_position.z + (self.player.position.z - self.prev_position.z) * a,
         );
         build_camera(&interp, aspect, self.config.render_distance)
@@ -3523,6 +3807,67 @@ mod tests {
     }
 
     #[test]
+    fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
+        // The real acceptance test for `Sim::end_session`: not just that it
+        // clears fields, but that a *second* connect afterward behaves
+        // exactly like the first, with nothing from the old session leaking
+        // through.
+        use crate::net::NetUpdate;
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        sim.poll_net();
+        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+
+        // Populate every read-model `end_session` is responsible for
+        // clearing, so this test can actually observe the reset rather than
+        // asserting on fields that were already empty.
+        feed.send(NetUpdate::Chat {
+            text: lodestone_model::Text::literal("hello"),
+            player: false,
+        })
+        .unwrap();
+        feed.send(NetUpdate::Health {
+            health: 12.0,
+            food: 8,
+        })
+        .unwrap();
+        sim.poll_net();
+        assert!(
+            !sim.recent_chat(10).is_empty(),
+            "setup: chat must be populated before the teardown can be observed clearing it"
+        );
+        assert_eq!(sim.health(), Some(12.0), "setup: health must be populated");
+        assert_eq!(sim.local_entity_id, Some(7), "setup: entity id must be populated");
+
+        sim.end_session();
+
+        assert!(sim.net().is_none(), "the connection must be dropped");
+        assert_eq!(*sim.session_phase(), SessionPhase::LocalOnly);
+        assert!(sim.recent_chat(10).is_empty(), "chat log must clear");
+        assert_eq!(sim.health(), None, "health must clear");
+        assert_eq!(sim.food(), None, "food must clear");
+        assert_eq!(sim.local_entity_id, None, "the local entity id must clear");
+
+        // The negative control this test exists for: a fresh connect
+        // afterward must reach `Connected` and must not carry the old
+        // session's chat forward, proving the reset actually took rather
+        // than merely reporting empty because nothing polled yet.
+        let (net2, _actions2, feed2) = NetClient::loopback_with_feed();
+        sim.attach_net(net2);
+        assert_eq!(*sim.session_phase(), SessionPhase::Connecting);
+        feed2.send(NetUpdate::LoggedIn { entity_id: 9 }).unwrap();
+        sim.poll_net();
+        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        assert_eq!(sim.local_entity_id, Some(9));
+        assert!(
+            sim.recent_chat(10).is_empty(),
+            "the new session must not inherit the old one's chat"
+        );
+    }
+
+    #[test]
     fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
         use crate::net::NetUpdate;
         use lodestone_client::ClientAction;
@@ -3928,6 +4273,158 @@ mod tests {
         assert!(
             sprint > walk * 1.1,
             "sprint ({sprint:.3}) should clearly exceed walk ({walk:.3})"
+        );
+    }
+
+    /// Swimming has to reach the *player*, not just exist in the physics crate.
+    /// Flood a pool in the demo world (whose palette has a real water block), hold
+    /// sprint + forward, and check the pose actually flips: `swimming` set, the eye
+    /// dropped to `Pose.SWIMMING`'s `0.4`, and the camera moved with it.
+    ///
+    /// The first phase is the control: standing in exactly the same water without
+    /// sprinting must **not** swim, so the assertions below are about sprinting
+    /// while submerged and not about "being wet".
+    #[test]
+    fn sprinting_underwater_enters_the_swim_pose_and_drops_the_camera() {
+        let mut sim = Sim::new(test_config());
+        let feet_y = sim.player.position.y.floor() as i32;
+        // A private pool: stone floor, water from the feet to well over the eye,
+        // wide enough that a second of swimming (~1 block) stays inside it. Filling
+        // the column with water is also what flattens the generated slope the player
+        // spawns on — see `sprint_moves_faster_than_walk_via_attribute_seam`.
+        for dz in -5..=5 {
+            for dx in -5..=5 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                for dy in 0..=4 {
+                    sim.set_block_world([dx, feet_y + dy, dz], id::WATER);
+                }
+            }
+        }
+
+        for _ in 0..10 {
+            sim.step(1.0 / 20.0);
+        }
+        assert!(
+            sim.fluid_state.under_water(),
+            "the pool must actually submerge the eye, or this gate proves nothing"
+        );
+        assert!(
+            !sim.player.swimming,
+            "control: submerged but not sprinting is not swimming"
+        );
+        assert_eq!(
+            sim.player.eye_height,
+            lodestone_physics::player::DEFAULT_EYE_HEIGHT
+        );
+
+        sim.input.set(lodestone_controller::Action::Forward, true);
+        sim.input.set(lodestone_controller::Action::Sprint, true);
+        for _ in 0..10 {
+            sim.step(1.0 / 20.0);
+        }
+        assert!(
+            sim.player.swimming,
+            "sprinting while submerged must enter the swim pose"
+        );
+        assert_eq!(
+            sim.player.eye_height, SWIMMING_EYE_HEIGHT,
+            "the shell owns the pose eye height; physics only reads it"
+        );
+
+        // Pin the interpolation so the camera assertion is about the pose and not
+        // about where between two ticks we happen to be.
+        sim.prev_position = sim.player.position;
+        sim.interp_alpha = 0.0;
+        let cam = sim.camera(1.0);
+        let expected = sim.player.position.y as f32 + SWIMMING_EYE_HEIGHT;
+        assert!(
+            (cam.position.y - expected).abs() < 1e-4,
+            "swim camera should sit {SWIMMING_EYE_HEIGHT} above the feet: got {} want {expected}",
+            cam.position.y
+        );
+    }
+
+    /// Sneak is how you swim *downward* (`goDownInWater`), so the land-side
+    /// "sneaking cancels sprint" gate must not apply while submerged — otherwise
+    /// holding shift underwater stops the swim dead. Control: the same shift+sprint
+    /// on dry land still cancels sprint.
+    #[test]
+    fn sneak_cancels_sprint_on_land_but_not_under_water() {
+        let mut sim = Sim::new(test_config());
+        sim.input.set(lodestone_controller::Action::Forward, true);
+        sim.input.set(lodestone_controller::Action::Sprint, true);
+        sim.input.set(lodestone_controller::Action::Sneak, true);
+
+        assert!(
+            !sim.swim_adjusted_intent().sprint,
+            "control: on land, sneaking still vetoes sprint"
+        );
+
+        sim.fluid_state = FluidState {
+            water_height: 2.0,
+            eye_in_water: true,
+            ..FluidState::NONE
+        };
+        let intent = sim.swim_adjusted_intent();
+        assert!(
+            intent.sprint,
+            "submerged, shift must not cancel a swim-sprint"
+        );
+        assert!(
+            intent.sneak,
+            "…and shift itself must survive, or the sink impulse is lost"
+        );
+    }
+
+    /// The server derives the swimming pose itself, from `isSprinting()` — and it
+    /// only learns that from `ServerboundPlayerCommandPacket`, never from the input
+    /// packet's `sprint` bit. So the sprint *edge* has to reach the wire as a
+    /// `PlayerCommand`, exactly once per change.
+    #[test]
+    fn sprint_edges_reach_the_wire_as_player_commands() {
+        use crate::net::NetUpdate;
+        let (net, actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 7 }).unwrap();
+        sim.poll_net();
+        while actions.try_recv().is_ok() {}
+
+        let drain = |actions: &std::sync::mpsc::Receiver<ClientAction>| -> Vec<ClientAction> {
+            std::iter::from_fn(|| actions.try_recv().ok()).collect()
+        };
+
+        // Not sprinting and never was: no packet at all (vanilla's `wasSprinting`
+        // starts false).
+        sim.send_is_sprinting_if_needed();
+        assert!(
+            drain(&actions).is_empty(),
+            "no sprint edge, no sprint packet"
+        );
+
+        sim.player.sprinting = true;
+        sim.send_is_sprinting_if_needed();
+        assert_eq!(
+            drain(&actions),
+            vec![ClientAction::PlayerCommand {
+                entity_id: 7,
+                command: PlayerCommand::StartSprinting,
+            }]
+        );
+
+        // Edge-triggered: holding sprint must not spam the server every tick.
+        sim.send_is_sprinting_if_needed();
+        sim.send_is_sprinting_if_needed();
+        assert!(drain(&actions).is_empty(), "sprint is edge-triggered");
+
+        sim.player.sprinting = false;
+        sim.send_is_sprinting_if_needed();
+        assert_eq!(
+            drain(&actions),
+            vec![ClientAction::PlayerCommand {
+                entity_id: 7,
+                command: PlayerCommand::StopSprinting,
+            }]
         );
     }
 

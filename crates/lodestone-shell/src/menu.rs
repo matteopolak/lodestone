@@ -59,8 +59,11 @@ pub enum Screen {
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
     /// The settings screen (currently just GUI scale). Reached from
-    /// [`Screen::MainMenu`]; Escape returns there. Changes persist immediately
-    /// (see [`crate::config::Options`]), not on exit.
+    /// [`Screen::MainMenu`] (the title's Options button) or from
+    /// [`Screen::Paused`] (the pause menu's Options button, mid-session);
+    /// Escape returns to whichever it was opened from — see
+    /// [`UiState::close_settings`]. Changes persist immediately (see
+    /// [`crate::config::Options`]), not on exit.
     Settings,
     /// A session is being established — integrated-server startup and/or the
     /// connect handshake. Nothing is playable yet; the pointer is free so the
@@ -78,7 +81,14 @@ pub enum Screen {
     Container,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
-    /// *local* UI state, not a world stop.
+    /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
+    /// (Escape or a focus loss) and from [`Screen::Chat`]/[`Screen::Container`]
+    /// (a focus loss only — Escape from those cancels back to `Playing`
+    /// instead). Draws its own button rows (Back to Game, Options, Quit to
+    /// Title) as an overlay over the still-rendering world — see
+    /// [`render::pause_frame`] and [`render::MenuRenderer::render_overlay`];
+    /// deliberately **not** an [`render::owns_frame`] screen, because that set
+    /// clears the frame and would stop the world rendering behind it.
     Paused,
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
@@ -92,6 +102,11 @@ pub struct UiState {
     kind: Option<SessionKind>,
     error: Option<String>,
     quit_requested: bool,
+    /// Where Escape (or the settings screen's own back action) returns to from
+    /// [`Screen::Settings`] — [`Screen::MainMenu`] or [`Screen::Paused`],
+    /// whichever opened it. See [`UiState::open_settings`],
+    /// [`UiState::open_settings_from_pause`] and [`UiState::close_settings`].
+    settings_return: Screen,
 }
 
 impl Default for UiState {
@@ -101,6 +116,7 @@ impl Default for UiState {
             kind: None,
             error: None,
             quit_requested: false,
+            settings_return: Screen::MainMenu,
         }
     }
 }
@@ -182,6 +198,14 @@ impl UiState {
 
     /// Whether the shell is on any pre-session menu screen, i.e. no world is
     /// loaded and the menu renderer owns the frame.
+    ///
+    /// [`Screen::Settings`] is included even though it is reachable
+    /// mid-session too (from [`Screen::Paused`]'s Options button, see
+    /// [`open_settings_from_pause`](Self::open_settings_from_pause)): it is
+    /// still an [`render::owns_frame`] screen either way, so the world's
+    /// *rendering* pauses for as long as Settings is up regardless of how it
+    /// was reached — only its ticking and networking are guaranteed to
+    /// continue (see the module docs' note on gating input, not the network).
     #[must_use]
     pub fn is_menu(&self) -> bool {
         matches!(
@@ -242,18 +266,30 @@ impl UiState {
     /// The session failed to establish or ended unexpectedly. Valid from any
     /// live screen (connecting, playing, paused) — a mid-game disconnect and a
     /// refused connection land in the same place with a reason.
+    ///
+    /// [`Screen::Settings`] is included **conditionally**: only when it was
+    /// opened from the pause menu (`settings_return == Paused`), i.e. the
+    /// player is mid-session tweaking GUI scale. Settings opened from the
+    /// title screen is deliberately excluded, same as `MainMenu` itself —
+    /// otherwise a stray disconnect signal from an abandoned connection
+    /// attempt could reach in and yank the player out of the pre-session
+    /// Options screen for no session they were ever in.
     pub fn session_failed(&mut self, reason: impl Into<String>) {
+        let mid_session_settings =
+            self.screen == Screen::Settings && self.settings_return == Screen::Paused;
         // Ignore failures once we've already left for the menu, so a trailing
         // error from a shutting-down session doesn't resurrect the error screen.
-        if matches!(
-            self.screen,
-            Screen::Connecting
-                | Screen::Playing
-                | Screen::Chat
-                | Screen::Container
-                | Screen::Paused
-                | Screen::Error
-        ) {
+        if mid_session_settings
+            || matches!(
+                self.screen,
+                Screen::Connecting
+                    | Screen::Playing
+                    | Screen::Chat
+                    | Screen::Container
+                    | Screen::Paused
+                    | Screen::Error
+            )
+        {
             self.error = Some(reason.into());
             self.screen = Screen::Error;
         }
@@ -299,19 +335,35 @@ impl UiState {
         }
     }
 
-    /// Open the settings screen. Only from the title screen, matching
-    /// [`open_server_list`](Self::open_server_list)'s reasoning: a stray call
-    /// must never pull the player out of a world.
+    /// Open the settings screen from the title. Only from the title screen,
+    /// matching [`open_server_list`](Self::open_server_list)'s reasoning: a
+    /// stray call must never pull the player out of a world.
     pub fn open_settings(&mut self) {
         if self.screen == Screen::MainMenu {
+            self.settings_return = Screen::MainMenu;
             self.screen = Screen::Settings;
         }
     }
 
-    /// Back to the title screen from settings.
+    /// Open the settings screen from the pause menu's Options button. Only
+    /// from [`Screen::Paused`] — the mid-session counterpart to
+    /// [`open_settings`](Self::open_settings), so Escape (or the equivalent
+    /// Back action) returns to the paused world instead of skipping past it to
+    /// the title screen. See [`close_settings`](Self::close_settings).
+    pub fn open_settings_from_pause(&mut self) {
+        if self.screen == Screen::Paused {
+            self.settings_return = Screen::Paused;
+            self.screen = Screen::Settings;
+        }
+    }
+
+    /// Back to whichever screen opened settings — the title screen or the
+    /// pause menu. This is what makes Escape from Options a genuine *stack*:
+    /// Options opened from the pause menu must return to the pause menu, not
+    /// fall all the way through to the title and drop a live session.
     pub fn close_settings(&mut self) {
         if self.screen == Screen::Settings {
-            self.screen = Screen::MainMenu;
+            self.screen = self.settings_return;
         }
     }
 
@@ -354,12 +406,15 @@ impl UiState {
     /// - Error → back to the menu (dismiss)
     /// - ServerEdit → ServerList (cancel the edit)
     /// - ServerList → MainMenu
-    /// - Settings → MainMenu
+    /// - Settings → MainMenu, **or** Paused if that is where it was opened
+    ///   from (see [`close_settings`](Self::close_settings))
     /// - MainMenu → request a clean quit (Escape on the title exits)
     /// - Connecting → no-op (can't pause mid-connect; the app offers quit-to-cancel)
     ///
     /// Note the menu screens unwind **one level at a time**: Escape from the
-    /// edit form must not skip past the list and quit the game.
+    /// edit form must not skip past the list and quit the game, and — the same
+    /// rule applied mid-session — Escape from Options opened out of the pause
+    /// menu must not skip past the pause menu and drop straight into play.
     pub fn on_escape(&mut self) {
         match self.screen {
             Screen::Playing => self.screen = Screen::Paused,
@@ -368,7 +423,7 @@ impl UiState {
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
-            Screen::Settings => self.screen = Screen::MainMenu,
+            Screen::Settings => self.close_settings(),
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
         }
@@ -391,6 +446,25 @@ impl UiState {
     pub fn resume(&mut self) {
         if self.screen == Screen::Paused {
             self.screen = Screen::Playing;
+        }
+    }
+
+    /// Leave a live session for the title screen — the pause menu's "Quit to
+    /// Title" button. Only from [`Screen::Paused`], matching every other
+    /// "leave a screen" guard here: a stray call must never cut a live
+    /// session out from under the player who didn't ask for it.
+    ///
+    /// Deliberately **not** routed through [`session_failed`](Self::session_failed):
+    /// this is not an error, so no `error` is set and the title screen shows
+    /// plainly rather than with a disconnect reason that never happened. The
+    /// app still owns tearing down the actual network/session resources in
+    /// reaction to the [`nav::MenuAction`] this produces — this method only
+    /// moves the screen.
+    pub fn quit_to_title(&mut self) {
+        if self.screen == Screen::Paused {
+            self.kind = None;
+            self.error = None;
+            self.screen = Screen::MainMenu;
         }
     }
 
@@ -750,5 +824,129 @@ mod tests {
         let mut ui = UiState::new();
         ui.close_settings();
         assert_eq!(ui.screen(), Screen::MainMenu, "nothing to close");
+    }
+
+    #[test]
+    fn options_opened_from_pause_returns_to_pause_not_the_title() {
+        // The bug this guards: Escape from Options always falling through to
+        // MainMenu, which would drop a live session out from under the player
+        // just for opening the pause menu's Options button.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.on_escape();
+        assert!(ui.is_paused());
+
+        ui.open_settings_from_pause();
+        assert_eq!(ui.screen(), Screen::Settings);
+        assert!(!ui.wants_cursor_grab());
+        assert!(!ui.accepts_gameplay_input());
+
+        ui.on_escape();
+        assert!(
+            ui.is_paused(),
+            "settings opened from pause must unwind back to pause, not the title"
+        );
+
+        // And the ordinary title-screen path is unaffected: still MainMenu.
+        let mut ui = UiState::new();
+        ui.open_settings();
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn open_settings_from_pause_only_opens_from_the_pause_screen() {
+        // Mirrors `settings_only_opens_from_the_title_screen`'s guard, for the
+        // new entry point: a stray call must never pull the player out of
+        // wherever they actually are.
+        let mut ui = UiState::new();
+        ui.open_settings_from_pause();
+        assert_eq!(ui.screen(), Screen::MainMenu, "not paused, so no-op");
+
+        ui.enter_dev_world();
+        ui.open_settings_from_pause();
+        assert_eq!(
+            ui.screen(),
+            Screen::Playing,
+            "playing, not paused, so no-op"
+        );
+    }
+
+    #[test]
+    fn escape_still_quits_from_the_title_after_a_pause_settings_round_trip() {
+        // The `settings_return` bookkeeping must not leak into the ordinary
+        // title-screen Escape path once the player is back there for real.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.on_escape(); // -> Paused
+        ui.open_settings_from_pause();
+        ui.on_escape(); // -> Paused
+        ui.on_escape(); // -> Playing
+        assert!(ui.is_playing());
+    }
+
+    #[test]
+    fn quit_to_title_only_leaves_from_pause_and_clears_session_state() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        ui.pause();
+        assert!(ui.is_paused());
+
+        ui.quit_to_title();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(
+            ui.kind().is_none(),
+            "leaving must not remember the old session"
+        );
+        assert!(ui.error().is_none(), "this is not a failure, so no reason");
+        assert!(!ui.wants_cursor_grab());
+
+        // A stray call from anywhere else must be a no-op — same guard as
+        // every other "leave a screen" method in this file.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.quit_to_title();
+        assert_eq!(
+            ui.screen(),
+            Screen::Playing,
+            "playing, not paused, so no-op"
+        );
+    }
+
+    #[test]
+    fn a_disconnect_while_tweaking_pause_settings_reaches_the_error_screen() {
+        // Settings opened from the title must NOT be reachable by a stray
+        // disconnect (there is no session to have disconnected from), but
+        // settings opened from the pause menu is genuinely mid-session and
+        // must report a real one.
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        ui.pause();
+        ui.open_settings_from_pause();
+        assert_eq!(ui.screen(), Screen::Settings);
+
+        ui.session_failed("disconnected: Server closed");
+        assert_eq!(
+            ui.screen(),
+            Screen::Error,
+            "a real disconnect must reach the player even while they're in \
+             the pause menu's options"
+        );
+        assert_eq!(ui.error(), Some("disconnected: Server closed"));
+    }
+
+    #[test]
+    fn a_stray_failure_does_not_reach_settings_opened_from_the_title() {
+        let mut ui = UiState::new();
+        ui.open_settings();
+        ui.session_failed("connection refused (os error 61)");
+        assert_eq!(
+            ui.screen(),
+            Screen::Settings,
+            "no session was ever started from the title's Options button"
+        );
+        assert!(ui.error().is_none());
     }
 }

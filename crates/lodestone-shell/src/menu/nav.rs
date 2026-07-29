@@ -78,6 +78,13 @@ pub enum MenuAction {
     /// [`MenuAction::Reprobe`] so the app does not start a probe for an address
     /// that is no longer in the list.
     Forget(ServerEntry),
+    /// The pause menu's "Quit to Title" was activated: [`UiState`] has already
+    /// moved to [`Screen::MainMenu`] (see [`UiState::quit_to_title`]); the app
+    /// must now tear down whatever live session (net connection and/or
+    /// integrated server) is still attached to `Sim`, exactly as it would for
+    /// an ordinary disconnect — nothing here does that on its own, since
+    /// `MenuNav` holds no session state to tear down.
+    QuitToTitle,
 }
 
 /// Which field of the add/edit form has focus.
@@ -218,11 +225,56 @@ impl MainButton {
     }
 }
 
+/// The pause menu's buttons, in display order.
+///
+/// Vanilla's `PauseScreen` also has Advancements and Statistics; both are
+/// deliberately omitted rather than stubbed. Neither has a client-side
+/// subsystem here to open onto — there is no advancement tracking and no
+/// statistics decoder anywhere in this crate or `lodestone-game`, so either
+/// button would open nothing, which is exactly the "island" defect class this
+/// repo's rules single out. Vanilla also labels this button "Save and Quit to
+/// Title" in singleplayer and "Disconnect" in multiplayer; this client uses
+/// one label, "QUIT TO TITLE", for both, because [`SessionKind::Singleplayer`]
+/// is currently just the local dev world with no persistence to speak of (see
+/// the module docs) — "Save and Quit" would promise a save that does not
+/// happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseButton {
+    /// Resume play. Equivalent to Escape.
+    BackToGame,
+    /// Open the settings screen (reuses [`super::Screen::Settings`] — see
+    /// [`super::UiState::open_settings_from_pause`]).
+    Options,
+    /// Leave the session for the title screen.
+    QuitToTitle,
+}
+
+/// Every pause-menu button, in display order.
+pub const PAUSE_BUTTONS: [PauseButton; 3] = [
+    PauseButton::BackToGame,
+    PauseButton::Options,
+    PauseButton::QuitToTitle,
+];
+
+impl PauseButton {
+    /// The label drawn on the button.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            PauseButton::BackToGame => "BACK TO GAME",
+            PauseButton::Options => "OPTIONS",
+            PauseButton::QuitToTitle => "QUIT TO TITLE",
+        }
+    }
+}
+
 /// Selection state and the saved server list.
 #[derive(Debug, Clone)]
 pub struct MenuNav {
     main: usize,
     server: usize,
+    /// Highlighted row on the pause menu ([`PAUSE_BUTTONS`]).
+    paused: usize,
     form: EditForm,
     list: ServerList,
     /// Where the list is persisted. Held rather than recomputed so a test can
@@ -274,6 +326,7 @@ impl MenuNav {
         Self {
             main: 0,
             server: 0,
+            paused: 0,
             form: EditForm::adding(),
             list: ServerList::load_from(&path),
             path,
@@ -322,6 +375,18 @@ impl MenuNav {
         self.server
     }
 
+    /// The highlighted pause-menu button.
+    #[must_use]
+    pub fn pause_button(&self) -> PauseButton {
+        PAUSE_BUTTONS[self.paused.min(PAUSE_BUTTONS.len() - 1)]
+    }
+
+    /// Index of the highlighted pause-menu button.
+    #[must_use]
+    pub fn pause_index(&self) -> usize {
+        self.paused
+    }
+
     /// The add/edit form.
     #[must_use]
     pub fn form(&self) -> &EditForm {
@@ -342,6 +407,7 @@ impl MenuNav {
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
             Screen::ServerList if row < self.list.len() => self.server = row,
+            Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
             Screen::ServerEdit => {
                 self.form.field = match row {
                     0 => FormField::Name,
@@ -361,6 +427,10 @@ impl MenuNav {
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
             Screen::Settings => self.key_settings(ui, key),
+            // Unlike the other arms above, the pause menu is not an
+            // `owns_frame` screen — see `render::pause_frame`'s docs — but it
+            // still owns its own row navigation exactly like they do.
+            Screen::Paused => self.key_paused(ui, key),
             // The error screen has exactly one affordance — go back — reachable
             // with Escape or by activating its single row.
             Screen::Error if matches!(key, MenuKey::Escape | MenuKey::Enter) => {
@@ -534,6 +604,42 @@ impl MenuNav {
                 self.cycle_gui_scale(-1);
                 MenuAction::None
             }
+            MenuKey::Escape => {
+                ui.on_escape();
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// The pause menu: Up/Down move the highlight, Enter activates the
+    /// highlighted button, Escape resumes play (same as [`UiState::on_escape`]
+    /// from [`Screen::Paused`] — spelled out here too rather than falling
+    /// through to a catch-all, now that this screen has its own arm).
+    fn key_paused(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.paused = wrap_prev(self.paused, PAUSE_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.paused = wrap_next(self.paused, PAUSE_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Enter => match self.pause_button() {
+                PauseButton::BackToGame => {
+                    ui.resume();
+                    MenuAction::None
+                }
+                PauseButton::Options => {
+                    ui.open_settings_from_pause();
+                    MenuAction::None
+                }
+                PauseButton::QuitToTitle => {
+                    ui.quit_to_title();
+                    MenuAction::QuitToTitle
+                }
+            },
             MenuKey::Escape => {
                 ui.on_escape();
                 MenuAction::None
@@ -1029,6 +1135,106 @@ mod tests {
             .options_save_error()
             .expect("a failed write must be reported");
         assert!(err.contains("options.json"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn pause_menu_selection_wraps_both_ways() {
+        let (mut nav, _) = nav("pause-wrap");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        assert_eq!(nav.pause_button(), PauseButton::BackToGame);
+
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(
+            nav.pause_button(),
+            PauseButton::QuitToTitle,
+            "up from the top wraps"
+        );
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::BackToGame);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::Options);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+    }
+
+    #[test]
+    fn back_to_game_resumes_play() {
+        let (mut nav, _) = nav("pause-resume");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        assert_eq!(nav.pause_button(), PauseButton::BackToGame);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert!(
+            ui.is_playing(),
+            "the highlighted Back to Game button resumed"
+        );
+    }
+
+    #[test]
+    fn pause_options_opens_settings_and_escape_returns_to_pause() {
+        let (mut nav, _) = nav("pause-options");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        nav.key(&mut ui, MenuKey::Down); // BackToGame -> Options
+        assert_eq!(nav.pause_button(), PauseButton::Options);
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Settings);
+        assert!(!ui.wants_cursor_grab());
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert!(
+            ui.is_paused(),
+            "escape from options opened out of the pause menu must return \
+             there, not skip past it into play or the title"
+        );
+    }
+
+    #[test]
+    fn quit_to_title_from_the_pause_menu_leaves_for_the_main_menu() {
+        let (mut nav, _) = nav("pause-quit");
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        ui.pause();
+        nav.key(&mut ui, MenuKey::Up); // BackToGame -> QuitToTitle (wraps)
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::QuitToTitle);
+        assert_eq!(
+            ui.screen(),
+            Screen::MainMenu,
+            "the ui state has already left, independent of the app's teardown"
+        );
+        assert!(ui.kind().is_none());
+    }
+
+    #[test]
+    fn pause_menu_escape_resumes_play() {
+        let (mut nav, _) = nav("pause-escape");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert!(ui.is_playing());
+    }
+
+    #[test]
+    fn hovering_a_pause_row_moves_the_highlight() {
+        let (mut nav, _) = nav("pause-hover");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.pause();
+        assert_eq!(nav.pause_index(), 0);
+        nav.hover(&ui, 2);
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
+        // Out-of-range rows are ignored rather than clamped.
+        nav.hover(&ui, 99);
+        assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
     }
 
     #[test]
