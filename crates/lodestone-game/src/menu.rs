@@ -1485,4 +1485,86 @@ mod tests {
             "armour placement is dead until the census lands"
         );
     }
+
+    /// The other half of the canary above: once the effective fields *are*
+    /// populated, the conversion must carry them and armour must go on.
+    ///
+    /// This exercises `From<&lodestone_model::ItemStack>`, which is the only
+    /// path a wire stack takes into the menu model. The values here stand in for
+    /// what the v770 prototype census folds in during decode — this crate cannot
+    /// depend on a version crate to decode for real, so the fields are set
+    /// directly and the *conversion* is what is under test.
+    #[test]
+    fn populated_prototype_components_survive_the_conversion_and_equip() {
+        let helmet = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:diamond_helmet"),
+            count: 1,
+            components: lodestone_model::ItemComponents {
+                equippable: Some(lodestone_model::event::EquipmentSlot::Head),
+                max_stack_size: Some(1),
+                max_damage: Some(363),
+                ..lodestone_model::ItemComponents::default()
+            },
+        });
+
+        assert_eq!(
+            crate::container::equippable_slot(&helmet),
+            Some(EquipmentSlot::Head),
+            "the equippable slot must survive the wire->menu conversion"
+        );
+        assert_eq!(
+            helmet.max_stack_size(),
+            1,
+            "a real per-item cap must not fall back to 64"
+        );
+        assert!(
+            !helmet.is_stackable(),
+            "carrying max_damage must make a damageable item unstackable"
+        );
+
+        let mut menu = Menu::player();
+        menu.set_carried(Some(helmet));
+        Click::left(5).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(
+            count_at(&menu, 5),
+            Some(1),
+            "a diamond helmet must now actually go into the head slot"
+        );
+    }
+
+    /// The control the old suite could not express, and the one that would have
+    /// caught `"chest" | "body"`.
+    ///
+    /// `wolf_armor` is genuinely `body`, and vanilla's humanoid-armour gate
+    /// (`EquipmentSlot.Type.HUMANOID_ARMOR`) excludes `BODY`. If `body` is ever
+    /// folded into `Chest` again, this fails while every positive test above
+    /// keeps passing.
+    #[test]
+    fn animal_body_armour_is_refused_by_the_player_chestplate_slot() {
+        let wolf = ItemStack::from(&lodestone_model::ItemStack {
+            item: id("minecraft:wolf_armor"),
+            count: 1,
+            components: lodestone_model::ItemComponents {
+                equippable: Some(lodestone_model::event::EquipmentSlot::Body),
+                max_stack_size: Some(1),
+                ..lodestone_model::ItemComponents::default()
+            },
+        });
+
+        assert_eq!(
+            crate::container::equippable_slot(&wolf),
+            None,
+            "`body` must not resolve to a humanoid armour slot"
+        );
+
+        let mut menu = Menu::player();
+        menu.set_carried(Some(wolf));
+        // Slot 6 is the chestplate position on the player screen.
+        Click::left(6).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(
+            count_at(&menu, 6),
+            None,
+            "wolf armour must not be wearable as a chestplate"
+        );
+    }
 }

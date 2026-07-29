@@ -1,3 +1,4 @@
+use crate::event::EquipmentSlot;
 use crate::ids::ResourceKey;
 use crate::text::Text;
 
@@ -39,6 +40,22 @@ impl ItemStack {
 /// component. [`has_unmodeled`](Self::has_unmodeled) records whether the wire
 /// carried at least one component this build could not decode, so a consumer can
 /// distinguish a genuinely bare stack from one that was only partially understood.
+///
+/// # Two kinds of field live here: *patch* fields and *effective* fields
+///
+/// Most fields are the raw patch — what the wire said, and nothing else.
+/// [`tool`](Self::tool) is explicitly patch-shaped ([`ToolPatch::Inherited`]
+/// means "the wire said nothing"), because evaluating a tool needs the version's
+/// block tags and block-registry ids and so cannot happen at decode time; that
+/// lives behind `VersionAdapter::tool_mining`.
+///
+/// [`max_stack_size`](Self::max_stack_size), [`max_damage`](Self::max_damage)
+/// and [`equippable`](Self::equippable) are different: they are **effective**
+/// values, the item's built-in prototype component already folded with the
+/// patch, resolved by the adapter at decode time. They can be, because each is a
+/// plain scalar needing no tag or state lookup to interpret. `None` means "this
+/// adapter has no prototype census for this item", never a guessed default —
+/// see each field's docs for why guessing is the trap.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ItemComponents {
     /// A player- or server-assigned display name overriding the item's default.
@@ -54,9 +71,62 @@ pub struct ItemComponents {
     /// Almost always [`ToolPatch::Inherited`] — see that type's docs; a plain
     /// vanilla pickaxe carries no `minecraft:tool` on the wire at all.
     pub tool: ToolPatch,
+    /// **Effective** `minecraft:max_stack_size`: how many of this item fit in one
+    /// slot. `None` when the producing adapter has no item-prototype census.
+    ///
+    /// This is a *prototype* component — vanilla's `COMMON_ITEM_COMPONENTS` sets
+    /// it to `64` for every item and individual items override it — so a
+    /// clientbound patch essentially never mentions it and it cannot be
+    /// recovered from the wire. Guessing `64` is wrong for a great many items
+    /// (`minecraft:water_bucket` and every shulker box are `1`,
+    /// `minecraft:egg` is `16`), and guessing `1` — vanilla's own fallback when
+    /// the component is genuinely absent, `ItemInstance.getMaxStackSize` — is
+    /// wrong for almost everything else. A consumer that gets `None` should
+    /// treat the cap as unknown rather than substituting either.
+    pub max_stack_size: Option<u32>,
+    /// **Effective** `minecraft:max_damage`: the item's durability, or `None`
+    /// both when the item is not damageable *and* when the adapter has no
+    /// prototype census (the two are indistinguishable here by design — an
+    /// undamageable item and an unknown one both have no durability to show).
+    ///
+    /// Also a prototype component, and the gate on vanilla
+    /// `ItemStack.isDamageableItem` and therefore `ItemStack.isStackable`: while
+    /// this is absent, two identically-componented swords look stackable and
+    /// merge into a stack of two.
+    pub max_damage: Option<u32>,
+    /// **Effective** `minecraft:equippable` slot: where this item is worn, or
+    /// `None` for an item that is not equippable (or an adapter with no
+    /// prototype census).
+    ///
+    /// Also a prototype component. `ArmorSlot.mayPlace` is
+    /// `owner.isEquippableInSlot(stack, slot)`, which is
+    /// `slot == equippable.slot() && …`, so while this is `None` **no item can
+    /// be placed in any armour slot by any click type**.
+    ///
+    /// Only the slot is carried. Vanilla's `Equippable` also has an
+    /// `allowedEntities` set — `minecraft:wolf_armor` is wolves only,
+    /// `minecraft:saddle` is `#minecraft:can_equip_saddle` — which
+    /// `Equippable.canBeEquippedBy` additionally requires. Every restricted item
+    /// in 26.2 is in a non-humanoid slot ([`EquipmentSlot::Body`] or
+    /// [`EquipmentSlot::Saddle`]) and so cannot reach a player armour slot on
+    /// the slot check alone, but a consumer wanting the restriction itself must
+    /// ask the version seam (`VersionAdapter::item_prototype`), not this field.
+    ///
+    /// **[`EquipmentSlot::Body`] is not chest armour.** Vanilla gates humanoid
+    /// armour on `EquipmentSlot.Type.HUMANOID_ARMOR`, which covers
+    /// [`Feet`](EquipmentSlot::Feet)/[`Legs`](EquipmentSlot::Legs)/[`Chest`](EquipmentSlot::Chest)/[`Head`](EquipmentSlot::Head)
+    /// and deliberately **excludes** `BODY` (animal armour). Folding `"body"`
+    /// into `Chest` makes wolf armour and horse armour placeable in a player's
+    /// chestplate slot.
+    pub equippable: Option<EquipmentSlot>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
+    ///
+    /// For the three *effective* fields this additionally means "the patch may
+    /// have overridden one of these and we could not see it": they still hold
+    /// the item's prototype value, which is the best available answer, but is not
+    /// guaranteed to be the effective one.
     pub has_unmodeled: bool,
 }
 

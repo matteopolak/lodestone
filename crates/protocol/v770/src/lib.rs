@@ -67,6 +67,20 @@ pub(crate) mod generated_block_registry;
 #[path = "generated/tools.rs"]
 pub(crate) mod generated_tools;
 
+/// Generated block **outline**/**interaction** shape tables (raw rodata
+/// statics) — `BlockStateBase.getShape` and `getInteractionShape`, which are
+/// neither the collision shape nor fluid presence. Use the [`outline_shapes`]
+/// module for the lookup API; this holds only the arrays.
+#[path = "generated/outline_shapes.rs"]
+pub(crate) mod generated_outline_shapes;
+
+/// Generated item **prototype** component census (raw rodata statics):
+/// per-item `minecraft:max_stack_size`, `minecraft:max_damage` and
+/// `minecraft:equippable`, none of which a clientbound stack carries. Use the
+/// [`item_prototypes`] module for the lookup API; this holds only the array.
+#[path = "generated/item_prototypes.rs"]
+pub(crate) mod generated_item_prototypes;
+
 /// Generated sound-event id→(name, fixed range) table (raw rodata statics). Use
 /// the [`sound_events`] module for the lookup API; this holds only the array.
 #[path = "generated/sound_events.rs"]
@@ -107,9 +121,11 @@ pub mod entity_dimensions;
 pub mod entity_types;
 pub mod entity_variants;
 pub mod hardness;
+pub mod item_prototypes;
 pub mod items;
 pub mod menus;
 pub mod mob_effects;
+pub mod outline_shapes;
 pub mod packets;
 pub mod particle_types;
 pub mod path_types;

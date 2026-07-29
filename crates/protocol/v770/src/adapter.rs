@@ -6,7 +6,8 @@ use std::time::Instant;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
 use lodestone_model::{
-    AdapterError, AnimationAction, BlockActionKind, BlockFace, BlockHardness, BlockPos, BossAction,
+    AdapterError, AnimationAction, BlockAabb, BlockActionKind, BlockFace, BlockHardness, BlockPos,
+    BossAction,
     BossColor,
     BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
@@ -14,7 +15,7 @@ use lodestone_model::{
     EntityBaseDimensions,
     EntityEquipment,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents,
-    ItemEnchantment, ItemStack, ItemTool, LoginProfile,
+    ItemEnchantment, ItemPrototype, ItemStack, ItemTool, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
     ParticleStatus, PlayerCommand, PlayerInput, PlayerListEntry, PlayerLookAtEntity,
     RecipeBookType,
@@ -737,6 +738,17 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
 /// cannot be skipped), flags the set, and returns `complete == false`. Removed
 /// components are bare type ids and are always skippable, so a patch that
 /// reaches them is fully consumed.
+///
+/// # The three *effective* fields start from the item's prototype
+///
+/// `max_stack_size`, `max_damage` and `equippable` are **not** patch fields —
+/// they are the item's built-in prototype values, folded with whatever the patch
+/// says. They are seeded here from [`crate::item_prototypes`] *before* the patch
+/// is read, because a clientbound patch almost never mentions any of them
+/// (vanilla keeps all three in the prototype component map) and a stack that
+/// reported "unknown" for them would leave armour unequippable and every stack
+/// cap at 64. See [`ItemComponents`] for why they are effective rather than
+/// patch-shaped, and `docs/item-prototypes.md` for the census.
 fn read_component_patch(
     reader: &mut Reader<'_>,
     item: &str,
@@ -744,6 +756,11 @@ fn read_component_patch(
     let added = reader.var_i32().map_err(dec_err)?;
     let removed = reader.var_i32().map_err(dec_err)?;
     let mut components = ItemComponents::default();
+    if let Some(prototype) = crate::item_prototypes::prototype(item) {
+        components.max_stack_size = Some(u32::from(prototype.max_stack_size));
+        components.max_damage = prototype.max_damage.map(u32::from);
+        components.equippable = prototype.equip_slot;
+    }
 
     for _ in 0..added {
         let type_id = reader.var_i32().map_err(dec_err)?;
@@ -764,11 +781,40 @@ fn read_component_patch(
             Some("minecraft:tool") => {
                 components.tool = ToolPatch::Set(read_tool(reader)?);
             }
+            // Both of these are `ByteBufCodecs.VAR_INT` (`DataComponents.java:110-115`)
+            // and both *override* the prototype value seeded above. They are
+            // decoded rather than treated as unmodeled not because servers send
+            // them often — they essentially never do — but because a patch that
+            // did carry one would otherwise stop decoding here and leave the
+            // seeded prototype value silently stale.
+            Some("minecraft:max_stack_size") => {
+                let size = reader.var_i32().map_err(dec_err)?;
+                components.max_stack_size = Some(u32::try_from(size).map_err(|_| {
+                    AdapterError::Decode(format!("negative item max_stack_size {size}"))
+                })?);
+            }
+            Some("minecraft:max_damage") => {
+                let max = reader.var_i32().map_err(dec_err)?;
+                components.max_damage = Some(u32::try_from(max).map_err(|_| {
+                    AdapterError::Decode(format!("negative item max_damage {max}"))
+                })?);
+            }
             other => {
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
                 // the modeled fields decoded so far, flag the stack, and stop —
                 // the packet is dropped past this point, not fatal.
+                //
+                // One special case: if the component we cannot decode is
+                // `minecraft:equippable` itself, the prototype slot seeded above
+                // is *known* to be overridden, so report "unknown" rather than a
+                // value we can see is wrong. (`Equippable`'s stream codec is an
+                // eleven-field record with a `HolderSet<EntityType>`; decoding it
+                // for the sake of a component no vanilla server patches is not
+                // worth the surface.)
+                if other == Some("minecraft:equippable") {
+                    components.equippable = None;
+                }
                 components.has_unmodeled = true;
                 tracing::warn!(
                     item,
@@ -791,8 +837,18 @@ fn read_component_patch(
         // opinion" would leave it at 8x. Every other modeled field defaults to
         // "absent" anyway, so consuming the id is enough for those.
         let type_id = reader.var_i32().map_err(dec_err)?;
-        if component_type_name(type_id) == Some("minecraft:tool") {
-            components.tool = ToolPatch::Removed;
+        match component_type_name(type_id) {
+            Some("minecraft:tool") => components.tool = ToolPatch::Removed,
+            // A removal clears the component back to *nothing*, and vanilla's
+            // own fallback with no `minecraft:max_stack_size` at all is **1**,
+            // not 64 (`ItemInstance.java:14-16`) — so this is a real, if exotic,
+            // way to make an item unstackable.
+            Some("minecraft:max_stack_size") => components.max_stack_size = Some(1),
+            // No `minecraft:max_damage` means not damageable, which is exactly
+            // what `None` means here.
+            Some("minecraft:max_damage") => components.max_damage = None,
+            Some("minecraft:equippable") => components.equippable = None,
+            _ => {}
         }
     }
 
@@ -4015,5 +4071,48 @@ impl VersionAdapter for V770Adapter {
         // `Player.hasCorrectToolForDrops`, block requirement folded in, so the
         // caller has nothing left to invert.
         crate::tool::mining(held, state_id)
+    }
+
+    fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        // The per-block-state collision census is version data homed in this
+        // crate (dumped from the real 26.2 server's `Block.BLOCK_STATE_REGISTRY`);
+        // the registry seam reaches it through here so a version-free consumer
+        // never names v770. Zero-copy: `collision_shapes::Aabb` *is*
+        // `BlockAabb`, so this hands back the rodata slice itself.
+        crate::collision_shapes::collision_boxes(state_id)
+    }
+
+    fn block_name(&self, state_id: u32) -> Option<&'static str> {
+        // Block *name* for a block-*state* id, from the same generated table the
+        // asset baker resolves properties through. `&'static str` out of rodata,
+        // O(1), no instance and no allocation — the physics seam calls this for
+        // the block under the player every tick.
+        crate::block_states::block_name(state_id)
+    }
+
+    fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        // `BlockStateBase.getShape` — the shape `Entity.pick` clips against, and
+        // a third thing beside collision and fluid presence. Version data homed
+        // in this crate; zero-copy out of rodata. See `crate::outline_shapes` for
+        // why half of all states disagree with `block_collision`.
+        crate::outline_shapes::outline_boxes(state_id)
+    }
+
+    fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        // `BlockStateBase.getInteractionShape` — empty for all but four block
+        // families, and a *face* refinement on top of the outline hit rather than
+        // a clip target of its own.
+        crate::outline_shapes::interaction_boxes(state_id)
+    }
+
+    fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
+        // The item-prototype census (`minecraft:max_stack_size`,
+        // `minecraft:max_damage`, `minecraft:equippable`) is version data homed
+        // in this crate, because a clientbound stack carries only the *patch*
+        // against it and so none of the three is ever on the wire. Stacks decoded
+        // by this adapter already have these folded into
+        // `ItemComponents`' effective fields; this seam is for callers with no
+        // stack in hand.
+        crate::item_prototypes::model_prototype(item)
     }
 }

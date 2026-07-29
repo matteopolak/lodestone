@@ -36,6 +36,10 @@ pub const CUSTOM_NAME_COMPONENT: &str = "minecraft:custom_name";
 pub const TOOL_COMPONENT: &str = "minecraft:tool";
 /// Well-known component identifier for enchantments.
 pub const ENCHANTMENTS_COMPONENT: &str = "minecraft:enchantments";
+/// Well-known component identifier for the worn-slot component
+/// (`minecraft:equippable`). Only the slot name is carried; the other nine
+/// fields of vanilla's record are unmodelled.
+pub const EQUIPPABLE_COMPONENT: &str = "minecraft:equippable";
 
 /// A canonical, version-free component value.
 ///
@@ -365,6 +369,35 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             && let Ok(key) = TOOL_COMPONENT.parse()
         {
             components.insert(key, ComponentValue::Tool(stack.components.tool.clone()));
+        }
+
+        // The three *effective* fields — prototype folded with patch by the
+        // version adapter. Unlike the patch-only fields above, these are
+        // present for ordinary stacks, and without them armour cannot be
+        // equipped at all (`equippable_slot` answers `None`, so an armour
+        // slot's `may_place` is `None == Some(_)`) and every stack reads as
+        // capping at 64, which is wrong for 295 of 1537 items.
+        if let Some(slot) = stack.components.equippable
+            && let Ok(key) = EQUIPPABLE_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Str(slot.name().to_string()));
+        }
+
+        if let Some(max) = stack.components.max_stack_size
+            && let Ok(key) = MAX_STACK_SIZE_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(max)));
+        }
+
+        // Carried so `is_damageable` — and through it `is_stackable` — stops
+        // answering "always stackable". Vanilla's predicate is
+        // `MAX_DAMAGE && !UNBREAKABLE && DAMAGE`; `minecraft:unbreakable` is
+        // still unmodelled, and `MAX_DAMAGE`/`DAMAGE` agree for all 1537 items
+        // in 26.2 (asserted by the census), so this is sufficient today.
+        if let Some(max) = stack.components.max_damage
+            && let Ok(key) = MAX_DAMAGE_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Int(i64::from(max)));
         }
 
         Self::with_components(

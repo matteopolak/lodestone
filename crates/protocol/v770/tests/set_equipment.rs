@@ -58,7 +58,18 @@ fn set_equipment_decodes_two_slots_via_continuation_bit() {
                 Some(ItemStack {
                     item: key("minecraft:diamond"),
                     count: 1,
-                    components: lodestone_model::ItemComponents::default(),
+                    // An empty component *patch* does not mean empty components:
+                    // the decoder folds the item's built-in prototype into the
+                    // effective fields. `minecraft:diamond` stacks to 64, is not
+                    // damageable and is not equippable — from the committed server
+                    // dump (`tests/support/item_prototype_jvm.txt`), not from the
+                    // census code. See `docs/item-prototypes.md`.
+                    components: lodestone_model::ItemComponents {
+                        max_stack_size: Some(64),
+                        max_damage: None,
+                        equippable: None,
+                        ..lodestone_model::ItemComponents::default()
+                    },
                 })
             );
         }
