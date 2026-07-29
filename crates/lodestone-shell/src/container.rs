@@ -31,6 +31,7 @@
 
 use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
 use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
+use lodestone_game::recipe::RecipeBook;
 use lodestone_render::{BlockModels, ModelVertex};
 
 use lodestone_assets::{ItemAtlas, ResourceLocation};
@@ -99,6 +100,12 @@ pub struct ContainerFrame<'a> {
     /// unchanged: nothing here reads this field unless a caller opts in
     /// through [`with_cursor`](Self::with_cursor).
     pub cursor: Option<[f32; 2]>,
+    /// The local recipe corpus (see `crate::resources::load_recipe_book`), for
+    /// a **ghost preview** of the crafting result: `None` (the default) draws
+    /// nothing extra, which is what keeps every existing caller (headless
+    /// builds, the pixel gates, `tests/container_screen.rs`) unchanged. See
+    /// [`with_recipe_book`](Self::with_recipe_book).
+    pub recipe_book: Option<&'a RecipeBook>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -111,6 +118,7 @@ impl<'a> ContainerFrame<'a> {
             menu,
             title,
             cursor: None,
+            recipe_book: None,
         }
     }
 
@@ -121,6 +129,7 @@ impl<'a> ContainerFrame<'a> {
             menu: None,
             title: "",
             cursor: None,
+            recipe_book: None,
         }
     }
 
@@ -129,6 +138,17 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_cursor(mut self, cursor: Option<[f32; 2]>) -> Self {
         self.cursor = cursor;
+        self
+    }
+
+    /// Attach a recipe book so an **empty** crafting result slot draws a
+    /// dimmed ghost preview of what the grid would produce — never the real
+    /// (undimmed) icon, and never written into `menu` itself. The server's own
+    /// `container_set_slot` remains the only thing that ever fills the result
+    /// slot for real; see `docs/crafting.md`'s "who computes the result slot".
+    #[must_use]
+    pub fn with_recipe_book(mut self, book: Option<&'a RecipeBook>) -> Self {
+        self.recipe_book = book;
         self
     }
 }
@@ -178,6 +198,7 @@ impl ContainerGeometry {
             frame,
             width,
             height,
+            crate::config::AUTO_GUI_SCALE,
             &IconAssets {
                 items: None,
                 models: None,
@@ -201,6 +222,7 @@ impl ContainerGeometry {
             frame,
             width,
             height,
+            crate::config::AUTO_GUI_SCALE,
             &IconAssets {
                 items: Some(items),
                 models,
@@ -213,6 +235,7 @@ impl ContainerGeometry {
         frame: &ContainerFrame<'_>,
         width: u32,
         height: u32,
+        gui_scale: u32,
         assets: &IconAssets<'_>,
         font: Option<&VanillaFont>,
     ) -> Self {
@@ -233,9 +256,8 @@ impl ContainerGeometry {
         // performs the identical division for the widget's origin — see its own
         // doc comment — so the two agree on what "the canvas" is by construction
         // rather than by coincidence.
-        let (w, h) =
-            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
-        let (x, y) = panel_origin(&layout, width, height);
+        let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
+        let (x, y) = panel_origin_with_scale(&layout, gui_scale, width, height);
         let mut b = Builder::new(w, h, font);
 
         b.rect_px(
@@ -282,6 +304,34 @@ impl ContainerGeometry {
             b.draw_stack(assets, stack, sx, sy);
         }
 
+        // Ghost preview: when the crafting result slot is still empty, show
+        // what the grid would produce, dimmed — a hint before the server's own
+        // `container_set_slot` lands, never a claim. This never touches `menu`
+        // itself (the match runs fresh against `menu.crafting_grid()` every
+        // frame), so a server disagreeing simply means next frame's real
+        // `slot_item` draw takes over and this block stops firing — the same
+        // "server truth always wins" contract every other slot already has.
+        // See `docs/crafting.md`'s "who computes the result slot".
+        if let Some(craft) = menu.craft_layout()
+            && menu.slot_item(craft.result_slot).is_none()
+            && let Some(book) = frame.recipe_book
+            && let Some(grid) = menu.crafting_grid()
+            && let Some(predicted) = book.match_grid(&grid)
+            && let Some(rect) = layout.slots.iter().find(|r| r.menu_index == craft.result_slot)
+        {
+            let sx = x + rect.x;
+            let sy = y + rect.y;
+            b.draw_stack(assets, predicted, sx, sy);
+            // Dim the icon just drawn: a translucent dark quad on the colour
+            // stream, appended after the icon so it lands on top of it (see the
+            // module doc on pass structure — everything past `chrome_floats`
+            // draws over the icon passes regardless of append order among
+            // itself). This is the same "same icon, lower apparent opacity"
+            // treatment vanilla's own recipe-book ghosts use, and it is what
+            // keeps a predicted result visually distinct from a confirmed one.
+            b.rect_px(sx, sy, CELL, CELL, [0.05, 0.05, 0.05, 0.55]);
+        }
+
         // The carried stack — what the player has picked up and is dragging —
         // draws last: above every slot (it is appended after them on all three
         // streams, and the icon streams draw in this same append order), below
@@ -297,12 +347,8 @@ impl ContainerGeometry {
         // its own `x`/`y` by is what keeps the drawn stack centred on the actual
         // cursor instead of drifting off toward a corner as the scale grows.
         if let (Some([cx, cy]), Some(stack)) = (frame.cursor, menu.carried()) {
-            let scale = crate::config::calculate_gui_scale(
-                crate::config::AUTO_GUI_SCALE,
-                width,
-                height,
-            )
-            .max(1) as f32;
+            let scale =
+                crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
             let (cx, cy) = (cx / scale, cy / scale);
             b.draw_stack(assets, stack, cx - CELL * 0.5, cy - CELL * 0.5);
         }
@@ -497,10 +543,29 @@ fn crafting_layout(craft: CraftLayout, container_size: usize) -> SlotLayout {
 /// and [`hit_test`] must agree to the pixel or the screen and the mouse disagree
 /// about which slot is which — a bug that reads as "clicks land one slot off"
 /// and is invisible in any screenshot.
+///
+/// Always lays out against [`crate::config::AUTO_GUI_SCALE`]. Use
+/// [`panel_origin_with_scale`] to lay out against a specific (e.g. persisted
+/// manual) `gui_scale` instead — this is a thin wrapper over it, kept so every
+/// existing caller of this exact signature (the pixel gates,
+/// `tests/container_screen.rs`) is unaffected.
 #[must_use]
 pub fn panel_origin(layout: &SlotLayout, width: u32, height: u32) -> (f32, f32) {
-    let (w, h) =
-        crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
+    panel_origin_with_scale(layout, crate::config::AUTO_GUI_SCALE, width, height)
+}
+
+/// As [`panel_origin`], but against an explicit `gui_scale` (`0` = auto) rather
+/// than always auto. `app.rs`'s real windowed render/hit-test path uses this
+/// with the persisted `Options.gui_scale` so a manual scale setting moves the
+/// drawn panel and the click hit-rects together — see [`hit_test_with_scale`].
+#[must_use]
+pub fn panel_origin_with_scale(
+    layout: &SlotLayout,
+    gui_scale: u32,
+    width: u32,
+    height: u32,
+) -> (f32, f32) {
+    let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
     (
         ((w - layout.width) * 0.5).max(8.0),
         ((h - layout.height) * 0.5).max(8.0),
@@ -538,11 +603,26 @@ pub enum MenuHit {
 /// caller does not need to pre-scale the cursor itself.
 #[must_use]
 pub fn hit_test(menu: &Menu, width: u32, height: u32, x: f32, y: f32) -> MenuHit {
+    hit_test_with_scale(menu, crate::config::AUTO_GUI_SCALE, width, height, x, y)
+}
+
+/// As [`hit_test`], but against an explicit `gui_scale` (`0` = auto). Must be
+/// called with the **same** `gui_scale` the frame was last drawn with — see
+/// [`panel_origin_with_scale`] — or clicks land on the wrong slot while the
+/// screen still looks correct, exactly the class of bug this module's own
+/// docs warn about.
+#[must_use]
+pub fn hit_test_with_scale(
+    menu: &Menu,
+    gui_scale: u32,
+    width: u32,
+    height: u32,
+    x: f32,
+    y: f32,
+) -> MenuHit {
     let layout = slot_layout(menu);
-    let (px, py) = panel_origin(&layout, width, height);
-    let scale =
-        crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, width, height).max(1)
-            as f32;
+    let (px, py) = panel_origin_with_scale(&layout, gui_scale, width, height);
+    let scale = crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
     let local_x = x / scale - px;
     let local_y = y / scale - py;
     if local_x < 0.0 || local_y < 0.0 || local_x >= layout.width || local_y >= layout.height {
@@ -1069,6 +1149,9 @@ impl ContainerRenderer {
     /// Draws the container overlay over the current frame, with **no** item
     /// icons: slot contents fall back to the colour swatch. The plain entry
     /// point, kept so existing callers and the headless gates are unchanged.
+    /// Always lays out against [`crate::config::AUTO_GUI_SCALE`]; use
+    /// [`render_scaled`](Self::render_scaled) for the real windowed path,
+    /// which has a persisted `Options.gui_scale` to honour.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1079,6 +1162,24 @@ impl ContainerRenderer {
         height: u32,
     ) {
         self.render_with_icons(device, queue, view, None, frame, None, width, height);
+    }
+
+    /// As [`render`](Self::render), but against an explicit `gui_scale` (`0` =
+    /// auto) so the drawn panel matches whatever scale [`hit_test_with_scale`]
+    /// is being called with for the same frame.
+    pub fn render_scaled(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        frame: &ContainerFrame<'_>,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+    ) {
+        self.render_with_icons_scaled(
+            device, queue, view, None, frame, None, gui_scale, width, height,
+        );
     }
 
     /// Draws the container overlay including **real item icons**.
@@ -1116,6 +1217,34 @@ impl ContainerRenderer {
         width: u32,
         height: u32,
     ) {
+        self.render_with_icons_scaled(
+            device,
+            queue,
+            view,
+            depth,
+            frame,
+            models,
+            crate::config::AUTO_GUI_SCALE,
+            width,
+            height,
+        );
+    }
+
+    /// As [`render_with_icons`](Self::render_with_icons), but against an
+    /// explicit `gui_scale` (`0` = auto) — see [`render_scaled`](Self::render_scaled).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_icons_scaled(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        frame: &ContainerFrame<'_>,
+        models: Option<&BlockModels>,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+    ) {
         // Only ask for model geometry when there is somewhere to draw it.
         let want_models = self.icons.models_attached() && depth.is_some();
         let item_atlas = self.icons.item_atlas();
@@ -1123,6 +1252,7 @@ impl ContainerRenderer {
             frame,
             width,
             height,
+            gui_scale,
             &IconAssets {
                 items: item_atlas.as_deref(),
                 models: models.filter(|_| want_models),
@@ -1148,8 +1278,7 @@ impl ContainerRenderer {
         // straight to `gui_ortho`, which must match the logical canvas
         // `ContainerGeometry::build_inner` posed the 3-D block-item vertices
         // into above, not the raw physical framebuffer.
-        let (logical_w, logical_h) =
-            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
+        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,

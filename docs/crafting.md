@@ -120,21 +120,62 @@ cargo test -p lodestone-game --features json --test recipe_book -- --ignored --n
 cargo test -p lodestone-game --features json --test recipe_corpus -- --ignored --nocapture
 ```
 
-## Not wired yet
+## Wiring into the shell
 
-- Nothing calls `load_data_root` at runtime. `lodestone-game` is version-free and
-  must not depend on `lodestone-assets`, so the jar read belongs one layer up:
-  feed `client.jar`'s `data/**` entries through `CorpusBuilder::push_recipe` /
-  `push_tag` from wherever the asset pipeline already opens the jar.
+`crates/lodestone-shell/src/container.rs`'s `slot_layout` has, since before
+this section was last accurate, dispatched additively on `Menu::craft_layout()`
+(`crafting_layout`): a crafting table draws the real 3×3 grid plus the
+take-only result slot, not a flat 9-wide generic run. See that file's own
+module doc for the layout constants and the slot-order gotchas.
+
+`crates/lodestone-shell/src/resources.rs::load_recipe_book` feeds the real
+corpus in: it opens `client.jar` the same way every other shell asset loader
+does (`ZipSource` + `ResourceManager`), lists everything under `data/` with
+`ResourceManager::list` (a plain prefix match — nesting-safe, unlike a
+filesystem walk, since a prefix filter has no notion of depth to get wrong),
+and feeds each `recipe/**` and `tags/item/**` entry to `CorpusBuilder`. It does
+**not** call `load_data_root`: that function walks a real filesystem
+directory, and the corpus here lives inside a zip. `WindowApp` (`app.rs`)
+loads it once at GPU bring-up into a `recipe_book: Option<RecipeBook>` field.
+
+**Requires the `json` feature on `lodestone-game`'s dependency edge from
+`lodestone-shell`**, which is *not yet enabled* in
+`crates/lodestone-shell/Cargo.toml` (still `lodestone-game = { workspace =
+true }`, no `features = ["json"]`) — `recipe_json` is behind that feature and
+gates on the *depending* crate's own Cargo.toml, not a runtime check. Until
+that one line is added, `resources.rs` does not compile at all, let alone load
+recipes. This is a deliberate, narrow gap: it was left for review rather than
+made by the same change that added `load_recipe_book`, per that session's file
+scope.
+
+The loaded book feeds two things, both additive and neither touching the
+result slot's server authority:
+
+- **A ghost preview.** `ContainerFrame::with_recipe_book` attaches the book;
+  when the crafting result slot is empty, `ContainerGeometry::build_inner`
+  matches `menu.crafting_grid()` against it directly (not through
+  `Menus::predicted_craft_result`, which needs the `Menus` wrapper the shell's
+  `Sim` deliberately does not expose past `Menu` snapshots — see `sim.rs`'s
+  `player_menu`/`open_menu`) and draws the predicted result dimmed. The match
+  reruns every frame against live `menu` state and writes nothing back into
+  it, so a server disagreeing just means the real `slot_item` draw takes over
+  next frame — the same "server truth always wins" contract every other slot
+  already has.
+- **A debug-overlay counter.** `HudFrame::recipe_stats` appends a
+  `recipes=N tags=M` line to the F3 overlay when the book has loaded, as the
+  cheap "did this actually reach the running client" signal — the same role
+  `assets.sprites`/`assets.items` counters play for the other loaders in
+  `resources.rs`.
+
+Remaining gaps:
+
 - The v770 adapter encodes the serverbound `place_recipe`,
   `recipe_book_change_settings` and `recipe_book_seen_recipe` packets, but
   decodes **none** of the clientbound recipe packets (`update_recipes`,
   `recipe_book_add`/`remove`/`settings`, `place_ghost_recipe`). There is no
   `ClientEvent` for them yet.
-- The shell draws an `OpenMenuSnapshot` through `ContainerRenderer`, which lays
-  out `MenuKind::Player` and `MenuKind::Generic`. A crafting table currently
-  renders as a 10-slot generic row; it needs a layout that reads
-  `craft_layout()`.
+- No recipe-book UI (the "what can I make" browser) exists; the local corpus
+  is currently consumed only by the ghost preview and the debug counter above.
 
 ## Dependencies
 

@@ -51,3 +51,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
   the two sources of truth that already exist, what must stay a plain library, and
   why a native plugin is not a substitute for the sandboxed WASM host.
+- [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
+  pathfinding plugin: why movement costs are derived by simulating our own physics
+  rather than by formula, how a 150 ms search reconciles with a one-threaded
+  frame-driven ECS, the 0.25-block-per-packet agreement the server actually
+  enforces, and the finding that the live `CollisionView` answers three questions
+  out of twelve.
