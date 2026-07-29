@@ -36,11 +36,21 @@
 //!
 //! ## How to change it
 //!
-//! Sizes are the `const`s below and are in *physical* pixels — there is no DPI
-//! scaling yet, so on a 2× display the menu draws at half the apparent size of
-//! the equivalent vanilla screen. Text is upper-case-only because that is what
-//! the HUD's bitmap font has glyphs for; `glyph_rows` up-cases internally, so
-//! passing mixed case is harmless but pointless.
+//! Sizes are the `const`s below and are in *logical* GUI pixels — not physical
+//! ones. [`MenuRenderer::render`] converts the real framebuffer size (physical
+//! pixels) down to a logical canvas via [`logical_canvas`] before handing it to
+//! [`geometry`], using [`crate::config::calculate_gui_scale`] and whatever
+//! `gui_scale` option [`frame_for`] stamped onto the [`MenuFrame`]. That is what
+//! fixes the "menu draws half-size on Retina" report: on a HiDPI display the
+//! framebuffer is larger than the logical window, `calculate_gui_scale` picks a
+//! correspondingly larger integer scale, and dividing it back out keeps a fixed
+//! `ROW_W`/`BUTTON_H` at the same *visual* size regardless of DPI. `geometry`
+//! itself stays pixel-space and scale-agnostic — it does not know or care
+//! whether the canvas it was given is physical or logical, which is why every
+//! test below that calls it directly with a fixed size is unaffected by this.
+//! Text is upper-case-only because that is what the HUD's bitmap font has
+//! glyphs for; `glyph_rows` up-cases internally, so passing mixed case is
+//! harmless but pointless.
 
 use lodestone_assets::Image;
 
@@ -191,6 +201,13 @@ pub struct MenuFrame<'a> {
     pub footer: Vec<String>,
     /// A message above the footer, drawn in the failure colour.
     pub message: Option<String>,
+    /// The user's `gui_scale` option (`0` = auto). [`frame_for`] stamps this
+    /// onto every screen's frame, not just [`super::Screen::Settings`]'s — the
+    /// whole menu must scale, not only the screen that edits the setting.
+    /// Carried on the frame rather than as a new parameter to
+    /// [`MenuRenderer::render`] so that call site (owned by `app.rs`) does not
+    /// need to change. See [`logical_canvas`].
+    pub gui_scale: u32,
 }
 
 /// Decoded favicon mosaics, keyed by the status cache's address key.
@@ -252,7 +269,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
     use super::Screen;
     matches!(
         screen,
-        Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Error
+        Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings | Screen::Error
     )
 }
 
@@ -273,7 +290,7 @@ pub fn frame_for<'a>(
     use super::nav::{FormField, MAIN_BUTTONS};
     use super::status::StatusSlot;
 
-    match ui.screen() {
+    let frame = match ui.screen() {
         Screen::MainMenu => Some(MenuFrame {
             title: "LODESTONE",
             subtitle: "A MINECRAFT CLIENT",
@@ -288,6 +305,7 @@ pub fn frame_for<'a>(
             selected: nav.main_index(),
             footer: vec!["UP/DOWN SELECT   ENTER CONFIRM   ESC QUIT".to_string()],
             message: None,
+            ..Default::default()
         }),
         Screen::ServerList => {
             let entries = nav.list().entries();
@@ -349,6 +367,7 @@ pub fn frame_for<'a>(
                     "ESC BACK".to_string(),
                 ],
                 message: nav.save_error().map(str::to_string),
+                ..Default::default()
             })
         }
         Screen::ServerEdit => {
@@ -385,6 +404,29 @@ pub fn frame_for<'a>(
                     "AN EMPTY NAME USES THE HOST - AN EMPTY PORT ALLOWS SRV".to_string(),
                 ],
                 message: (!form.is_valid()).then(|| "AN ADDRESS IS REQUIRED".to_string()),
+                ..Default::default()
+            })
+        }
+        Screen::Settings => {
+            let scale = nav.gui_scale();
+            let label = if scale == crate::config::AUTO_GUI_SCALE {
+                "GUI SCALE: AUTO".to_string()
+            } else {
+                format!("GUI SCALE: {scale}")
+            };
+            Some(MenuFrame {
+                title: "OPTIONS",
+                subtitle: "",
+                rows: vec![MenuRow {
+                    label,
+                    detail: "UP/DOWN CHANGES IT - AUTO FITS THE WINDOW".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                }],
+                selected: 0,
+                footer: vec!["UP/DOWN CHANGE   ESC BACK".to_string()],
+                message: nav.options_save_error().map(str::to_string),
+                ..Default::default()
             })
         }
         // The error screen is drawn by this renderer too, even though it is not
@@ -404,9 +446,36 @@ pub fn frame_for<'a>(
             selected: 0,
             footer: vec!["ENTER OR ESC RETURNS TO THE MENU".to_string()],
             message: ui.error().map(|e| e.to_uppercase()),
+            ..Default::default()
         }),
         _ => None,
-    }
+    };
+    // Stamped on every screen (not read back out of `nav` per-screen above) so
+    // the whole menu scales, not only the settings screen that edits the
+    // setting.
+    frame.map(|mut f| {
+        f.gui_scale = nav.gui_scale();
+        f
+    })
+}
+
+/// The logical canvas size [`geometry`] should lay its fixed pixel constants
+/// into, given the real framebuffer size in physical pixels and the user's
+/// `gui_scale` option (`0` = auto). This is the one function that fixes the
+/// "menu draws half-size on Retina" report: it divides the framebuffer by the
+/// effective integer [`crate::config::calculate_gui_scale`], exactly vanilla's
+/// `Window.guiScaledWidth`/`Height` — so a fixed `ROW_W` comes out the same
+/// *visual* size at any DPI, rather than shrinking as the physical framebuffer
+/// grows. At `scale == 1` this is the identity (canvas == framebuffer), which
+/// is why every `geometry`-calling test below, which passes a fixed size
+/// directly, is unaffected by this existing.
+#[must_use]
+pub fn logical_canvas(gui_scale: u32, framebuffer_width: u32, framebuffer_height: u32) -> (f32, f32) {
+    let scale = crate::config::calculate_gui_scale(gui_scale, framebuffer_width, framebuffer_height).max(1);
+    (
+        framebuffer_width as f32 / scale as f32,
+        framebuffer_height as f32 / scale as f32,
+    )
 }
 
 /// Per-glyph horizontal advance at `scale` (fixed advance: cell plus one column).
@@ -747,7 +816,8 @@ impl MenuRenderer {
         width: u32,
         height: u32,
     ) {
-        let verts = geometry(frame, width as f32, height as f32);
+        let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
+        let verts = geometry(frame, logical_w, logical_h);
         if verts.len() > self.capacity_floats {
             self.capacity_floats = verts.len().next_power_of_two();
             self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -867,6 +937,7 @@ mod tests {
             Screen::MainMenu,
             Screen::ServerList,
             Screen::ServerEdit,
+            Screen::Settings,
             Screen::Connecting,
             Screen::Playing,
             Screen::Chat,
@@ -882,6 +953,7 @@ mod tests {
                     ui.open_server_list();
                     ui.open_server_edit();
                 }
+                Screen::Settings => ui.open_settings(),
                 Screen::Connecting => ui.begin(SessionKind::Multiplayer),
                 Screen::Playing => ui.enter_dev_world(),
                 Screen::Chat => {
@@ -919,7 +991,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(reached, 9, "a screen was added without being covered here");
+        assert_eq!(reached, 10, "a screen was added without being covered here");
         let _ = &mut nav;
     }
 
@@ -1072,6 +1144,7 @@ mod tests {
             selected,
             footer: vec![],
             message: None,
+            gui_scale: 0,
         }
     }
 
@@ -1291,6 +1364,41 @@ mod tests {
             0.0,
             "text overran the row's right edge"
         );
+    }
+
+    #[test]
+    fn logical_canvas_shrinks_a_retina_style_framebuffer_back_to_visual_size() {
+        // A 2x HiDPI display reports a framebuffer double an ordinary window's
+        // physical size for the same visual window. Auto scale must pick up
+        // roughly double the scale too, so the logical canvas (what `geometry`
+        // actually lays fixed pixel constants into) lands close to the same
+        // apparent size in both cases — this is the fix for the "menu draws
+        // half-size on Retina" report.
+        let lo_dpi = logical_canvas(0, 1280, 720);
+        let hi_dpi = logical_canvas(0, 2560, 1440);
+        // Not a no-op: the canvas must actually shrink relative to the raw
+        // framebuffer, or this is the exact island the change was for.
+        assert!(hi_dpi.0 < 2560.0 && hi_dpi.1 < 1440.0);
+        // And the two logical canvases must be close in size, not 2x apart,
+        // which is what "half size on Retina" looked like before this existed.
+        assert!(
+            (lo_dpi.0 - hi_dpi.0).abs() < lo_dpi.0 * 0.5,
+            "logical canvases diverged: {lo_dpi:?} vs {hi_dpi:?}"
+        );
+    }
+
+    #[test]
+    fn logical_canvas_is_the_identity_at_scale_one() {
+        // A tiny framebuffer forces scale 1 (see `config`'s own tests), at
+        // which point the logical canvas must equal the physical one exactly —
+        // this is what keeps every fixed-size `geometry` test above valid.
+        assert_eq!(logical_canvas(0, 200, 200), (200.0, 200.0));
+    }
+
+    #[test]
+    fn logical_canvas_never_divides_by_zero_for_a_degenerate_framebuffer() {
+        let (w, h) = logical_canvas(0, 0, 0);
+        assert!(w.is_finite() && h.is_finite());
     }
 
     #[test]

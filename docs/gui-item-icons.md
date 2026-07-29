@@ -50,6 +50,8 @@ Sim::player_menu -> HudFrame::hotbar_items      Menus::active -> ContainerFrame
                                                   -> IconSink::model (posed verts)
                              IconPart::Special -> nothing
                            count + durability   -> IconSink::colour
+                             (count draws through the caller's `Option<&VanillaFont>`,
+                              same fallback rule as every other HUD string)
         ,----------------------------------------------.
   HudRenderer::render_with_item_models    ContainerRenderer::render_with_icons
         `-------------> IconRenderer (upload / draw) -> pixels
@@ -101,6 +103,25 @@ the renderer draws as two ranges of one buffer:
 If you add anything to the container's colour stream, put it in the loop that
 matches its layer, not wherever is convenient — a stack count emitted in the
 wells loop ends up *underneath* the sprite it counts.
+
+### Stack count text and font
+
+`draw_item_icon` takes `font: Option<&VanillaFont>`, threaded from each
+screen's own `Builder` (`HudRenderer`/`ContainerRenderer` both resolve
+`VanillaFont::shared()` once in `new()`, exactly like `HudRenderer` already
+did for every other string). With a font attached, the count draws through
+`VanillaFont::draw` — real glyph widths and vanilla's 1 px / 25%-brightness
+drop shadow. Without one it falls back to the fixed-advance 5×7 debug font,
+now with the same 25%-brightness shadow colour (`vanilla_font::shadow_of`)
+instead of a pure black one.
+
+**The text scale is `size / 16.0`, the same factor the icon itself draws
+at — not a separate multiplier.** An earlier version scaled the fallback
+digits by an extra 2x on top of that, which is what actually made stack
+counts look oversized: the count grew relative to the icon it sits on, not
+just relative to the slot. Keep it this way once a real `gui_scale` lands —
+scaling every one of these sizes uniformly is exactly what keeps the count
+proportioned correctly relative to the icon without a special case.
 
 The middle pass exists *because of the depth attachment*: a render pass's
 attachments are fixed for its lifetime, and only the item models need depth.

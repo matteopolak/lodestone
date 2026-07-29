@@ -67,14 +67,30 @@
 //! cargo test -p lodestone-shell --test hotbar_block_item_pixels -- --ignored --nocapture
 //! ```
 
+use lodestone::config::{calculate_gui_scale, AUTO_GUI_SCALE};
 use lodestone::gpu::RenderState;
 use lodestone::hud::{DebugStats, HotbarSlot, HudFrame, HudRenderer};
 use lodestone::resources::{BlockResources, load_item_atlas};
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
 
-const W: u32 = 640;
-const H: u32 = 480;
+/// `HudGeometry::build_inner` divides the physical framebuffer down to a
+/// **logical** GUI canvas via `crate::menu::render::logical_canvas` before
+/// laying `draw_hotbar_items`'s fixed pixel constants into it, then the render
+/// pass stretches that canvas back out to fill the physical target — so a
+/// pixel gate reading back the physical framebuffer must either convert
+/// through that scale, or pick a size where the divide is a no-op. `(480,
+/// 320)` is `hud.rs`'s own `hud_vitals_draw_the_real_heart_sprite` gate's
+/// fixture, chosen for exactly this reason: it sits below vanilla's
+/// 320-logical-pixel floor at any scale above 1, so
+/// `calculate_gui_scale(AUTO, 480, 320) == 1` and `cell_rect` below needs no
+/// separate physical<->logical conversion. Scale-diversity is still exercised
+/// elsewhere in the suite —
+/// `container_screen.rs`'s `hit_test_and_drawn_geometry_share_one_panel_origin`
+/// runs the same panel-origin math at 1920x1080 (scale 4) — so this file
+/// dropping to scale 1 does not leave the GUI-scaling code path unexercised.
+const W: u32 = 480;
+const H: u32 = 320;
 
 /// The item under test: a full opaque cube whose faces are all one sprite, so
 /// the silhouette area is exactly the analytic figure above with no cutout
@@ -87,7 +103,10 @@ const ITEM: &str = "minecraft:stone";
 const EXPECTED_LIT: f32 = 172.5;
 
 /// The `(x, y)` pixel origin of hotbar cell `i` and the icon size, mirroring
-/// `hud::draw_hotbar_items`' procedural branch (no GUI atlas attached).
+/// `hud::draw_hotbar_items`' procedural branch (no GUI atlas attached). Reads
+/// `W`/`H` directly as the layout canvas: valid only because `W`x`H` is chosen
+/// so `calculate_gui_scale(AUTO, W, H) == 1`, verified in the test body below
+/// rather than assumed here.
 fn cell_rect(i: u32) -> [u32; 4] {
     let cx = W as f32 * 0.5;
     let cell = 22.0f32;
@@ -171,6 +190,19 @@ fn band_mean(pixels: &[u8], rect: [u32; 4], rows: std::ops::Range<u32>) -> Optio
 #[test]
 #[ignore = "requires a GPU adapter and the vanilla client.jar"]
 fn a_block_item_in_the_hotbar_reaches_pixels() {
+    // `cell_rect` hand-derives its rect straight from `W`/`H` with no
+    // physical<->logical conversion, which is only correct while the divide
+    // `HudGeometry::build_inner` performs is a no-op. Assert the precondition
+    // rather than silently trusting it — a future change to `W`/`H` that
+    // broke this would otherwise sample the wrong screen region and either
+    // false-fail or, worse, false-pass by accident.
+    assert_eq!(
+        calculate_gui_scale(AUTO_GUI_SCALE, W, H),
+        1,
+        "cell_rect assumes W x H divides to itself under the GUI scale; if this \
+         fails, cell_rect must convert its rect through the scale explicitly"
+    );
+
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
          run on a host with a GPU — do NOT treat a skip as a pass",

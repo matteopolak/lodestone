@@ -391,14 +391,28 @@ impl HudGeometry {
         models: Option<&BlockModels>,
         font: Option<&VanillaFont>,
     ) -> Self {
-        let mut b = Builder::new(
-            width.max(1) as f32,
-            height.max(1) as f32,
-            gui,
-            items,
-            models,
-            font,
+        // `width`/`height` are the **physical** framebuffer, straight from
+        // `winit::inner_size()` — already DPI-scaled, exactly what
+        // `crate::menu::render::logical_canvas` expects. Dividing it down to the
+        // logical canvas here, and laying every fixed pixel constant below into
+        // that smaller space, is the whole fix for "the HUD draws at half size on
+        // a Retina display": the constants themselves never change, only the
+        // canvas they are laid into. Reuses the exact helper `menu/render.rs`
+        // already uses for the menu screens, rather than a second scale
+        // computation that could disagree with it. `AUTO_GUI_SCALE` is used
+        // unconditionally because the persisted `Options.gui_scale` lives in
+        // `menu::nav::MenuNav`, which nothing on this call path threads through
+        // — `app.rs`'s HUD call site is out of this change's scope. Every
+        // caller already passes a *live* physical framebuffer size (production
+        // and every gate alike), so "auto" is not a stand-in value here, it is
+        // the real effective scale that would apply even with the option wired
+        // through, for any player who has not manually overridden it.
+        let (w, h) = crate::menu::render::logical_canvas(
+            crate::config::AUTO_GUI_SCALE,
+            width,
+            height,
         );
+        let mut b = Builder::new(w, h, gui, items, models, font);
 
         let scale = 2.0;
         let margin = 6.0;
@@ -721,12 +735,15 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
     // (first icon origin x, icon origin y, cell pitch, icon size) for the active
     // hotbar layout. Vanilla insets the 16px icon 3px into each 20px native slot.
     let (icon0_x, icon_y, pitch, size) = if b.gui.is_some() {
-        const S: f32 = 2.0;
-        let hw = 182.0 * S;
-        let hh = 22.0 * S;
+        // Native sprite pixels, laid straight into the already-scale-divided
+        // canvas — see the "GUI Scale" note on `sprite_vitals`, which this
+        // mirrors exactly (same hotbar rect, same reasoning for dropping the
+        // old hardcoded ×2).
+        let hw = 182.0;
+        let hh = 22.0;
         let hx = cx - hw * 0.5;
         let hy = b.h - hh - margin;
-        (hx + 3.0 * S, hy + 3.0 * S, 20.0 * S, 16.0 * S)
+        (hx + 3.0, hy + 3.0, 20.0, 16.0)
     } else {
         let cell = 22.0;
         let hw = 9.0 * cell;
@@ -749,18 +766,26 @@ fn draw_hotbar_items(b: &mut Builder, frame: &HudFrame) {
 /// on or off does not visibly jump the HUD. A no-op-safe: [`Builder::sprite`]
 /// draws nothing for a missing sprite, so a partial atlas degrades gracefully.
 fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
-    // Vanilla "GUI Scale 2": native sprite pixels are doubled on screen. At an
-    // integer scale the atlas sampler's Nearest magnification replicates texels
-    // exactly, so on-screen pixels equal jar pixels — which the GPU gate checks.
-    const S: f32 = 2.0;
+    // Native sprite pixels, laid straight into `b.w`/`b.h` — the
+    // already-scale-divided logical canvas `HudGeometry::build_inner` computes
+    // via `logical_canvas`. This used to hardcode a ×2 ("vanilla GUI Scale 2")
+    // on every sprite dimension here, from before there was any real scale
+    // computation; now that the canvas itself is divided by the *actual*
+    // effective scale, that hardcode would double-apply it — sprites here would
+    // render at 2× the size of the hotbar cells and text around them, which are
+    // laid out in plain logical pixels with no such multiplier. Dropping it is
+    // what keeps this cluster at the same visual size as everything else at any
+    // scale, not just the one this used to assume. At an integer scale the atlas
+    // sampler's Nearest magnification still replicates texels exactly, so
+    // on-screen pixels equal jar pixels — which the GPU gate checks.
     let white = [1.0, 1.0, 1.0, 1.0];
     let cx = b.w * 0.5;
     let margin = 6.0;
 
     // Hotbar (182x22 native), centred at the bottom, with the 24x23 selection
     // sprite over the chosen slot.
-    let hw = 182.0 * S;
-    let hh = 22.0 * S;
+    let hw = 182.0;
+    let hh = 22.0;
     let hx = cx - hw * 0.5;
     let hy = b.h - hh - margin;
     let mut cluster_top = b.h - margin;
@@ -769,18 +794,18 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
         // Vanilla draws the selection at native offset (slot*20 - 1, -1) from the
         // hotbar origin; the sprite is 24x23 so it overhangs the 20px slot pitch.
         let sel = sel.min(8) as f32;
-        let sw = 24.0 * S;
-        let sh = 23.0 * S;
-        let sx = hx + (sel * 20.0 - 1.0) * S;
-        let sy = hy - S;
+        let sw = 24.0;
+        let sh = 23.0;
+        let sx = hx + sel * 20.0 - 1.0;
+        let sy = hy - 1.0;
         b.sprite("hud/hotbar_selection", sx, sy, sw, sh, white);
         cluster_top = hy;
     }
 
     // XP bar (182x5), just above the hotbar: full background, then the progress
     // sprite cropped left-to-right to its filled fraction.
-    let bar_w = 182.0 * S;
-    let bar_h = 5.0 * S;
+    let bar_w = 182.0;
+    let bar_h = 5.0;
     if let Some((level, progress)) = frame.xp {
         let by = hy - bar_h - 4.0;
         b.sprite("hud/experience_bar_background", hx, by, bar_w, bar_h, white);
@@ -815,8 +840,8 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
     // Hearts (health) left, hunger right, one row above the cluster. Each icon
     // is 9x9 native, stepped 8px (vanilla spacing); a container/empty backing is
     // drawn first, then a full or half overlay per two points.
-    let icon = 9.0 * S;
-    let step = 8.0 * S;
+    let icon = 9.0;
+    let step = 8.0;
     let row_y = cluster_top - icon - 4.0;
     if let Some(hp) = frame.health {
         let hp = hp.max(0.0);
@@ -1003,7 +1028,7 @@ impl<'a> Builder<'a> {
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
         };
-        item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size);
+        item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size, self.font);
     }
 
     /// Emit a GUI sprite scaled into the pixel rect `(x, y, w, h)`, tinted by
@@ -1565,13 +1590,24 @@ impl HudRenderer {
         // Grow + upload both icon streams, and rewrite the model pass's GUI
         // camera for the current target size. Counts come back zero for a half
         // that is not attached, so the draws below need no further branching.
+        //
+        // `upload` feeds `width`/`height` straight to `gui_ortho`, the
+        // projection that turns the 3-D block-item vertices' GUI-pixel-space
+        // positions into clip space. Those vertices were posed by
+        // `HudGeometry::build_inner` above, in the *logical* canvas (physical
+        // framebuffer divided by the effective GUI scale) — so the projection
+        // must be built for that same logical size, not the raw physical one,
+        // or the model pass and the flat-sprite/colour passes it shares a
+        // frame with would disagree about how big a "GUI pixel" is.
+        let (logical_w, logical_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
             &geo.item_verts,
             &geo.model_verts,
-            width,
-            height,
+            logical_w.max(1.0) as u32,
+            logical_h.max(1.0) as u32,
             "hud-item-verts",
         );
 
@@ -2511,9 +2547,15 @@ mod tests {
         const BG: [u8; 3] = [24, 96, 176];
 
         // Only health on: no hotbar, XP or hunger, so the hearts sit at a
-        // location we can compute exactly. `sprite_vitals` uses S=2; with the
-        // cluster anchored at the bottom, the first heart is at (cx-182, h-28)
-        // and spans 18×18 px.
+        // location we can compute exactly. `(w, h) = (480, 320)` is chosen
+        // specifically so `calculate_gui_scale(AUTO, 480, 320) == 1` — below
+        // vanilla's 320-logical-pixel-wide floor at any scale above 1 — so the
+        // logical canvas `HudGeometry::build_inner` lays `sprite_vitals` into
+        // is identical to this physical target and no scale multiplication
+        // enters the picture here at all. `sprite_vitals` draws hearts at their
+        // native 9×9 size (no more hardcoded ×2 — see its own doc comment); with
+        // the cluster anchored at the bottom, the first heart is at
+        // `(cx - 91, h - 19)` and spans 9×9 px.
         let hud_frame = HudFrame {
             show_debug: false,
             crosshair: false,
@@ -2523,10 +2565,10 @@ mod tests {
             hotbar: None,
             ..HudFrame::new(&stats)
         };
-        let s = 2u32;
+        let s = 1u32;
         let cx = w / 2;
-        let x0 = cx - 182;
-        let y0 = h - 28;
+        let x0 = cx - 91;
+        let y0 = h - 19;
 
         // Render one frame with `hud`, read it back, and score how many *opaque*
         // heart texels match the jar sprite within tolerance after the 2× Nearest

@@ -38,6 +38,7 @@ use lodestone_assets::{ItemAtlas, ResourceLocation};
 use std::sync::Arc;
 
 use crate::hud::HotbarSlot;
+use crate::hud::VanillaFont;
 use crate::hud::item_icon::{self, ColourStream, IconAssets, IconRenderer, IconSink};
 
 const FLOATS_PER_VERTEX: usize = 6;
@@ -90,13 +91,27 @@ pub struct ContainerFrame<'a> {
     pub menu: Option<&'a Menu>,
     /// Title to draw at the top-left of the panel.
     pub title: &'a str,
+    /// Viewport-pixel position of the mouse cursor, the same coordinate space
+    /// [`hit_test`] takes — **not** local widget coordinates. `None` (the
+    /// default from [`new`](Self::new)) draws no carried stack even if
+    /// [`Menu::carried`] holds one, which is what keeps every existing caller
+    /// (headless builds, the pixel gates, `tests/container_screen.rs`)
+    /// unchanged: nothing here reads this field unless a caller opts in
+    /// through [`with_cursor`](Self::with_cursor).
+    pub cursor: Option<[f32; 2]>,
 }
 
 impl<'a> ContainerFrame<'a> {
-    /// A frame for an optional menu.
+    /// A frame for an optional menu, with no cursor position — the carried
+    /// stack (if any) will not draw. Chain [`with_cursor`](Self::with_cursor)
+    /// to supply one.
     #[must_use]
     pub fn new(menu: Option<&'a Menu>, title: &'a str) -> Self {
-        Self { menu, title }
+        Self {
+            menu,
+            title,
+            cursor: None,
+        }
     }
 
     /// A frame that deliberately draws nothing.
@@ -105,7 +120,16 @@ impl<'a> ContainerFrame<'a> {
         Self {
             menu: None,
             title: "",
+            cursor: None,
         }
+    }
+
+    /// Attach the mouse position, in viewport pixels, so a loaded cursor
+    /// (`menu.carried().is_some()`) draws the carried stack centred on it.
+    #[must_use]
+    pub fn with_cursor(mut self, cursor: Option<[f32; 2]>) -> Self {
+        self.cursor = cursor;
+        self
     }
 }
 
@@ -128,7 +152,12 @@ pub struct ContainerGeometry {
     /// the icons, so the renderer draws this stream in two ranges with the icon
     /// passes in between.
     pub chrome_vertex_count: usize,
-    /// Pixel rect covered by the widget, if anything was drawn.
+    /// Rect covered by the widget, if anything was drawn — in the **logical**
+    /// GUI canvas (physical `width`/`height` divided by the effective GUI
+    /// scale, matching [`panel_origin`]), not raw physical pixels. A caller
+    /// comparing this against a physical-pixel target (a screenshot, a
+    /// framebuffer readback) must scale it up first, the same way [`hit_test`]
+    /// scales a physical cursor position down before comparing the other way.
     pub widget_rect: Option<Rect>,
 }
 
@@ -145,10 +174,16 @@ impl ContainerGeometry {
     /// exercises.
     #[must_use]
     pub fn build(frame: &ContainerFrame<'_>, width: u32, height: u32) -> Self {
-        Self::build_inner(frame, width, height, &IconAssets {
-            items: None,
-            models: None,
-        })
+        Self::build_inner(
+            frame,
+            width,
+            height,
+            &IconAssets {
+                items: None,
+                models: None,
+            },
+            None,
+        )
     }
 
     /// Builds container overlay geometry drawing **real item icons** from the
@@ -162,10 +197,16 @@ impl ContainerGeometry {
         items: &ItemAtlas,
         models: Option<&BlockModels>,
     ) -> Self {
-        Self::build_inner(frame, width, height, &IconAssets {
-            items: Some(items),
-            models,
-        })
+        Self::build_inner(
+            frame,
+            width,
+            height,
+            &IconAssets {
+                items: Some(items),
+                models,
+            },
+            None,
+        )
     }
 
     fn build_inner(
@@ -173,6 +214,7 @@ impl ContainerGeometry {
         width: u32,
         height: u32,
         assets: &IconAssets<'_>,
+        font: Option<&VanillaFont>,
     ) -> Self {
         let Some(menu) = frame.menu else {
             return Self {
@@ -184,10 +226,17 @@ impl ContainerGeometry {
             };
         };
         let layout = slot_layout(menu);
-        let w = width.max(1) as f32;
-        let h = height.max(1) as f32;
+        // `width`/`height` are the physical framebuffer; divide down to the
+        // logical canvas the same way `menu/render.rs` and `crate::hud` do, so
+        // the panel and its slots come out the same *visual* size at any DPI
+        // instead of shrinking as the physical framebuffer grows. `panel_origin`
+        // performs the identical division for the widget's origin — see its own
+        // doc comment — so the two agree on what "the canvas" is by construction
+        // rather than by coincidence.
+        let (w, h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
         let (x, y) = panel_origin(&layout, width, height);
-        let mut b = Builder::new(w, h);
+        let mut b = Builder::new(w, h, font);
 
         b.rect_px(
             x,
@@ -230,29 +279,32 @@ impl ContainerGeometry {
             let Some(stack) = menu.slot_item(slot.menu_index) else {
                 continue;
             };
-            match (assets.items, icon_record(stack)) {
-                // The real thing: the shared hotbar icon pass, which also draws
-                // the stack count and the durability bar.
-                (Some(_), Some(record)) => b.item_icon(assets, &record, sx, sy, CELL),
-                // No atlas (or an item id the atlas could never key): the old
-                // hash-derived swatch plus a letter, so an occupied slot still
-                // reads as occupied on a jar-less run.
-                _ => {
-                    let color = item_color(stack.item().path());
-                    b.rect_px(sx + 3.0, sy + 3.0, 10.0, 10.0, color);
-                    let label = item_label(stack.item().path());
-                    b.text(&label, sx + 5.0, sy + 5.0, 1.0, [0.97, 0.95, 0.86, 1.0]);
-                    if stack.count() > 1 {
-                        b.text(
-                            &stack.count().to_string(),
-                            sx + 8.0,
-                            sy + 10.0,
-                            1.0,
-                            [0.98, 0.98, 0.92, 1.0],
-                        );
-                    }
-                }
-            }
+            b.draw_stack(assets, stack, sx, sy);
+        }
+
+        // The carried stack — what the player has picked up and is dragging —
+        // draws last: above every slot (it is appended after them on all three
+        // streams, and the icon streams draw in this same append order), below
+        // the tooltip (which this client does not draw yet). Vanilla centres it
+        // on the cursor; `cursor` is `None` unless the caller opted in via
+        // `ContainerFrame::with_cursor`, so every existing caller (the headless
+        // gates, `tests/container_screen.rs`, a menu with nothing carried) draws
+        // exactly as before.
+        //
+        // `frame.cursor` is documented as the same **physical** viewport space
+        // `hit_test` takes, but this builder draws in the logical canvas (`w`,
+        // `h` above) — dividing by the same effective scale `hit_test` divides
+        // its own `x`/`y` by is what keeps the drawn stack centred on the actual
+        // cursor instead of drifting off toward a corner as the scale grows.
+        if let (Some([cx, cy]), Some(stack)) = (frame.cursor, menu.carried()) {
+            let scale = crate::config::calculate_gui_scale(
+                crate::config::AUTO_GUI_SCALE,
+                width,
+                height,
+            )
+            .max(1) as f32;
+            let (cx, cy) = (cx / scale, cy / scale);
+            b.draw_stack(assets, stack, cx - CELL * 0.5, cy - CELL * 0.5);
         }
 
         Self {
@@ -434,7 +486,12 @@ fn crafting_layout(craft: CraftLayout, container_size: usize) -> SlotLayout {
     }
 }
 
-/// Where the panel's top-left corner lands in viewport pixels.
+/// Where the panel's top-left corner lands, in the **logical** GUI canvas —
+/// `width`/`height` in physical framebuffer pixels, divided by the effective
+/// GUI scale exactly as [`crate::menu::render::logical_canvas`] does for the
+/// menu screens (reused here rather than a second scale computation). [`hit_test`]
+/// converts an incoming physical cursor position down to this same logical
+/// space before comparing against it, which is what keeps the two agreeing.
 ///
 /// The single source of the centring offset. [`ContainerGeometry::build_inner`]
 /// and [`hit_test`] must agree to the pixel or the screen and the mouse disagree
@@ -442,8 +499,8 @@ fn crafting_layout(craft: CraftLayout, container_size: usize) -> SlotLayout {
 /// and is invisible in any screenshot.
 #[must_use]
 pub fn panel_origin(layout: &SlotLayout, width: u32, height: u32) -> (f32, f32) {
-    let w = width.max(1) as f32;
-    let h = height.max(1) as f32;
+    let (w, h) =
+        crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
     (
         ((w - layout.width) * 0.5).max(8.0),
         ((h - layout.height) * 0.5).max(8.0),
@@ -472,15 +529,22 @@ pub enum MenuHit {
 /// draws — so the clickable area and the visible area are the same rectangle by
 /// construction rather than by coincidence.
 ///
-/// Coordinates are raw viewport pixels, the same space the geometry is built in;
-/// this module applies no GUI scale of its own, so a caller that scales the
-/// overlay must scale the cursor identically.
+/// `x`/`y` are raw **physical** viewport pixels — the same space `width`/
+/// `height` and the cursor position `app.rs` tracks are already in. This module
+/// *does* apply a GUI scale of its own (the same effective scale
+/// [`crate::config::calculate_gui_scale`] picks for [`panel_origin`] and the
+/// drawn geometry): the incoming physical cursor is divided down to the same
+/// logical space the widget was laid out in before anything is compared, so a
+/// caller does not need to pre-scale the cursor itself.
 #[must_use]
 pub fn hit_test(menu: &Menu, width: u32, height: u32, x: f32, y: f32) -> MenuHit {
     let layout = slot_layout(menu);
     let (px, py) = panel_origin(&layout, width, height);
-    let local_x = x - px;
-    let local_y = y - py;
+    let scale =
+        crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, width, height).max(1)
+            as f32;
+    let local_x = x / scale - px;
+    let local_y = y / scale - py;
     if local_x < 0.0 || local_y < 0.0 || local_x >= layout.width || local_y >= layout.height {
         return MenuHit::Outside;
     }
@@ -778,22 +842,27 @@ fn item_color(path: &str) -> [f32; 4] {
 /// colour stream is this module's own; the two icon streams are the shared
 /// hotbar ones (see [`crate::hud::item_icon`]).
 #[derive(Debug)]
-struct Builder {
+struct Builder<'a> {
     w: f32,
     h: f32,
     verts: Vec<f32>,
     item_verts: Vec<f32>,
     model_verts: Vec<ModelVertex>,
+    /// The vanilla proportional font, for stack counts. `None` on a jar-less
+    /// run, where [`item_icon::draw_item_icon`] falls back to the fixed-advance
+    /// 5×7 debug font — the same degradation the HUD's own text uses.
+    font: Option<&'a VanillaFont>,
 }
 
-impl Builder {
-    fn new(w: f32, h: f32) -> Self {
+impl<'a> Builder<'a> {
+    fn new(w: f32, h: f32, font: Option<&'a VanillaFont>) -> Self {
         Self {
             w,
             h,
             verts: Vec::new(),
             item_verts: Vec::new(),
             model_verts: Vec::new(),
+            font,
         }
     }
 
@@ -833,7 +902,38 @@ impl Builder {
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
         };
-        item_icon::draw_item_icon(&mut sink, assets, (w, h), record, x, y, size);
+        item_icon::draw_item_icon(&mut sink, assets, (w, h), record, x, y, size, self.font);
+    }
+
+    /// Draw one occupied cell's contents at `(x, y)`: the real icon when the
+    /// item resolves against an attached atlas, else the hash-derived
+    /// swatch-and-letter fallback. Shared by the per-slot loop and the carried
+    /// stack, so an atlas-less run shows the cursor's stack exactly as it
+    /// shows an occupied well.
+    fn draw_stack(&mut self, assets: &IconAssets<'_>, stack: &lodestone_game::item::ItemStack, x: f32, y: f32) {
+        match (assets.items, icon_record(stack)) {
+            // The real thing: the shared hotbar icon pass, which also draws
+            // the stack count and the durability bar.
+            (Some(_), Some(record)) => self.item_icon(assets, &record, x, y, CELL),
+            // No atlas (or an item id the atlas could never key): the old
+            // hash-derived swatch plus a letter, so an occupied cell still
+            // reads as occupied on a jar-less run.
+            _ => {
+                let color = item_color(stack.item().path());
+                self.rect_px(x + 3.0, y + 3.0, 10.0, 10.0, color);
+                let label = item_label(stack.item().path());
+                self.text(&label, x + 5.0, y + 5.0, 1.0, [0.97, 0.95, 0.86, 1.0]);
+                if stack.count() > 1 {
+                    self.text(
+                        &stack.count().to_string(),
+                        x + 8.0,
+                        y + 10.0,
+                        1.0,
+                        [0.98, 0.98, 0.92, 1.0],
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -847,6 +947,10 @@ pub struct ContainerRenderer {
     /// hotbar. Both halves start detached, so [`render`](Self::render) alone
     /// keeps the pre-icon behaviour.
     icons: IconRenderer,
+    /// The vanilla proportional font, resolved once per process exactly like
+    /// [`HudRenderer`](crate::hud::HudRenderer)'s. `None` on a jar-less run,
+    /// where stack counts draw with the fixed-advance debug font.
+    font: Option<Arc<VanillaFont>>,
 }
 
 impl ContainerRenderer {
@@ -917,6 +1021,7 @@ impl ContainerRenderer {
             buffer,
             capacity_floats,
             icons: IconRenderer::new(),
+            font: VanillaFont::shared(),
         }
     }
 
@@ -1014,10 +1119,16 @@ impl ContainerRenderer {
         // Only ask for model geometry when there is somewhere to draw it.
         let want_models = self.icons.models_attached() && depth.is_some();
         let item_atlas = self.icons.item_atlas();
-        let geo = ContainerGeometry::build_inner(frame, width, height, &IconAssets {
-            items: item_atlas.as_deref(),
-            models: models.filter(|_| want_models),
-        });
+        let geo = ContainerGeometry::build_inner(
+            frame,
+            width,
+            height,
+            &IconAssets {
+                items: item_atlas.as_deref(),
+                models: models.filter(|_| want_models),
+            },
+            self.font.as_deref(),
+        );
         if geo.verts.is_empty() && geo.item_verts.is_empty() && geo.model_verts.is_empty() {
             return;
         }
@@ -1033,13 +1144,19 @@ impl ContainerRenderer {
         if !geo.verts.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.verts));
         }
+        // As in `HudRenderer::render_with_item_models`: `upload` feeds these
+        // straight to `gui_ortho`, which must match the logical canvas
+        // `ContainerGeometry::build_inner` posed the 3-D block-item vertices
+        // into above, not the raw physical framebuffer.
+        let (logical_w, logical_h) =
+            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
             &geo.item_verts,
             &geo.model_verts,
-            width,
-            height,
+            logical_w.max(1.0) as u32,
+            logical_h.max(1.0) as u32,
             "container-item-verts",
         );
 
@@ -1133,7 +1250,14 @@ mod tests {
         }
     }
 
-    /// Centre of a slot's hit rect, in viewport pixels.
+    /// Centre of a slot's hit rect, in **physical** viewport pixels — the same
+    /// space [`hit_test`] takes, and `VIEW` (1280x720) is deliberately *not* the
+    /// identity-scale case: `calculate_gui_scale(AUTO, 1280, 720) == 3` (see
+    /// `config::tests::auto_scale_at_1280x720`), so this genuinely exercises the
+    /// scale-conversion round trip rather than being inert at scale 1.
+    /// `panel_origin`/`slot_layout` work in the *logical* canvas, so their
+    /// result is scaled back up to physical pixels before returning — the
+    /// inverse of what `hit_test` does to its incoming `x`/`y`.
     fn slot_point(menu: &Menu, menu_index: usize) -> (f32, f32) {
         let layout = slot_layout(menu);
         let (px, py) = panel_origin(&layout, VIEW.0, VIEW.1);
@@ -1142,7 +1266,13 @@ mod tests {
             .iter()
             .find(|r| r.menu_index == menu_index)
             .unwrap_or_else(|| panic!("menu index {menu_index} has no rect"));
-        (px + rect.x + rect.w * 0.5, py + rect.y + rect.h * 0.5)
+        let scale =
+            crate::config::calculate_gui_scale(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1)
+                .max(1) as f32;
+        (
+            (px + rect.x + rect.w * 0.5) * scale,
+            (py + rect.y + rect.h * 0.5) * scale,
+        )
     }
 
     // ---------------------------------------------------------------------
