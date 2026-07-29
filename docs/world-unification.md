@@ -210,6 +210,16 @@ Three rules, on `lodestone_ecs::EcsHandle`. None of them is style.
    into `NetClient`/`ClientHandle` — **every** read on those locks this same `World` now.
    `Sim::fold_entities` resolves `net.entity_snapshots()` to an owned `Vec` *before* taking its
    guard, for exactly this reason.
+
+   **"Every read" is too strong, and the exception is load-bearing.** The *chunk*-backed reads —
+   `block_at`, `sections_and_light_at`, `world_dimensions`, `loaded_chunks` — take only
+   `SharedState`'s chunk-store lock and never touch the ECS `World`. That is what makes two shipped
+   call sites legal rather than deadlocks: `crate::interact::drive_mining` reads
+   `NetHandle::block_at` from inside `run_schedule(GameTick)` (so, under the `World` write guard),
+   and `crate::net::entity_light_at` does the same lookup for entity lighting. Both are `World →
+   chunks`, i.e. rule 3, not rule 1. The rule-1 set is the *ECS*-backed reads: `entities`,
+   `entity_snapshots`, `world_time`, `tab_list`, `scoreboard`, `boss_bars`, `player_menu`,
+   `open_menu`, `menu_click`.
 2. **Never hold a guard across an `.await`.** `lodestone_client`'s driver already promised this for
    the scalar read-model (`state.rs`'s module docs); it now matters for this lock too, because a task
    parked with the `World` write-locked would stall the frame.
@@ -220,6 +230,13 @@ Three rules, on `lodestone_ecs::EcsHandle`. None of them is style.
    Reversing either side is an ABBA deadlock and nothing in the type system stops it —
    `tick_particles` is written inside-out (store handle cloned, `World` guard taken, chunk guard
    taken inside) specifically to obey this, because the obvious spelling is the wrong order.
+
+**Rule 1 is enforced structurally for writes and only by review for reads.** `Sim::write` and
+`write_local` take `&mut self`, so the borrow checker forbids the closure reaching another accessor
+and so the same lock a second time. `Sim::read` takes `&self` and gets no such protection: a `read`
+closure that called another `&self` accessor would take a second read guard and deadlock behind any
+queued writer. Audited at the time of writing — no `read`/`write` closure in `sim.rs` calls any method
+on `self` — but that is a review property, not a compiler one.
 
 `Sim` enforces (1) structurally rather than by convention: there is no accessor that returns a guard
 or a `&`-into-the-`World`. Reads return owned values (`player() -> PlayerState`, which is `Copy`;
@@ -245,28 +262,92 @@ packet, executes directives, and `emit` calls `read_model.apply(&event)` *before
 there blocks the whole driver task — so it stops reading the socket too. Before (c) that lock was
 uncontended (only the net thread ever wrote the client's `World`); now the driver contends for it.
 
-What bounds the damage is that **no guard spans the frame**. `Sim::step` never takes one long guard;
-counted from the code it takes on the order of 15 short guards plus ~8 per catch-up tick, and the
-longest single hold is one `run_schedule` call. Ingest's own hold is one `run_schedule(NetIngest)`
-for one event. So the worst case a packet can wait is *one guard hold*, not *one frame*.
+What bounds the damage is that **no guard spans the frame**. `Sim::step` never takes one long guard.
+Ingest's own hold is one `run_schedule(NetIngest)` for one event. So the worst case a packet can wait
+is *one guard hold*, not *one frame*.
 
-Two deliberate choices keep the longest hold small:
+Three deliberate choices keep the longest hold small:
 
 - `Sim::particle_instances` returns an owned `Vec` rather than a mapped read guard. The guard version
   would keep the `World` read-locked for the whole GPU upload — the same failure inverted, with the
   frame stalling ingest. A `memcpy` of a few thousand POD instances is the cheaper side of that
   trade.
 - `drain_action_queue` takes the queue out under a guard and releases it before `net.send_action`.
+- **`Sim::with_particles_unlocked` moves the whole emitter out of the `World`**, runs the
+  `O(live particles)` pass with **no guard held at all**, and moves it back. Both per-frame particle
+  passes go through it. See below.
 
-**The longest remaining hold is `Sim::extract_particles`**, which holds the write guard across the
-particle extract *and* the per-particle light sampling closure (which reads chunks through
-`ClientHandle` — order-legal, rule 3, but not free). That is the first place to look if a live
-session ever shows delayed packet handling, and it is the one number this change could not measure:
-quantifying it needs a live session with real particle volume, and the oracles are not part of repo
-state. **Treat the bound above as structural, not measured.**
+### The bound is now measured, not counted off the code
 
-For scale: keep-alive timeouts are seconds and the guard holds are sub-millisecond, so this is a
-latency question, not a disconnect risk.
+§4.1(c) shipped the paragraph above as an argument from reading the source — which is exactly the
+**duration** species of vacuous test `CLAUDE.md` names: a claim about how long something takes with
+nothing that looks at how long it takes. `lodestone_ecs::LockHolds` is the counter that looks.
+
+Every guard `Sim` takes goes through `lodestone_ecs::hold_read` / `hold_write`, which fold the hold
+duration into a `LockHolds` resource (interior `AtomicU64`s, because a **read** guard yields `&World`
+and the reads are most of the guards). `CorePlugin` inserts it; a `World` without it is silently
+unmeasured rather than a panic. `Sim::lock_holds()` / `Sim::reset_lock_holds()` read and zero it.
+The clock starts *after* acquisition, so this measures **how long we held it** — not how long we
+waited for it, which is the other side of the same coin and would not be attributable.
+
+Measured on an M-series laptop, hermetic (`cargo test -p lodestone-shell --lib -- --nocapture`):
+
+| | wall | guarded | holds | longest |
+|---|---|---|---|---|
+| `extract_particles`, 4 000 live particles | 371 µs | 57 µs | 4 | **41 µs** |
+| the same call in its **pre-fix shape** (extract inside the guard) | 329 µs | 330 µs | 2 | **328 µs** |
+| one `Sim::step(0.1)`, demo world | 134 µs | 119 µs | 35 | **40 µs** |
+
+Read those three rows carefully, because two of them are the point:
+
+- **Row 2 is the negative control, and it fires.** `the_pre_fix_shape_of_extract_particles_fails_the_hold_bound`
+  reproduces the old spelling and asserts it *fails* the bound row 1 passes. Without it, row 1 is a
+  ratio nobody has shown can come out the other way.
+- **Rows 1 and 3 agree, which is the real finding.** The longest hold in `extract_particles` is now
+  the same ~40 µs as the longest hold in a whole frame — i.e. the particle path is no longer the
+  outlier, and **the longest remaining hold in the process is one `run_schedule` call**, as the
+  original structural argument assumed but could not show. 35 holds per frame, also measured, is
+  what "many short guards" means.
+- The assertion in row 1 is a **ratio against the call's own wall time** (guarded < 25%), not an
+  absolute nanosecond ceiling: an absolute bound is a statement about one machine. Row 3's ceiling
+  *is* absolute (25 ms — "no guard spans a 40 fps frame") because a whole `step` legitimately is
+  mostly its two `run_schedule` holds, so a ratio there would assert nothing; its control is
+  `lodestone-ecs`'s `the_hold_meter_reports_a_deliberately_long_hold`, which sleeps 30 ms under a
+  guard and observes the counter report it.
+
+Two honest limits on the above. First, **41 µs is more than two resource moves should cost** and is
+not fully explained; it is within scheduling noise at this scale and it is not the number the
+assertion rests on (the ratio is), but do not read it as a floor. Second, the hermetic light closure
+is the offline arm (`self.net == None`), so the *live* per-particle chunk lookups are absent from
+row 1 — which is the whole point rather than a gap: those lookups now happen with **no `World` guard
+held**, so their cost cannot enter the hold however large particle volume gets. To see the live
+magnitude anyway, run `scripts/live-oracles/creative.sh`, break a large volume of blocks (or stand in
+rain) and read `Sim::lock_holds()`.
+
+**What the meter does not cover:** the net thread's own holds. `SharedState::apply` takes
+`ecs.write()` directly; routing that one call through `lodestone_ecs::hold_write` would put ingest's
+`run_schedule(NetIngest)` hold on the same counter. That is a one-line change in `lodestone-client`
+and was out of scope here.
+
+For scale: keep-alive timeouts are seconds and the measured guard holds are tens of microseconds, so
+this is a latency question, not a disconnect risk.
+
+### `tick_particles` no longer navigates rule 3 — it retires it
+
+`tick_particles` used to be written inside-out on purpose (chunk store handle cloned, `World` guard
+taken, chunk guard taken *inside*) because the obvious spelling — take the chunk read guard, then
+reach for the emitter — is `chunks → World`, the one order that can ABBA against the net thread. It
+now goes through `with_particles_unlocked`, so the chunk guard is taken inside a closure that holds
+**no** `World` guard, and the two are never held together at all. Do not read the trailing
+`insert_resource` write as "chunks then `World`": the chunk guard is a temporary inside the closure
+and is gone before it.
+
+The one thing `with_particles_unlocked` costs is an **absence window** — between its two guards the
+`World` has no `ParticleSim`. Nothing can observe it: `&mut self` makes it exclusive on the driver
+thread, the closure runs no schedule, the only other reader (`crate::interact::drive_mining`, a
+`TickSet::Send` system) is on that same thread, and the net thread's `NetIngest` systems live in
+`lodestone-ecs` and cannot name a `lodestone-shell` resource at all. A panic inside the closure would
+leave it missing, which is what the `expect` message says.
 
 ---
 
