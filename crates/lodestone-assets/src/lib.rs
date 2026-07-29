@@ -75,6 +75,7 @@ mod bake;
 mod blockstate;
 pub mod entity;
 pub mod entity_models;
+pub mod equipment;
 mod error;
 pub mod fluid;
 pub mod font;

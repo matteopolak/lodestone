@@ -11,23 +11,24 @@
 use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
+use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
-    AnimInput, AnimSlotUniform, BlockAtlas, BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT,
-    DepthBuffer, ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas,
-    GpuEntityModel, GpuMesh, GpuModelMesh, ItemGeometry, Mesh, ModelCameraUniform, ModelMesh,
-    ModelPipeline, SpriteAnimation,
+    AnimInput, AnimSlotUniform, ArmourModelSet, BlockAtlas, BlockPipeline, Camera, CameraUniform,
+    DEPTH_FORMAT, DepthBuffer, ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet,
+    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, ItemGeometry, Mesh,
+    ModelCameraUniform, ModelMesh, ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
     entity::{
-        Arm, dropped_item_mesh, first_person_arm_parts, first_person_arm_pose, ground_transform,
-        hand_projection, hand_transform, held_item_mesh, item_bob_offset, model_for_type,
-        player_model_name,
+        Arm, armour_layer_tint, armour_layers, dropped_item_mesh, first_person_arm_parts,
+        first_person_arm_pose, ground_transform, hand_projection, hand_transform, held_item_mesh,
+        item_bob_offset, model_for_type, player_model_name,
     },
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
     model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
-    upload_instances,
+    upload_instances, upload_instances_tinted,
     vertex::vram_bytes,
 };
 
@@ -637,6 +638,19 @@ pub struct RenderStats {
     /// `entities_drawn`, and a silently-broken equipment chain would otherwise
     /// look exactly like a server that sent no equipment.
     pub held_items_drawn: usize,
+    /// Humanoid armour **layers** drawn this frame — one per
+    /// `(wearer, slot, texture layer)`, so a leather chestplate counts 2 (its
+    /// dyeable base and its overlay) and a diamond one counts 1.
+    ///
+    /// Counted per layer rather than per piece precisely because the second
+    /// leather layer is the one at risk: it is coplanar with the first and
+    /// depends on the armour pipeline's `LessEqual` depth compare, so a
+    /// regression there shows up as a count that is right and pixels that are
+    /// not — but a count that *drops* to one per piece localises the break to
+    /// resolution rather than to depth.
+    ///
+    /// Zero with no vanilla pack: armour has no synthetic-texture fallback.
+    pub armour_layers_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional
@@ -809,6 +823,21 @@ struct EntityRenderer {
     /// startup on any adapter at wgpu's 4-group floor.
     hand_cam_buffer: wgpu::Buffer,
     hand_cam_bind_group: wgpu::BindGroup,
+    /// The humanoid-armour layers: a second pipeline (`LessEqual` depth — see
+    /// [`EntityPipeline::armour_pipeline`]), the four slot meshes on the CPU
+    /// (needed per frame to pair each part with the wearer's own part index) and
+    /// on the GPU, and one texture bind group per `(texture name, layer type)`.
+    ///
+    /// `armour_textures` is **empty without a vanilla pack**, and armour then
+    /// draws nothing rather than falling back to a synthetic colour the way a
+    /// mob's own sheet does. That asymmetry is deliberate: a flat-magenta mob is
+    /// recognisably "this mob's sheet is missing", whereas a flat-coloured
+    /// helmet-shaped shell over a mob's head reads as a *rendering* bug, and the
+    /// offline demo has no armour to draw in the first place.
+    armour_pipeline: wgpu::RenderPipeline,
+    armour_models: ArmourModelSet,
+    armour_gpu: Vec<(ArmourSlot, GpuEntityModel)>,
+    armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup>,
 }
 
 impl EntityRenderer {
@@ -840,6 +869,26 @@ impl EntityRenderer {
             let bg = pipeline.texture_bind_group(device, &view, &sampler);
             textures.insert(name, bg);
         }
+
+        // The armour layers. Four meshes, uploaded once and shared by every
+        // material — the geometry depends only on the slot's inflation, so
+        // eight materials do not mean eight helmets.
+        let armour_pipeline = pipeline.armour_pipeline(device, color_format);
+        let armour_models = ArmourModelSet::load();
+        let armour_gpu: Vec<(ArmourSlot, GpuEntityModel)> = armour_models
+            .iter()
+            .filter_map(|(slot, mesh)| {
+                GpuEntityModel::upload_armour(device, mesh).map(|gpu| (slot, gpu))
+            })
+            .collect();
+        let armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup> =
+            load_humanoid_armour_textures()
+                .iter()
+                .map(|(key, img)| {
+                    let view = entity_texture_from_image(device, queue, img);
+                    (*key, pipeline.texture_bind_group(device, &view, &sampler))
+                })
+                .collect();
 
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
@@ -885,8 +934,116 @@ impl EntityRenderer {
             cam_bind_group,
             hand_cam_buffer,
             hand_cam_bind_group,
+            armour_pipeline,
+            armour_models,
+            armour_gpu,
+            armour_textures,
         }
     }
+
+    /// The uploaded armour mesh for a slot, if it has geometry.
+    fn armour_model(&self, slot: ArmourSlot) -> Option<&GpuEntityModel> {
+        self.armour_gpu
+            .iter()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, gpu)| gpu)
+    }
+}
+
+/// Decode every humanoid-armour sheet 26.2 ships, keyed by
+/// `(texture name, layer type)` — the identity `equipment/<asset>.json` gives a
+/// layer, and therefore the identity a bind group needs.
+///
+/// Version-free and **fail-open**: an empty map means no pack was found or no
+/// sheet decoded, and armour then simply does not draw. There is no synthetic
+/// fallback on purpose — see [`EntityRenderer::armour_textures`].
+///
+/// # This duplicates `resources.rs`'s pack discovery, and should not have to
+///
+/// `resources::asset_root`/`open_client_jar` are private and
+/// `resources::vanilla_manager` is `#[cfg(test)]`, so production code in another
+/// module cannot reach any of them; `crate::hud::vanilla_font::jar_manager`
+/// already carries an identical copy for exactly this reason and says so. The
+/// right end state is one `pub(crate) fn vanilla_manager()` in `resources.rs`
+/// with all three callers going through it — a one-line attribute change in a
+/// file this pass does not own. Until then the discovery rule is duplicated
+/// *exactly*: `LODESTONE_ASSETS` if set and complete, else the highest-sorting
+/// `.cache/mc/<version>` under any ancestor of the working directory holding
+/// both `client.jar` and `generated/reports/blocks.json`.
+fn load_humanoid_armour_textures()
+-> HashMap<(&'static str, ArmourLayerType), lodestone_assets::Image> {
+    use lodestone_assets::equipment::{ARMOUR_ASSETS, armour_texture_path};
+    use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
+    use std::path::{Path, PathBuf};
+
+    fn is_pack_root(dir: &Path) -> bool {
+        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+    }
+    fn pack_root() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
+            let p = PathBuf::from(dir);
+            return is_pack_root(&p).then_some(p);
+        }
+        let cwd = std::env::current_dir().ok()?;
+        for base in cwd.ancestors() {
+            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
+                Ok(rd) => rd
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| is_pack_root(p))
+                    .collect(),
+                Err(_) => continue,
+            };
+            entries.sort();
+            if let Some(root) = entries.pop() {
+                return Some(root);
+            }
+        }
+        None
+    }
+
+    let mut out = HashMap::new();
+    let Some(jar) = pack_root().map(|root| root.join("client.jar")) else {
+        return out;
+    };
+    let Ok(bytes) = std::fs::read(&jar) else {
+        tracing::warn!(target: "assets", "read {}", jar.display());
+        return out;
+    };
+    let Ok(zip) = ZipSource::from_bytes(bytes) else {
+        tracing::warn!(target: "assets", "open {}", jar.display());
+        return out;
+    };
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+
+    for asset in ARMOUR_ASSETS {
+        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+            for layer in asset.layers(layer_type) {
+                let key = (layer.texture, layer_type);
+                if out.contains_key(&key) {
+                    // Leather shares one layer list between both layer types, so
+                    // the same (texture, type) pair is reached twice.
+                    continue;
+                }
+                let path = armour_texture_path(layer, layer_type);
+                let Some(png) = manager.read(&path) else {
+                    tracing::warn!(target: "assets", "missing armour sheet {path}");
+                    continue;
+                };
+                match Image::decode_png(&png) {
+                    Ok(img) => {
+                        out.insert(key, img);
+                    }
+                    Err(e) => tracing::warn!(target: "assets", "decode {path}: {e}"),
+                }
+            }
+        }
+    }
+    tracing::info!(
+        target: "assets",
+        loaded = out.len(),
+        "loaded vanilla humanoid armour sheets"
+    );
+    out
 }
 
 #[cfg(test)]
@@ -1971,6 +2128,12 @@ impl RenderState {
         // be written first too.
         let entity_batches = self.prepare_entities(device, queue, camera, entities, &mut stats);
 
+        // Humanoid armour layers, over the same instances — resolved from the
+        // same `entities` slice and the same resolver, so a helmet cannot be
+        // posed off a head the body pass did not draw. Uploaded here for the
+        // usual reason: no buffer creation mid-pass.
+        let armour_batches = self.prepare_armour(device, camera, entities, &mut stats);
+
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
         // creation mid-pass). Both are item models through the model pipeline,
@@ -2116,6 +2279,39 @@ impl RenderState {
                         pass.set_vertex_buffer(1, buffer.slice(..));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
+            // Humanoid armour, immediately after the bodies it sits on and
+            // before anything else — the pieces are physically outside the mob
+            // (the smallest inflation is +0.4 texels) so the depth buffer sorts
+            // body against armour on its own, but a coplanar *pair* of armour
+            // layers does not sort itself. That is why this uses the armour
+            // pipeline's `LessEqual` compare, and why `armour_batches` is walked
+            // in its accumulation order: leather's untinted `leather_overlay`
+            // sits exactly on its dyeable base and only wins by being second.
+            //
+            // Group 0 is the world entity camera, still bound from the pass
+            // above; group 1 is rebound per armour texture.
+            if !armour_batches.is_empty() {
+                pass.set_pipeline(&self.entities.armour_pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                for batch in &armour_batches {
+                    let Some(model) = self.entities.armour_model(batch.slot) else {
+                        continue;
+                    };
+                    let Some(texture) = self.entities.armour_textures.get(&batch.texture) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer, count) in &batch.parts {
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..*count);
                         stats.draw_calls += 1;
                     }
                 }
@@ -2460,12 +2656,18 @@ impl RenderState {
     ///
     /// # What is deliberately not handled
     ///
-    /// * **Armour, `Body` and `Saddle`.** Skipped with a counter-free `continue`,
-    ///   not silently: see [`EntityDraw::equipment`] for why (there is no armour
-    ///   mesh in the corpus — it needs a whole new humanoid set baked at two
-    ///   inflations, plus trim and dye, which is a mesh job and not a plumbing
-    ///   one). Faking it by posing an *item* model at a chest slot would draw a
-    ///   floating chestplate icon, which is worse than nothing.
+    /// * **The four humanoid armour slots.** Still skipped *here*, because armour
+    ///   is not an item model hung off an arm — it is a cuboid mesh layer over
+    ///   the wearer's rig, and it goes through the *entity* pipeline. See
+    ///   [`RenderState::prepare_armour`], which is where `Head`/`Chest`/`Legs`/
+    ///   `Feet` are consumed. Faking one here by posing an *item* model at a
+    ///   chest slot would draw a floating chestplate icon, which is worse than
+    ///   nothing.
+    /// * **`Body` and `Saddle`.** Neither is humanoid armour and neither has a
+    ///   mesh: `BODY` is `ANIMAL_ARMOR` (wolf armour, horse barding —
+    ///   `WolfArmorLayer`, `HorseArmorLayer`) and `SADDLE` is its own type with
+    ///   eleven per-mount layer types. See [`humanoid_armour_slot`] for why
+    ///   folding `Body` into `Chest` is specifically wrong.
     /// * **Rigs with no arm.** A creeper with a `MainHand` item (a plugin can do
     ///   this) resolves no `right_arm` part, so nothing is drawn. Vanilla agrees:
     ///   `ItemInHandLayer` is only attached to renderers whose model implements
@@ -2520,8 +2722,9 @@ impl RenderState {
             let arm = match slot {
                 EquipmentSlot::MainHand => Arm::Right,
                 EquipmentSlot::OffHand => Arm::Left,
-                // Armour/body/saddle: see this method's docs. Left unhandled on
-                // purpose rather than approximated.
+                // Humanoid armour is drawn by `prepare_armour` through the
+                // entity pipeline; `Body`/`Saddle` are animal equipment with no
+                // mesh at all. See this method's docs.
                 _ => continue,
             };
             let Some(geometry) = model.items.get(id) else {
@@ -2635,6 +2838,182 @@ impl RenderState {
             })
             .collect()
     }
+
+    /// Resolve this frame's **humanoid armour layers** into per-`(slot, texture)`
+    /// instance buffers, ready to draw over the mobs wearing them.
+    ///
+    /// # Every piece is posed off the wearer's own part matrix
+    ///
+    /// Vanilla's armour model is an instance of the wearer's model *class* and is
+    /// animated by the wearer's render state, so a zombie's chestplate reaches
+    /// out in front with `animateZombieArms`. The equivalent here is to run no
+    /// second pose at all: `ArmourMesh::attach` pairs each armour part with the
+    /// wearer's index for the same name, and this reads
+    /// `instance.part_transforms[i]` — the matrix the mob is *already* being
+    /// drawn with.
+    ///
+    /// **Nothing is written back.** That is the same discipline
+    /// `EntityInstance::hand_transforms` exists to enforce for held items: there,
+    /// folding the item's pivot shift into `part_transforms` would have dragged
+    /// the visible arm along with the sword. Armour needs the wearer's matrix
+    /// *unmodified*, so there is nothing to fold in — but the rule is the same
+    /// one, and a future "optimisation" that poses armour by mutating the
+    /// wearer's transforms would break the mob, not the armour.
+    ///
+    /// # What is deliberately not handled
+    ///
+    /// * **Trims** (`minecraft:trim`). Not decoded anywhere in this engine and
+    ///   not carried past `net::entity_snapshot`, so there is no input; they also
+    ///   need a stitched trim-sprite atlas and a third depth mode
+    ///   (`CompareOp.EQUAL`, no depth write). See `docs/armour-rendering.md`.
+    /// * **A stack's own dye** (`minecraft:dyed_color`). Same reason: the
+    ///   component is dropped at `entity_snapshot`, which narrows a stack to its
+    ///   item id. Leather therefore always draws at
+    ///   `Dyeable.colorWhenUndyed`, which is the correct answer for an undyed
+    ///   piece and the only reachable one for a dyed one.
+    /// * **Baby rigs.** Vanilla swaps in a whole second mesh set
+    ///   (`createBabyArmorMesh`, `humanoid_baby` sheets, its own deformations);
+    ///   a baby zombie wears adult armour scaled by the mob's 0.5 uniform scale
+    ///   instead. Visibly close, not vanilla.
+    /// * **Enchantment glint.** `hasFoil` is not on this side of the wire.
+    fn prepare_armour(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<ArmourDrawBatch> {
+        // No pack, no sheets, nothing to draw — and no synthetic fallback, on
+        // purpose (see `EntityRenderer::armour_textures`).
+        if self.entities.armour_textures.is_empty() {
+            return Vec::new();
+        }
+        let frustum = camera.frustum();
+        let mut accum: Vec<ArmourAccum> = Vec::new();
+
+        for draw in entities {
+            if draw.equipment.is_empty() {
+                continue;
+            }
+            // Cheap reject before any pose work: most equipment is a held item.
+            if !draw
+                .equipment
+                .iter()
+                .any(|(slot, _)| humanoid_armour_slot(*slot).is_some())
+            {
+                continue;
+            }
+            // Same resolver, same `AnimInput` as `prepare_entities`, so a piece
+            // of armour can never be posed off a different pose than the body it
+            // is drawn over.
+            let Some(instance) = self.entities.models.resolve(
+                &draw.type_path,
+                draw.feet,
+                draw.yaw,
+                draw.scale,
+                &draw.anim,
+            ) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
+                continue;
+            }
+            let Some(wearer) = self.entities.models.get(instance.model) else {
+                continue;
+            };
+            let light = u32::from(self.entity_light.sample(draw.feet));
+
+            // Walk the *slots* rather than the equipment list, so the draw order
+            // is `HumanoidArmorLayer.submit`'s (chest, legs, feet, head)
+            // regardless of what order the server happened to send.
+            for slot in ArmourSlot::ALL {
+                let Some((_, id)) = draw
+                    .equipment
+                    .iter()
+                    .find(|(s, _)| humanoid_armour_slot(*s) == Some(slot))
+                else {
+                    continue;
+                };
+                // A modded namespace has no entry in the 26.2 asset table, and
+                // guessing one would draw the wrong material.
+                if id.namespace() != "minecraft" {
+                    continue;
+                }
+                let layers = armour_layers(slot, id.path());
+                if layers.is_empty() {
+                    continue;
+                }
+                let Some(mesh) = self.entities.armour_models.get(slot) else {
+                    continue;
+                };
+                // The humanoid gate lives inside `attach`: a pig handed a
+                // chestplate resolves `body` by name and still wears nothing.
+                let attached: Vec<_> = mesh.attach(&wearer.skeleton).collect();
+                if attached.is_empty() {
+                    continue;
+                }
+                for layer in layers {
+                    let texture = (layer.texture, slot.layer_type());
+                    if !self.entities.armour_textures.contains_key(&texture) {
+                        continue;
+                    }
+                    let tint = armour_layer_tint(layer);
+                    let group = match accum
+                        .iter_mut()
+                        .position(|a| a.slot == slot && a.texture == texture)
+                    {
+                        Some(i) => &mut accum[i],
+                        None => {
+                            accum.push(ArmourAccum {
+                                slot,
+                                texture,
+                                parts: Vec::new(),
+                            });
+                            accum.last_mut().expect("just pushed")
+                        }
+                    };
+                    for (range, wearer_index) in &attached {
+                        let Some(transform) = instance.part_transforms.get(*wearer_index) else {
+                            continue;
+                        };
+                        let part = match group.parts.iter_mut().position(|p| p.range == *range) {
+                            Some(i) => &mut group.parts[i],
+                            None => {
+                                group.parts.push(ArmourPartAccum {
+                                    range: *range,
+                                    transforms: Vec::new(),
+                                    lights: Vec::new(),
+                                    tints: Vec::new(),
+                                });
+                                group.parts.last_mut().expect("just pushed")
+                            }
+                        };
+                        part.transforms.push(*transform);
+                        part.lights.push(light);
+                        part.tints.push(tint);
+                    }
+                    stats.armour_layers_drawn += 1;
+                }
+            }
+        }
+
+        accum
+            .into_iter()
+            .map(|group| ArmourDrawBatch {
+                slot: group.slot,
+                texture: group.texture,
+                parts: group
+                    .parts
+                    .into_iter()
+                    .filter_map(|p| {
+                        let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
+                        upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)
+                            .map(|buffer| (p.range, buffer, count))
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
 }
 
 /// The first-person arm's draw for one frame: the uploaded `player_wide` mesh and
@@ -2660,6 +3039,64 @@ struct EntityDrawBatch {
     parts: Vec<Option<wgpu::Buffer>>,
 }
 
+/// One `(armour slot, texture)` group's uploaded instance buffers for a frame.
+///
+/// The **order of these in the returned `Vec` is load bearing**: leather's
+/// `humanoid` layer list is a dyeable base sheet and an untinted
+/// `leather_overlay` at the *same* inflation, so the two are coplanar and the
+/// overlay only wins the (`LessEqual`) depth test if it is drawn second. Batches
+/// are accumulated in insertion order — slot in `ArmourSlot::ALL` order, then
+/// layer in declaration order — never through a `HashMap`.
+#[derive(Debug)]
+struct ArmourDrawBatch {
+    slot: ArmourSlot,
+    texture: (&'static str, ArmourLayerType),
+    /// `(index range, instance buffer, instance count)` per armour part that
+    /// anything in this group used.
+    parts: Vec<(lodestone_render::PartRange, wgpu::Buffer, u32)>,
+}
+
+/// Per-part instance accumulation for one `(slot, texture)` group, before upload.
+struct ArmourAccum {
+    slot: ArmourSlot,
+    texture: (&'static str, ArmourLayerType),
+    parts: Vec<ArmourPartAccum>,
+}
+
+struct ArmourPartAccum {
+    range: lodestone_render::PartRange,
+    transforms: Vec<glam::Mat4>,
+    lights: Vec<u32>,
+    tints: Vec<[u8; 3]>,
+}
+
+/// The [`ArmourSlot`] an [`EquipmentSlot`] maps onto, or `None`.
+///
+/// This is vanilla's `EquipmentSlot.Type.HUMANOID_ARMOR` predicate
+/// (`EquipmentSlot.java:15-19`) and nothing looser. In particular:
+///
+/// * **`Body` is not `Chest`.** `BODY` is `ANIMAL_ARMOR` — wolf armour and horse
+///   barding live there — and `SADDLE` is its own type. A fold of `"body"` into
+///   the chest slot was removed from the item census for exactly this reason
+///   (`docs/item-prototypes.md`), and reintroducing it here would put a horse's
+///   diamond barding on a player's torso.
+/// * **`EquipmentSlot::isArmor` is the wrong predicate** even though it sounds
+///   right: it is the *union* of humanoid and animal armour
+///   (`EquipmentSlot.java:73-75`).
+/// * `MainHand`/`OffHand` are held items and go through `merge_held_items`.
+fn humanoid_armour_slot(slot: EquipmentSlot) -> Option<ArmourSlot> {
+    match slot {
+        EquipmentSlot::Head => Some(ArmourSlot::Head),
+        EquipmentSlot::Chest => Some(ArmourSlot::Chest),
+        EquipmentSlot::Legs => Some(ArmourSlot::Legs),
+        EquipmentSlot::Feet => Some(ArmourSlot::Feet),
+        EquipmentSlot::MainHand
+        | EquipmentSlot::OffHand
+        | EquipmentSlot::Body
+        | EquipmentSlot::Saddle => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2681,6 +3118,211 @@ mod tests {
     #[must_use]
     fn sky_clear_bytes() -> [u8; 3] {
         SKY_COLOR.map(|c| (c * 255.0).round() as u8)
+    }
+
+    /// `Body` and `Saddle` must never reach the humanoid armour path, and the
+    /// four that must are mapped exactly once each.
+    ///
+    /// This is the mapping a fold of `"body"` into `Chest` would break, and it
+    /// has already been shipped wrong once on the census side — wolf armour and
+    /// horse barding both live in `Body`, so the visible symptom is a player
+    /// wearing a horse's diamond barding as a chestplate.
+    #[test]
+    fn only_the_four_humanoid_slots_map_to_armour() {
+        use lodestone_assets::equipment::ArmourSlot;
+
+        assert_eq!(
+            humanoid_armour_slot(EquipmentSlot::Head),
+            Some(ArmourSlot::Head)
+        );
+        assert_eq!(
+            humanoid_armour_slot(EquipmentSlot::Chest),
+            Some(ArmourSlot::Chest)
+        );
+        assert_eq!(
+            humanoid_armour_slot(EquipmentSlot::Legs),
+            Some(ArmourSlot::Legs)
+        );
+        assert_eq!(
+            humanoid_armour_slot(EquipmentSlot::Feet),
+            Some(ArmourSlot::Feet)
+        );
+        for slot in [
+            EquipmentSlot::Body,
+            EquipmentSlot::Saddle,
+            EquipmentSlot::MainHand,
+            EquipmentSlot::OffHand,
+        ] {
+            assert_eq!(
+                humanoid_armour_slot(slot),
+                None,
+                "{slot:?} is not HUMANOID_ARMOR"
+            );
+        }
+        // Every slot the model layer knows about is accounted for, so a new
+        // vanilla slot fails here rather than being silently ignored.
+        let mapped = EquipmentSlot::ALL
+            .iter()
+            .filter(|s| humanoid_armour_slot(**s).is_some())
+            .count();
+        assert_eq!(mapped, 4);
+    }
+
+    /// Every humanoid armour sheet 26.2 ships must actually decode out of the
+    /// real jar at the path [`lodestone_assets::equipment`] computes, at the
+    /// **64×32** the meshes' UVs assume.
+    ///
+    /// Ignored without a pack rather than skipped silently: an empty map is the
+    /// fail-open production behaviour (armour just does not draw), which is
+    /// exactly the state a path typo would also produce, so the only way to tell
+    /// them apart is to assert against a real jar.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
+        use lodestone_assets::equipment::{ARMOUR_ASSETS, ArmourLayerType};
+
+        let sheets = load_humanoid_armour_textures();
+        assert!(
+            !sheets.is_empty(),
+            "no armour sheets loaded; set LODESTONE_ASSETS to a pack root with client.jar"
+        );
+        for asset in ARMOUR_ASSETS {
+            for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+                for layer in asset.layers(layer_type) {
+                    let img = sheets
+                        .get(&(layer.texture, layer_type))
+                        .unwrap_or_else(|| panic!("{}/{:?} did not load", layer.texture, layer_type));
+                    assert_eq!(
+                        (img.width, img.height),
+                        (64, 32),
+                        "{}/{:?} is not the 64x32 the armour meshes' UVs assume",
+                        layer.texture,
+                        layer_type
+                    );
+                }
+            }
+        }
+        // Nine `humanoid` sheets (7 plain materials + leather's two layers,
+        // where turtle_scute replaces leather's single-layer slot) and eight
+        // `humanoid_leggings` ones (no turtle leggings exist).
+        assert_eq!(sheets.len(), 17, "expected 9 humanoid + 8 leggings sheets");
+    }
+
+    /// Hermetic (no GPU): the whole armour resolution chain a live frame runs,
+    /// from the `EntityDraw` the extract system produces through to the
+    /// `(index range, wearer part)` pairs `prepare_armour` uploads.
+    ///
+    /// This is the *island* check for armour minus the pixels: it asserts that a
+    /// zombie wearing a full diamond set produces attach points on a wearer
+    /// resolved through the real corpus, and that each one indexes a real
+    /// `part_transforms` entry with a positive determinant. What it cannot see —
+    /// that `prepare_armour` is actually called and its batches drawn — is
+    /// covered by `render_inner` calling it unconditionally next to
+    /// `prepare_entities`.
+    #[test]
+    fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
+        use lodestone_assets::ResourceLocation as Rl;
+        use lodestone_assets::equipment::ArmourSlot;
+        use lodestone_render::entity::{armour_layer_tint, armour_layers};
+
+        let models = EntityModelSet::load();
+        let armour = ArmourModelSet::load();
+        let draw = EntityDraw {
+            id: 7,
+            type_path: "zombie".to_string(),
+            item: None,
+            equipment: vec![
+                (
+                    EquipmentSlot::Head,
+                    Rl::parse("minecraft:diamond_helmet").unwrap(),
+                ),
+                (
+                    EquipmentSlot::Chest,
+                    Rl::parse("minecraft:leather_chestplate").unwrap(),
+                ),
+                (
+                    EquipmentSlot::Legs,
+                    Rl::parse("minecraft:iron_leggings").unwrap(),
+                ),
+                (
+                    EquipmentSlot::Feet,
+                    Rl::parse("minecraft:golden_boots").unwrap(),
+                ),
+                // Must be ignored: animal armour, not humanoid.
+                (
+                    EquipmentSlot::Body,
+                    Rl::parse("minecraft:diamond_horse_armor").unwrap(),
+                ),
+            ],
+            feet: Vec3::new(4.0, 70.0, -2.0),
+            yaw: 41.0,
+            head_yaw: 0.0,
+            pitch: 0.0,
+            scale: 1.0,
+            anim: AnimInput {
+                head_yaw_deg: 5.0,
+                head_pitch_deg: -3.0,
+                limb_swing: 2.0,
+                limb_swing_amount: 0.8,
+                attack_anim: 0.0,
+                age_ticks: 11.0,
+                aggressive: false,
+            },
+        };
+
+        let instance = models
+            .resolve(&draw.type_path, draw.feet, draw.yaw, draw.scale, &draw.anim)
+            .expect("zombie resolves");
+        let wearer = models.get(instance.model).expect("zombie mesh");
+
+        let mut layer_count = 0;
+        let mut attach_count = 0;
+        for slot in ArmourSlot::ALL {
+            let (_, id) = draw
+                .equipment
+                .iter()
+                .find(|(s, _)| humanoid_armour_slot(*s) == Some(slot))
+                .unwrap_or_else(|| panic!("{slot:?} equipped"));
+            let layers = armour_layers(slot, id.path());
+            assert!(!layers.is_empty(), "{slot:?} ({id}) resolved no layers");
+            // Leather is the two-layer case; everything else is one.
+            assert_eq!(
+                layers.len(),
+                if id.path().starts_with("leather") { 2 } else { 1 },
+                "{slot:?} ({id}) layer count"
+            );
+            let mesh = armour.get(slot).expect("slot mesh");
+            for (range, wearer_index) in mesh.attach(&wearer.skeleton) {
+                let m = instance
+                    .part_transforms
+                    .get(wearer_index)
+                    .expect("wearer part index is in range");
+                assert!(range.index_count > 0);
+                assert!(
+                    m.determinant() > 0.0,
+                    "{slot:?} armour rides a negative-determinant wearer matrix"
+                );
+                attach_count += 1;
+            }
+            layer_count += layers.len();
+        }
+        // 1 diamond helmet layer + 2 leather + 1 iron + 1 golden.
+        assert_eq!(layer_count, 5);
+        // head+hat, body+arms, body+legs, legs.
+        assert_eq!(attach_count, 2 + 3 + 3 + 2);
+
+        // `Body` contributed nothing: the horse armour must not have been read
+        // as a chestplate.
+        assert!(
+            armour_layers(ArmourSlot::Chest, "diamond_horse_armor").is_empty(),
+            "animal armour must not resolve as humanoid armour"
+        );
+        // And the leather tint is vanilla's undyed brown, in gamma bytes.
+        let leather = armour_layers(ArmourSlot::Chest, "leather_chestplate");
+        assert_eq!(
+            armour_layer_tint(&leather[0]),
+            lodestone_assets::equipment::UNDYED_LEATHER_RGB
+        );
     }
 
     /// The sky reference must stay a plausible blue in the readback's own space;

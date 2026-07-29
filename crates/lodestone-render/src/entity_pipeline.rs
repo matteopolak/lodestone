@@ -72,13 +72,25 @@ use crate::entity::EntityMesh;
 use crate::models::ModelVertex;
 
 /// A per-instance entity record for the instance vertex buffer: a column-major
-/// `mat4x4<f32>` laid out as four `vec4` attributes, plus the entity's packed
-/// sky/block light byte.
+/// `mat4x4<f32>` laid out as four `vec4` attributes, the entity's packed
+/// sky/block light byte, and a per-instance tint.
 ///
 /// Light rides the *instance* buffer, not the vertex buffer, because the vertex
 /// buffer is shared by every instance of a model type — a per-vertex light byte
 /// could only ever say one thing for all mobs of that kind. Vanilla's own
-/// lightmap sample is per entity, so this is also the faithful granularity.
+/// lightmap sample is per entity, so this is also the faithful granularity. The
+/// tint rides here for the same reason and at the same granularity: vanilla's
+/// `submitModel(model, state, pose, renderType, light, overlay, color, …)` takes
+/// one `color` per submitted model, and dyed leather armour is the case that
+/// needs it.
+///
+/// # Why the instance buffer and not a fifth bind group
+///
+/// Because a bind group is the one resource this pass cannot afford. The model
+/// shader is at wgpu's default `max_bind_groups` of 4 and a fifth group compiles
+/// on an M5 (which reports 8) while crashing at startup on any 4-group adapter —
+/// see `CLAUDE.md`. A vertex attribute has no such ceiling: this adds location 9
+/// to a buffer that already exists.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct EntityInstanceRaw {
@@ -89,31 +101,59 @@ pub struct EntityInstanceRaw {
     /// [`ModelVertex::light`](crate::models::ModelVertex::light), so the entity
     /// and model shaders unpack it with identical code.
     pub light: u32,
+    /// Packed `0x00RRGGBB` **gamma-space** tint, multiplied into the texel.
+    /// [`NO_TINT`] (white) is "no tint" and is what every mob passes.
+    ///
+    /// Gamma space, not linear: vanilla is not colour-managed and its vertex
+    /// colour multiplies the gamma-encoded texel byte. The shader therefore
+    /// folds this into the *same* `srgb_to_linear(linear_to_srgb(rgb) * …)`
+    /// round-trip the directional and world-light shades already use. Doing it
+    /// in linear light pulls every factor toward 1.0 and washes dyed leather
+    /// out.
+    pub tint: u32,
 }
+
+/// The `tint` value meaning "leave the texel alone": opaque white.
+pub const NO_TINT: u32 = 0x00FF_FFFF;
 
 impl EntityInstanceRaw {
     /// Pack a [`glam::Mat4`] into the instance format (column-major), lit
-    /// full-bright. Kept for callers with no world to sample.
+    /// full-bright and untinted. Kept for callers with no world to sample.
     #[must_use]
     pub fn from_mat4(m: glam::Mat4) -> Self {
         Self::new(m, u32::from(crate::entity::ENTITY_FULLBRIGHT))
     }
 
     /// Pack a transform and a packed sky/block light byte into the instance
-    /// format (column-major).
+    /// format (column-major), untinted.
     #[must_use]
     pub fn new(m: glam::Mat4, light: u32) -> Self {
         Self {
             model: m.to_cols_array_2d(),
             light,
+            tint: NO_TINT,
         }
+    }
+
+    /// Set this instance's packed `0x00RRGGBB` gamma-space tint.
+    ///
+    /// Builder-style for the same reason [`EntityInstance::with_light`] is: only
+    /// dyed armour has anything to pass, and every other caller wants
+    /// [`NO_TINT`].
+    ///
+    /// [`EntityInstance::with_light`]: crate::entity::EntityInstance::with_light
+    #[must_use]
+    pub fn with_tint(mut self, rgb: [u8; 3]) -> Self {
+        self.tint =
+            (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+        self
     }
 
     /// The instance-stepped vertex-buffer layout: four `Float32x4` columns at
     /// shader locations 4–7, then the packed light `Uint32` at location 8.
     #[must_use]
     pub const fn instance_layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 5] = [
+        const ATTRS: [wgpu::VertexAttribute; 6] = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 0,
@@ -138,6 +178,11 @@ impl EntityInstanceRaw {
                 format: wgpu::VertexFormat::Uint32,
                 offset: 64,
                 shader_location: 8,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: 68,
+                shader_location: 9,
             },
         ];
         wgpu::VertexBufferLayout {
@@ -188,6 +233,36 @@ impl GpuEntityModel {
             parts: mesh.parts.clone(),
         })
     }
+
+    /// Upload an [`ArmourMesh`](crate::entity::ArmourMesh), or `None` if empty.
+    ///
+    /// `parts` carries the ranges in the mesh's own order, with the part *names*
+    /// left behind on the CPU side: an armour draw gets its ranges from
+    /// [`ArmourMesh::attach`](crate::entity::ArmourMesh::attach), which pairs
+    /// each range with the wearer's part index, so the GPU struct never needs to
+    /// be indexed by name.
+    #[must_use]
+    pub fn upload_armour(device: &wgpu::Device, mesh: &crate::entity::ArmourMesh) -> Option<Self> {
+        if mesh.indices.is_empty() {
+            return None;
+        }
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-armour-vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-armour-indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some(GpuEntityModel {
+            vertices,
+            indices,
+            index_count: mesh.indices.len() as u32,
+            parts: mesh.parts.iter().map(|(_, r)| *r).collect(),
+        })
+    }
 }
 
 /// Build an instance buffer from a slice of model matrices and the matching
@@ -223,6 +298,110 @@ pub fn upload_instances(
     )
 }
 
+/// [`upload_instances`] with a per-instance gamma-space tint.
+///
+/// `tints` is indexed in lockstep with `transforms`; a short or missing entry
+/// falls back to [`NO_TINT`], for the same reason `lights` falls back to
+/// full-bright — a plumbing mistake should render the *untinted* thing, not a
+/// black one, because "grey leather" is a legible bug and "black leather" looks
+/// like a lighting failure somewhere else entirely.
+#[must_use]
+pub fn upload_instances_tinted(
+    device: &wgpu::Device,
+    transforms: &[glam::Mat4],
+    lights: &[u32],
+    tints: &[[u8; 3]],
+) -> Option<wgpu::Buffer> {
+    if transforms.is_empty() {
+        return None;
+    }
+    let fallback = u32::from(crate::entity::ENTITY_FULLBRIGHT);
+    let raw: Vec<EntityInstanceRaw> = transforms
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let inst = EntityInstanceRaw::new(*m, lights.get(i).copied().unwrap_or(fallback));
+            match tints.get(i) {
+                Some(rgb) => inst.with_tint(*rgb),
+                None => inst,
+            }
+        })
+        .collect();
+    Some(
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-entity-armour-instances"),
+            contents: bytemuck::cast_slice(&raw),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+    )
+}
+
+/// The one place the entity pipeline's raster/depth/vertex state is spelled out,
+/// parameterised by the two things that vary: the label and the depth
+/// comparison. Two pipelines share it — the mob pass and the armour pass — so a
+/// change to the vertex layout or the colour target cannot land on one and miss
+/// the other.
+fn build_entity_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    camera_layout: &wgpu::BindGroupLayout,
+    texture_layout: &wgpu::BindGroupLayout,
+    label: &str,
+    depth_compare: wgpu::CompareFunction,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(&format!("{label}-shader")),
+        source: wgpu::ShaderSource::Wgsl(ENTITY_WGSL.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&format!("{label}-layout")),
+        bind_group_layouts: &[Some(camera_layout), Some(texture_layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("{label}-pipeline")),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                Some(ModelVertex::vertex_layout()),
+                Some(EntityInstanceRaw::instance_layout()),
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            // Double-sided for now: robust visibility while per-model winding
+            // parity is pixel-verified. See the module docs. Vanilla's armour
+            // render type is `armorCutoutNoCull`, i.e. also double-sided.
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(depth_compare),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 /// A depth-tested, instanced pipeline for baked entity geometry.
 #[derive(Debug)]
 pub struct EntityPipeline {
@@ -238,11 +417,6 @@ impl EntityPipeline {
     /// Build the entity pipeline targeting `color_format`.
     #[must_use]
     pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("lodestone-entity-shader"),
-            source: wgpu::ShaderSource::Wgsl(ENTITY_WGSL.into()),
-        });
-
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-entity-camera-bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -281,59 +455,65 @@ impl EntityPipeline {
             ],
         });
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("lodestone-entity-layout"),
-            bind_group_layouts: &[Some(&camera_layout), Some(&texture_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("lodestone-entity-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[
-                    Some(ModelVertex::vertex_layout()),
-                    Some(EntityInstanceRaw::instance_layout()),
-                ],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                // Double-sided for now: robust visibility while per-model winding
-                // parity is pixel-verified. See the module docs.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = build_entity_pipeline(
+            device,
+            color_format,
+            &camera_layout,
+            &texture_layout,
+            "lodestone-entity",
+            wgpu::CompareFunction::Less,
+        );
 
         EntityPipeline {
             pipeline,
             camera_layout,
             texture_layout,
         }
+    }
+
+    /// A second render pipeline over **this** pipeline's own bind-group layouts,
+    /// differing only in its depth comparison: `LessEqual` rather than `Less`.
+    /// For the humanoid-armour layers.
+    ///
+    /// Sharing `self`'s layout objects rather than creating equivalent ones is
+    /// deliberate: every camera and texture bind group already built through
+    /// [`camera_bind_group`](Self::camera_bind_group) /
+    /// [`texture_bind_group`](Self::texture_bind_group) is then valid here with
+    /// no second set of uploads, and there is no reliance on wgpu deduplicating
+    /// two structurally identical layout descriptors.
+    ///
+    /// # Why `LessEqual`, and why only here
+    ///
+    /// Vanilla's own entity depth state is
+    /// `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
+    /// (`DepthStencilState.java:6`), which under this engine's `[0,1]`
+    /// DirectX-style depth — vanilla is reversed-Z — is `LessEqual`. The base
+    /// entity pipeline above uses `Less`, so it is the one that departs from
+    /// vanilla; that is left alone here rather than "fixed", because changing it
+    /// would alter how *every* mob's coplanar geometry resolves and this change
+    /// has no pixel gate to prove that safe.
+    ///
+    /// Armour needs the faithful value for a concrete reason: leather's
+    /// `humanoid` layer list is **two coplanar layers** at one inflation — a
+    /// greyscale dyeable base and an untinted `leather_overlay` detail pass
+    /// drawn straight over it (`equipment/leather.json`). Under `Less` the
+    /// second draw fails the depth test against the first at every texel and
+    /// the overlay is silently invisible; under `LessEqual` it wins, which is
+    /// what vanilla does.
+    #[must_use]
+    pub fn armour_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-armour",
+            wgpu::CompareFunction::LessEqual,
+        )
     }
 
     /// Build the group-0 uniform buffer for the entity pass with fog
@@ -583,6 +763,10 @@ struct VsOut {
     // Flat: world light is one lightmap sample for the whole entity (vanilla's
     // granularity), so interpolating it across a mob would be meaningless.
     @location(2) @interpolate(flat) light_term: f32,
+    // Flat for the same reason: vanilla's `submitModel` colour is one value per
+    // submitted model. `vec3(1)` is `NO_TINT` and is what every mob carries;
+    // dyed leather armour is the only thing that sets it today.
+    @location(3) @interpolate(flat) tint: vec3<f32>,
 };
 
 @vertex
@@ -594,6 +778,7 @@ fn vs_main(
     @location(6) m2: vec4<f32>,
     @location(7) m3: vec4<f32>,
     @location(8) light: u32,
+    @location(9) tint: u32,
 ) -> VsOut {
     let model = mat4x4<f32>(m0, m1, m2, m3);
     let world = model * vec4<f32>(position, 1.0);
@@ -611,6 +796,14 @@ fn vs_main(
     out.uv = uv;
     out.world = world.xyz;
     out.light_term = 0.2 + 0.8 * max(sky, block);
+    // Unpack 0x00RRGGBB. These bytes are *gamma-space* sRGB, exactly as
+    // vanilla's vertex colour is, and are multiplied inside the transfer
+    // round-trip below rather than in linear light.
+    out.tint = vec3<f32>(
+        f32((tint >> 16u) & 255u),
+        f32((tint >> 8u) & 255u),
+        f32(tint & 255u),
+    ) / 255.0;
     return out;
 }
 
@@ -626,10 +819,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(cross(dpdx(in.world), dpdy(in.world)));
     let light_dir = normalize(vec3<f32>(0.3, 1.0, 0.55));
     let diffuse = 0.4 + 0.6 * clamp(abs(dot(n, light_dir)), 0.0, 1.0);
-    // Direction and world light are one shade, multiplied in gamma space through
-    // a single transfer round-trip (one round-trip, not one per factor, so there
-    // is less rounding) — exactly the model shader's treatment of `ao * light`.
-    let lit = srgb_to_linear(linear_to_srgb(tex_col.rgb) * diffuse * in.light_term);
+    // Direction, world light and the per-instance tint are one shade, multiplied
+    // in gamma space through a single transfer round-trip (one round-trip, not
+    // one per factor, so there is less rounding) — exactly the model shader's
+    // treatment of `ao * light`.
+    //
+    // The tint belongs in here and not outside: vanilla's dye colour is a vertex
+    // colour multiplied into the gamma-encoded texel byte, and doing it in
+    // linear light would pull it toward white. Leather's base sheet is
+    // near-greyscale, so it is the whole visible colour of the piece.
+    let lit = srgb_to_linear(linear_to_srgb(tex_col.rgb) * in.tint * diffuse * in.light_term);
     // Fade toward the fog colour by view distance, on the same curve as terrain,
     // so a mob at the render-distance edge or under water dissolves with the
     // blocks around it instead of hanging in front of them.
@@ -643,20 +842,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn instance_raw_is_four_columns_plus_a_light_word() {
-        assert_eq!(core::mem::size_of::<EntityInstanceRaw>(), 68);
+    fn instance_raw_is_four_columns_plus_a_light_and_a_tint_word() {
+        assert_eq!(core::mem::size_of::<EntityInstanceRaw>(), 72);
         let layout = EntityInstanceRaw::instance_layout();
-        assert_eq!(layout.array_stride, 68);
+        assert_eq!(layout.array_stride, 72);
         assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
-        assert_eq!(layout.attributes.len(), 5);
+        assert_eq!(layout.attributes.len(), 6);
         // Instance attributes start at location 4, past ModelVertex's 0..=3.
         assert_eq!(layout.attributes[0].shader_location, 4);
         assert_eq!(layout.attributes[3].shader_location, 7);
         assert_eq!(layout.attributes[3].offset, 48);
-        // The light word sits immediately after the matrix.
+        // The light word sits immediately after the matrix, the tint after it.
         assert_eq!(layout.attributes[4].shader_location, 8);
         assert_eq!(layout.attributes[4].offset, 64);
         assert_eq!(layout.attributes[4].format, wgpu::VertexFormat::Uint32);
+        assert_eq!(layout.attributes[5].shader_location, 9);
+        assert_eq!(layout.attributes[5].offset, 68);
+        assert_eq!(layout.attributes[5].format, wgpu::VertexFormat::Uint32);
+    }
+
+    /// A tint must round-trip its bytes in `0x00RRGGBB` order, and an instance
+    /// built without one must be **white**, not zero. Zero would be black, and
+    /// every mob in the game goes through [`EntityInstanceRaw::new`].
+    #[test]
+    fn tint_defaults_to_white_and_packs_rgb_in_order() {
+        let m = glam::Mat4::IDENTITY;
+        assert_eq!(EntityInstanceRaw::new(m, 0).tint, NO_TINT);
+        assert_eq!(EntityInstanceRaw::from_mat4(m).tint, NO_TINT);
+        assert_eq!(NO_TINT, 0x00FF_FFFF);
+        let leather = EntityInstanceRaw::new(m, 0)
+            .with_tint(lodestone_assets::equipment::UNDYED_LEATHER_RGB);
+        assert_eq!(leather.tint, 0x00A0_6540);
+        // R in the high byte: a byte-order slip would make leather blue.
+        assert_eq!((leather.tint >> 16) & 0xFF, 0xA0);
+        assert_eq!(leather.tint & 0xFF, 0x40);
     }
 
     /// The uniform the entity shader's `Camera` struct maps onto: 80 bytes of
