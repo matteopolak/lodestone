@@ -443,6 +443,165 @@ pub struct ItemPrototype {
     pub equippable_by_any_entity: bool,
 }
 
+/// The per-block **movement constants** vanilla stores as
+/// `BlockBehaviour.Properties` fields and tag memberships rather than as
+/// geometry, keyed by the block's canonical `minecraft:*` name.
+///
+/// Returned by [`block_physics`]. Every field is what the physics integrator
+/// (`lodestone_physics::CollisionView`) asks for by the same name, and every one
+/// of them is a *cost of moving through or over a cell* — which is why a
+/// pathfinder needs the whole set and why it lives here, in a version-free crate
+/// a plugin already depends on, rather than privately inside the client shell.
+///
+/// # Why this is not behind [`VersionAdapter`]
+///
+/// The rest of the block data in this module ([`BlockAabb`], [`BlockHardness`])
+/// is keyed by **block-state id**, which vanilla renumbers every version — so it
+/// has to be reached through a version adapter. These six are keyed by block
+/// *name*, which is stable across versions: `minecraft:ice` has been `0.98`
+/// friction since 1.0. Putting a name-keyed table behind the version seam would
+/// mean re-homing an identical copy in every protocol crate.
+///
+/// That is a claim about *stability*, not about *correctness by construction*: the
+/// values here are anchored to a dump of the real 26.2 server
+/// (`crates/protocol/v770/tests/block_physics.rs` replays all 1,196 registered
+/// blocks through [`block_physics`] and demands agreement, bit-exactly, on every
+/// field). If a future version *does* change one, that gate fails, and the fix at
+/// that point is a per-version override — not a silent edit here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockPhysics {
+    /// `Block.getFriction` — vanilla `Properties.friction`, default `0.6`.
+    ///
+    /// Only five blocks differ in 26.2: ice, packed ice and frosted ice `0.98`,
+    /// blue ice `0.989`, slime block `0.8`.
+    pub friction: f32,
+    /// `Block.getSpeedFactor` — default `1.0`. Soul sand and honey block `0.4`.
+    pub speed_factor: f32,
+    /// `Block.getJumpFactor` — default `1.0`. Honey block `0.5`, alone.
+    pub jump_factor: f32,
+    /// `Block.getBounceRestitution`, **already net of**
+    /// `BlockTags.SUPPRESSES_BOUNCE` — default `0.0`. Slime block `1.0`, every
+    /// dyed bed `0.75`.
+    ///
+    /// Do not subtract the tag again. In 26.2 its only member is
+    /// `minecraft:honey_block`, which sets no restitution, so tag-aware and
+    /// tag-blind agree on every block — the subtraction is currently a no-op and
+    /// a future bouncy suppressor would break it *silently*, which is why the
+    /// version crate's gate pins the tag's membership.
+    pub bounce_restitution: f32,
+    /// `Block.entityInside` → `Entity.makeStuckInBlock`: the per-axis speed
+    /// multiplier of the three blocks that grab you, or `None` for everything
+    /// else.
+    ///
+    /// **The one field here that is not a dumped property.** The vector is
+    /// constructed in imperative code inside each block's `entityInside`
+    /// override, so there is nothing on a `Properties` object to read. What the
+    /// version crate's gate *can* establish is completeness: the JVM oracle
+    /// enumerates every block whose class overrides `entityInside` (61 of them in
+    /// 26.2) and asserts that all three rows below are in that set, so no fourth
+    /// grabbing block can appear without the gate noticing the candidate set
+    /// changed.
+    ///
+    /// Per-entity overrides are deliberately not modelled: cobweb gives a
+    /// `WEAVING` mob `(0.5, 0.25, 0.5)` instead, and sweet berry bush exempts
+    /// foxes and bees.
+    pub stuck_multiplier: Option<[f64; 3]>,
+    /// Membership of `BlockTags.CLIMBABLE` — ladder, vine, scaffolding, the four
+    /// nether vine blocks and both cave-vine blocks. Nine in 26.2.
+    ///
+    /// Scaffolding is in the tag but holds differently when sneaking, a
+    /// distinction this flag does not carry.
+    pub climbable: bool,
+}
+
+/// What [`block_physics`] answers for a block it has no row for, and for a name
+/// it cannot resolve at all: vanilla's own defaults, which the overwhelming
+/// majority of the 1,196 registered blocks have verbatim.
+pub const DEFAULT_BLOCK_PHYSICS: BlockPhysics = BlockPhysics {
+    friction: 0.6,
+    speed_factor: 1.0,
+    jump_factor: 1.0,
+    bounce_restitution: 0.0,
+    stuck_multiplier: None,
+    climbable: false,
+};
+
+/// The movement constants of a block, by its canonical `minecraft:*` name — the
+/// name a [`VersionAdapter::block_name`] call already returns for a block-state
+/// id.
+///
+/// An unrecognised name (including one from another namespace, or one this
+/// version does not have) yields [`DEFAULT_BLOCK_PHYSICS`] rather than `None`:
+/// unlike a shape or a hardness, "no row" is not a data gap here — it is the
+/// answer for 1,166 of 1,196 blocks, and a caller that had to handle `None`
+/// would end up re-inventing these same defaults at every call site.
+///
+/// O(1)-ish and allocation-free: a `match` over string literals, which rustc
+/// compiles to a length-bucketed comparison chain. The physics tick calls this
+/// for the block under the player's feet.
+///
+/// # Provenance
+///
+/// Every row is a value read out of the real 26.2 server, not out of the
+/// decompiled source by hand — see [`BlockPhysics`] for where the gate lives and
+/// what it covers. The `Blocks.java` line numbers below are cross-references for
+/// a reader, not the source of the numbers.
+#[must_use]
+pub fn block_physics(block_name: &str) -> BlockPhysics {
+    BlockPhysics {
+        friction: match block_name {
+            // `Blocks.java:1950` (ice), `:3021` (packed ice), `:3732` (frosted ice).
+            "minecraft:ice" | "minecraft:packed_ice" | "minecraft:frosted_ice" => 0.98,
+            // `Blocks.java:4227`.
+            "minecraft:blue_ice" => 0.989,
+            // `Blocks.java:2926`.
+            "minecraft:slime_block" => 0.8,
+            _ => DEFAULT_BLOCK_PHYSICS.friction,
+        },
+        // `Blocks.java:2024` (soul sand), `:4843` (honey block).
+        speed_factor: match block_name {
+            "minecraft:soul_sand" | "minecraft:honey_block" => 0.4,
+            _ => DEFAULT_BLOCK_PHYSICS.speed_factor,
+        },
+        // `Blocks.java:4843` — honey block is the only block in 26.2 that sets it.
+        jump_factor: match block_name {
+            "minecraft:honey_block" => 0.5,
+            _ => DEFAULT_BLOCK_PHYSICS.jump_factor,
+        },
+        bounce_restitution: match block_name {
+            // `Blocks.java:2926`.
+            "minecraft:slime_block" => 1.0,
+            // `Blocks.java:684`, via the `BED` `ColorCollection` — all 16 dyed
+            // beds share one `Properties` builder. Matched by suffix *within the
+            // vanilla namespace only*, so a modded `_bed` does not inherit it.
+            name if name.starts_with("minecraft:") && name.ends_with("_bed") => 0.75,
+            _ => DEFAULT_BLOCK_PHYSICS.bounce_restitution,
+        },
+        stuck_multiplier: match block_name {
+            // `WebBlock.java:30-35`.
+            "minecraft:cobweb" => Some([0.25, 0.05, 0.25]),
+            // `PowderSnowBlock.java:66`.
+            "minecraft:powder_snow" => Some([0.9, 1.5, 0.9]),
+            // `SweetBerryBushBlock.java:86`.
+            "minecraft:sweet_berry_bush" => Some([0.8, 0.75, 0.8]),
+            _ => DEFAULT_BLOCK_PHYSICS.stuck_multiplier,
+        },
+        // `data/minecraft/tags/block/climbable.json`, all nine entries.
+        climbable: matches!(
+            block_name,
+            "minecraft:ladder"
+                | "minecraft:vine"
+                | "minecraft:scaffolding"
+                | "minecraft:weeping_vines"
+                | "minecraft:weeping_vines_plant"
+                | "minecraft:twisting_vines"
+                | "minecraft:twisting_vines_plant"
+                | "minecraft:cave_vines"
+                | "minecraft:cave_vines_plant"
+        ),
+    }
+}
+
 /// Adapter implemented by protocol crates to lift packets into this canonical
 /// model and lower canonical actions back into packets.
 ///
@@ -799,6 +958,47 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// "unknown", never a guessed 64.
     fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
         let _ = item;
+        None
+    }
+
+    /// Whether a block state **blocks motion** — vanilla
+    /// `BlockState.blocksMotion()` — or `None` if this version does not know the
+    /// state.
+    ///
+    /// # Why this cannot be derived from [`block_collision`](VersionAdapter::block_collision)
+    ///
+    /// `blocksMotion()` is
+    /// `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`, and `isSolid()`
+    /// reads a cached `legacySolid` flag computed once per state by
+    /// `BlockBehaviour.BlockStateBase.calculateSolid()`. Only the **last** of that
+    /// method's five branches is geometry:
+    ///
+    /// ```text
+    /// forceSolidOn  -> true          // 237 blocks in 26.2, no getter, not in blocks.json
+    /// forceSolidOff -> false         //   8 blocks
+    /// cache == null -> false         //  23 `dynamicShape()` blocks
+    /// shape empty   -> false
+    /// else mean bbox extent >= 0.7291666666666666 || Ysize >= 1.0
+    /// ```
+    ///
+    /// Deriving the answer from a shape table alone therefore gets **2,618 of
+    /// 26.2's 32,366 states, across 202 blocks**, wrong — measured, not estimated,
+    /// in `crates/protocol/v770/tests/block_physics.rs`. Every sign, hanging sign,
+    /// banner, wall, pressure plate, chain, lantern, lightning rod, dead coral,
+    /// *open* fence gate, cake, bell, conduit and turtle egg reads as
+    /// non-blocking; azalea, big dripleaf, chorus plant/flower, end rod, snow and
+    /// scaffolding read as blocking.
+    ///
+    /// `0.7291666666666666` is exactly `(1 + 1 + 3/16) / 3` — the mean extent of a
+    /// ladder's collision box. The threshold has that value *because* a ladder
+    /// lands on it, and `Blocks.LADDER` calls `forceSolidOff()` precisely because
+    /// landing on it produces the wrong answer.
+    ///
+    /// The default returns `None`: a version with no solidity census reports
+    /// "unknown". A consumer falling back to the geometry derivation should say so
+    /// — that fallback is wrong for the 202 blocks above.
+    fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
+        let _ = state_id;
         None
     }
 }

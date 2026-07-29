@@ -4115,4 +4115,14 @@ impl VersionAdapter for V770Adapter {
         // stack in hand.
         crate::item_prototypes::model_prototype(item)
     }
+
+    fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
+        // `BlockState.blocksMotion()`, dumped per state rather than derived from
+        // `block_collision`: `calculateSolid`'s first three branches
+        // (`forceSolidOn` on 237 blocks, `forceSolidOff` on 8, and a null shape
+        // cache on the 23 `dynamicShape()` blocks) are invisible to any shape
+        // table, and skipping them is wrong for 2,618 of 32,366 states. One bit
+        // out of rodata. See `crate::block_solidity`.
+        crate::block_solidity::blocks_motion(state_id)
+    }
 }
