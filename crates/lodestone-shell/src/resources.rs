@@ -341,6 +341,94 @@ pub fn load_item_atlas() -> Option<Arc<ItemAtlas>> {
     Some(Arc::new(atlas))
 }
 
+/// Loads the real crafting-recipe and item-tag corpus from `client.jar`'s
+/// `data/minecraft/{recipe,tags/item}/**` entries, version-free and fail-open
+/// like every other loader in this module: `None` when no pack is found or the
+/// jar can't be opened, so a jar-less/headless run simply has no recipe-book
+/// prediction rather than a hard error. The crafting **result slot itself is
+/// unaffected either way** — it is always the server's `container_set_slot`
+/// that fills it (see `docs/crafting.md`); this corpus only feeds a local
+/// prediction drawn when that slot is still empty.
+///
+/// Deliberately does **not** call [`lodestone_game::recipe_json::load_data_root`]:
+/// that walks a real filesystem directory, and the corpus here lives inside a
+/// **zip** (`client.jar`). [`ResourceManager::list`] already returns every
+/// entry under a prefix regardless of nesting depth, so the "flat `read_dir`
+/// drops nested tags" trap that function's own docs warn about (33 of 224 tags
+/// live under `tags/item/enchantable/*`) does not apply here — a prefix filter
+/// has no notion of depth to get wrong in the first place.
+#[must_use]
+pub fn load_recipe_book() -> Option<lodestone_game::recipe::RecipeBook> {
+    use lodestone_game::recipe_json::CorpusBuilder;
+
+    let root = asset_root()?;
+    let jar = root.join("client.jar");
+    let bytes = match std::fs::read(&jar) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(target: "assets", "read {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let zip = match ZipSource::from_bytes(bytes) {
+        Ok(z) => z,
+        Err(e) => {
+            tracing::warn!(target: "assets", "open {}: {e}", jar.display());
+            return None;
+        }
+    };
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+
+    let mut builder = CorpusBuilder::new();
+    for path in manager.list("data/") {
+        if let Some(id) = recipe_entry_id(&path, "recipe") {
+            if let Some(text) = manager
+                .read(&path)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            {
+                builder.push_recipe(id, &text);
+            }
+        } else if let Some(id) = recipe_entry_id(&path, "tags/item") {
+            if let Some(text) = manager
+                .read(&path)
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+            {
+                builder.push_tag(id, &text);
+            }
+        }
+    }
+
+    let recipes = builder.recipe_count();
+    let tags = builder.tag_count();
+    let failures = builder.failures().len();
+    let book = builder.finish();
+    tracing::info!(
+        target: "assets",
+        recipes,
+        tags,
+        failures,
+        "loaded vanilla recipe corpus"
+    );
+    if book.is_empty() {
+        tracing::warn!(target: "assets", "recipe corpus is empty; crafting predictions disabled");
+        return None;
+    }
+    Some(book)
+}
+
+/// Parses an in-pack path `data/<namespace>/<kind>/<rest>.json` into the
+/// `<namespace>:<rest>` [`Identifier`](lodestone_model::Identifier) vanilla's
+/// own `FileToIdConverter` derives, or `None` if `path` is not under
+/// `data/*/<kind>/` or is not a `.json` file. `kind` is `"recipe"` or
+/// `"tags/item"`.
+fn recipe_entry_id(path: &str, kind: &str) -> Option<lodestone_model::Identifier> {
+    let rest = path.strip_prefix("data/")?;
+    let (namespace, rest) = rest.split_once('/')?;
+    let rest = rest.strip_prefix(kind)?.strip_prefix('/')?;
+    let rest = rest.strip_suffix(".json")?;
+    lodestone_model::Identifier::new(namespace, rest).ok()
+}
+
 /// Gate helper: open the vanilla `client.jar` as a [`ResourceManager`],
 /// version-free, using the same discovery as the atlas loaders. Returns `None`
 /// when no pack is found so gates can fail *closed and loud* rather than

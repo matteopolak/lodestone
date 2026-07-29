@@ -279,6 +279,10 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
             Some(render.depth_view()),
             &hud_frame,
             Some(models),
+            // Derived, not hardcoded to 1: the test asserts this fixture's scale
+            // is 1 so the canvas divide is a no-op, and deriving it here means a
+            // future fixture-size change cannot silently desync draw from layout.
+            calculate_gui_scale(AUTO_GUI_SCALE, W, H),
             W,
             H,
         );

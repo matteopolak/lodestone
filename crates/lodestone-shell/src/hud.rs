@@ -269,6 +269,13 @@ pub struct HudFrame<'a> {
     /// The action-bar message `(text, alpha)`, drawn just above the hotbar
     /// cluster with a fade. `None` when nothing is showing.
     pub action_bar: Option<(String, f32)>,
+    /// `(recipes, tags)` loaded into the local recipe corpus (see
+    /// `crate::resources::load_recipe_book`), appended to the debug overlay as
+    /// one extra line when `Some`. `None` before the corpus has loaded or on a
+    /// jar-less run — the line is omitted rather than showing a misleading
+    /// `0 0`, the same convention [`Self::hotbar_items`] uses for "not yet
+    /// known" versus "known empty".
+    pub recipe_stats: Option<(usize, usize)>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -292,6 +299,7 @@ impl<'a> HudFrame<'a> {
             xp: None,
             title: None,
             action_bar: None,
+            recipe_stats: None,
         }
     }
 }
@@ -352,7 +360,16 @@ impl HudGeometry {
     /// quads. This is the jar-less / headless path.
     #[must_use]
     pub fn build(frame: &HudFrame, width: u32, height: u32) -> Self {
-        Self::build_inner(frame, width, height, None, None, None, None)
+        Self::build_inner(
+            frame,
+            width,
+            height,
+            crate::config::AUTO_GUI_SCALE,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Like [`build`](Self::build), but with vanilla text: proportional advances
@@ -369,7 +386,16 @@ impl HudGeometry {
         height: u32,
         font: &VanillaFont,
     ) -> Self {
-        Self::build_inner(frame, width, height, None, None, None, Some(font))
+        Self::build_inner(
+            frame,
+            width,
+            height,
+            crate::config::AUTO_GUI_SCALE,
+            None,
+            None,
+            None,
+            Some(font),
+        )
     }
 
     /// Like [`build`](Self::build), but draws the survival vitals from the real
@@ -378,7 +404,16 @@ impl HudGeometry {
     /// crosshair, …) is identical and still emitted to the colour stream.
     #[must_use]
     pub fn build_with_gui(frame: &HudFrame, width: u32, height: u32, gui: &GuiAtlas) -> Self {
-        Self::build_inner(frame, width, height, Some(gui), None, None, None)
+        Self::build_inner(
+            frame,
+            width,
+            height,
+            crate::config::AUTO_GUI_SCALE,
+            Some(gui),
+            None,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -386,6 +421,7 @@ impl HudGeometry {
         frame: &HudFrame,
         width: u32,
         height: u32,
+        gui_scale: u32,
         gui: Option<&GuiAtlas>,
         items: Option<&ItemAtlas>,
         models: Option<&BlockModels>,
@@ -399,19 +435,13 @@ impl HudGeometry {
         // a Retina display": the constants themselves never change, only the
         // canvas they are laid into. Reuses the exact helper `menu/render.rs`
         // already uses for the menu screens, rather than a second scale
-        // computation that could disagree with it. `AUTO_GUI_SCALE` is used
-        // unconditionally because the persisted `Options.gui_scale` lives in
-        // `menu::nav::MenuNav`, which nothing on this call path threads through
-        // — `app.rs`'s HUD call site is out of this change's scope. Every
-        // caller already passes a *live* physical framebuffer size (production
-        // and every gate alike), so "auto" is not a stand-in value here, it is
-        // the real effective scale that would apply even with the option wired
-        // through, for any player who has not manually overridden it.
-        let (w, h) = crate::menu::render::logical_canvas(
-            crate::config::AUTO_GUI_SCALE,
-            width,
-            height,
-        );
+        // computation that could disagree with it. `gui_scale` is the resolved
+        // `Options.gui_scale`, threaded in by the caller — `build`/`build_with_font`/
+        // `build_with_gui` above pass `AUTO_GUI_SCALE` explicitly since they are
+        // the jar-less/headless/test paths, which have no persisted option to
+        // read; `render_with_item_models` (the real windowed path) passes the
+        // live value from `menu::nav::MenuNav::gui_scale()` via `app.rs`.
+        let (w, h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let mut b = Builder::new(w, h, gui, items, models, font);
 
         let scale = 2.0;
@@ -421,7 +451,11 @@ impl HudGeometry {
 
         // Debug text, top-left.
         if frame.show_debug {
-            for (i, line) in frame.stats.lines().iter().enumerate() {
+            let mut debug_lines = frame.stats.lines();
+            if let Some((recipes, tags)) = frame.recipe_stats {
+                debug_lines.push(format!("recipes={recipes} tags={tags}"));
+            }
+            for (i, line) in debug_lines.iter().enumerate() {
                 let y = margin + i as f32 * line_h;
                 b.text(line, margin, y, scale, [0.96, 0.98, 1.0, 1.0]);
             }
@@ -1479,10 +1513,11 @@ impl HudRenderer {
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
     ///
     /// Convenience wrapper over [`render_with_item_models`](Self::render_with_item_models)
-    /// with no model set and no depth attachment, i.e. flat item sprites only —
-    /// block items keep their empty wells. Kept as the plain entry point so the
-    /// existing headless HUD gates (which have neither a baked model set nor a
-    /// depth buffer) call it unchanged.
+    /// with no model set, no depth attachment, and [`AUTO_GUI_SCALE`](crate::config::AUTO_GUI_SCALE)
+    /// (this call has no access to the persisted `Options.gui_scale` — its
+    /// callers are the headless HUD gates and the scoreboard/tab-list overlays,
+    /// none of which own one). Kept as the plain entry point so those existing
+    /// callers are unchanged.
     pub fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1492,7 +1527,17 @@ impl HudRenderer {
         width: u32,
         height: u32,
     ) {
-        self.render_with_item_models(device, queue, view, None, frame, None, width, height);
+        self.render_with_item_models(
+            device,
+            queue,
+            view,
+            None,
+            frame,
+            None,
+            crate::config::AUTO_GUI_SCALE,
+            width,
+            height,
+        );
     }
 
     /// Draw the HUD, including the **3-D block-item** icons.
@@ -1502,7 +1547,10 @@ impl HudRenderer {
     /// — normally
     /// [`RenderState::depth_view`](crate::gpu::RenderState::depth_view). Both are
     /// needed for a mini-block to draw; either being `None` degrades to the
-    /// previous behaviour rather than erroring.
+    /// previous behaviour rather than erroring. `gui_scale` is the resolved
+    /// `Options.gui_scale` (`0` = auto) — `app.rs`'s real windowed call site
+    /// passes `menu::nav::MenuNav::gui_scale()` so a manual scale setting
+    /// resizes the HUD exactly as it already resizes the menu screens.
     ///
     /// # Pass structure
     ///
@@ -1527,6 +1575,7 @@ impl HudRenderer {
         depth: Option<&wgpu::TextureView>,
         frame: &HudFrame,
         models: Option<&BlockModels>,
+        gui_scale: u32,
         width: u32,
         height: u32,
     ) {
@@ -1544,6 +1593,7 @@ impl HudRenderer {
             frame,
             width,
             height,
+            gui_scale,
             gui_atlas.as_deref(),
             item_atlas.as_deref(),
             models.filter(|_| want_models),
@@ -1599,8 +1649,7 @@ impl HudRenderer {
         // must be built for that same logical size, not the raw physical one,
         // or the model pass and the flat-sprite/colour passes it shares a
         // frame with would disagree about how big a "GUI pixel" is.
-        let (logical_w, logical_h) =
-            crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, width, height);
+        let (logical_w, logical_h) = crate::menu::render::logical_canvas(gui_scale, width, height);
         let (item_count, model_count) = self.icons.upload(
             device,
             queue,
