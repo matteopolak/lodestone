@@ -73,7 +73,7 @@ use lodestone_game::item::ItemStack as GameItem;
 use lodestone_game::menu::Menu;
 use lodestone_game::reconcile::{ClickIntent, ClientMenu, ServerUpdate};
 use lodestone_model::ItemStack as ModelItem;
-use lodestone_model::{ClientAction, ContainerClickType, ContainerSlotChange};
+use lodestone_model::{ClientAction, ContainerClickType, ContainerSlotChange, ItemComponents};
 use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
 use uuid::Uuid;
 
@@ -124,6 +124,7 @@ fn game_to_model(g: &GameItem) -> ModelItem {
     ModelItem {
         item: g.item().clone(),
         count: g.count() as u32,
+        components: ItemComponents::default(),
     }
 }
 

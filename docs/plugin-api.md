@@ -70,8 +70,8 @@ document's brief — a plugin driving the player. `docs/bevy-migration.md` §6 s
 analogous to azalea's `SendGamePacketEvent`. No `SendAction` message type exists in
 `crates/lodestone-ecs/src/` today (`grep -rn SendAction crates/lodestone-ecs` is empty). The only
 egress that exists right now is off-ECS: `lodestone_client::ClientHandle::send_action`
-(`crates/lodestone-client/src/handle.rs:67`) and `lodestone_shell::net::NetClient::send_action`
-(`crates/lodestone-shell/src/net.rs:405`), both of which take a `ClientAction` directly and both of
+(`crates/lodestone-client/src/handle.rs:69`) and `lodestone_shell::net::NetClient::send_action`
+(`crates/lodestone-shell/src/net.rs:413`), both of which take a `ClientAction` directly and both of
 which predate the ECS entirely. A plugin cannot reach either from inside a system today because
 neither is a bevy resource — this is one of the concrete Stage 2/6 deliverables (§4 below).
 
@@ -96,7 +96,7 @@ assumed from the stage numbering:
 - **The sanctioned egress exists, as a resource rather than a message.**
   `player.rs`'s `ActionQueue(pub Vec<ClientAction>)` is `app.init_resource`'d
   (`player.rs:530`) and drained every tick by the driver
-  (`lodestone-shell/src/sim.rs:1529`, `resource_mut::<ActionQueue>()`). A plugin
+  (`lodestone-shell/src/sim.rs:1697`, `resource_mut::<ActionQueue>()`). A plugin
   system can push a `ClientAction` onto it via `ResMut<ActionQueue>` today — the
   capability `docs/bevy-migration.md` §6 asked for (`MessageWriter<SendAction>`)
   exists under a different shape (a plain `Vec` resource, not a bevy `Message`),

@@ -13,11 +13,18 @@ Per-subsystem detail goes in [`docs/`](./docs/README.md).
 
 ```bash
 cargo check --workspace --all-targets     # the health check
+cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
 cargo build --release --bin lodestone --features live
 ```
 
 - **`cargo build` is NOT a health check.** It skips test targets, so a crate whose lib compiles and
   whose lib-test does not reports green. Always `--all-targets`.
+- **`--all-targets` alone misses non-default features.** `live_inventory.rs` sat broken behind the
+  `live-inventory` feature for a whole session — invisible to the first command, caught immediately
+  by the second. The `--exclude` is not a workaround: `lodestone-allocbench` has a deliberate
+  `compile_error!` when more than one allocator feature is on, because each installs its own
+  `#[global_allocator]`, so plain `--all-features` **structurally cannot pass** and chasing it is
+  wasted time. With that one crate excluded, the whole workspace is clean under `--all-features`.
 - **`cargo test -p <crate>` is not one either — it fail-fasts.** It aborts at the *first* failing
   test binary, so everything alphabetically later is never run and never reported. This has misled
   twice: a stale `block_updates` failure hid the new `hardness` gate entirely, and what looked like

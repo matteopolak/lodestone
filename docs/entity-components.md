@@ -106,8 +106,8 @@ switch that keeps every other entity type on a pure position ease.
 what the ~25 hermetic tests in `entities.rs` are written against:
 
 1. `Update` / `FrameSet::Interpolate` → `advance_interp_clocks`
-2. per 20 Hz tick: `tick_item_physics` then `GameTick` / `TickSet::Animate` →
-   `tick_walk_animation`
+2. per 20 Hz tick, inside `GameTick`: `TickSet::Physics` → `tick_item_physics`,
+   then `TickSet::Animate` → `tick_walk_animation`
 3. `fold_snapshots` (this frame's `EntitySnapshot`s, then the prune)
 4. `Extract` / `ExtractSet::Entities` → `extract_entity_draws`
 
@@ -130,13 +130,21 @@ a tracked entity and the next extract puts it on screen.
 - **`step_item_physics` and `lodestone_physics::move_entity` stay plain
   functions.** [`bevy-migration.md`](./bevy-migration.md) §8: the ECS owns state
   and scheduling, never verified math. A system calls them.
-- **Two things are not systems yet, and both are blocked on the same thing.**
-  `tick_item_physics` needs a `&dyn CollisionView` and `fold_snapshots` needs a
-  `&[EntitySnapshot]`; a `bevy_ecs` `Resource` must be `'static`, and the
-  workspace denies `unsafe_code`, so neither borrow can reach a system. The
-  collision source becomes `'static` at §4.1(d) (the chunk world as a resource,
-  Stage 4); the snapshot slice disappears when ingest writes the render
-  components directly. Both functions carry that note at their definition.
+- **`tick_item_physics` is now a real system; `fold_snapshots` is the one thing
+  left that is not.** `tick_item_physics` used to be blocked on the same
+  `'static`-resource problem as `fold_snapshots` — a `bevy_ecs` `Resource` must
+  be `'static`, and the workspace denies `unsafe_code`, so a borrowed
+  `&dyn CollisionView` (whose owner was a local in `Sim::update_entities`)
+  could not reach a system. `lodestone_ecs::player::CollisionSource` inverted
+  that: the trait object is `'static` because an implementor owns whatever it
+  borrows from, so `tick_item_physics` now runs in `GameTick`/`TickSet::Physics`
+  against a `PlayerCollision` resource. `fold_snapshots` is blocked on a
+  *different* shape of the same class of problem, not on the collision borrow:
+  its input is a `&[EntitySnapshot]` slice that `sim.rs` owns as a plain `Vec`,
+  not a view an owned adapter could rebuild on demand, so the `CollisionSource`
+  fix does not apply. The snapshot slice disappears only when ingest writes the
+  render components directly, which is when `fold_snapshots` becomes a system.
+  Both functions carry that note at their definition.
 - **The render order is clocks → ticks → fold, which is `Update` before
   `GameTick` and the fold after both** — inverted from the plan's `NetIngest` →
   `GameTick` → `Update` → `Extract`. That is behaviour, not style: every numeric
