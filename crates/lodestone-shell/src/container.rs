@@ -30,6 +30,7 @@
 //! occupied slot.
 
 use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
+use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
 use lodestone_game::recipe::RecipeBook;
 use lodestone_render::{BlockModels, ModelVertex};
@@ -718,6 +719,14 @@ pub struct MenuInput {
     last_slot: Option<usize>,
     /// The pending release should gather (`PICKUP_ALL`) instead.
     double_click: bool,
+    /// Mirrors vanilla `AbstractContainerScreen.lastQuickMoved`: the stack
+    /// held by the slot a `QUICK_MOVE` click was just sent for, or `None` for
+    /// vanilla's `ItemStack.EMPTY`. Set at both the sites vanilla sets it —
+    /// `:312` in [`press`](Self::press) and `:426` in [`release`](Self::release)
+    /// — and read by the shift+double-click gather in `release`, which moves
+    /// every slot matching *this* stack rather than gathering onto the
+    /// cursor.
+    last_quick_moved: Option<ItemStack>,
 }
 
 impl MenuInput {
@@ -739,6 +748,10 @@ impl MenuInput {
     ///
     /// `is_repeat` is the platform's double-click flag; combined with hitting the
     /// same slot twice it arms the gather that fires on release.
+    ///
+    /// `menu` is read only to capture `last_quick_moved` off the slot about to
+    /// be quick-moved (vanilla `AbstractContainerScreen.java:312`) — it does
+    /// not otherwise change what this method sends.
     pub fn press(
         &mut self,
         hit: MenuHit,
@@ -746,6 +759,7 @@ impl MenuInput {
         shift: bool,
         ctx: MenuContext,
         is_repeat: bool,
+        menu: &Menu,
     ) -> Vec<Click> {
         let cloning = button == MenuButton::Pick && ctx.creative;
         let slot_hit = match hit {
@@ -778,9 +792,24 @@ impl MenuInput {
         }
 
         self.skip_next_release = true;
+        // `quickKey` in vanilla: a shift-click on a real slot. Captured before
+        // the `if` chain below because vanilla's own assignment
+        // (`AbstractContainerScreen.java:312`) happens as a side effect of
+        // computing this same condition, and `cloning` takes priority over it
+        // there (the two are mutually exclusive `if`/`else` arms, not just
+        // independent conditions).
+        let quick_key = !cloning && shift && slot != OUTSIDE_SLOT;
+        if quick_key {
+            // An empty slot records vanilla's `ItemStack.EMPTY`, modelled here
+            // as `None`.
+            self.last_quick_moved = match hit {
+                MenuHit::Slot(i) => menu.slot_item(i).cloned(),
+                _ => None,
+            };
+        }
         let input = if cloning {
             ContainerInput::Clone
-        } else if shift && slot != OUTSIDE_SLOT {
+        } else if quick_key {
             ContainerInput::QuickMove
         } else if slot == OUTSIDE_SLOT {
             // Vanilla sends THROW at -999 here. The server no-ops it (its THROW
@@ -817,12 +846,19 @@ impl MenuInput {
     }
 
     /// Mouse-button release. Returns the clicks to send.
+    ///
+    /// `menu` gates the double-click gather branch and (for the shift variant)
+    /// supplies the slots to sweep — see [`gather_shift_matches`](Self::gather_shift_matches)
+    /// — and also captures `last_quick_moved` for the plain shift-click path,
+    /// at the second of the two sites vanilla sets it
+    /// (`AbstractContainerScreen.java:426`; the first is [`press`](Self::press)).
     pub fn release(
         &mut self,
         hit: MenuHit,
         button: MenuButton,
         shift: bool,
         ctx: MenuContext,
+        menu: &Menu,
     ) -> Vec<Click> {
         let drag = self.drag.take();
         let gather = std::mem::take(&mut self.double_click);
@@ -837,7 +873,31 @@ impl MenuInput {
 
         if gather && button == MenuButton::Left {
             if let MenuHit::Slot(i) = hit {
-                return vec![Click::double(i)];
+                // `AbstractContainerScreen.java:387`: the whole gather branch
+                // (both this and the shift variant below) is gated on
+                // `menu.canTakeItemForPickAll(ItemStack.EMPTY, slot)`. Every
+                // result-bearing menu overrides that to exclude its own
+                // result container (`Menu::can_take_for_pick_all` in
+                // lodestone-game — private, so recomputed here from what the
+                // shell already has; its server-side effect is covered by
+                // `pickup_all_never_drains_the_crafting_result` in
+                // `lodestone-game`). This is **not** a desync fix: a real
+                // server honours a PICKUP_ALL/QUICK_MOVE aimed at the result
+                // slot regardless, since `Menu::do_click` has no such gate —
+                // skipping the packet here only suppresses non-vanilla client
+                // UX, matching double-clicking a crafting result silently
+                // sending nothing, as it does in the real game.
+                let allowed = menu.craft_layout().is_none_or(|l| i != l.result_slot);
+                if allowed {
+                    return if shift {
+                        self.gather_shift_matches(menu, i)
+                    } else {
+                        vec![Click::double(i)]
+                    };
+                }
+                // Not allowed: fall through to the ordinary release handling
+                // below, exactly as vanilla's `if` failing falls into its
+                // `else` — the gather is skipped, not replaced with nothing.
             }
         }
         if skip {
@@ -864,9 +924,20 @@ impl MenuInput {
             MenuHit::Outside => OUTSIDE_SLOT,
             MenuHit::Panel => return Vec::new(),
         };
-        let input = if button == MenuButton::Pick && ctx.creative {
+        let clone_click = button == MenuButton::Pick && ctx.creative;
+        // `AbstractContainerScreen.java:426`: the second `lastQuickMoved`
+        // site, inside the (non-clone) loaded-cursor release path — mirrored
+        // in `press` for the empty-cursor press path.
+        let quick_key = !clone_click && shift && slot != OUTSIDE_SLOT;
+        if quick_key {
+            self.last_quick_moved = match hit {
+                MenuHit::Slot(i) => menu.slot_item(i).cloned(),
+                _ => None,
+            };
+        }
+        let input = if clone_click {
             ContainerInput::Clone
-        } else if shift && slot != OUTSIDE_SLOT {
+        } else if quick_key {
             ContainerInput::QuickMove
         } else {
             ContainerInput::Pickup
@@ -876,6 +947,50 @@ impl MenuInput {
             button: button.number(),
             input,
         }]
+    }
+
+    /// `AbstractContainerScreen.java:388-398`: shift+double-click does not
+    /// gather onto the cursor — it sends one `QUICK_MOVE` per slot that is in
+    /// the **same backing container** as the double-clicked slot, may be
+    /// picked up, is non-empty, and matches `last_quick_moved`
+    /// (`target.mayPickup(player) && target.hasItem() && target.container ==
+    /// slot.container && canItemQuickReplace(target, lastQuickMoved, true)`).
+    ///
+    /// `target.container == slot.container` compares the **backing
+    /// container** (`Slot::container`, an index into `Menu`'s container
+    /// list), not the menu — getting this wrong would let a shift+double-click
+    /// in a chest sweep the player's own inventory, or vice versa, since both
+    /// live in the same `Menu`.
+    ///
+    /// `canItemQuickReplace(target, lastQuickMoved, true)` is called here only
+    /// once `target.hasItem()` is already known true, at which point its
+    /// `ignoreSize` argument (`true`) drops the remaining size check
+    /// entirely, so it reduces to `isSameItemSameComponents(lastQuickMoved,
+    /// target.getItem())`.
+    fn gather_shift_matches(&self, menu: &Menu, origin: usize) -> Vec<Click> {
+        let Some(last) = self.last_quick_moved.as_ref() else {
+            return Vec::new();
+        };
+        let Some(origin_container) = menu.slot(origin).map(|s| s.container) else {
+            return Vec::new();
+        };
+        let mut clicks = Vec::new();
+        for target in 0..menu.slot_count() {
+            if menu.slot(target).is_none_or(|s| s.container != origin_container) {
+                continue;
+            }
+            if !menu.may_pickup(target) {
+                continue;
+            }
+            let Some(target_item) = menu.slot_item(target) else {
+                continue;
+            };
+            if !ItemStack::is_same_item_same_components(target_item, last) {
+                continue;
+            }
+            clicks.push(Click::shift(target));
+        }
+        clicks
     }
 }
 
@@ -1379,6 +1494,15 @@ mod tests {
         }
     }
 
+    /// A plain player-inventory menu, for the many `press`/`release` tests
+    /// below that need *a* [`Menu`] to satisfy the signature but do not care
+    /// about its contents or its result slot. Tests that do care (the
+    /// `canTakeItemForPickAll` gate, the shift+double-click gather) build
+    /// their own.
+    fn blank_menu() -> Menu {
+        Menu::player()
+    }
+
     /// Centre of a slot's hit rect, in **physical** viewport pixels — the same
     /// space [`hit_test`] takes, and `VIEW` (1280x720) is deliberately *not* the
     /// identity-scale case: `calculate_gui_scale(AUTO, 1280, 720) == 3` (see
@@ -1511,22 +1635,38 @@ mod tests {
 
     #[test]
     fn an_empty_cursor_sends_on_press_and_nothing_on_release() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
-        let clicks = input.press(MenuHit::Slot(37), MenuButton::Left, false, survival(), false);
+        let clicks = input.press(
+            MenuHit::Slot(37),
+            MenuButton::Left,
+            false,
+            survival(),
+            false,
+            &menu,
+        );
         assert_eq!(clicks, vec![Click::left(37)]);
         // `skipNextRelease`: the release must not send a second packet.
         assert!(
             input
-                .release(MenuHit::Slot(37), MenuButton::Left, false, survival())
+                .release(MenuHit::Slot(37), MenuButton::Left, false, survival(), &menu)
                 .is_empty()
         );
     }
 
     #[test]
     fn shift_press_is_a_quick_move() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
         assert_eq!(
-            input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), false),
+            input.press(
+                MenuHit::Slot(0),
+                MenuButton::Left,
+                true,
+                survival(),
+                false,
+                &menu
+            ),
             vec![Click::shift(0)],
             "shift-clicking the result slot must be QUICK_MOVE — the repeat-craft gesture"
         );
@@ -1537,16 +1677,17 @@ mod tests {
     /// press-to-`PICKUP` mapper passes every other test here and loses the drag.
     #[test]
     fn a_loaded_cursor_sends_the_click_on_release_not_on_press() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
         assert!(
             input
-                .press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false)
+                .press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false, &menu)
                 .is_empty(),
             "vanilla only arms isQuickCrafting on press"
         );
         assert!(input.is_dragging());
         assert_eq!(
-            input.release(MenuHit::Slot(1), MenuButton::Right, false, loaded()),
+            input.release(MenuHit::Slot(1), MenuButton::Right, false, loaded(), &menu),
             vec![Click::right(1)],
             "no slot was painted, so it degrades to a plain place-one"
         );
@@ -1555,13 +1696,14 @@ mod tests {
 
     #[test]
     fn painting_slots_emits_the_full_quick_craft_sequence() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
-        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false);
+        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false, &menu);
         for cell in [1usize, 2, 4, 5] {
             input.dragged(MenuHit::Slot(cell));
         }
         input.dragged(MenuHit::Slot(5)); // a repeat must not be painted twice
-        let clicks = input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded());
+        let clicks = input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded(), &menu);
         assert_eq!(clicks.len(), 6, "start + 4 slots + end, got {clicks:?}");
         assert_eq!(clicks[0].slot, OUTSIDE_SLOT);
         assert_eq!(clicks[5].slot, OUTSIDE_SLOT);
@@ -1594,11 +1736,11 @@ mod tests {
             8,
         )));
         let mut input = MenuInput::new();
-        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false);
+        input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false, &menu);
         for cell in [1usize, 2, 4, 5] {
             input.dragged(MenuHit::Slot(cell));
         }
-        for click in input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded()) {
+        for click in input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded(), &menu) {
             click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
         }
         for cell in [1usize, 2, 4, 5] {
@@ -1618,59 +1760,179 @@ mod tests {
 
     #[test]
     fn a_click_inside_the_panel_but_off_a_slot_does_nothing() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
         assert!(
             input
-                .press(MenuHit::Panel, MenuButton::Left, false, survival(), false)
+                .press(MenuHit::Panel, MenuButton::Left, false, survival(), false, &menu)
                 .is_empty()
         );
         assert!(!input.is_dragging());
         assert!(
             input
-                .release(MenuHit::Panel, MenuButton::Left, false, loaded())
+                .release(MenuHit::Panel, MenuButton::Left, false, loaded(), &menu)
                 .is_empty()
         );
     }
 
     #[test]
     fn releasing_a_loaded_cursor_outside_drops_it() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
-        input.press(MenuHit::Outside, MenuButton::Left, false, loaded(), false);
+        input.press(MenuHit::Outside, MenuButton::Left, false, loaded(), false, &menu);
         assert_eq!(
-            input.release(MenuHit::Outside, MenuButton::Left, false, loaded()),
+            input.release(MenuHit::Outside, MenuButton::Left, false, loaded(), &menu),
             vec![Click::drop_cursor()]
         );
     }
 
     #[test]
     fn a_second_press_on_the_same_slot_gathers_on_release() {
+        let menu = blank_menu();
         let mut input = MenuInput::new();
-        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), false);
-        input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded());
-        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), true);
+        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), false, &menu);
+        input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded(), &menu);
+        input.press(MenuHit::Slot(9), MenuButton::Left, false, loaded(), true, &menu);
         assert_eq!(
-            input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded()),
+            input.release(MenuHit::Slot(9), MenuButton::Left, false, loaded(), &menu),
             vec![Click::double(9)]
         );
     }
 
     #[test]
     fn pick_block_only_clones_with_infinite_materials() {
+        let menu = blank_menu();
         let creative = MenuContext {
             cursor_loaded: false,
             creative: true,
         };
         let mut input = MenuInput::new();
         assert_eq!(
-            input.press(MenuHit::Slot(3), MenuButton::Pick, false, creative, false),
+            input.press(MenuHit::Slot(3), MenuButton::Pick, false, creative, false, &menu),
             vec![Click::clone_slot(3)]
         );
         let mut survival_input = MenuInput::new();
         assert!(
             survival_input
-                .press(MenuHit::Slot(3), MenuButton::Pick, false, survival(), false)
+                .press(MenuHit::Slot(3), MenuButton::Pick, false, survival(), false, &menu)
                 .is_empty(),
             "middle-click in survival is a hotbar rebind, not a container click"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Gap (a): `canTakeItemForPickAll` — AbstractContainerScreen.java:387.
+    // ---------------------------------------------------------------------
+
+    /// Vanilla `AbstractContainerScreen.java:387` gates the whole double-click
+    /// gather branch on `menu.canTakeItemForPickAll(ItemStack.EMPTY, slot)`,
+    /// which every result-bearing menu overrides to exclude its own result
+    /// slot. So double-clicking a crafting result must send **nothing** — not
+    /// a desync fix (a real server honours the packet fine; `Menu::do_click`
+    /// has no such gate), just non-vanilla UX otherwise.
+    #[test]
+    fn double_clicking_the_crafting_result_slot_sends_nothing() {
+        let menu = Menu::crafting(3, 3);
+        let craft = menu.craft_layout().expect("a crafting table has a grid");
+        let result = MenuHit::Slot(craft.result_slot);
+        let mut input = MenuInput::new();
+        input.press(result, MenuButton::Left, false, survival(), false, &menu);
+        input.release(result, MenuButton::Left, false, survival(), &menu);
+        input.press(result, MenuButton::Left, false, survival(), true, &menu);
+        assert_eq!(
+            input.release(result, MenuButton::Left, false, survival(), &menu),
+            Vec::new(),
+            "canTakeItemForPickAll excludes the result slot from double-click gather"
+        );
+    }
+
+    /// Control for the test above, proving the detector actually fires rather
+    /// than every double-click silently sending nothing: the identical
+    /// press/release sequence on an ordinary slot of the same menu must still
+    /// gather.
+    #[test]
+    fn double_clicking_an_ordinary_slot_still_gathers() {
+        let menu = Menu::crafting(3, 3);
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(10), MenuButton::Left, false, survival(), false, &menu);
+        input.release(MenuHit::Slot(10), MenuButton::Left, false, survival(), &menu);
+        input.press(MenuHit::Slot(10), MenuButton::Left, false, survival(), true, &menu);
+        assert_eq!(
+            input.release(MenuHit::Slot(10), MenuButton::Left, false, survival(), &menu),
+            vec![Click::double(10)]
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Gap (b): shift+double-click "move all matching" —
+    // AbstractContainerScreen.java:388-398.
+    // ---------------------------------------------------------------------
+
+    /// The gather-by-shift branch sends one `QUICK_MOVE` per slot that shares
+    /// the double-clicked slot's **backing container**, holds an item, and
+    /// matches `last_quick_moved` — not a single `PICKUP_ALL`. Exercises the
+    /// exact set and order of emitted slots, plus two controls: a
+    /// wrong-item chest slot (must not appear) and a matching player-inventory
+    /// slot in a *different* backing container (must not appear either — the
+    /// `target.container == slot.container` restriction, not just an item
+    /// match).
+    #[test]
+    fn shift_double_click_gathers_only_matching_slots_in_the_same_backing_container() {
+        let mut menu = Menu::generic(9);
+        let diamond = |count: i32| ItemStack::new("minecraft:diamond".parse().unwrap(), count);
+        // Chest slots (container 0): three matching diamonds and one
+        // non-matching dirt stack, at varied counts to show the match is
+        // item-identity, not size.
+        menu.set_slot_item(0, Some(diamond(1)));
+        menu.set_slot_item(1, Some(ItemStack::new("minecraft:dirt".parse().unwrap(), 64)));
+        menu.set_slot_item(2, Some(diamond(3)));
+        menu.set_slot_item(4, Some(diamond(5)));
+        // Player main storage (container 1): a matching diamond stack that
+        // must NOT be swept — it is a different backing container than the
+        // chest, even though it lives in the same `Menu`.
+        menu.set_slot_item(20, Some(diamond(1)));
+
+        let mut input = MenuInput::new();
+        // A first shift-click on chest slot 0 is what populates
+        // `last_quick_moved` in real play; reproduce it before the
+        // shift+double-click.
+        input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), false, &menu);
+        input.release(MenuHit::Slot(0), MenuButton::Left, true, survival(), &menu);
+        input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), true, &menu);
+        let clicks = input.release(MenuHit::Slot(0), MenuButton::Left, true, survival(), &menu);
+
+        assert!(
+            clicks.iter().all(|c| c.input == ContainerInput::QuickMove),
+            "shift+double-click gathers via QUICK_MOVE, not PICKUP_ALL: {clicks:?}"
+        );
+        assert_eq!(
+            clicks.iter().map(|c| c.slot).collect::<Vec<_>>(),
+            vec![0, 2, 4],
+            "must sweep exactly the matching chest slots, in ascending slot order, and not \
+             the wrong-item slot 1 or the different-container slot 20"
+        );
+    }
+
+    /// Control for the test above: `last_quick_moved` is captured off the
+    /// double-clicked slot's *own* contents at press time
+    /// (`AbstractContainerScreen.java:312`), so shift+double-clicking an
+    /// **empty** slot records vanilla's `ItemStack.EMPTY` — and
+    /// `!this.lastQuickMoved.isEmpty()` then suppresses the gather entirely,
+    /// sending nothing. This proves the emitted clicks in the test above come
+    /// from a real match against a captured stack, not from the double-click
+    /// alone.
+    #[test]
+    fn shift_double_click_on_an_empty_slot_sends_nothing() {
+        let menu = Menu::generic(9); // slot 0 starts empty
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), false, &menu);
+        input.release(MenuHit::Slot(0), MenuButton::Left, true, survival(), &menu);
+        input.press(MenuHit::Slot(0), MenuButton::Left, true, survival(), true, &menu);
+        assert_eq!(
+            input.release(MenuHit::Slot(0), MenuButton::Left, true, survival(), &menu),
+            Vec::new(),
+            "an empty slot's captured stack is vanilla's ItemStack.EMPTY, which suppresses \
+             the shift+double-click gather"
         );
     }
 }
