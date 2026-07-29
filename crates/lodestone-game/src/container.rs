@@ -83,7 +83,14 @@ impl EquipmentSlot {
     pub fn from_name(value: &str) -> Option<Self> {
         match value {
             "head" => Some(Self::Head),
-            "chest" | "body" => Some(Self::Chest),
+            // `"body"` is deliberately absent, not folded into `Chest`.
+            // Vanilla gates humanoid armour on `EquipmentSlot.Type.HUMANOID_ARMOR`
+            // (`EquipmentSlot.java:15-19`), which covers feet/legs/chest/head and
+            // **excludes** `BODY`. The prototype census makes this reachable
+            // rather than theoretical: `wolf_armor` and all four
+            // `*_horse_armor` items really are `body`, so folding them here put
+            // animal armour in a player's chestplate slot.
+            "chest" => Some(Self::Chest),
             "legs" => Some(Self::Legs),
             "feet" => Some(Self::Feet),
             "offhand" => Some(Self::Offhand),

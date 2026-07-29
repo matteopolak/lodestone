@@ -1,7 +1,12 @@
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{action::ClientAction, event::ClientEvent, item::ItemStack, text::Text};
+use crate::{
+    action::ClientAction,
+    event::{ClientEvent, EquipmentSlot},
+    item::ItemStack,
+    text::Text,
+};
 
 /// Packet direction relative to an endpoint, re-exported from `lodestone-core`
 /// so adapter id tables can use the same direction type as packet metadata.
@@ -300,6 +305,36 @@ pub struct EntityBaseDimensions {
     pub height: f32,
 }
 
+/// One axis-aligned collision box of a block state, in **block-local**
+/// coordinates: `min`/`max` are `[x, y, z]` offsets from the block's own corner.
+///
+/// This is the element type of the [`VersionAdapter::block_collision`] seam. A
+/// full cube is `min = [0.0; 3]`, `max = [1.0; 3]`; a block with no collision
+/// (air, water, cobweb, most plants) has *no* boxes at all — an empty slice, not
+/// a zero-volume box.
+///
+/// # `max` is **not** capped at 1.0
+///
+/// Fences, walls and fence gates reach `y = 1.5` in vanilla, which is why the
+/// 0.6-block auto-step cannot mount them. Clamping a box to the unit cube would
+/// make a fence look step-able; the uncapped value is load-bearing (see
+/// `CollisionView::collision_top` in `lodestone-physics`).
+///
+/// # Why `f32`
+///
+/// Vanilla's shapes are `double`, but every distinct coordinate value a real
+/// block state uses is exactly representable in `f32` (asserted by the version
+/// crate's drift test against the JVM oracle dump), so the narrow form is
+/// lossless and halves the rodata a 32k-state table costs. `f32 -> f64` widening
+/// at the physics seam is exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockAabb {
+    /// Minimum corner `[x, y, z]`, block-local.
+    pub min: [f32; 3],
+    /// Maximum corner `[x, y, z]`, block-local. Uncapped — see the type docs.
+    pub max: [f32; 3],
+}
+
 /// A block state's break-time inputs: vanilla `destroySpeed` (hardness) and
 /// whether the correct tool is required for drops.
 ///
@@ -361,6 +396,51 @@ pub struct ToolMining {
     /// `0` when the held item has no tool component (a bare hand, or a
     /// non-tool), matching vanilla's "no `minecraft:tool`, no durability cost".
     pub damage_per_block: u32,
+}
+
+/// An item's built-in **prototype** component values: the ones a clientbound
+/// stack never carries, because a stack on the wire is only the *patch* against
+/// this.
+///
+/// This is the [`VersionAdapter::item_prototype`] seam's return type. Everything
+/// here is version data (a census of the real registry), which is why it cannot
+/// be recovered from a packet capture and why guessing is worse than reporting
+/// nothing — see the individual fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemPrototype {
+    /// Effective `minecraft:max_stack_size`, `1..=99`.
+    ///
+    /// Vanilla's `COMMON_ITEM_COMPONENTS` sets `64` and individual items
+    /// override it, so this is present for every registered item; the census
+    /// records the resolved value rather than the override. `64` is *not* a safe
+    /// default: every shulker box, bucket and tool is `1`, and eggs are `16`.
+    pub max_stack_size: u32,
+    /// Effective `minecraft:max_damage`, or `None` for an item with no
+    /// durability at all.
+    ///
+    /// `Some(_)` is what makes vanilla `ItemStack.isDamageableItem` true and
+    /// therefore `ItemStack.isStackable` false for a damaged tool.
+    pub max_damage: Option<u32>,
+    /// The slot `minecraft:equippable` names, or `None` for an item that is not
+    /// equippable.
+    ///
+    /// [`EquipmentSlot::Body`] (animal armour) and [`EquipmentSlot::Saddle`] are
+    /// *not* player armour: vanilla's humanoid-armour gate is
+    /// `EquipmentSlot.Type.HUMANOID_ARMOR`, covering only
+    /// [`Feet`](EquipmentSlot::Feet)/[`Legs`](EquipmentSlot::Legs)/[`Chest`](EquipmentSlot::Chest)/[`Head`](EquipmentSlot::Head).
+    pub equip_slot: Option<EquipmentSlot>,
+    /// Whether `minecraft:equippable`'s `allowedEntities` is empty, i.e. any
+    /// entity may wear it (vanilla `Equippable.canBeEquippedBy` returns `true`
+    /// unconditionally). `false` means the item is restricted to a specific
+    /// entity set — `minecraft:wolf_armor` to wolves, `minecraft:saddle` to
+    /// `#minecraft:can_equip_saddle` — which this seam deliberately does not
+    /// enumerate, because in 26.2 every restricted item is already in a
+    /// non-humanoid [`equip_slot`](Self::equip_slot) and so is excluded by the
+    /// slot check alone.
+    ///
+    /// Meaningless (and always `true`) when [`equip_slot`](Self::equip_slot) is
+    /// `None`.
+    pub equippable_by_any_entity: bool,
 }
 
 /// Adapter implemented by protocol crates to lift packets into this canonical
@@ -555,6 +635,170 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// reports "unknown", never a guessed speed.
     fn tool_mining(&self, held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
         let _ = (held, state_id);
+        None
+    }
+
+    /// The **collision** geometry of a block state — vanilla
+    /// `BlockState.getCollisionShape(...).toAabbs()` — as block-local
+    /// [`BlockAabb`]s, or `None` if this version does not know the state.
+    ///
+    /// An empty slice is a *meaningful* answer, distinct from `None`: the state
+    /// exists and has no collision (air, water, lava, cobweb, kelp, most plants).
+    ///
+    /// # Why this must be a version seam and not derived
+    ///
+    /// Collision geometry is **code**-defined in vanilla, not property-derived:
+    /// `blocks.json` carries no shapes at all, and `Block.getCollisionShape` is
+    /// neighbour-state-dependent for stairs, fences, walls and panes. The only
+    /// authoritative source is the game itself (boot the server, walk
+    /// `Block.BLOCK_STATE_REGISTRY`), and the resulting table is keyed by
+    /// block-state ids that are renumbered every version — so a version-free
+    /// consumer (the shell's `CollisionView`, a pathfinder) reaches it here, the
+    /// same way it reaches [`block_hardness`](VersionAdapter::block_hardness).
+    ///
+    /// # This is collision, **not** the outline or interaction shape
+    ///
+    /// Three different vanilla shapes answer three different questions, and they
+    /// genuinely disagree: a fluid has a full collision-less cell *and* an empty
+    /// outline; kelp has an outline (so it can be targeted and broken) and **no**
+    /// collision; a soul-sand block collides to `y = 0.875` but outlines to `1.0`.
+    /// Do not wire this into block picking — that needs the outline shape.
+    ///
+    /// The default returns `None`: a version that has not homed a collision
+    /// census reports "unknown", never a guessed cube. A consumer that falls back
+    /// to a unit cube on `None` should say so loudly — silently cubing every
+    /// solid block is exactly the defect this seam exists to remove (slabs,
+    /// stairs, fences and ice all become full blocks, and the player stands half
+    /// a block too high on every one of them).
+    fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        let _ = state_id;
+        None
+    }
+
+    /// The block identifier of a block state — for example
+    /// `"minecraft:oak_slab"` for every one of that block's states — or `None` if
+    /// this version does not know the state.
+    ///
+    /// Deliberately the *block* name with no property values: this is the key for
+    /// the handful of per-block physics constants that vanilla stores as
+    /// `BlockBehaviour.Properties` rather than as geometry, and which therefore
+    /// cannot be recovered from [`block_collision`](VersionAdapter::block_collision):
+    /// `friction` (ice 0.98, slime 0.8), `speedFactor` (soul sand and honey 0.4),
+    /// `jumpFactor` (honey 0.5), `bounceRestitution` (slime 1.0, bed 0.75),
+    /// `makeStuckInBlock` (cobweb, powder snow, sweet berry bush) and membership
+    /// of `BlockTags.CLIMBABLE`. A consumer keys those off *names*, which are
+    /// stable across versions in a way state ids are not.
+    ///
+    /// A consumer wanting properties too should not reach for this — that is
+    /// [`BlockStateRegistry`](crate::BlockStateRegistry), whose borrowing shape
+    /// requires an owned instance. This returns `&'static str` straight from
+    /// rodata and needs no instance.
+    ///
+    /// The default returns `None`.
+    fn block_name(&self, state_id: u32) -> Option<&'static str> {
+        let _ = state_id;
+        None
+    }
+
+    /// The **outline** geometry of a block state — vanilla
+    /// `BlockStateBase.getShape(...).toAabbs()` — as block-local [`BlockAabb`]s,
+    /// or `None` if this version does not know the state.
+    ///
+    /// This is the shape **block selection** uses, and it is a third thing,
+    /// neither collision nor fluid presence. `Entity.pick` clips with
+    /// `ClipContext.Block.OUTLINE` and `ClipContext.Fluid.NONE`, and
+    /// `ClipContext.Block.OUTLINE` *is* `BlockStateBase::getShape`. So:
+    ///
+    /// * `LiquidBlock.getShape` is `Shapes.empty()` → open water and lava are
+    ///   never targeted, which is why picking cannot be "the cell is not empty";
+    /// * kelp's is `Block.column(16, 0, 9)` and seagrass's `Block.column(12, 0, 12)`
+    ///   → **non-empty**, so both are targetable and breakable, even though their
+    ///   *collision* shape is empty and their `getFluidState` is water. Picking
+    ///   is therefore not `!is_water` either;
+    /// * cobweb's outline is a full unit cube while its collision is empty.
+    ///
+    /// Half of all block states in 26.2 have an outline that differs from their
+    /// collision shape, so [`block_collision`](VersionAdapter::block_collision)
+    /// is not a usable stand-in. An empty slice is a meaningful answer (the state
+    /// exists and cannot be targeted), distinct from `None`.
+    ///
+    /// # Two shapes here are context-dependent and resolve to their default form
+    ///
+    /// Vanilla's `getShape` takes a `CollisionContext`; the census dumps it with
+    /// `CollisionContext.empty()`, the same thing vanilla's own shape cache does.
+    /// Two consequences worth knowing: `minecraft:light` outlines to
+    /// `Shapes.empty()` here because its shape is
+    /// `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`, and
+    /// `minecraft:scaffolding` reports its standing rather than its descending
+    /// shape.
+    ///
+    /// The default returns `None`: a version with no outline census reports
+    /// "unknown", never a guessed cube. A consumer falling back to a unit cube
+    /// over-selects at the edges of every slab, stair, torch and kelp stalk.
+    fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        let _ = state_id;
+        None
+    }
+
+    /// The **interaction** geometry of a block state — vanilla
+    /// `BlockStateBase.getInteractionShape(...).toAabbs()` — as block-local
+    /// [`BlockAabb`]s, or `None` if this version does not know the state.
+    ///
+    /// Almost always an *empty* slice: `BlockBehaviour.getInteractionShape`
+    /// defaults to `Shapes.empty()` and only the cauldron family, hoppers,
+    /// scaffolding and composters override it in 26.2.
+    ///
+    /// # It refines the hit *face*, it does not add a hit
+    ///
+    /// The one caller is `BlockGetter.clipWithInteractionOverride`, which clips
+    /// the outline first and only then, **if the outline already hit**, clips the
+    /// interaction shape and — when that hit is nearer — replaces the resulting
+    /// hit's `Direction` while keeping the outline's hit location. So this can
+    /// never make an unpickable block pickable, and never moves the hit point. It
+    /// is what makes a hopper's funnel and a cauldron's inner walls report the
+    /// face you visually clicked rather than the outer bounding face. Treating it
+    /// as a second, independent clip target is the misreading to avoid.
+    ///
+    /// The default returns `None`.
+    fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
+        let _ = state_id;
+        None
+    }
+
+    /// The built-in **prototype** component values of an item, keyed by its
+    /// canonical `minecraft:*` identifier, or `None` for an item this version's
+    /// census does not know.
+    ///
+    /// # Why this cannot be read off the wire
+    ///
+    /// A clientbound `ItemStack` is an item id plus a `DataComponentPatch` — the
+    /// *delta* from the item's built-in prototype component map. Three components
+    /// gameplay needs live only in that prototype, so no packet ever mentions
+    /// them and no wire decoder can produce them:
+    ///
+    /// * `minecraft:max_stack_size` — without it every stack looks like 64, so a
+    ///   drag distributing buckets or shulker boxes over-fills the prediction and
+    ///   is corrected by the server;
+    /// * `minecraft:max_damage` — without it `isDamageableItem` is false, so
+    ///   `isStackable` is true and two identically-componented swords merge;
+    /// * `minecraft:equippable` — without it `ArmorSlot.mayPlace` (which is
+    ///   `slot == equippable.slot() && …`) is false for every item, so **no
+    ///   armour can be equipped by any click type**.
+    ///
+    /// This is the same shape of problem as `minecraft:tool`, which
+    /// [`tool_mining`](VersionAdapter::tool_mining) exists for: the prototype is
+    /// version data, so a version-free consumer reaches it here.
+    ///
+    /// Adapters also fold these into
+    /// [`ItemComponents`](crate::ItemComponents)' effective fields at decode
+    /// time, which is the route a consumer holding a stack should use. This seam
+    /// is for the case where there is no stack — a creative-menu entry, a recipe
+    /// output, a slot cap computed before anything is in the slot.
+    ///
+    /// The default returns `None`: a version with no item census reports
+    /// "unknown", never a guessed 64.
+    fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
+        let _ = item;
         None
     }
 }

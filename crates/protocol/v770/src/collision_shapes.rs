@@ -43,16 +43,17 @@ pub use table::STATE_COUNT;
 
 /// An axis-aligned collision box in block-local coordinates.
 ///
-/// `min`/`max` are `[x, y, z]`. A full cube is `min = [0.0; 3]`,
-/// `max = [1.0; 3]`; a block with no collision (air, water, cobweb) has *no*
-/// boxes at all (an empty slice), not a zero-volume box.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Aabb {
-    /// Minimum corner `[x, y, z]`.
-    pub min: [f32; 3],
-    /// Maximum corner `[x, y, z]`.
-    pub max: [f32; 3],
-}
+/// This **is** [`lodestone_model::BlockAabb`], not a copy of it. The table used
+/// to own its own struct, which meant the only way to hand shapes across the
+/// version seam ([`VersionAdapter::block_collision`]) was to convert box by box
+/// — turning a rodata slice into a per-query allocation, in the innermost loop of
+/// the physics tick. Sharing one type identity makes the seam return
+/// `&'static [Aabb]` straight out of rodata instead. The alias keeps this
+/// module's own name working, so the generated table and every existing consumer
+/// are unchanged.
+///
+/// [`VersionAdapter::block_collision`]: lodestone_model::VersionAdapter::block_collision
+pub type Aabb = lodestone_model::BlockAabb;
 
 /// The collision boxes for block-state `id`, or `None` if `id` is not in
 /// `0..`[`STATE_COUNT`].

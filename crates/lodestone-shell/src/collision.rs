@@ -8,11 +8,49 @@
 //! - [`LiveCollision`] over an owned snapshot of the **live server world**, keyed
 //!   by vanilla block-state ids and the vanilla classifier.
 //!
-//! Both use the *same* deliberately-coarse mapping — every full opaque cube is a
-//! unit-cube collider, a fluid cell reports `is_water`/`is_lava` (so the engine
-//! runs its swim path), everything else is empty — so switching between them
-//! changes only *where blocks come from*, never how collision resolves. The
-//! bit-exact movement in `lodestone-physics` is untouched.
+//! # Real per-state shapes, not a unit cube per solid block
+//!
+//! Both adapters used to emit *one unit cube* for every block that occludes, and
+//! nothing for everything else. In the demo palette that is exactly right — its
+//! nine blocks are all full cubes or air. In live play it was the single largest
+//! correctness gap in the client: **no slabs, no stairs, no fences, no walls, no
+//! ice, no ladders, no cobwebs, no soul sand**. A player stood on top of a
+//! bottom slab at `y + 1.0` instead of `y + 0.5`, walked through the top half of
+//! a stair, and could step over a fence that vanilla makes 1.5 blocks tall.
+//!
+//! That mattered quantitatively, not just aesthetically. 26.2's server replays
+//! our movement delta through `move(MoverType.PLAYER, …)` and rubber-bands as
+//! soon as horizontal disagreement passes **0.25 blocks in a single packet, with
+//! no accumulator** (`docs/baritone-port.md` §3.2). `lodestone-physics` is
+//! bit-exact against two independent oracles across 26 zero-tolerance golden
+//! traces, so the integrator was never the problem — it was being fed a world in
+//! which slabs did not exist. Half a block of vertical error on the first slab is
+//! **2× the rubber-band threshold**.
+//!
+//! The real shapes come from the version crate's generated collision census
+//! (dumped from the real server's `Block.BLOCK_STATE_REGISTRY`) and reach this
+//! version-free module through [`VersionAdapter::block_collision`] — the same
+//! sanctioned seam `block_hardness` and `tool_mining` use. See
+//! [`docs/collision-shapes.md`](https://github.com/) in this repo for the census
+//! and how to extend it.
+//!
+//! # One answer per question, shared by both adapters
+//!
+//! The two adapters implement *one* trait, so any disagreement between them is a
+//! bug that hides: a test passes against `WorldCollision` while the game
+//! misbehaves against `LiveCollision`. They are kept honest structurally rather
+//! than by review — every one of [`CollisionView`]'s answers is computed **once**,
+//! in a free function over the private [`BlockView`] trait, and each `impl
+//! CollisionView` block is nothing but one-line delegation. The only things the
+//! two adapters supply differently are:
+//!
+//! | question | [`WorldCollision`] | [`LiveCollision`] |
+//! |---|---|---|
+//! | state id at a cell | demo palette | snapshot section |
+//! | shape of a state | full cube if solid | version collision census |
+//! | fluid kind | [`demo_fluid`] | [`vanilla_fluid`] |
+//! | fluid cell (level) | `None` — the palette has no `level` property | `BlockModels::fluid` |
+//! | vanilla block name | fixed demo id → name table | [`VersionAdapter::block_name`] |
 //!
 //! # Fluids have one classifier, not one per consumer
 //!
@@ -40,16 +78,388 @@
 //! predicate, [`LiveCollision::is_pickable`], not in a negation of `is_water`. One
 //! question one answer is right; the mistake was assuming there was one question.
 //!
+//! The same warning now applies to the collision census wired in here: **collision
+//! shape is not outline shape**. A fluid has a full collision-less cell and an
+//! *empty* outline; kelp has an outline and no collision; soul sand collides to
+//! `y = 0.875` and outlines to `1.0`. Nothing in this module may be used to decide
+//! what the crosshair selects — that seam is `is_pickable`, and its real fix is an
+//! outline/interaction-shape census beside the collision one.
+//!
 //! [`FluidState`]: lodestone_physics::FluidState
+//! [`demo_fluid`]: crate::blocks::demo_fluid
+//! [`vanilla_fluid`]: crate::blocks::vanilla_fluid
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use lodestone_physics::{Aabb, CollisionView};
+use lodestone_model::{BlockAabb, VersionAdapter};
+use lodestone_physics::{Aabb, CollisionView, FluidCell, HorizontalDir, Vec3d};
 use lodestone_render::{BlockAtlas, BlockClassifier, FluidKind};
 use lodestone_world::{ChunkPos, ChunkSection, World};
 
 use crate::blocks::{demo_fluid, id, vanilla_fluid};
+
+// ---------------------------------------------------------------------------
+// The shared seam: what the two adapters answer differently
+// ---------------------------------------------------------------------------
+
+/// A block-local unit cube — the shape of every full block, and the fallback a
+/// [`LiveCollision`] with no version data is reduced to.
+const FULL_CUBE: &[BlockAabb] = &[BlockAabb {
+    min: [0.0, 0.0, 0.0],
+    max: [1.0, 1.0, 1.0],
+}];
+
+/// No collision at all. Distinct from a zero-volume box: vanilla's
+/// `Shapes.empty()` contributes nothing to a sweep, and a zero-volume box would
+/// still be tested (and, with the `1.0E-7` epsilon, could stop a movement).
+const NO_COLLISION: &[BlockAabb] = &[];
+
+/// The four per-cell facts an adapter must supply. Everything [`CollisionView`]
+/// answers is derived from these by the free functions below, so both adapters
+/// share one body per answer and cannot drift.
+///
+/// Private on purpose: this is an internal factorisation, not a public seam. The
+/// public seam is [`CollisionView`] itself.
+trait BlockView {
+    /// Block-state id at world coordinates, in this adapter's own id space.
+    /// Outside the loaded world this must report *air*, never a solid.
+    fn state_at(&self, x: i32, y: i32, z: i32) -> u32;
+
+    /// Block-local collision boxes for a state. An empty slice means "no
+    /// collision", which is a real answer (air, water, kelp, cobweb).
+    fn shape_of(&self, state: u32) -> &'static [BlockAabb];
+
+    /// Which fluid, if any, this state's cell carries — for
+    /// [`CollisionView::is_water`] / [`is_lava`](CollisionView::is_lava).
+    fn fluid_kind_of(&self, state: u32) -> Option<FluidKind>;
+
+    /// The fluid's *dynamic* state (amount + falling) for
+    /// [`CollisionView::fluid_at`], or `None` when this adapter cannot know it.
+    /// See the module table: the demo palette genuinely cannot.
+    fn fluid_cell_of(&self, state: u32) -> Option<FluidCell>;
+
+    /// The vanilla block identifier for a state (`"minecraft:ice"`), for the
+    /// name-keyed physics constants. `None` when unresolvable, in which case
+    /// every name-keyed answer falls back to vanilla's *default* for that
+    /// property (0.6 friction, 1.0 factors, no bounce, not climbable) — the same
+    /// value the overwhelming majority of blocks have.
+    fn name_of(&self, state: u32) -> Option<&'static str>;
+}
+
+// ---------------------------------------------------------------------------
+// Shape geometry: the shared bodies
+// ---------------------------------------------------------------------------
+
+/// Appends a block-local shape to `out` in **world space**, which is the
+/// coordinate space [`CollisionView::collision_boxes`] is contracted in.
+///
+/// Widening `f32 -> f64` is exact, so this is lossless against the game's
+/// `double` shapes.
+fn emit_world_boxes(shape: &[BlockAabb], x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+    let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+    for b in shape {
+        out.push(Aabb::new(
+            bx + f64::from(b.min[0]),
+            by + f64::from(b.min[1]),
+            bz + f64::from(b.min[2]),
+            bx + f64::from(b.max[0]),
+            by + f64::from(b.max[1]),
+            bz + f64::from(b.max[2]),
+        ));
+    }
+}
+
+/// `shape.max(Axis.Y)`, block-local and **uncapped** — a fence is `1.5`, a bottom
+/// slab `0.5`, soul sand `0.875`, air `0.0`.
+///
+/// Overriding [`CollisionView::collision_top`] rather than taking its default is
+/// not a micro-optimisation: the default gathers into a `Vec` it allocates on
+/// every call, and a pathfinder asks this for every candidate cell.
+fn shape_top(shape: &[BlockAabb]) -> f64 {
+    shape
+        .iter()
+        .map(|b| f64::from(b.max[1]))
+        .fold(0.0_f64, f64::max)
+}
+
+/// The union bounding box of a shape, block-local, or `None` for an empty shape.
+fn shape_bounds(shape: &[BlockAabb]) -> Option<([f32; 3], [f32; 3])> {
+    let mut it = shape.iter();
+    let first = it.next()?;
+    let (mut min, mut max) = (first.min, first.max);
+    for b in it {
+        for a in 0..3 {
+            min[a] = min[a].min(b.min[a]);
+            max[a] = max[a].max(b.max[a]);
+        }
+    }
+    Some((min, max))
+}
+
+/// Vanilla's `BlockStateBase.calculateSolid` over the collision shape:
+/// non-empty, and either the *mean* of the bounding box's three dimensions is at
+/// least `0.7291666666666666` or its Y size is at least `1.0`.
+///
+/// That magic constant is not arbitrary — it is exactly `(1 + 1 + 3/16) / 3`, the
+/// mean size of a ladder's collision box, so a ladder lands precisely *on* the
+/// threshold. Vanilla flips it back off with `forceSolidOff()`; see
+/// [`blocks_motion_at`] for the two lists this cannot see.
+fn shape_is_solid(shape: &[BlockAabb]) -> bool {
+    let Some((min, max)) = shape_bounds(shape) else {
+        return false;
+    };
+    let size = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+    let mean = f64::from(size[0] + size[1] + size[2]) / 3.0;
+    mean >= 0.7291666666666666 || f64::from(size[1]) >= 1.0
+}
+
+/// `Block.isFaceFull(collisionShape, dir)` for a horizontal direction: does the
+/// shape cover that whole 1×1 face?
+///
+/// **Under-approximation, deliberately.** Vanilla unions the whole `VoxelShape`
+/// before testing, so a face covered by *several* boxes jointly counts; this
+/// asks whether any *single* box covers it. Every real block whose face is full
+/// has one box that does it (a cube, a slab's own side, a double-height door),
+/// so the two agree on the blocks that exist — but the general case is not
+/// proven, and the honest statement is "no false positives, possible false
+/// negatives". The only consumer is a *falling* fluid's downward jet
+/// ([`lodestone_physics::get_flow`]), where a false negative loses a `-6.0`
+/// vertical nudge on a waterfall hugging a multi-box wall.
+fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
+    // Axis normal to the face, and the two axes spanning it.
+    let (axis, at_max) = match dir {
+        HorizontalDir::North => (2, false),
+        HorizontalDir::South => (2, true),
+        HorizontalDir::West => (0, false),
+        HorizontalDir::East => (0, true),
+    };
+    let span = if axis == 0 { [1, 2] } else { [0, 1] };
+    shape.iter().any(|b| {
+        let touches = if at_max {
+            b.max[axis] >= 1.0
+        } else {
+            b.min[axis] <= 0.0
+        };
+        touches && span.iter().all(|&a| b.min[a] <= 0.0 && b.max[a] >= 1.0)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Name-keyed physics constants
+// ---------------------------------------------------------------------------
+//
+// These six values are `BlockBehaviour.Properties` fields and tag memberships,
+// not geometry, so no collision census can carry them — they are keyed by block
+// *name*, which is why `VersionAdapter::block_name` exists. Every value below was
+// read out of the decompiled 26.2 `Blocks.java` / `data/minecraft/tags/block/*`,
+// with the line cited, rather than recalled.
+
+/// `Block.getFriction` — `BlockBehaviour.Properties.friction`, default `0.6`.
+///
+/// `Blocks.java`: ice/packed ice/frosted ice `0.98` (1950, 3021, 3732), blue ice
+/// `0.989` (4227), slime block `0.8` (2926). Nothing else in 26.2 sets it.
+fn friction_for(name: &str) -> f32 {
+    match name {
+        "minecraft:ice" | "minecraft:packed_ice" | "minecraft:frosted_ice" => 0.98,
+        "minecraft:blue_ice" => 0.989,
+        "minecraft:slime_block" => 0.8,
+        _ => 0.6,
+    }
+}
+
+/// `Block.getSpeedFactor` — default `1.0`. `Blocks.java`: soul sand `0.4` (2024),
+/// honey block `0.4` (4843). Nothing else in 26.2 sets it.
+fn speed_factor_for(name: &str) -> f32 {
+    match name {
+        "minecraft:soul_sand" | "minecraft:honey_block" => 0.4,
+        _ => 1.0,
+    }
+}
+
+/// `Block.getJumpFactor` — default `1.0`. `Blocks.java`: honey block `0.5`
+/// (4843), the only block in 26.2 that sets it.
+fn jump_factor_for(name: &str) -> f32 {
+    match name {
+        "minecraft:honey_block" => 0.5,
+        _ => 1.0,
+    }
+}
+
+/// `Block.getBounceRestitution`, already net of `BlockTags.SUPPRESSES_BOUNCE`
+/// — default `0.0`. `Blocks.java`: slime block `1.0` (2926), every bed `0.75`
+/// (684, via the `BED` colour collection).
+///
+/// The suppression tag needs no subtraction here: its sole member is
+/// `minecraft:honey_block` (`tags/block/suppresses_bounce.json`), which sets no
+/// restitution in the first place, so tag-aware and tag-blind agree on every
+/// block in 26.2. Should a future version add a bouncy suppressor, this is where
+/// it breaks — and it will break silently, so re-read the tag on a data bump.
+///
+/// All 16 `*_bed` states are matched by suffix; `block_states.rs` confirms
+/// exactly 16 names end in `_bed` in 26.2 and all of them are beds.
+fn bounce_for(name: &str) -> f32 {
+    match name {
+        "minecraft:slime_block" => 1.0,
+        n if n.ends_with("_bed") => 0.75,
+        _ => 0.0,
+    }
+}
+
+/// `Block.entityInside` → `Entity.makeStuckInBlock` — the per-axis speed
+/// multiplier of the three blocks that grab you. `None` for everything else.
+///
+/// `WebBlock.java:33` `(0.25, 0.05, 0.25)`, `PowderSnowBlock.java:66`
+/// `(0.9, 1.5, 0.9)`, `SweetBerryBushBlock.java:86` `(0.8, 0.75, 0.8)`. Note
+/// `WebBlock` gives a `WEAVING` mob `(0.5, 0.25, 0.5)` instead; that is a
+/// per-entity override which `CollisionView` deliberately does not model here.
+fn stuck_for(name: &str) -> Option<Vec3d> {
+    match name {
+        "minecraft:cobweb" => Some(Vec3d::new(0.25, 0.05, 0.25)),
+        "minecraft:powder_snow" => Some(Vec3d::new(0.9, 1.5, 0.9)),
+        "minecraft:sweet_berry_bush" => Some(Vec3d::new(0.8, 0.75, 0.8)),
+        _ => None,
+    }
+}
+
+/// `BlockTags.CLIMBABLE`, verbatim from `data/minecraft/tags/block/climbable.json`
+/// in the 26.2 jar — all nine entries, no guesses.
+///
+/// `cave_vines`/`cave_vines_plant` are in the tag even though they are the glow
+/// berry vine, and `scaffolding` is in it but holds differently when sneaking (a
+/// distinction [`CollisionView::is_climbable`] does not carry).
+fn is_climbable_name(name: &str) -> bool {
+    matches!(
+        name,
+        "minecraft:ladder"
+            | "minecraft:vine"
+            | "minecraft:scaffolding"
+            | "minecraft:weeping_vines"
+            | "minecraft:weeping_vines_plant"
+            | "minecraft:twisting_vines"
+            | "minecraft:twisting_vines_plant"
+            | "minecraft:cave_vines"
+            | "minecraft:cave_vines_plant"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The shared answers: one body each, both adapters delegate here
+// ---------------------------------------------------------------------------
+
+fn boxes_at(v: &impl BlockView, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+    emit_world_boxes(v.shape_of(v.state_at(x, y, z)), x, y, z, out);
+}
+
+fn top_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f64 {
+    shape_top(v.shape_of(v.state_at(x, y, z)))
+}
+
+fn friction_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
+    v.name_of(v.state_at(x, y, z)).map_or(0.6, friction_for)
+}
+
+fn speed_factor_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
+    v.name_of(v.state_at(x, y, z)).map_or(1.0, speed_factor_for)
+}
+
+fn jump_factor_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
+    v.name_of(v.state_at(x, y, z)).map_or(1.0, jump_factor_for)
+}
+
+fn bounce_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
+    v.name_of(v.state_at(x, y, z)).map_or(0.0, bounce_for)
+}
+
+fn stuck_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<Vec3d> {
+    v.name_of(v.state_at(x, y, z)).and_then(stuck_for)
+}
+
+fn climbable_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    v.name_of(v.state_at(x, y, z))
+        .is_some_and(is_climbable_name)
+}
+
+fn is_water_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    v.fluid_kind_of(v.state_at(x, y, z)) == Some(FluidKind::Water)
+}
+
+fn is_lava_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    v.fluid_kind_of(v.state_at(x, y, z)) == Some(FluidKind::Lava)
+}
+
+fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
+    v.fluid_cell_of(v.state_at(x, y, z))
+}
+
+/// `BlockState.blocksMotion()` = `block != COBWEB && block != BAMBOO_SAPLING &&
+/// isSolid()`, where `isSolid` is the cached `legacySolid` flag
+/// (`BlockBehaviour.java:542-549`).
+///
+/// # What this gets wrong, and why it is not silent
+///
+/// `legacySolid` is [`shape_is_solid`] *unless* the block overrides it with
+/// `forceSolidOn()` / `forceSolidOff()`, and 26.2 has **143 blocks with
+/// `forceSolidOn` and 8 with `forceSolidOff`** — no committed table in this repo
+/// carries that flag, so those 151 are answered from geometry and some of them
+/// are wrong:
+///
+/// * `forceSolidOn` with an empty or thin collision shape reads here as **not**
+///   blocking motion when vanilla says it does: every sign and hanging sign,
+///   every pressure plate, an *open* fence gate, lanterns, chains, cobweb,
+///   bamboo, cake, bell, dead corals, turtle egg.
+/// * `forceSolidOff` reads as blocking when vanilla says it does not: ladder
+///   (which sits exactly on the `0.7291666…` threshold — that is why the
+///   override exists), snow, azalea, big dripleaf, chorus plant/flower, end rod.
+///   Ladder is hard-coded off below because it is the one a player meets
+///   constantly.
+///
+/// The blast radius is small and known: `blocks_motion` has exactly one consumer,
+/// [`lodestone_physics::get_flow`]'s empty-neighbour branch, which decides whether
+/// a fluid spills over an edge. Nothing about the player's own movement reads it.
+/// Closing the gap properly means a `legacySolid` (or `forceSolid*`) column beside
+/// the collision census in the version crate.
+fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
+    let state = v.state_at(x, y, z);
+    match v.name_of(state) {
+        // The two explicit exclusions in `blocksMotion` itself, plus the one
+        // `forceSolidOff` block a player touches every session.
+        Some("minecraft:cobweb" | "minecraft:bamboo_sapling" | "minecraft:ladder") => false,
+        _ => shape_is_solid(v.shape_of(state)),
+    }
+}
+
+/// `FlowingFluid.isSolidFace` (`FlowingFluid.java:105-115`), horizontal case:
+/// `false` if the cell holds the same fluid, `false` for ice, else
+/// `isFaceSturdy(FULL)` = [`shape_face_is_full`].
+///
+/// Two approximations, both narrowing:
+/// * the seam does not say *which* fluid is flowing, so **any** fluid in the cell
+///   answers `false` (vanilla only excludes the same fluid — so water beside lava
+///   loses the jet);
+/// * `isFaceSturdy` is the under-approximating [`shape_face_is_full`].
+///
+/// Vanilla's `direction == UP -> true` branch is unreachable here: the seam is
+/// typed [`HorizontalDir`], so the vertical case cannot be asked.
+fn is_solid_face_at(v: &impl BlockView, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
+    let state = v.state_at(x, y, z);
+    if v.fluid_kind_of(state).is_some() {
+        return false;
+    }
+    // `IceBlock` covers ice, frosted ice and blue ice; packed ice is a plain
+    // `Block`, so it is *not* excluded (`IceBlock` subclasses only).
+    if matches!(
+        v.name_of(state),
+        Some("minecraft:ice" | "minecraft:frosted_ice" | "minecraft:blue_ice")
+    ) {
+        return false;
+    }
+    shape_face_is_full(v.shape_of(state), dir)
+}
+
+// ---------------------------------------------------------------------------
+// The demo world
+// ---------------------------------------------------------------------------
 
 /// A [`CollisionView`] over a borrowed [`World`].
 #[derive(Debug)]
@@ -82,6 +492,13 @@ impl<'a> WorldCollision<'a> {
     }
 
     /// Whether the block at these coordinates is a full-cube collider.
+    ///
+    /// In the demo palette this really is the whole story — every block in it is
+    /// either air, water, or a full cube — which is why [`shape_of`] can hand back
+    /// [`FULL_CUBE`] on the strength of it. The live adapter's counterpart is
+    /// *not* the collision answer; see [`LiveCollision::is_solid`].
+    ///
+    /// [`shape_of`]: BlockView::shape_of
     #[must_use]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         let b = self.block_at(x, y, z);
@@ -101,53 +518,143 @@ impl<'a> WorldCollision<'a> {
     }
 }
 
-impl CollisionView for WorldCollision<'_> {
-    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        if self.is_solid(x, y, z) {
-            out.push(Aabb::new(
-                f64::from(x),
-                f64::from(y),
-                f64::from(z),
-                f64::from(x) + 1.0,
-                f64::from(y) + 1.0,
-                f64::from(z) + 1.0,
-            ));
+/// The vanilla block each demo-palette id stands in for, so the demo world reads
+/// the *same* name-keyed constant tables the live world does.
+///
+/// Every one of these resolves to vanilla's default (0.6 friction, no bounce, not
+/// climbable), so the mapping changes no demo behaviour today. It exists so the
+/// two adapters share one code path rather than one having stubs: if someone adds
+/// ice to the demo palette, it becomes slippery with no further wiring, and if the
+/// name tables gain a row that is wrong, both worlds show it.
+fn demo_block_name(state: u32) -> Option<&'static str> {
+    Some(match state {
+        id::STONE => "minecraft:stone",
+        id::DIRT => "minecraft:dirt",
+        id::GRASS => "minecraft:grass_block",
+        id::SAND => "minecraft:sand",
+        id::WATER => "minecraft:water",
+        id::LOG => "minecraft:oak_log",
+        id::LEAVES => "minecraft:oak_leaves",
+        id::BEDROCK => "minecraft:bedrock",
+        id::GRAVEL => "minecraft:gravel",
+        _ => return None,
+    })
+}
+
+impl BlockView for WorldCollision<'_> {
+    fn state_at(&self, x: i32, y: i32, z: i32) -> u32 {
+        self.block_at(x, y, z)
+    }
+
+    fn shape_of(&self, state: u32) -> &'static [BlockAabb] {
+        if state == id::AIR || state == id::WATER {
+            NO_COLLISION
+        } else {
+            FULL_CUBE
         }
     }
 
+    fn fluid_kind_of(&self, state: u32) -> Option<FluidKind> {
+        demo_fluid(state)
+    }
+
+    /// **Always `None`, on purpose.** `fluid_at` must report the fluid's *amount*
+    /// (`1..=8`) and falling flag, which vanilla derives from a `level` property.
+    /// The demo palette's water is a single property-less id, so there is no
+    /// amount to report — and fabricating "source, amount 8" would invent a
+    /// current (`get_flow` reads neighbour levels) that this world's flat lakes do
+    /// not have. Reporting `None` keeps demo water inert, exactly as before real
+    /// shapes were wired in.
+    fn fluid_cell_of(&self, _state: u32) -> Option<FluidCell> {
+        None
+    }
+
+    fn name_of(&self, state: u32) -> Option<&'static str> {
+        demo_block_name(state)
+    }
+}
+
+impl CollisionView for WorldCollision<'_> {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+        boxes_at(self, x, y, z, out);
+    }
+
+    fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
+        top_at(self, x, y, z)
+    }
+
+    fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
+        friction_at(self, x, y, z)
+    }
+
+    fn speed_factor(&self, x: i32, y: i32, z: i32) -> f32 {
+        speed_factor_at(self, x, y, z)
+    }
+
+    fn jump_factor(&self, x: i32, y: i32, z: i32) -> f32 {
+        jump_factor_at(self, x, y, z)
+    }
+
     fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        demo_fluid(self.block_at(x, y, z)) == Some(FluidKind::Water)
+        is_water_at(self, x, y, z)
+    }
+
+    fn is_climbable(&self, x: i32, y: i32, z: i32) -> bool {
+        climbable_at(self, x, y, z)
     }
 
     fn is_lava(&self, x: i32, y: i32, z: i32) -> bool {
-        demo_fluid(self.block_at(x, y, z)) == Some(FluidKind::Lava)
+        is_lava_at(self, x, y, z)
+    }
+
+    fn stuck_multiplier(&self, x: i32, y: i32, z: i32) -> Option<Vec3d> {
+        stuck_at(self, x, y, z)
+    }
+
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
+        fluid_at(self, x, y, z)
+    }
+
+    fn blocks_motion(&self, x: i32, y: i32, z: i32) -> bool {
+        blocks_motion_at(self, x, y, z)
+    }
+
+    fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
+        is_solid_face_at(self, x, y, z, dir)
+    }
+
+    fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
+        bounce_at(self, x, y, z)
     }
 }
+
+// ---------------------------------------------------------------------------
+// The live world
+// ---------------------------------------------------------------------------
 
 /// A [`CollisionView`] over the **live server world**, keyed by vanilla block
 /// state ids.
 ///
 /// This is the multiplayer companion to [`WorldCollision`]: it makes the shell's
-/// physics walk on the *server's* terrain instead of the offline demo world.
-/// Crucially it changes **where blocks come from, not how collision resolves** —
-/// it fills the exact same [`CollisionView`] hooks the demo adapter does (full
-/// cube for a solid block, `is_water`/`is_lava` for fluids, defaults for the
-/// rest), so the bit-exact movement in `lodestone-physics` is untouched. The two
-/// adapters are deliberately the same coarseness: a full opaque cube collides,
-/// everything else (air, water, foliage, and — a known v1 limitation — partial
-/// blocks like slabs and stairs) does not.
+/// physics walk on the *server's* terrain instead of the offline demo world, with
+/// the server's *real* per-state collision geometry (see the module docs for what
+/// standing on a unit cube per solid block used to cost).
 ///
-/// Solidity is read from the same vanilla classifier the live mesher uses: a
-/// block whose baked model is a full six-faced cube reports
-/// [`Cell::occludes`](lodestone_render::Cell::occludes), which is exactly the set
-/// that should stop a player. Water and air classify as non-occluding, so they
-/// fall through to `is_water`/empty automatically.
+/// Two independent inputs, and it is worth keeping them straight:
 ///
-/// The sections are an **owned snapshot** — a map of `Arc<ChunkSection>` pulled
-/// from the client-owned world under a single lock (see
-/// [`crate::net::NetClient::sections_at`]) — so no world lock is held while
-/// physics queries it, and the many per-tick block lookups touch only local
-/// memory.
+/// * **the world** — an *owned snapshot* of block-state ids, a map of
+///   `Arc<ChunkSection>` pulled from the client-owned world under a single lock
+///   (see [`crate::net::NetClient::sections_at`]), so no world lock is held while
+///   physics queries it and the many per-tick lookups touch only local memory;
+/// * **the version data** — [`VersionAdapter`], consulted for each state's
+///   collision shape and block name. Both of its accessors are `&'static` rodata
+///   reads, so this adapter holds an `Arc` and copies nothing.
+///
+/// Without version data the view degrades to the old coarse behaviour (unit cube
+/// per occluding block) rather than losing collision entirely — a player who
+/// cannot stand up is worse than one standing slightly too high — but it *says
+/// so*, once, at `warn` level, and [`Self::has_real_shapes`] reports it for the
+/// debug overlay. A silent fallback here is how the gap survived nine months.
 #[derive(Debug)]
 pub struct LiveCollision {
     /// `(chunk-x, chunk-z, section-index)` → owned block section. A missing key
@@ -157,11 +664,16 @@ pub struct LiveCollision {
     min_y: i32,
     /// Number of 16-block sections stacked in a column.
     section_count: usize,
-    /// The vanilla classifier: `classify(id).occludes` is the solidity oracle,
-    /// and its attached [`BlockModels`](lodestone_render::BlockModels) is the
-    /// fluid oracle behind [`is_water`](CollisionView::is_water) /
-    /// [`is_lava`](CollisionView::is_lava) — see [`vanilla_fluid`].
+    /// The vanilla classifier: its attached [`BlockModels`](lodestone_render::BlockModels)
+    /// is the fluid oracle behind [`is_water`](CollisionView::is_water) /
+    /// [`is_lava`](CollisionView::is_lava) and [`fluid_at`](CollisionView::fluid_at)
+    /// — see [`vanilla_fluid`] — and `classify(id).occludes` is both the
+    /// no-version-data shape fallback and the answer to [`Self::is_solid`].
     atlas: Arc<BlockAtlas>,
+    /// The version data behind [`VersionAdapter::block_collision`] and
+    /// [`VersionAdapter::block_name`]. `None` degrades to unit cubes; see the
+    /// type docs.
+    version: Option<Arc<dyn VersionAdapter>>,
     /// Resolved state ids of the three air blocks (see [`AIR_BLOCKS`]), for
     /// [`is_pickable`](Self::is_pickable). Small and fixed, so a linear scan beats
     /// a set.
@@ -182,8 +694,70 @@ pub struct LiveCollision {
 /// cave, in preference to whatever real block is behind it.
 const AIR_BLOCKS: [&str; 3] = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
 
+/// The process-wide default version data, resolved once from the compiled-in
+/// family set. See [`default_version_data`].
+static DEFAULT_VERSION_DATA: OnceLock<Option<Arc<dyn VersionAdapter>>> = OnceLock::new();
+
+/// The version data [`LiveCollision::new`] uses when the caller injects none.
+///
+/// A live session's protocol is settled by the time anything collides — but
+/// `LiveCollision::new` is not handed it, so rather than leave the field empty
+/// (which reduces the whole world to unit cubes: see the type docs) this resolves
+/// the **sole compiled-in family**. That inference is sound in the only case it
+/// fires: a live connection exists at all *because*
+/// [`lodestone_registry::adapter_for_protocol`] matched a compiled family
+/// (`net.rs`), so with exactly one family compiled it is that one. A default build
+/// (no `live` feature) has none, and a hypothetical multi-family build is
+/// ambiguous; both log and fall back.
+///
+/// Prefer [`LiveCollision::with_version_data`], which passes the *connected*
+/// protocol's adapter and needs no inference. This exists so that no build can
+/// silently lose collision geometry by forgetting to wire it.
+///
+/// Resolved once for the process: `adapter_for_protocol` builds a boxed adapter
+/// per call, and `LiveCollision` is rebuilt every tick.
+fn default_version_data() -> Option<Arc<dyn VersionAdapter>> {
+    DEFAULT_VERSION_DATA
+        .get_or_init(|| {
+            let protocols = lodestone_registry::supported_protocols();
+            let &[protocol] = protocols.as_slice() else {
+                if protocols.is_empty() {
+                    tracing::warn!(
+                        target: "physics",
+                        "no version family compiled in: live collision falls back to a unit cube \
+                         per solid block, so slabs, stairs, fences and ice will be wrong \
+                         (build with --features live)"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "physics",
+                        families = ?lodestone_registry::compiled_families(),
+                        "more than one version family compiled in, so the collision-shape source \
+                         is ambiguous; falling back to a unit cube per solid block. Wire \
+                         LiveCollision::with_version_data from the connected protocol."
+                    );
+                }
+                return None;
+            };
+            let adapter = lodestone_registry::adapter_for_protocol(protocol).map(Arc::from);
+            if adapter.is_none() {
+                tracing::warn!(
+                    target: "physics",
+                    protocol,
+                    "compiled family does not resolve its own protocol; live collision falls back \
+                     to a unit cube per solid block"
+                );
+            }
+            adapter
+        })
+        .clone()
+}
+
 impl LiveCollision {
     /// Build a view from a pre-fetched section snapshot and the dimension geometry.
+    ///
+    /// Version data defaults to [`default_version_data`]; override it with
+    /// [`with_version_data`](Self::with_version_data).
     #[must_use]
     pub fn new(
         sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
@@ -212,8 +786,28 @@ impl LiveCollision {
             min_y,
             section_count,
             atlas,
+            version: default_version_data(),
             air_states,
         }
+    }
+
+    /// Use `version` as the source of per-state collision shapes and block names.
+    ///
+    /// This is the explicit form of what [`new`](Self::new) infers: pass the
+    /// adapter for the protocol actually connected. Cheap — the adapter is shared
+    /// by `Arc` and every lookup through it returns `&'static` rodata.
+    #[must_use]
+    pub fn with_version_data(mut self, version: Option<Arc<dyn VersionAdapter>>) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Whether this view has real per-state collision geometry, or is degraded to
+    /// a unit cube per occluding block. For the debug overlay — a player standing
+    /// half a block above a slab should be able to see *why* from inside the game.
+    #[must_use]
+    pub fn has_real_shapes(&self) -> bool {
+        self.version.is_some()
     }
 
     /// Vanilla block-state id at world coordinates, or `0` (`minecraft:air`)
@@ -232,9 +826,18 @@ impl LiveCollision {
         section.get_block(x.rem_euclid(16) as usize, ly, z.rem_euclid(16) as usize)
     }
 
-    /// Whether the block at these coordinates is a full-cube collider (a full
-    /// six-faced opaque cube per the vanilla classifier). Air, water and foliage
-    /// classify as non-occluding and so do not collide.
+    /// Whether the block at these coordinates is a full six-faced opaque cube per
+    /// the vanilla classifier — i.e. whether it **occludes**.
+    ///
+    /// # This is no longer the collision answer, and it never should have been
+    ///
+    /// Occlusion and collision are different questions that agree on plain cubes
+    /// and disagree on plenty else: a slab collides and does not occlude; soul
+    /// sand occludes and collides only to `y = 0.875`; a barrier collides and
+    /// occludes nothing. Using this *as* the collision shape is what removed every
+    /// partial block from the live world. Collision now comes from
+    /// [`VersionAdapter::block_collision`]; this remains only as the occlusion
+    /// predicate (and as the fallback shape when no version data is available).
     #[must_use]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         self.atlas.classify(self.block_at(x, y, z), 0, 0).occludes
@@ -282,13 +885,18 @@ impl LiveCollision {
     ///
     /// # What this actually tests, and where it is coarse
     ///
-    /// There is no outline-shape table in this repo (`collision_shapes` is a
-    /// collision-only oracle dump, and kelp's collision shape is empty too), so the
-    /// nearest available proxy for "has an outline" is *has baked model geometry*.
-    /// That coincidence is structural, not luck: fluids are the one thing vanilla
-    /// does **not** draw through the block-model pipeline — their blockstate models
-    /// are empty — which is exactly why `BlockModels::quads` is empty for a fluid
-    /// state and non-empty for kelp (see [`lodestone_render::FluidCell`]).
+    /// **The collision census now wired into this module is not the shape this
+    /// question wants**, and substituting it would be a regression, not a fix:
+    /// kelp's *collision* shape is empty (so kelp would stop being breakable
+    /// again), and a fluid's is empty too while its outline is also empty — the two
+    /// tables agree there by coincidence and disagree on the cases that matter.
+    /// Outline and interaction shapes need their own census beside the collision
+    /// one; until then the nearest available proxy for "has an outline" is *has
+    /// baked model geometry*. That coincidence is structural, not luck: fluids are
+    /// the one thing vanilla does **not** draw through the block-model pipeline —
+    /// their blockstate models are empty — which is exactly why
+    /// `BlockModels::quads` is empty for a fluid state and non-empty for kelp (see
+    /// [`lodestone_render::FluidCell`]).
     ///
     /// A cell is pickable when it is:
     /// 1. not one of the three air blocks ([`AIR_BLOCKS`]); **and**
@@ -302,10 +910,9 @@ impl LiveCollision {
     /// occluding cube is `is_full_cube(quads) && layer == Solid`, which cannot hold
     /// with no quads.
     ///
-    /// Still coarse, unchanged from before: a picked cell is treated as a full unit
-    /// cube, so anything with a genuinely partial outline (a slab, a stair, kelp's
-    /// own 9/16 height) over-selects at its edges. The real fix is an
-    /// outline/interaction-shape oracle dump alongside the collision one.
+    /// Still coarse, unchanged: a picked cell is treated as a full unit cube, so
+    /// anything with a genuinely partial outline (a slab, a stair, kelp's own 9/16
+    /// height) over-selects at its edges.
     #[must_use]
     pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
         let state = self.block_at(x, y, z);
@@ -321,26 +928,111 @@ impl LiveCollision {
     }
 }
 
-impl CollisionView for LiveCollision {
-    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
-        if self.is_solid(x, y, z) {
-            out.push(Aabb::new(
-                f64::from(x),
-                f64::from(y),
-                f64::from(z),
-                f64::from(x) + 1.0,
-                f64::from(y) + 1.0,
-                f64::from(z) + 1.0,
-            ));
+impl BlockView for LiveCollision {
+    fn state_at(&self, x: i32, y: i32, z: i32) -> u32 {
+        self.block_at(x, y, z)
+    }
+
+    /// One `&'static` slice out of the version crate's rodata: a bounds-checked
+    /// index into `STATE_SHAPE: [u16; 32366]` and one more into
+    /// `SHAPES: [&[Aabb]; 326]`, behind a single virtual call. No allocation, no
+    /// scan, no per-state cache to invalidate.
+    ///
+    /// Falls back to occlusion-implies-cube in two cases, which are not the same
+    /// thing: no version data at all (logged once — see the type docs), or a state
+    /// id the census does not know, which means a corrupt or out-of-range palette
+    /// entry rather than a data gap.
+    fn shape_of(&self, state: u32) -> &'static [BlockAabb] {
+        if let Some(version) = &self.version
+            && let Some(shape) = version.block_collision(state)
+        {
+            return shape;
+        }
+        if self.atlas.classify(state, 0, 0).occludes {
+            FULL_CUBE
+        } else {
+            NO_COLLISION
         }
     }
 
+    fn fluid_kind_of(&self, state: u32) -> Option<FluidKind> {
+        vanilla_fluid(&self.atlas, state)
+    }
+
+    /// The fluid's amount and falling flag, from the same
+    /// [`BlockModels::fluid`](lodestone_render::BlockModels::fluid) call
+    /// [`vanilla_fluid`] makes — read one level deeper, because `vanilla_fluid`
+    /// discards the dynamic state and `fluid_at` is the consumer that needs it.
+    /// Still one rule in one place; two callers of it.
+    fn fluid_cell_of(&self, state: u32) -> Option<FluidCell> {
+        let cell = self.atlas.models()?.fluid(state)?;
+        Some(FluidCell {
+            kind: match cell.kind {
+                FluidKind::Water => lodestone_physics::FluidKind::Water,
+                FluidKind::Lava => lodestone_physics::FluidKind::Lava,
+            },
+            amount: cell.state.amount,
+            falling: cell.state.falling,
+        })
+    }
+
+    /// The block identifier, `&'static str` from the version crate's rodata.
+    fn name_of(&self, state: u32) -> Option<&'static str> {
+        self.version.as_ref()?.block_name(state)
+    }
+}
+
+impl CollisionView for LiveCollision {
+    fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>) {
+        boxes_at(self, x, y, z, out);
+    }
+
+    fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
+        top_at(self, x, y, z)
+    }
+
+    fn friction(&self, x: i32, y: i32, z: i32) -> f32 {
+        friction_at(self, x, y, z)
+    }
+
+    fn speed_factor(&self, x: i32, y: i32, z: i32) -> f32 {
+        speed_factor_at(self, x, y, z)
+    }
+
+    fn jump_factor(&self, x: i32, y: i32, z: i32) -> f32 {
+        jump_factor_at(self, x, y, z)
+    }
+
     fn is_water(&self, x: i32, y: i32, z: i32) -> bool {
-        self.fluid_kind(x, y, z) == Some(FluidKind::Water)
+        is_water_at(self, x, y, z)
+    }
+
+    fn is_climbable(&self, x: i32, y: i32, z: i32) -> bool {
+        climbable_at(self, x, y, z)
     }
 
     fn is_lava(&self, x: i32, y: i32, z: i32) -> bool {
-        self.fluid_kind(x, y, z) == Some(FluidKind::Lava)
+        is_lava_at(self, x, y, z)
+    }
+
+    fn stuck_multiplier(&self, x: i32, y: i32, z: i32) -> Option<Vec3d> {
+        stuck_at(self, x, y, z)
+    }
+
+    fn fluid_at(&self, x: i32, y: i32, z: i32) -> Option<FluidCell> {
+        fluid_at(self, x, y, z)
+    }
+
+    fn blocks_motion(&self, x: i32, y: i32, z: i32) -> bool {
+        blocks_motion_at(self, x, y, z)
+    }
+
+    fn is_solid_face(&self, x: i32, y: i32, z: i32, dir: HorizontalDir) -> bool {
+        is_solid_face_at(self, x, y, z, dir)
+    }
+
+    fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
+        bounce_at(self, x, y, z)
     }
 }
 
@@ -405,6 +1097,149 @@ mod tests {
         );
     }
 
+    /// The shape helpers are pure functions of a box list, so they can be pinned
+    /// without any world, atlas or version data — and the expected numbers are
+    /// vanilla's own (`Blocks.java` / `BlockBehaviour.calculateSolid`), not this
+    /// module's output.
+    #[test]
+    fn shape_helpers_match_vanilla_on_hand_written_shapes() {
+        let slab = [BlockAabb {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 0.5, 1.0],
+        }];
+        let fence_post = [BlockAabb {
+            min: [0.375, 0.0, 0.375],
+            max: [0.625, 1.5, 0.625],
+        }];
+        let ladder = [BlockAabb {
+            min: [0.0, 0.0, 0.0],
+            max: [1.0, 1.0, 0.1875],
+        }];
+
+        assert_eq!(shape_top(&slab), 0.5, "a bottom slab's top is 8/16");
+        assert_eq!(shape_top(FULL_CUBE), 1.0);
+        assert_eq!(
+            shape_top(&fence_post),
+            1.5,
+            "a fence is 1.5 tall and must NOT be capped to 1.0, or a 0.6 auto-step \
+             would mount it"
+        );
+        assert_eq!(shape_top(NO_COLLISION), 0.0, "no collision, no top");
+
+        // `calculateSolid`: mean size >= 0.7291666… or Y size >= 1.0.
+        assert!(shape_is_solid(FULL_CUBE));
+        assert!(!shape_is_solid(NO_COLLISION));
+        assert!(
+            shape_is_solid(&slab),
+            "a slab's Y size is 0.5 but its mean is (1+0.5+1)/3 = 0.833 >= 0.729"
+        );
+        assert!(
+            shape_is_solid(&fence_post),
+            "a fence post is thin but 1.5 tall, so the Y branch carries it"
+        );
+        assert!(
+            shape_is_solid(&ladder),
+            "a ladder's mean is exactly (1+1+0.1875)/3 = 0.7291666…, i.e. ON the \
+             threshold — which is precisely why vanilla needs forceSolidOff for it"
+        );
+
+        // A full cube fills every face; a 3/16-deep ladder plate fills only the
+        // face it is pressed against.
+        for dir in HorizontalDir::ALL {
+            assert!(shape_face_is_full(FULL_CUBE, dir), "cube fills {dir:?}");
+            assert!(!shape_face_is_full(NO_COLLISION, dir));
+            assert!(
+                !shape_face_is_full(&fence_post, dir),
+                "a 4/16-wide post fills no face ({dir:?})"
+            );
+        }
+        assert!(
+            shape_face_is_full(&ladder, HorizontalDir::North),
+            "the ladder plate spans x and y at z = 0, so the north face is full"
+        );
+        assert!(
+            !shape_face_is_full(&ladder, HorizontalDir::South),
+            "…and the south face is 13/16 away from the plate"
+        );
+    }
+
+    /// The name-keyed tables, against the values read out of the decompiled 26.2
+    /// jar with line numbers (see each function's docs). The **controls** are the
+    /// `_` arms: a block that sets none of these must come back with vanilla's
+    /// default, or a table that returned "slippery" for everything would satisfy
+    /// every positive assertion here.
+    #[test]
+    fn name_keyed_constants_match_the_decompiled_values() {
+        assert_eq!(friction_for("minecraft:ice"), 0.98);
+        assert_eq!(friction_for("minecraft:packed_ice"), 0.98);
+        assert_eq!(friction_for("minecraft:frosted_ice"), 0.98);
+        assert_eq!(friction_for("minecraft:blue_ice"), 0.989);
+        assert_eq!(friction_for("minecraft:slime_block"), 0.8);
+        assert_eq!(friction_for("minecraft:stone"), 0.6, "control: default");
+        assert_eq!(friction_for("minecraft:ice_bricks_that_do_not_exist"), 0.6);
+
+        assert_eq!(speed_factor_for("minecraft:soul_sand"), 0.4);
+        assert_eq!(speed_factor_for("minecraft:honey_block"), 0.4);
+        assert_eq!(speed_factor_for("minecraft:sand"), 1.0, "control: default");
+
+        assert_eq!(jump_factor_for("minecraft:honey_block"), 0.5);
+        assert_eq!(
+            jump_factor_for("minecraft:soul_sand"),
+            1.0,
+            "control: soul sand slows you but does not shorten your jump"
+        );
+
+        assert_eq!(bounce_for("minecraft:slime_block"), 1.0);
+        assert_eq!(bounce_for("minecraft:white_bed"), 0.75);
+        assert_eq!(bounce_for("minecraft:black_bed"), 0.75);
+        assert_eq!(bounce_for("minecraft:stone"), 0.0, "control: default");
+        assert_eq!(
+            bounce_for("minecraft:honey_block"),
+            0.0,
+            "control: the only SUPPRESSES_BOUNCE member sets no restitution anyway"
+        );
+
+        assert_eq!(
+            stuck_for("minecraft:cobweb"),
+            Some(Vec3d::new(0.25, 0.05, 0.25))
+        );
+        assert_eq!(
+            stuck_for("minecraft:powder_snow"),
+            Some(Vec3d::new(0.9, 1.5, 0.9))
+        );
+        assert_eq!(
+            stuck_for("minecraft:sweet_berry_bush"),
+            Some(Vec3d::new(0.8, 0.75, 0.8))
+        );
+        assert_eq!(stuck_for("minecraft:stone"), None, "control: default");
+
+        for name in [
+            "minecraft:ladder",
+            "minecraft:vine",
+            "minecraft:scaffolding",
+            "minecraft:weeping_vines",
+            "minecraft:weeping_vines_plant",
+            "minecraft:twisting_vines",
+            "minecraft:twisting_vines_plant",
+            "minecraft:cave_vines",
+            "minecraft:cave_vines_plant",
+        ] {
+            assert!(is_climbable_name(name), "{name} is in BlockTags.CLIMBABLE");
+        }
+        // Controls: near-misses that are *not* in the tag.
+        for name in [
+            "minecraft:sugar_cane",
+            "minecraft:glow_lichen",
+            "minecraft:chain",
+            "minecraft:stone",
+        ] {
+            assert!(
+                !is_climbable_name(name),
+                "{name} is NOT in BlockTags.CLIMBABLE"
+            );
+        }
+    }
+
     /// The vanilla atlas (with baked models attached), or a loud failure naming
     /// the fix. Every test below needs the real state ids — a waterlogged stair
     /// or a kelp plant only exists in the vanilla id space.
@@ -449,6 +1284,284 @@ mod tests {
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
         LiveCollision::new(sections, 0, 1, atlas)
+    }
+
+    /// The block-local boxes this view resolves for a single cell holding
+    /// `state`, rounded back into block-local space so they can be compared with
+    /// vanilla's own numbers.
+    fn local_boxes(atlas: &Arc<BlockAtlas>, state: u32) -> Vec<[f64; 6]> {
+        let view = live_column(Arc::clone(atlas), state, 4..=4);
+        let mut out = Vec::new();
+        view.collision_boxes(0, 4, 0, &mut out);
+        out.iter()
+            .map(|b| {
+                [
+                    b.min_x,
+                    b.min_y - 4.0,
+                    b.min_z,
+                    b.max_x,
+                    b.max_y - 4.0,
+                    b.max_z,
+                ]
+            })
+            .collect()
+    }
+
+    /// **The routing gate.** The generated collision census must actually reach
+    /// [`CollisionView::collision_boxes`] — for nine months it did not, and every
+    /// solid block in live play was a unit cube.
+    ///
+    /// # Where the expected values come from
+    ///
+    /// Not from this module. Each one is vanilla's own constructor call, read out
+    /// of the decompiled 26.2 jar and converted from sixteenths by hand:
+    /// `SlabBlock.SHAPE_BOTTOM = Block.column(16, 0, 8)` and `SHAPE_TOP =
+    /// Block.column(16, 8, 16)`; `SoulSandBlock.SHAPE = Block.column(16, 0, 14)`;
+    /// `FenceBlock` passes `collisionHeight = 24` with `postWidth = 4` to
+    /// `CrossCollisionBlock`, whose post is `Block.column(4, 0, 24)`; `COBWEB` is
+    /// registered `.noCollision()`. `Block.column(w, lo, hi)` centres `w`, so
+    /// `column(4, …)` spans `6/16..10/16`.
+    ///
+    /// # The controls
+    ///
+    /// Three of them, because "the boxes are right" is easy to satisfy vacuously:
+    ///
+    /// 1. **bottom vs top slab** — the same block, the same `8/16`, at opposite
+    ///    ends of the cell. A resolver that returned a hard-coded slab shape, or
+    ///    ignored the `type` property, passes one and fails the other.
+    /// 2. **empty is not a cube** — cobweb, water and kelp must resolve to *no*
+    ///    boxes. An adapter that cubed everything non-air passes every positive
+    ///    assertion above and fails these.
+    /// 3. **the degraded view** — the same states through
+    ///    [`LiveCollision::with_version_data(None)`](LiveCollision::with_version_data),
+    ///    which is exactly what this module did before the fix, must produce the
+    ///    *wrong* answer. This is the proof the detector fires: without it, every
+    ///    assertion here could be satisfied by a census that happened to be
+    ///    reachable for some unrelated reason.
+    #[test]
+    #[ignore = "requires the vanilla pack AND --features live (the version collision census)"]
+    fn the_real_per_state_collision_census_reaches_the_collision_view() {
+        let atlas = vanilla_atlas();
+
+        // Precondition, loud rather than skipped: with no version data every
+        // assertion below would be testing the fallback, not the census.
+        let probe = live_column(Arc::clone(&atlas), 0, 0..=0);
+        assert!(
+            probe.has_real_shapes(),
+            "no version collision census is wired in — run this gate with \
+             --features live, or LiveCollision has lost its shape source"
+        );
+
+        let cases: &[(&str, &[[f64; 6]])] = &[
+            ("minecraft:stone", &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]),
+            (
+                "minecraft:oak_slab[type=bottom,waterlogged=false]",
+                &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]],
+            ),
+            (
+                "minecraft:oak_slab[type=top,waterlogged=false]",
+                &[[0.0, 0.5, 0.0, 1.0, 1.0, 1.0]],
+            ),
+            (
+                "minecraft:oak_slab[type=double,waterlogged=false]",
+                &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]],
+            ),
+            ("minecraft:soul_sand", &[[0.0, 0.0, 0.0, 1.0, 0.875, 1.0]]),
+            (
+                "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]",
+                &[[0.375, 0.0, 0.375, 0.625, 1.5, 0.625]],
+            ),
+            // Control 2: an empty shape is a real answer, not a missing one.
+            ("minecraft:cobweb", &[]),
+            ("minecraft:water[level=0]", &[]),
+            ("minecraft:kelp_plant", &[]),
+        ];
+
+        for (name, expected) in cases {
+            let id = state_id(&atlas, name);
+            let got = local_boxes(&atlas, id);
+            assert_eq!(
+                got.len(),
+                expected.len(),
+                "{name}: expected {} box(es), got {got:?}",
+                expected.len()
+            );
+            for (g, e) in got.iter().zip(expected.iter()) {
+                for a in 0..6 {
+                    assert!(
+                        (g[a] - e[a]).abs() < 1e-6,
+                        "{name}: component {a} is {} , vanilla says {} (whole box \
+                         {g:?} vs {e:?})",
+                        g[a],
+                        e[a]
+                    );
+                }
+            }
+        }
+
+        // Control 1, stated as the property rather than the numbers: the two slab
+        // halves must not resolve to the same thing.
+        let bottom = local_boxes(
+            &atlas,
+            state_id(&atlas, "minecraft:oak_slab[type=bottom,waterlogged=false]"),
+        );
+        let top = local_boxes(
+            &atlas,
+            state_id(&atlas, "minecraft:oak_slab[type=top,waterlogged=false]"),
+        );
+        assert_ne!(
+            bottom, top,
+            "a bottom and a top slab must have different collision boxes"
+        );
+
+        // …and the uncapped-top contract, which a pathfinder's step-up check reads.
+        let fence = state_id(
+            &atlas,
+            "minecraft:oak_fence[east=false,north=false,south=false,waterlogged=false,west=false]",
+        );
+        let fence_view = live_column(Arc::clone(&atlas), fence, 4..=4);
+        assert!(
+            (fence_view.collision_top(0, 4, 0) - 1.5).abs() < 1e-6,
+            "a fence's collision_top must be 1.5, never clamped to 1.0"
+        );
+
+        // Control 3: the pre-fix behaviour, on the same states, must be wrong.
+        let slab = state_id(&atlas, "minecraft:oak_slab[type=bottom,waterlogged=false]");
+        let degraded = live_column(Arc::clone(&atlas), slab, 4..=4).with_version_data(None);
+        assert!(
+            (degraded.collision_top(0, 4, 0) - 1.0).abs() < 1e-6,
+            "control did not fire: without the census a bottom slab must read as a \
+             full cube (that IS the bug), got {}",
+            degraded.collision_top(0, 4, 0)
+        );
+        let cobweb = state_id(&atlas, "minecraft:cobweb");
+        let real = live_column(Arc::clone(&atlas), cobweb, 4..=4);
+        assert_eq!(
+            real.collision_top(0, 4, 0),
+            0.0,
+            "cobweb has no collision at all"
+        );
+    }
+
+    /// The name-keyed constants must reach the view through the *version* seam,
+    /// not just exist as a table. Ice is the case a player feels immediately.
+    ///
+    /// Controls: stone (friction default) and the fact that ice's *shape* is a
+    /// full cube — a view that resolved ice to nothing would report the default
+    /// friction for the air above it and look identical.
+    #[test]
+    #[ignore = "requires the vanilla pack AND --features live (the version block-name census)"]
+    fn name_keyed_constants_reach_the_view_through_the_version_seam() {
+        let atlas = vanilla_atlas();
+        let probe = live_column(Arc::clone(&atlas), 0, 0..=0);
+        assert!(
+            probe.has_real_shapes(),
+            "no version data wired in — run with --features live"
+        );
+
+        let ice = live_column(Arc::clone(&atlas), state_id(&atlas, "minecraft:ice"), 4..=4);
+        assert_eq!(ice.friction(0, 4, 0), 0.98, "ice is slippery");
+        assert_eq!(ice.collision_top(0, 4, 0), 1.0, "…and is still a full cube");
+
+        let stone = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:stone"),
+            4..=4,
+        );
+        assert_eq!(stone.friction(0, 4, 0), 0.6, "control: default friction");
+
+        let soul_sand = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:soul_sand"),
+            4..=4,
+        );
+        assert_eq!(soul_sand.speed_factor(0, 4, 0), 0.4);
+        assert_eq!(
+            soul_sand.jump_factor(0, 4, 0),
+            1.0,
+            "control: soul sand slows but does not shorten a jump"
+        );
+
+        let honey = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:honey_block"),
+            4..=4,
+        );
+        assert_eq!(honey.speed_factor(0, 4, 0), 0.4);
+        assert_eq!(honey.jump_factor(0, 4, 0), 0.5);
+
+        let slime = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:slime_block"),
+            4..=4,
+        );
+        assert_eq!(slime.bounce_restitution(0, 4, 0), 1.0);
+        assert_eq!(slime.friction(0, 4, 0), 0.8);
+        assert_eq!(
+            stone.bounce_restitution(0, 4, 0),
+            0.0,
+            "control: stone does not bounce"
+        );
+
+        let cobweb = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:cobweb"),
+            4..=4,
+        );
+        assert_eq!(
+            cobweb.stuck_multiplier(0, 4, 0),
+            Some(Vec3d::new(0.25, 0.05, 0.25))
+        );
+        assert_eq!(
+            stone.stuck_multiplier(0, 4, 0),
+            None,
+            "control: stone does not grab you"
+        );
+
+        let ladder = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:ladder[facing=north,waterlogged=false]"),
+            4..=4,
+        );
+        assert!(ladder.is_climbable(0, 4, 0), "ladders are climbable");
+        assert!(
+            !stone.is_climbable(0, 4, 0),
+            "control: stone is not climbable"
+        );
+        assert!(
+            !ladder.blocks_motion(0, 4, 0),
+            "a ladder is forceSolidOff in vanilla despite sitting exactly on the \
+             calculateSolid threshold"
+        );
+        assert!(
+            stone.blocks_motion(0, 4, 0),
+            "control: stone does block motion"
+        );
+
+        // `fluid_at` now reports the level, not just presence: a source is amount
+        // 8, and level 3 flowing water is amount 5 (`8 - level`).
+        let source = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:water[level=0]"),
+            4..=4,
+        );
+        let flowing = live_column(
+            Arc::clone(&atlas),
+            state_id(&atlas, "minecraft:water[level=3]"),
+            4..=4,
+        );
+        assert_eq!(source.fluid_at(0, 4, 0).map(|c| c.amount), Some(8));
+        assert_eq!(
+            flowing.fluid_at(0, 4, 0).map(|c| c.amount),
+            Some(5),
+            "control: a flowing cell is shallower than a source, which is what \
+             makes get_flow produce a current at all"
+        );
+        assert_eq!(
+            stone.fluid_at(0, 4, 0),
+            None,
+            "control: stone holds no fluid"
+        );
     }
 
     /// The player's fluid summary standing feet-first at `feet_y` in the column,

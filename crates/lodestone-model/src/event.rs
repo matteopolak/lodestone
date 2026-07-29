@@ -439,6 +439,27 @@ impl EquipmentSlot {
         }
     }
 
+    /// Returns this slot's canonical vanilla name, as `minecraft:equippable`
+    /// spells it.
+    ///
+    /// Note `Body` and `Saddle` are **not** humanoid armour: vanilla gates
+    /// wearable-by-a-player on `EquipmentSlot.Type.HUMANOID_ARMOR`, which covers
+    /// only feet/legs/chest/head. A consumer that folds `"body"` into `"chest"`
+    /// lets wolf and horse armour into a player's chestplate slot.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MainHand => "mainhand",
+            Self::OffHand => "offhand",
+            Self::Feet => "feet",
+            Self::Legs => "legs",
+            Self::Chest => "chest",
+            Self::Head => "head",
+            Self::Body => "body",
+            Self::Saddle => "saddle",
+        }
+    }
+
     /// Returns this slot's vanilla `EquipmentSlot` ordinal.
     #[must_use]
     pub const fn ordinal(self) -> u8 {

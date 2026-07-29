@@ -33,6 +33,23 @@ const STONE_64: [u8; 4] = [0x40, 0x01, 0x00, 0x00];
 /// The empty stack.
 const EMPTY_STACK: [u8; 1] = [0x00];
 
+/// The components a decoded `minecraft:stone` stack carries.
+///
+/// An empty component *patch* does not mean empty components: the decoder folds
+/// the item's built-in prototype into [`ItemComponents`]' effective fields, so a
+/// plain stone stack reports its real stack cap. The literals below come from the
+/// committed server dump (`tests/support/item_prototype_jvm.txt`,
+/// `P 1 minecraft:stone 64 - 0 - -`) rather than from the census code, so this is
+/// still an external expectation — see `docs/item-prototypes.md`.
+fn stone_components() -> lodestone_model::ItemComponents {
+    lodestone_model::ItemComponents {
+        max_stack_size: Some(64),
+        max_damage: None,
+        equippable: None,
+        ..lodestone_model::ItemComponents::default()
+    }
+}
+
 #[test]
 fn container_set_slot_decodes_a_plain_stack() {
     // window 1, state 5, slot 36, then the stone stack.
@@ -55,7 +72,7 @@ fn container_set_slot_decodes_a_plain_stack() {
                 Some(ItemStack {
                     item: key("minecraft:stone"),
                     count: 64,
-                    components: lodestone_model::ItemComponents::default(),
+                    components: stone_components(),
                 })
             );
         }
@@ -238,7 +255,7 @@ fn set_cursor_item_decodes_a_plain_stack() {
             item: Some(ItemStack {
                 item: key("minecraft:stone"),
                 count: 64,
-                components: lodestone_model::ItemComponents::default(),
+                components: stone_components(),
             }),
         })]
     );
@@ -285,7 +302,7 @@ fn set_player_inventory_decodes_slot_and_stack() {
             item: Some(ItemStack {
                 item: key("minecraft:stone"),
                 count: 64,
-                components: lodestone_model::ItemComponents::default(),
+                components: stone_components(),
             }),
         })]
     );
