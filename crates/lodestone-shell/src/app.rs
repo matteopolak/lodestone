@@ -347,17 +347,16 @@ pub(crate) fn launch_singleplayer() -> Result<NetClient, LaunchError> {
 
 /// Whether argv asked for a connection, i.e. whether to bypass the main menu.
 ///
-/// True for `--live`, or for a `--host`/`--port` that differs from the default.
+/// True for `--live`, or for any `--host`/`--port` at all.
 ///
-/// **Known wart.** `--host 127.0.0.1` — spelling out the default — is
-/// indistinguishable here from passing nothing, so it lands on the menu. The
-/// clean fix is one `Option`-shaped field in [`Config`] recording whether the
-/// flag was seen; `config.rs` is outside this change's file scope, so the
-/// comparison against `Config::default()` stands in for it. Nothing depends on
-/// the distinction today: `--live` is the flag every script and gate uses.
+/// This used to compare against `Config::default()`, which made
+/// `--host 127.0.0.1 --port 25565` — spelling out the defaults — indistinguishable
+/// from passing nothing, so it silently landed on the main menu. That is the
+/// launch the two-worlds report came from: the user asked for a server on the
+/// command line and got the title screen. [`Config::address_given`] now records
+/// whether the flag was *seen*, which is the question actually being asked.
 fn requested_a_connection(config: &Config) -> bool {
-    let defaults = Config::default();
-    config.connect_in_window || config.host != defaults.host || config.port != defaults.port
+    config.connect_in_window || config.address_given
 }
 
 struct WindowApp {
@@ -529,7 +528,6 @@ impl WindowApp {
     /// launch path or silently do nothing, this drives the honest failure path:
     /// the menu shows an Error explaining the feature is staged. Kept here so the
     /// wiring is a one-call swap once the seam lands.
-    #[allow(dead_code)]
     fn begin_singleplayer(&mut self) {
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
         match launch_singleplayer() {
@@ -659,10 +657,12 @@ impl WindowApp {
         match action {
             MenuAction::None => {}
             MenuAction::Singleplayer => {
-                // The local worldgen world. `Sim` already generated it at
-                // construction, so this is immediate.
-                self.ui.enter_dev_world();
-                self.set_grab(true);
+                // The honest staged failure, not the old offline demo world.
+                // `Sim::new` no longer builds one (see its docs): a client holds
+                // the server's world or none at all, and a demo world left
+                // resident under a later multiplayer join is the two-worlds
+                // defect this button used to be the entry point for.
+                self.begin_singleplayer();
             }
             MenuAction::Connect(entry) => {
                 self.connect_to(entry.host.clone(), entry.effective_port());
@@ -1383,11 +1383,11 @@ impl ApplicationHandler for WindowApp {
                                     .is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK_WINDOW);
                             self.last_menu_click = Some(now);
                             self.menu_input
-                                .press(hit, menu_button, self.shift_held, ctx, is_repeat)
+                                .press(hit, menu_button, self.shift_held, ctx, is_repeat, &menu)
                         }
                         ElementState::Released => {
                             self.menu_input
-                                .release(hit, menu_button, self.shift_held, ctx)
+                                .release(hit, menu_button, self.shift_held, ctx, &menu)
                         }
                     };
                     for click in clicks {
@@ -1579,7 +1579,13 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let mut target = HeadlessTarget::new(device, w, h, format);
 
     let render_distance = config.render_distance;
-    let mut sim = Sim::new(config);
+    // The offline evidence path, and the one place the demo world still exists:
+    // this renders a single frame with no server and *fails* below 5% terrain
+    // coverage, so it needs a world that does not come from a connection. The
+    // interactive client has none — see `Sim::new`. (`Sim::new` would delegate
+    // here anyway on `Mode::Headless`; spelled out so the dependency is visible
+    // at the call site rather than hidden in a mode check.)
+    let mut sim = Sim::with_demo_world(config);
     let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
     render.set_fog(sky_fog(render_distance));
 
@@ -1711,7 +1717,9 @@ mod tests {
     /// A cheap sim: headless mode with the smallest render distance that still
     /// generates real terrain, so physics ticks do real collision work.
     fn pacing_sim() -> Sim {
-        Sim::new(Config {
+        // Explicitly the demo-world fixture: this needs real terrain so the
+        // physics ticks do collision work, and the client `Sim::new` has none.
+        Sim::with_demo_world(Config {
             mode: Mode::Headless,
             render_distance: 2,
             ..Config::default()

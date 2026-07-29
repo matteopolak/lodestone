@@ -30,7 +30,7 @@ use crate::blocks::id;
 use crate::camera_rig::build_camera;
 use crate::chat::{ChatLog, compose_chat_action};
 use crate::collision::{LiveCollision, WorldCollision};
-use crate::config::Config;
+use crate::config::{Config, Mode};
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::mesher::{MeshScheduler, Meshed, SectionKey, snapshot_section, snapshot_section_live};
@@ -49,8 +49,18 @@ type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
 /// Fixed physics timestep: 20 ticks per second, like vanilla.
 const TICK_DT: f64 = 1.0 / 20.0;
 /// Cap how far worldgen spans regardless of render distance, so start-up meshing
-/// stays snappy for the demo.
+/// stays snappy for the demo. Only [`Sim::with_demo_world`] generates that world;
+/// a real client session has no offline terrain at all.
 const MAX_WORLD_RADIUS: i32 = 6;
+/// Where the player stands before a session exists, in the real client
+/// ([`Sim::new`]) which has no offline world to place them in.
+///
+/// A pure placeholder: the login teleport overwrites it within the first few
+/// packets, and physics is frozen until then (see [`Sim::physics_tick`]) because
+/// there is nothing to stand on. Deliberately *not* `worldgen::spawn_feet()` —
+/// that samples the demo generator's noise, and the client no longer has a demo
+/// world for the answer to mean anything.
+const PRE_SESSION_FEET: [f64; 3] = [0.5, 71.0, 0.5];
 /// Horizontal free-fly speed in blocks per tick (sprint doubles it). The physics
 /// engine models no creative/spectator flight, so fly is a shell-side free-cam.
 const FLY_SPEED: f64 = 0.45;
@@ -567,14 +577,68 @@ pub enum SessionPhase {
 }
 
 impl Sim {
-    /// Build the simulation: generate the world, place the player, and schedule
-    /// every non-empty section for meshing.
+    /// Build the simulation for a **real client session**: no offline world.
+    ///
+    /// The client renders exactly one world — the server's. Nothing is generated,
+    /// meshed or uploaded here; terrain appears only as the live session's chunks
+    /// arrive (`mark_column_dirty`), and the player's position comes from the
+    /// login teleport.
+    ///
+    /// # Why there is no offline world any more
+    ///
+    /// There used to be one, generated unconditionally and meshed whenever the
+    /// vanilla atlas was absent — which was *every windowed run that did not pass
+    /// `--live`*, because the atlas choice was keyed off `config.connect_in_window`
+    /// (see the report). Joining a server from the main menu then left the demo
+    /// world resident and drawn around the origin while the player stood at the
+    /// server's real spawn, with the live columns never meshed at all (the live
+    /// branch of `mark_column_dirty` is gated on the vanilla atlas, which that
+    /// session did not have). Two candidate worlds, one of them wrong, is a defect
+    /// class rather than a bug: the fix is that the client only ever has one.
+    ///
+    /// `Mode::Headless` is the single remaining exception and delegates to
+    /// [`Sim::with_demo_world`]: it is the offline, GPU-only evidence path
+    /// (`app::run_headless` renders one offscreen frame and *fails* below 5%
+    /// terrain coverage), so it needs a world that exists without a server.
     #[must_use]
     pub fn new(config: Config) -> Self {
-        let radius = (config.render_distance as i32).clamp(1, MAX_WORLD_RADIUS);
-        let world = worldgen::generate(radius);
+        if config.mode == Mode::Headless {
+            return Self::with_demo_world(config);
+        }
+        Self::build(config, false)
+    }
 
-        let feet = worldgen::spawn_feet();
+    /// Build the simulation **around the offline demo world** — a fixture, not a
+    /// product path.
+    ///
+    /// Generates `worldgen`'s world on the demo palette and schedules every
+    /// non-empty section, i.e. exactly what [`Sim::new`] used to do for any run
+    /// without `--live`. Two callers, both deliberate:
+    ///
+    /// * every hermetic gate that needs terrain without a server — this crate's
+    ///   own unit tests (via `test_config`, which is `Mode::Headless`) and
+    ///   `tests/break_particles_pixels.rs`;
+    /// * `--headless`, through [`Sim::new`]'s `Mode::Headless` delegation.
+    ///
+    /// **Do not call this from an interactive path.** The demo palette and the
+    /// vanilla registry are disjoint block-id spaces, so a session holding this
+    /// world cannot mesh a server's chunks (see `mark_column_dirty`).
+    #[must_use]
+    pub fn with_demo_world(config: Config) -> Self {
+        Self::build(config, true)
+    }
+
+    /// The shared constructor. `demo_world` picks between the two mutually
+    /// exclusive block-id worlds *and* whether any offline terrain exists at all;
+    /// the two must agree, which is why this is one function and not two.
+    fn build(config: Config, demo_world: bool) -> Self {
+        let (world, feet) = if demo_world {
+            let radius = (config.render_distance as i32).clamp(1, MAX_WORLD_RADIUS);
+            (worldgen::generate(radius), worldgen::spawn_feet())
+        } else {
+            (World::new(), PRE_SESSION_FEET)
+        };
+
         let mut player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
         player.pitch = 10.0;
 
@@ -582,19 +646,23 @@ impl Sim {
             .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(2);
 
-        // Pick the block-id world once. A live multiplayer session wants the
-        // vanilla atlas (its world streams vanilla ids); the offline dev world
-        // uses the demo palette. A vanilla load failure falls back to demo and
-        // records a banner rather than rendering an invisible world.
-        let resources = BlockResources::load(config.connect_in_window);
+        // Pick the block-id world once. A client session wants the vanilla atlas
+        // (the server's world streams vanilla ids); the demo-world fixture uses
+        // the demo palette. A vanilla load failure falls back to the demo palette
+        // and records a banner — see `mark_column_dirty`, which counts and logs
+        // the live chunks such a session cannot mesh instead of dropping them
+        // silently.
+        let resources = BlockResources::load(!demo_world);
         let render_live = resources.vanilla_atlas.is_some();
         let mut scheduler = MeshScheduler::new(workers, resources.classifier);
 
-        // Schedule the demo world only when meshing on the demo palette. Under
-        // the vanilla atlas the demo world's ids would misclassify, so it is left
-        // unmeshed and the live server world is meshed instead (on chunk arrival,
-        // see `mark_column_dirty`).
-        if !render_live {
+        // `BlockResources::load(false)` always yields the demo palette, so this
+        // never schedules demo ids under the vanilla atlas.
+        debug_assert!(
+            !(demo_world && render_live),
+            "the demo world must never be meshed with the vanilla classifier"
+        );
+        if demo_world {
             for (pos, chunk) in world_sections(&world) {
                 for si in 0..chunk {
                     let key = SectionKey {
@@ -794,13 +862,13 @@ impl Sim {
     ///   section this session ever uploaded is queued into
     ///   `pending_removals` — the app's existing per-frame drain — per
     ///   [`Self::uploaded_sections`]'s doc.
-    /// - **The player**: returned to the same spawn [`Sim::new`] uses, and
-    ///   free-fly clears. A live reconnect immediately overrides this with
-    ///   the new server's login teleport, but re-entering the offline dev
-    ///   world (Singleplayer from the title) has no teleport to correct it —
-    ///   leaving the old server's coordinates would spawn the player
-    ///   wherever they happened to quit, possibly deep underground in a
-    ///   world the offline generator never built.
+    /// - **The player**: returned to the same spawn the constructor used
+    ///   ([`PRE_SESSION_FEET`] for a real client, the demo surface for the
+    ///   [`Sim::with_demo_world`] fixture), and free-fly clears. A live
+    ///   reconnect immediately overrides this with the new server's login
+    ///   teleport; leaving the old server's coordinates in place would
+    ///   otherwise show the title screen's frozen player at wherever they
+    ///   happened to quit.
     /// - **`status`**: recomputed with the same rule [`Sim::new`] uses, so
     ///   the debug overlay reads "local world"/"live world (vanilla atlas)"
     ///   again instead of whatever the old session last wrote there (e.g.
@@ -860,7 +928,14 @@ impl Sim {
         // the app's ordinary drain path — see `uploaded_sections`'s doc.
         self.pending_removals.extend(self.uploaded_sections.drain());
 
-        let feet = worldgen::spawn_feet();
+        // Back to whatever spawn this `Sim` was built around — the demo world's
+        // surface for the fixture, the pre-session placeholder for a real client
+        // (which has no offline world to return to).
+        let feet = if self.world.is_empty() {
+            PRE_SESSION_FEET
+        } else {
+            worldgen::spawn_feet()
+        };
         self.player = PlayerState::at(Vec3d::new(feet[0], feet[1], feet[2]), 180.0);
         self.player.pitch = 10.0;
         self.fly = false;
@@ -1308,6 +1383,19 @@ impl Sim {
     /// sprint speed maths (no double-count) while the sprint flag still drives
     /// the sprint jump boost.
     fn physics_tick(&mut self, intent: MovementInput) {
+        // No session and no offline world: there is nothing to stand on and
+        // nobody to be. `app::WindowApp::redraw` steps the sim on every frame
+        // including while a menu owns the screen, so without this the pre-session
+        // player free-falls through an empty world for as long as the title
+        // screen is up (terminal velocity ≈ 78 blocks/s) and then arrives at the
+        // login teleport carrying that velocity into its first tick.
+        if self.net.is_none() && self.world.is_empty() {
+            self.player.velocity = Vec3d::ZERO;
+            self.player.on_ground = true;
+            self.fluid_state = FluidState::NONE;
+            return;
+        }
+
         let base = f64::from(self.profile.base_movement_speed);
         let attr = if intent.sprint {
             base * (1.0 + f64::from(self.profile.sprint_speed_modifier))
@@ -2345,17 +2433,24 @@ impl Sim {
             return;
         }
 
-        // Demo path: re-mesh the locally generated column. A *live* session
-        // reaching here means the live guard was rejected (net not attached, or
-        // dimensions not yet known) — the demo world has no such column, so this
-        // would drop it silently. Count and log it loudly instead.
-        if self.vanilla_atlas.is_some() {
+        // Demo path: re-mesh the fixture's locally generated column. A *live*
+        // session reaching here has no such column, so this would drop it
+        // silently — count and log it loudly instead.
+        //
+        // `net.is_some()` is part of the guard, not just the atlas: a session
+        // whose vanilla load *failed* (jar-less run, demo-palette fallback) takes
+        // this branch for every arriving server chunk and used to return silently
+        // on the `world.get` miss below, rendering an empty world with a clean
+        // log. That is exactly the shape of the two-worlds report — make it
+        // observable in `drops=` instead.
+        if self.vanilla_atlas.is_some() || self.net.is_some() {
             self.mesh_drops += 1;
             tracing::warn!(
                 cx,
                 cz,
+                has_atlas = self.vanilla_atlas.is_some(),
                 branch = "live-guard-rejected",
-                "live column skipped: net/dimensions not ready at mesh time"
+                "live column skipped: no vanilla atlas, or net/dimensions not ready at mesh time"
             );
             return;
         }
@@ -2770,6 +2865,100 @@ mod tests {
             render_distance: 2,
             ..Config::default()
         }
+    }
+
+    /// What a real windowed client is built from — the path that must never hold
+    /// an offline world. `Mode::Window` matters: `Mode::Headless` deliberately
+    /// delegates to the demo-world fixture (see [`Sim::new`]).
+    fn client_config() -> Config {
+        Config {
+            mode: Mode::Window,
+            render_distance: 2,
+            ..Config::default()
+        }
+    }
+
+    /// Sections the GPU is holding, counted the way `app::WindowApp::redraw`
+    /// drives it: upload everything that has meshed, then apply the removals.
+    /// `uploaded_sections` is `Sim`'s own record of exactly that set.
+    fn resident_sections(sim: &mut Sim) -> usize {
+        let _ = sim.drain_all_meshes();
+        let _ = sim.drain_removals();
+        sim.uploaded_sections.len()
+    }
+
+    /// Drive one loopback session to `Connected` and report what is resident.
+    /// The feed sends **no chunks**, so the live world's section set is empty and
+    /// any non-zero count is offline terrain.
+    fn resident_after_connect(mut sim: Sim) -> usize {
+        use crate::net::NetUpdate;
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net();
+        assert_eq!(*sim.session_phase(), SessionPhase::Connected);
+        sim.step(5.0 / 20.0);
+        resident_sections(&mut sim)
+    }
+
+    #[test]
+    fn a_client_session_holds_only_the_live_world_never_offline_terrain() {
+        // The two-worlds regression: the client came up with `worldgen`'s demo
+        // world meshed and uploaded around the origin, then a multiplayer join
+        // added the server's columns *alongside* it — the player standing at the
+        // server's spawn with the wrong world drawn several hundred blocks away.
+        //
+        // The assertion is on the counters the report was diagnosed from: total
+        // resident sections must equal the live set, not the sum. It comes first
+        // in this test so that the control below — the pre-fix construction —
+        // fails on *this* check rather than on a structural one.
+        assert_eq!(
+            resident_after_connect(Sim::new(client_config())),
+            0,
+            "after attaching a live session the resident set must be exactly the \
+             live world's sections (none here — the loopback feed sends no chunks); \
+             anything else is the offline world left behind"
+        );
+
+        // Same property, one layer earlier: nothing to tear down beats tearing
+        // it down, so the offline world must never be built or scheduled at all.
+        let mut sim = Sim::new(client_config());
+        assert!(
+            sim.world.is_empty(),
+            "a client session must not generate an offline world"
+        );
+        assert_eq!(
+            sim.pending_meshes(),
+            0,
+            "a client session must not schedule offline sections for meshing"
+        );
+        assert_eq!(
+            resident_sections(&mut sim),
+            0,
+            "nothing may be uploaded before a session exists"
+        );
+    }
+
+    #[test]
+    fn the_demo_world_fixture_is_the_control_that_fails_the_gate_above() {
+        // The detector's positive control. `Sim::with_demo_world` *is* what
+        // `Sim::new` used to do for every windowed run without `--live`, so this
+        // reproduces the reported state exactly: offline sections meshed,
+        // uploaded, and still resident after a live session attaches. If this ever
+        // reports zero, the gate above has stopped being able to fail and is
+        // vacuous — it is not measuring residency any more.
+        let mut fixture = Sim::with_demo_world(test_config());
+        assert!(!fixture.world.is_empty(), "the fixture must build a world");
+        assert!(
+            resident_sections(&mut fixture) > 0,
+            "control: the fixture must actually upload offline sections"
+        );
+        assert!(
+            resident_after_connect(Sim::with_demo_world(test_config())) > 0,
+            "control: offline sections must still be resident after a live \
+             session attaches — this is the assertion the client path must not \
+             be able to satisfy"
+        );
     }
 
     #[test]

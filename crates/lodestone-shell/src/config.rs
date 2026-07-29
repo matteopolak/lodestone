@@ -214,6 +214,15 @@ pub struct Config {
     pub render_distance: u32,
     /// Whether to also open a live connection while the window is up.
     pub connect_in_window: bool,
+    /// Whether argv actually named a connection target (`--host` or `--port`),
+    /// as opposed to [`Self::host`]/[`Self::port`] merely holding their defaults.
+    ///
+    /// Recorded as its own flag because the *value* cannot answer the question:
+    /// `--host 127.0.0.1 --port 25565` is byte-identical to passing nothing, and
+    /// `app::requested_a_connection` used to compare against `Config::default()`
+    /// and therefore sent that launch to the main menu instead of the server the
+    /// user named. Not set by `--live`, which has its own flag.
+    pub address_given: bool,
     /// How long the `Connect` mode streams events before exiting.
     pub connect_for: Duration,
     /// Mouse-look sensitivity as a vanilla `0..1` slider (fed through the cubic
@@ -231,6 +240,7 @@ impl Default for Config {
             protocol: 776,
             render_distance: 8,
             connect_in_window: false,
+            address_given: false,
             connect_for: Duration::from_secs(15),
             sensitivity: 0.5,
         }
@@ -261,11 +271,13 @@ impl Config {
                 "--host" => {
                     if let Some(v) = it.next() {
                         cfg.host = v;
+                        cfg.address_given = true;
                     }
                 }
                 "--port" => {
                     if let Some(v) = it.next().and_then(|v| v.parse().ok()) {
                         cfg.port = v;
+                        cfg.address_given = true;
                     }
                 }
                 "--protocol" => {
@@ -313,6 +325,8 @@ MODES (default: --window):
     --live                   Also open a live connection while windowed
 
 CONNECTION:
+    Naming either of these connects on launch and skips the main menu — even when
+    the value given is the default one.
     --host <HOST>            Server host (default: 127.0.0.1)
     --port <PORT>            Server port (default: 25565)
     --protocol <N>           Protocol number to request an adapter for
@@ -383,6 +397,27 @@ mod tests {
         assert_eq!(c.mode, Mode::Connect);
         assert_eq!(c.connect_for.as_secs(), 3);
         assert!(c.connect_in_window);
+    }
+
+    #[test]
+    fn spelling_out_the_default_address_still_counts_as_asking_for_a_connection() {
+        // The launch behind the two-worlds report: `app::requested_a_connection`
+        // compared the *values* against `Config::default()`, so this argv was
+        // indistinguishable from passing nothing and landed on the main menu.
+        let c = parse(&["--host", "127.0.0.1", "--port", "25565"]);
+        assert_eq!(c.host, Config::default().host, "same value as the default");
+        assert_eq!(c.port, Config::default().port, "same value as the default");
+        assert!(
+            c.address_given,
+            "the flag was seen, which is the question the menu bypass asks"
+        );
+        // Control: no address flag at all must stay false, or the field is a
+        // constant `true` and cannot distinguish anything.
+        assert!(!parse(&["--window"]).address_given);
+        assert!(
+            !parse(&["--live"]).address_given,
+            "--live has its own flag; it must not imply an address was named"
+        );
     }
 
     #[test]
