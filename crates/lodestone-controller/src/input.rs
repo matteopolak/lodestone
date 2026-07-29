@@ -30,6 +30,15 @@ pub enum Action {
     Sprint,
 }
 
+/// Vanilla's double-tap-forward-to-sprint window, in 20 Hz ticks.
+///
+/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/Options.java:631-640`:
+/// the `options.sprintWindow` slider is an `OptionInstance.IntRange(0, 10)` with
+/// default `7` (`0` disables double-tap sprint; `LocalPlayer.java:807` arms the
+/// timer with this value). This crate has no settings plumbing yet, so vanilla's
+/// default is hard-coded rather than exposed as a slider.
+pub const SPRINT_TRIGGER_WINDOW_TICKS: u8 = 7;
+
 /// The set of currently-held actions plus accumulated, not-yet-consumed mouse
 /// motion. Cheap to copy; the platform layer owns one.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -41,6 +50,35 @@ pub struct InputState {
     jump: bool,
     sneak: bool,
     sprint: bool,
+    /// Sprint latched on by a double-tap of forward, independent of the
+    /// sprint key. Mirrors vanilla's persisted `LocalPlayer.isSprinting()`
+    /// flag as set by the `sprintTriggerTime` branch of `aiStep`
+    /// (`LocalPlayer.java:802-814`): a *fresh* forward press while
+    /// [`sprint_trigger_ticks`](Self::sprint_trigger_ticks) is still counting
+    /// down latches this on, the same way holding the sprint key drives
+    /// `sprint` above. [`movement_intent`] ORs the two together and applies
+    /// the existing forward/back/sneak gate to the result, so the latch
+    /// supplies the flag without ever bypassing that gate — see that
+    /// function's doc comment for the "flag vs. currently effective"
+    /// distinction this mirrors.
+    ///
+    /// Deliberately *not* the same field as `sprint`: unlike the sprint key,
+    /// which always reflects live physical key state, this must persist
+    /// across the moment forward is briefly released between the two taps,
+    /// and must be cleared independently of the key (see `set`) once the
+    /// double-tap's effect has run its course. Conflating the two would let
+    /// a stale latch resume sprinting on a later, unrelated single tap of
+    /// forward.
+    sprint_latched: bool,
+    /// Ticks remaining in the double-tap window armed by the last *fresh*
+    /// forward press (vanilla's `sprintTriggerTime`, `LocalPlayer.java:137`).
+    /// Counts down once per [`InputState::tick`] call; a second fresh
+    /// forward press while this is still nonzero triggers
+    /// [`sprint_latched`](Self::sprint_latched). Sneaking or holding back
+    /// cancels a pending window each tick, mirroring
+    /// `LocalPlayer.java:798-800` (vanilla also cancels while slowed by item
+    /// use — this crate has no such signal to check).
+    sprint_trigger_ticks: u8,
     /// Accumulated horizontal mouse delta in pixels since last consume.
     pub mouse_dx: f32,
     /// Accumulated vertical mouse delta in pixels since last consume.
@@ -51,13 +89,55 @@ impl InputState {
     /// Set or clear a held action.
     pub fn set(&mut self, action: Action, held: bool) {
         match action {
-            Action::Forward => self.forward = held,
+            Action::Forward => {
+                let fresh_press = held && !self.forward;
+                self.forward = held;
+                // Arm/trigger the double-tap window, but only on a genuine
+                // fresh press with real forward impulse — mirrors vanilla
+                // gating this on `canStartSprinting()`'s
+                // `input.hasForwardImpulse()` (false if back is also held,
+                // since the two cancel) and `!isMovingSlowly()` (sneaking).
+                // See `LocalPlayer.java:802-809`.
+                if fresh_press && !self.back && !self.sneak {
+                    if self.sprint_trigger_ticks > 0 {
+                        self.sprint_latched = true;
+                    } else {
+                        self.sprint_trigger_ticks = SPRINT_TRIGGER_WINDOW_TICKS;
+                    }
+                }
+                // Releasing forward always ends an active double-tap sprint
+                // (vanilla: `shouldStopRunSprinting`'s `!hasForwardImpulse`
+                // branch, `LocalPlayer.java:919`) — clear the latch so a
+                // later, unrelated forward press doesn't resume sprinting
+                // without a fresh trigger.
+                if !held {
+                    self.sprint_latched = false;
+                }
+            }
             Action::Back => self.back = held,
             Action::Left => self.left = held,
             Action::Right => self.right = held,
             Action::Jump => self.jump = held,
             Action::Sneak => self.sneak = held,
             Action::Sprint => self.sprint = held,
+        }
+    }
+
+    /// Advance the double-tap-sprint timer by one 20 Hz physics tick.
+    ///
+    /// Mirrors `LocalPlayer.aiStep`'s per-tick handling of `sprintTriggerTime`
+    /// (`LocalPlayer.java:764-766` for the countdown, `:798-800` for the
+    /// sneak/back cancel). This crate touches no clock (see the
+    /// `no_wasm_trap_symbols_are_confined` guard below), so the platform
+    /// layer must call this once per fixed tick rather than this type ever
+    /// reaching for `Instant::now()`.
+    pub fn tick(&mut self) {
+        if self.sprint_trigger_ticks > 0 {
+            self.sprint_trigger_ticks -= 1;
+        }
+        if self.sneak || self.back {
+            self.sprint_trigger_ticks = 0;
+            self.sprint_latched = false;
         }
     }
 
@@ -104,12 +184,17 @@ impl InputState {
 /// with **left** (A) — the engine's `input_vector` treats +strafe as left, so we
 /// must not flip it here. Sprinting only applies while actually moving forward,
 /// mirroring `LocalPlayer.aiStep` gating (you can't sprint standing still or
-/// while sneaking).
+/// while sneaking) — this must not flip to an unconditional check here, since
+/// the sprint *flag* (raw key **or** [`InputState::tick`]'s double-tap latch)
+/// and sprint being *currently effective* are deliberately separate: the flag
+/// says sprint was requested, this gate says whether it's allowed to apply
+/// right now, exactly like vanilla's `isSprinting()` vs `canStartSprinting()`.
 #[must_use]
 pub fn movement_intent(state: &InputState) -> MovementInput {
     let forward = f32::from(state.forward) - f32::from(state.back);
     let strafe = f32::from(state.left) - f32::from(state.right);
-    let sprint = state.sprint && state.forward && !state.back && !state.sneak;
+    let sprint_requested = state.sprint || state.sprint_latched;
+    let sprint = sprint_requested && state.forward && !state.back && !state.sneak;
     MovementInput {
         forward,
         strafe,
@@ -193,6 +278,102 @@ mod tests {
         assert!(movement_intent(&s).sprint);
         s.set(Action::Sneak, true);
         assert!(!movement_intent(&s).sprint, "no sprint while sneaking");
+    }
+
+    #[test]
+    fn double_tap_forward_starts_sprint_without_sprint_key() {
+        let mut s = InputState::default();
+        s.set(Action::Forward, true);
+        assert!(!movement_intent(&s).sprint, "first tap alone doesn't sprint");
+        s.set(Action::Forward, false);
+        s.tick();
+        s.set(Action::Forward, true);
+        assert!(
+            movement_intent(&s).sprint,
+            "second fresh press within the window should latch sprint on"
+        );
+    }
+
+    #[test]
+    fn holding_forward_without_a_second_tap_never_sprints() {
+        let mut s = InputState::default();
+        s.set(Action::Forward, true);
+        for _ in 0..(SPRINT_TRIGGER_WINDOW_TICKS as u32 + 5) {
+            s.tick();
+            assert!(
+                !movement_intent(&s).sprint,
+                "a single held press must not auto-sprint"
+            );
+        }
+    }
+
+    #[test]
+    fn second_tap_after_window_expires_does_not_sprint() {
+        let mut s = InputState::default();
+        s.set(Action::Forward, true);
+        s.set(Action::Forward, false);
+        // Let the window fully expire before the second tap.
+        for _ in 0..=(SPRINT_TRIGGER_WINDOW_TICKS as u32) {
+            s.tick();
+        }
+        s.set(Action::Forward, true);
+        assert!(
+            !movement_intent(&s).sprint,
+            "a stale double-tap window must not trigger sprint"
+        );
+    }
+
+    #[test]
+    fn sneaking_cancels_a_pending_double_tap_window() {
+        let mut s = InputState::default();
+        s.set(Action::Forward, true);
+        s.set(Action::Forward, false);
+        s.set(Action::Sneak, true);
+        s.tick(); // sneak held during this tick cancels the pending window
+        s.set(Action::Sneak, false);
+        s.set(Action::Forward, true);
+        assert!(
+            !movement_intent(&s).sprint,
+            "sneaking between taps should cancel the pending window"
+        );
+    }
+
+    #[test]
+    fn releasing_forward_clears_the_latch_for_later_unrelated_taps() {
+        let mut s = InputState::default();
+        // A genuine double tap latches sprint on.
+        s.set(Action::Forward, true);
+        s.set(Action::Forward, false);
+        s.tick();
+        s.set(Action::Forward, true);
+        assert!(movement_intent(&s).sprint);
+        // Release forward (stops the effective sprint) and let plenty of
+        // ticks pass, then a single unrelated later tap must not inherit the
+        // old latch.
+        s.set(Action::Forward, false);
+        for _ in 0..20 {
+            s.tick();
+        }
+        s.set(Action::Forward, true);
+        assert!(
+            !movement_intent(&s).sprint,
+            "a stale latch must not resume sprint on an unrelated later tap"
+        );
+    }
+
+    #[test]
+    fn sprint_key_and_double_tap_do_not_fight() {
+        let mut s = InputState::default();
+        // Holding the sprint key already sprints while moving forward...
+        s.set(Action::Sprint, true);
+        s.set(Action::Forward, true);
+        assert!(movement_intent(&s).sprint);
+        // ...and a double-tap on top of that is a harmless no-op, not a
+        // conflict: both paths just set the same effective flag.
+        s.set(Action::Forward, false);
+        s.tick();
+        s.set(Action::Forward, true);
+        assert!(movement_intent(&s).sprint);
     }
 
     #[test]

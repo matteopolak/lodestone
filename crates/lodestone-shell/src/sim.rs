@@ -60,26 +60,27 @@ const PLACE_BLOCK: u32 = id::STONE;
 const HOTBAR_SLOTS: usize = 9;
 
 /// The live [`Mining`] predictor's [`BreakInputs`] for one dig tick, built from
-/// the version's block-state hardness census plus the player's own state.
+/// the version's block-state hardness census, the resolved held-item
+/// contribution, and the player's own state.
 ///
 /// Free-standing and pure so the two traps folded into it are testable without a
 /// server, a GPU, or a generated world — both are wrong in the direction of
 /// *breaking too fast*, which is exactly the defect this path already shipped
 /// once.
 ///
-/// # Trap 1: `correct_tool` is **not** `requires_correct_tool`
+/// # Trap 1: `correct_tool` comes from `tool`, never re-derived from `requires_correct_tool`
 ///
 /// [`BlockHardness::requires_correct_tool`] is `BlockState.requiresCorrectToolForDrops`
 /// — a property of the *block* ("does this drop nothing unless mined with a
-/// suitable tool?"). [`BreakInputs::correct_tool`] is
-/// `Player.hasCorrectToolForDrops` — a property of the *held item vs. the block*
-/// — and it selects vanilla's `30` (correct) vs `100` (wrong) speed divider.
-/// Bare-handed the two are opposites: an empty hand is the correct tool for
-/// exactly those blocks that demand none, so `correct_tool == !requires_correct_tool`.
-///
-/// Passing the field straight across looks like faithful data wiring and makes
-/// stone break in **45 ticks instead of 151** (3.4× too fast) while dirt goes
-/// the other way (51 instead of 15). See the warning on [`BlockHardness`].
+/// suitable tool?"). [`ToolMining::correct_tool`] (and, downstream,
+/// [`BreakInputs::correct_tool`]) is `Player.hasCorrectToolForDrops` — a property
+/// of the *held item vs. the block* — and it selects vanilla's `30` (correct) vs
+/// `100` (wrong) speed divider. `tool.correct_tool` is **already folded**
+/// (`!requires_correct_tool || item_is_correct`, see the warning on
+/// [`ToolMining`]/[`BlockHardness`]) by whatever produced `tool` — bare-handed
+/// that reduces to `!requires_correct_tool`. Assign it straight across; combining
+/// it with `requires_correct_tool` again makes stone break in **45 ticks instead
+/// of 151** (3.4× too fast) while dirt goes the other way (51 instead of 15).
 ///
 /// # Trap 2: `submerged` is `eye_in_water`, not `under_water()`
 ///
@@ -89,16 +90,15 @@ const HOTBAR_SLOTS: usize = 9;
 /// `isUnderWater()`. The two agree in nearly every real pose but are not the
 /// same function, so the mining path reads the raw `eye_in_water` flag.
 ///
-/// # Bare hands only
+/// # Mining efficiency, haste and fatigue are still unmodeled
 ///
-/// Tool speed, mining efficiency, haste and fatigue are left at
-/// [`BreakInputs::default`]. `minecraft:tool` is not among the modeled item
-/// components (only `custom_name`, `damage`, `enchantments`), so there is no
-/// source for a held tool's per-block mining speed — a guess here would be the
-/// same class of invention this function exists to remove. Digging therefore
-/// always times as an empty hand, even with a pickaxe selected.
-fn bare_hand_break_inputs(
+/// Everything but `hardness`/`correct_tool`/`tool_speed`/`is_air`/`on_ground`/
+/// `submerged` is left at [`BreakInputs::default`] — no enchantment, potion or
+/// attribute inputs are modeled yet, only the tool census resolved by
+/// [`lodestone_model::VersionAdapter::tool_mining`].
+fn dig_break_inputs(
     entry: lodestone_model::BlockHardness,
+    tool: lodestone_model::ToolMining,
     is_air: bool,
     on_ground: bool,
     submerged: bool,
@@ -106,11 +106,55 @@ fn bare_hand_break_inputs(
     BreakInputs {
         hardness: entry.hardness,
         is_air,
-        // See "Trap 1" above — this negation is load-bearing.
-        correct_tool: !entry.requires_correct_tool,
+        // See "Trap 1" above — this straight assignment (not a re-negation) is
+        // load-bearing.
+        correct_tool: tool.correct_tool,
+        tool_speed: tool.speed,
         on_ground,
         submerged,
         ..BreakInputs::default()
+    }
+}
+
+/// The bare-hand [`lodestone_model::ToolMining`] fold, for when
+/// [`lodestone_model::VersionAdapter::tool_mining`] has nothing to resolve
+/// against (no held item) or is unreachable.
+///
+/// Mirrors v770's `tool::bare_handed` exactly (`speed: 1.0`,
+/// `correct_tool: !requires_correct_tool`, `damage_per_block: 0`) rather than
+/// depending on it, since this version-free crate cannot name a protocol crate.
+/// This is Trap 1's negation, kept in exactly one place.
+fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_model::ToolMining {
+    lodestone_model::ToolMining {
+        speed: 1.0,
+        correct_tool: !entry.requires_correct_tool,
+        damage_per_block: 0,
+    }
+}
+
+/// Lifts a hotbar slot's canonical stack into the minimal
+/// [`lodestone_model::ItemStack`] shape
+/// [`lodestone_model::VersionAdapter::tool_mining`] expects.
+///
+/// The shell's own inventory model ([`lodestone_game::item::ItemStack`], reached
+/// through [`Sim::player_menu`]) does not carry a `minecraft:tool` component —
+/// `lodestone_game::menus::model_item_to_game` folds only `custom_name`/
+/// `damage`/`enchantments` off the wire, dropping the rest of the model's
+/// component patch. That is not a loss here: an ordinary vanilla tool ships
+/// with an *empty* `minecraft:tool` patch regardless (the component lives in
+/// the item's built-in prototype, not the wire delta — see
+/// `docs/tool-mining.md`), so [`lodestone_model::ItemComponents::default`]'s
+/// `ToolPatch::Inherited` is the value a faithfully-decoded stack would carry
+/// too, and `tool_mining` resolves `Inherited` against the item id via the
+/// version's generated prototype table. The one case this cannot see is a
+/// server/datapack that overrides `minecraft:tool` explicitly on the wire
+/// (`/give …[minecraft:tool={…}]`) — the same class of known gap as the
+/// existing tag-only `update_tags` gap `docs/tool-mining.md` already documents.
+fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::ItemStack {
+    lodestone_model::ItemStack {
+        item: held.item().clone(),
+        count: u32::try_from(held.count()).unwrap_or(0),
+        components: lodestone_model::ItemComponents::default(),
     }
 }
 
@@ -970,6 +1014,11 @@ impl Sim {
             self.tick_count += 1;
             self.accumulator -= TICK_DT;
             self.tick_particles();
+            // Age the double-tap-to-sprint window here, inside the fixed 20 Hz loop:
+            // vanilla's `sprintTriggerTime` is counted in *ticks* (default 7), so
+            // ageing it per frame instead would make the double-tap window
+            // frame-rate dependent — wider at 144 fps than at 30.
+            self.input.tick();
             // Age the HUD status effects at the same fixed 20 Hz the server ticks
             // them, so displayed timers count down in step with the world.
             self.hud_effects.tick(1);
@@ -1013,12 +1062,33 @@ impl Sim {
     /// Fold this frame's entity snapshots into the interpolator so
     /// [`entity_draws`](Self::entity_draws) yields smooth per-frame transforms.
     /// No live connection means no entities.
+    ///
+    /// Drives [`EntityInterpolator::update_with_view`], not the plain
+    /// `update`: a dropped item's own per-tick physics (`step_item_physics`
+    /// in `crate::entities`) needs a real [`CollisionView`] to stop at a
+    /// floor instead of sinking through it between the server's
+    /// once-a-second corrections — see the module docs on `crate::entities`.
+    /// [`Self::live_collision`] is the same player-column snapshot the
+    /// physics tick already builds; off a live connection (or before the
+    /// player's own column has streamed in) there is no view to build, but
+    /// `snapshots` is empty in that case too, so the offline-world fallback
+    /// view is never actually asked to resolve anything against real
+    /// terrain.
     fn update_entities(&mut self, dt: f32) {
         let snapshots = self
             .net
             .as_ref()
             .map_or_else(Vec::new, NetClient::entity_snapshots);
-        self.entity_interp.update(&snapshots, dt);
+        match self.live_collision() {
+            Some(view) => self
+                .entity_interp
+                .update_with_view(&snapshots, dt, &view, &self.profile),
+            None => {
+                let view = WorldCollision::new(&self.world);
+                self.entity_interp
+                    .update_with_view(&snapshots, dt, &view, &self.profile);
+            }
+        }
     }
 
     /// The interpolated entities to draw this frame, resolved by the renderer
@@ -1501,7 +1571,18 @@ impl Sim {
         let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
         let state_id = self.net.as_ref().and_then(|n| n.block_at(pos));
-        let Some(entry) = state_id.and_then(|id| self.resolve_block_hardness(id)) else {
+        let Some(id_value) = state_id else {
+            // No live state at this position (or no live connection): same
+            // "abort, never guess" contract as the unknown-state case below.
+            let actions = self.mining.stop();
+            if let Some(net) = &self.net {
+                for action in actions {
+                    net.send_action(action);
+                }
+            }
+            return;
+        };
+        let Some(entry) = self.resolve_block_hardness(id_value) else {
             // Unknown state (or no version family compiled in): the shell has no
             // honest break time for this block, so it aborts rather than digging
             // at a made-up rate. `stop()` is idempotent — it emits one `ABORT`
@@ -1514,28 +1595,71 @@ impl Sim {
             }
             return;
         };
-        let inputs = bare_hand_break_inputs(
+        // The held item's contribution (speed, correct-tool-for-drops) to this
+        // dig, resolved through the same version-owned seam as `entry` above —
+        // see `tool_mining_item` for why the shell's own inventory model is
+        // enough to drive this correctly for ordinary tools. Falls back to bare
+        // hand (not a guess: it is what an empty main hand *is*) when nothing is
+        // held, and — defensively, should never actually happen since `entry`
+        // above already proved this version knows `id_value` — when the version
+        // adapter's tool census has nothing for this state either.
+        let held = self
+            .player_menu()
+            .player_native(self.selected_slot)
+            .map(tool_mining_item);
+        let tool = self
+            .version_data
+            .as_ref()
+            .and_then(|v| v.tool_mining(held.as_ref(), id_value))
+            .unwrap_or_else(|| bare_handed_tool_mining(entry));
+        let inputs = dig_break_inputs(
             entry,
-            state_id == Some(id::AIR),
+            tool,
+            id_value == id::AIR,
             self.player.on_ground,
             // `eye_in_water`, not `under_water()` — see "Trap 2" on
-            // `bare_hand_break_inputs`.
+            // `dig_break_inputs`.
             self.fluid_state.eye_in_water,
         );
         // Vanilla's `ClientLevel.addBreakingBlockEffect` — the per-tick "chip"
-        // that pops off the mined face — fires from `Minecraft.continueAttack`,
-        // *not* `startAttack`: the very first tick of a dig only starts the
-        // predictor and swings, and the chip begins appearing from the second
-        // tick onward. `self.mining.target()` still holds the *previous* tick's
-        // target here (`continue_` below is what advances it), so comparing it
-        // to `pos` before calling distinguishes "already mining this exact
-        // block" (continue) from "first tick of a new/retargeted dig" (start),
-        // exactly the split vanilla's own state machine makes.
-        let already_mining_here = self.mining.target() == Some(pos);
+        // that pops off the mined face — fires from `Minecraft.continueAttack`
+        // whenever `MultiPlayerGameMode.continueDestroyBlock` returns `true`.
+        // That is *not* restricted to ticks after the first: `continueAttack`
+        // runs in the same client tick as `startAttack` (both are driven off
+        // the same `handleKeybinds` pass), so on the very tick a fresh dig
+        // starts, `continueDestroyBlock` immediately sees `sameDestroyTarget`
+        // already true (from `startDestroyBlock` moments earlier that same
+        // tick) and returns `true` too — the chip appears from tick one, not
+        // tick two. A prior version of this comment claimed otherwise; it was
+        // read off this port's own state machine rather than
+        // `Minecraft.java`, and was wrong. `continueDestroyBlock` also returns
+        // `true` on a retarget (it delegates to `startDestroyBlock`, whose
+        // normal-case return is unconditionally `true`) and on the finishing
+        // tick, but *not* when the target block reads as air before the call,
+        // nor for an instant break reached by a fresh press directly onto it
+        // (that tick's `startAttack` has already turned the block to air
+        // before `continueAttack`'s own air check runs).
+        //
+        // We have one call, not vanilla's two (`start`/`continue_` collapse
+        // into `continue_` here), so the tick-one case has to be read off
+        // `target()` differently: capture it both before and after the call
+        // and OR them, rather than comparing only the before-value to `pos`.
+        // Before-is-some covers "continuing" and "finishing"; after-is-some
+        // covers "just started" (fresh or retargeted) and also "retargeted
+        // onto an instant break" (target was Some going in, `start` clears it
+        // for the instant case, but vanilla still chips there — see above).
+        // Only "before none, after none" survives the OR, which is exactly
+        // the instant-break-from-idle and post-break-cooldown cases; the
+        // cooldown one is a deliberate, documented divergence from vanilla
+        // (which does emit a stray chip on the already-broken block during
+        // its 5-tick `destroyDelay`) — matching this port's existing choice
+        // not to send a block-action packet during cooldown either.
+        let was_mining = self.mining.target().is_some();
         // `continue_` delegates to `start` when no dig is live yet, so this one
         // entry point covers first-press, hold, and retarget uniformly.
         let actions = self.mining.continue_(pos, face, &inputs, None);
-        if already_mining_here
+        let is_mining_now = self.mining.target().is_some();
+        if (was_mining || is_mining_now)
             && actions
                 .iter()
                 .any(|a| matches!(a, ClientAction::SwingArm { .. }))
@@ -1546,7 +1670,7 @@ impl Sim {
             // chip approximates with the unit cube rather than the true model.
             self.particles.breaking_block(
                 hit.block,
-                state_id.unwrap_or(id::AIR),
+                id_value,
                 [1.0; 3],
                 particle_face(face),
             );
@@ -2492,7 +2616,7 @@ mod tests {
     /// Bare-hand inputs on flat, dry ground — the pose every timing figure below
     /// is quoted at.
     fn dry_ground(entry: lodestone_model::BlockHardness) -> BreakInputs {
-        bare_hand_break_inputs(entry, false, true, false)
+        dig_break_inputs(entry, bare_handed_tool_mining(entry), false, true, false)
     }
 
     #[test]
@@ -2535,6 +2659,60 @@ mod tests {
     }
 
     #[test]
+    fn a_resolved_tool_mining_speeds_up_the_dig_not_just_bare_hands() {
+        // This is the actual regression the `sim.rs` wiring exists to close:
+        // before it, `drive_mining` fed `BreakInputs::default()` for every tool
+        // field regardless of what the version adapter resolved, so a diamond
+        // pickaxe mined stone no faster than a fist. `dig_break_inputs` must
+        // fold a real `ToolMining` straight through — reference numbers from
+        // `docs/tool-mining.md` (also pinned externally by
+        // `crates/protocol/v770/tests/tools.rs`): a diamond pickaxe (`speed:
+        // 8.0`, `correct_tool: true`) on stone is 6 ticks, not the bare-hand
+        // 151.
+        let diamond_pickaxe = lodestone_model::ToolMining {
+            speed: 8.0,
+            correct_tool: true,
+            damage_per_block: 1,
+        };
+        let tooled = dig_break_inputs(census::STONE, diamond_pickaxe, false, true, false);
+        assert_eq!(tooled.tool_speed, 8.0);
+        assert!(tooled.correct_tool);
+        assert_eq!(
+            tooled.ticks_to_break(),
+            Some(6),
+            "a diamond pickaxe on stone must be 6 ticks, matching the v770 tool oracle"
+        );
+        assert_eq!(
+            dry_ground(census::STONE).ticks_to_break(),
+            Some(151),
+            "bare hand on the same block must be unaffected by the tooled case above"
+        );
+    }
+
+    #[test]
+    fn tool_mining_item_lifts_the_hotbar_stacks_id_and_count_with_no_tool_override() {
+        // `tool_mining_item` is what `drive_mining` feeds `VersionAdapter::tool_mining`
+        // for the selected hotbar slot. It must carry the real item id and count
+        // across, and — since the shell's own inventory model does not decode
+        // `minecraft:tool` (see the function's own docs) — leave `components` at
+        // `ItemComponents::default()` so `tool_mining` takes the `Inherited`
+        // branch and resolves the item's *built-in* tool from the version's
+        // generated prototype table, rather than silently treating every held
+        // item as toolless.
+        let item_id: lodestone_model::Identifier =
+            "minecraft:diamond_pickaxe".parse().expect("valid id");
+        let held = lodestone_game::item::ItemStack::new(item_id.clone(), 1);
+        let lifted = tool_mining_item(&held);
+        assert_eq!(lifted.item, item_id);
+        assert_eq!(lifted.count, 1);
+        assert_eq!(
+            lifted.components.tool,
+            lodestone_model::ToolPatch::Inherited,
+            "no wire override means Inherited — the item id alone must resolve the tool"
+        );
+    }
+
+    #[test]
     fn submerged_reads_eye_in_water_not_the_fogs_under_water() {
         // Vanilla's `getDestroySpeed` gates the 5x underwater penalty on
         // `isEyeInFluid(WATER)` alone; `FluidState::under_water()` additionally
@@ -2552,7 +2730,13 @@ mod tests {
         );
 
         let dry = dry_ground(census::STONE);
-        let wet = bare_hand_break_inputs(census::STONE, false, true, eye_only.eye_in_water);
+        let wet = dig_break_inputs(
+            census::STONE,
+            bare_handed_tool_mining(census::STONE),
+            false,
+            true,
+            eye_only.eye_in_water,
+        );
         // Compare the *rate*, not the tick count: `ticks_to_break` replays
         // vanilla's f32 accumulate-and-compare loop, so a 5x slower rate lands
         // near — not exactly on — 5x the ticks (the same rounding that makes
@@ -2573,7 +2757,13 @@ mod tests {
         // `on_ground` was already wired before the hardness seam; keep it pinned
         // so a rewrite of the input builder cannot quietly drop it.
         let grounded = dry_ground(census::STONE);
-        let airborne = bare_hand_break_inputs(census::STONE, false, false, false);
+        let airborne = dig_break_inputs(
+            census::STONE,
+            bare_handed_tool_mining(census::STONE),
+            false,
+            false,
+            false,
+        );
         assert_eq!(airborne.dig_speed(), grounded.dig_speed() / 5.0);
         assert!(
             airborne.ticks_to_break().unwrap() > grounded.ticks_to_break().unwrap() * 4,
@@ -2583,10 +2773,13 @@ mod tests {
 
     #[test]
     fn tool_inputs_stay_at_bare_hand_defaults() {
-        // `minecraft:tool` is not a modeled item component, so there is no source
-        // for a held tool's per-block speed. This pins that the shell leaves
-        // those inputs alone rather than inventing one; when the component lands,
-        // this test is the reminder of what to revisit.
+        // `dry_ground` builds its inputs from `bare_handed_tool_mining`
+        // specifically (an empty main hand), so `tool_speed` must stay at the
+        // bare-hand `1.0` here — a live dig instead resolves a real
+        // `ToolMining` through `VersionAdapter::tool_mining` in `drive_mining`.
+        // Mining efficiency, haste and fatigue have no modeled source at all
+        // yet (no enchantment/potion/attribute inputs), so those stay at
+        // `BreakInputs::default` regardless of what is held.
         let inputs = dry_ground(census::STONE);
         assert_eq!(inputs.tool_speed, 1.0);
         assert_eq!(inputs.mining_efficiency, 0.0);
@@ -2886,11 +3079,13 @@ mod tests {
         while Instant::now() < gate_deadline {
             assert!(place(&mut rcon, gate, "minecraft:slime_block").await);
             let mut m = Mining::new();
-            let inputs = bare_hand_break_inputs(
-                lodestone_model::BlockHardness {
-                    hardness: 0.0,
-                    requires_correct_tool: false,
-                },
+            let gate_entry = lodestone_model::BlockHardness {
+                hardness: 0.0,
+                requires_correct_tool: false,
+            };
+            let inputs = dig_break_inputs(
+                gate_entry,
+                bare_handed_tool_mining(gate_entry),
                 false,
                 true,
                 false,
@@ -2942,7 +3137,13 @@ mod tests {
 
         // --- AFTER: the shell's own inputs, from the real census entry ---
         assert!(place(&mut rcon, target, "minecraft:stone").await);
-        let stone = bare_hand_break_inputs(census::STONE, false, true, false);
+        let stone = dig_break_inputs(
+            census::STONE,
+            bare_handed_tool_mining(census::STONE),
+            false,
+            true,
+            false,
+        );
         assert_eq!(stone.ticks_to_break(), Some(151));
         let after = dig(&handle, &mut rcon, target, &stone, 400)
             .await
