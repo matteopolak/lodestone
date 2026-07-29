@@ -67,15 +67,25 @@
 //! **deleted** — 28 fields down to 15.
 //!
 //! `Sim` itself is **not** deleted, and `docs/sim-dissolution.md` records why field
-//! by field. The short version: two of the fifteen survivors are `ecs` (this
-//! crate's `World`, which cannot be a resource in itself) and `entity_interp`
-//! (which holds a second `World`), so "one owner, one `App`" is §4.1(c).
+//! by field.
 //!
-//! Still where it was: the *bevy* `World` split — the net thread's, the entity
-//! interpolator's and the driver's are still three, which is why [`CorePlugin`]
-//! still refuses to insert [`WorldTime`], and why there are still **two 20 Hz
-//! accumulators** driving two `GameTick` schedules on two different catch-up
-//! policies. See `docs/chunk-world-resource.md` and `docs/sim-dissolution.md`.
+//! # §4.1(c) — one `World`, one `GameTick`, one accumulator
+//!
+//! The three bevy `World`s are **one**. The driver builds it, hands the
+//! [`EcsHandle`] to `NetClient::connect`, and `lodestone_client`'s `SharedState`
+//! adopts that handle instead of minting its own; the entity interpolator's
+//! `World` is gone entirely and its systems run in the same schedules as the
+//! player's. Consequences, each of which was blocked on this and nothing else:
+//!
+//! - [`CorePlugin`] now inserts [`WorldTime`] **and** [`FrameClock`]. The guard
+//!   that refused to existed only to stop two `World`s becoming two clocks.
+//! - There is one 20 Hz accumulator ([`FrameClock::accumulator`]) on one
+//!   catch-up policy ([`MAX_CATCH_UP_TICKS`] = vanilla's ten, not the shell's old
+//!   five). `lodestone_shell::entities`'s `TickAccum` is deleted.
+//! - A plugin adding a `GameTick` system no longer has to pick which `App` or
+//!   which clock; there is one of each.
+//!
+//! See `docs/world-unification.md` for the lock discipline this buys and costs.
 //!
 //! # What this crate depends on
 //!
@@ -112,6 +122,12 @@ pub use bevy_app as app;
 /// Re-exported so plugin authors never need to match `bevy_ecs`'s version by
 /// hand.
 pub use bevy_ecs as ecs;
+/// Re-exported because [`EcsHandle`] is a `parking_lot::RwLock` and a driver that
+/// wants to *name* a guard type (rather than only use one as a temporary) must
+/// spell it with the same `parking_lot` this crate locked with. Matching the
+/// version by hand in every consumer's manifest is how you end up with two
+/// `RwLock`s that look identical and are not the same lock.
+pub use parking_lot;
 
 pub use chunks::{ChunkWorld, WorldExtent};
 pub use handle::{EcsHandle, new_handle, new_ingest_handle};
@@ -121,7 +137,9 @@ pub use player::{
     Profile, SelectedSlot, SprintKeyHeld, Submersion, reset_local_player, spawn_local_player,
 };
 pub use plugin::CorePlugin;
-pub use resources::{FrameClock, VersionData, WorldTime};
+pub use resources::{
+    FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
+};
 pub use session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionBossBars,
     SessionChat, SessionHudPlugin, SessionMenus, SessionPhase, SessionPlugin, SessionScoreboard,

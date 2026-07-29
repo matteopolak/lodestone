@@ -31,9 +31,9 @@
 
 use std::time::{Duration, Instant};
 
+use lodestone::net::NetClient;
 use lodestone::entities::{EntityDraw, EntityInterpolator};
 use lodestone::gpu::RenderState;
-use lodestone::net::NetClient;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::RconClient;
 
@@ -87,7 +87,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     let mut target = HeadlessTarget::new(device, w, h, format);
 
     // --- Connect the shell's own net client to the live oracle. --------------
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
+    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
 
     // Wait until the bot is actually in the world (chunks streaming). The net
     // thread drives independently; draining poll() keeps its update channel from

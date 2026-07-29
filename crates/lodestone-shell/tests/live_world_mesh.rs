@@ -144,7 +144,7 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     // A player must be online before RCON can find the spawn column and before
     // the flat oracle keeps chunks resident. Connect a *scout* client, learn where
     // it spawned, then build the room in its column.
-    let scout = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    let scout = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
     wait_logged_in(&scout, "scout");
 
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
@@ -208,7 +208,7 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     // chunk-data packet carrying the server's now-seam-complete light — far more
     // reliable than depending on incremental LIGHT_UPDATE deltas reaching the
     // scout. The scout stays connected to keep the area active while B streams.
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
     wait_logged_in(&net, "reader");
     let dims = net.world_dimensions().expect(
         "logged in but the client never reported world dimensions — the column geometry seam \

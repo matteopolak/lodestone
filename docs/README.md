@@ -90,6 +90,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every entity's state lives in, the three-state `Reported<T>` encoding that keeps
   "never reported" distinct from "explicitly cleared" (and a dropped item visible),
   and the two folds that cannot be systems until the chunk world is a resource.
+- [One bevy World (§4.1(c))](./world-unification.md) — three `World`s become one, the
+  single 20 Hz accumulator and why its catch-up cap is ten ticks rather than five, the
+  lock discipline that costs, and the honest answer to whether ingest can stall a frame.
 - [Dissolving `Sim`](./sim-dissolution.md) — what Stage 5 moved off the shell's god
   object, the fifteen fields still on it and precisely why each stays, and the two
   20 Hz clocks whose divergence is cumulative rather than a rounding artefact.

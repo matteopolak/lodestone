@@ -12,18 +12,31 @@ use crate::sets::{ExtractSet, FrameSet, IngestSet, TickSet};
 /// ordering of all four schedules' public sets, including bevy's own
 /// `Update`.
 ///
-/// Deliberately carries **no game state of its own** — not even
-/// [`crate::WorldTime`]. Whoever owns the authoritative `World` inserts that
-/// resource explicitly; if `CorePlugin` did it, every `App` built with it
-/// (there will be more than one before this migration is done — see the note
-/// on two-`World`s-in-one-process in `docs/bevy-migration.md`'s Stage 0
-/// report) would get its own silently-diverging copy, which is exactly the
-/// "two sources of truth" failure the whole migration exists to delete.
+/// # The two clocks it now owns, and why it refused to before
+///
+/// Until §4.1(c) this plugin deliberately inserted **no** state at all — not
+/// even [`crate::WorldTime`] — because there were three bevy `World`s in the
+/// process (the net thread's, the entity interpolator's and the driver's) and a
+/// plugin that inserted a clock would have given each of them its own silently
+/// diverging copy. That guard was doing real work: the *other* clock, the 20 Hz
+/// accumulator, escaped it (each `World` had one because
+/// `World::run_schedule(GameTick)` runs that `World`'s schedule) and diverged by
+/// five ticks per stall, unbounded.
+///
+/// There is now one `World`, so the guard has nothing left to protect and is
+/// retired: [`crate::WorldTime`] (the *server's* clock) and
+/// [`crate::FrameClock`] (the *driver's*) are inserted here, once, by the one
+/// plugin every `App` in the tree installs. `init_resource`, not
+/// `insert_resource`, so re-running `build` — or an owner that seeded a clock
+/// before adding the plugin — cannot zero a live clock.
 #[derive(Debug, Default)]
 pub struct CorePlugin;
 
 impl Plugin for CorePlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<crate::WorldTime>();
+        app.init_resource::<crate::FrameClock>();
+
         app.init_schedule(NetIngest);
         app.configure_sets(
             NetIngest,

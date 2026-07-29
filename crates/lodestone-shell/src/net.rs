@@ -347,14 +347,15 @@ pub struct NetClient {
     /// Published by the net thread once login completes; lets the render/mesh
     /// thread read the client-owned world lock-free of tokio.
     handle: SharedHandle,
-    /// A stand-in for the client's session `World`, used only by this crate's
-    /// hermetic tests.
+    /// The driver's `World` and session entity, for a **loopback** client that has
+    /// no `ClientBuilder` to hand them to.
     ///
-    /// It carries the **same** `lodestone_ecs::session` systems the real client
-    /// folds with, so a test can exercise the whole read path — `Sim::sidebar()`
-    /// → [`Self::scoreboard`] → the folded component — with no server. A test
-    /// *double*, not a second fold: there is one implementation of the fold and
-    /// this runs it. Compiled out of every production build.
+    /// Production goes through [`Self::connect`], where the real client adopts the
+    /// handle at build time; a loopback has no connection at all, so
+    /// `Sim::attach_net` binds it afterwards ([`Self::bind_session`]) and
+    /// [`Self::ingest_session_event`] folds through the **same** systems the net
+    /// thread runs, into the **same** `World` the shell reads. A test *double* for
+    /// the transport, not for the fold. Compiled out of every production build.
     #[cfg(test)]
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 }
@@ -362,8 +363,32 @@ pub struct NetClient {
 impl NetClient {
     /// Spawn a background thread that connects to `host:port` speaking the given
     /// protocol number and forwards events. Returns immediately.
+    ///
+    /// # `session`, and why it is threaded down here
+    ///
+    /// `docs/bevy-migration.md` §4.1(c). `Some((world, entity))` makes the client
+    /// fold its read-model into a `World` the **caller** already owns, hanging the
+    /// session components off `entity` — so a component the net thread's ingest
+    /// writes is visible to a `GameTick` system on the driver thread, which is the
+    /// entire point. `None` lets the client mint its own `World`, which is what a
+    /// bare `NetClient` in a live gate (no `Sim` anywhere) wants.
+    ///
+    /// The handle travels *down*, never up: `lodestone_shell::sim::Sim` owns the
+    /// `World` and hands it here. Adopting the client's instead would change the
+    /// `World`'s identity at every connect and invalidate `Sim.local`, the local
+    /// player's `Entity`, which the voluntary-teardown path holds across
+    /// `Sim::end_session`.
+    ///
+    /// Prefer [`crate::sim::Sim::connect`] over calling this with `Some(..)` by
+    /// hand: passing `None` where a `Sim` exists is silent — the session fold lands
+    /// in a `World` nothing reads and every HUD accessor returns an empty default.
     #[must_use]
-    pub fn connect(host: String, port: u16, protocol: i32) -> Self {
+    pub fn connect(
+        host: String,
+        port: u16,
+        protocol: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (action_tx, action_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -382,6 +407,7 @@ impl NetClient {
                     action_rx,
                     stop_thread,
                     handle_thread,
+                    session,
                 )
             })
             .expect("spawn net thread");
@@ -603,13 +629,25 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
-            session: Some(test_session_world()),
+            // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
+            session: None,
         };
         (client, action_rx)
     }
 
-    /// Fold one `ClientEvent` through the session systems of the test-only
-    /// stand-in `World`, exactly as the net thread's `SharedState::apply` does.
+    /// Point a loopback client at the driver's `World`, so a hermetic test folds
+    /// into the same store the shell reads. Called by `Sim::attach_net`.
+    #[cfg(test)]
+    pub(crate) fn bind_session(
+        &mut self,
+        world: lodestone_ecs::EcsHandle,
+        entity: lodestone_ecs::ecs::entity::Entity,
+    ) {
+        self.session = Some((world, entity));
+    }
+
+    /// Fold one `ClientEvent` through the session systems of the `World` this
+    /// loopback is bound to, exactly as the net thread's `SharedState::apply` does.
     ///
     /// One event per schedule run, deliberately — the same rule the real ingest
     /// follows, so a test's cross-family ordering matches production's.
@@ -640,19 +678,11 @@ impl NetClient {
             stop: Arc::new(AtomicBool::new(false)),
             thread: None,
             handle: Arc::new(OnceLock::new()),
-            session: Some(test_session_world()),
+            // Bound by `Sim::attach_net`; a loopback with no `Sim` folds nothing.
+            session: None,
         };
         (client, action_rx, tx)
     }
-}
-
-/// A `World` carrying `SessionPlugin`'s folds plus one session entity — the
-/// net thread's shape, minus the net thread. See [`NetClient::session`].
-#[cfg(test)]
-fn test_session_world() -> (lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity) {
-    let ecs = lodestone_ecs::new_ingest_handle();
-    let entity = lodestone_ecs::spawn_session(&mut ecs.write());
-    (ecs, entity)
 }
 
 impl Drop for NetClient {
@@ -715,6 +745,7 @@ fn run(
     action_rx: Receiver<ClientAction>,
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
+    session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -742,9 +773,17 @@ fn run(
         };
         let server = ServerAddress { host, port };
 
+        // §4.1(c): fold into the driver's `World` when we were given one. The
+        // builder installs no plugins and spawns no entity — the shell's `App`
+        // already carries `IngestPlugin`/`SessionPlugin` and the entity is
+        // `Sim.local` — because `add_systems` does not deduplicate.
+        let mut builder =
+            ClientBuilder::new(server, profile, adapter).connect_timeout(Some(Duration::from_secs(10)));
+        if let Some((world, entity)) = session {
+            builder = builder.ecs(world, entity);
+        }
         let (handle, mut events) =
-            match ClientBuilder::new(server, profile, adapter)
-                .connect_timeout(Some(Duration::from_secs(10)))
+            match builder
                 .connect()
                 .await
             {
@@ -1109,7 +1148,7 @@ mod tests {
     fn poll_is_empty_before_any_events() {
         // Connecting to a dead port yields an error update eventually, but poll
         // right away should simply be empty (non-blocking).
-        let client = NetClient::connect("127.0.0.1".into(), 1, 776);
+        let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
         let _ = client.poll();
     }
 

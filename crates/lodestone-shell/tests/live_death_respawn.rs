@@ -40,7 +40,6 @@
 use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
-use lodestone::net::NetClient;
 use lodestone::sim::{SessionPhase, Sim};
 use lodestone_testsupport::RconClient;
 
@@ -184,7 +183,9 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
     let mut sim = Sim::new(live_config());
     sim.recover_from_death = recover;
     let demo_spawn = sim.player().position;
-    sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
+    // §4.1(c): `Sim::connect` threads the shell\'s one `World` into the
+    // client, so the session fold lands where the HUD accessors read.
+    sim.connect(HOST.into(), PORT, PROTOCOL);
 
     // Phase 1: drive until the server has placed us and chunks are streaming.
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -244,7 +245,7 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
         if recover
             && sim.respawn_count() > respawns_before
             && !sim.is_dead()
-            && *sim.session_phase() == SessionPhase::Connected
+            && sim.session_phase() == SessionPhase::Connected
         {
             // Give chunk streaming a few ticks to catch up at the new position.
             for _ in 0..15 {
@@ -268,7 +269,7 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
         .is_some_and(|cols| cols.iter().any(|c| c.x == pcx && c.z == pcz));
 
     DeathOutcome {
-        phase: sim.session_phase().clone(),
+        phase: sim.session_phase(),
         dead_final: sim.is_dead(),
         respawns: sim.respawn_count().saturating_sub(respawns_before),
         loaded,

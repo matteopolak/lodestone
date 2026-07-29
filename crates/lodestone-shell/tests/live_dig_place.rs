@@ -39,7 +39,6 @@
 use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
-use lodestone::net::NetClient;
 use lodestone::sim::{SessionPhase, Sim};
 use lodestone_testsupport::RconClient;
 
@@ -84,7 +83,9 @@ fn dig_and_place_reach_the_server() {
 
     let mut sim = Sim::new(live_config());
     let demo_spawn = sim.player().position;
-    sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
+    // §4.1(c): `Sim::connect` threads the shell\'s one `World` into the
+    // client, so the session fold lands where the HUD accessors read.
+    sim.connect(HOST.into(), PORT, PROTOCOL);
 
     // Drive the real join path until the server has placed us and chunks stream.
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -114,7 +115,7 @@ fn dig_and_place_reach_the_server() {
     }
     assert_eq!(
         sim.session_phase(),
-        &SessionPhase::Connected,
+        SessionPhase::Connected,
         "expected a live Connected session before interacting"
     );
 
@@ -181,7 +182,7 @@ fn dig_and_place_reach_the_server() {
     );
     settle_target(&mut sim);
     let hit = sim
-        .target
+        .target()
         .expect("the wall block should be targeted after aiming at it");
     assert_eq!(
         hit.block, wall,
@@ -282,7 +283,7 @@ fn dig_and_place_reach_the_server() {
     );
     settle_target(&mut sim);
     let dig_hit = sim
-        .target
+        .target()
         .expect("the dig block should be targeted after aiming at it");
     assert_eq!(
         dig_hit.block, dig_block,
@@ -348,7 +349,7 @@ fn pump(sim: &mut Sim) {
 }
 
 /// Recompute the view target across a few frames so a freshly-streamed column is
-/// picked up before we read `sim.target`.
+/// picked up before we read `sim.target()`.
 fn settle_target(sim: &mut Sim) {
     for _ in 0..5 {
         pump(sim);
@@ -369,8 +370,10 @@ fn aim_at(sim: &mut Sim, point: [f64; 3]) {
     let dy = point[1] - eye[1];
     let dz = point[2] - eye[2];
     let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
-    sim.player_mut().yaw = (-dx).atan2(dz).to_degrees() as f32;
-    sim.player_mut().pitch = (-dy / len).asin().to_degrees() as f32;
+    sim.player_mut(|p| {
+        p.yaw = (-dx).atan2(dz).to_degrees() as f32;
+        p.pitch = (-dy / len).asin().to_degrees() as f32;
+    });
 }
 
 /// Whether the server reports `block` exactly at `pos` (`execute if block`).

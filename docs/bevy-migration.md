@@ -251,6 +251,52 @@ Two things are known-broken and must be avoided:
 
 ### 4.1 One World, one driver, a lock only for outsiders
 
+**(c) and (d) landed.** See [`world-unification.md`](./world-unification.md) for (c) and
+[`chunk-world-resource.md`](./chunk-world-resource.md) for (d). Six places where this section, or the
+brief handed to (c), was wrong:
+
+- **"a lock only for outsiders" is not what shipped, and could not be.** The heading and (c)'s own
+  text say the driver "owns the `World` outright" and the lock exists for bot code. But the *net
+  thread* writes the read-model, so the driver and the net thread both hold the handle and the
+  contention is **driver-vs-ingest**, not "bot-code-vs-driver". §2.5's promise that "a slow frame
+  delays *application*, never *receipt*" therefore does **not** hold for this lock:
+  `SharedState::apply` runs inline in the driver task *before* `events.send(event).await`, so blocking
+  on the `World` lock stops the socket being read too. What bounds it is that no guard spans a frame —
+  `Sim::step` takes ~15 short guards plus ~8 per catch-up tick, and the longest single hold is one
+  `run_schedule`. The worst case a packet waits is one guard hold, not one frame.
+- **The catch-up policy had to be *decided*, not merely unified.** There were two clamps, five ticks
+  and ten, and the tighter one silently shadowed the other. Ten won — vanilla's
+  `MAX_TICKS_PER_UPDATE`, the only one of the two with an external oracle — and §4.2's claim that
+  `GameTick`'s cap "comes from `docs/frame-pacing.md`" was true of the document and false of the code
+  until now. `app.rs`'s pacing assertion changed from `5` to `10`, and its three tick constants are
+  now *aliases* of `lodestone-ecs`'s rather than local re-derivations.
+- **The `PlayerSnapshot` vitals were not blocked only on (c).** Stages 2 and 3 both bounded that
+  residue by "the §4.1 `World` unification". The second blocker is `SharedState::apply`'s
+  **exclusive** routing switch: `Login`, `HealthChanged`, `Respawned` and `Death` each carry vitals
+  *and* `dimension`/`game_mode`/`alive`, and claiming one for a `NetIngest` system stops `Inner::apply`
+  seeing it — freezing `dimension` (the too-bright-Nether bug, by traversal) and `alive`. They are
+  **still duplicated**. Separately, `alive` and `Dead` are two different rules over the same events,
+  and one of them has a live-gate test switch on it (`recover_from_death`), so they must not be merged
+  either.
+- **One `World` forces one *entity*.** `spawn_local_player` and `spawn_session` both spawn a
+  `LocalPlayer`; in one `World` that is two players and every `With<LocalPlayer>` system silently sees
+  both. This section does not mention it and it is the first thing that breaks.
+- **One `World` does *not* mean one resource per type.** `tick_item_physics` and `player_physics`
+  both wanted `PlayerCollision`, and merging them would have merged two genuinely different decisions
+  (`Pending` holds the player but must not freeze items; the `collide_against_live_world` control must
+  not also disable item physics). `ItemCollision` is a deliberate second resource.
+- **`EntityInterpolator` still owns a `World`, on purpose.** Two `#[ignore]`d live GPU gates and ~25
+  unit tests drive it with no `Sim` at all. It runs the same systems off the same `FrameClock` type,
+  so it is a second *instance*, not a second mechanism — and `TickAccum`, the second accumulator
+  *type*, is deleted.
+
+Still open from Stage 1: ingest folds the server's report onto one entity per mob and
+`fold_snapshots` spawns a second, render-side entity per mob, with `EntitySnapshot` between them. (c)
+removed one of that collapse's two stated blockers (the borrowed-slice `'static` problem — the
+components are in the same `World` now); the other stands, since ingest runs in `NetIngest` (ordered
+*before* `GameTick`) while the interpolator's order is clocks → ticks → fold.
+
+
 ```
   net thread (tokio, owns the socket)          driver thread (winit, or a headless timer)
   ┌───────────────────────────────┐            ┌──────────────────────────────────────────┐

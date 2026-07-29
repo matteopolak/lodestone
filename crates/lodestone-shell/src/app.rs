@@ -33,7 +33,7 @@ use crate::menu::{SessionKind, UiState};
 use crate::net::NetClient;
 use crate::sim::Sim;
 use lodestone_assets::ResourceLocation;
-use lodestone_controller::Action;
+use lodestone_controller::{Action, InputState};
 use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_game::menu::Menu;
 use lodestone_game::recipe::RecipeBook;
@@ -121,16 +121,29 @@ fn hotbar_slot_for(code: KeyCode) -> Option<usize> {
 /// count and keeps the sub-tick residual, and `runTick` then simply **runs at
 /// most ten of them and drops the rest**. Missed real time is discarded, never
 /// replayed — which is the whole point.
-pub(crate) const MAX_TICKS_PER_UPDATE: u32 = 10;
+///
+/// **Aliased, not re-derived**, since §4.1(c): the number the simulation actually
+/// clamps to lives beside the one accumulator, and this file's copy of it was how
+/// the shell came to run five catch-up ticks while claiming ten.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const MAX_TICKS_PER_UPDATE: u32 = lodestone_ecs::MAX_CATCH_UP_TICKS;
 
-/// Length of one client tick in seconds (20 Hz), matching `sim`'s `TICK_DT`.
-pub(crate) const TICK_SECS: f64 = 1.0 / 20.0;
+/// Length of one client tick in seconds (20 Hz).
+///
+/// An alias, like [`MAX_TICKS_PER_UPDATE`]: the accumulator that counts in this
+/// period lives in `lodestone-ecs`, and a local copy is how the two clocks §4.1(c)
+/// unified came to disagree in the first place. Only this file's tests and doc
+/// links read it, hence the `dead_code` allowance in non-test builds.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const TICK_SECS: f64 = lodestone_ecs::TICK_PERIOD;
 
 /// The most real time one update may hand the simulation, in seconds.
 ///
 /// `10 × 0.05 = 0.5`. Anything beyond this is dropped rather than replayed, so
-/// alt-tabbing away for a minute costs ten ticks of catch-up, not 1200.
-pub(crate) const MAX_CATCHUP_SECS: f64 = MAX_TICKS_PER_UPDATE as f64 * TICK_SECS;
+/// alt-tabbing away for a minute costs ten ticks of catch-up, not 1200. The pacer
+/// clamps here and `FrameClock::begin_frame` clamps to the same constant, so the
+/// two agree by construction rather than by coincidence.
+pub(crate) const MAX_CATCHUP_SECS: f64 = lodestone_ecs::MAX_CATCH_UP_SECS;
 
 /// Presentation rate while the window is visible but **unfocused**. The
 /// simulation keeps running at the full 20 Hz either way; only presentation is
@@ -488,7 +501,7 @@ impl WindowApp {
             let _ = window.set_cursor_grab(CursorGrabMode::None);
             window.set_cursor_visible(true);
             self.grabbed = false;
-            self.sim.input_mut().release_all();
+            self.sim.input_mut(InputState::release_all);
             // Releasing the pointer also ends any held dig, so mining does not
             // continue while the player is in a menu or the window is unfocused.
             self.sim.end_attack();
@@ -563,14 +576,22 @@ impl WindowApp {
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
     fn connect_to(&mut self, host: String, port: u16) {
-        let net = NetClient::connect(host, port, self.config.protocol);
+        // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
+        // and attaches it, so the render sources below are installed from the
+        // already-attached client's shared handle rather than from a `NetClient`
+        // this function still owns. `shared_handle` survives the move either way
+        // (it is an `Arc<OnceLock<_>>` the net thread publishes into).
+        self.sim.connect(host, port, self.config.protocol);
+        let Some(net_handle) = self.sim.net().map(crate::net::NetClient::shared_handle) else {
+            return;
+        };
         if let Some(render) = self.render.as_mut() {
-            let handle = net.shared_handle();
+            let handle = net_handle.clone();
             // Terrain and mobs must read the same clock: `RenderState` folds this
             // factor into the fog lane both the model and entity passes sample.
             // Installing it for one and not the other makes mobs darker than the
             // blocks they stand on at midnight.
-            let clock = net.shared_handle();
+            let clock = net_handle;
             render.set_sky_darken_source(move || {
                 clock
                     .get()
@@ -585,7 +606,6 @@ impl WindowApp {
                 )
             });
         }
-        self.sim.attach_net(net);
         self.install_outline_source();
     }
 
@@ -921,7 +941,7 @@ impl WindowApp {
         // Extraction lives in `Sim` because resolving each particle's light
         // needs the world; doing it here would hand out two borrows of `Sim`.
         let particle_frame = self.sim.extract_particles(&camera);
-        render.prepare_particles(device, queue, self.sim.particle_instances(), &camera);
+        render.prepare_particles(device, queue, &self.sim.particle_instances(), &camera);
         render.update_animation(queue, self.sim.tick_count());
         // Route the progressive-mining crack overlay when a dig is in flight,
         // otherwise take the plain path (avoids building the crack buffer while
@@ -1075,7 +1095,7 @@ impl WindowApp {
         );
         // Status-effect overlay, composited over the HUD in its own Load pass.
         if let Some(effects) = self.effects.as_mut() {
-            effects.render(device, queue, frame.view(), self.sim.active_effects(), w, h);
+            effects.render(device, queue, frame.view(), &self.sim.active_effects(), w, h);
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
@@ -1224,11 +1244,15 @@ impl ApplicationHandler for WindowApp {
         // `WindowApp::begin_singleplayer`).
         if requested_a_connection(&self.config) {
             self.ui.begin(SessionKind::Multiplayer);
-            let net = NetClient::connect(
+            self.sim.connect(
                 self.config.host.clone(),
                 self.config.port,
                 self.config.protocol,
             );
+            let net = self
+                .sim
+                .net()
+                .expect("Sim::connect always leaves a client attached");
             // Install the entity light sampler now, at connect time, not after
             // login: `set_entity_light_source` wants a `'static` closure
             // installed *once*, and the shared handle it needs is available
@@ -1258,7 +1282,6 @@ impl ApplicationHandler for WindowApp {
                     feet.z.floor() as i32,
                 )
             });
-            self.sim.attach_net(net);
         }
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
         // already put us on. Nothing else to do.
@@ -1518,7 +1541,7 @@ impl ApplicationHandler for WindowApp {
                     {
                         // Open the chat prompt; `/` pre-fills the command prefix.
                         // Release held movement so we don't walk while typing.
-                        self.sim.input_mut().release_all();
+                        self.sim.input_mut(InputState::release_all);
                         let _ = self.chat_input.take();
                         if code == KeyCode::Slash {
                             self.chat_input.push_char('/');
@@ -1527,7 +1550,7 @@ impl ApplicationHandler for WindowApp {
                         self.tab_held = false;
                         self.set_grab(false);
                     } else if code == KeyCode::KeyE && pressed && self.ui.accepts_gameplay_input() {
-                        self.sim.input_mut().release_all();
+                        self.sim.input_mut(InputState::release_all);
                         self.ui.open_container();
                         self.tab_held = false;
                         self.set_grab(false);
@@ -1542,7 +1565,7 @@ impl ApplicationHandler for WindowApp {
                     } else if let Some(action) = action_for(code)
                         && self.ui.accepts_gameplay_input()
                     {
-                        self.sim.input_mut().set(action, pressed);
+                        self.sim.input_mut(|i| i.set(action, pressed));
                     }
                 }
             }
@@ -1566,7 +1589,8 @@ impl ApplicationHandler for WindowApp {
             && self.ui.is_playing()
             && self.grabbed
         {
-            self.sim.input_mut().add_mouse(delta.0 as f32, delta.1 as f32);
+            self.sim
+                .input_mut(|i| i.add_mouse(delta.0 as f32, delta.1 as f32));
         }
     }
 
@@ -1642,7 +1666,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
         .map_err(|e: TargetError| anyhow::anyhow!("headless acquire failed: {e}"))?;
     let entity_draws = sim.entity_draws();
     let _ = sim.extract_particles(&camera);
-    render.prepare_particles(device, queue, sim.particle_instances(), &camera);
+    render.prepare_particles(device, queue, &sim.particle_instances(), &camera);
     render.update_animation(queue, sim.tick_count());
     let stats = render.render(device, queue, frame.view(), &camera, outline, &entity_draws);
     let pixels = target.read_texels(device, queue);
@@ -1719,7 +1743,10 @@ fn run_connect(config: Config) -> anyhow::Result<()> {
         config.protocol,
         config.connect_for.as_secs()
     );
-    let net = NetClient::connect(config.host.clone(), config.port, config.protocol);
+    // `None`: `--connect` is the event-stream diagnostic. It has no `Sim`, no
+    // renderer and no `World` of its own, so the client mints one — there is
+    // nothing for it to be shared *with*.
+    let net = NetClient::connect(config.host.clone(), config.port, config.protocol, None);
     let deadline = Instant::now() + config.connect_for;
     let mut seen = 0usize;
 
@@ -1788,17 +1815,28 @@ mod tests {
             "catch-up must never exceed vanilla's cap, got {clamped}"
         );
 
-        // Measured: **5**, not 10. `Sim::step` applies its own, tighter
-        // `dt.clamp(0.0, 0.25)` (sim.rs:938) to the accumulator *before* the
-        // tick loop, so the shell's effective catch-up budget is half vanilla's
-        // 500 ms. That inner clamp predates this pacer (it is in the initial
-        // commit) and lives in a file this change does not own, so the number is
-        // pinned here rather than corrected: if anyone loosens or removes it,
-        // this fails and the two caps get reconciled deliberately.
+        // Measured: **10**. It used to be 5, because `Sim::step` applied its own,
+        // tighter `dt.clamp(0.0, 0.25)` to the accumulator before the tick loop and
+        // so silently halved this pacer's budget. That assertion said as much out
+        // loud ("if this changed, reconcile the two caps") and this is the change
+        // that reconciled them: §4.1(c) left one accumulator
+        // (`lodestone_ecs::FrameClock`) on one policy
+        // (`lodestone_ecs::MAX_CATCH_UP_SECS`), and the surviving number is
+        // vanilla's ten — the only one of the two candidates with an external
+        // oracle. See that constant's docs for the full argument.
         assert_eq!(
-            clamped, 5,
-            "sim.rs's inner 0.25 s clamp is expected to bind before app.rs's \
-             {MAX_CATCHUP_SECS} s one; if this changed, reconcile the two caps"
+            clamped,
+            u64::from(MAX_TICKS_PER_UPDATE),
+            "one clamp now: `FrameClock::begin_frame` banks at most \
+             {MAX_CATCHUP_SECS} s, so a maximal stall runs exactly vanilla's \
+             {MAX_TICKS_PER_UPDATE} catch-up ticks"
+        );
+        // …and the shell's clamp *is* the ECS's, not a second one that happens to
+        // agree. A copy that agreed today is how the five-vs-ten divergence
+        // started.
+        assert!(
+            (MAX_CATCHUP_SECS - lodestone_ecs::MAX_CATCH_UP_SECS).abs() < 1e-12,
+            "app.rs and lodestone-ecs must not carry two catch-up budgets"
         );
 
         // -- negative control ------------------------------------------------

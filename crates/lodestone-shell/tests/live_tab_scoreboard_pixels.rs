@@ -28,8 +28,8 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
 use lodestone::net::NetClient;
+use lodestone::hud::{DebugStats, HudFrame, HudRenderer};
 use lodestone::{scoreboard, tablist};
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::RconClient;
@@ -77,7 +77,7 @@ fn live_tab_list_and_scoreboard_reach_pixels() {
         ));
     }
 
-    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2);
+    let net = NetClient::connect(GAME_HOST.to_owned(), GAME_PORT, PROTOCOL_26_2, None);
 
     let deadline = Instant::now() + Duration::from_secs(25);
     let mut rows = Vec::new();

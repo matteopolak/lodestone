@@ -32,7 +32,7 @@ const PROTOCOL: i32 = 776;
 #[test]
 #[ignore = "requires the live lodestone-mc262 server on 127.0.0.1:25565 (`docker start lodestone-mc262`) and `--features live`"]
 fn live_sections_cross_the_shell_seam_as_real_terrain() {
-    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL);
+    let net = NetClient::connect(HOST.into(), PORT, PROTOCOL, None);
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let mut logged_in = false;

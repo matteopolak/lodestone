@@ -17,32 +17,49 @@
 //! `scoreboard` module is deleted; the shell no longer folds anything, it
 //! reads.
 //!
-//! # Two halves, and why the split is not arbitrary
+//! # Two halves, and what §4.1(c) did to the split
 //!
-//! | half | lives in which `World` | why |
-//! |---|---|---|
-//! | [`SessionScoreboard`] / [`SessionTabList`] / [`SessionBossBars`] / [`SessionMenus`] | the **net thread's** (`lodestone_client::state::SharedState`) | both the bot API *and* the shell HUD read them, and only the net thread's `World` is reachable from `ClientHandle` |
-//! | [`Phase`] / [`Vitals`] / [`Xp`] / [`TitleOverlay`] / [`ActionBarOverlay`] / [`HudEffects`] / [`RespawnCount`] / [`ServerEntityId`] | the **driver's** (`lodestone_shell::sim::Sim`) | nothing else folds them, and per-tick driver logic reads them |
+//! Stage 3 split this module in two because the process held three `World`s and a
+//! component in one is invisible to a system in another:
 //!
-//! That rule — *the fold lives where the readers are shared; a fold with a
-//! single driver-side reader stays on the driver* — is what keeps this stage
-//! from trading one duplicate for another. A component in one `World` cannot be
-//! read by a system in the other, and the workspace has three `World`s until
-//! `docs/bevy-migration.md` §4.1 unifies them, so "put everything in one place"
-//! is not yet an option that exists.
+//! | half | lived in which `World` |
+//! |---|---|
+//! | [`SessionScoreboard`] / [`SessionTabList`] / [`SessionBossBars`] / [`SessionMenus`] | the **net thread's** — both the bot API and the shell HUD read them, and only that `World` was reachable from `ClientHandle` |
+//! | [`Phase`] / [`Vitals`] / [`Xp`] / [`TitleOverlay`] / [`ActionBarOverlay`] / [`HudEffects`] / [`RespawnCount`] / [`ServerEntityId`] | the **driver's** — nothing else folds them, and per-tick driver logic reads them |
 //!
-//! # What deliberately did **not** collapse
+//! **There is one `World` now** (§4.1(c), `docs/world-unification.md`), and in the
+//! shell both halves hang off the *same* entity: `Sim::build` calls
+//! `spawn_local_player`, then [`insert_hud_components`], then
+//! [`insert_session_components`] on one [`LocalPlayer`]. That is not optional —
+//! [`spawn_session`] also marks `LocalPlayer`, so two entities in one `World` would
+//! give every `With<LocalPlayer>` system two players.
+//!
+//! The two *plugins* stay separate anyway, and the reason is no longer the `World`
+//! boundary: [`SessionPlugin`] is the fold and [`SessionHudPlugin`] is the 20 Hz
+//! ageing tick, and a harness that wants one without the other must be able to say
+//! so. `lodestone_client::state::SharedState::default` (a bot with no driver) still
+//! installs only [`SessionPlugin`], on an entity of its own.
+//!
+//! # What deliberately did **not** collapse, and why it survived §4.1(c)
 //!
 //! `lodestone_client::state::PlayerSnapshot`'s vitals (`health`, `food`,
 //! `saturation`, `xp_*`, `entity_id`, `alive`) still duplicate [`Vitals`] /
-//! [`Xp`] / [`ServerEntityId`]. That is the same ruling Stage 2 made for
-//! `PlayerSnapshot` as a whole, and it holds for a concrete reason: the
-//! driver-side copies are read by *systems and per-tick logic* (`Dead` gates
-//! `MovementIntent`; `ServerEntityId` filters which entity's mob effects reach
-//! `PlayerState::effects`), so they cannot live in the net thread's `World`
-//! without either a per-tick mirror — a second source of truth by definition —
-//! or taking the net thread's lock inside the physics tick. See the Stage 3
-//! doc for the third implementation this leaves standing
+//! [`Xp`] / [`ServerEntityId`]. Stage 3 recorded the reason as the `World` split
+//! and bounded the residue by §4.1 — **and that was not the whole story.** One
+//! `World` has shipped and the duplication is still here, because
+//! `lodestone_client::state::SharedState::apply` routes each event to **exactly
+//! one** of two folds, and the events carrying vitals also carry
+//! `dimension`/`game_mode`/`alive`: claiming `Login`/`HealthChanged`/`Respawned`/
+//! `Death` for a system here would stop the scalar fold seeing them and freeze
+//! `dimension` (the too-bright-Nether bug, reached by traversal).
+//! `docs/world-unification.md` has the table.
+//!
+//! Note also that `alive` and the shell's `Dead` marker are **not** the same fact:
+//! `Dead` is inserted only on the death packet, removed only on respawn, and gated
+//! on a live-gate test switch (`Sim.recover_from_death`), while `alive` also tracks
+//! `health > 0.0`. Merging them would quietly delete a negative control.
+//!
+//! See the Stage 3 doc for the third implementation this leaves standing
 //! (`lodestone_game::player_state::HudState`) and what blocks adopting it.
 
 use bevy_app::{App, Plugin};

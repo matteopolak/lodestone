@@ -44,7 +44,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
-use lodestone::net::NetClient;
 use lodestone::sim::Sim;
 use lodestone_controller::Action;
 use lodestone_testsupport::RconClient;
@@ -216,7 +215,9 @@ fn join_and_settle(collide_live: bool) -> (Sim, Settle) {
     let mut sim = Sim::new(live_config());
     sim.collide_against_live_world = collide_live;
     let demo_spawn = sim.player().position;
-    sim.attach_net(NetClient::connect(HOST.into(), PORT, PROTOCOL));
+    // §4.1(c): `Sim::connect` threads the shell\'s one `World` into the
+    // client, so the session fold lands where the HUD accessors read.
+    sim.connect(HOST.into(), PORT, PROTOCOL);
 
     // Phase 1: drive until the server has placed us (teleport moved us off the
     // demo spawn) and chunks are streaming.
@@ -339,11 +340,11 @@ fn observe_jump(sim: &mut Sim) -> JumpArc {
     // Vanilla jump is edge-triggered on a grounded tick: hold Space for exactly
     // one tick, then release so the arc is a single clean parabola rather than a
     // repeated bunny-hop.
-    sim.input_mut().set(Action::Jump, true);
+    sim.input_mut(|i| i.set(Action::Jump, true));
     sim.step(1.0 / 20.0);
     let _ = sim.drain_meshes();
     let _ = sim.drain_removals();
-    sim.input_mut().set(Action::Jump, false);
+    sim.input_mut(|i| i.set(Action::Jump, false));
 
     let mut apex_y = sim.player().position.y.max(ground_y);
     let mut min_y = sim.player().position.y.min(ground_y);

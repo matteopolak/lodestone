@@ -173,6 +173,11 @@ rodio-backed engine would be `!Send` is wrong here. **`NetClient` is the only
 
 ### Was §4.1(c) required?
 
+> **(c) has since landed** — [`world-unification.md`](./world-unification.md).
+> `entity_interp` is deleted, `ecs` is the shared `EcsHandle`, and `Sim` is at 14
+> fields. `net` is still the one genuinely blocked survivor.
+
+
 **For deleting `Sim` outright: yes.** Not because of the state — thirteen of the
 fifteen remaining fields would move without it — but because `Sim` owns the driver's
 `World` *and* the interpolator's, and "delete `Sim`" means one owner drives one
@@ -186,6 +191,14 @@ with the three `World`s exactly where Stage 4 left them.
 ---
 
 ## Two `GameTick` schedules on two clocks
+
+> **Resolved by §4.1(c).** There is one `World`, one `GameTick`, one accumulator
+> (`FrameClock`) and one catch-up policy (ten ticks — vanilla's, not the `0.25 s`
+> this section measured). `TickAccum` is deleted and `end_session` resets the one
+> accumulator. Everything below is the *measurement* that forced the decision, kept
+> because the mechanism (a clamp mismatch, not float width) is the interesting part;
+> see [`world-unification.md`](./world-unification.md) for what shipped, including
+> which clamp won and why.
 
 Investigated as part of this stage. **There are two independent 20 Hz accumulators
 driving two separate `GameTick` schedules**, and they are not in lockstep.
