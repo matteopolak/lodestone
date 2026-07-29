@@ -54,6 +54,13 @@ pub(crate) mod generated_attribute_types;
 #[path = "generated/hardness.rs"]
 pub(crate) mod generated_hardness;
 
+/// Generated per-block-state `legacySolid`/`blocksMotion` bitsets (raw rodata
+/// statics) — the flag `calculateSolid` caches, which is **not** derivable from
+/// the collision census because 237 blocks force it on and 8 force it off. Use
+/// the [`block_solidity`] module for the lookup API; this holds only the arrays.
+#[path = "generated/block_solidity.rs"]
+pub(crate) mod generated_block_solidity;
+
 /// Generated `minecraft:block` registry-order tables (raw rodata statics):
 /// registry id → name, and block-state id → registry id. Two id spaces the wire
 /// uses interchangeably that are *not* the same order — see the module docs.
@@ -113,6 +120,7 @@ pub(crate) mod generated_mob_effects;
 
 pub mod adapter;
 pub mod attribute_types;
+pub mod block_solidity;
 pub mod block_states;
 pub mod chunk_batch;
 pub mod collision_shapes;

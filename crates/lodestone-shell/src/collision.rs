@@ -96,7 +96,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use lodestone_model::{BlockAabb, VersionAdapter};
+use lodestone_model::{
+    BlockAabb, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter, block_physics,
+};
 use lodestone_physics::{Aabb, CollisionView, FluidCell, HorizontalDir, Vec3d};
 use lodestone_render::{BlockAtlas, BlockClassifier, FluidKind};
 use lodestone_world::{ChunkPos, ChunkSection, World};
@@ -149,6 +151,14 @@ trait BlockView {
     /// property (0.6 friction, 1.0 factors, no bounce, not climbable) — the same
     /// value the overwhelming majority of blocks have.
     fn name_of(&self, state: u32) -> Option<&'static str>;
+
+    /// Vanilla `BlockState.blocksMotion()` for a state, or `None` when this
+    /// adapter has no census for it — in which case [`blocks_motion_at`] falls
+    /// back to deriving it from the shape, which is wrong for 202 blocks. See
+    /// that function's docs; this must never be synthesised from
+    /// [`shape_of`](Self::shape_of) *inside* an adapter, or the fallback stops
+    /// being distinguishable from a real answer.
+    fn blocks_motion_of(&self, state: u32) -> Option<bool>;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,98 +263,36 @@ fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
 // Name-keyed physics constants
 // ---------------------------------------------------------------------------
 //
-// These six values are `BlockBehaviour.Properties` fields and tag memberships,
-// not geometry, so no collision census can carry them — they are keyed by block
-// *name*, which is why `VersionAdapter::block_name` exists. Every value below was
-// read out of the decompiled 26.2 `Blocks.java` / `data/minecraft/tags/block/*`,
-// with the line cited, rather than recalled.
+// Six of `CollisionView`'s answers — friction, speed factor, jump factor, bounce
+// restitution, stuck multiplier and climbable — are `BlockBehaviour.Properties`
+// fields and tag memberships rather than geometry, so no collision census can
+// carry them. They are keyed by block *name*, which is why
+// `VersionAdapter::block_name` exists.
+//
+// **They no longer live here.** They used to be six private functions in this
+// module, hand-transcribed from the decompiled `Blocks.java`. Two things were
+// wrong with that: nothing outside the code under test pinned the numbers (every
+// other block table in this repo is dumped from the real server), and a
+// third-party plugin — for which "how expensive is it to walk over this block" is
+// the whole of a pathfinder's cost function — structurally could not reach a
+// private item in the client shell. Both are fixed by
+// `lodestone_model::block_physics`, a `pub fn` in the version-free model crate,
+// anchored to a JVM dump of all 1,196 registered blocks by
+// `crates/protocol/v770/tests/block_physics.rs`. See
+// `docs/block-physics-constants.md`.
+//
+// The lookup is done once per query rather than field by field: `block_physics`
+// returns the whole `BlockPhysics` by value (six words, no allocation), so
+// `friction_at` and friends each pay one name match.
 
-/// `Block.getFriction` — `BlockBehaviour.Properties.friction`, default `0.6`.
+/// The name-keyed constants for the block at a cell, or vanilla's defaults when
+/// the adapter cannot resolve a name for the state.
 ///
-/// `Blocks.java`: ice/packed ice/frosted ice `0.98` (1950, 3021, 3732), blue ice
-/// `0.989` (4227), slime block `0.8` (2926). Nothing else in 26.2 sets it.
-fn friction_for(name: &str) -> f32 {
-    match name {
-        "minecraft:ice" | "minecraft:packed_ice" | "minecraft:frosted_ice" => 0.98,
-        "minecraft:blue_ice" => 0.989,
-        "minecraft:slime_block" => 0.8,
-        _ => 0.6,
-    }
-}
-
-/// `Block.getSpeedFactor` — default `1.0`. `Blocks.java`: soul sand `0.4` (2024),
-/// honey block `0.4` (4843). Nothing else in 26.2 sets it.
-fn speed_factor_for(name: &str) -> f32 {
-    match name {
-        "minecraft:soul_sand" | "minecraft:honey_block" => 0.4,
-        _ => 1.0,
-    }
-}
-
-/// `Block.getJumpFactor` — default `1.0`. `Blocks.java`: honey block `0.5`
-/// (4843), the only block in 26.2 that sets it.
-fn jump_factor_for(name: &str) -> f32 {
-    match name {
-        "minecraft:honey_block" => 0.5,
-        _ => 1.0,
-    }
-}
-
-/// `Block.getBounceRestitution`, already net of `BlockTags.SUPPRESSES_BOUNCE`
-/// — default `0.0`. `Blocks.java`: slime block `1.0` (2926), every bed `0.75`
-/// (684, via the `BED` colour collection).
-///
-/// The suppression tag needs no subtraction here: its sole member is
-/// `minecraft:honey_block` (`tags/block/suppresses_bounce.json`), which sets no
-/// restitution in the first place, so tag-aware and tag-blind agree on every
-/// block in 26.2. Should a future version add a bouncy suppressor, this is where
-/// it breaks — and it will break silently, so re-read the tag on a data bump.
-///
-/// All 16 `*_bed` states are matched by suffix; `block_states.rs` confirms
-/// exactly 16 names end in `_bed` in 26.2 and all of them are beds.
-fn bounce_for(name: &str) -> f32 {
-    match name {
-        "minecraft:slime_block" => 1.0,
-        n if n.ends_with("_bed") => 0.75,
-        _ => 0.0,
-    }
-}
-
-/// `Block.entityInside` → `Entity.makeStuckInBlock` — the per-axis speed
-/// multiplier of the three blocks that grab you. `None` for everything else.
-///
-/// `WebBlock.java:33` `(0.25, 0.05, 0.25)`, `PowderSnowBlock.java:66`
-/// `(0.9, 1.5, 0.9)`, `SweetBerryBushBlock.java:86` `(0.8, 0.75, 0.8)`. Note
-/// `WebBlock` gives a `WEAVING` mob `(0.5, 0.25, 0.5)` instead; that is a
-/// per-entity override which `CollisionView` deliberately does not model here.
-fn stuck_for(name: &str) -> Option<Vec3d> {
-    match name {
-        "minecraft:cobweb" => Some(Vec3d::new(0.25, 0.05, 0.25)),
-        "minecraft:powder_snow" => Some(Vec3d::new(0.9, 1.5, 0.9)),
-        "minecraft:sweet_berry_bush" => Some(Vec3d::new(0.8, 0.75, 0.8)),
-        _ => None,
-    }
-}
-
-/// `BlockTags.CLIMBABLE`, verbatim from `data/minecraft/tags/block/climbable.json`
-/// in the 26.2 jar — all nine entries, no guesses.
-///
-/// `cave_vines`/`cave_vines_plant` are in the tag even though they are the glow
-/// berry vine, and `scaffolding` is in it but holds differently when sneaking (a
-/// distinction [`CollisionView::is_climbable`] does not carry).
-fn is_climbable_name(name: &str) -> bool {
-    matches!(
-        name,
-        "minecraft:ladder"
-            | "minecraft:vine"
-            | "minecraft:scaffolding"
-            | "minecraft:weeping_vines"
-            | "minecraft:weeping_vines_plant"
-            | "minecraft:twisting_vines"
-            | "minecraft:twisting_vines_plant"
-            | "minecraft:cave_vines"
-            | "minecraft:cave_vines_plant"
-    )
+/// `DEFAULT_BLOCK_PHYSICS` is the right answer for an unresolvable name rather
+/// than a fudge: it is what 1,166 of 26.2's 1,196 blocks report.
+fn physics_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> BlockPhysics {
+    v.name_of(v.state_at(x, y, z))
+        .map_or(DEFAULT_BLOCK_PHYSICS, block_physics)
 }
 
 // ---------------------------------------------------------------------------
@@ -360,28 +308,29 @@ fn top_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f64 {
 }
 
 fn friction_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
-    v.name_of(v.state_at(x, y, z)).map_or(0.6, friction_for)
+    physics_at(v, x, y, z).friction
 }
 
 fn speed_factor_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
-    v.name_of(v.state_at(x, y, z)).map_or(1.0, speed_factor_for)
+    physics_at(v, x, y, z).speed_factor
 }
 
 fn jump_factor_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
-    v.name_of(v.state_at(x, y, z)).map_or(1.0, jump_factor_for)
+    physics_at(v, x, y, z).jump_factor
 }
 
 fn bounce_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> f32 {
-    v.name_of(v.state_at(x, y, z)).map_or(0.0, bounce_for)
+    physics_at(v, x, y, z).bounce_restitution
 }
 
 fn stuck_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<Vec3d> {
-    v.name_of(v.state_at(x, y, z)).and_then(stuck_for)
+    physics_at(v, x, y, z)
+        .stuck_multiplier
+        .map(|[x, y, z]| Vec3d::new(x, y, z))
 }
 
 fn climbable_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
-    v.name_of(v.state_at(x, y, z))
-        .is_some_and(is_climbable_name)
+    physics_at(v, x, y, z).climbable
 }
 
 fn is_water_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
@@ -396,35 +345,51 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
     v.fluid_cell_of(v.state_at(x, y, z))
 }
 
-/// `BlockState.blocksMotion()` = `block != COBWEB && block != BAMBOO_SAPLING &&
-/// isSolid()`, where `isSolid` is the cached `legacySolid` flag
-/// (`BlockBehaviour.java:542-549`).
+/// `BlockState.blocksMotion()`, from the version crate's per-state census
+/// ([`VersionAdapter::block_blocks_motion`]) when there is one, and from
+/// [`shape_is_solid`] only when there is not.
 ///
-/// # What this gets wrong, and why it is not silent
+/// # Why the census had to exist
 ///
-/// `legacySolid` is [`shape_is_solid`] *unless* the block overrides it with
-/// `forceSolidOn()` / `forceSolidOff()`, and 26.2 has **143 blocks with
-/// `forceSolidOn` and 8 with `forceSolidOff`** — no committed table in this repo
-/// carries that flag, so those 151 are answered from geometry and some of them
-/// are wrong:
+/// `blocksMotion()` is `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`,
+/// and `isSolid()` reads the cached `legacySolid` flag
+/// (`BlockBehaviour.java:541-550`) that `calculateSolid()`
+/// (`BlockBehaviour.java:484-504`) computes once per state. Only the *last* of
+/// that method's branches is geometry — the first three are
+/// `Properties.forceSolidOn` (237 blocks in 26.2), `forceSolidOff` (8), and a
+/// null shape cache for the 23 `dynamicShape()` blocks. None of the three has a
+/// getter, appears in `blocks.json`, or is recoverable from a shape.
 ///
-/// * `forceSolidOn` with an empty or thin collision shape reads here as **not**
-///   blocking motion when vanilla says it does: every sign and hanging sign,
-///   every pressure plate, an *open* fence gate, lanterns, chains, cobweb,
-///   bamboo, cake, bell, dead corals, turtle egg.
-/// * `forceSolidOff` reads as blocking when vanilla says it does not: ladder
-///   (which sits exactly on the `0.7291666…` threshold — that is why the
-///   override exists), snow, azalea, big dripleaf, chorus plant/flower, end rod.
-///   Ladder is hard-coded off below because it is the one a player meets
-///   constantly.
+/// This function used to be the geometry branch plus a hard-coded ladder
+/// exception, and that was **wrong for 2,618 of 32,366 states across 202
+/// blocks** — measured in `crates/protocol/v770/tests/block_physics.rs`, not
+/// estimated. 2,497 of those states are cells vanilla stops you in and we let you
+/// walk through: every sign, hanging sign, banner, wall, pressure plate, chain,
+/// lantern, lightning rod, dead coral, *open* fence gate, cake, bell, conduit,
+/// amethyst cluster and turtle egg. The other 121 are the reverse (azalea,
+/// flowering azalea, big dripleaf, chorus plant/flower, end rod, snow,
+/// scaffolding).
 ///
-/// The blast radius is small and known: `blocks_motion` has exactly one consumer,
-/// [`lodestone_physics::get_flow`]'s empty-neighbour branch, which decides whether
-/// a fluid spills over an edge. Nothing about the player's own movement reads it.
-/// Closing the gap properly means a `legacySolid` (or `forceSolid*`) column beside
-/// the collision census in the version crate.
+/// The blast radius of getting it wrong is still small and still known —
+/// `blocks_motion` has exactly one consumer, [`lodestone_physics::get_flow`]'s
+/// empty-neighbour branch, which decides whether a fluid spills over an edge, and
+/// nothing about the player's own movement reads it. This was correctness debt,
+/// not a live bug; it is repaid so that the *next* consumer (a pathfinder asking
+/// "can I stand here") inherits a right answer instead of a plausible one.
+///
+/// # The fallback is loud about being wrong
+///
+/// With no version data the census is unreachable and this degrades to the old
+/// geometry derivation, keeping the same three name exclusions so a ladder still
+/// reads correctly. That path is reached in exactly the cases
+/// [`LiveCollision::has_real_shapes`] already reports (`--features live`
+/// missing), and by [`WorldCollision`], whose ten-block demo palette is entirely
+/// full cubes and air — the one world where the derivation is exact.
 fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     let state = v.state_at(x, y, z);
+    if let Some(real) = v.blocks_motion_of(state) {
+        return real;
+    }
     match v.name_of(state) {
         // The two explicit exclusions in `blocksMotion` itself, plus the one
         // `forceSolidOff` block a player touches every session.
@@ -575,6 +540,16 @@ impl BlockView for WorldCollision<'_> {
 
     fn name_of(&self, state: u32) -> Option<&'static str> {
         demo_block_name(state)
+    }
+
+    /// **Always `None`.** Demo-palette ids are not vanilla block-state ids, so no
+    /// version census can be indexed by them. The shape derivation
+    /// [`blocks_motion_at`] falls back to is *exact* for this world — every block
+    /// in the palette is either a full cube or air — so unlike the live view there
+    /// is nothing lost, and mapping the ten ids onto vanilla state ids purely to
+    /// reach the census would be inventing a translation that has no other user.
+    fn blocks_motion_of(&self, _state: u32) -> Option<bool> {
+        None
     }
 }
 
@@ -1060,6 +1035,15 @@ impl BlockView for LiveCollision {
     fn name_of(&self, state: u32) -> Option<&'static str> {
         self.version.as_ref()?.block_name(state)
     }
+
+    /// One bit out of the version crate's `legacySolid`/`blocksMotion` bitset —
+    /// the flag `calculateSolid` caches, which the collision census cannot
+    /// reproduce (237 blocks force it on, 8 force it off, 23 have no shape cache
+    /// at all). `None` only with no version data, or for a state id the census
+    /// does not know.
+    fn blocks_motion_of(&self, state: u32) -> Option<bool> {
+        self.version.as_ref()?.block_blocks_motion(state)
+    }
 }
 
 impl CollisionView for LiveCollision {
@@ -1243,55 +1227,82 @@ mod tests {
         );
     }
 
-    /// The name-keyed tables, against the values read out of the decompiled 26.2
-    /// jar with line numbers (see each function's docs). The **controls** are the
-    /// `_` arms: a block that sets none of these must come back with vanilla's
-    /// default, or a table that returned "slippery" for everything would satisfy
-    /// every positive assertion here.
+    /// The name-keyed constants now come from `lodestone_model::block_physics`,
+    /// which is anchored to a dump of all 1,196 blocks the real 26.2 server
+    /// registers (`crates/protocol/v770/tests/block_physics.rs`). This test is not
+    /// a second copy of that gate — it is the **shell's** contract on the table:
+    /// the rows this module's `*_at` helpers depend on, plus the fallback
+    /// behaviour that is this module's own (`DEFAULT_BLOCK_PHYSICS` for an
+    /// unresolvable name).
+    ///
+    /// The **controls** are the default arms: a table that returned "slippery" for
+    /// everything would satisfy every positive assertion here.
     #[test]
-    fn name_keyed_constants_match_the_decompiled_values() {
-        assert_eq!(friction_for("minecraft:ice"), 0.98);
-        assert_eq!(friction_for("minecraft:packed_ice"), 0.98);
-        assert_eq!(friction_for("minecraft:frosted_ice"), 0.98);
-        assert_eq!(friction_for("minecraft:blue_ice"), 0.989);
-        assert_eq!(friction_for("minecraft:slime_block"), 0.8);
-        assert_eq!(friction_for("minecraft:stone"), 0.6, "control: default");
-        assert_eq!(friction_for("minecraft:ice_bricks_that_do_not_exist"), 0.6);
-
-        assert_eq!(speed_factor_for("minecraft:soul_sand"), 0.4);
-        assert_eq!(speed_factor_for("minecraft:honey_block"), 0.4);
-        assert_eq!(speed_factor_for("minecraft:sand"), 1.0, "control: default");
-
-        assert_eq!(jump_factor_for("minecraft:honey_block"), 0.5);
+    fn name_keyed_constants_come_from_the_shared_model_table() {
+        assert_eq!(block_physics("minecraft:ice").friction, 0.98);
+        assert_eq!(block_physics("minecraft:packed_ice").friction, 0.98);
+        assert_eq!(block_physics("minecraft:frosted_ice").friction, 0.98);
+        assert_eq!(block_physics("minecraft:blue_ice").friction, 0.989);
+        assert_eq!(block_physics("minecraft:slime_block").friction, 0.8);
         assert_eq!(
-            jump_factor_for("minecraft:soul_sand"),
+            block_physics("minecraft:stone").friction,
+            0.6,
+            "control: default"
+        );
+        assert_eq!(
+            block_physics("minecraft:ice_bricks_that_do_not_exist").friction,
+            0.6
+        );
+
+        assert_eq!(block_physics("minecraft:soul_sand").speed_factor, 0.4);
+        assert_eq!(block_physics("minecraft:honey_block").speed_factor, 0.4);
+        assert_eq!(
+            block_physics("minecraft:sand").speed_factor,
+            1.0,
+            "control: default"
+        );
+
+        assert_eq!(block_physics("minecraft:honey_block").jump_factor, 0.5);
+        assert_eq!(
+            block_physics("minecraft:soul_sand").jump_factor,
             1.0,
             "control: soul sand slows you but does not shorten your jump"
         );
 
-        assert_eq!(bounce_for("minecraft:slime_block"), 1.0);
-        assert_eq!(bounce_for("minecraft:white_bed"), 0.75);
-        assert_eq!(bounce_for("minecraft:black_bed"), 0.75);
-        assert_eq!(bounce_for("minecraft:stone"), 0.0, "control: default");
         assert_eq!(
-            bounce_for("minecraft:honey_block"),
+            block_physics("minecraft:slime_block").bounce_restitution,
+            1.0
+        );
+        assert_eq!(block_physics("minecraft:white_bed").bounce_restitution, 0.75);
+        assert_eq!(block_physics("minecraft:black_bed").bounce_restitution, 0.75);
+        assert_eq!(
+            block_physics("minecraft:stone").bounce_restitution,
+            0.0,
+            "control: default"
+        );
+        assert_eq!(
+            block_physics("minecraft:honey_block").bounce_restitution,
             0.0,
             "control: the only SUPPRESSES_BOUNCE member sets no restitution anyway"
         );
 
         assert_eq!(
-            stuck_for("minecraft:cobweb"),
-            Some(Vec3d::new(0.25, 0.05, 0.25))
+            block_physics("minecraft:cobweb").stuck_multiplier,
+            Some([0.25, 0.05, 0.25])
         );
         assert_eq!(
-            stuck_for("minecraft:powder_snow"),
-            Some(Vec3d::new(0.9, 1.5, 0.9))
+            block_physics("minecraft:powder_snow").stuck_multiplier,
+            Some([0.9, 1.5, 0.9])
         );
         assert_eq!(
-            stuck_for("minecraft:sweet_berry_bush"),
-            Some(Vec3d::new(0.8, 0.75, 0.8))
+            block_physics("minecraft:sweet_berry_bush").stuck_multiplier,
+            Some([0.8, 0.75, 0.8])
         );
-        assert_eq!(stuck_for("minecraft:stone"), None, "control: default");
+        assert_eq!(
+            block_physics("minecraft:stone").stuck_multiplier,
+            None,
+            "control: default"
+        );
 
         for name in [
             "minecraft:ladder",
@@ -1304,7 +1315,10 @@ mod tests {
             "minecraft:cave_vines",
             "minecraft:cave_vines_plant",
         ] {
-            assert!(is_climbable_name(name), "{name} is in BlockTags.CLIMBABLE");
+            assert!(
+                block_physics(name).climbable,
+                "{name} is in BlockTags.CLIMBABLE"
+            );
         }
         // Controls: near-misses that are *not* in the tag.
         for name in [
@@ -1314,8 +1328,53 @@ mod tests {
             "minecraft:stone",
         ] {
             assert!(
-                !is_climbable_name(name),
+                !block_physics(name).climbable,
                 "{name} is NOT in BlockTags.CLIMBABLE"
+            );
+        }
+
+        // This module's own contract: an unresolvable name is vanilla's default,
+        // *not* a panic and not some neighbouring row.
+        assert_eq!(block_physics("not even an identifier"), DEFAULT_BLOCK_PHYSICS);
+    }
+
+    /// The name-keyed constants must reach [`CollisionView`] **through both
+    /// adapters**, not merely exist as a shared function. `WorldCollision` is the
+    /// cheap half to check (no atlas, no version data), and it is the half that
+    /// would silently stub out if someone gave the two adapters separate bodies —
+    /// the failure mode this module's structure exists to prevent.
+    ///
+    /// The demo palette maps onto real vanilla names, all of which take the
+    /// default row, so the assertions are the defaults; the control is that a
+    /// *name* the mapping does not cover reads as air rather than as a block.
+    #[test]
+    fn the_demo_view_reads_the_shared_table_rather_than_a_stub() {
+        let world = crate::worldgen::generate(0);
+        let view = WorldCollision::new(&world);
+        let s = crate::worldgen::surface_height(0, 0);
+
+        assert_eq!(view.friction(0, s, 0), 0.6);
+        assert_eq!(view.speed_factor(0, s, 0), 1.0);
+        assert_eq!(view.jump_factor(0, s, 0), 1.0);
+        assert_eq!(view.bounce_restitution(0, s, 0), 0.0);
+        assert_eq!(view.stuck_multiplier(0, s, 0), None);
+        assert!(!view.is_climbable(0, s, 0));
+        assert!(
+            view.blocks_motion(0, s, 0),
+            "the demo palette is full cubes, so the shape derivation is exact here"
+        );
+        assert!(
+            !view.blocks_motion(0, s + 5, 0),
+            "control: air above the surface blocks nothing"
+        );
+
+        // Every demo id must map to a name the shared table recognises as a real
+        // block, or the mapping has rotted and both adapters silently default.
+        for state in [id::STONE, id::DIRT, id::GRASS, id::SAND, id::WATER] {
+            let name = demo_block_name(state).expect("demo id maps to a vanilla name");
+            assert!(
+                name.starts_with("minecraft:"),
+                "demo id {state} maps to {name:?}, which is not a vanilla identifier"
             );
         }
     }
@@ -1617,6 +1676,54 @@ mod tests {
             stone.blocks_motion(0, 4, 0),
             "control: stone does block motion"
         );
+
+        // **The routing gate for the `blocksMotion` census.** These four are
+        // `forceSolidOn` blocks whose collision shape is far too thin for
+        // `calculateSolid`'s geometry branch, so they are the states that can only
+        // be right if `VersionAdapter::block_blocks_motion` is actually being
+        // consulted. A view still deriving from the shape answers `false` for all
+        // four and passes every other assertion in this test.
+        for name in [
+            "minecraft:oak_sign[rotation=0,waterlogged=false]",
+            "minecraft:stone_pressure_plate[powered=false]",
+            "minecraft:lantern[hanging=false,waterlogged=false]",
+            "minecraft:turtle_egg[eggs=1,hatch=0]",
+        ] {
+            let id = state_id(&atlas, name);
+            let view = live_column(Arc::clone(&atlas), id, 4..=4);
+            assert!(
+                view.blocks_motion(0, 4, 0),
+                "{name} is forceSolidOn in vanilla and must block motion — if this \
+                 fails, the census is not reaching the view and the shape \
+                 derivation is answering instead"
+            );
+            // The control that proves the detector fires: the derivation this
+            // replaced, on the same state, gives the *wrong* answer.
+            assert!(
+                !shape_is_solid(view.shape_of(id)),
+                "control did not fire: {name}'s shape must be too thin for \
+                 calculateSolid's geometry branch"
+            );
+        }
+        // …and the reverse direction, so the census is not simply answering "true"
+        // for everything the derivation called false.
+        for name in [
+            "minecraft:azalea",
+            "minecraft:big_dripleaf[facing=north,tilt=none,waterlogged=false]",
+            "minecraft:scaffolding[bottom=false,distance=0,waterlogged=false]",
+        ] {
+            let id = state_id(&atlas, name);
+            let view = live_column(Arc::clone(&atlas), id, 4..=4);
+            assert!(
+                !view.blocks_motion(0, 4, 0),
+                "{name} does not block motion in vanilla"
+            );
+            assert!(
+                shape_is_solid(view.shape_of(id)),
+                "control did not fire: {name}'s shape must look solid to the \
+                 geometry branch"
+            );
+        }
 
         // `fluid_at` now reports the level, not just presence: a source is amount
         // 8, and level 3 flowing water is amount 5 (`8 - level`).

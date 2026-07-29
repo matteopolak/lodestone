@@ -3,6 +3,10 @@
 Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 (architecture and rationale) and [`HANDOFF.md`](../HANDOFF.md) (deferred work).
 
+- [Block physics constants](./block-physics-constants.md) — friction, speed and jump
+  factor, bounce, stuck multiplier, climbable and `blocksMotion`: the block facts that
+  are *not* geometry, where they live, why they sit outside the version seam, and the
+  measured 2,618 states the old shape-derived `blocksMotion` got wrong.
 - [Fluid classification](./fluid-classification.md) — the one answer to "does this
   block state carry water?", shared by the mesher and by physics (swimming, fog,
   overlay, ambient sounds) — and why that is a different question from "can I break
