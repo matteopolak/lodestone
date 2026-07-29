@@ -69,6 +69,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `bevy_ecs` so plugins have native-equivalent power: what azalea actually does,
   the two sources of truth that already exist, what must stay a plain library, and
   why a native plugin is not a substitute for the sandboxed WASM host.
+- [Plugin API](./plugin-api.md) — the plugin surface as a specification: what a
+  bevy plugin can read, write, schedule and intercept today versus what Stages
+  2–6 must still deliver, why a compiled-in plugin has no sandbox, why a native
+  plugin and the WASM host are not substitutes, and the gap list — four ABI
+  pieces (`TickSet::Intent`, the `SendAction`/`RawPacket` messages, an `Extract`
+  debug-geometry channel, and reachable block-physics constants) that no stage
+  currently claims.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded
