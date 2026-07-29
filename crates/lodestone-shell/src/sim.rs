@@ -6,7 +6,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
-use std::time::Instant;
 
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World as EcsWorld;
@@ -14,22 +13,22 @@ use lodestone_assets::Language;
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
 use lodestone_ecs::player::{
-    ActionQueue, CollisionSource, Dead, Egress, Flying, LastSprintingSent, LocalPlayerPlugin,
-    MovementIntent, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
+    ActionQueue, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin, MovementIntent,
+    PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
     reset_local_player, spawn_local_player,
 };
 use lodestone_ecs::session::{
-    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionHudPlugin,
-    TitleOverlay, Vitals, Xp, insert_hud_components,
+    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionChat,
+    SessionHudPlugin, TitleOverlay, Vitals, Xp, insert_hud_components,
 };
-use lodestone_ecs::{ChunkWorld, CorePlugin, GameTick, Update};
+use lodestone_ecs::{ChunkWorld, CorePlugin, FrameClock, GameTick, Update, VersionData};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
-use lodestone_model::{BlockFace, PlayerCommand, Vec3f};
+use lodestone_model::{BlockFace, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{CollisionView, FluidState, PhysicsProfile, PlayerState, Vec3d};
 use lodestone_render::{BlockAtlas, Camera};
@@ -38,11 +37,15 @@ use lodestone_world::{ChunkPos, World};
 use crate::audio::ShellAudio;
 use crate::blocks::id;
 use crate::camera_rig::build_camera;
-use crate::chat::{ChatLog, compose_chat_action};
+use crate::chat::compose_chat_action;
 use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
 use crate::entities::{EntityDraw, EntityInterpolator};
 use crate::hud::{DebugStats, process_rss_bytes};
+use crate::interact::{
+    Attacking, InteractPlugin, MiningPredictor, NetHandle, ParticleSim, PlacementPredictor,
+    RayTarget,
+};
 use crate::mesher::{MeshPolicy, MeshScheduler, Meshed, SectionKey, TerrainMesh, TerrainPlugin};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
@@ -113,7 +116,7 @@ const HOTBAR_SLOTS: usize = 9;
 /// `submerged` is left at [`BreakInputs::default`] — no enchantment, potion or
 /// attribute inputs are modeled yet, only the tool census resolved by
 /// [`lodestone_model::VersionAdapter::tool_mining`].
-fn dig_break_inputs(
+pub(crate) fn dig_break_inputs(
     entry: lodestone_model::BlockHardness,
     tool: lodestone_model::ToolMining,
     is_air: bool,
@@ -141,7 +144,7 @@ fn dig_break_inputs(
 /// `correct_tool: !requires_correct_tool`, `damage_per_block: 0`) rather than
 /// depending on it, since this version-free crate cannot name a protocol crate.
 /// This is Trap 1's negation, kept in exactly one place.
-fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_model::ToolMining {
+pub(crate) fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_model::ToolMining {
     lodestone_model::ToolMining {
         speed: 1.0,
         correct_tool: !entry.requires_correct_tool,
@@ -177,7 +180,7 @@ fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_m
 /// prototype table exactly as before.
 ///
 /// [`ComponentValue::Tool`]: lodestone_game::item::ComponentValue::Tool
-fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::ItemStack {
+pub(crate) fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::ItemStack {
     let tool = match held.components().get_str(lodestone_game::item::TOOL_COMPONENT) {
         Some(lodestone_game::item::ComponentValue::Tool(patch)) => patch.clone(),
         // Absent (the `Inherited` case) or — defensively — some other component
@@ -302,7 +305,7 @@ impl PlacementWorld for ServerAuthoritativeWorld {
 }
 
 /// Map a raycast hit's outward face normal to the [`BlockFace`] that was struck.
-fn face_from_normal(normal: [i32; 3]) -> BlockFace {
+pub(crate) fn face_from_normal(normal: [i32; 3]) -> BlockFace {
     match normal {
         [0, 1, 0] => BlockFace::Up,
         [0, -1, 0] => BlockFace::Down,
@@ -319,7 +322,7 @@ fn face_from_normal(normal: [i32; 3]) -> BlockFace {
 /// directions under different names because they come from different crates
 /// (`lodestone-model` for protocol-facing code, `lodestone-particle` for the
 /// vanilla particle simulation), not because they disagree about anything.
-fn particle_face(face: BlockFace) -> particle_emit::Face {
+pub(crate) fn particle_face(face: BlockFace) -> particle_emit::Face {
     match face {
         BlockFace::Down => particle_emit::Face::Down,
         BlockFace::Up => particle_emit::Face::Up,
@@ -417,8 +420,6 @@ pub struct Sim {
     pub config: Config,
     /// Latest debug stats (the app fills in FPS/frame-time/GPU counters).
     pub stats: DebugStats,
-    /// The block the view ray is currently pointing at (for outline + edits).
-    pub target: Option<RayHit>,
     /// The `World` the **local player** lives in as components, plus the
     /// `GameTick` systems that advance it (`docs/bevy-migration.md` Stage 2,
     /// `docs/local-player-components.md`), and since Stage 4 the
@@ -427,10 +428,12 @@ pub struct Sim {
     ///
     /// `Sim` holds **no** `PlayerState`, `InputState`, `PhysicsProfile`,
     /// `FluidState`, hotbar slot, fly flag, death flag or wire edge-tracker of
-    /// its own, and since Stage 4 **no `lodestone_world::World`, no mesh
-    /// scheduler and no mesh queues** either: this is the sole store, reached
-    /// through the accessors below. That is the stage's authority test — a second
-    /// copy here would make a plugin's write to a component a write to nothing.
+    /// its own, since Stage 4 **no `lodestone_world::World`, no mesh scheduler
+    /// and no mesh queues** either, and since Stage 5 **no frame clock, chat log,
+    /// pick target, particle simulation, mining/placement predictor or version
+    /// adapter**: this is the sole store, reached through the accessors below.
+    /// That is the stages' authority test — a second copy here would make a
+    /// plugin's write to a component a write to nothing.
     ///
     /// This is still the **third** *bevy* `World` in the process (the net
     /// thread's, the entity interpolator's, and this one). Stage 4 unified the two
@@ -451,15 +454,7 @@ pub struct Sim {
     /// what lets [`Sim::end_session`] release a server's terrain while leaving the
     /// `with_demo_world` fixture's terrain alone.
     adopted_live_world: bool,
-    accumulator: f64,
-    last_step: Instant,
     status: String,
-    /// Fractional progress `[0,1)` from the last tick toward the next.
-    interp_alpha: f32,
-    /// Total physics ticks run since start.
-    tick_count: u64,
-    /// Total frames (calls to [`Sim::step`]) since start.
-    frame_count: u64,
     /// The stitched vanilla atlas for the live world, or `None` when running on
     /// the demo palette. Its presence is the single discriminant for "render the
     /// live server world with the vanilla atlas" vs "mesh the demo world": the
@@ -497,23 +492,6 @@ pub struct Sim {
     /// Debug-overlay line set when vanilla assets failed to load and the session
     /// fell back to the demo palette.
     asset_banner: Option<String>,
-    /// Vanilla particle simulation. Fed by block breaks — offline via
-    /// [`break_block`](Self::break_block), live via the server's
-    /// `PARTICLES_DESTROY_BLOCK` level event — and by the server's general
-    /// `LEVEL_PARTICLES` packet ([`NetUpdate::Particles`]) — and drained once
-    /// per frame into GPU instances.
-    particles: Particles,
-    /// Received chat/system lines (bounded scrollback), rendered by the HUD.
-    ///
-    /// The one piece of session state still stored on `Sim` rather than as a
-    /// component, and for a reason that is not laziness: every push needs
-    /// [`Self::clock_secs`], which is `Sim`'s own frame clock, and every read
-    /// needs it again to compute an age. See the Stage 3 doc.
-    chat_log: ChatLog,
-    /// Monotonic wall-clock seconds since the sim started, accumulated from the
-    /// real per-frame `dt` in [`Sim::step`]. Stamps chat arrivals so the HUD can
-    /// age lines for the vanilla fade-out without reaching for a clock itself.
-    clock_secs: f64,
     /// Test seam (normal play: always `true`): when `false`, death is treated as
     /// the terminal `SessionPhase::Ended` it used to be, reproducing the "stuck
     /// on the death screen forever" bug as the live gate's negative control. Never
@@ -526,33 +504,6 @@ pub struct Sim {
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
     audio: Option<ShellAudio>,
-    /// The block-mining predictor (`START`/`STOP`/`ABORT` + swing), driven each
-    /// tick while the attack button is held on a live server. Idle on the demo
-    /// world, which edits blocks directly. Owns its own prediction-sequence
-    /// counter.
-    mining: Mining,
-    /// The block-placement predictor. Lowers a right-click into the server's
-    /// `use_item_on` action on the live path; idle on the demo world.
-    placement: Placement,
-    /// Whether the attack (left) button is currently held. Drives the live
-    /// hold-to-mine loop; a demo-world break is a one-shot on press instead.
-    attacking: bool,
-    /// The version adapter for [`Config::protocol`], held solely as the shell's
-    /// route to per-block-state data — today [`VersionAdapter::block_hardness`],
-    /// which the live mining predictor needs to time a break.
-    ///
-    /// Resolved through [`lodestone_registry::adapter_for_protocol`] so the shell
-    /// still names no version crate; a direct dependency on one would mint a
-    /// second, divergent version-data seam beside the registry. `None` when no
-    /// family for that protocol is compiled in (the default build — the `live`
-    /// feature is what compiles one), in which case the shell reports "unknown
-    /// hardness" and refuses to dig rather than guessing a number.
-    ///
-    /// Deliberately a *second* adapter instance rather than a borrow of the one
-    /// [`crate::net`] hands the client driver: that one is moved into the driver
-    /// and lives on its own thread. Adapters are stateless value types, so a
-    /// second one costs a `Box` and answers identically.
-    version_data: Option<Box<dyn lodestone_model::VersionAdapter>>,
 }
 
 impl Sim {
@@ -713,9 +664,21 @@ impl Sim {
             // resources, and `heal_dirty_columns` becomes an `Update` system in
             // `FrameSet::Terrain`.
             TerrainPlugin,
+            // Stage 5: the pick target, the two interaction predictors and the
+            // particle emitter become resources, and the sprint edge and the
+            // hold-to-mine loop become `TickSet::Send` systems. Added *after*
+            // `ControllerPlugin` because it asserts that plugin is present rather
+            // than adding it itself — `add_systems` does not deduplicate.
+            InteractPlugin,
         ));
         let mut ecs = std::mem::take(app.world_mut());
         ecs.insert_resource(Profile(PhysicsProfile::mc_1_21()));
+        // Stage 5. `ParticleSim` cannot come from `InteractPlugin`: like the mesh
+        // worker pool, the emitter has to be built with the sprite table for
+        // whichever block-id space this session's world holds.
+        ecs.insert_resource(ParticleSim(particles));
+        ecs.insert_resource(VersionData(version_data));
+        ecs.insert_resource(FrameClock::default());
         // `TerrainPlugin` inserts a *default* (empty) store; this replaces it with
         // the one this session actually meshes. The worker pool cannot come from a
         // plugin at all: it has to be built with the classifier for whichever
@@ -737,32 +700,19 @@ impl Sim {
         let mut sim = Self {
             config,
             stats,
-            target: None,
             ecs,
             local,
             net: None,
             adopted_live_world: false,
-            accumulator: 0.0,
-            last_step: Instant::now(),
             status,
-            interp_alpha: 0.0,
-            tick_count: 0,
-            frame_count: 0,
             vanilla_atlas: resources.vanilla_atlas,
             language: resources.language,
             teleport_count: 0,
             collide_against_live_world: true,
             asset_banner: resources.banner,
-            particles,
-            chat_log: ChatLog::new(),
-            clock_secs: 0.0,
             recover_from_death: true,
             entity_interp: EntityInterpolator::new(),
             audio: ShellAudio::from_env(),
-            mining: Mining::new(),
-            placement: Placement::new(),
-            attacking: false,
-            version_data,
         };
         sim.refresh_mesh_policy();
         sim
@@ -815,6 +765,57 @@ impl Sim {
     #[must_use]
     pub fn chunk_count(&self) -> usize {
         self.ecs.resource::<ChunkWorld>().len()
+    }
+
+    // -----------------------------------------------------------------------
+    // Stage 5 residents of `self.ecs`: the driver clock, the pick target, the
+    // two interaction predictors, the particle emitter and the version adapter.
+    //
+    // These accessors exist for the same reason the Stage 2/3/4 ones above do —
+    // `crate::app`, `crate::gpu` and `crate::hud` still reach the state through
+    // `Sim` — but the resource is the only copy. A read here that cached its
+    // result on `Sim` would be the second source of truth the migration exists
+    // to delete.
+    // -----------------------------------------------------------------------
+
+    /// The driver's frame clock.
+    #[must_use]
+    fn clock(&self) -> FrameClock {
+        *self.ecs.resource::<FrameClock>()
+    }
+
+    /// The mutable form of [`Self::clock`].
+    fn clock_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, FrameClock> {
+        self.ecs.resource_mut::<FrameClock>()
+    }
+
+    /// The block the view ray currently points at.
+    #[must_use]
+    pub fn target(&self) -> Option<RayHit> {
+        self.ecs.resource::<RayTarget>().0
+    }
+
+    /// Overwrite the pick target. Only the per-frame raycast and the two edit
+    /// paths that consume a target should call this.
+    fn set_target(&mut self, hit: Option<RayHit>) {
+        self.ecs.resource_mut::<RayTarget>().0 = hit;
+    }
+
+    /// The particle simulation.
+    #[must_use]
+    fn particles(&self) -> &Particles {
+        &self.ecs.resource::<ParticleSim>().0
+    }
+
+    /// The mutable form of [`Self::particles`].
+    fn particles_mut(&mut self) -> bevy_ecs::change_detection::Mut<'_, ParticleSim> {
+        self.ecs.resource_mut::<ParticleSim>()
+    }
+
+    /// The live mining predictor.
+    #[must_use]
+    fn mining(&self) -> &Mining {
+        &self.ecs.resource::<MiningPredictor>().0
     }
 
     /// Terrain-meshing state (worker pool, dirty set, removal queue, drop count).
@@ -971,22 +972,6 @@ impl Sim {
             .0
     }
 
-    /// The last sprint state put on the wire (vanilla's `wasSprinting`).
-    #[must_use]
-    fn last_sprinting_sent(&self) -> Option<bool> {
-        self.ecs
-            .get::<LastSprintingSent>(self.local)
-            .expect("the local player always carries LastSprintingSent")
-            .0
-    }
-
-    /// Record the sprint state just put on the wire.
-    fn set_last_sprinting_sent(&mut self, sprinting: bool) {
-        if let Some(mut last) = self.ecs.get_mut::<LastSprintingSent>(self.local) {
-            last.0 = Some(sprinting);
-        }
-    }
-
     /// Mark the local player dead (server death packet) or alive again (respawn).
     ///
     /// Death is a transient *state*, not the end of the session: the client
@@ -1044,6 +1029,12 @@ impl Sim {
 
     /// Attach a live connection whose updates are polled each frame.
     pub fn attach_net(&mut self, net: NetClient) {
+        // Stage 5: the `Send + Sync` half of the connection goes into the `World`
+        // so the `TickSet::Send` systems can read the client. Not a second copy —
+        // it is the same `Arc<OnceLock<_>>` the net thread publishes into, and
+        // `NetClient` itself can never be a resource because its `mpsc::Receiver`
+        // is `!Sync`. See `crate::interact::NetHandle`.
+        self.ecs.insert_resource(NetHandle(Some(net.shared_handle())));
         self.net = Some(net);
         self.status = "connecting…".into();
         self.set_phase(SessionPhase::Connecting);
@@ -1129,13 +1120,17 @@ impl Sim {
         // method is about to reset out from under it.
         self.net = None;
 
-        self.chat_log = ChatLog::new();
         self.entity_interp = EntityInterpolator::new();
         self.teleport_count = 0;
 
-        self.mining = Mining::new();
-        self.placement = Placement::new();
-        self.attacking = false;
+        // Stage 5: all four are resources now, and `chat_log` moved out of this
+        // list entirely — it is a `SessionChat` component that
+        // `insert_hud_components` below puts back with the rest of the set, which
+        // is what stops it being the field a later addition forgets.
+        self.ecs.insert_resource(MiningPredictor(Mining::new()));
+        self.ecs.insert_resource(PlacementPredictor(Placement::new()));
+        self.ecs.insert_resource(Attacking(false));
+        self.ecs.insert_resource(NetHandle(None));
 
         // Flush and discard mesh jobs still in flight for the old server's
         // chunks rather than letting them complete later and land silently
@@ -1180,7 +1175,7 @@ impl Sim {
         // new server happens to assign that id to first). One call rather than a
         // field-by-field reset, for the same reason `reset_local_player` is one.
         insert_hud_components(&mut self.ecs, self.local);
-        self.target = None;
+        self.set_target(None);
         self.input_mut().release_all();
 
         self.status = if self.vanilla_atlas.is_some() {
@@ -1241,12 +1236,12 @@ impl Sim {
     /// apply the vanilla fade-out. Lines carry legacy `§` colour codes.
     #[must_use]
     pub fn recent_chat(&self, n: usize) -> Vec<(String, f32)> {
-        let now = self.clock_secs;
-        self.chat_log
-            .recent(n)
-            .into_iter()
-            .map(|(line, at)| (line, (now - at).max(0.0) as f32))
-            .collect()
+        let now = self.clock().secs;
+        self.ecs
+            .get::<SessionChat>(self.local)
+            .expect("the local player always carries SessionChat")
+            .0
+            .recent_ages(n, now)
     }
 
     /// Server-reported health in `0..=20`, or `None` off a live survival server.
@@ -1539,11 +1534,7 @@ impl Sim {
     /// Frames rendered per physics tick since start (fixed-timestep health).
     #[must_use]
     pub fn frames_per_tick(&self) -> f32 {
-        if self.tick_count == 0 {
-            0.0
-        } else {
-            self.frame_count as f32 / self.tick_count as f32
-        }
+        self.clock().frames_per_tick()
     }
 
     /// Apply accumulated mouse motion to the view angles.
@@ -1723,8 +1714,11 @@ impl Sim {
     /// confined to stalls).
     pub fn step(&mut self, dt: f64) {
         self.apply_mouse();
-        self.clock_secs += dt.max(0.0);
-        self.accumulator += dt.clamp(0.0, 0.25);
+        {
+            let mut clock = self.clock_mut();
+            clock.secs += dt.max(0.0);
+            clock.accumulator += dt.clamp(0.0, 0.25);
+        }
 
         // The derived egress gate. Refreshed once per frame because both of its
         // inputs are frame-stable: `poll_net` is the only thing that changes the
@@ -1735,7 +1729,7 @@ impl Sim {
         };
         self.ecs.insert_resource(egress);
 
-        while self.accumulator >= TICK_DT {
+        while self.clock().accumulator >= TICK_DT {
             let collision = self.tick_collision();
             self.ecs.insert_resource(collision);
             self.ecs.run_schedule(GameTick);
@@ -1743,9 +1737,18 @@ impl Sim {
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and
             // everything else the tick queued reach the socket, in order.
+            //
+            // Since Stage 5 that includes the sprint edge and the hold-to-mine
+            // loop, which used to be sent *after* this drain by a hand-written
+            // `drive_interaction()` below. Wire order is unchanged: they are now
+            // `TickSet::Send` systems ordered after `send_player_input`, so their
+            // actions sit behind the movement packet in the same single queue.
             self.drain_action_queue();
-            self.tick_count += 1;
-            self.accumulator -= TICK_DT;
+            {
+                let mut clock = self.clock_mut();
+                clock.ticks += 1;
+                clock.accumulator -= TICK_DT;
+            }
             self.tick_particles();
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
@@ -1753,22 +1756,22 @@ impl Sim {
             // which the `run_schedule(GameTick)` above already ran — same fixed
             // 20 Hz, but a plugin can now order against it and the components are
             // the only copy.
-            // Drive live block interactions at the same fixed 20 Hz: the held
-            // dig accumulates in step with the server's destroy timer, and the
-            // sprint edge is resent on change. Demo sessions have no net, so this
-            // is a cheap no-op there.
-            //
-            // Not yet systems, and both for the same reason: they need session
-            // and world state (`local_entity_id`, the raycast target,
-            // `version_data`, the live block store) that Stages 3 and 4 own.
-            // Mirroring those into resources to make a system possible now is
-            // exactly the second-source-of-truth the migration exists to delete.
-            if *self.session_phase() == SessionPhase::Connected && self.is_live() {
-                self.drive_interaction();
-            }
+            // The live block interactions — the sprint edge and the held dig —
+            // used to be driven from here by `drive_interaction()`. They are
+            // `crate::interact`'s `send_sprint_command` / `drive_mining` systems in
+            // `TickSet::Send` since Stage 5, which the `run_schedule(GameTick)`
+            // above already ran; the `Egress` resource inserted before this loop
+            // carries the `phase == Connected && is_live()` gate that used to be
+            // written here. See `docs/sim-dissolution.md` for why the blocker
+            // Stage 2 recorded (`Sim.target` / `version_data` / the live block
+            // store) was not the real one.
         }
-        self.interp_alpha = (self.accumulator / TICK_DT) as f32;
-        self.frame_count += 1;
+        {
+            let alpha = (self.clock().accumulator / TICK_DT) as f32;
+            let mut clock = self.clock_mut();
+            clock.interp_alpha = alpha;
+            clock.frames += 1;
+        }
 
         self.poll_net();
         // `Update` / `FrameSet::Terrain`: heal chunk seams whose neighbourhood
@@ -1899,15 +1902,6 @@ impl Sim {
         Some(LiveCollision::new(sections, min_y, section_count, atlas))
     }
 
-    /// Convenience wrapper using the wall clock since the last call.
-    pub fn step_realtime(&mut self) -> f64 {
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_step).as_secs_f64();
-        self.last_step = now;
-        self.step(dt);
-        dt
-    }
-
     /// Whether this session is rendering a live server world (as opposed to the
     /// offline demo). The stitched vanilla atlas plus a live connection is the
     /// single discriminant used everywhere the live and demo paths diverge.
@@ -1947,15 +1941,19 @@ impl Sim {
         // face at the edge of reach is always covered. A `None` snapshot means
         // the player's own column has not streamed in; nothing is targetable.
         if self.is_live() {
-            self.target = self
+            let hit = self
                 .live_collision()
                 .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)));
+            self.set_target(hit);
             return;
         }
-        let store = self.chunk_world();
-        let world = store.read();
-        let view = WorldCollision::new(&world);
-        self.target = raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z));
+        let hit = {
+            let store = self.chunk_world();
+            let world = store.read();
+            let view = WorldCollision::new(&world);
+            raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z))
+        };
+        self.set_target(hit);
     }
 
     /// Distance fog for this frame: sized to the configured render distance
@@ -2001,11 +1999,11 @@ impl Sim {
     /// at all, matching vanilla.
     #[must_use]
     pub fn crack_target(&self) -> Option<crate::gpu::CrackTarget> {
-        let stage = self.mining.destroy_stage();
+        let stage = self.mining().destroy_stage();
         if stage < 0 {
             return None;
         }
-        let block = self.target?.block;
+        let block = self.target()?.block;
         let state_id = if self.is_live() {
             let pos = BlockPos::new(block[0], block[1], block[2]);
             self.net.as_ref()?.block_at(pos)?
@@ -2028,7 +2026,7 @@ impl Sim {
     /// break would be local-only and the server would restore the block on the
     /// next chunk update.
     pub fn break_block(&mut self) -> bool {
-        let Some(hit) = self.target else { return false };
+        let Some(hit) = self.target() else { return false };
         // Read the state *before* clearing the cell: the debris takes its
         // texture from the block that broke, and after `set_block_world` the
         // cell is air and that information is gone.
@@ -2038,10 +2036,11 @@ impl Sim {
             // block's outline shape, which the shell does not carry, so debris
             // from a slab or fence fills the whole cell rather than hugging the
             // model.
-            self.particles
+            self.particles_mut()
+                .0
                 .destroy_block(hit.block, broken, [1.0; 3]);
             self.remesh_around(hit.block);
-            self.target = None;
+            self.set_target(None);
             true
         } else {
             false
@@ -2054,7 +2053,7 @@ impl Sim {
     /// the offline editing path is preserved.
     pub fn begin_attack(&mut self) {
         if self.is_live() {
-            self.attacking = true;
+            self.ecs.resource_mut::<Attacking>().0 = true;
         } else {
             self.break_block();
         }
@@ -2066,8 +2065,12 @@ impl Sim {
         if !self.is_live() {
             return;
         }
-        self.attacking = false;
-        let actions = self.mining.stop();
+        self.ecs.resource_mut::<Attacking>().0 = false;
+        let actions = self.ecs.resource_mut::<MiningPredictor>().0.stop();
+        // Sent directly rather than queued: `ActionQueue` is only drained inside
+        // the tick loop, so a release on a frame that runs no tick would sit for
+        // up to 50 ms before the `ABORT` reached the server. See
+        // `crate::interact`'s "how to change it".
         if let Some(net) = &self.net {
             for action in actions {
                 net.send_action(action);
@@ -2101,7 +2104,7 @@ impl Sim {
         if self.is_dead() {
             return;
         }
-        let Some(hit) = self.target else { return };
+        let Some(hit) = self.target() else { return };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
         let cursor = face_center_cursor(hit.normal);
@@ -2125,239 +2128,14 @@ impl Sim {
         };
         let (UseOnDecision::Interact { action }
         | UseOnDecision::Place { action, .. }
-        | UseOnDecision::Nothing { action }) =
-            self.placement.use_on(&ctx, &ServerAuthoritativeWorld);
+        | UseOnDecision::Nothing { action }) = self
+            .ecs
+            .resource_mut::<PlacementPredictor>()
+            .0
+            .use_on(&ctx, &ServerAuthoritativeWorld);
         if let Some(net) = &self.net {
             net.send_action(action);
             net.send_action(ClientAction::SwingArm { hand: Hand::Main });
-        }
-    }
-
-    /// The version's break-time census for a live block-state id, or `None` when
-    /// the shell cannot answer honestly.
-    ///
-    /// `None` has two causes and they are deliberately not distinguished by the
-    /// caller, because the correct response to both is the same — refuse to dig:
-    ///
-    /// * no version family compiled in for [`Config::protocol`] (the default,
-    ///   version-free build; the `live` feature compiles one), so
-    ///   [`Self::version_data`] is `None`;
-    /// * a state id outside the version's census — a modded or corrupt id. The
-    ///   v770 table covers all 32,366 real states, so on a vanilla server this
-    ///   does not happen.
-    ///
-    /// Guessing a hardness here is precisely how block breaking got too fast the
-    /// first time, so the seam's "reports unknown, never a guessed number"
-    /// contract is carried through to the consumer rather than papered over.
-    fn resolve_block_hardness(&self, state_id: u32) -> Option<lodestone_model::BlockHardness> {
-        self.version_data.as_ref()?.block_hardness(state_id)
-    }
-
-    /// Advance the live block interactions one tick: the sprint edge and the
-    /// held-attack dig. Called once per physics tick from [`step`](Self::step)
-    /// while connected, so the dig accumulates at the same 20 Hz the server
-    /// ticks its own destroy timer.
-    ///
-    /// The edge-triggered *player-input* packet used to be sent from here and is
-    /// now `lodestone_controller::ecs::send_player_input`, a `TickSet::Send`
-    /// system. Order on the wire is unchanged: that system runs (and is drained
-    /// into the socket) before this method is called.
-    fn drive_interaction(&mut self) {
-        self.send_is_sprinting_if_needed();
-        self.drive_mining();
-    }
-
-    /// `LocalPlayer.sendIsSprintingIfNeeded` (`LocalPlayer.java:303-312`): put the
-    /// sprint **edge** on the wire as a `PlayerCommand`.
-    ///
-    /// The source of truth is [`PlayerState::sprinting`], which the physics tick
-    /// assigns from the movement intent — so what the server hears is what actually
-    /// drove this tick's movement, not a re-read of the keyboard. This is the packet
-    /// that makes the server set `isSprinting()`, and therefore the packet that makes
-    /// its `updateSwimming` agree with ours; see [`Self::last_sprinting_sent`].
-    ///
-    /// A dead player is not sprinting, nor is one in the shell's free-fly debug cam
-    /// (which never runs a physics tick, so `sprinting` would sit stale), and no
-    /// command is sent before the server has given us an entity id (the packet
-    /// carries it).
-    fn send_is_sprinting_if_needed(&mut self) {
-        let sprinting = self.player().sprinting && !self.is_dead() && !self.flying();
-        if self.last_sprinting_sent() == Some(sprinting) {
-            return;
-        }
-        let Some(entity_id) = self.server_entity_id() else {
-            return;
-        };
-        self.set_last_sprinting_sent(sprinting);
-        if let Some(net) = &self.net {
-            net.send_action(ClientAction::PlayerCommand {
-                entity_id,
-                command: if sprinting {
-                    PlayerCommand::StartSprinting
-                } else {
-                    PlayerCommand::StopSprinting
-                },
-            });
-        }
-    }
-
-    /// Drive the live mining predictor one tick from the held attack button and
-    /// the current target. Holding the button keeps the dig active: the predictor
-    /// emits a `START` on first press, accumulates `getDestroyProgress` every
-    /// tick thereafter, and emits the `STOP_DESTROY` on the tick its own progress
-    /// reaches `1.0` — the same tick vanilla's client would, because it is fed
-    /// the same per-block hardness vanilla reads off the `BlockState`.
-    ///
-    /// The hardness comes from [`VersionAdapter::block_hardness`] keyed on the
-    /// *live* state id (`NetClient::block_at`), so it is real version data rather
-    /// than a shell-side guess. A state the version cannot resolve (or a build
-    /// with no family compiled in) aborts the dig instead of substituting a
-    /// number — see [`resolve_block_hardness`](Self::resolve_block_hardness).
-    ///
-    /// # The `STOP` lands past the server's own gate
-    ///
-    /// This path used to feed one small fake hardness for every block, which made
-    /// the predictor emit its `STOP` after ~5 ticks; the server then latched
-    /// `hasDelayedDestroy` and finished the block on its own timer. That produced
-    /// correct *break* times by accident but a crack overlay that pulsed through
-    /// all ten stages in a quarter second regardless of the block — the visible
-    /// "breaking is too fast" defect.
-    ///
-    /// With real hardness the `STOP` instead lands at the true completion tick,
-    /// which is *later*, and the server takes its immediate branch: on `STOP` it
-    /// breaks when `getDestroyProgress * (ticksSpentDestroying + 1) >= 0.7`, and
-    /// for bare-hand stone that product is ≈`1.01` (`0.00667 × 151`) by the time
-    /// the `STOP` arrives — clear of the `0.7` gate. Delayed-destroy
-    /// remains the safety net in the other direction (a `STOP` arriving early
-    /// still finishes on the server's timer), so both regimes break the block —
-    /// this one just does it the way vanilla does.
-    fn drive_mining(&mut self) {
-        let target = if self.attacking && !self.is_dead() {
-            self.target
-        } else {
-            None
-        };
-        let Some(hit) = target else {
-            // Not attacking (or no target / dead): abort any live dig.
-            let actions = self.mining.stop();
-            if let Some(net) = &self.net {
-                for action in actions {
-                    net.send_action(action);
-                }
-            }
-            return;
-        };
-        let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
-        let face = face_from_normal(hit.normal);
-        let state_id = self.net.as_ref().and_then(|n| n.block_at(pos));
-        let Some(id_value) = state_id else {
-            // No live state at this position (or no live connection): same
-            // "abort, never guess" contract as the unknown-state case below.
-            let actions = self.mining.stop();
-            if let Some(net) = &self.net {
-                for action in actions {
-                    net.send_action(action);
-                }
-            }
-            return;
-        };
-        let Some(entry) = self.resolve_block_hardness(id_value) else {
-            // Unknown state (or no version family compiled in): the shell has no
-            // honest break time for this block, so it aborts rather than digging
-            // at a made-up rate. `stop()` is idempotent — it emits one `ABORT`
-            // for a live dig and nothing on subsequent ticks.
-            let actions = self.mining.stop();
-            if let Some(net) = &self.net {
-                for action in actions {
-                    net.send_action(action);
-                }
-            }
-            return;
-        };
-        // The held item's contribution (speed, correct-tool-for-drops) to this
-        // dig, resolved through the same version-owned seam as `entry` above —
-        // see `tool_mining_item` for why the shell's own inventory model is
-        // enough to drive this correctly for ordinary tools. Falls back to bare
-        // hand (not a guess: it is what an empty main hand *is*) when nothing is
-        // held, and — defensively, should never actually happen since `entry`
-        // above already proved this version knows `id_value` — when the version
-        // adapter's tool census has nothing for this state either.
-        let held = self
-            .player_menu()
-            .player_native(self.selected_slot())
-            .map(tool_mining_item);
-        let tool = self
-            .version_data
-            .as_ref()
-            .and_then(|v| v.tool_mining(held.as_ref(), id_value))
-            .unwrap_or_else(|| bare_handed_tool_mining(entry));
-        let inputs = dig_break_inputs(
-            entry,
-            tool,
-            id_value == id::AIR,
-            self.player().on_ground,
-            // `eye_in_water`, not `under_water()` — see "Trap 2" on
-            // `dig_break_inputs`.
-            self.fluid_state().eye_in_water,
-        );
-        // Vanilla's `ClientLevel.addBreakingBlockEffect` — the per-tick "chip"
-        // that pops off the mined face — fires from `Minecraft.continueAttack`
-        // whenever `MultiPlayerGameMode.continueDestroyBlock` returns `true`.
-        // That is *not* restricted to ticks after the first: `continueAttack`
-        // runs in the same client tick as `startAttack` (both are driven off
-        // the same `handleKeybinds` pass), so on the very tick a fresh dig
-        // starts, `continueDestroyBlock` immediately sees `sameDestroyTarget`
-        // already true (from `startDestroyBlock` moments earlier that same
-        // tick) and returns `true` too — the chip appears from tick one, not
-        // tick two. A prior version of this comment claimed otherwise; it was
-        // read off this port's own state machine rather than
-        // `Minecraft.java`, and was wrong. `continueDestroyBlock` also returns
-        // `true` on a retarget (it delegates to `startDestroyBlock`, whose
-        // normal-case return is unconditionally `true`) and on the finishing
-        // tick, but *not* when the target block reads as air before the call,
-        // nor for an instant break reached by a fresh press directly onto it
-        // (that tick's `startAttack` has already turned the block to air
-        // before `continueAttack`'s own air check runs).
-        //
-        // We have one call, not vanilla's two (`start`/`continue_` collapse
-        // into `continue_` here), so the tick-one case has to be read off
-        // `target()` differently: capture it both before and after the call
-        // and OR them, rather than comparing only the before-value to `pos`.
-        // Before-is-some covers "continuing" and "finishing"; after-is-some
-        // covers "just started" (fresh or retargeted) and also "retargeted
-        // onto an instant break" (target was Some going in, `start` clears it
-        // for the instant case, but vanilla still chips there — see above).
-        // Only "before none, after none" survives the OR, which is exactly
-        // the instant-break-from-idle and post-break-cooldown cases; the
-        // cooldown one is a deliberate, documented divergence from vanilla
-        // (which does emit a stray chip on the already-broken block during
-        // its 5-tick `destroyDelay`) — matching this port's existing choice
-        // not to send a block-action packet during cooldown either.
-        let was_mining = self.mining.target().is_some();
-        // `continue_` delegates to `start` when no dig is live yet, so this one
-        // entry point covers first-press, hold, and retarget uniformly.
-        let actions = self.mining.continue_(pos, face, &inputs, None);
-        let is_mining_now = self.mining.target().is_some();
-        if (was_mining || is_mining_now)
-            && actions
-                .iter()
-                .any(|a| matches!(a, ClientAction::SwingArm { .. }))
-        {
-            // Full-cube shape and untinted-white, for the same reason as the
-            // destroy-burst debris (see `destroy_block`/`NetUpdate::BlockDestroyed`
-            // below): the shell does not carry a block's outline shape, so the
-            // chip approximates with the unit cube rather than the true model.
-            self.particles.breaking_block(
-                hit.block,
-                id_value,
-                [1.0; 3],
-                particle_face(face),
-            );
-        }
-        if let Some(net) = &self.net {
-            for action in actions {
-                net.send_action(action);
-            }
         }
     }
 
@@ -2366,7 +2144,7 @@ impl Sim {
     /// block was placed. The live path uses [`use_item`](Self::use_item) instead
     /// so the server actually hears the placement.
     pub fn place_block(&mut self) -> bool {
-        let Some(hit) = self.target else { return false };
+        let Some(hit) = self.target() else { return false };
         let pos = hit.place_position();
         let cell_empty = {
             let store = self.chunk_world();
@@ -2410,14 +2188,14 @@ impl Sim {
     fn tick_particles(&mut self) {
         if self.vanilla_atlas.is_some() && self.net.is_some() && self.collide_against_live_world {
             if let Some(view) = self.live_collision() {
-                self.particles.tick(&view);
+                self.particles_mut().0.tick(&view);
                 return;
             }
         }
         let store = self.chunk_world();
         let world = store.read();
         let view = WorldCollision::new(&world);
-        self.particles.tick(&view);
+        self.ecs.resource_mut::<ParticleSim>().0.tick(&view);
     }
 
     /// Rebuild this frame's particle instances for `camera` and report what
@@ -2427,7 +2205,7 @@ impl Sim {
         // The same alpha every other interpolated draw uses, rather than a
         // second computation of it -- two frame alphas that drift apart show up
         // as particles lagging the terrain by a fraction of a tick.
-        let partial = self.interp_alpha;
+        let partial = self.ecs.resource::<FrameClock>().interp_alpha;
         // Light is sampled from the live world when there is one. A `None` here
         // is not darkness: `ParticleEngine::extract` substitutes full sky light,
         // matching how the demo terrain is meshed.
@@ -2466,13 +2244,19 @@ impl Sim {
             }
             None => Box::new(|_, _, _| None),
         };
-        self.particles.extract(camera, partial, &light)
+        // Field-level borrows deliberately, not `self.particles_mut()`: `light`
+        // above holds a borrow of `self.net`, and going through a `&mut self`
+        // accessor would conflict with it. Disjoint fields do not.
+        self.ecs
+            .resource_mut::<ParticleSim>()
+            .0
+            .extract(camera, partial, &light)
     }
 
     /// This frame's particle instances, ready for upload.
     #[must_use]
     pub fn particle_instances(&self) -> &[ParticleInstance] {
-        self.particles.instances()
+        self.particles().instances()
     }
 
     /// The number of fixed simulation ticks (20/s) elapsed. Drives animated
@@ -2480,7 +2264,7 @@ impl Sim {
     /// renderer samples each animation at this tick each frame.
     #[must_use]
     pub fn tick_count(&self) -> u64 {
-        self.tick_count
+        self.clock().ticks
     }
 
     /// The block state id at a world position, or air when the column is not
@@ -2770,14 +2554,22 @@ impl Sim {
                     // raw keys like `entity.minecraft.spider`.
                     let text = self.resolve_text(&text);
                     tracing::info!(target: "chat", "{}", text.to_legacy_string());
-                    if player {
-                        self.chat_log.push_player(
-                            text,
-                            lodestone_game::chat::MessageTrust::NotSecure,
-                            self.clock_secs,
-                        );
-                    } else {
-                        self.chat_log.push_system(text, self.clock_secs);
+                    // Stamped with the driver's own clock, which is why the log and
+                    // the clock had to move to the ECS together (Stage 3 deferred
+                    // both for exactly this reason). `local` is the session entity,
+                    // so a `SessionChat` that somehow went missing drops the line
+                    // rather than panicking mid-poll.
+                    let now = self.clock().secs;
+                    if let Some(mut chat) = self.ecs.get_mut::<SessionChat>(self.local) {
+                        if player {
+                            chat.0.push_player(
+                                text,
+                                lodestone_game::chat::MessageTrust::NotSecure,
+                                now,
+                            );
+                        } else {
+                            chat.0.push_system(text, now);
+                        }
                     }
                 }
                 NetUpdate::BlockDestroyed { pos, state } => {
@@ -2793,7 +2585,8 @@ impl Sim {
                     // outline shape, which the shell does not carry. Debris from
                     // a slab or a fence therefore fills the whole cell rather
                     // than hugging the model.
-                    self.particles
+                    self.particles_mut()
+                        .0
                         .destroy_block([pos.x, pos.y, pos.z], state, [1.0, 1.0, 1.0]);
                 }
                 NetUpdate::Particles {
@@ -2820,7 +2613,7 @@ impl Sim {
                     let within_cutoff =
                         long_distance || dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= 1024.0;
                     if within_cutoff {
-                        self.particles.spawn_particles(
+                        self.particles_mut().0.spawn_particles(
                             &kind,
                             [pos.x, pos.y, pos.z],
                             [offset.x, offset.y, offset.z],
@@ -3019,7 +2812,7 @@ impl Sim {
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
         self.stats.flying = self.flying();
-        self.stats.target = self.target.map(|h| h.block);
+        self.stats.target = self.target().map(|h| h.block);
         self.stats.status = self.status.clone();
     }
 
@@ -3028,16 +2821,12 @@ impl Sim {
     /// stays smooth even though physics runs at a fixed 20 Hz. View angles are
     /// current (mouse-look is per-frame, matching vanilla).
     ///
-    /// # The pose eye height is folded into the feet position
-    ///
-    /// [`build_camera`] hardcodes the standing
-    /// [`PLAYER_EYE_HEIGHT`](lodestone_render::camera::PLAYER_EYE_HEIGHT), so the
-    /// only way to give the swimming pose its real `0.4` eye from here is to pre-bias
-    /// the feet Y by the difference. That is exactly equivalent — the camera consumes
-    /// `position` solely as the eye — but it does mean the value handed to
-    /// `build_camera` is not the player's feet while a non-standing pose is active.
-    /// The clean shape is an explicit `eye_height` parameter on `build_camera`; that
-    /// signature belongs to `camera_rig.rs`, which is out of this change's scope.
+    /// The pose's eye height is passed to [`build_camera`] explicitly, so the
+    /// position handed to it is the player's real interpolated feet in every pose
+    /// (`Avatar.java:22-36`: `0.4` swimming, `1.27` crouching, `1.62` standing).
+    /// It used to be folded into the feet Y as a bias instead — arithmetically the
+    /// same, but the argument was then not the feet whenever a non-standing pose
+    /// was active. See `camera_rig.rs`'s module docs.
     ///
     /// This is also the ray origin for [`update_target`](Self::update_target), so the
     /// pick sees the world from where the player actually is: a swimmer looking down
@@ -3045,16 +2834,20 @@ impl Sim {
     /// beyond.
     #[must_use]
     pub fn camera(&self, aspect: f32) -> Camera {
-        let a = f64::from(self.interp_alpha);
+        let a = f64::from(self.clock().interp_alpha);
         let mut interp = *self.player();
         let prev = self.prev_position();
-        let eye_bias = f64::from(interp.eye_height - lodestone_render::camera::PLAYER_EYE_HEIGHT);
         interp.position = Vec3d::new(
             prev.x + (interp.position.x - prev.x) * a,
-            prev.y + (interp.position.y - prev.y) * a + eye_bias,
+            prev.y + (interp.position.y - prev.y) * a,
             prev.z + (interp.position.z - prev.z) * a,
         );
-        build_camera(&interp, aspect, self.config.render_distance)
+        build_camera(
+            &interp,
+            interp.eye_height,
+            aspect,
+            self.config.render_distance,
+        )
     }
 }
 
@@ -3589,14 +3382,18 @@ mod tests {
         // Air is state 0 in every version's block-state registry, so it is the
         // one id the shell can name without naming a version.
         let air = sim
-            .resolve_block_hardness(id::AIR)
+            .ecs()
+            .resource::<VersionData>()
+            .block_hardness(id::AIR)
             .expect("air must resolve through the seam");
         assert_eq!(air.hardness, 0.0);
 
         // Find the census entries the unit tests above assume, by value rather
         // than by id (ids renumber every data bump).
         let entries: Vec<_> = (0..40_000)
-            .filter_map(|id| sim.resolve_block_hardness(id))
+            .filter_map(|id| sim.ecs()
+            .resource::<VersionData>()
+            .block_hardness(id))
             .collect();
         assert!(
             entries.len() > 30_000,
@@ -3618,7 +3415,9 @@ mod tests {
 
         // An id past the census reports unknown rather than a guess, which is
         // what makes `drive_mining` refuse to dig instead of inventing a rate.
-        assert_eq!(sim.resolve_block_hardness(u32::MAX), None);
+        assert_eq!(sim.ecs()
+            .resource::<VersionData>()
+            .block_hardness(u32::MAX), None);
     }
 
     /// Live break-timing gate for the shell's own mining inputs, against the
@@ -3985,7 +3784,7 @@ mod tests {
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
         assert!(sent > 0, "a connected sim should send movement packets");
         assert_eq!(
-            sent as u64, sim.tick_count,
+            sent as u64, sim.tick_count(),
             "exactly one outbound Move per physics tick"
         );
     }
@@ -3999,7 +3798,7 @@ mod tests {
         sim.attach_net(net);
         assert_eq!(*sim.session_phase(), SessionPhase::Connecting);
         sim.step(5.0 / 20.0);
-        assert!(sim.tick_count > 0, "ticks must still run while connecting");
+        assert!(sim.tick_count() > 0, "ticks must still run while connecting");
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
         assert_eq!(sent, 0, "no movement should be sent before login");
     }
@@ -4089,7 +3888,7 @@ mod tests {
     /// reads and `block_at_world` would report the pre-edit block.
     #[test]
     fn a_write_through_the_chunk_world_resource_is_what_the_sim_reads() {
-        let mut sim = Sim::new(test_config());
+        let sim = Sim::new(test_config());
         let feet = sim.player().position;
         let (bx, bz) = (feet.x.floor() as i32 + 4, feet.z.floor() as i32 + 4);
         let above = crate::worldgen::surface_height(bx, bz) + 4;
@@ -4297,7 +4096,8 @@ mod tests {
         // `particles.rs`'s own hermetic tests use, so `unresolved == 0` is
         // actually reachable without fetching `client.jar`.
         let rect = [0.0f32, 0.0, 0.0625, 0.0625];
-        sim.particles
+        sim.particles_mut()
+            .0
             .install_test_sheet_uv(HashMap::from([((Sheet::Flame, 0u16), rect)]));
 
         // Keep the particle origin within vanilla's 32-block render cutoff of
@@ -4315,13 +4115,14 @@ mod tests {
         sim.poll_net();
 
         assert_eq!(
-            sim.particles.engine_mut().particles().len(),
+            sim.particles_mut().0.engine_mut().particles().len(),
             9,
             "count must be honoured exactly once the event reaches the emitter"
         );
         let cam = sim.camera(1.0);
         let frame = sim
-            .particles
+            .particles_mut()
+            .0
             .extract(&cam, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT));
         assert_eq!(frame.alive, 9);
         assert_eq!(
@@ -4348,7 +4149,7 @@ mod tests {
         sim.attach_net(net);
         feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
         sim.poll_net();
-        sim.particles.install_test_sheet_uv(HashMap::from([(
+        sim.particles_mut().0.install_test_sheet_uv(HashMap::from([(
             (Sheet::Flame, 0u16),
             [0.0f32, 0.0, 0.0625, 0.0625],
         )]));
@@ -4368,7 +4169,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert_eq!(
-            sim.particles.engine_mut().particles().len(),
+            sim.particles_mut().0.engine_mut().particles().len(),
             0,
             "a far-away burst without long_distance must be dropped, not spawned off-screen"
         );
@@ -4384,7 +4185,7 @@ mod tests {
         .unwrap();
         sim.poll_net();
         assert_eq!(
-            sim.particles.engine_mut().particles().len(),
+            sim.particles_mut().0.engine_mut().particles().len(),
             3,
             "the same burst with long_distance set must bypass the cutoff"
         );
@@ -4873,7 +4674,7 @@ mod tests {
         let mut sim = Sim::new(test_config());
         sim.set_prev_position(Vec3d::new(0.0, 64.0, 0.0));
         sim.player_mut().position = Vec3d::new(10.0, 64.0, 0.0);
-        sim.interp_alpha = 0.5;
+        sim.clock_mut().interp_alpha = 0.5;
         let cam = sim.camera(1.0);
         assert!(
             (cam.position.x - 5.0).abs() < 1e-4,
@@ -5000,7 +4801,7 @@ mod tests {
         // about where between two ticks we happen to be.
         let settled = sim.player().position;
         sim.set_prev_position(settled);
-        sim.interp_alpha = 0.0;
+        sim.clock_mut().interp_alpha = 0.0;
         let cam = sim.camera(1.0);
         let expected = sim.player().position.y as f32 + SWIMMING_EYE_HEIGHT;
         assert!(
@@ -5060,6 +4861,9 @@ mod tests {
     #[test]
     fn sprint_edges_reach_the_wire_as_player_commands() {
         use crate::net::NetUpdate;
+        use lodestone_ecs::ecs::system::RunSystemOnce;
+        use lodestone_model::PlayerCommand;
+
         let (net, actions, feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         sim.attach_net(net);
@@ -5071,16 +4875,40 @@ mod tests {
             std::iter::from_fn(|| actions.try_recv().ok()).collect()
         };
 
+        // Since Stage 5 the sprint edge is `crate::interact::send_sprint_command`,
+        // a `TickSet::Send` system. Run *that system* and then the driver's own
+        // queue drain, rather than the whole `GameTick` schedule: the schedule also
+        // emits the per-tick movement packet, which would swamp the
+        // "no edge, no packet" assertions below. Deliberately **not** an assertion
+        // on `ActionQueue` — the queue is not the wire, and this test's whole point
+        // is that the command reaches the socket.
+        //
+        // `Egress` has to be set by hand for the same reason the old direct call
+        // needed no gate: the demo fixture has no vanilla atlas, so `is_live()` is
+        // false and `step` would derive `live: false`. The gate moved from the call
+        // site into the system, which is where `send_player_input` already keeps
+        // its identical one.
+        let sprint_once = |sim: &mut Sim| {
+            sim.ecs_mut().insert_resource(Egress {
+                in_world: true,
+                live: true,
+            });
+            sim.ecs_mut()
+                .run_system_once(crate::interact::send_sprint_command)
+                .expect("send_sprint_command runs");
+            sim.drain_action_queue();
+        };
+
         // Not sprinting and never was: no packet at all (vanilla's `wasSprinting`
         // starts false).
-        sim.send_is_sprinting_if_needed();
+        sprint_once(&mut sim);
         assert!(
             drain(&actions).is_empty(),
             "no sprint edge, no sprint packet"
         );
 
         sim.player_mut().sprinting = true;
-        sim.send_is_sprinting_if_needed();
+        sprint_once(&mut sim);
         assert_eq!(
             drain(&actions),
             vec![ClientAction::PlayerCommand {
@@ -5090,12 +4918,12 @@ mod tests {
         );
 
         // Edge-triggered: holding sprint must not spam the server every tick.
-        sim.send_is_sprinting_if_needed();
-        sim.send_is_sprinting_if_needed();
+        sprint_once(&mut sim);
+        sprint_once(&mut sim);
         assert!(drain(&actions).is_empty(), "sprint is edge-triggered");
 
         sim.player_mut().sprinting = false;
-        sim.send_is_sprinting_if_needed();
+        sprint_once(&mut sim);
         assert_eq!(
             drain(&actions),
             vec![ClientAction::PlayerCommand {
@@ -5111,16 +4939,16 @@ mod tests {
         sim.drain_all_meshes();
         // Aim straight down at the block under the player's feet.
         let feet = sim.player().position;
-        sim.target = Some(crate::raycast::RayHit {
+        sim.set_target(Some(crate::raycast::RayHit {
             block: [
                 feet.x.floor() as i32,
                 feet.y.floor() as i32 - 1,
                 feet.z.floor() as i32,
             ],
             normal: [0, 1, 0],
-        });
+        }));
         assert!(sim.break_block(), "should break the solid block");
-        assert!(sim.target.is_none(), "target cleared after break");
+        assert!(sim.target().is_none(), "target cleared after break");
         assert!(sim.pending_meshes() > 0, "a remesh was scheduled");
     }
 
@@ -5235,10 +5063,10 @@ mod tests {
         let bx = feet.x.floor() as i32 + 3;
         let bz = feet.z.floor() as i32;
         let s = crate::worldgen::surface_height(bx, bz);
-        sim.target = Some(crate::raycast::RayHit {
+        sim.set_target(Some(crate::raycast::RayHit {
             block: [bx, s, bz],
             normal: [0, 1, 0],
-        });
+        }));
         {
             let store = sim.chunk_world();
             let world = store.read();
@@ -5261,14 +5089,14 @@ mod tests {
         let feet = sim.player().position;
         // Target the block under the feet, whose top face is where the player
         // stands — placing there would clip the player, so it must be refused.
-        sim.target = Some(crate::raycast::RayHit {
+        sim.set_target(Some(crate::raycast::RayHit {
             block: [
                 feet.x.floor() as i32,
                 feet.y.floor() as i32 - 1,
                 feet.z.floor() as i32,
             ],
             normal: [0, 1, 0],
-        });
+        }));
         assert!(!sim.place_block(), "placing inside the player is refused");
     }
 

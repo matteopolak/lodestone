@@ -90,6 +90,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   every entity's state lives in, the three-state `Reported<T>` encoding that keeps
   "never reported" distinct from "explicitly cleared" (and a dropped item visible),
   and the two folds that cannot be systems until the chunk world is a resource.
+- [Dissolving `Sim`](./sim-dissolution.md) — what Stage 5 moved off the shell's god
+  object, the fifteen fields still on it and precisely why each stays, and the two
+  20 Hz clocks whose divergence is cumulative rather than a rounding artefact.
 - [Chunk world resource](./chunk-world-resource.md) — the one `lodestone_world::World`
   behind an ECS resource, terrain meshing as `Update` state, and why §4.1's two clauses
   are independent: unifying the *chunk* store did not unify the *bevy* worlds.

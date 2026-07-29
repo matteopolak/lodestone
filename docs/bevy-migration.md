@@ -748,6 +748,54 @@ growing a falling wall at chunk borders, which is the `dirty_columns` coalescing
 
 ### Stage 5 — `Sim` is deleted
 
+**Partly landed — `Sim` is not deleted.** See
+[`sim-dissolution.md`](./sim-dissolution.md) for the field-by-field record. 28 fields
+before, **15** after; `Sim::step` is still the driver loop. Seven places the plan (or
+the brief handed to the stage) was wrong:
+
+- **The authority test as written is unreachable, for the same reason Stage 3's was.**
+  "`struct Sim` no longer exists" requires one owner driving one `App`, and `Sim` owns
+  *two* bevy `World`s (its own and `EntityInterpolator`'s). That is §4.1**(c)**.
+  Thirteen of the fifteen surviving fields would move without (c); the two that would
+  not are `ecs` (a `World` cannot be a resource in itself) and `entity_interp`
+  (nesting a `World` inside a `World` compiles and unifies nothing).
+- **The blocker Stage 2 recorded for `Mining`/`Placement` was the wrong one.** It
+  named `Sim.target`, `version_data`, the live block store and the particle emitter as
+  "Stage 3/4 residents". Re-checked one at a time: all four were free — three were
+  plain owned values with no cross-`World` dependency, and the store stopped mattering
+  at Stage 4. The actual blocker was that `drive_mining` reached the client through
+  `&NetClient`, and `NetClient` holds an `mpsc::Receiver`, which is **`!Sync`** and so
+  can never be a `Resource`. No earlier stage could have changed that, and no later one
+  needs to: every read on `NetClient` bar `poll()` already delegates to
+  `SharedHandle`, which is `Send + Sync + 'static`. Both are now `TickSet::Send`
+  systems.
+- **`vanilla_atlas` is listed under Stage 4's "Moves" and Stage 4 did not move it.**
+  It is still a `Sim` field, and it is the `is_live()` discriminant read at ~8 sites.
+- **Two of the fields the plan names do not exist.** `input` and `fly` moved in
+  Stage 2 (`RawInput`, `Flying`); `audio` and `language` are still there, and
+  `ShellAudio` is `Send + Sync` — measured with a scratch `need<T: Send + Sync>()`
+  probe, not assumed, because "a rodio engine must be `!Send`" was the obvious guess
+  and it is wrong.
+- **`step_realtime` had zero callers anywhere in the tree.** Deleted, along with
+  `last_step`, the only `Instant` on `Sim`. A `pub fn` in a lib+bin crate that nothing
+  calls is an island by the repo's own definition.
+- **`snapshot_section` / `snapshot_section_live` are not `Sim` state and block
+  nothing.** The brief listed them as surviving "only as thin wrappers". They are thin
+  adapters over `snapshot_section_in`, but `snapshot_section` has six callers (two in
+  `gpu.rs`, four in `mesher.rs`'s own tests) and `snapshot_section_live` one
+  (`tests/live_world_mesh.rs`). Deleting them buys no authority and churns a live gate.
+- **There are two 20 Hz accumulators driving two `GameTick` schedules, and the
+  divergence is unbounded.** `Sim::step` banks `dt.clamp(0.0, 0.25)` (five ticks);
+  `EntityInterpolator` banks the pacer-clamped `dt` unclamped (up to ten). A maximal
+  stall therefore advances item physics five ticks further than player physics, the
+  excess real time is discarded rather than reconciled, and `end_session` resets one
+  accumulator and not the other. The `f32`-vs-`f64` term is real but ~1.5e-8 relative —
+  one tick per ~39 days — and is not the mechanism. Unifying needs (c) (one `GameTick`
+  is one `World`'s schedule) *and* a decision about which catch-up policy is right,
+  since the interpolator's ten ticks is the one that matches
+  [`frame-pacing.md`](./frame-pacing.md). Consequence for §6: a plugin adding a
+  `GameTick` system today picks not just which `App` but which **clock**.
+
 **Moves:** whatever `Sim` still holds — `input`, `stats`, `target`, `clock_secs`, `particles`,
 `audio`, `language`, `asset_banner`, `interp_alpha`, `tick_count`, `frame_count`, `fly`.
 `Sim::step` (`sim.rs:494`+) becomes the four schedules; `App::redraw` becomes `app.update()` then
