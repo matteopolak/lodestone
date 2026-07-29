@@ -636,9 +636,30 @@ impl CollisionView for WorldCollision<'_> {
 /// debug overlay. A silent fallback here is how the gap survived nine months.
 #[derive(Debug)]
 pub struct LiveCollision {
-    /// `(chunk-x, chunk-z, section-index)` → owned block section. A missing key
-    /// (unloaded or all-air section) reads as air.
-    sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
+    /// Dense grid of owned block sections, one entry per `(column, section)`
+    /// slot in the observed footprint of the snapshot handed to [`Self::new`].
+    ///
+    /// This used to be a `HashMap<(i32, i32, usize), Arc<ChunkSection>>`, so
+    /// every one of [`BlockView::state_at`]'s per-*queried-cell* lookups —
+    /// which is to say every collision, friction, fluid and physics answer at
+    /// every candidate block, every physics substep — hashed a 3-tuple and
+    /// probed the table. `Sim::live_collision` (`sim.rs`) always snapshots
+    /// exactly the 3×3 columns centred on the player (see
+    /// `docs/chunk-world-resource.md`), so the key space is bounded and known
+    /// at construction time: [`Self::new`] converts the `HashMap` into this
+    /// grid **once per tick**, and every per-cell lookup after that is
+    /// `origin`-relative array-index arithmetic — no hashing, no probing.
+    grid: Vec<Option<Arc<ChunkSection>>>,
+    /// Chunk-x of `grid`'s `(0, 0, _)` slot.
+    origin_cx: i32,
+    /// Chunk-z of `grid`'s `(0, 0, _)` slot.
+    origin_cz: i32,
+    /// Columns spanned by `grid` along x (at most 3; less if an edge column of
+    /// the requested 3×3 has no non-air section at all, which is a real
+    /// answer — see [`Self::block_at`] — not a truncated snapshot).
+    width_x: i32,
+    /// Columns spanned by `grid` along z. See [`width_x`](Self::width_x).
+    width_z: i32,
     /// World-space bottom of the dimension (overworld `-64`).
     min_y: i32,
     /// Number of 16-block sections stacked in a column.
@@ -735,6 +756,12 @@ fn default_version_data() -> Option<Arc<dyn VersionAdapter>> {
 impl LiveCollision {
     /// Build a view from a pre-fetched section snapshot and the dimension geometry.
     ///
+    /// `sections` keeps its `HashMap` shape at this boundary because
+    /// `Sim::live_collision` (`sim.rs`) already builds one while zipping its
+    /// request list against `sections_at`'s response — but it is consumed
+    /// exactly once, here, to build the dense grid every later lookup reads.
+    /// See [`Self::grid`] for why.
+    ///
     /// Version data defaults to [`default_version_data`]; override it with
     /// [`with_version_data`](Self::with_version_data).
     #[must_use]
@@ -760,14 +787,60 @@ impl LiveCollision {
                 air_states.push(id);
             }
         }
+        let (grid, origin_cx, origin_cz, width_x, width_z) =
+            Self::build_grid(sections, section_count);
         Self {
-            sections,
+            grid,
+            origin_cx,
+            origin_cz,
+            width_x,
+            width_z,
             min_y,
             section_count,
             atlas,
             version: default_version_data(),
             air_states,
         }
+    }
+
+    /// Converts the `HashMap` snapshot into the dense grid [`Self::block_at`]
+    /// reads, in one pass over its entries.
+    ///
+    /// The grid's footprint is the bounding box of the keys actually present,
+    /// not a hardcoded 3×3: `sections_at` elides every all-air section
+    /// regardless of column, so a column with no non-air section anywhere in
+    /// it contributes no keys at all and must not be misread as "not
+    /// requested" — see the type docs. Both are handled identically here: a
+    /// `(cx, cz)` outside the observed bounding box was never a key in the
+    /// map either, so [`Self::block_at`]'s bounds check and the old
+    /// `HashMap::get` miss agree on every input, air included.
+    fn build_grid(
+        sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
+        section_count: usize,
+    ) -> (Vec<Option<Arc<ChunkSection>>>, i32, i32, i32, i32) {
+        if sections.is_empty() {
+            return (Vec::new(), 0, 0, 0, 0);
+        }
+        let mut min_cx = i32::MAX;
+        let mut max_cx = i32::MIN;
+        let mut min_cz = i32::MAX;
+        let mut max_cz = i32::MIN;
+        for &(cx, cz, _) in sections.keys() {
+            min_cx = min_cx.min(cx);
+            max_cx = max_cx.max(cx);
+            min_cz = min_cz.min(cz);
+            max_cz = max_cz.max(cz);
+        }
+        let width_x = max_cx - min_cx + 1;
+        let width_z = max_cz - min_cz + 1;
+        let mut grid = vec![None; (width_x * width_z) as usize * section_count];
+        for ((cx, cz, si), section) in sections {
+            let dx = cx - min_cx;
+            let dz = cz - min_cz;
+            let idx = ((dx * width_z + dz) as usize) * section_count + si;
+            grid[idx] = Some(section);
+        }
+        (grid, min_cx, min_cz, width_x, width_z)
     }
 
     /// Use `version` as the source of per-state collision shapes and block names.
@@ -791,14 +864,25 @@ impl LiveCollision {
 
     /// Vanilla block-state id at world coordinates, or `0` (`minecraft:air`)
     /// outside the snapshot / world.
+    ///
+    /// Was one `HashMap<(i32, i32, usize), _>` probe per call; is now bounds
+    /// checks plus one array index into [`Self::grid`], built once in
+    /// [`Self::new`]. Every physics substep queries this for every candidate
+    /// block in the player's sweep, so this is the function the dense-grid
+    /// change in [`Self::new`] exists to speed up.
     #[must_use]
     pub fn block_at(&self, x: i32, y: i32, z: i32) -> u32 {
         if y < self.min_y || y >= self.min_y + (self.section_count as i32) * 16 {
             return 0;
         }
         let si = ((y - self.min_y) / 16) as usize;
-        let key = (x.div_euclid(16), z.div_euclid(16), si);
-        let Some(section) = self.sections.get(&key) else {
+        let dx = x.div_euclid(16) - self.origin_cx;
+        let dz = z.div_euclid(16) - self.origin_cz;
+        if dx < 0 || dx >= self.width_x || dz < 0 || dz >= self.width_z {
+            return 0;
+        }
+        let idx = ((dx * self.width_z + dz) as usize) * self.section_count + si;
+        let Some(Some(section)) = self.grid.get(idx) else {
             return 0;
         };
         let ly = (y - self.min_y).rem_euclid(16) as usize;
