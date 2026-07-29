@@ -2039,7 +2039,9 @@ version = "0.1.0"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
+ "lodestone-model",
  "parking_lot",
+ "uuid",
 ]
 
 [[package]]
@@ -2201,6 +2203,7 @@ name = "lodestone-shell"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bevy_ecs",
  "bytemuck",
  "glam 0.33.2",
  "lodestone-assets",

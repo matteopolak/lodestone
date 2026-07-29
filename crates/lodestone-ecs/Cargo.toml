@@ -17,3 +17,13 @@ bevy_ecs = { workspace = true }
 # The `Arc<RwLock<World>>` handle a driver hands to async/bot callers and, later,
 # net-thread ingest. `parking_lot` per §11 (azalea uses it for the same purpose).
 parking_lot = { workspace = true }
+# The version-free ingest vocabulary (`ClientEvent`) and the value types the
+# entity component set is built out of (`Vec3`, `Rotation`, `ResourceKey`,
+# `ItemStack`, `Reported`, …), per docs/bevy-migration.md §11. Deliberately the
+# *only* Lodestone dependency: never a version crate (§5), and not
+# `lodestone-render` (§4.4 keeps the GPU layer bevy-free, which also means the
+# ECS must not reach into it).
+lodestone-model = { workspace = true }
+# `EntityUuid`. `lodestone-model` already speaks `Uuid` in `EntitySpawned`, so
+# this adds no new type to the graph, only the name.
+uuid = { workspace = true }

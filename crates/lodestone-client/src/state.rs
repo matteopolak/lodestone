@@ -33,7 +33,7 @@ use lodestone_game::{
 };
 use lodestone_model::{
     BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, EntityAttributeSnapshot,
-    EntityEquipment, EntityMetadataUpdate, EntityMovement, EntityPose, EntityVariant, GameMode,
+    EntityEquipment, EntityPose, EntityVariant, GameMode,
     ItemStack, PlayerListEntry, Reported, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
@@ -104,6 +104,23 @@ impl Default for PlayerSnapshot {
 }
 
 /// A view of another entity in the world.
+///
+/// # This is a *derived* value, not storage
+///
+/// Since Stage 1 of [`docs/bevy-migration.md`](../../../docs/bevy-migration.md)
+/// the authoritative copy of every field below lives in `lodestone-ecs`'s
+/// entity component set, folded by the `NetIngest` systems in
+/// `lodestone_ecs::ingest`. `Inner` no longer holds a
+/// `HashMap<i32, EntityView>`; [`SharedState::entities`] builds these on demand
+/// from components ([`entity_view`]).
+///
+/// The plan permits exactly one intermediate shape here — *components
+/// authoritative, this struct derived* — and never the reverse. It survives
+/// only because [`crate::ClientHandle::entities`] and its tests still speak
+/// this vocabulary; Stage 6 replaces those with ECS queries and this type goes
+/// away with them. **Do not add a field here without adding the component it
+/// is read from**, or the new field becomes a second source of truth by
+/// definition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityView {
     /// The entity's id.
@@ -186,7 +203,6 @@ pub struct EntityView {
 #[derive(Debug)]
 struct Inner {
     player: PlayerSnapshot,
-    entities: HashMap<i32, EntityView>,
     players: HashMap<Uuid, PlayerListEntry>,
     scoreboard: Scoreboard,
     /// Boss bars in server insertion order (render order).
@@ -198,7 +214,6 @@ impl Default for Inner {
     fn default() -> Self {
         Self {
             player: PlayerSnapshot::default(),
-            entities: HashMap::new(),
             players: HashMap::new(),
             scoreboard: Scoreboard::default(),
             boss_bars: Vec::new(),
@@ -250,7 +265,12 @@ impl std::fmt::Debug for SharedState {
 
 impl Default for SharedState {
     fn default() -> Self {
-        let ecs = lodestone_ecs::new_handle();
+        // `new_ingest_handle` (not `new_handle`) because this is the `World`
+        // that is *authoritative* over entity state: it carries
+        // `IngestPlugin`'s `NetIngest` systems. `WorldTime` is still inserted
+        // explicitly rather than by a plugin — see `CorePlugin`'s docs on why
+        // the clock's owner must be named at the call site.
+        let ecs = lodestone_ecs::new_ingest_handle();
         ecs.write().insert_resource(WorldTime::default());
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
@@ -299,10 +319,29 @@ impl SharedState {
     /// Chunk data is written by the adapter through [`SharedState::world_write`]
     /// instead, so the heavy payload is never borrowed or cloned here.
     ///
-    /// [`ClientEvent::TimeChanged`] is special-cased *here* rather than inside
-    /// [`Inner::apply`]: `WorldTime` lives in this state's [`EcsHandle`]
-    /// (`self.ecs`), a sibling field `Inner::apply` has no access to. Every
-    /// other event still folds through `Inner::apply` unchanged.
+    /// [`ClientEvent::TimeChanged`] and every entity event are handled *here*
+    /// rather than inside [`Inner::apply`]: they live in this state's
+    /// [`EcsHandle`] (`self.ecs`), a sibling field `Inner::apply` has no access
+    /// to. Everything else still folds through `Inner::apply` unchanged.
+    ///
+    /// # Why entity events run a schedule instead of touching components
+    ///
+    /// The fold *is* the `NetIngest` systems
+    /// ([`lodestone_ecs::ingest`]), so this method's job is only to enqueue and
+    /// run. `lodestone_ecs::ingest::handles_event` is the routing switch; it
+    /// lives beside the systems so the two cannot drift, because an event
+    /// routed here that no system folds would vanish silently.
+    ///
+    /// One event per schedule run, deliberately — that is what makes arrival
+    /// order across event families exact without the systems having to
+    /// interleave (see the ordering note in `lodestone_ecs::ingest`'s module
+    /// docs).
+    ///
+    /// The `clone()` is the one cost this shape adds over the old in-place fold:
+    /// the queue owns its events, and this method only borrows. Entity events are
+    /// small (a pose delta, a metadata patch) and arrive at tick rate for ~30
+    /// entities, so it is not worth an API change to avoid — but if `apply` ever
+    /// takes the event by value, drop it.
     pub(crate) fn apply(&self, event: &ClientEvent) {
         if let ClientEvent::TimeChanged {
             world_age,
@@ -313,6 +352,12 @@ impl SharedState {
             let mut time = world.resource_mut::<WorldTime>();
             time.age = *world_age;
             time.time_of_day = *time_of_day;
+        } else if lodestone_ecs::ingest::handles_event(event) {
+            let mut world = self.ecs.write();
+            world
+                .resource_mut::<lodestone_ecs::ingest::IngestQueue>()
+                .push(event.clone());
+            world.run_schedule(lodestone_ecs::NetIngest);
         } else {
             let mut inner = self.inner.write().unwrap_or_else(|e| e.into_inner());
             inner.apply(event);
@@ -503,26 +548,31 @@ impl SharedState {
             .collect()
     }
 
-    /// Clones out a single entity view.
+    /// Derives a single entity view from its components.
+    ///
+    /// Takes only a **read** lock on the ECS `World`: the lookup goes through
+    /// the [`EntityIndex`](lodestone_ecs::entity::EntityIndex) resource and
+    /// `World::get_entity`, both of which are `&World` operations. A `Query`
+    /// would need `&mut World` (it caches its `QueryState`) and would therefore
+    /// contend with the net thread's ingest writes for no benefit at this
+    /// entity count.
     #[must_use]
     pub(crate) fn entity(&self, entity_id: i32) -> Option<EntityView> {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entities
-            .get(&entity_id)
-            .cloned()
+        let world = self.ecs.read();
+        let entity = world
+            .resource::<lodestone_ecs::entity::EntityIndex>()
+            .get(entity_id)?;
+        entity_view(world.get_entity(entity).ok()?)
     }
 
-    /// Clones out all currently tracked entities.
+    /// Derives all currently tracked entities from their components.
     #[must_use]
     pub(crate) fn entities(&self) -> Vec<EntityView> {
-        self.inner
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .entities
-            .values()
-            .cloned()
+        let world = self.ecs.read();
+        world
+            .resource::<lodestone_ecs::entity::EntityIndex>()
+            .iter()
+            .filter_map(|(_, entity)| entity_view(world.get_entity(entity).ok()?))
             .collect()
     }
 
@@ -694,118 +744,6 @@ impl Inner {
                 self.player.xp_total = *total;
                 self.player.xp_known = true;
             }
-            ClientEvent::EntitySpawned {
-                entity_id,
-                uuid,
-                entity_type,
-                pos,
-                rotation,
-                velocity,
-            } => {
-                self.entities.insert(
-                    *entity_id,
-                    EntityView {
-                        entity_id: *entity_id,
-                        uuid: *uuid,
-                        entity_type: entity_type.clone(),
-                        position: *pos,
-                        rotation: *rotation,
-                        head_yaw: rotation.yaw,
-                        velocity: *velocity,
-                        on_ground: false,
-                        flags: None,
-                        custom_name: Reported::Unreported,
-                        custom_name_visible: None,
-                        pose: None,
-                        health: None,
-                        baby: None,
-                        variant: None,
-                        attributes: Vec::new(),
-                        equipment: Vec::new(),
-                        item: Reported::Unreported,
-                    },
-                );
-            }
-            ClientEvent::EntityMoved {
-                entity_id,
-                movement,
-                rotation,
-                on_ground,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    entity.position = match movement {
-                        EntityMovement::Absolute(pos) => *pos,
-                        EntityMovement::Relative(delta) => entity.position + *delta,
-                    };
-                    if let Some(rotation) = rotation {
-                        entity.rotation = *rotation;
-                    }
-                    entity.on_ground = *on_ground;
-                }
-            }
-            ClientEvent::EntityVelocity {
-                entity_id,
-                velocity,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    entity.velocity = Some(*velocity);
-                }
-            }
-            ClientEvent::EntityHeadRotation {
-                entity_id,
-                head_yaw,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    entity.head_yaw = *head_yaw;
-                }
-            }
-            ClientEvent::EntityRemoved { entity_ids } => {
-                for id in entity_ids {
-                    self.entities.remove(id);
-                }
-            }
-            ClientEvent::EntityMetadataUpdated {
-                entity_id,
-                metadata,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    apply_metadata(entity, metadata);
-                }
-            }
-            ClientEvent::EntityAttributesUpdated {
-                entity_id,
-                attributes,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    for snapshot in attributes {
-                        match entity
-                            .attributes
-                            .iter_mut()
-                            .find(|existing| existing.attribute == snapshot.attribute)
-                        {
-                            Some(existing) => *existing = snapshot.clone(),
-                            None => entity.attributes.push(snapshot.clone()),
-                        }
-                    }
-                }
-            }
-            ClientEvent::EntityEquipmentUpdated {
-                entity_id,
-                equipment,
-            } => {
-                if let Some(entity) = self.entities.get_mut(entity_id) {
-                    for update in equipment {
-                        match entity
-                            .equipment
-                            .iter_mut()
-                            .find(|existing| existing.slot == update.slot)
-                        {
-                            Some(existing) => *existing = update.clone(),
-                            None => entity.equipment.push(update.clone()),
-                        }
-                    }
-                }
-            }
             ClientEvent::PlayerListUpdate { entries } => {
                 for entry in entries {
                     self.players.insert(entry.uuid, entry.clone());
@@ -854,6 +792,14 @@ impl Inner {
             ClientEvent::BossBarUpdate { id, action } => {
                 apply_boss_bar(&mut self.boss_bars, *id, action);
             }
+            // Every entity event is folded by `lodestone_ecs::ingest`'s
+            // `NetIngest` systems instead and never reaches here —
+            // `SharedState::apply` routes them by `lodestone_ecs::ingest::handles_event`
+            // before this fold is called. The arms that used to live here (spawn,
+            // movement, velocity, head rotation, removal, metadata, attributes,
+            // equipment) plus the `apply_metadata` helper are *deleted*, not
+            // mirrored: `Inner` has no `entities` map for a second copy to live in.
+            //
             // Chat, KeepAlive, Disconnect carry no scalar read-model state.
             // ChunkLoaded / ChunkUnloaded are handled by the adapter through the
             // `WorldSink`, so their heavy payload never reaches this fold; the
@@ -863,39 +809,68 @@ impl Inner {
     }
 }
 
-/// Folds a metadata update into an entity view: each field is only overwritten
-/// when the update actually carried it, so a partial `set_entity_data` (the
-/// common case — the server sends only changed indices) never clobbers
-/// previously-known values.
-fn apply_metadata(entity: &mut EntityView, metadata: &EntityMetadataUpdate) {
-    if let Some(flags) = metadata.flags {
-        entity.flags = Some(flags);
-    }
-    if let Reported::Reported(custom_name) = &metadata.custom_name {
-        entity.custom_name = Reported::Reported(custom_name.clone());
-    }
-    if let Some(visible) = metadata.custom_name_visible {
-        entity.custom_name_visible = Some(visible);
-    }
-    if let Some(pose) = metadata.pose {
-        entity.pose = Some(pose);
-    }
-    if let Some(health) = metadata.health {
-        entity.health = Some(health);
-    }
-    if let Some(baby) = metadata.baby {
-        entity.baby = Some(baby);
-    }
-    if let Some(variant) = &metadata.variant {
-        entity.variant = Some(variant.clone());
-    }
-    // Both states are preserved deliberately: `Reported::Unreported` is "this
-    // packet said nothing about the item" and must not overwrite a stack an
-    // earlier packet reported, while `Reported::Reported(None)` is the server
-    // clearing it. A dropped item announces itself once, at spawn, and then
-    // sends item-free metadata for the rest of its life, so collapsing the two
-    // here would lose the identity again a tick after it arrived.
-    if let Reported::Reported(item) = &metadata.item {
-        entity.item = Reported::Reported(item.clone());
-    }
+/// Derives an [`EntityView`] from one entity's components.
+///
+/// The read side of Stage 1's authority handover: the components are the only
+/// copy, and this rebuilds the old struct for the callers that still want it
+/// ([`SharedState::entity`], [`SharedState::entities`], and through them
+/// [`crate::ClientHandle::entities`]).
+///
+/// # The three `Reported` states, reconstituted
+///
+/// `Unreported` / `Reported(None)` / `Reported(Some(v))` map back from
+/// **component absent** / present-with-`None` / present-with-`Some`. This is
+/// the inverse of the encoding `lodestone_ecs::entity`'s module docs define,
+/// and it must stay an exact inverse: reading absence as `Reported(None)` here
+/// would tell a caller the server had cleared a field it has never mentioned —
+/// which for a dropped item's `item` is the difference between "draw nothing
+/// yet" and "this drop is empty forever".
+///
+/// The plain `Option` fields follow the same rule for the same reason
+/// (`velocity`: absent is "never reported", which is not the same as a reported
+/// zero), which is why every one of them is a `.map(...)` over
+/// `EntityRef::get`, never a `unwrap_or_default`.
+fn entity_view(entity: lodestone_ecs::ecs::world::EntityRef<'_>) -> Option<EntityView> {
+    use lodestone_ecs::entity as ecs_entity;
+
+    Some(EntityView {
+        entity_id: entity.get::<ecs_entity::MinecraftEntityId>()?.0,
+        uuid: entity.get::<ecs_entity::EntityUuid>().map(|uuid| uuid.0),
+        entity_type: entity.get::<ecs_entity::EntityKind>()?.0.clone(),
+        position: entity.get::<ecs_entity::Position>()?.0,
+        rotation: entity.get::<ecs_entity::Rotation>()?.0,
+        head_yaw: entity.get::<ecs_entity::HeadYaw>()?.0,
+        velocity: entity.get::<ecs_entity::Velocity>().map(|v| v.0),
+        on_ground: entity
+            .get::<ecs_entity::OnGround>()
+            .is_some_and(|grounded| grounded.0),
+        flags: entity.get::<ecs_entity::EntityFlags>().map(|f| f.0),
+        custom_name: entity
+            .get::<ecs_entity::CustomName>()
+            .map_or(Reported::Unreported, |name| {
+                Reported::Reported(name.0.clone())
+            }),
+        custom_name_visible: entity
+            .get::<ecs_entity::CustomNameVisible>()
+            .map(|visible| visible.0),
+        pose: entity.get::<ecs_entity::Pose>().map(|pose| pose.0),
+        health: entity.get::<ecs_entity::Health>().map(|health| health.0),
+        baby: entity.get::<ecs_entity::Baby>().map(|baby| baby.0),
+        variant: entity
+            .get::<ecs_entity::Variant>()
+            .map(|variant| variant.0.clone()),
+        attributes: entity
+            .get::<ecs_entity::Attributes>()
+            .map(|attributes| attributes.0.clone())
+            .unwrap_or_default(),
+        equipment: entity
+            .get::<ecs_entity::Equipment>()
+            .map(|equipment| equipment.0.clone())
+            .unwrap_or_default(),
+        item: entity
+            .get::<ecs_entity::DisplayItem>()
+            .map_or(Reported::Unreported, |item| {
+                Reported::Reported(item.0.clone())
+            }),
+    })
 }

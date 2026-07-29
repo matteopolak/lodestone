@@ -27,3 +27,27 @@ pub type EcsHandle = Arc<RwLock<World>>;
 pub fn new_handle() -> EcsHandle {
     Arc::new(RwLock::new(World::new()))
 }
+
+/// An [`EcsHandle`] onto a `World` that carries [`crate::CorePlugin`]'s
+/// schedules and [`crate::ingest::IngestPlugin`]'s entity-ingest systems —
+/// i.e. a `World` that is *authoritative* over entity state and can be handed
+/// `ClientEvent`s.
+///
+/// The `App` is built only to run the plugins' `build` (which is the only way
+/// to register schedules and systems) and is then discarded, keeping the
+/// `World` it produced. That is azalea's own shape: it takes the `World` out of
+/// the `App` and puts it behind an `Arc<RwLock<_>>`
+/// (`azalea-client/src/client.rs:143`) because the driver is a hand-written
+/// loop, not `App::run`. Nothing here calls `App::update`, so the discarded
+/// `App`'s own `Main` schedule ordering is irrelevant; the caller runs named
+/// schedules on the `World` directly (`world.run_schedule(NetIngest)`).
+///
+/// Carries no [`crate::WorldTime`] — see [`new_handle`] and
+/// [`crate::CorePlugin`] on why inserting that is left to whoever is making a
+/// particular `World` authoritative over the clock.
+#[must_use]
+pub fn new_ingest_handle() -> EcsHandle {
+    let mut app = bevy_app::App::new();
+    app.add_plugins(crate::ingest::IngestPlugin);
+    Arc::new(RwLock::new(std::mem::take(app.world_mut())))
+}
