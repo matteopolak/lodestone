@@ -230,12 +230,22 @@ pub enum MainButton {
     Options,
     /// Quit the game.
     Quit,
+    /// Open the account list (issue #66). **Not a vanilla widget** — unlike
+    /// every other row in this enum, there is no `TitleScreen.java` line to
+    /// cite for it. Real Minecraft has no in-game account switcher at all:
+    /// an account is chosen once, outside the game, by the separate
+    /// Minecraft Launcher, and the game client just uses whatever it was
+    /// handed. Lodestone has no separate launcher, so the game itself has to
+    /// own this. [`title_slot`] places it below vanilla's own four rows
+    /// rather than inserting it into their grid, so it cannot be mistaken
+    /// for a reproduced vanilla rect.
+    Accounts,
 }
 
 /// Every title-screen widget, in vanilla's display order. Indices are the one
 /// index space shared by keyboard selection, mouse hover, hit-testing and the
 /// renderer — see [`super::render::title_slot`].
-pub const MAIN_BUTTONS: [MainButton; 8] = [
+pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
     MainButton::Realms,
@@ -244,6 +254,10 @@ pub const MAIN_BUTTONS: [MainButton; 8] = [
     MainButton::Accessibility,
     MainButton::Options,
     MainButton::Quit,
+    // Not part of vanilla's own eight — see `MainButton::Accounts`'s docs.
+    // Appended last rather than inserted into the vanilla run so every
+    // vanilla row keeps its original index.
+    MainButton::Accounts,
 ];
 
 impl MainButton {
@@ -265,6 +279,7 @@ impl MainButton {
             MainButton::Accessibility => "Accessibility Settings...",
             MainButton::Options => "Options...",
             MainButton::Quit => "Quit Game",
+            MainButton::Accounts => "Accounts",
         }
     }
 
@@ -280,6 +295,7 @@ impl MainButton {
                 | MainButton::Multiplayer
                 | MainButton::Options
                 | MainButton::Quit
+                | MainButton::Accounts
         )
     }
 
@@ -414,7 +430,13 @@ impl PauseButton {
 }
 
 /// Selection state and the saved server list.
-#[derive(Debug, Clone)]
+///
+/// No longer `Clone`: [`accounts`](MenuNav::accounts) holds a live channel
+/// receiver for an in-flight sign-in ([`accounts::AccountsNav`]), and
+/// `mpsc::Receiver` is not `Clone`. Nothing in the tree ever cloned a
+/// `MenuNav` (it is held once, behind `&mut self`, in `app.rs`'s window
+/// struct), so dropping the derive costs nothing.
+#[derive(Debug)]
 pub struct MenuNav {
     main: usize,
     server: usize,
@@ -435,6 +457,9 @@ pub struct MenuNav {
     options_path: std::path::PathBuf,
     /// The last options-save error, surfaced on the settings screen.
     options_save_error: Option<String>,
+    /// The account list + sign-in flow (issue #66). See
+    /// [`crate::menu::accounts`].
+    accounts: crate::menu::accounts::AccountsNav,
 }
 
 impl Default for MenuNav {
@@ -444,30 +469,45 @@ impl Default for MenuNav {
 }
 
 impl MenuNav {
-    /// Loads the saved server list and options from their real locations.
+    /// Loads the saved server list, options and account metadata from their
+    /// real locations.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_paths(servers_path(), crate::config::options_path())
+        Self::with_paths(
+            servers_path(),
+            crate::config::options_path(),
+            lodestone_auth::paths::profiles_path(),
+        )
     }
 
     /// Loads the server list from `path`. Missing or corrupt is an empty list.
-    /// The options file is derived from the same directory (`options.json`
-    /// beside it) so existing callers of this constructor keep working
-    /// unchanged — see [`MenuNav::with_paths`] to point both explicitly.
+    /// The options and account-metadata files are derived from the same
+    /// directory (`options.json`/`profiles.json` beside it) so existing
+    /// callers of this constructor keep working unchanged — see
+    /// [`MenuNav::with_paths`] to point all three explicitly.
     #[must_use]
     pub fn with_path(path: std::path::PathBuf) -> Self {
         let options_path = path
             .parent()
             .map(|d| d.join("options.json"))
             .unwrap_or_else(|| std::path::PathBuf::from("options.json"));
-        Self::with_paths(path, options_path)
+        let profiles_path = path
+            .parent()
+            .map(|d| d.join("profiles.json"))
+            .unwrap_or_else(|| std::path::PathBuf::from("profiles.json"));
+        Self::with_paths(path, options_path, profiles_path)
     }
 
-    /// Loads the server list from `path` and the options from `options_path`.
-    /// Missing or corrupt is an empty list / the default options respectively,
-    /// never an error — a corrupt file must not stop the game from launching.
+    /// Loads the server list from `path`, the options from `options_path` and
+    /// account metadata from `profiles_path`. Missing or corrupt is an empty
+    /// list / the default options / no known accounts respectively, never an
+    /// error — a corrupt file must not stop the game from launching.
     #[must_use]
-    pub fn with_paths(path: std::path::PathBuf, options_path: std::path::PathBuf) -> Self {
+    pub fn with_paths(
+        path: std::path::PathBuf,
+        options_path: std::path::PathBuf,
+        profiles_path: std::path::PathBuf,
+    ) -> Self {
         Self {
             main: 0,
             server: 0,
@@ -479,6 +519,7 @@ impl MenuNav {
             options: Options::load_from(&options_path),
             options_path,
             options_save_error: None,
+            accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
         }
     }
 
@@ -544,6 +585,12 @@ impl MenuNav {
         self.save_error.as_deref()
     }
 
+    /// The account list + sign-in flow state (issue #66).
+    #[must_use]
+    pub fn accounts(&self) -> &crate::menu::accounts::AccountsNav {
+        &self.accounts
+    }
+
     /// Moves the highlight to row `row` of the current screen, as a mouse hover
     /// would. Out-of-range rows are ignored rather than clamped: the caller
     /// hit-tests against the rendered rects, so "no row here" must not silently
@@ -562,6 +609,7 @@ impl MenuNav {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
             Screen::ServerList if row < self.list.len() => self.server = row,
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
+            Screen::Accounts => self.accounts.hover(row),
             Screen::ServerEdit => {
                 self.form.field = match row {
                     0 => FormField::Name,
@@ -581,6 +629,7 @@ impl MenuNav {
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
             Screen::Settings => self.key_settings(ui, key),
+            Screen::Accounts => self.key_accounts(ui, key),
             // Unlike the other arms above, the pause menu is not an
             // `owns_frame` screen — see `render::pause_frame`'s docs — but it
             // still owns its own row navigation exactly like they do.
@@ -645,6 +694,10 @@ impl MenuNav {
                     MainButton::Quit => {
                         ui.request_quit();
                         MenuAction::Quit
+                    }
+                    MainButton::Accounts => {
+                        ui.open_accounts();
+                        MenuAction::None
                     }
                     // Unreachable — every variant below is disabled above.
                     // Spelled out instead of `_` so making one of them *enabled*
@@ -789,6 +842,22 @@ impl MenuNav {
             }
             _ => MenuAction::None,
         }
+    }
+
+    /// The account list: entirely delegated to [`accounts::AccountsNav`],
+    /// which owns the row highlight, the scroll window and the sign-in state
+    /// machine. This arm's only job is translating its
+    /// [`accounts::AccountsSignal::Back`] into leaving the screen — every
+    /// other outcome (selecting an account, starting/cancelling a sign-in,
+    /// removing an account) is a self-contained mutation `AccountsNav`
+    /// already applied by the time this returns.
+    fn key_accounts(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        use crate::menu::accounts::AccountsSignal;
+        match self.accounts.handle_key(key) {
+            AccountsSignal::Back => ui.close_accounts(),
+            AccountsSignal::None => {}
+        }
+        MenuAction::None
     }
 
     /// The pause menu: Up/Down move the highlight, Enter activates the
@@ -969,7 +1038,10 @@ mod tests {
         let mut ui = UiState::new();
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Up);
-        assert_eq!(nav.main_button(), MainButton::Quit, "up from the top wraps");
+        // `Accounts` is appended after `Quit` (see `MAIN_BUTTONS`'s docs) and
+        // is enabled, so it — not `Quit` — is now the last stop wrapping up
+        // from the top reaches.
+        assert_eq!(nav.main_button(), MainButton::Accounts, "up from the top wraps");
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Down);
@@ -1006,14 +1078,16 @@ mod tests {
             "escape returns to the title without moving the highlight"
         );
 
-        // Quit is always the last button: wrapping `Up` from the first row
-        // reaches it regardless of how many rows sit in between (that
-        // invariant is what `main_menu_selection_wraps_both_ways` pins down
-        // in isolation). Walk there for real, exercising the same edges.
+        // `Accounts` is the last button now (see `MAIN_BUTTONS`'s docs), so
+        // wrapping `Up` from the top lands there rather than on `Quit` — see
+        // `main_menu_selection_wraps_both_ways`. Walk to `Quit` directly
+        // instead, exercising a plain `Up` from the top of the vanilla run.
         nav.key(&mut ui, MenuKey::Up);
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Up);
-        assert_eq!(nav.main_button(), MainButton::Quit, "up from the top wraps");
+        assert_eq!(nav.main_button(), MainButton::Accounts, "up from the top wraps");
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Quit);
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Quit);
         assert!(ui.quit_requested());
     }
@@ -1376,6 +1450,10 @@ mod tests {
                 std::process::id()
             )),
             std::path::PathBuf::from("/dev/null/nope/options.json"),
+            std::env::temp_dir().join(format!(
+                "lodestone-nav-{}-settingsfail/profiles.json",
+                std::process::id()
+            )),
         );
         let mut ui = UiState::new();
         ui.open_settings();
@@ -1539,10 +1617,12 @@ mod tests {
         let (mut nav, _) = nav("skip-disabled");
         let mut ui = UiState::new();
 
-        // Title screen: Singleplayer, Multiplayer, Options, Quit — Realms and
-        // the three icon buttons are stepped over in both directions.
+        // Title screen: Singleplayer, Multiplayer, Options, Quit, Accounts —
+        // Realms and the three icon buttons are stepped over in both
+        // directions. `Accounts` is not vanilla (see `MainButton::Accounts`)
+        // but is enabled, so it is part of this walk too.
         let mut seen = vec![nav.main_button()];
-        for _ in 0..3 {
+        for _ in 0..4 {
             nav.key(&mut ui, MenuKey::Down);
             seen.push(nav.main_button());
         }
@@ -1552,10 +1632,11 @@ mod tests {
                 MainButton::Singleplayer,
                 MainButton::Multiplayer,
                 MainButton::Options,
-                MainButton::Quit
+                MainButton::Quit,
+                MainButton::Accounts,
             ]
         );
-        for _ in 0..8 {
+        for _ in 0..9 {
             nav.key(&mut ui, MenuKey::Up);
             assert!(
                 nav.main_button().enabled(),

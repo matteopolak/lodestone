@@ -242,10 +242,83 @@ pub struct FaviconMosaic {
 #[must_use]
 pub fn favicon_mosaic(png: &[u8]) -> Option<FaviconMosaic> {
     let img = Image::decode_png(png).ok()?;
-    if img.width == 0 || img.height == 0 {
+    rgba_mosaic(&img.rgba, img.width as usize, img.height as usize)
+}
+
+/// Box-filters a small player-head icon down to a [`MOSAIC`]×[`MOSAIC`]
+/// colour grid, from **already-decoded** RGBA bytes rather than a PNG file —
+/// see [`default_head_icon`] for why that is the parameter this screen needs.
+///
+/// Shares [`rgba_mosaic`]'s box filter with [`favicon_mosaic`] rather than
+/// re-deriving it: a head and a favicon are the same kind of drawable (a
+/// small square texture reduced to coloured cells), so there is one filter,
+/// not two that could silently drift apart.
+#[must_use]
+pub fn head_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMosaic> {
+    rgba_mosaic(rgba, width, height)
+}
+
+/// A placeholder head icon used until skins are implemented (issue #62): a
+/// flat skin-tone square with a darker hairline band across the top eighth
+/// and two single-pixel eyes, at [`HEAD_SIZE`]×[`HEAD_SIZE`].
+///
+/// **The texture is the parameter, not the constant.** [`head_mosaic`] does
+/// not know or care that [`DEFAULT_HEAD_RGBA`] is hand-authored pixels rather
+/// than a downloaded skin — it is exactly the same call a real skin's decoded
+/// face region would go through. Swapping this default out for
+/// `head_mosaic(&decoded_skin_face, 8, 8)` once issue #62 lands a skin
+/// fetch is the entire change; nothing in [`MenuRow`], [`draw_widget`]'s
+/// icon-drawing branch, or the geometry builder needs to move.
+#[must_use]
+pub fn default_head_icon() -> FaviconMosaic {
+    head_mosaic(&DEFAULT_HEAD_RGBA, HEAD_SIZE, HEAD_SIZE).expect("the embedded default head is a valid 8x8 RGBA grid")
+}
+
+/// Side length, in pixels, of [`DEFAULT_HEAD_RGBA`].
+const HEAD_SIZE: usize = 8;
+
+/// An 8×8 RGBA placeholder head: skin tone (`0xC8, 0x96, 0x64`) with a
+/// darker top row (hair) and two single-pixel dark eyes on row 4. Hand-authored
+/// pixels, not art — see [`default_head_icon`]'s docs on why that is fine.
+const DEFAULT_HEAD_RGBA: [u8; HEAD_SIZE * HEAD_SIZE * 4] = build_default_head();
+
+const fn build_default_head() -> [u8; HEAD_SIZE * HEAD_SIZE * 4] {
+    const SKIN: [u8; 4] = [0xC8, 0x96, 0x64, 0xFF];
+    const HAIR: [u8; 4] = [0x4A, 0x30, 0x1E, 0xFF];
+    const EYE: [u8; 4] = [0x20, 0x20, 0x20, 0xFF];
+    let mut out = [0u8; HEAD_SIZE * HEAD_SIZE * 4];
+    let mut y = 0;
+    while y < HEAD_SIZE {
+        let mut x = 0;
+        while x < HEAD_SIZE {
+            let px = if y == 0 {
+                HAIR
+            } else if y == 3 && (x == 2 || x == 5) {
+                EYE
+            } else {
+                SKIN
+            };
+            let i = (y * HEAD_SIZE + x) * 4;
+            out[i] = px[0];
+            out[i + 1] = px[1];
+            out[i + 2] = px[2];
+            out[i + 3] = px[3];
+            x += 1;
+        }
+        y += 1;
+    }
+    out
+}
+
+/// The box filter shared by [`favicon_mosaic`] and [`head_mosaic`]: reduces
+/// `width`×`height` RGBA pixels to [`MOSAIC`]×[`MOSAIC`] cells, averaging each
+/// cell's source rect. Returns `None` for a zero-sized image.
+#[must_use]
+fn rgba_mosaic(rgba: &[u8], width: usize, height: usize) -> Option<FaviconMosaic> {
+    if width == 0 || height == 0 {
         return None;
     }
-    let (iw, ih) = (img.width as usize, img.height as usize);
+    let (iw, ih) = (width, height);
     let mut cells = Vec::with_capacity(MOSAIC * MOSAIC);
     for cy in 0..MOSAIC {
         for cx in 0..MOSAIC {
@@ -262,11 +335,11 @@ pub fn favicon_mosaic(png: &[u8]) -> Option<FaviconMosaic> {
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = (y * iw + x) * 4;
-                    if i + 3 >= img.rgba.len() {
+                    if i + 3 >= rgba.len() {
                         continue;
                     }
                     for (c, a) in acc.iter_mut().enumerate() {
-                        *a += f32::from(img.rgba[i + c]);
+                        *a += f32::from(rgba[i + c]);
                     }
                     n += 1.0;
                 }
@@ -318,6 +391,21 @@ pub enum Origin {
     BottomLeft,
     /// `(w, h)` — bottom-right corner text (the copyright line).
     BottomRight,
+    /// `(w, 0)` — top-right corner, for the non-vanilla `Accounts` title-screen
+    /// button (see [`super::nav::MainButton::Accounts`]). Vanilla's own eight
+    /// widgets already fill a 320×240 canvas (`config::MIN_SCALED_*`, the real
+    /// floor `calculate_gui_scale` can produce) to within 16 px, so a ninth
+    /// row appended below them does not fit at the minimum window size —
+    /// measured, not assumed: `every_vanilla_widget_is_on_screen_and_none_overlap`
+    /// caught it the first time this button was placed as `full(TITLE_PITCH * 5.0)`.
+    /// The gap above the logo (`y < LOGO_Y`, i.e. `y < 30`) is free at every
+    /// canvas size instead, which is where this corner sits.
+    TopRight,
+    /// `(w / 2, h)` — bottom-centre, for the account screen's row of
+    /// non-vanilla nine-slice buttons (Add account / Select / Remove /
+    /// Cancel). Not vanilla-sourced like the others above: nothing in
+    /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge.
+    ScreenBottom,
 }
 
 impl Origin {
@@ -333,6 +421,8 @@ impl Origin {
             ),
             Origin::BottomLeft => (0.0, height),
             Origin::BottomRight => (width, height),
+            Origin::TopRight => (width, 0.0),
+            Origin::ScreenBottom => (width * 0.5, height),
         }
     }
 }
@@ -403,8 +493,27 @@ pub fn title_slot(button: MainButton) -> Slot {
         MainButton::Accessibility => icon(14.0),
         MainButton::Options => half(-100.0),
         MainButton::Quit => half(2.0),
+        // Not vanilla — see `MainButton::Accounts`'s docs and
+        // `Origin::TopRight`'s. A corner widget, not one more stack row:
+        // vanilla's own eight already reach to within 16 px of the bottom of
+        // a 320×240 canvas, so nothing fits below them there. The gap above
+        // the logo (`y < LOGO_Y`) is free at every canvas size instead.
+        MainButton::Accounts => Slot {
+            origin: Origin::TopRight,
+            dx: -(ACCOUNTS_ENTRY_W + ACCOUNTS_ENTRY_MARGIN),
+            dy: ACCOUNTS_ENTRY_MARGIN,
+            w: ACCOUNTS_ENTRY_W,
+            h: WIDGET_H,
+        },
     }
 }
+
+/// Width of the non-vanilla `Accounts` corner button — see
+/// [`Origin::TopRight`]'s docs for why it lives there rather than in
+/// vanilla's own vertical stack.
+const ACCOUNTS_ENTRY_W: f32 = 90.0;
+/// Distance from the top-right corner to the `Accounts` button, both axes.
+const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
 /// `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`), resolved by hand
@@ -490,6 +599,15 @@ pub struct MenuRow {
     pub trailing: String,
     /// Favicon to draw at the row's left edge.
     pub favicon: Option<FaviconMosaic>,
+    /// A player head to draw at the row's left edge instead of a favicon —
+    /// the account list's own icon (issue #66/#62). Drawn through the exact
+    /// same [`FaviconMosaic`] path as `favicon`: a head is not a conceptually
+    /// different kind of "small square texture", so it gets no second
+    /// drawable type or draw call to drift from the favicon one. See
+    /// [`default_head_icon`] for why the *texture* is a parameter here
+    /// rather than a hardcoded draw, which is what makes swapping in a real
+    /// downloaded skin later (issue #62) a data change, not a rewrite.
+    pub head: Option<FaviconMosaic>,
     /// Whether the row can be activated (a failed row is still selectable).
     pub enabled: bool,
     /// Draw `detail` in the failure colour.
@@ -628,7 +746,12 @@ pub fn owns_frame(screen: super::Screen) -> bool {
     use super::Screen;
     matches!(
         screen,
-        Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings | Screen::Error
+        Screen::MainMenu
+            | Screen::ServerList
+            | Screen::ServerEdit
+            | Screen::Settings
+            | Screen::Accounts
+            | Screen::Error
     )
 }
 
@@ -691,6 +814,189 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
             align: Align::Centre,
             colour: LABEL,
         }],
+        ..Default::default()
+    }
+}
+
+/// Width of one account-screen action button (Add account / Select / Remove
+/// / Cancel), in logical pixels. Not vanilla-sourced — see [`Origin::ScreenBottom`].
+const ACCOUNTS_BUTTON_W: f32 = 130.0;
+/// Horizontal gap between account-screen buttons.
+const ACCOUNTS_BUTTON_GAP: f32 = 8.0;
+/// Vertical distance from the bottom edge to the account-screen button row,
+/// leaving room for the two lines of footer hint text below it.
+const ACCOUNTS_BUTTON_BOTTOM: f32 = 74.0;
+
+/// The rect for account-screen button `index` (0..4, see
+/// [`super::accounts::BUTTON_ADD`] and its siblings), evenly spaced and
+/// centred along the bottom of the screen.
+fn accounts_button_slot(index: usize) -> Slot {
+    let total_w = 4.0 * ACCOUNTS_BUTTON_W + 3.0 * ACCOUNTS_BUTTON_GAP;
+    Slot {
+        origin: Origin::ScreenBottom,
+        dx: -total_w * 0.5 + index as f32 * (ACCOUNTS_BUTTON_W + ACCOUNTS_BUTTON_GAP),
+        dy: -ACCOUNTS_BUTTON_BOTTOM,
+        w: ACCOUNTS_BUTTON_W,
+        h: WIDGET_H,
+    }
+}
+
+/// Builds the account list's ordinary (no sign-in in flight) frame: the
+/// scrollable account + offline list, then the four action buttons.
+///
+/// The list rows are unslotted (the centred row stack [`row_rect`] already
+/// gives every other row-stack screen); the button row is slotted (real
+/// `widget/button*` nine-slice sprites via [`draw_widget`], anchored to the
+/// bottom edge independent of how many rows are above it) — see
+/// [`row_rect`]'s doc comment for why mixing the two within one frame needed
+/// a fix there, not here.
+#[must_use]
+fn accounts_idle_frame(accounts: &super::accounts::AccountsNav) -> MenuFrame<'static> {
+    use super::accounts::{AccountRow, BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT, VISIBLE_ROWS};
+
+    let all_rows = accounts.rows();
+    let list_len = all_rows.len();
+    let accounts_len = list_len.saturating_sub(1); // the offline row is always last
+    let scroll = accounts.scroll().min(list_len.saturating_sub(1));
+    let shown = list_len.saturating_sub(scroll).min(VISIBLE_ROWS);
+    let focus = accounts.focus();
+
+    let mut rows: Vec<MenuRow> = all_rows[scroll..scroll + shown]
+        .iter()
+        .map(|row| match row {
+            AccountRow::Account(p) => MenuRow {
+                label: p.username.clone(),
+                detail: "MICROSOFT ACCOUNT".to_string(),
+                trailing: if accounts.is_selected(p.profile_id) {
+                    "SELECTED".to_string()
+                } else {
+                    String::new()
+                },
+                head: Some(default_head_icon()),
+                enabled: true,
+                ..Default::default()
+            },
+            AccountRow::Offline => MenuRow {
+                label: "Play Offline".to_string(),
+                detail: "NO SIGN-IN REQUIRED".to_string(),
+                trailing: if accounts.offline_selected() {
+                    "SELECTED".to_string()
+                } else {
+                    String::new()
+                },
+                head: Some(default_head_icon()),
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .collect();
+
+    // Explicit per-constant pushes, not a loop over a positional array: the
+    // button *index* (which drives both the slot position and what
+    // `AccountsNav::handle_key` does with it) must never silently drift from
+    // its label just because the two lists were reordered independently.
+    let button_row = |index: usize, label: &str, enabled: bool| MenuRow {
+        label: label.to_string(),
+        enabled,
+        slot: Some(accounts_button_slot(index)),
+        ..Default::default()
+    };
+    rows.push(button_row(BUTTON_ADD, "ADD ACCOUNT", true));
+    rows.push(button_row(BUTTON_SELECT, "SELECT", true));
+    rows.push(button_row(BUTTON_REMOVE, "REMOVE", accounts.highlighted() < accounts_len));
+    rows.push(button_row(BUTTON_CANCEL, "CANCEL", true));
+
+    let selected = if focus < list_len {
+        focus.saturating_sub(scroll)
+    } else {
+        shown + (focus - list_len).min(BUTTON_COUNT - 1)
+    };
+
+    let mut footer = vec!["ENTER SELECT   DEL REMOVE   ESC CANCEL".to_string()];
+    if list_len > VISIBLE_ROWS {
+        footer.push(format!("SHOWING {}-{} OF {}", scroll + 1, scroll + shown, list_len));
+    }
+
+    MenuFrame {
+        title: "ACCOUNTS",
+        subtitle: if list_len == 1 {
+            "NO ACCOUNTS SIGNED IN - ADD ONE, OR PLAY OFFLINE"
+        } else {
+            ""
+        },
+        rows,
+        selected,
+        footer,
+        message: accounts.save_error(),
+        ..Default::default()
+    }
+}
+
+/// Builds the account screen's frame while a device-code sign-in is in
+/// flight (or has just failed): the code/URL to show, or the failure.
+#[must_use]
+fn accounts_flow_frame(
+    title: &'static str,
+    user_code: Option<&str>,
+    verification_uri: Option<&str>,
+    waiting: bool,
+) -> MenuFrame<'static> {
+    let mut rows = Vec::new();
+    if let Some(uri) = verification_uri {
+        rows.push(MenuRow {
+            label: uri.to_string(),
+            detail: "GO TO THIS ADDRESS IN YOUR BROWSER (OPENED FOR YOU)".to_string(),
+            enabled: true,
+            ..Default::default()
+        });
+    }
+    if let Some(code) = user_code {
+        rows.push(MenuRow {
+            label: code.to_string(),
+            detail: "THEN ENTER THIS CODE".to_string(),
+            enabled: true,
+            ..Default::default()
+        });
+    }
+    if rows.is_empty() {
+        rows.push(MenuRow {
+            label: "CONTACTING MICROSOFT...".to_string(),
+            enabled: true,
+            ..Default::default()
+        });
+    }
+    let footer = if waiting {
+        vec![
+            "WAITING FOR YOU TO FINISH SIGNING IN...".to_string(),
+            "O REOPEN BROWSER   C COPY CODE   ESC CANCEL".to_string(),
+        ]
+    } else {
+        vec!["ESC CANCEL".to_string()]
+    };
+    MenuFrame {
+        title,
+        subtitle: "",
+        rows,
+        selected: usize::MAX,
+        footer,
+        ..Default::default()
+    }
+}
+
+/// Builds the account screen's frame for a failed sign-in attempt.
+#[must_use]
+fn accounts_failed_frame(message: &str) -> MenuFrame<'static> {
+    MenuFrame {
+        title: "SIGN-IN FAILED",
+        subtitle: "",
+        rows: vec![MenuRow {
+            label: "BACK TO ACCOUNTS".to_string(),
+            enabled: true,
+            ..Default::default()
+        }],
+        selected: 0,
+        footer: vec!["ENTER OR ESC CONTINUES".to_string()],
+        message: Some(message.to_uppercase()),
         ..Default::default()
     }
 }
@@ -790,6 +1096,7 @@ pub fn frame_for<'a>(
                                 }),
                             _ => None,
                         },
+                        head: None,
                         enabled: true,
                         detail_is_error: is_error,
                         field: false,
@@ -878,6 +1185,29 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
+        // The account list (issue #66). `pump` is called here, on every
+        // frame this screen is showing, rather than from an `app.rs` hook —
+        // see `accounts.rs`'s module docs on why that module is written to
+        // work through a shared `&AccountsNav` reference.
+        Screen::Accounts => {
+            use super::accounts::SignInView;
+            let accounts = nav.accounts();
+            accounts.pump();
+            Some(match accounts.sign_in_view() {
+                SignInView::Idle => accounts_idle_frame(accounts),
+                SignInView::Requesting => accounts_flow_frame("SIGN IN WITH MICROSOFT", None, None, false),
+                SignInView::Waiting {
+                    user_code,
+                    verification_uri,
+                } => accounts_flow_frame(
+                    "SIGN IN WITH MICROSOFT",
+                    Some(&user_code),
+                    Some(&verification_uri),
+                    true,
+                ),
+                SignInView::Failed { message } => accounts_failed_frame(&message),
+            })
+        }
         // The error screen is drawn by this renderer too, even though it is not
         // an `is_menu()` screen: a session that dies mid-game used to leave a
         // frozen world on screen with no explanation. `Screen::Connecting` is
@@ -950,7 +1280,7 @@ fn clip(s: &str, max_px: f32, scale: f32) -> &str {
 
 /// Height of the row stack for `rows`.
 fn row_height(row: &MenuRow) -> f32 {
-    if row.favicon.is_some() || !row.detail.is_empty() {
+    if row.favicon.is_some() || row.head.is_some() || !row.detail.is_empty() {
         LIST_ROW_H
     } else {
         BUTTON_H
@@ -972,8 +1302,17 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     if let Some(slot) = row.slot {
         return Some(slot.resolve(width, height));
     }
+    // Only the *other* unslotted rows count toward the centred stack's total
+    // height and this row's offset within it. Without this filter, a frame
+    // that mixes centred rows with vanilla-positioned ones (the account
+    // list's scrollable rows plus its slotted action buttons) would have
+    // every slotted row's height silently added into the centred group's
+    // math even though that row is drawn somewhere else entirely — no
+    // existing screen mixes the two kinds, so this could not be observed
+    // before the account screen needed it.
     let total: f32 = rows
         .iter()
+        .filter(|r| r.slot.is_none())
         .map(|r| row_height(r) + ROW_GAP)
         .sum::<f32>()
         .max(0.0)
@@ -983,6 +1322,7 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
     let y = top
         + rows[..i]
             .iter()
+            .filter(|r| r.slot.is_none())
             .map(|r| row_height(r) + ROW_GAP)
             .sum::<f32>();
     let w = ROW_W.min(width - 2.0 * PAD);
@@ -1109,7 +1449,7 @@ pub fn build(
         }
 
         let mut text_x = x + PAD;
-        if let Some(icon) = &row.favicon {
+        if let Some(icon) = row.favicon.as_ref().or(row.head.as_ref()) {
             let iy = y + (h - ICON) * 0.5;
             b.mosaic(icon, text_x, iy, ICON);
             text_x += ICON + PAD;
@@ -1980,6 +2320,7 @@ mod tests {
             Screen::ServerList,
             Screen::ServerEdit,
             Screen::Settings,
+            Screen::Accounts,
             Screen::Connecting,
             Screen::Playing,
             Screen::Chat,
@@ -1996,6 +2337,7 @@ mod tests {
                     ui.open_server_edit();
                 }
                 Screen::Settings => ui.open_settings(),
+                Screen::Accounts => ui.open_accounts(),
                 Screen::Connecting => ui.begin(SessionKind::Multiplayer),
                 Screen::Playing => ui.enter_dev_world(),
                 Screen::Chat => {
@@ -2044,7 +2386,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(reached, 10, "a screen was added without being covered here");
+        assert_eq!(reached, 11, "a screen was added without being covered here");
         let _ = &mut nav;
     }
 
@@ -2396,6 +2738,84 @@ mod tests {
             prev_bottom = y + rh;
         }
         assert!(row_rect(&rows, 99, w, h).is_none());
+    }
+
+    #[test]
+    fn a_slotted_row_sharing_a_frame_does_not_perturb_the_centred_stacks_math() {
+        // The bug this guards: `row_rect`'s centred-stack total used to sum
+        // *every* row's height, including slotted ones, because no screen had
+        // ever mixed the two kinds before the account screen (a scrollable
+        // unslotted list plus slotted nine-slice action buttons). Build one
+        // unslotted-only frame and one with an extra slotted row spliced in
+        // between two unslotted rows, and require the *unslotted* rows to land
+        // at identical rects in both — the slotted row must be invisible to
+        // their stack.
+        let (w, h) = (1280.0, 720.0);
+        let plain: Vec<MenuRow> = vec![button("A"), button("B")];
+        let plain_rects: Vec<_> = (0..plain.len())
+            .map(|i| row_rect(&plain, i, w, h).unwrap())
+            .collect();
+
+        let mut mixed = vec![button("A")];
+        mixed.push(MenuRow {
+            label: "SLOTTED".to_string(),
+            enabled: true,
+            slot: Some(Slot {
+                origin: Origin::ScreenTop,
+                dx: 0.0,
+                dy: 0.0,
+                w: 50.0,
+                h: 20.0,
+            }),
+            ..Default::default()
+        });
+        mixed.push(button("B"));
+
+        let a_rect = row_rect(&mixed, 0, w, h).unwrap();
+        let b_rect = row_rect(&mixed, 2, w, h).unwrap();
+        assert_eq!(a_rect, plain_rects[0], "row A must not shift because a slotted row shares the frame");
+        assert_eq!(b_rect, plain_rects[1], "row B must not shift either");
+
+        // The slotted row itself is unaffected too — it always resolves via
+        // its own `Slot`, never the stack.
+        let slotted_rect = row_rect(&mixed, 1, w, h).unwrap();
+        assert_eq!(slotted_rect, (1280.0 * 0.5, 0.0, 50.0, 20.0));
+    }
+
+    #[test]
+    fn default_head_icon_is_a_real_mosaic_not_a_blank_or_transparent_one() {
+        // The account screen's placeholder head must actually reach pixels —
+        // an all-transparent or all-zero mosaic would draw nothing and look
+        // exactly like a missing icon, which is indistinguishable from this
+        // function being wired to nothing.
+        let m = default_head_icon();
+        assert_eq!(m.size, MOSAIC);
+        assert_eq!(m.cells.len(), MOSAIC * MOSAIC);
+        assert!(m.cells.iter().any(|c| c[3] > 0.0), "every cell was transparent");
+        // Not a flat single colour either — the hairline row and eye pixels
+        // must show up as *some* variation, or `head_mosaic`'s box filter
+        // could be silently discarding the source detail.
+        let first = m.cells[0];
+        assert!(
+            m.cells.iter().any(|c| c != &first),
+            "the mosaic is a single flat colour; the hand-authored detail did not survive the filter"
+        );
+    }
+
+    #[test]
+    fn head_mosaic_is_the_same_drawable_favicon_mosaic_is() {
+        // `head_mosaic` takes raw RGBA + dimensions (what a decoded skin's
+        // face region would already be), unlike `favicon_mosaic`'s PNG bytes
+        // — this pins that the two still produce the same shape of output
+        // (same box filter) given equivalent solid-colour input.
+        let rgba = vec![10u8, 200, 30, 255].repeat(4 * 4);
+        let m = head_mosaic(&rgba, 4, 4).expect("a valid RGBA buffer must decode");
+        assert_eq!(m.size, MOSAIC);
+        for c in &m.cells {
+            assert!((c[0] - 10.0 / 255.0).abs() < 0.01);
+            assert!((c[1] - 200.0 / 255.0).abs() < 0.01);
+            assert!((c[2] - 30.0 / 255.0).abs() < 0.01);
+        }
     }
 
     #[test]
@@ -3156,8 +3576,10 @@ mod tests {
         let mut fav = FaviconCache::new();
         let title = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
         let geo = build(&title, Some(&atlas), None, V_W, V_H);
-        // 8 nine-slice backgrounds + 3 icons + 2 logo quads, so comfortably
-        // more than one quad per widget, and *nothing* on the flat-fill path.
+        // 9 nine-slice backgrounds (the 8 vanilla widgets plus the
+        // non-vanilla `Accounts` row — see `MainButton::Accounts`) + 3 icons
+        // + 2 logo quads, so comfortably more than one quad per widget, and
+        // *nothing* on the flat-fill path.
         assert!(
             geo.sprite.len() / (SPRITE_FLOATS_PER_VERTEX * 6) > MAIN_BUTTONS.len(),
             "only {} sprite quads for {} widgets plus the logo",

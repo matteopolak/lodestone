@@ -27,6 +27,31 @@ pub enum ClientError {
     /// The background driver task panicked. This indicates a bug.
     #[error("client driver task panicked")]
     DriverPanicked,
+
+    /// The server's login sequence asked for online-mode encryption
+    /// (`Directive::BeginEncryption { should_authenticate: true, .. }`), but
+    /// this session was built without an authenticated
+    /// [`lodestone_auth::Session`] (see [`crate::ClientBuilder::online_session`]).
+    ///
+    /// Deliberately checked *before* the RSA/AES handshake even starts:
+    /// without this check, an offline profile connecting to an online-mode
+    /// server would still complete the crypto exchange and only then fail
+    /// the session-server `join`, which the server also can't tell apart from
+    /// a genuine Mojang-side rejection. Fail fast, fail clearly.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error(
+        "this server requires online-mode authentication, but no Microsoft \
+         session was configured for this connection (see ClientBuilder::online_session)"
+    )]
+    OnlineModeSessionRequired,
+
+    /// The session-server `join` call (or a step of the auth chain reached
+    /// while getting there) failed. Carries the crate's own typed error, so a
+    /// UI can match e.g. `lodestone_auth::AuthError::Xsts` for a specific
+    /// message instead of parsing this variant's `Display` text.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[error("online-mode authentication failed: {0}")]
+    Auth(#[from] lodestone_auth::AuthError),
 }
 
 /// Why a client session ended.

@@ -33,6 +33,7 @@ lodestone-macros = { path = "crates/lodestone-macros" }
 lodestone-model  = { path = "crates/lodestone-model" }
 lodestone-world  = { path = "crates/lodestone-world" }
 lodestone-net    = { path = "crates/lodestone-net" }
+lodestone-auth   = { path = "crates/lodestone-auth" }
 lodestone-client = { path = "crates/lodestone-client" }
 lodestone-game   = { path = "crates/lodestone-game" }
 lodestone-assets = { path = "crates/lodestone-assets" }
@@ -109,6 +110,16 @@ reqwest = { version = "0.13", default-features = false, features = [
 # SRV record resolution (`_minecraft._tcp.<host>`) for real servers behind a
 # service record. Native-only (needs UDP sockets).
 hickory-resolver = "0.26"
+# OS credential store (macOS Keychain / Windows Credential Manager / Linux
+# Secret Service) for the Microsoft refresh token, keyed per-profile-UUID so
+# multiple accounts coexist (issue #64). Default `v1` feature auto-selects the
+# right backend per target (`apple-native-keyring-store` on macOS/iOS,
+# `windows-native-keyring-store` on Windows, `zbus-secret-service-keyring-store`
+# — pure-Rust, no libdbus — elsewhere); each is itself target-gated in
+# `keyring`'s own manifest, so this pulls in nothing platform-specific on the
+# wrong OS. Native-only: no wasm32 backend exists (nor would one make sense —
+# a browser build has no OS keychain to reach).
+keyring = "4.1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

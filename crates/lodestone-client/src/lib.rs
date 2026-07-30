@@ -91,6 +91,11 @@ pub use builder::ClientBuilder;
 pub use config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
 pub use error::{BotError, ClientClosed, ClientError, SessionOutcome, WaitError};
 pub use handle::{ClientHandle, EventStream, WalkOutcome};
+// Re-exported so a caller can build the `Session` `ClientBuilder::online_session`
+// (issue #65) wants without a direct `lodestone-auth` dependency of their own —
+// same reasoning as the `lodestone-game`/`lodestone-model` re-exports below.
+#[cfg(not(target_arch = "wasm32"))]
+pub use lodestone_auth::{AuthError, Session};
 // Stage 3 of `docs/bevy-migration.md` deleted this crate's own `scoreboard`
 // module — a second `Scoreboard`/`Objective`/`ScoreEntry`/`Team`/`BossBar` set
 // folding the same `ClientEvent` stream as `lodestone-game`'s. The read-model
