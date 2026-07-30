@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::{
     action::ClientAction,
     event::{ClientEvent, EquipmentSlot},
+    ids::ResourceKey,
     item::ItemStack,
     text::Text,
 };
@@ -303,6 +304,53 @@ pub struct EntityBaseDimensions {
     /// Standing bounding-box height, in blocks. Vanilla
     /// `EntityDimensions.height()` at scale 1.
     pub height: f32,
+}
+
+/// The version-free per-entity-type facts a physics consumer needs about a
+/// *neighbouring* entity: its base hitbox, and whether it can shove the local
+/// player.
+///
+/// This is the [`VersionAdapter::entity_facts`] seam's return type. It is keyed
+/// by [`ResourceKey`] rather than by network id, which is what makes it usable
+/// past ingest: the raw `add_entity` varint does not survive into the ECS (only
+/// the resolved key does), and a resource key is the version-independent
+/// identity anyway. Use [`VersionAdapter::entity_dimensions`] instead when you
+/// still hold the wire id — on the decode side, or in the integrated server.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityFacts {
+    /// The type's base hitbox — exactly what [`VersionAdapter::entity_dimensions`]
+    /// returns for the same type. Base geometry only; see
+    /// [`EntityBaseDimensions`] on the `SCALE`/`STEP_HEIGHT` folds being the
+    /// caller's.
+    pub dimensions: EntityBaseDimensions,
+    /// Whether an entity of this type can shove the local player through
+    /// vanilla `LivingEntity.pushEntities()`.
+    ///
+    /// # This is a *type*-level capability, and default-**deny**
+    ///
+    /// `Entity.isPushable()` is `false` and only `LivingEntity` overrides it to
+    /// `true`; more to the point, `LivingEntity.aiStep` is the only caller of
+    /// `pushEntities()` in the whole vanilla tree, so a non-living entity never
+    /// runs the crowd pass at all. A version that does not know a type therefore
+    /// reports "no", never "probably". The inverse — assuming an unknown type
+    /// can push — makes dropped items nudge the player around the floor.
+    ///
+    /// `true` means "can, in some runtime state", not "always does". The
+    /// per-instance refinements vanilla layers on top (`isAlive()`,
+    /// `isSpectator()`, `onClimbable()`, a horse's `!isVehicle()`, a warden's
+    /// `!isDiggingOrEmerging()`) are entity *state*, not per-type data, and stay
+    /// the consumer's to apply where it has them.
+    ///
+    /// # What this does **not** cover
+    ///
+    /// Only the `LivingEntity.pushEntities()` mechanism, because that is the one
+    /// `lodestone-physics`'s crowd pass models. Vanilla boats and rideable
+    /// minecarts also push players, but from their own tick through
+    /// `AbstractBoat.push(Entity)` and `NewMinecartBehavior.pushEntities(AABB)`,
+    /// which use a differently-inflated query box and extra conditions. A
+    /// version reports `false` for those families rather than approximating them
+    /// into the wrong pass.
+    pub pushes_players: bool,
 }
 
 /// One axis-aligned collision box of a block state, in **block-local**
@@ -737,6 +785,33 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// census simply reports "unknown", never a guessed box.
     fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
         let _ = entity_type_id;
+        None
+    }
+
+    /// Resolves an entity type's physics-relevant facts — its base hitbox and
+    /// whether it can shove the local player — from its **resource key**, if this
+    /// version knows the type.
+    ///
+    /// # Why keyed by [`ResourceKey`] and not the network id
+    ///
+    /// [`Self::entity_dimensions`] keys on the `add_entity` varint, which is the
+    /// right identity on the decode side but is *gone* by the time physics runs:
+    /// `ClientEvent::EntitySpawned` carries the already-resolved key and never the
+    /// raw id, so a consumer downstream of ingest has no id to pass. Keying this
+    /// seam by the key it actually holds is what lets the entity-push producer
+    /// call it at all — without widening a spawn event, and without pushing a raw
+    /// wire id back into the ECS, where it would be a second, version-shaped
+    /// identity for something the ECS already names version-independently.
+    ///
+    /// The two are the same census read two ways; a version implementing both must
+    /// return the same `dimensions` for the same type through either.
+    ///
+    /// The default returns `None`: a version that has homed no census reports
+    /// "unknown", never a guessed box and never a permissive `pushes_players`. A
+    /// caller that cannot distinguish "no adapter" from "unknown type" should
+    /// treat both as *not* a pusher — see [`EntityFacts::pushes_players`].
+    fn entity_facts(&self, entity_type: &ResourceKey) -> Option<EntityFacts> {
+        let _ = entity_type;
         None
     }
 

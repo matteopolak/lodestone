@@ -21,16 +21,29 @@ use lodestone_core::{Ctx, Decode, Reader, Result};
 /// big-endian `f32`s — the partial tick and the clock rate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClockUpdate {
-    /// Registry holder id of the world clock (`id + 1` on the wire; `0` selects
-    /// an inline direct value, which carries no bytes for the empty
-    /// `WorldClock` record).
+    /// Registry holder id of the world clock — a **plain** VarInt registry id.
+    ///
+    /// The key codec is `ByteBufCodecs.holderRegistry(Registries.WORLD_CLOCK)`,
+    /// which is `registry(key, Registry::asHolderIdMap)`: a bare
+    /// `VarInt.write(id)` with **no `+1` offset and no inline-direct path**. The
+    /// `id + 1` / `0 = inline` convention belongs to the *other* codec,
+    /// `ByteBufCodecs.holder(key, directCodec)`, which `set_time` does not use.
+    /// (This comment previously said otherwise; the decode was always right, the
+    /// record was not.)
+    ///
+    /// 26.2 registers two clocks, in this order: `minecraft:overworld` = `0`,
+    /// `minecraft:the_end` = `1` (`WorldClocks::bootstrap`). The overworld clock
+    /// is the day/night one; see [`SetTime::day_clock`].
     pub holder_id: i32,
     /// Total ticks elapsed on this clock. Modulo `24000` this is the clock's
     /// time of day.
     pub total_ticks: i64,
     /// Fractional progress into the current tick.
     pub partial_tick: f32,
-    /// Rate at which the clock advances.
+    /// Rate at which the clock advances. **`0.0` when the clock is paused** —
+    /// `ServerClockManager.ClockInstance.packNetworkState` sends
+    /// `paused || !advance_time ? 0.0 : rate`, so `/gamerule advanceTime false`
+    /// arrives as a rate of zero rather than as a flag.
     pub rate: f32,
 }
 
@@ -48,19 +61,51 @@ pub struct SetTime {
 }
 
 impl SetTime {
-    /// Best-effort time of day: the first clock update's tick count, or the
-    /// world age when no clock updates are present.
+    /// The overworld **day** clock's update, if this packet carries one.
     ///
-    /// A normal single-overworld session sends exactly one clock update (the
-    /// day clock), so this is its `total_ticks`. It is documented as
-    /// best-effort because the wire no longer names a single canonical day
-    /// clock without resolving the `Holder` against the world-clock registry,
-    /// which this phase does not load.
+    /// # Why this is an `Option`, and why the old fallback was a bug
+    ///
+    /// This used to be `day_time() -> i64`, falling back to
+    /// [`game_time`](Self::game_time) when `clocks` was empty. Measured against
+    /// a live 26.2 server, that fallback **is** the value the client ends up
+    /// using, essentially always:
+    ///
+    /// * `MinecraftServer::forceGameTimeSynchronization` broadcasts
+    ///   `SetTime(gameTime, Map.of())` — an **empty** clock map — roughly once a
+    ///   second, forever.
+    /// * `ServerClockManager::modifyClock` sends a *one-entry* map only when a
+    ///   clock actually changes (`/time set`, rate, pause), and
+    ///   `createFullSyncPacket` sends the full map once, at join.
+    ///
+    /// So the empty-map packet arrived every second and overwrote the day time
+    /// with the monotonic world age. Measured on the survival oracle: `/time set`
+    /// `noon`/`midnight`/`day`/`night` in turn, and the client's reported
+    /// `time_of_day` never left `age` (`639197`, `639257`, `639317`, `639377`) —
+    /// so `sky_darken_for_time_of_day` returned a **session constant**
+    /// (`0.24` there), and terrain and mobs were lit at one fixed hour for the
+    /// whole session. On a world whose `age % 24000` lands in daylight the
+    /// constant is `1.0` instead: permanent noon, i.e. the reported
+    /// "the world is fullbright" and "the mobs look like they're in the daytime".
+    ///
+    /// An absent clock update therefore means **"nothing changed, keep what you
+    /// had"**, never "the day time equals the world age". The caller holds the
+    /// last update and extrapolates from `game_time` — see `V770Adapter`'s
+    /// `DayClock`.
+    ///
+    /// # Which clock
+    ///
+    /// 26.2 has two (`WorldClocks::bootstrap`): `minecraft:overworld` (id `0`)
+    /// and `minecraft:the_end` (id `1`). The day/night cycle is the overworld
+    /// one, and the map is a Java `HashMap`, so **wire order is not registry
+    /// order** and `clocks.first()` cannot be trusted on the full-sync packet.
+    /// This selects the lowest holder id present, which is the overworld clock
+    /// for vanilla's registration order. Resolving it by name would need the
+    /// `minecraft:world_clock` registry from the configuration `registry_data`
+    /// packet, which this crate does not ingest; do that if a data pack ever
+    /// reorders the registry.
     #[must_use]
-    pub fn day_time(&self) -> i64 {
-        self.clocks
-            .first()
-            .map_or(self.game_time, |clock| clock.total_ticks)
+    pub fn day_clock(&self) -> Option<&ClockUpdate> {
+        self.clocks.iter().min_by_key(|c| c.holder_id)
     }
 }
 

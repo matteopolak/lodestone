@@ -43,6 +43,13 @@ pub(crate) mod generated_entity_types;
 
 #[path = "generated/entity_dimensions.rs"]
 pub(crate) mod generated_entity_dimensions;
+
+/// Generated per-entity-type push census (raw rodata statics) — whether a type
+/// can shove the local player through `LivingEntity.pushEntities()`. Use the
+/// [`entity_census`] module for the lookup API; this holds only the array.
+#[path = "generated/entity_census.rs"]
+pub(crate) mod generated_entity_census;
+
 /// Generated attribute id→name table (raw rodata statics). Use the
 /// [`attribute_types`] module for the lookup API; this holds only the array.
 #[path = "generated/attribute_types.rs"]
@@ -125,6 +132,7 @@ pub mod block_states;
 pub mod chunk_batch;
 pub mod collision_shapes;
 pub mod data_component_types;
+pub mod entity_census;
 pub mod entity_dimensions;
 pub mod entity_types;
 pub mod entity_variants;
