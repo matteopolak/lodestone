@@ -197,9 +197,15 @@ Real with a stated approximation (2):
 
 - **`--features live`** compiles a version family into the registry. Without it
   there is no census, and the view degrades to unit cubes (logged).
-- `LiveCollision::new` infers the census from the **sole** compiled-in family;
-  `LiveCollision::with_version_data(Some(adapter))` is the explicit form and should
-  be preferred by any caller that knows the connected protocol.
+- `LiveCollision::new` takes `version: Option<Arc<dyn VersionAdapter>>` as a
+  required constructor parameter (issue #42 — it used to reach for
+  `collision::inferred_version_data()` internally instead of receiving it).
+  `Sim::live_collision` passes `crate::collision::inferred_version_data()`
+  explicitly, which infers the census from the **sole** compiled-in family; a
+  caller that already knows the connected protocol's adapter should pass that
+  instead. `LiveCollision::with_version_data(Some(adapter))` remains for
+  overriding it after construction (the degraded-view test fixtures use it
+  that way).
 - `LODESTONE_ASSETS` — the pack root the vanilla atlas (and hence the fluid
   classifier) loads from. Required by the `#[ignore]`d gates.
 

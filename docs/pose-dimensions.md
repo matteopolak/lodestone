@@ -319,3 +319,30 @@ Note that the *server* runs the same `updatePlayerPose` on its `ServerPlayer`
 `docs/swimming.md`'s `PlayerCommand` sprint edge is a precondition for the swim
 half of this gate. Send only `SetPlayerInput` and the server's pose never becomes
 `SWIMMING`, so it will refuse a movement the client thinks is legal.
+
+## Re-checked for issue #59 (camera jerk), and cleared
+
+Issue #59 reported a camera jerk entering/leaving swim mode and asked whether
+pose oscillation — this gate flipping pose on consecutive ticks — could be a
+second cause distinct from the eye-height snap `docs/swimming.md` documents as
+the real one. It is not, and the two properties that rule it out were
+re-verified rather than assumed:
+
+* **The gate is a pure function of position, run once per tick, with no
+  hysteresis.** `update_player_pose` reads `state.position` and the current
+  world only; nothing here remembers "how long has it held this pose" or
+  damps a rapid flip. If a caller's own inputs (position, `sneak`, `swimming`)
+  genuinely oscillate tick to tick — hovering exactly at a submersion boundary,
+  say — the pose *would* legitimately follow, but that is the caller feeding
+  it oscillating state, not a bug in the gate reacting to stable state.
+* **`min_y` is anchored at the feet, so only the top face ever moves.**
+  Re-read directly off `EntityDimensions::bounding_box`
+  (`crates/lodestone-physics/src/entity.rs:102-112`): `feet.y` is the box's
+  `min_y` unconditionally, and `feet.y + height` is `max_y`. A pose change
+  cannot be "the origin is wrong" here — there is no code path that anchors
+  the box anywhere but the feet.
+
+Neither check found anything specific to issue #59; both simply re-confirm
+what this doc already documents above. The eye-height snap
+(`docs/swimming.md`'s `EyeHeightSmoother` section) remains the one identified
+cause of the camera jerk.

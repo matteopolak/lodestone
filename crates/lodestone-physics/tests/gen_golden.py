@@ -872,6 +872,29 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
         s.vel[1] += float(f32(0.04))
     else:
         s.no_jump_delay = 0
+    # Player.travel (Player.java:1401-1415): while swimming, blend vertical
+    # velocity toward the look angle's Y component. This runs in Player.travel,
+    # which wraps LivingEntity.travel -> travelInFluid -> travelInWater (i.e.
+    # the rest of this function), so it lands here -- before travelInWater's own
+    # physics below ever reads deltaMovement.y -- not after.
+    #
+    # multiplier is 0.085 when looking notably down (lookAngleY < -0.2), else
+    # 0.06; both read directly off Player.java:1408. The blend itself only
+    # applies when looking level-or-down, holding jump, or still submerged at
+    # roughly head height (BlockPos.containing(x, y + 1.0 - 0.1, z), any fluid).
+    if s.swimming:
+        look = calculate_view_vector(s.pitch, s.yaw)
+        look_angle_y = look[1]
+        multiplier = 0.085 if look_angle_y < -0.2 else 0.06
+        head_block = (
+            mth_floor(s.pos[0]),
+            mth_floor(s.pos[1] + 1.0 - 0.1),
+            mth_floor(s.pos[2]),
+        )
+        head_submerged = world.fluid_at(*head_block) is not None
+        if look_angle_y <= 0.0 or jump or head_submerged:
+            vy = s.vel[1]
+            s.vel[1] = vy + (look_angle_y - vy) * multiplier
     is_falling = s.vel[1] <= 0.0
     base_gravity = effective_gravity(float(P.gravity), is_falling, s.slow_falling)
     if s.dolphins_grace:
@@ -1456,6 +1479,103 @@ def scenario_swim_sprint():
     return w, trace
 
 
+def scenario_swim_look_down_dives():
+    # Identical fixture/input to scenario_swim_sprint, but pitch = 60 (looking
+    # steeply down: lookAngleY = -sin(60 deg) ~= -0.866, well past the -0.2
+    # threshold, so the steeper 0.085 multiplier applies). Issue #59: looking
+    # down while swimming did not make the player descend, because the
+    # look-descent term (Player.java:1401-1415) was never ported. Paired with
+    # scenario_swim_sprint (pitch 0) as the control -- both share sprint +
+    # forward input and the same deep pool, so any difference in the vertical
+    # trace is the look-angle term and nothing else.
+    w = World()
+    for y in range(80, 101):
+        for x in range(-2, 3):
+            for z in range(-2, 3):
+                w.add_water(x, y, z)
+    s = State(0.5, 90.0, 0.5, 0.0)
+    s.pitch = f32(60.0)
+    trace = []
+    for _ in range(120):
+        tick(w, s, 1.0, 0.0, False, False, True)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def swim_surface_world():
+    # A 10-block-deep pool (world y 80.0 .. 90.0, i.e. block indices 80..89)
+    # with open air above and a floor far below so a 30-tick trace can never
+    # reach the bottom. Shared by the two look-gate scenarios below.
+    w = World()
+    for y in range(80, 90):
+        for x in range(-2, 3):
+            for z in range(-2, 3):
+                w.add_water(x, y, z)
+    w.add_solid(0, 40, 0)
+    return w
+
+
+def swim_surface_state(pitch_degrees):
+    # Seeded already-swimming, straddling the surface: feet at y = 89.5 puts
+    # the 0.6-tall swimming box at 89.5..90.1, inside the topmost water block
+    # (89.0..90.0) -- so `is_in_water` holds and the swim pose is sustained by
+    # sprint alone, exactly like scenario_elytra_gap_glide seeds FALL_FLYING
+    # directly rather than growing into it. The pose is seeded for the same
+    # reason: naturally *entering* swimming needs the eye submerged under the
+    # STANDING 1.62 eye height, which this shallow pool cannot provide.
+    #
+    # Crucially, BlockPos.containing(x, y + 1.0 - 0.1, z) = floor(89.5 + 0.9)
+    # = floor(90.4) = 90, and block (x, 90, z) is air -- so `head_submerged`
+    # is False here, which is what lets the look-angle sign (not just its
+    # magnitude) gate the descent term.
+    s = State(0.5, 89.5, 0.5, 0.0)
+    s.pitch = f32(pitch_degrees)
+    s.pose = "swimming"
+    s.swimming = True
+    # `update_swimming` reads the PREVIOUS tick's `sprinting` (baseTick runs
+    # before aiStep), so this must be pre-seeded too, or dispatching through
+    # the full `tick()` on tick 1 would immediately read the fresh `State`'s
+    # default `sprinting = False` and undo the seeded swim pose before either
+    # scenario gets to exercise it.
+    s.sprinting = True
+    return s
+
+
+def scenario_swim_surface_look_up_no_pulldown():
+    # Looking up (pitch -60 => lookAngleY = -sin(-60 deg) ~= +0.866) at the
+    # surface with the head clear of the water (head_submerged False, see
+    # swim_surface_state) and not jumping: `lookAngleY <= 0.0 || jumping ||
+    # headSubmerged` is false on every term, so Player.travel's descent blend
+    # never fires. Whatever vertical motion happens is buoyancy alone
+    # (getFluidFallingAdjustedMovement) -- this is the gate itself, not just
+    # the multiplier, and it is what lets a swimmer stop descending by
+    # looking up instead of being dragged back down regardless of where they
+    # are looking.
+    w = swim_surface_world()
+    s = swim_surface_state(-60.0)
+    trace = []
+    for _ in range(30):
+        tick(w, s, 0.0, 0.0, False, False, True)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_swim_surface_look_down_control():
+    # WORLD CONTROL for scenario_swim_surface_look_up_no_pulldown: identical
+    # fixture and seed, pitch flipped to +60 (looking down, lookAngleY ~=
+    # -0.866, past the -0.2 threshold). `lookAngleY <= 0.0` is now true, so the
+    # descent blend fires every tick with the steep 0.085 multiplier and pulls
+    # the player down noticeably faster than buoyancy alone. If this trace
+    # matched the look-up one, the gate above would not be doing anything.
+    w = swim_surface_world()
+    s = swim_surface_state(60.0)
+    trace = []
+    for _ in range(30):
+        tick(w, s, 0.0, 0.0, False, False, True)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
 def scenario_soul_sand_walk():
     # Synthetic soul-sand-like floor: a full collision cube carrying a block
     # speed factor of 0.4. The player rests at y=1.0, so blockPosition() (0,1,0)
@@ -1935,6 +2055,9 @@ SCENARIOS = [
     ("levitation", scenario_levitation),
     ("slow_falling_water", scenario_slow_falling_water),
     ("swim_sprint", scenario_swim_sprint),
+    ("swim_look_down_dives", scenario_swim_look_down_dives),
+    ("swim_surface_look_up_no_pulldown", scenario_swim_surface_look_up_no_pulldown),
+    ("swim_surface_look_down_control", scenario_swim_surface_look_down_control),
     ("soul_sand_walk", scenario_soul_sand_walk),
     ("jump_boost", scenario_jump_boost),
     ("honey_jump", scenario_honey_jump),

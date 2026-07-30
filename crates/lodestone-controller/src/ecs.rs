@@ -230,10 +230,23 @@ impl Plugin for ControllerPlugin {
                 .after(TickSet::Input)
                 .before(TickSet::Physics),
         );
+        // **Ordered against `apply_look_intent`, which shares this set.** Both
+        // touch `PhysicsState` — that one takes `&mut` (it commits this tick's
+        // yaw/pitch) and this one takes `&` — so leaving them unordered is a real
+        // write/read race, and under strict `ambiguity_detection` it fails the
+        // schedule build. `exactly_one_system_writes_movement_intent` is the guard
+        // that caught it.
+        //
+        // Look **before** movement is the correct direction, not just a tie-break:
+        // `LookIntent` decides which way the player faces this tick and
+        // `MovementInput`'s forward/strafe are relative to facing, so a programmatic
+        // driver that aims at a block and walks toward it must have its rotation
+        // committed before the movement intent is derived from it.
         app.add_systems(
             GameTick,
             (compute_movement_intent, tick_sprint_window)
                 .chain()
+                .after(lodestone_ecs::player::apply_look_intent)
                 .in_set(TickSet::Intent),
         );
         app.add_systems(
@@ -605,4 +618,5 @@ mod tests {
             schedule.initialize(world).is_err()
         })
     }
+
 }

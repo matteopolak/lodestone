@@ -227,6 +227,32 @@ pub struct PlayerState {
     /// Send only sprint and the server's swim pose follows; send the input packet
     /// alone and it never does.
     pub swimming: bool,
+    /// **Output.** `LivingEntity.swimAmount` after the last [`tick`] — a `0..1`
+    /// ramp toward the swim pose, advanced by `SWIM_AMOUNT_PER_TICK` (`0.09F`,
+    /// `LivingEntity.java:174`) per tick and clamped to `[0, 1]`
+    /// (`LivingEntity.java:3478-3483`), never snapping the way
+    /// [`Self::swimming`] itself does. Vanilla advances this **every tick**,
+    /// right after `updateSwimming` decides this tick's [`Self::swimming`] and
+    /// before `aiStep`/`travel` runs (`LivingEntity.tick()`,
+    /// `LivingEntity.java:2755-2758`), so [`crate::player::tick`] updates it in
+    /// that same slot.
+    ///
+    /// Vanilla uses this to blend the swimming model's body-pitch animation
+    /// (`HumanoidModel`/`HumanoidMobRenderer`) — **not** the camera eye height,
+    /// which Camera.java smooths independently (see `camera_rig.rs`'s
+    /// `EyeHeightSmoother`). Nothing in this crate reads this field; it exists
+    /// so a renderer can consume the exact per-tick ramp instead of
+    /// re-deriving one from [`Self::swimming`] (which would reintroduce the
+    /// snap this field exists to avoid).
+    pub swim_amount: f32,
+    /// **Output.** The previous tick's [`Self::swim_amount`]
+    /// (`swimAmountO`), for a partial-tick interpolated read —
+    /// `Mth.lerp(a, swimAmountO, swimAmount)` (`LivingEntity.java:401`).
+    /// Because the ramp is monotonic and clamped (unlike the arm-swing's
+    /// sawtooth `attack_anim`, whose `getAttackAnim` wraps a negative delta), a
+    /// plain `lerp(a, swim_amount_o, swim_amount)` is exactly vanilla's read —
+    /// no wrap-around correction needed.
+    pub swim_amount_o: f32,
     /// `Attributes.WATER_MOVEMENT_EFFICIENCY` — the Depth Strider attribute, as an
     /// **input** from the equipment layer (like [`Self::movement_speed`]).
     ///
@@ -307,6 +333,8 @@ impl PlayerState {
             eye_in_water: false,
             eye_in_lava: false,
             swimming: false,
+            swim_amount: 0.0,
+            swim_amount_o: 0.0,
             water_movement_efficiency: 0.0,
             fall_distance: 0.0,
         }
@@ -1294,7 +1322,8 @@ fn jump_out_of_fluid(
 ///
 /// In order: the `baseTick` flow-current push, `LocalPlayer.aiStep`'s
 /// sneak-to-sink (`goDownInWater`, `-0.04F`), the velocity snap-to-zero prologue,
-/// the shallow-vs-deep jump decision ([`apply_fluid_jump`]), the
+/// the shallow-vs-deep jump decision ([`apply_fluid_jump`]), `Player.travel`'s
+/// swim look-descent (blending vertical velocity toward the look angle), the
 /// slow-down/input-speed terms (sprint, Depth Strider, Dolphin's Grace), the
 /// collision move, the ladder clamp, the `multiply(slowDown, 0.8F, slowDown)`
 /// drag, buoyancy ([`fluid_falling_adjusted_movement`]) and finally
@@ -1354,6 +1383,43 @@ pub fn tick_water(
 
     // --- aiStep jump: shallow water jumps, deep water swims up -----------------
     apply_fluid_jump(state, input, fluid, view, profile);
+
+    // --- Player.travel: the swim look-descent (Player.java:1401-1415) ---------
+    // Runs in `Player.travel()`, which wraps `super.travel()` (`LivingEntity.
+    // travel` → `travelInFluid` → `travelInWater`, i.e. the rest of this
+    // function) — so it modifies `deltaMovement.y` *before* `travelInWater`'s
+    // own physics ever sees it, which is why this sits ahead of the `isFalling`/
+    // `oldY` capture below rather than after it.
+    //
+    // While swimming, blend vertical velocity toward the look direction's Y
+    // component (steeper multiplier `0.085` looking notably down, `< -0.2`;
+    // `0.06` otherwise) whenever looking level-or-down, holding jump, or still
+    // submerged at head height — so releasing jump and looking up lets a
+    // swimmer coast to the surface instead of being pulled back down, but
+    // looking down (or still being underwater) glides them lower. Both
+    // constants are read directly from `Player.java:1408`, not from any
+    // secondhand recollection of them.
+    if state.swimming {
+        let look_angle_y = calculate_view_vector(state.pitch, state.yaw).y;
+        let multiplier = if look_angle_y < -0.2 { 0.085 } else { 0.06 };
+        // `BlockPos.containing(x, y + 1.0 - 0.1, z)` — roughly head height,
+        // floored to a block position; `!isEmpty()` is "any fluid present".
+        let head_submerged = view
+            .fluid_at(
+                mth::floor(state.position.x),
+                mth::floor(state.position.y + 1.0 - 0.1),
+                mth::floor(state.position.z),
+            )
+            .is_some();
+        if look_angle_y <= 0.0 || input.jump || head_submerged {
+            let vy = state.velocity.y;
+            state.velocity = Vec3d::new(
+                state.velocity.x,
+                vy + (look_angle_y - vy) * multiplier,
+                state.velocity.z,
+            );
+        }
+    }
 
     // --- travelInFluid / travelInWater ----------------------------------------
     // `isFalling` and `oldY` are read at the top of `travelInFluid`, i.e. *after*
@@ -1684,6 +1750,9 @@ fn travel_and_check_inside_blocks(
         view,
         state.position,
     );
+    // `LivingEntity.updateSwimAmount()` — see its doc for why this sits here,
+    // between `updateSwimming` and the travel dispatch below.
+    update_swim_amount(state);
 
     if fluid.in_water() {
         tick_water(state, input, &fluid, view, profile);
@@ -1775,6 +1844,27 @@ fn water_at_block(view: &dyn CollisionView, position: Vec3d) -> bool {
         Some(cell) => cell.kind == crate::fluid::FluidKind::Water,
         None => view.is_water(bx, by, bz),
     }
+}
+
+/// `LivingEntity.updateSwimAmount()` (`LivingEntity.java:3478-3483`) — advances
+/// the `0..1` swim-pose ramp by `SWIM_AMOUNT_PER_TICK` (`0.09F`) toward `1.0`
+/// while `swimming`, or back toward `0.0` otherwise, clamping at both ends.
+///
+/// Called immediately after [`update_swimming`] decides this tick's swim flag,
+/// mirroring vanilla's exact call order: `LivingEntity.tick()` calls
+/// `updateSwimAmount()` right after `super.tick()` (where `Entity.baseTick`'s
+/// `updateSwimming()` lives) and *before* `aiStep()` (where `travel` — and
+/// therefore the look-descent in [`tick_water`] — runs). So this ramp always
+/// reflects `swimming` as of the **start** of the current tick, one step ahead
+/// of the travel branch that consumes `swimming` directly.
+fn update_swim_amount(state: &mut PlayerState) {
+    const SWIM_AMOUNT_PER_TICK: f32 = 0.09;
+    state.swim_amount_o = state.swim_amount;
+    state.swim_amount = if state.swimming {
+        (state.swim_amount + SWIM_AMOUNT_PER_TICK).min(1.0)
+    } else {
+        (state.swim_amount - SWIM_AMOUNT_PER_TICK).max(0.0)
+    };
 }
 
 /// `LivingEntity.getFrictionInfluencedSpeed(blockFriction)`.

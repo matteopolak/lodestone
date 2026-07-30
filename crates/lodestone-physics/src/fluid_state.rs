@@ -194,6 +194,24 @@ fn fluid_kind_at(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> Option<Flu
 /// own-height is `amount / 9.0F`; without it (coarse presence only) a present cell
 /// is a full cell, so height is `1.0`. `hasSameAbove` checks the cell directly
 /// above for the same fluid, via the same fine-then-coarse resolution.
+///
+/// # A known, narrow approximation
+///
+/// Vanilla's `hasSameAbove` is `fluidState.getType().isSame(above.getType())` —
+/// `Fluid` **object identity**, and a source (`Fluids.WATER`) and flowing water
+/// (`Fluids.FLOWING_WATER`) are two *different* registered `Fluid` instances
+/// (`WaterFluid.getSource()`/`getFlowing()`, `.cache/mc/26.2/src/.../WaterFluid.java`).
+/// So in real vanilla, a flowing cell directly under a *source* does **not**
+/// count as "the same fluid above" — only two cells that are both sources, or
+/// both flowing (any two levels), do. This function folds that down to "same
+/// [`FluidKind`] above" (any water above water, any lava above lava,
+/// regardless of source/flowing/level), which disagrees with vanilla only at
+/// the one cell directly beneath a source sitting on a flowing column — e.g.
+/// a waterfall's inlet — where vanilla reports that cell's own fractional
+/// height and this reports `1.0`. Left undistinguished because `FluidCell`
+/// carries no source/flowing bit and the blast radius is at most one cell's
+/// ~0.11-block height error per fluid body, not fixed here — see
+/// `docs/fluid-classification.md`'s "Coarseness" section.
 fn cell_height(view: &dyn CollisionView, x: i32, y: i32, z: i32, kind: FluidKind) -> f32 {
     match view.fluid_at(x, y, z) {
         Some(cell) => {
