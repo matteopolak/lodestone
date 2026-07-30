@@ -236,6 +236,97 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
     );
 }
 
+/// Occlusion is decided **per face** from the covering quad's sprite, not from
+/// the block's render layer — the fix for the reported water-shoreline bug.
+///
+/// `grass_block[snowy=false]` is the block that broke the old rule, and it breaks
+/// it twice over. Its model lays four transparent `grass_block_side_overlay`
+/// decals over the six opaque faces of a full cube, so (a) it bakes **ten** quads
+/// and fails `is_full_cube`'s exactly-six test, and (b) the decal's binary-alpha
+/// sprite drags the whole block's [`RenderLayer`] to `Cutout`. The old
+/// `is_full_cube(quads) && layer == Solid` therefore called a solid dirt block
+/// see-through. Vanilla does not consult textures at all: `BlockBehaviour`'s
+/// `initCache` sets the occlusion shape from `canOcclude`, a `Properties` flag
+/// cleared only by `noOcclusion()`/`noCollision()`, and `GRASS_BLOCK`'s properties
+/// call neither.
+///
+/// The consequence was visible in water: the fluid mesher culls a side face
+/// against an occluding neighbour and *excludes* an occluding neighbour from its
+/// corner-height average, so a grass bank made every shoreline cell draw an
+/// animated `water_flow` side face and tilt its surface. See
+/// `docs/fluid-rendering.md`.
+///
+/// # Negative control (executed here)
+///
+/// The pre-fix expression is evaluated on the same state and asserted to
+/// **disagree** — so this gate fails the moment occlusion goes back to being a
+/// whole-block property. The three companion assertions are the other direction:
+/// `oak_leaves` covers all six boundary faces but with a cutout sprite,
+/// `white_stained_glass` with a translucent one, and `powder_snow` is six thin
+/// opaque shells that draw their own interior. None of them may occlude, or the
+/// per-face rule would have overshot into culling real geometry.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar and generated/reports/blocks.json"]
+fn occlusion_is_per_face_so_grass_block_occludes_despite_its_cutout_layer() {
+    let (models, _mgr, reg) = build_models();
+
+    let grass = find_state(reg.as_ref(), "minecraft:grass_block", &[("snowy", "false")])
+        .expect("grass_block[snowy=false] in registry");
+    let sm = models.state(grass);
+    assert_eq!(
+        sm.layer,
+        RenderLayer::Cutout,
+        "grass_block's overlay decal puts the *block* on the cutout pass"
+    );
+    assert!(
+        sm.quads.len() > 6,
+        "grass_block bakes its overlay decals as extra quads (got {})",
+        sm.quads.len()
+    );
+    assert_eq!(
+        sm.face_occludes,
+        [true; 6],
+        "every one of grass_block's six boundary faces is covered by an opaque sprite"
+    );
+    assert!(
+        sm.occludes,
+        "grass_block is a solid dirt block: it must cull its neighbours"
+    );
+
+    // Negative control, executed: the pre-fix rule on the very same state.
+    let pre_fix = is_full_cube(&sm.quads) && sm.layer == RenderLayer::Solid;
+    assert!(
+        !pre_fix,
+        "the pre-fix rule must still disagree here — if it now agrees, this gate has \
+         stopped testing anything and occlusion has silently gone back to a \
+         whole-block property"
+    );
+
+    // The other direction: per-face occlusion must not overshoot.
+    for (block, why) in [
+        (
+            "minecraft:oak_leaves",
+            "a full cube whose sprite is cutout — you see through it",
+        ),
+        (
+            "minecraft:white_stained_glass",
+            "a full cube whose sprite is translucent",
+        ),
+        (
+            "minecraft:powder_snow",
+            "six thin opaque shells that draw their own interior, so culling the block \
+             behind one would open a hole (vanilla marks it noOcclusion())",
+        ),
+    ] {
+        let id = find_state(reg.as_ref(), block, &[]).unwrap_or_else(|| panic!("{block} in registry"));
+        assert!(
+            !models.occludes(id),
+            "{block} must not occlude: {why} (face_occludes = {:?})",
+            models.state(id).face_occludes
+        );
+    }
+}
+
 /// The single tinted colour every tinted quad of `state_id` resolves to (its
 /// palette entry), asserting the block is a single tint *source* so the number
 /// is unambiguous. Panics if the state has no tinted quad.

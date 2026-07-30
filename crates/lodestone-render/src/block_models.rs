@@ -15,20 +15,23 @@
 //!
 //! * a **complete** stitched [`Atlas`] of every block texture (not just the
 //!   cube-face subset), so a baked quad's UVs always resolve to a real sprite;
-//! * a per-state [`StateModel`] carrying the baked quads, a geometry-derived
-//!   occlusion flag ([`is_full_cube`] **and** an opaque layer — a cutout or
-//!   translucent full cube such as leaves, glass or water must not cull its
-//!   neighbours), and the block's [`RenderLayer`] derived from its sprites'
-//!   alpha.
+//! * a per-state [`StateModel`] carrying the baked quads, **per-face** occlusion
+//!   ([`StateModel::face_occludes`] — a cutout or translucent full cube such as
+//!   leaves, glass or water must not cull its neighbours), and the block's
+//!   [`RenderLayer`] derived from its sprites' alpha.
 //!
 //! # Why occlusion follows geometry, not a list
 //!
-//! `occludes` is `is_full_cube(quads) && layer == Solid` — computed from the
-//! baked geometry and the sprite alpha, never a hardcoded per-block table. A
-//! per-version block list would be a version-specific fact smuggled into a
-//! version-free crate and would rot the first time Mojang changed a model. A
-//! cross-plant is not a full cube, so it never occludes; leaves are a full cube
-//! but cutout, so they do not occlude either.
+//! Occlusion is computed from the baked geometry and the sprite alpha, never a
+//! hardcoded per-block table. A per-version block list would be a
+//! version-specific fact smuggled into a version-free crate and would rot the
+//! first time Mojang changed a model. A cross-plant covers no boundary face, so
+//! it never occludes; leaves cover all six but their sprite is cutout, so they do
+//! not occlude either.
+//!
+//! It is decided **per face**, not per block: see `face_occlusion` below for the
+//! measurement that forced that, and `docs/fluid-rendering.md` for the
+//! water-shoreline bug the per-block version caused.
 //!
 //! # Render layer
 //!
@@ -66,7 +69,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lodestone_assets::fluid::{FluidState, SpriteUv};
-use lodestone_assets::tint::vanilla_tint_kind;
+use lodestone_assets::tint::{vanilla_particle_tint_kind, vanilla_tint_kind};
 use lodestone_assets::{
     AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
@@ -78,7 +81,7 @@ use lodestone_model::{BlockStateRegistry, Identifier};
 
 use crate::anim::{AnimFrame, AnimSlotUniform, SpriteAnimation};
 use crate::block_resolver::DefaultTints;
-use crate::models::is_full_cube;
+use crate::models::{face_of_direction, quad_is_full_face};
 use crate::translucency::RenderLayer;
 
 /// Number of slots in the tint palette uploaded to the model shader. A baked
@@ -306,10 +309,23 @@ pub struct StateModel {
     /// The baked quads, with absolute atlas UVs. Empty for air / fluids with no
     /// blockstate model / states that fail to bake.
     pub quads: Vec<BakedQuad>,
-    /// Whether this state fully occludes its neighbours: a full opaque cube.
-    /// `is_full_cube(quads) && layer == Solid`, so leaves/glass/water (full-cube
-    /// geometry but cutout/translucent) correctly do **not** cull neighbours.
+    /// Whether this state fully occludes its neighbours on **every** face — i.e.
+    /// all six of [`face_occludes`](Self::face_occludes) hold. Leaves, glass and
+    /// water are full-cube geometry but cutout/translucent, so they correctly do
+    /// **not** cull neighbours.
     pub occludes: bool,
+    /// Per-face occlusion, indexed by [`Face::index`](crate::section::Face::index)
+    /// (`West, East, Down, Up, North, South`). A face occludes when *some* quad
+    /// covers that whole boundary square (`cullface` = its own facing, coplanar,
+    /// spanning `1×1`) **and** the sprite that quad samples is fully opaque.
+    ///
+    /// This is per-**face** rather than per-block on purpose: `grass_block` lays a
+    /// transparent `grass_block_side_overlay` decal over four opaque
+    /// `grass_block_side` faces, so its *block* layer is `Cutout` while every one
+    /// of its six boundary faces is opaque. Judging occlusion by the block layer
+    /// called it see-through and produced the water-shoreline bug (see the module
+    /// docs and `docs/fluid-rendering.md`).
+    pub face_occludes: [bool; 6],
     /// The render pass this block's geometry belongs to, derived from its sprite
     /// alpha (the most transparent layer across its faces).
     pub layer: RenderLayer,
@@ -318,6 +334,23 @@ pub struct StateModel {
     /// [`BakedModel::particle_uv`](lodestone_assets::bake::BakedModel::particle_uv)
     /// for why this cannot be derived from `quads`.
     pub particle_uv: Option<[f32; 4]>,
+    /// The linear-ish `[r, g, b]` multiplier a break/hit particle of this state
+    /// applies on top of its `#particle` sprite — vanilla's
+    /// `TerrainParticle`'s `rCol *= tintSource.colorAsTerrainParticle(…)`.
+    /// `None` for an untinted state (the overwhelming majority).
+    ///
+    /// This is **not** derivable from the quads' `tint_index` values, for two
+    /// independent reasons: the `#particle` sprite is a different texture from
+    /// any face, and vanilla's particle tint is a separate virtual method that
+    /// deliberately disagrees with the in-world face tint for `grass_block`
+    /// (untinted particles over a `block/dirt` sprite) and for `water` /
+    /// `bubble_column` (tinted particles over an untinted surface). See
+    /// [`vanilla_particle_tint_kind`](lodestone_assets::tint::vanilla_particle_tint_kind).
+    ///
+    /// Like every other tint in this struct it is the **fixed plains default**,
+    /// not the live biome colour, so a state's debris matches the terrain quads
+    /// beside it rather than the biome it fell in.
+    pub particle_tint: Option<[f32; 3]>,
 }
 
 impl StateModel {
@@ -327,10 +360,23 @@ impl StateModel {
         StateModel {
             quads: Vec::new(),
             occludes: false,
+            face_occludes: [false; 6],
             layer: RenderLayer::Solid,
             particle_uv: None,
+            particle_tint: None,
         }
     }
+}
+
+/// `0xRRGGBB` -> `[r, g, b]` in `0..=1`, the form a particle's colour
+/// multiplier takes. Vanilla does the same division by 255 inline in
+/// `TerrainParticle`'s constructor.
+fn unpack_rgb(rgb: u32) -> [f32; 3] {
+    [
+        ((rgb >> 16) & 0xFF) as f32 / 255.0,
+        ((rgb >> 8) & 0xFF) as f32 / 255.0,
+        (rgb & 0xFF) as f32 / 255.0,
+    ]
 }
 
 /// One item's baked inventory geometry: the 3-D mini-block a hotbar/inventory
@@ -929,13 +975,25 @@ impl BlockModels {
                             }
                         }
                     }
+                    // The tint a *particle* of this state takes. Resolved from
+                    // the particle-specific lookup, not from the quads' tint
+                    // indices: the `#particle` sprite is a different texture
+                    // from any face (see `particle_uv`), and vanilla's
+                    // `colorAsTerrainParticle` deliberately disagrees with the
+                    // in-world face tint for `grass_block` and for water.
+                    let particle_tint = resolved
+                        .as_ref()
+                        .and_then(|r| tints.color(vanilla_particle_tint_kind(r.block, r.properties)))
+                        .map(unpack_rgb);
                     let layer = block_layer(&sprite_rects, &quads);
-                    let occludes = is_full_cube(&quads) && layer == RenderLayer::Solid;
+                    let face_occludes = face_occlusion(&sprite_rects, &quads);
                     StateModel {
                         quads,
-                        occludes,
+                        occludes: face_occludes.iter().all(|o| *o),
+                        face_occludes,
                         layer,
                         particle_uv,
+                        particle_tint,
                     }
                 }
                 _ => StateModel::empty(),
@@ -1211,7 +1269,8 @@ impl BlockModels {
         &self.item_bake_misses
     }
 
-    /// Whether a state fully occludes its neighbours (a full opaque cube).
+    /// Whether a state fully occludes its neighbours (every one of its six
+    /// boundary faces is a full opaque face).
     #[must_use]
     pub fn occludes(&self, state_id: u32) -> bool {
         self.state(state_id).occludes
@@ -1223,6 +1282,30 @@ impl BlockModels {
     #[must_use]
     pub fn particle_uv(&self, state_id: u32) -> Option<[f32; 4]> {
         self.state(state_id).particle_uv
+    }
+
+    /// The `[r, g, b]` multiplier a break/hit particle of `state_id` applies on
+    /// top of its `#particle` sprite, or `None` for an untinted state — see
+    /// [`StateModel::particle_tint`] for why this is a separate lookup from the
+    /// quads' tint indices, and why leaving it out renders foliage debris white.
+    #[must_use]
+    pub fn particle_tint(&self, state_id: u32) -> Option<[f32; 3]> {
+        self.state(state_id).particle_tint
+    }
+
+    /// How many states carry a [`particle_tint`](Self::particle_tint).
+    ///
+    /// Exposed as an **anti-vacuity check**: a table that resolved no tints at
+    /// all still satisfies "no state's debris is the wrong colour", so a gate on
+    /// particle tinting has to be able to prove the table is populated. On a
+    /// complete vanilla pack this is in the thousands (every leaf, grass, fern,
+    /// stem, vine and redstone-wire state).
+    #[must_use]
+    pub fn particle_tinted_state_count(&self) -> usize {
+        self.models
+            .iter()
+            .filter(|m| m.particle_tint.is_some())
+            .count()
     }
 
     /// The render layer of a state's geometry.
@@ -1417,6 +1500,78 @@ fn block_layer(sprites: &[SpriteRect], quads: &[BakedQuad]) -> RenderLayer {
         }
     }
     layer
+}
+
+/// Per-face occlusion: for each of the six [`Face`] indices, whether some quad
+/// covers that whole boundary square with a **fully opaque** sprite.
+///
+/// # Why this is per-face and not `is_full_cube(quads) && layer == Solid`
+///
+/// That older rule was wrong twice over, and both errors landed on the same
+/// block. `grass_block[snowy=false]` bakes **ten** quads — six opaque cube faces
+/// plus four coplanar `grass_block_side_overlay` decals whose sprite is binary
+/// alpha (measured: exactly `{0, 255}`). So:
+///
+/// * `is_full_cube` demands exactly six quads and saw ten → `false`;
+/// * `block_layer` takes the *most transparent* sprite over all quads, so the
+///   decal dragged the whole block to `Cutout` → `layer != Solid`.
+///
+/// Vanilla does not derive occlusion from textures at all: `BlockBehaviour`'s
+/// `initCache` sets `occlusionShape = canOcclude ? getOcclusionShape(...) :
+/// Shapes.empty()`, and `canOcclude` is a `Properties` flag cleared only by
+/// `noOcclusion()`/`noCollision()`. `GRASS_BLOCK`'s properties call neither, so
+/// vanilla occludes; leaves, glass, ice, slime, honey, spawners, grates and
+/// `powder_snow` all call `noOcclusion()`. That flag is Java, not data — it is in
+/// no report — so a renderer without it must approximate. Asking *per face*
+/// whether an opaque quad covers the boundary is the closest approximation the
+/// baked geometry supports.
+///
+/// # The hollow-shell exception
+///
+/// One block defeats "opaque boundary face ⇒ occludes": `powder_snow` is six
+/// **thin shells** (`[0,15.998,0]..[16,16,16]` and its five mirrors), each drawn
+/// on both sides with an opaque sprite. Its outward faces do sit on the boundary,
+/// so the rule above would call it occluding — but vanilla marks it
+/// `noOcclusion()`, and for a reason we can detect: a model that draws its own
+/// **interior** is see-through from inside, so culling the block behind it opens a
+/// hole. The tell is a quad whose facing is the *opposite* of its `cullface`
+/// (powder_snow's east shell carries a `west`-facing quad with `cullface: east`).
+/// Such a quad vetoes occlusion on the face it lines.
+///
+/// Measured over all 32,366 states of 26.2: that veto fires on **exactly**
+/// `powder_snow` and on **zero** blocks that occluded under the old rule. With it,
+/// the complete set of states whose occlusion changes is
+/// `{grass_block[snowy=false]}` — the one block the bug was about — and no state
+/// anywhere *loses* occlusion, so the change cannot open a new hole.
+///
+/// The visible cost of the old rule was the reported water bug: a lake's shore
+/// blocks are `grass_block`, so every shoreline cell was treated as air-like by
+/// the fluid mesher — its side faces survived culling and drew the animated
+/// `water_flow` sprite, and its corner heights averaged *down* toward the
+/// "air" bank, tilting and animating the surface. Measured on an 8×8×8 pool:
+/// 64 quads (all horizontal) with occluding walls, **384 quads, 284 of them
+/// vertical** with non-occluding ones.
+fn face_occlusion(sprites: &[SpriteRect], quads: &[BakedQuad]) -> [bool; 6] {
+    let mut opaque_face = [false; 6];
+    let mut interior_drawn = [false; 6];
+    for quad in quads {
+        let facing = face_of_direction(quad.direction);
+        if let Some(cull) = quad.cullface {
+            // A quad lining the inside of the `cull` shell: it faces inward, so
+            // that shell is not a light-tight boundary.
+            if face_of_direction(cull) == facing.opposite() {
+                interior_drawn[facing.opposite().index()] = true;
+            }
+        }
+        if !quad_is_full_face(quad) {
+            continue;
+        }
+        if sprite_for_uv(sprites, uv_centroid(quad)).is_some_and(|sr| sr.layer == RenderLayer::Solid)
+        {
+            opaque_face[facing.index()] = true;
+        }
+    }
+    std::array::from_fn(|i| opaque_face[i] && !interior_drawn[i])
 }
 
 /// The centroid of a quad's four UVs — a point guaranteed to sit inside its

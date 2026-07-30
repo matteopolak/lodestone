@@ -246,7 +246,14 @@ fn face_plane(d: Direction) -> (usize, f32) {
 /// Whether a single quad is a full unit face on its own `direction`: coplanar
 /// with the cube face, spanning the whole `1×1` square, and culled by the
 /// neighbour in that direction.
-fn quad_is_full_face(q: &BakedQuad) -> bool {
+///
+/// `cullface == Some(direction)` is the model author's own declaration that the
+/// face sits on the block boundary, so this is data-driven rather than inferred
+/// from coordinates alone. Public because occlusion is decided **per face** in
+/// [`block_models`](crate::block_models) — a block whose *layer* is cutout can
+/// still present opaque boundary faces (`grass_block`).
+#[must_use]
+pub fn quad_is_full_face(q: &BakedQuad) -> bool {
     const EPS: f32 = 1e-4;
     // Must be culled by exactly its own facing neighbour — a face that is never
     // culled (`cullface: None`, e.g. a cross-plant blade) is not a cube face.
@@ -1475,6 +1482,108 @@ mod tests {
         assert!(
             m.lava.vertices.iter().all(|vx| vx.light == 0xFF),
             "lava must be emitted full-bright"
+        );
+    }
+
+    // --- The shoreline: a pool bounded by real banks -----------------------
+
+    /// A pool of water walled on all four sides and floored, with open air above.
+    /// `bank_occludes` chooses whether the bank blocks are reported as occluding,
+    /// which is the single bit the reported water bug turned on the wrong way.
+    fn walled_pool(bank_occludes: bool) -> FakeFluidView {
+        let mut v = FakeFluidView::default();
+        for y in 0..8 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let inside = (4..12).contains(&x) && (4..12).contains(&z);
+                    if inside {
+                        v.water(x, y, z, FluidState::source());
+                    } else if bank_occludes {
+                        v.solid(x, y, z);
+                    }
+                }
+            }
+        }
+        // The floor under the pool, and the banks one cell outside the section.
+        for z in 0..16 {
+            for x in 0..16 {
+                if bank_occludes {
+                    v.solid(x, -1, z);
+                }
+            }
+        }
+        v
+    }
+
+    /// How many of a fluid mesh's quads are *vertical* (a side face), and how
+    /// many horizontal surfaces are **level** (all four corners at one height).
+    fn face_profile(mesh: &ModelMesh) -> (usize, usize, usize) {
+        let mut vertical = 0;
+        let mut level_top = 0;
+        let mut sloped_top = 0;
+        for q in mesh.vertices.chunks(4) {
+            let ys: Vec<f32> = q.iter().map(|v| v.position[1]).collect();
+            let flat = ys.iter().all(|y| (y - ys[0]).abs() < 1e-6);
+            if !flat {
+                // Either a genuine side face, or a *sloped* top surface. Tell them
+                // apart by whether the quad has any vertical extent beyond the
+                // corner-height spread: a side face spans down to the cell base.
+                let (lo, hi) = ys.iter().fold((f32::MAX, f32::MIN), |(l, h), &y| {
+                    (l.min(y), h.max(y))
+                });
+                if hi - lo > 0.5 {
+                    vertical += 1;
+                } else {
+                    sloped_top += 1;
+                }
+            } else {
+                level_top += 1;
+            }
+        }
+        (vertical, level_top, sloped_top)
+    }
+
+    /// The whole reported bug in one assertion, with the pre-fix behaviour as the
+    /// executed negative control.
+    ///
+    /// The user's report was: water "shows the 'flowing down' effect on the edges
+    /// that touch non-water blocks". Vanilla's `FluidRenderer.tesselate` culls a
+    /// fluid side face whose neighbour occludes it
+    /// (`!isFaceOccludedByNeighbor(faceDir, max(h0, h1), faceState)`, and for a
+    /// `Shapes.block()` occluder that test is `direction != UP` — i.e. always true
+    /// for a horizontal face). So a pool walled in solid blocks must emit **only**
+    /// its top surface, and that surface must be level: `FluidRenderer.getHeight`
+    /// returns `-1.0` for a solid non-fluid neighbour, which
+    /// `addWeightedHeight` drops from the average entirely, whereas an *air*
+    /// neighbour contributes `0.0` and drags the corner down.
+    ///
+    /// Both halves run here. The bank that occludes is the fixed behaviour; the
+    /// bank that does not is exactly what `grass_block` used to report, and it
+    /// fails every assertion below — 284 side faces and a tilted rim instead of
+    /// zero and flat.
+    #[test]
+    fn a_walled_pool_emits_only_its_level_top_surface() {
+        let (vertical, level, sloped) = face_profile(&mesh_fluids(&walled_pool(true)).water);
+        assert_eq!(
+            vertical, 0,
+            "a pool walled in occluding blocks must emit no side faces at all — every \
+             one of them would draw the animated water_flow sprite over the bank"
+        );
+        assert_eq!(sloped, 0, "no corner may slope toward an occluding bank");
+        assert_eq!(
+            level, 64,
+            "exactly the 8x8 top surface of the pool's topmost layer"
+        );
+
+        // Negative control, executed: the pre-fix occlusion answer for a
+        // grass-block bank. Every assertion above must fail on it.
+        let (bad_vertical, _bad_level, bad_sloped) =
+            face_profile(&mesh_fluids(&walled_pool(false)).water);
+        assert!(
+            bad_vertical > 0 && bad_sloped > 0,
+            "control must reproduce the bug: a non-occluding bank has to yield side \
+             faces ({bad_vertical}) and sloped rim quads ({bad_sloped}); if it does not, \
+             this gate cannot see the defect it exists to catch"
         );
     }
 }

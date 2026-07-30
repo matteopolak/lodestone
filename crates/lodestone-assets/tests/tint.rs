@@ -3,7 +3,7 @@
 use lodestone_assets::Image;
 use lodestone_assets::tint::{
     BiomeTint, Colormap, GrassColorModifier, Rgb, TintKind, colors, redstone_power_color,
-    vanilla_tint_kind,
+    vanilla_particle_tint_kind, vanilla_tint_kind,
 };
 use lodestone_model::{BlockPos, Identifier};
 use std::collections::BTreeMap;
@@ -299,4 +299,87 @@ fn vanilla_classification_known_blocks() {
         TintKind::Constant(0xE0C71C)
     );
     assert_eq!(lodestone_assets::tint::stem_color(0), 0x00FF00);
+}
+
+/// `colorAsTerrainParticle` is a *different* virtual method from the in-world
+/// face tint, and vanilla's `BlockTintSources` (26.2) deliberately makes the two
+/// disagree for exactly two registrations. Both divergences are load-bearing on
+/// screen, and both are the kind a "reuse the face tint" implementation gets
+/// silently wrong:
+///
+/// * `grass_block` — `grassBlock()` overrides `colorAsTerrainParticle` to `-1`,
+///   because `grass_block`'s `#particle` variable is `block/dirt`. Tinting it
+///   throws **green dirt**.
+/// * `water` / `bubble_column` — `waterParticles()` is the mirror image: `color`
+///   and `colorInWorld` are `-1` (the surface is tinted by the fluid model) while
+///   `colorAsTerrainParticle` returns the biome water colour.
+#[test]
+fn particle_tint_diverges_from_the_face_tint_exactly_where_vanilla_does() {
+    let props = BTreeMap::new();
+    let id = |s: &str| s.parse::<Identifier>().unwrap();
+
+    // grass_block: grass-tinted faces, untinted particles.
+    assert_eq!(
+        vanilla_tint_kind(&id("minecraft:grass_block"), 0, &props),
+        TintKind::Grass,
+        "the face tint is unchanged by this"
+    );
+    assert_eq!(
+        vanilla_particle_tint_kind(&id("minecraft:grass_block"), &props),
+        TintKind::None,
+        "grass_block's particle sprite is block/dirt; tinting it would throw green dirt"
+    );
+
+    // water / bubble_column: untinted faces, water-tinted particles.
+    for block in ["minecraft:water", "minecraft:bubble_column"] {
+        assert_eq!(
+            vanilla_tint_kind(&id(block), 0, &props),
+            TintKind::None,
+            "{block}'s surface is tinted by the fluid model, not by a face tint index"
+        );
+        assert_eq!(
+            vanilla_particle_tint_kind(&id(block), &props),
+            TintKind::Water,
+            "{block} registers waterParticles(), which tints particles only"
+        );
+    }
+
+    // Everything else inherits colorAsTerrainParticle from colorInWorld, so the
+    // two lookups must agree at layer 0. `short_grass` and `redstone_wire` are
+    // the greyscale-sprite blocks the white-debris bug was reported against.
+    let mut rprops = BTreeMap::new();
+    rprops.insert("power".to_string(), "9".to_string());
+    for (block, props) in [
+        ("minecraft:short_grass", &props),
+        ("minecraft:fern", &props),
+        ("minecraft:tall_grass", &props),
+        ("minecraft:oak_leaves", &props),
+        ("minecraft:vine", &props),
+        ("minecraft:sugar_cane", &props),
+        ("minecraft:lily_pad", &props),
+        ("minecraft:spruce_leaves", &props),
+        ("minecraft:leaf_litter", &props),
+        ("minecraft:redstone_wire", &rprops),
+        // Untinted, and must stay so: carrying a tintindex is not being tinted.
+        ("minecraft:stone", &props),
+        ("minecraft:cherry_leaves", &props),
+        ("minecraft:bamboo", &props),
+    ] {
+        assert_eq!(
+            vanilla_particle_tint_kind(&id(block), props),
+            vanilla_tint_kind(&id(block), 0, props),
+            "{block} has no colorAsTerrainParticle override, so the two lookups must agree"
+        );
+    }
+
+    // Non-vacuity: the agreeing set must actually contain tinted blocks, or the
+    // loop above is satisfied by `None == None` throughout.
+    assert_eq!(
+        vanilla_particle_tint_kind(&id("minecraft:short_grass"), &props),
+        TintKind::Grass
+    );
+    assert_eq!(
+        vanilla_particle_tint_kind(&id("minecraft:redstone_wire"), &rprops),
+        TintKind::RedstonePower(9)
+    );
 }
