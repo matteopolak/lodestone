@@ -223,6 +223,12 @@ fn the_pose_fit_gate_needs_both_terms_and_a_mob_contributes_to_neither() {
         .bounding_box(feet)
         .inflate(-1.0E-7);
 
+    // Drift guard: these two boxes are hand-derived from Avatar.POSES and
+    // Player.java:374, and `lodestone_physics::pose` now ships the same
+    // construction. If the shipped one ever changes shape, this is where it shows.
+    assert_eq!(standing, lodestone_physics::Pose::Standing.fit_box(feet));
+    assert_eq!(swimming, lodestone_physics::Pose::Swimming.fit_box(feet));
+
     assert!(
         !no_collision(&view, standing),
         "the standing box must not fit under a ceiling at y = 2"

@@ -21,6 +21,9 @@
 //!   by players and mobs and parameterised by [`entity::EntityDimensions`].
 //! * [`player`] — the per-tick player movement pipeline (a thin caller of the
 //!   entity core).
+//! * [`pose`] — [`pose::Pose`], the per-pose hitbox/eye height, and vanilla's
+//!   fit-gated `Player.updatePlayerPose` state machine, which is what makes a
+//!   swimmer `0.6` tall without ever clipping them into a ceiling.
 //! * [`push`] — entity-versus-entity interaction: the soft crowd push
 //!   (`Entity.push(Entity)`) and the entity half of `noCollision`. Deliberately
 //!   *not* on [`collision::CollisionView`]: that trait answers block geometry, and
@@ -40,6 +43,7 @@ pub mod fluid_state;
 pub mod geometry;
 pub mod mth;
 pub mod player;
+pub mod pose;
 pub mod profile;
 pub mod push;
 
@@ -55,6 +59,10 @@ pub use geometry::{Aabb, Axis, Vec3d};
 pub use player::{
     EdgeBackOff, MovementInput, PlayerState, StatusEffects, input_vector, tick, tick_air,
     tick_among_entities, tick_elytra, tick_lava, tick_water,
+};
+pub use pose::{
+    Pose, can_player_fit_within_blocks_and_entities_when, can_player_fit_within_blocks_when,
+    desired_pose, update_player_pose,
 };
 pub use profile::{FluidModel, InputModel, PhysicsProfile};
 pub use push::{

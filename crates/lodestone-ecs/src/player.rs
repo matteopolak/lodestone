@@ -60,8 +60,8 @@ use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::world::World;
 use lodestone_model::{ClientAction, PlayerInput};
 use lodestone_physics::{
-    CollisionView, FluidState, MovementInput, PhysicsProfile, PlayerState, Vec3d,
-    compute_fluid_state, tick,
+    CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
+    Vec3d, compute_fluid_state, tick_among_entities,
 };
 
 use crate::schedules::{Extract, GameTick};
@@ -309,6 +309,23 @@ impl Default for Profile {
     }
 }
 
+/// This tick's entity-push neighbourhood — every nearby entity
+/// [`lodestone_physics::push::apply_entity_push`] should test the local
+/// player against, refreshed by the driver once per tick before `GameTick`
+/// runs. Same pattern as [`PlayerCollision`]: the *decision* (which entities,
+/// how their boxes are sized) is the shell's, because it owns the ECS world
+/// query and whatever per-type geometry it can resolve, but the snapshot is
+/// handed to the ECS as an owned `Vec` so [`player_physics`] can stay a plain
+/// scheduled system rather than reaching back into the world itself.
+///
+/// Empty (the [`Default`]) reproduces prior behaviour exactly: passing an
+/// empty slice to [`lodestone_physics::tick_among_entities`] is bit-for-bit
+/// [`lodestone_physics::tick`] (`apply_entity_push` returns immediately), so a
+/// driver that never populates this — every existing test harness, and
+/// `--headless` — sees no behaviour change at all.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct NearbyEntities(pub Vec<NearbyEntity>);
+
 /// The one sanctioned egress: actions produced by systems this tick, drained
 /// by the driver and handed to the socket.
 ///
@@ -391,39 +408,15 @@ pub struct Egress {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// `Player.updatePlayerPose` / `getDesiredPose` (`Player.java:343-371`),
-/// reduced to the one thing the physics engine takes as an input: the **eye
-/// height**.
-///
-/// [`PlayerState::eye_height`] is documented as an input the *pose layer*
-/// owns, and this is that layer. It has to be written, because nothing else
-/// does: left at the standing `1.62` a swimmer's eye sits a metre above their
-/// body, so `getFluidJumpThreshold` reads the wrong branch, the submerged fog
-/// and underwater overlay flip a block early leaving the surface, and the
-/// camera floats.
-///
-/// Applied *after* the tick so the next tick — which reads it at the top of
-/// `LivingEntity.travel` — sees this tick's pose, exactly as vanilla's
-/// `setPose` lands before the following tick's `baseTick`.
-///
-/// Pose order is vanilla's `getDesiredPose`: swimming beats crouching beats
-/// standing.
-///
-/// **Not modelled:** the *hitbox* half of the pose. Vanilla's `Pose.SWIMMING`
-/// is `0.6 × 0.6` and is gated on `canPlayerFitWithinBlocksAndEntitiesWhen`;
-/// this engine keeps the standing `0.6 × 1.8` box for every pose, so a swimmer
-/// cannot fit through a one-block gap and the fit gate has nothing to test.
-/// Changing the box changes collision, which is what the server re-derives
-/// from our reported position, so it is deliberately a separate step.
-fn update_pose(player: &mut PlayerState, intent: MovementInput) {
-    player.eye_height = if player.swimming {
-        SWIMMING_EYE_HEIGHT
-    } else if intent.sneak {
-        CROUCHING_EYE_HEIGHT
-    } else {
-        lodestone_physics::player::DEFAULT_EYE_HEIGHT
-    };
-}
+// `Player.updatePlayerPose` used to be re-implemented here, as an eye-height-only
+// approximation, because `lodestone-physics` modelled no pose box. It does now:
+// `lodestone_physics::pose::update_player_pose` runs vanilla's real fit gate at
+// the tail of `tick`/`tick_among_entities` and commits box and eye height
+// together. Deciding the pose a second time in this crate could only *disagree*
+// with that gate — specifically by overwriting a fit-forced crouch (shift not
+// held, but the ceiling too low to stand) with a standing `1.62` eye. The
+// `Pending` arm below still seeds a pose, because it has no `CollisionView` for
+// the gate to consult.
 
 /// One free-fly tick: move horizontally relative to yaw, vertically with
 /// jump/sneak, ignoring gravity and collision.
@@ -472,6 +465,11 @@ fn fly_step(
     // entered before taking off — the player would fly around with a 0.4 eye
     // height.
     player.swimming = false;
+    // The box half of the same reset. Free-fly never calls `tick`, so nothing
+    // else clears a pose entered before taking off — a player who dives, starts
+    // swimming and then flies would otherwise keep the `0.6 × 0.6` swimming box
+    // for the whole flight, and get it back on landing.
+    player.pose = lodestone_physics::Pose::Standing;
     player.eye_height = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
 }
 
@@ -505,6 +503,7 @@ fn player_fluid_state(
 pub fn player_physics(
     collision: Res<PlayerCollision>,
     profile: Res<Profile>,
+    nearby: Res<NearbyEntities>,
     mut players: Query<
         (
             &mut PhysicsState,
@@ -545,7 +544,18 @@ pub fn player_physics(
 
         if let PlayerCollision::View(source) = &*collision {
             source.with_view(&mut |view| {
-                tick(player, intent, view, profile);
+                // `tick_among_entities` with an empty `nearby` is bit-for-bit
+                // `tick` — see [`NearbyEntities`]'s own doc for why that makes
+                // this swap provably inert for every caller that does not
+                // populate the resource.
+                tick_among_entities(
+                    player,
+                    intent,
+                    view,
+                    profile,
+                    &nearby.0,
+                    PushSelf::LIVING_PLAYER,
+                );
                 // The same view movement collided against, so the submerged
                 // summary is consistent with where the tick left the player.
                 fluid.0 = player_fluid_state(player, profile, view);
@@ -557,8 +567,17 @@ pub fn player_physics(
             player.velocity = Vec3d::ZERO;
             player.on_ground = true;
             fluid.0 = FluidState::NONE;
+            // No `CollisionView`, so there is nothing to gate the pose against.
+            // `with_pose` commits box *and* eye height together — the pair
+            // vanilla's `refreshDimensions` always writes at once — so this
+            // cannot leave a `0.6` box wearing a `1.62` eye.
+            //
+            // The `View` arm deliberately does **not** do this: `tick_among_
+            // entities` ends in `update_player_pose`, which runs vanilla's fit
+            // gate. Re-deciding the pose here from `desired_pose` alone would
+            // overwrite a fit-forced crouch with a standing eye height.
+            *player = player.with_pose(lodestone_physics::desired_pose(player, intent));
         }
-        update_pose(player, intent);
     }
 }
 
@@ -637,6 +656,7 @@ impl Plugin for LocalPlayerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerCollision>();
         app.init_resource::<Profile>();
+        app.init_resource::<NearbyEntities>();
         app.init_resource::<ActionQueue>();
         app.init_resource::<Egress>();
         // `TickSet::Intent` before `TickSet::Physics`: the master chain in

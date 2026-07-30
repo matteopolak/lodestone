@@ -13,21 +13,25 @@ use lodestone_physics::geometry::Aabb;
 use lodestone_physics::player::{
     MovementInput, PlayerState, StatusEffects, tick, tick_air, tick_among_entities, tick_elytra,
 };
+use lodestone_physics::pose::Pose;
 use lodestone_physics::push::{NearbyEntity, PushSelf};
 use lodestone_physics::{PhysicsProfile, Vec3d};
 
 #[path = "support/golden_traces.rs"]
 mod golden_traces;
 use golden_traces::{
-    GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_DIAGONAL_WALK, GOLDEN_ELYTRA_CLIMB,
-    GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GLIDE_LEVEL,
-    GOLDEN_ENTITY_PUSH_FLUSH_CONTROL, GOLDEN_ENTITY_PUSH_SHOVE, GOLDEN_ENTITY_PUSH_WIDE_PLATEAU,
-    GOLDEN_FREE_FALL, GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE, GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB,
-    GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SINK, GOLDEN_LEVITATION, GOLDEN_SLAB_STEP,
-    GOLDEN_SLIME_BOUNCE, GOLDEN_SLIME_BOUNCE_SNEAK, GOLDEN_SLOW_FALLING_WATER,
-    GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP, GOLDEN_SNEAK_EDGE_WALK_OFF,
-    GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP, GOLDEN_SWIM_SPRINT, GOLDEN_WALK_FLAT,
-    GOLDEN_WALK_INTO_WALL, GOLDEN_WATER_CURRENT_PUSH, GOLDEN_WATER_SINK, GoldenTick,
+    GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_CROUCH_LOW_CORRIDOR,
+    GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED, GOLDEN_DIAGONAL_WALK, GOLDEN_ELYTRA_CLIMB,
+    GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GAP_GLIDE,
+    GOLDEN_ELYTRA_GLIDE_LEVEL, GOLDEN_ENTITY_PUSH_FLUSH_CONTROL, GOLDEN_ENTITY_PUSH_SHOVE,
+    GOLDEN_ENTITY_PUSH_WIDE_PLATEAU, GOLDEN_FREE_FALL, GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE,
+    GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB, GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SINK,
+    GOLDEN_LEVITATION, GOLDEN_SLAB_STEP, GOLDEN_SLIME_BOUNCE, GOLDEN_SLIME_BOUNCE_SNEAK,
+    GOLDEN_SLOW_FALLING_WATER, GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP,
+    GOLDEN_SNEAK_EDGE_WALK_OFF, GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP,
+    GOLDEN_STAND_LOW_CORRIDOR_CONTROL, GOLDEN_SWIM_GAP_BLOCKED_CONTROL, GOLDEN_SWIM_GAP_TUNNEL,
+    GOLDEN_SWIM_SPRINT, GOLDEN_WALK_FLAT, GOLDEN_WALK_INTO_WALL, GOLDEN_WATER_CURRENT_PUSH,
+    GOLDEN_WATER_SINK, GoldenTick,
 };
 
 #[derive(Default)]
@@ -1085,4 +1089,315 @@ fn entity_push_flush_control_is_inert() {
         impulse.x < 0.0,
         "one ulp closer must push — otherwise the control is vacuous"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `Player.updatePlayerPose` — pose-dependent dimensions and the fit gate.
+//
+// Counted, not assumed (the generator was instrumented to record every pose it
+// committed, per scenario). Of the 32 pre-existing traces: 19 never run the machine
+// at all, because `tick_air`/`tick_water`/`tick_elytra` are `travel`, not
+// `Player.tick`; 11 run it and only ever hold STANDING; and exactly two hold a
+// smaller box — `slime_bounce_sneak` crouches on a flat slime floor with nothing
+// above head height, and `swim_sprint` swims in a 5×5×21 water shaft with no solid
+// blocks at all, so in both the shorter top face intersects the same empty set of
+// cells. Regenerating `support/golden_traces.rs` after adding the machine and these
+// six scenarios produced 2664 insertions and 0 deletions — and the control for that
+// claim (regenerating the unmodified generator, which produced an empty diff) was
+// run first.
+//
+// See `docs/pose-dimensions.md`.
+// ---------------------------------------------------------------------------
+
+/// An open pool (`x <= 0`, three deep) opening into a **one-block-high** water
+/// tunnel (`x >= 1`): floor top `y = 1.0`, tunnel ceiling underside `y = 2.0`.
+fn water_tunnel(x_end: i32, r: i32) -> World {
+    let mut w = World::default();
+    for x in -8..=x_end {
+        for z in -r..=r {
+            w.solid(x, 0, z);
+            if x <= 0 {
+                for y in 1..=3 {
+                    w.add_water(x, y, z);
+                }
+            } else {
+                w.add_water(x, 1, z);
+                w.solid(x, 2, z);
+            }
+        }
+    }
+    w
+}
+
+/// A corridor with **1.5** blocks of headroom: a top slab (`2.5 ..= 3.0`) at
+/// `y = 2` for `x >= 1`, over a floor whose top face is `y = 1.0`.
+fn low_corridor(x_end: i32, r: i32) -> World {
+    let mut w = World::default();
+    for x in -8..=x_end {
+        for z in -r..=r {
+            w.solid(x, 0, z);
+            if x >= 1 {
+                w.boxed(x, 2, z, Aabb::new(0.0, 0.5, 0.0, 1.0, 1.0, 1.0));
+            }
+        }
+    }
+    w
+}
+
+/// [`assert_tick_trace`] with a per-tick input, for scenarios that change what
+/// the player is holding partway through.
+fn assert_tick_trace_inputs(
+    name: &str,
+    world: &World,
+    mut state: PlayerState,
+    golden: &[GoldenTick],
+    input: impl Fn(usize) -> MovementInput,
+) {
+    let profile = PhysicsProfile::mc_1_21();
+    for (t, expected) in golden.iter().enumerate() {
+        tick(&mut state, input(t), world, &profile);
+        check(name, t, "pos.x", state.position.x, expected.pos[0]);
+        check(name, t, "pos.y", state.position.y, expected.pos[1]);
+        check(name, t, "pos.z", state.position.z, expected.pos[2]);
+        check(name, t, "vel.x", state.velocity.x, expected.vel[0]);
+        check(name, t, "vel.y", state.velocity.y, expected.vel[1]);
+        check(name, t, "vel.z", state.velocity.z, expected.vel[2]);
+    }
+}
+
+/// The x a 0.6-wide box comes to rest at when its `+X` face is flush against the
+/// `x = 1` plane. Derived, not written down: the half-width is `f32(0.6)/2 =
+/// 0.300000011920929`, so the "obvious" `0.7` is wrong in the 8th place.
+fn flush_against_x1() -> f64 {
+    1.0 - f64::from(0.6_f32) / 2.0
+}
+
+#[test]
+fn swim_gap_tunnel_matches_golden() {
+    // The defect this work exists for: a sprint-swimmer must fit a one-block gap.
+    let world = water_tunnel(30, 2);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_tick_trace(
+        "swim_gap_tunnel",
+        &world,
+        state,
+        &GOLDEN_SWIM_GAP_TUNNEL,
+        MovementInput {
+            forward: 1.0,
+            sprint: true,
+            ..MovementInput::NONE
+        },
+    );
+
+    // The pose actually reached the collision sweep: the player is deep inside a
+    // tunnel whose ceiling a 1.8-high box cannot pass, and never left y = 1.0.
+    let last = GOLDEN_SWIM_GAP_TUNNEL.last().unwrap();
+    let x = f64::from_bits(last.pos[0]);
+    assert!(
+        x > 10.0,
+        "the swimmer did not get down the tunnel (x = {x})"
+    );
+    for (t, tk) in GOLDEN_SWIM_GAP_TUNNEL.iter().enumerate() {
+        assert_eq!(
+            f64::from_bits(tk.pos[1]),
+            1.0,
+            "swim_gap_tunnel left the tunnel floor at tick {t}"
+        );
+    }
+    // …and the state machine is what did it: replay to the end and read the pose.
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    for _ in 0..GOLDEN_SWIM_GAP_TUNNEL.len() {
+        tick(
+            &mut s,
+            MovementInput {
+                forward: 1.0,
+                sprint: true,
+                ..MovementInput::NONE
+            },
+            &world,
+            &profile,
+        );
+    }
+    assert_eq!(s.pose, Pose::Swimming);
+    assert_eq!(s.eye_height, 0.4, "the eye must follow the box");
+    assert!(s.swimming);
+}
+
+#[test]
+fn swim_gap_blocked_control_is_the_world_control() {
+    // WORLD CONTROL for the trace above: identical fixture, sprint released, so
+    // `updateSwimming` never fires, the pose stays STANDING and the 1.8-high box
+    // jams on the tunnel ceiling. Without this, "the swimmer got through" could
+    // just as well mean the fixture has no ceiling.
+    let world = water_tunnel(30, 2);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_tick_trace(
+        "swim_gap_blocked_control",
+        &world,
+        state,
+        &GOLDEN_SWIM_GAP_BLOCKED_CONTROL,
+        MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        },
+    );
+
+    let last = GOLDEN_SWIM_GAP_BLOCKED_CONTROL.last().unwrap();
+    assert_eq!(
+        f64::from_bits(last.pos[0]).to_bits(),
+        flush_against_x1().to_bits(),
+        "the standing box must come to rest flush against the tunnel mouth"
+    );
+}
+
+#[test]
+fn crouch_low_corridor_matches_golden() {
+    // Sneak-walking into 1.5 blocks of headroom. The crouch box's top is *exactly*
+    // the top slab's underside, so this is also the flush case for the collision
+    // sweep's `1.0E-7` perpendicular epsilon.
+    let world = low_corridor(40, 2);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_tick_trace(
+        "crouch_low_corridor",
+        &world,
+        state,
+        &GOLDEN_CROUCH_LOW_CORRIDOR,
+        MovementInput {
+            forward: 1.0,
+            sneak: true,
+            ..MovementInput::NONE
+        },
+    );
+
+    let x = f64::from_bits(GOLDEN_CROUCH_LOW_CORRIDOR.last().unwrap().pos[0]);
+    assert!(x > 5.0, "the crouch never got into the corridor (x = {x})");
+}
+
+#[test]
+fn stand_low_corridor_control_is_the_world_control() {
+    // WORLD CONTROL for the trace above: identical fixture, shift released. The
+    // desired pose is STANDING and it *fits* out here at x = 0.5, so the gate
+    // grants it and the 1.8-high box then jams on the slab. This is what makes
+    // "the crouch walked in" a statement about the box height.
+    let world = low_corridor(40, 2);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    assert_tick_trace(
+        "stand_low_corridor_control",
+        &world,
+        state,
+        &GOLDEN_STAND_LOW_CORRIDOR_CONTROL,
+        MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        },
+    );
+
+    let last = GOLDEN_STAND_LOW_CORRIDOR_CONTROL.last().unwrap();
+    assert_eq!(
+        f64::from_bits(last.pos[0]).to_bits(),
+        flush_against_x1().to_bits(),
+        "the standing box must come to rest flush against the corridor mouth"
+    );
+}
+
+#[test]
+fn crouch_release_stays_crouched_matches_golden() {
+    // THE FIT-GATE FALLBACK, end to end. Shift is released on tick 60, deep inside
+    // the corridor: `getDesiredPose()` says STANDING, the gate refuses it, and the
+    // second arm keeps CROUCHING while the walk speed goes to full.
+    //
+    // A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
+    // slab on tick 60 and jams — vanilla has no recovery for a *player* whose box
+    // grows (`Entity.refreshDimensions` excludes both clients and `Player`), so
+    // the gate is the only thing standing between this and a clipped player.
+    let world = low_corridor(40, 2);
+    let state = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    let inputs = |t: usize| MovementInput {
+        forward: 1.0,
+        sneak: t < 60,
+        ..MovementInput::NONE
+    };
+    assert_tick_trace_inputs(
+        "crouch_release_stays_crouched",
+        &world,
+        state,
+        &GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED,
+        inputs,
+    );
+
+    // It must both keep moving and speed up — a jam would show as neither.
+    let n = GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED.len();
+    let at = |i: usize| f64::from_bits(GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED[i].pos[0]);
+    let sneak_rate = (at(59) - at(50)) / 9.0;
+    let walk_rate = (at(n - 1) - at(n - 10)) / 9.0;
+    assert!(
+        walk_rate > sneak_rate * 2.0,
+        "releasing shift must speed the player up (sneak {sneak_rate}, walk {walk_rate})"
+    );
+
+    // And the pose is still CROUCHING at the end, with the crouch eye height.
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    for t in 0..n {
+        tick(&mut s, inputs(t), &world, &profile);
+    }
+    assert_eq!(s.pose, Pose::Crouching, "the gate must veto STANDING");
+    assert_eq!(s.eye_height, 1.27);
+    // CONTROL: the identical replay with the slab ceiling removed *does* revert to
+    // STANDING, so the assertion above is the fit gate and not a stuck flag.
+    let mut open = World::default();
+    for x in -8..=40 {
+        for z in -2..=2 {
+            open.solid(x, 0, z);
+        }
+    }
+    let mut o = grounded_facing(0.5, 1.0, 0.5, -90.0);
+    for t in 0..n {
+        tick(&mut o, inputs(t), &open, &profile);
+    }
+    assert_eq!(o.pose, Pose::Standing);
+}
+
+#[test]
+fn elytra_gap_glide_matches_golden() {
+    // `Pose.FALL_FLYING` is the same `0.6 × 0.6` record as `Pose.SWIMMING`
+    // (`Avatar.java:27-28`), so a glider fits a one-block gap too. The pose is
+    // *seeded*: a glider arriving at a tunnel has been fall-flying for many ticks,
+    // and starting it STANDING at 0.9 blocks/tick would jam it on the ceiling
+    // before the first `updatePlayerPose` could run.
+    let mut world = World::default();
+    for x in -8..=80 {
+        for z in -2..=2 {
+            world.solid(x, 0, z);
+            if x >= 1 {
+                world.solid(x, 2, z);
+            }
+        }
+    }
+    let mut state = grounded_facing(0.5, 1.0, 0.5, -90.0).with_pose(Pose::FallFlying);
+    state.fall_flying = true;
+    state.velocity = Vec3d::new(0.9, 0.0, 0.0);
+    assert_tick_trace(
+        "elytra_gap_glide",
+        &world,
+        state,
+        &GOLDEN_ELYTRA_GAP_GLIDE,
+        MovementInput::NONE,
+    );
+
+    let x = f64::from_bits(GOLDEN_ELYTRA_GAP_GLIDE.last().unwrap().pos[0]);
+    assert!(x > 30.0, "the glider did not get down the tunnel (x = {x})");
+    // The dry tunnel is what makes this FALL_FLYING and not SWIMMING: swimming
+    // comes first in `getDesiredPose`, so a wet fixture would prove nothing about
+    // the fall-flying arm.
+    let profile = PhysicsProfile::mc_1_21();
+    let mut s = grounded_facing(0.5, 1.0, 0.5, -90.0).with_pose(Pose::FallFlying);
+    s.fall_flying = true;
+    s.velocity = Vec3d::new(0.9, 0.0, 0.0);
+    for _ in 0..GOLDEN_ELYTRA_GAP_GLIDE.len() {
+        tick(&mut s, MovementInput::NONE, &world, &profile);
+    }
+    assert_eq!(s.pose, Pose::FallFlying);
+    assert!(!s.swimming);
 }

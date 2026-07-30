@@ -463,12 +463,43 @@ class State:
         # checkFallDistanceAccumulation and the water/vehicle/teleport resets. Both
         # ports treat it as a caller-supplied input defaulting to 0.0.
         self.fall_distance = 0.0
+        # Entity.getPose(). Decided at the END of Player.tick by
+        # update_player_pose(); the box this tick's movement collides with is
+        # therefore last tick's pose. Scenarios may seed it.
+        self.pose = "standing"
+        # Entity.isSwimming() -- Entity.updateSwimming's sprint-swim flag, which
+        # getDesiredPose reads. NOT "in water".
+        self.swimming = False
 
 
-def bounding_box(s):
-    half = P.width / 2.0
+# ---- Poses (Avatar.POSES, Avatar.java:24-37) --------------------------------
+# name -> (width, height, eyeHeight), all `float` literals in vanilla, so all
+# widened through f32 here. Only 1.5F is exactly representable: (double)0.6F is
+# 0.6000000238418579 and (double)1.8F is 1.7999999523162842, which is why the
+# box is built from these entries and never from a decimal.
+#
+# Step height is deliberately absent: it is the STEP_HEIGHT attribute
+# (Entity.maxUpStep), not part of the EntityDimensions record, so a crouching
+# player still steps 0.6.
+POSES = {
+    "standing": (f32(0.6), f32(1.8), f32(1.62)),
+    "crouching": (f32(0.6), f32(1.5), f32(1.27)),
+    "swimming": (f32(0.6), f32(0.6), f32(0.4)),
+    "fall_flying": (f32(0.6), f32(0.6), f32(0.4)),
+}
+
+
+def bounding_box(s, pose=None):
+    # EntityDimensions.makeBoundingBox: minY is the FEET, so a pose change only
+    # moves the top face -- it never displaces the player.
+    width, height, _ = POSES[pose if pose is not None else s.pose]
+    half = width / 2.0
     return (s.pos[0] - half, s.pos[1], s.pos[2] - half,
-            s.pos[0] + half, s.pos[1] + P.height, s.pos[2] + half)
+            s.pos[0] + half, s.pos[1] + height, s.pos[2] + half)
+
+
+def eye_height(s):
+    return POSES[s.pose][2]
 
 
 def player_speed(sprinting):
@@ -963,13 +994,139 @@ def tick_elytra(world, s, sneak=False):
             staying_on_ground_surface=sneak)
 
 
-def tick(world, s, forward, strafe, jump, sneak, sprint):
+# ---- Pose: dimensions and the fit gate --------------------------------------
+POSE_FIT_DEFLATION = 1.0e-7
+
+
+def water_top(world, x, y, z):
+    """fluidBottom + FluidState.getHeight, as EntityFluidInteraction.update reads it.
+
+    FlowingFluid.getHeight returns 1.0F when the cell above holds the same fluid,
+    else getOwnHeight() = amount/9F. A presence-only `add_water` cell carries no
+    level, so the whole cell counts as fluid -- the coarse stance both ports take.
+    """
+    cell = world.fluid_at(x, y, z)
+    if cell is None or world.is_water(x, y + 1, z):
+        return float(y) + 1.0
+    return float(y) + float(own_height(cell[1]))
+
+
+def is_eye_in_water(world, s):
+    """isEyeInFluid(WATER) -- EntityFluidInteraction.update's `eyesInside`.
+
+    The sweep is bounded by the entity's *box*, so this is exactly where a
+    0.6-high box with a 1.62 eye would answer False while fully submerged: the
+    eye's own cell is never visited. Box and eye height must come from the same
+    pose, which is why POSES carries both.
+    """
+    bb = bounding_box(s)
+    d = 0.001
+    x0, y0, z0 = mth_floor(bb[0] + d), mth_floor(bb[1] + d), mth_floor(bb[2] + d)
+    x1, y1, z1 = mth_ceil(bb[3] - d) - 1, mth_ceil(bb[4] - d) - 1, mth_ceil(bb[5] - d) - 1
+    eye_block_x = mth_floor(s.pos[0])
+    eye_block_z = mth_floor(s.pos[2])
+    eye_y = s.pos[1] + float(eye_height(s))
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            for z in range(z0, z1 + 1):
+                if not world.is_water(x, y, z):
+                    continue
+                top = water_top(world, x, y, z)
+                if top < bb[1] + d:
+                    continue
+                if x == eye_block_x and z == eye_block_z and eye_y >= float(y) and eye_y <= top:
+                    return True
+    return False
+
+
+def update_swimming(world, s):
+    """Entity.updateSwimming (Entity.java:1644-1652).
+
+    isSprinting() is read from the flag the PREVIOUS tick's aiStep set, because
+    baseTick runs before aiStep -- so `s.sprinting`, never this tick's input.
+    Entering needs isUnderWater() (= wasEyeInWater && isInWater) AND water at the
+    feet block; staying only needs sprinting and isInWater, which is what lets you
+    keep swimming as you break the surface. No passenger state in this oracle.
+    """
+    if s.swimming:
+        s.swimming = s.sprinting and is_in_water(world, s)
+    else:
+        feet = (mth_floor(s.pos[0]), mth_floor(s.pos[1]), mth_floor(s.pos[2]))
+        s.swimming = (s.sprinting and is_eye_in_water(world, s)
+                      and is_in_water(world, s) and world.is_water(*feet))
+
+
+def can_player_fit_when(world, s, pose):
+    """Player.canPlayerFitWithinBlocksAndEntitiesWhen (Player.java:373-375):
+    noCollision(this, dims(pose).makeBoundingBox(position).deflate(1.0E-7)).
+
+    Block half only. getEntityCollisions filters on canBeCollidedWith, which no
+    player and no mob overrides, so for these fixtures the entity term is
+    vacuously true.
+    """
+    b = bounding_box(s, pose)
+    d = POSE_FIT_DEFLATION
+    return no_collision(world, (b[0] + d, b[1] + d, b[2] + d,
+                                b[3] - d, b[4] - d, b[5] - d))
+
+
+def desired_pose(s, sneak):
+    """Player.getDesiredPose (Player.java:359-371).
+
+    SLEEPING and SPIN_ATTACK have no state here. The crouch term is the raw shift
+    key (isShiftKeyDown), not isCrouching -- which is derived from the pose and
+    would be circular.
+    """
+    if s.swimming:
+        return "swimming"
+    if s.fall_flying:
+        return "fall_flying"
+    if sneak:
+        return "crouching"
+    return "standing"
+
+
+def update_player_pose(world, s, sneak):
+    """Player.updatePlayerPose (Player.java:343-357), the LAST statement of
+    Player.tick.
+
+    Note the outer guard: if not even the swimming box fits, setPose is never
+    called and the pose is left exactly as it was. And note that the desired pose
+    is VETOED rather than applied -- there is no recovery for a player whose box
+    grows into a ceiling, because refreshDimensions' fudgePositionAfterSizeChange
+    excludes both clients and Players (Entity.java:3403-3408).
+    """
+    if not can_player_fit_when(world, s, "swimming"):
+        return
+    desired = desired_pose(s, sneak)
+    if can_player_fit_when(world, s, desired):
+        actual = desired
+    elif can_player_fit_when(world, s, "crouching"):
+        actual = "crouching"
+    else:
+        actual = "swimming"
+    s.pose = actual
+
+
+def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
+    """Everything super.tick() does to the motion: baseTick's swim summary, then
+    LivingEntity.travel's fluid/elytra/air dispatch. Excludes the pose, which is
+    Player.tick's own last statement -- and therefore runs AFTER pushEntities."""
+    # Entity.baseTick -> updateSwimming, before travel reads isInWater.
+    update_swimming(world, s)
     if is_in_water(world, s):
         tick_water(world, s, forward, strafe, jump, sneak, sprint)
     elif is_in_lava(world, s):
         tick_lava(world, s, forward, strafe, jump, sneak, sprint)
+    elif s.fall_flying:
+        tick_elytra(world, s, sneak)
     else:
         tick_air(world, s, forward, strafe, jump, sneak, sprint)
+
+
+def tick(world, s, forward, strafe, jump, sneak, sprint):
+    travel_dispatch(world, s, forward, strafe, jump, sneak, sprint)
+    update_player_pose(world, s, sneak)
 
 
 MIN_SEPARATION = float(f32(0.01))   # `dd >= 0.01F`, widened: 0.009999999776482582
@@ -1046,8 +1203,12 @@ def push_entities(s, neighbours, pushable_self=True, self_vehicle=False):
 
 def tick_with_push(world, s, forward, strafe, jump, sneak, sprint, neighbours,
                    pushable_self=True):
-    tick(world, s, forward, strafe, jump, sneak, sprint)
+    # pushEntities is the tail of aiStep, INSIDE super.tick(), so it runs before
+    # updatePlayerPose -- and that order is observable, because the push's pair
+    # test reads getBoundingBox(), which the pose sizes.
+    travel_dispatch(world, s, forward, strafe, jump, sneak, sprint)
     push_entities(s, neighbours, pushable_self=pushable_self)
+    update_player_pose(world, s, sneak)
 
 
 def flat_floor(y=0, r=4):
@@ -1605,6 +1766,158 @@ def scenario_entity_push_flush_control():
     return w, trace
 
 
+# ---- Pose fixtures ----------------------------------------------------------
+def water_tunnel(x_end=30, r=2):
+    """An open pool (x <= 0) opening into a ONE-BLOCK-HIGH water tunnel (x >= 1).
+
+    Floor top is y = 1.0 and the tunnel ceiling's underside is y = 2.0, so the gap
+    is exactly one block: the 0.6-high swimming box clears it by 0.4 and the
+    1.8-high standing box cannot enter at all. The pool is three blocks deep and
+    open above, so a player at y = 1.0 there is submerged past the standing eye
+    (1.62) -- which is what updateSwimming needs to *enter* the swim pose. Once
+    entered it is sustained by sprinting + isInWater alone, which is what carries
+    it into the tunnel where the eye would otherwise be out of water.
+    """
+    w = World()
+    for x in range(-8, x_end + 1):
+        for z in range(-r, r + 1):
+            w.add_solid(x, 0, z)
+            if x <= 0:
+                for y in (1, 2, 3):
+                    w.add_water(x, y, z)
+            else:
+                w.add_water(x, 1, z)
+                w.add_solid(x, 2, z)
+    return w
+
+
+def low_corridor(x_end=40, r=2):
+    """A corridor with 1.5 blocks of headroom: a TOP SLAB ceiling at y = 2, whose
+    world box is 2.5..3.0, over a floor whose top face is y = 1.0.
+
+    1.5 is the crouch box's exact height (Avatar.CROUCH_BB_HEIGHT), and (double)1.5F
+    is exact, so the crouch box's top lands *precisely* on the slab's underside.
+    The strict `min < max` overlap test (and collide()'s 1e-7 epsilon) admit that
+    flush contact; the 1.8-high standing box is refused. x <= 0 is open sky so a
+    standing player can be placed outside and walked in.
+    """
+    w = World()
+    for x in range(-8, x_end + 1):
+        for z in range(-r, r + 1):
+            w.add_solid(x, 0, z)
+            if x >= 1:
+                w.add_box(x, 2, z, (0.0, 0.5, 0.0, 1.0, 1.0, 1.0))
+    return w
+
+
+def scenario_swim_gap_tunnel():
+    # THE defect this work exists for: sprint-swim out of an open pool into a
+    # one-block gap. Ticks 1-2 are still STANDING (updateSwimming reads the
+    # PREVIOUS tick's isSprinting, so the flag cannot be set before tick 2, and
+    # updatePlayerPose runs after that), which is well before the player reaches
+    # the tunnel mouth at x = 0.7. From tick 3 the box is 0.6 tall and the swimmer
+    # passes under a ceiling that the standing box stops dead against.
+    w = water_tunnel()
+    s = State(0.5, 1.0, 0.5, -90.0)   # yaw -90 faces +X
+    s.on_ground = True
+    trace = []
+    for _ in range(80):
+        tick(w, s, 1.0, 0.0, False, False, True)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_swim_gap_blocked_control():
+    # WORLD CONTROL for scenario_swim_gap_tunnel: identical fixture, sprint
+    # released. Without sprint there is no swim pose, so the box stays 1.8 and the
+    # player must stop at the tunnel mouth (max_x flush on x = 1.0, i.e. x =
+    # 0.6999999880790711) and stay there. If this one also entered the tunnel the
+    # fixture would have no ceiling and the trace above would be vacuous.
+    w = water_tunnel()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(80):
+        tick(w, s, 1.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_crouch_low_corridor():
+    # Sneak-walk into 1.5 blocks of headroom. The player starts outside (STANDING
+    # fits at x = 0.5), crouches on tick 1 because shift is held, and then walks
+    # in with a 0.6 x 1.5 box whose top is flush with the slab.
+    w = low_corridor()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(150):
+        tick(w, s, 1.0, 0.0, False, True, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_stand_low_corridor_control():
+    # WORLD CONTROL for scenario_crouch_low_corridor: identical fixture, shift
+    # released, so the desired pose is STANDING and it *fits* out here at x = 0.5.
+    # The 1.8-high box then jams on the slab at the corridor mouth. This is what
+    # makes "the crouch walked in" mean something.
+    w = low_corridor()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(150):
+        tick(w, s, 1.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_crouch_release_stays_crouched():
+    # THE FIT-GATE FALLBACK. Sneak in for 60 ticks, then release shift while
+    # under the slab. getDesiredPose says STANDING; canPlayerFitWithinBlocksAnd-
+    # EntitiesWhen(STANDING) is false, so the second arm keeps CROUCHING and the
+    # player accelerates to full walking speed with a 1.5-high box.
+    #
+    # A naive `pose = sneak ? CROUCHING : STANDING` port grows the box into the
+    # slab on tick 60 -- and vanilla has NO recovery for that, because
+    # refreshDimensions' fudgePositionAfterSizeChange excludes clients and Players
+    # (Entity.java:3403-3408). So the naive port jams here instead of speeding up.
+    w = low_corridor()
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.on_ground = True
+    trace = []
+    for t in range(140):
+        tick(w, s, 1.0, 0.0, False, t < 60, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_elytra_gap_glide():
+    # Pose.FALL_FLYING is the same 0.6 x 0.6 record as Pose.SWIMMING
+    # (Avatar.java:27-28), so an elytra glider also fits a one-block gap. The pose
+    # is SEEDED here rather than grown into: a glider arriving at a tunnel has been
+    # fall-flying for many ticks already, and starting it STANDING at 0.9 blocks/tick
+    # would jam it on the ceiling before the first updatePlayerPose could run.
+    #
+    # The tunnel is dry (no water), so this reaches FALL_FLYING and not SWIMMING --
+    # the branch order in getDesiredPose puts swimming first.
+    w = World()
+    for x in range(-8, 81):
+        for z in range(-2, 3):
+            w.add_solid(x, 0, z)
+            if x >= 1:
+                w.add_solid(x, 2, z)
+    s = State(0.5, 1.0, 0.5, -90.0)
+    s.pose = "fall_flying"
+    s.fall_flying = True
+    s.vel = [0.9, 0.0, 0.0]
+    trace = []
+    for _ in range(60):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
 SCENARIOS = [
     ("free_fall", scenario_free_fall),
     ("walk_flat", scenario_walk_flat),
@@ -1638,6 +1951,12 @@ SCENARIOS = [
     ("entity_push_shove", scenario_entity_push_shove),
     ("entity_push_wide_plateau", scenario_entity_push_wide_plateau),
     ("entity_push_flush_control", scenario_entity_push_flush_control),
+    ("swim_gap_tunnel", scenario_swim_gap_tunnel),
+    ("swim_gap_blocked_control", scenario_swim_gap_blocked_control),
+    ("crouch_low_corridor", scenario_crouch_low_corridor),
+    ("stand_low_corridor_control", scenario_stand_low_corridor_control),
+    ("crouch_release_stays_crouched", scenario_crouch_release_stays_crouched),
+    ("elytra_gap_glide", scenario_elytra_gap_glide),
 ]
 
 
