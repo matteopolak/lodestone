@@ -398,6 +398,47 @@ pub fn vanilla_tint_kind(
     }
 }
 
+/// The tint a **break/hit particle** of `block` takes, matching vanilla's
+/// `BlockTintSource.colorAsTerrainParticle` at layer 0 — what
+/// `TerrainParticle`'s constructor multiplies its `0.6` grey by.
+///
+/// This is *not* the same lookup as `vanilla_tint_kind(block, 0, …)`. In-world
+/// face tinting and particle tinting are separate virtual methods on
+/// `BlockTintSource`, and two registrations override the particle one to
+/// disagree with the in-world one (`net.minecraft.client.color.block.
+/// BlockTintSources`, 26.2):
+///
+/// * **`grass_block`** — `grassBlock()` overrides `colorAsTerrainParticle` to
+///   return `-1` (untinted). It has to: `grass_block`'s `#particle` variable is
+///   `block/dirt`, so applying the grass colormap would throw *green dirt*.
+///   This is the same special case the pre-26.x client spelled out inline as
+///   `if (!state.is(Blocks.GRASS_BLOCK))`.
+/// * **`water` / `bubble_column`** — `waterParticles()` is the mirror image:
+///   `color`/`colorInWorld` are `-1` (the fluid *surface* is tinted by the fluid
+///   model instead, which is why [`vanilla_tint_kind`] reports `None` for them)
+///   while `colorAsTerrainParticle` returns the biome water colour.
+///
+/// Every other registration inherits `colorAsTerrainParticle` from
+/// `colorInWorld`, so it agrees with [`vanilla_tint_kind`] at layer 0 — hence
+/// the delegation rather than a second copy of the whole table.
+///
+/// Getting this wrong is not subtle on screen but *is* subtle in review: the
+/// tinted blocks are exactly the ones whose sprites are **greyscale** in the
+/// atlas (`grass`, `fern`, the leaves, `sugar_cane`, `redstone_dust_*`), so a
+/// missing tint renders their debris as near-white flecks rather than as an
+/// obviously wrong colour.
+#[must_use]
+pub fn vanilla_particle_tint_kind(
+    block: &Identifier,
+    properties: &BTreeMap<String, String>,
+) -> TintKind {
+    match block.path() {
+        "grass_block" => TintKind::None,
+        "water" | "bubble_column" => TintKind::Water,
+        _ => vanilla_tint_kind(block, 0, properties),
+    }
+}
+
 /// The stem tint for `age` (0..=7), matching `BlockTintSources.stem`:
 /// `ARGB.color(age*32, 255 - age*8, age*4)`.
 #[must_use]

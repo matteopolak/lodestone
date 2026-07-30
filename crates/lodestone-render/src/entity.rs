@@ -1650,20 +1650,49 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
     )
 }
 
-/// The camera-space chain `ItemInHandRenderer.renderPlayerArm` builds, with every
-/// attack/equip term at rest.
+/// The camera-space chain `ItemInHandRenderer.renderPlayerArm` builds, driven by
+/// `attack_anim`.
+///
+/// `attack_anim` is vanilla's `attackValue` — `Player.getAttackAnim(partialTick)`,
+/// i.e. swing progress in `0.0..=1.0`, interpolated from the **tick** clock
+/// (`lodestone_entity::pose::EntityPose::attack_anim_lerp`). `0.0` is a fully
+/// rested arm and reproduces this function's behaviour before the swing existed,
+/// byte for byte, which is what `arm_chain_at_rest_matches_the_static_chain`
+/// pins. Values outside the range are clamped rather than extrapolated: the
+/// shaping functions below are periodic, so an out-of-range value does not fail,
+/// it silently animates something else.
 ///
 /// ```text
-/// T(i·0.64000005, -0.6, -0.71999997) · Ry(i·45°) · T(i·-1, 3.6, 3.5)
-///   · Rz(i·120°) · Rx(200°) · Ry(i·-135°) · T(i·5.6, 0, 0)
+/// s  = sqrt(a)                     -- `Mth.sqrt(attackValue)`
+/// xs = -0.3 · sin(s·π)
+/// ys =  0.4 · sin(s·2π)
+/// zs = -0.4 · sin(a·π)
+/// yr =  sin(s·π)                   -- `ySwingRotation`
+/// zr =  sin(a²·π)                  -- `zSwingRotation`
+///
+/// T(i·(xs + 0.64000005), ys - 0.6, zs - 0.71999997)
+///   · Ry(i·45°) · Ry(i·yr·70°) · Rz(i·zr·-20°)
+///   · T(i·-1, 3.6, 3.5) · Rz(i·120°) · Rx(200°) · Ry(i·-135°) · T(i·5.6, 0, 0)
 /// ```
 ///
-/// with `i` = [`Arm::invert`]. The dropped terms and why:
+/// with `i` = [`Arm::invert`].
 ///
-/// * `attackValue` (`Player.getAttackAnim`) drives `xSwingPosition`,
-///   `ySwingPosition`, `zSwingPosition`, `ySwingRotation` and `zSwingRotation`,
-///   all of which are `sin(0) = 0` at rest. The shell has no per-frame attack-anim
-///   clock, so the swing is absent, not wrong.
+/// # The `sqrt` is the shape of the animation, not a detail
+///
+/// Three of the five terms are driven by `sqrt(a)` and one by `a²`, and only
+/// `zSwingPosition` is linear in `a`. `sin(sqrt(a)·π)` rises far faster than
+/// `sin(a·π)` and decays slowly — the arm snaps out and eases back, which is what
+/// a swing *reads* as. Substituting a linear ramp gives a symmetric, sluggish
+/// pendulum that is visibly not Minecraft, so this is transcribed term by term
+/// from `ItemInHandRenderer.renderPlayerArm` in
+/// `.cache/mc/26.2/client-src` rather than eyeballed.
+///
+/// Note `ySwingPosition` uses `2π`, not `π`: over one swing the arm's vertical
+/// offset goes up, back through zero, and down again, rather than making a single
+/// hump like `x` and `z`.
+///
+/// The dropped terms and why:
+///
 /// * `inverseArmHeight` is `swapAnimationScale(item) * (1 - lerp(oHeight, height))`
 ///   — vanilla's equip/swap raise. It contributes `-0.6 · inverseArmHeight` to `y`.
 ///   The shell tracks neither the held stack's identity for the local player nor
@@ -1673,18 +1702,36 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 ///   `Ry((viewYRot - yBob) · 0.1°)`, and `renderItemInHand` prefixes `bobHurt` and
 ///   `bobView`. All four need state the shell does not have (`xBob`/`yBob`, hurt
 ///   time, walk distance); all four are the identity when standing still.
+/// * `applyItemArmAttackTransform` — the *item*-in-hand swing (`45° + yr·-20°`,
+///   `zr'·-20°`, `xzr·-80°`) — is a **different** chain for the case where the
+///   main hand is not empty and vanilla draws the item instead of the arm. It is
+///   not this one and must not be folded in; see
+///   `RenderState::prepare_first_person_arm`'s note on the shell always drawing
+///   the empty-hand case.
 ///
 /// There is no `scale` anywhere in the chain, and that is not an omission — the
 /// large constants (`3.6`, `3.5`, `5.6`) are in blocks and largely cancel through
-/// the three rotations. The composed arm cube lands roughly `0.35..0.9` blocks
-/// right, `0.29..0.99` down and `0.44..1.19` forward of the eye, i.e. bottom-right
-/// of frame, which is what
+/// the three rotations. At rest the composed arm cube lands roughly `0.35..0.9`
+/// blocks right, `0.29..0.99` down and `0.44..1.19` forward of the eye, i.e.
+/// bottom-right of frame, which is what
 /// `the_first_person_arm_lands_in_the_bottom_right_of_frame` pins.
 #[must_use]
-pub fn first_person_arm_chain(arm: Arm) -> Mat4 {
+pub fn first_person_arm_chain(arm: Arm, attack_anim: f32) -> Mat4 {
     let i = arm.invert();
-    Mat4::from_translation(Vec3::new(i * 0.640_000_05, -0.6, -0.719_999_97))
-        * Mat4::from_rotation_y((i * 45.0).to_radians())
+    let ArmSwingTerms {
+        x_position,
+        y_position,
+        z_position,
+        y_rotation,
+        z_rotation,
+    } = ArmSwingTerms::new(attack_anim);
+    Mat4::from_translation(Vec3::new(
+        i * (x_position + 0.640_000_05),
+        y_position - 0.6,
+        z_position - 0.719_999_97,
+    )) * Mat4::from_rotation_y((i * 45.0).to_radians())
+        * Mat4::from_rotation_y((i * y_rotation * 70.0).to_radians())
+        * Mat4::from_rotation_z((i * z_rotation * -20.0).to_radians())
         * Mat4::from_translation(Vec3::new(i * -1.0, 3.6, 3.5))
         * Mat4::from_rotation_z((i * 120.0).to_radians())
         * Mat4::from_rotation_x(200.0f32.to_radians())
@@ -1692,19 +1739,68 @@ pub fn first_person_arm_chain(arm: Arm) -> Mat4 {
         * Mat4::from_translation(Vec3::new(i * 5.6, 0.0, 0.0))
 }
 
+/// The five scalars `renderPlayerArm` derives from `attackValue`, split out from
+/// [`first_person_arm_chain`] so the *shaping* can be asserted against
+/// hand-evaluated vanilla values on its own. Buried inside the matrix product,
+/// swapping a `sqrt(a)` for an `a` is invisible: the matrix still moves, still has
+/// determinant +1, and still keeps the arm on screen — it just animates wrong.
+///
+/// Every field is `0.0` at `attack_anim == 0.0`, which is what makes the swing
+/// purely additive on top of the rest chain.
+struct ArmSwingTerms {
+    /// `xSwingPosition`, pre-`invert`: `-0.3 · sin(sqrt(a)·π)`.
+    x_position: f32,
+    /// `ySwingPosition`: `0.4 · sin(sqrt(a)·2π)` — note the `2π`.
+    y_position: f32,
+    /// `zSwingPosition`: `-0.4 · sin(a·π)`, the one linear-in-`a` term.
+    z_position: f32,
+    /// `ySwingRotation`: `sin(sqrt(a)·π)`, scaled by `70°` at the call site.
+    y_rotation: f32,
+    /// `zSwingRotation`: `sin(a²·π)`, scaled by `-20°` at the call site.
+    z_rotation: f32,
+}
+
+impl ArmSwingTerms {
+    /// `attack_anim` outside `0.0..=1.0` is clamped — see
+    /// [`first_person_arm_chain`] on why extrapolating a periodic shaping
+    /// function is worse than clamping it.
+    fn new(attack_anim: f32) -> Self {
+        use std::f32::consts::{PI, TAU};
+        let a = attack_anim.clamp(0.0, 1.0);
+        let s = a.sqrt();
+        Self {
+            x_position: -0.3 * (s * PI).sin(),
+            y_position: 0.4 * (s * TAU).sin(),
+            z_position: -0.4 * (a * PI).sin(),
+            y_rotation: (s * PI).sin(),
+            z_rotation: (a * a * PI).sin(),
+        }
+    }
+}
+
 /// The camera-space matrix to draw the first-person arm (and its sleeve) with, or
 /// `None` if `mesh` has no such arm part.
 ///
 /// ```text
-/// first_person_arm_chain(arm) · rest_pose()[arm] · Rz(±0.1)
+/// first_person_arm_chain(arm, attack_anim) · rest_pose()[arm] · Rz(±0.1)
 /// ```
 ///
 /// `AvatarRenderer.renderHand` calls `arm.resetPose()` and then forces
-/// `zRot = ±0.1F`, so the arm is drawn from its **authored rest pose** with one
-/// rotation replaced — never from the third-person `setupAnim` result. That is
-/// why this is a separate function from [`EntityInstance::part_transforms`] and
-/// must stay one: the deferred third-person player body needs the animated chain,
-/// and sharing a code path would silently give one of the two the other's pose.
+/// `zRot = ±0.1F`, so the arm part itself is drawn from its **authored rest pose**
+/// with one rotation replaced — never from the third-person `setupAnim` result.
+/// That is why this is a separate function from [`EntityInstance::part_transforms`]
+/// and must stay one: the third-person player body needs the animated chain
+/// (`HumanoidModel.setupAttackAnimation`, which is
+/// [`crate::entity_anim::Skeleton::pose`]'s `attack_anim`), and sharing a code
+/// path would silently give one of the two the other's pose.
+///
+/// **The swing lives in the chain, not in the part pose**, and that is the whole
+/// reason both can be animated by the same `attack_anim` number without sharing
+/// any code: first person swings the *camera-space chain* the rested arm hangs
+/// off, third person swings the *arm part* inside a rested body. Feeding this
+/// function's `attack_anim` to `Skeleton::pose`, or vice versa, produces a
+/// plausible-looking wrong answer, so the two paths take the same scalar and
+/// nothing else.
 ///
 /// `rest_pose()[arm] · Rz(0.1)` is *exact* rather than approximate because
 /// `player_wide`'s `right_arm` is `PartPose::offset(-5, 2, 0)` with **zero** rest
@@ -1714,12 +1810,12 @@ pub fn first_person_arm_chain(arm: Arm) -> Mat4 {
 /// `right_sleeve` is a child of `right_arm` at `PartPose::ZERO`, so it shares this
 /// matrix exactly; [`first_person_arm_parts`] returns both indices for one matrix.
 #[must_use]
-pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm) -> Option<Mat4> {
+pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm, attack_anim: f32) -> Option<Mat4> {
     let index = mesh.skeleton.index_of(arm.part_name())?;
     let rest = mesh.skeleton.rest_pose();
     let local = *rest.get(index)?;
     Some(
-        first_person_arm_chain(arm)
+        first_person_arm_chain(arm, attack_anim)
             * local
             * Mat4::from_rotation_z(arm.invert() * FIRST_PERSON_ARM_Z_ROT),
     )
@@ -3004,7 +3100,8 @@ mod tests {
         // The load-bearing claims are the *signs*: right of centre, below the
         // eye, and in front of it. A missing rotation in the chain flips one.
         let mesh = player_mesh();
-        let pose = first_person_arm_pose(&mesh, Arm::Right).expect("player_wide has a right arm");
+        let pose =
+            first_person_arm_pose(&mesh, Arm::Right, 0.0).expect("player_wide has a right arm");
         // `player_wide`'s right arm cube: from [-3, -2, -2], size [4, 12, 4].
         let corners: Vec<Vec3> = (0..8u32)
             .map(|i| {
@@ -3023,7 +3120,7 @@ mod tests {
         assert!(hi.z < -HAND_NEAR, "the arm must be past the near plane");
 
         // The left arm is the mirror image about x, to within the zRot sign.
-        let left = first_person_arm_pose(&mesh, Arm::Left).expect("left arm");
+        let left = first_person_arm_pose(&mesh, Arm::Left, 0.0).expect("left arm");
         let lc = left.transform_point3(Vec3::ZERO);
         let rc = pose.transform_point3(Vec3::ZERO);
         assert!((lc.x + rc.x).abs() < 1e-4, "left/right must mirror: {lc} vs {rc}");
@@ -3055,18 +3152,125 @@ mod tests {
 
         let mesh = player_mesh();
         for arm in [Arm::Right, Arm::Left] {
-            let pose = first_person_arm_pose(&mesh, arm).expect("arm");
-            assert!(
-                pose.determinant() > 0.0,
-                "{arm:?} arm pose must not flip handedness; det = {}",
-                pose.determinant()
-            );
-            assert_eq!(
-                (proj * pose).determinant().signum(),
-                world.determinant().signum(),
-                "hand_projection * arm pose must keep the world's winding"
-            );
+            // Every phase of the swing, not just rest: a rotation cannot change a
+            // determinant's sign, but the chain is edited by hand and a stray
+            // reflection (a negated scale, a mirrored translation folded into a
+            // rotation) would only show up mid-swing.
+            for step in 0..=8 {
+                let attack = step as f32 / 8.0;
+                let pose = first_person_arm_pose(&mesh, arm, attack).expect("arm");
+                assert!(
+                    pose.determinant() > 0.0,
+                    "{arm:?} arm pose must not flip handedness at attack {attack}; det = {}",
+                    pose.determinant()
+                );
+                assert_eq!(
+                    (proj * pose).determinant().signum(),
+                    world.determinant().signum(),
+                    "hand_projection * arm pose must keep the world's winding at attack {attack}"
+                );
+            }
         }
+    }
+
+    /// The swing must be **additive**: `attack_anim == 0` has to reproduce the
+    /// pre-swing chain exactly, or every existing framing assertion above (and the
+    /// shell's headless arm gate) is silently measuring a different arm.
+    ///
+    /// The expected matrix is written out longhand rather than taken from
+    /// `first_person_arm_chain` itself — comparing the function to itself would
+    /// pass for any pair of symmetric mistakes.
+    #[test]
+    fn arm_chain_at_rest_matches_the_static_chain() {
+        for arm in [Arm::Right, Arm::Left] {
+            let i = arm.invert();
+            let expected = Mat4::from_translation(Vec3::new(i * 0.640_000_05, -0.6, -0.719_999_97))
+                * Mat4::from_rotation_y((i * 45.0).to_radians())
+                * Mat4::from_translation(Vec3::new(i * -1.0, 3.6, 3.5))
+                * Mat4::from_rotation_z((i * 120.0).to_radians())
+                * Mat4::from_rotation_x(200.0f32.to_radians())
+                * Mat4::from_rotation_y((i * -135.0).to_radians())
+                * Mat4::from_translation(Vec3::new(i * 5.6, 0.0, 0.0));
+            let actual = first_person_arm_chain(arm, 0.0);
+            let delta = (expected - actual)
+                .to_cols_array()
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()));
+            assert!(delta < 1e-5, "{arm:?} rest chain drifted by {delta}");
+        }
+        // The control: something must actually change once the swing is running,
+        // or "rest matches" is satisfied by a chain that ignores `attack_anim`.
+        let moved = (first_person_arm_chain(Arm::Right, 0.0)
+            - first_person_arm_chain(Arm::Right, 0.4))
+        .to_cols_array()
+        .iter()
+        .fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(moved > 0.05, "the swing must move the chain, moved by {moved}");
+    }
+
+    /// The five swing scalars against hand-evaluated vanilla values.
+    ///
+    /// `a = 0.25` is chosen because `sqrt(0.25) = 0.5` **exactly**, so every
+    /// expected number below is a closed form off the unit circle rather than
+    /// something read back out of this code:
+    ///
+    /// ```text
+    /// xs = -0.3 · sin(0.5π)    = -0.3 · 1          = -0.3
+    /// ys =  0.4 · sin(1.0π)    =  0.4 · 0          =  0.0
+    /// zs = -0.4 · sin(0.25π)   = -0.4 · √2/2       = -0.28284271
+    /// yr =        sin(0.5π)    =  1                =  1.0
+    /// zr =        sin(0.0625π) =  sin(11.25°)      =  0.19509032
+    /// ```
+    ///
+    /// This is where the `sqrt` shaping is actually pinned. A linear ramp gives
+    /// `xs = -0.3·sin(0.25π) = -0.212`, `yr = 0.707` instead of `1.0` — the arm
+    /// still swings, just wrongly, which is exactly the failure the matrix-level
+    /// and pixel-level gates cannot distinguish.
+    ///
+    /// `ys == 0` here is not a weak assertion, it is the `2π` term crossing zero
+    /// a quarter of the way in; a `π` typo would give `0.4` and fail loudly.
+    #[test]
+    fn arm_swing_terms_match_hand_evaluated_vanilla() {
+        let t = ArmSwingTerms::new(0.25);
+        assert!((t.x_position - -0.3).abs() < 1e-6, "xs {}", t.x_position);
+        assert!(t.y_position.abs() < 1e-6, "ys {}", t.y_position);
+        assert!(
+            (t.z_position - -0.282_842_71).abs() < 1e-6,
+            "zs {}",
+            t.z_position
+        );
+        assert!((t.y_rotation - 1.0).abs() < 1e-6, "yr {}", t.y_rotation);
+        assert!(
+            (t.z_rotation - 0.195_090_32).abs() < 1e-6,
+            "zr {}",
+            t.z_rotation
+        );
+
+        // At a = 1.0 the arm is back at rest in x and y (both `sin` arguments are
+        // whole multiples of π) — the property that makes the wrapped
+        // `attack_anim_lerp` in `lodestone_entity::pose` land the arm at rest
+        // rather than mid-arc.
+        let end = ArmSwingTerms::new(1.0);
+        assert!(end.x_position.abs() < 1e-6, "xs at end {}", end.x_position);
+        assert!(end.y_position.abs() < 1e-6, "ys at end {}", end.y_position);
+        assert!(end.y_rotation.abs() < 1e-6, "yr at end {}", end.y_rotation);
+
+        // Every term is zero at rest, which is what `arm_chain_at_rest_matches_
+        // the_static_chain` depends on.
+        let rest = ArmSwingTerms::new(0.0);
+        for (name, v) in [
+            ("xs", rest.x_position),
+            ("ys", rest.y_position),
+            ("zs", rest.z_position),
+            ("yr", rest.y_rotation),
+            ("zr", rest.z_rotation),
+        ] {
+            assert_eq!(v, 0.0, "{name} must be 0 at rest");
+        }
+
+        // Out of range clamps rather than extrapolating.
+        assert_eq!(ArmSwingTerms::new(-1.0).y_rotation, rest.y_rotation);
+        assert_eq!(ArmSwingTerms::new(4.0).y_rotation, end.y_rotation);
     }
 
     // ---- the deferred third-person body: `EntityInstance::part_transforms`,
