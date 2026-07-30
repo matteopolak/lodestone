@@ -178,6 +178,194 @@ the sea floor and writes **opaque** colour straight over the surface. The result
 is a submerged mob painted on top of the water at any depth. Fog tints a mob by
 distance — it cannot put a water surface in front of it.
 
+### Render layers: sheep wool (issue #53)
+
+Vanilla draws wool as a `RenderLayer` (`SheepWoolLayer`) over a sheep's own
+body model, following the exact same shape as the humanoid armour layer
+documented in [`armour-rendering.md`](./armour-rendering.md): a second,
+independently-baked mesh, posed off the wearer's — here the sheep's — own
+already-animated part matrices, never a second skeleton. This pass ports the
+mesh and the dye maths and confirms the SHEARED bit is already decoded, but
+does not land pixels: the mechanism that poses a layer off another rig's
+`part_transforms` (`ArmourMesh`/`attach`) lives in
+`lodestone-render/src/entity.rs`, which this pass does not own, and the same is
+true of the shell plumbing that would call it. What follows is landed, tested,
+and precisely specified for whoever lands the rest.
+
+**Landed, in `lodestone-assets/src/entity_models.rs`:**
+
+* `sheep_wool_model()` — `SheepFurModel.createFurLayer`'s mesh: `head` at
+  `+0.6` inflation, `body` at `+1.75`, all four legs at `+0.5`, sheet 64×32.
+  Its six parts share `sheep_model`'s part *names and pivots exactly*
+  (pinned by `sheep_wool_model_shares_sheep_body_part_names_and_pivots` in
+  `lodestone-assets/tests/entity_models.rs`), which is the whole precondition
+  for posing wool off the sheep body's `part_transforms` by name — the
+  `ArmourMesh::attach` discipline. Three details read from
+  `SheepFurModel.java` rather than guessed, all called out in the function's
+  doc comment: the head's wool box is one texel *shallower* in Z than the
+  body's (wool never reaches the snout — vanilla, not a bug), the legs are a
+  genuinely *shorter* box (6 texels tall, not a scaled 12 — "socks", not a
+  wrong deformation), and the fur legs are **not mirrored** the way the body's
+  right legs are.
+* `sheep_wool_tint(ordinal: u8) -> [u8; 3]` — `ColorLerper.Type.SHEEP`'s
+  16-entry dye table at vanilla's fixed `brightness = 0.75`, with `DyeColor.WHITE`
+  special-cased to vanilla's own literal `(230, 230, 230)` rather than the
+  formulaic `0.75 * 255`. `ordinal` is the same `0..=15` value the protocol
+  layer already decodes (see below). Out-of-range fails open to white, matching
+  `armour_layer_tint`'s rule for an unrecognised colour.
+* Confirmed against the real jar (`sheep_wool_texture_decodes_from_the_real_jar`,
+  `lodestone-assets/tests/real_jar.rs`, `--ignored`): `sheep_wool.png` is 64×32
+  and **exactly** greyscale — 888/888 opaque texels have R==G==B — which is the
+  precondition for painting it by a flat gamma-space tint multiply rather than
+  needing a per-colour texture the way horse coats do.
+
+**Was decoded, not an island at the protocol layer, but dropped one hop
+later — now fixed as far as the data can go without the held render files.**
+Grepped for the producer across the whole tree, not just a consumer in one file
+(per `CLAUDE.md`'s rule on stale absence claims):
+
+* `crates/protocol/v770/src/packets/metadata.rs` decodes the sheep wool
+  metadata byte (index 17) into `EntityVariant::Dyed { color, sheared }`
+  (`color` low nibble, `sheared` bit `0x10`), guarded on `MetadataClass::Sheep`
+  so it cannot collide with another mob's byte-valued index 17.
+  `lodestone-model/src/event.rs` carries both fields on the shared
+  `EntityVariant::Dyed` arm.
+* `lodestone-client/src/state.rs`'s `entity_view` reads a `Variant` ECS
+  component straight into `EntityView::variant: Option<EntityVariant>` — fully
+  wired, nothing missing here.
+* **It used to stop at `lodestone-shell/src/net.rs::entity_snapshot`, and now
+  does not.** `EntitySnapshot` (`lodestone-shell/src/entities.rs`) gained a
+  `variant: Option<EntityVariant>` field, and `entity_snapshot` now reads
+  `view.variant` into it — the exact same shape of fix already landed for
+  velocity and equipment. `entities.rs` also gained a `sheep_wool` helper that
+  narrows a snapshot's variant to a `SheepWool { color, sheared }` payload
+  **gated on the resolved `type_path` being exactly `"sheep"`**, never on
+  `AnimFamily::Quadruped` (the pig/cow trap below), a `RenderWool` component
+  that carries it alongside `RenderEquipment` (same "replace wholesale, no
+  movement gate" treatment — shearing is a metadata update, not a movement),
+  and `EntityDraw::wool: Option<SheepWool>`, populated by
+  `extract_entity_draws`. Hermetic tests
+  (`sheep_wool_narrows_only_the_dyed_variant_on_a_sheep`,
+  `sheep_wool_reaches_the_draw_only_for_a_sheep`,
+  `shearing_updates_wool_on_a_sheep_that_has_not_moved` in `entities.rs`;
+  `entity_snapshot_carries_variant_through` in `net.rs`) pin the whole chain,
+  including the pig/cow trap as an executed negative control.
+* **What is deliberately *not* filtered at this layer:** a sheared sheep still
+  yields `Some(SheepWool { sheared: true, .. })`, not `None` — the data stays
+  honest about what was reported, and vanilla's "sheared sheep grow no wool
+  mesh" gate belongs at the point that draws the mesh (`prepare_wool`, below),
+  the same discipline `EntityDraw::equipment` already uses for slots it cannot
+  yet draw.
+* **What is still not wired:** the `EntityView`-to-pixels half. `EntityDraw`
+  carries the payload now, but nothing meshes, poses or draws it — that is the
+  `WoolMesh`/`prepare_wool` work in the two held render files, unchanged from
+  the spec below.
+
+**The pig/cow trap applies here too, worse.** `AnimFamily::Quadruped` is
+`sheep`'s, `pig`'s, `cow`'s *and* `wolf`'s family — gating a wool attach on
+family alone would draw a fleece on a pig exactly the way an ungated armour
+attach would draw a breastplate on one (`armour-rendering.md`'s "a pig has both
+`head` and `body`" trap). A correct gate has to be keyed on the **resolved
+model name being `"sheep"`**, not on the animation family, since the family is
+shared by mobs that must never grow wool.
+
+**Pixel evidence, without touching the held files.** Every piece needed to
+pose a second mesh off a wearer's part matrix — `EntityMesh::from_model`,
+`EntityModelSet::resolve`/`get`, `plan_entities`, `EntityBatch::parts`,
+`Skeleton::index_of`, `GpuEntityModel::upload`, `upload_instances_tinted` — is
+already public, so
+`lodestone-render/tests/sheep_wool_pixels.rs` reimplements the
+`ArmourMesh::attach` idea locally (bake the wool mesh independently, look up
+each of its six parts' matrices by name against the sheep body's own
+`part_transforms`) entirely against that public API, with no edit to
+`lodestone-render/src/entity.rs`. `#[ignore]`d (needs a GPU adapter); measured
+results from one run:
+
+```text
+determinism control (sheared x2) : 0 px differ (must be 0)
+sheared vs woolly (white tint)    : 10151 px differ / 65536 total
+white-tint vs red-tint, in wool region : 10151/10151 px differ
+average per-channel byte delta         : 88.2
+```
+
+The three assertions: a sheared/woolly pair (the briefing's own suggested
+control) must differ by a real, non-trivial pixel count; two sheared renders
+must be pixel-identical (rules out a non-deterministic renderer); and,
+restricted to exactly the pixels the wool layer newly covers, a red-tinted
+render must differ substantially from a white-tinted one at the *same* pose —
+proving `sheep_wool_tint`'s bytes reach the shader's per-instance tint, not
+just that the CPU table has the right numbers.
+
+**Wiring still needed (outside this change's files), fully specified:**
+
+The `EntitySnapshot`/`EntityDraw` half (originally items 2 and 3 here) is
+**landed** — see the fold above. What is left is entirely inside the two files
+`lodestone-shell`'s render layer holds:
+
+1. **`lodestone-render/src/entity.rs`** — a `WoolMesh`/`SheepWoolModelSet` type
+   mirroring `ArmourMesh`/`ArmourModelSet` (same file, ~line 917–1071) field
+   for field: `vertices`, `indices`, `parts: Vec<(&'static str, PartRange)>`,
+   built from `sheep_wool_model()` via `bake_entity_parts` exactly as
+   `ArmourMesh::for_slot` builds from `humanoid_armour_model`. Its `attach`
+   must gate on the wearer's **resolved model name being `"sheep"`**, not
+   `wearer.family()` — see the pig/cow trap above; `wearer_carries_armour`'s
+   `AnimFamily::Humanoid` check is not the right template to copy verbatim
+   here for exactly that reason.
+2. **`lodestone-render/src/entity_pipeline.rs`** — a `GpuEntityModel::upload_wool`
+   mirroring `upload_armour` (same file, ~line 245), taking `&WoolMesh`.
+3. **`lodestone-shell/src/gpu.rs`** — a `prepare_wool` mirroring `prepare_armour`:
+   skip sheep whose `EntityDraw::wool.sheared` is true (vanilla's own gate;
+   the field itself is not pre-filtered — see above), else attach the one
+   wool mesh, tint via `sheep_wool_tint(color)`, batch by texture
+   (`entity/sheep/sheep_wool`), and draw. **Use the base entity pipeline
+   (`Less`), not `armour_pipeline` (`LessEqual`).** Armour needs `LessEqual`
+   because leather's two layers are coplanar at the same inflation; wool has no
+   second layer at the same inflation as itself, so there is no z-fighting risk
+   to correct for, and copying `armour_pipeline` here would be picking a
+   pipeline for the wrong reason (see `CLAUDE.md`'s note that the base and
+   armour pipelines already disagree on this compare function and neither
+   should be copied without checking why). `EntityRenderer` (the struct
+   holding `armour_pipeline`/`armour_models`/`armour_textures`) needs the
+   equivalent `wool_model: Option<GpuEntityModel>` (there is only one mesh, no
+   per-material variant) and `wool_texture: Option<wgpu::BindGroup>`, loaded
+   from `entity/sheep/sheep_wool` the same way `load_humanoid_armour_textures`
+   loads armour's sheets, and the draw call wired into the render pass right
+   after the `armour_batches` block, before the dropped-item pass.
+4. **Five existing `EntityDraw { .. }` struct literals in `gpu.rs`** (its
+   `into_draw`, one hermetic armour test, two pig-culling-gate literals, one
+   zombie-hue-gate literal) and **one `EntitySnapshot { .. }` literal in
+   `sim.rs`'s own test module** now need `wool: None`/`variant: None` (plus the
+   pre-existing `count: 1` from the drop-count widening below) added — the
+   mechanical consequence of widening a struct these two held files construct
+   by full literal. None of them need any *behavioural* change beyond that.
+
+**Deliberately out of scope for this pass**, same as armour's equivalent list:
+
+* **Baby sheep.** `BabySheepModel`/`textures/entity/sheep/sheep_wool_baby.png`
+  is a separate, smaller mesh; not built.
+* **The `jeb_` rainbow name easter egg.** `SheepRenderState.getWoolColor`
+  lerps through every dye colour once named `jeb_`; `sheep_wool_tint` only
+  implements the plain per-dye table.
+* **`sheep_wool_undercoat.png` / `SheepWoolUndercoatLayer`.** A second overlay
+  that only draws for a jeb_ sheep or a non-white one; not built, since it
+  depends on the same unwired dye plumbing as the primary layer.
+
+### Other render layers (surveyed, not landed)
+
+The same mechanism — a second mesh posed off the wearer's part matrix — is
+missing for a family of vanilla layers, and every one of them hits the same
+architectural blocker sheep wool does: the attach type lives in
+`lodestone-render/src/entity.rs` and the draw call lives in
+`lodestone-shell/src/gpu.rs`, neither owned by this pass. Listed here rather
+than half-landed, per `CLAUDE.md`'s "one working seam plus a clear list beats
+twelve half-done layers": wolf collar (dyed) and wet/angry variants, charged
+creeper aura, iron golem vines and cracked overlays, llama decor, horse
+markings and armour, mooshroom mushrooms, snow golem pumpkin, shulker head,
+villager and zombie-villager profession/type overlays, and glowing-eye layers
+(enderman, spider, blaze). Sheep wool is the one seam proven end-to-end at the
+mesh/tint/pixel level; the others have not been investigated further than this
+list.
+
 ## How to change it
 
 * **New mob ported.** Add the `EntityModelEntry` to
@@ -296,6 +484,18 @@ nothing consumes them.
   fog-disabled control that collapses the depth response. Also
   `water_surface_covers_a_mob_behind_it`, which runs **both draw orders** and
   requires the wrong one to reproduce the no-water render bit for bit.
+* `tests/sheep_wool_pixels.rs` (`lodestone-render`, `#[ignore]`d) — a sheared
+  sheep and a woolly one differ by a real pixel count, with a sheared×2
+  determinism control at exactly 0, and a red-tinted wool render differs from a
+  white-tinted one **only within the pixels the wool layer itself newly
+  covers** — see the sheep wool section above for the measured numbers.
+  `lodestone-assets/tests/entity_models.rs` carries the hermetic half: the wool
+  mesh's part names/pivots match the sheep body's exactly (the attach
+  precondition), its per-part inflation matches vanilla's baked geometry, and
+  `sheep_wool_tint`'s 16-entry table matches hand-derived `DyeColor` values.
+  `lodestone-assets/tests/real_jar.rs::sheep_wool_texture_decodes_from_the_real_jar`
+  (`#[ignore]`d) is the external-authority check that `sheep_wool.png` is
+  64×32 and genuinely greyscale.
 
 ## Dependencies
 

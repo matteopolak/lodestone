@@ -151,7 +151,7 @@ fn arm_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::TextureView
     (view, sampler)
 }
 
-/// The `player_wide` ("Steve") rig — the same one `prepare_first_person_arm`
+/// The `player_wide` ("Steve") rig — the same one `prepare_first_person_hand`
 /// draws, and the same construction `entity.rs`'s own `player_mesh` test helper
 /// uses. Code-authored in `lodestone-assets`, so this needs no vanilla pack.
 fn player_mesh() -> EntityMesh {
@@ -164,7 +164,7 @@ fn player_mesh() -> EntityMesh {
 /// Render the right arm at `attack_anim` and return the RGBA frame, row-major and
 /// tightly packed.
 ///
-/// This mirrors `RenderState::prepare_first_person_arm` exactly where it matters:
+/// This mirrors `RenderState::prepare_first_person_hand` exactly where it matters:
 /// group 0 is [`hand_projection`] **alone** (the arm pose is already in camera
 /// space — feeding a view-projection here parks it at the world origin), and the
 /// arm and its sleeve share one matrix.

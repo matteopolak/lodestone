@@ -234,12 +234,19 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 
 ## Known gaps
 
-* **The container screen is not wired in `app.rs` yet.** `ContainerRenderer` can
-  draw icons — `attach_items`, `attach_item_models`, `render_with_icons` all
-  exist and are proved by `tests/container_item_pixels.rs` — but `app.rs` still
-  calls the plain `ContainerRenderer::new` + `render`, so the live inventory keeps
-  the colour-swatch fallback. See [`container-screen.md`](container-screen.md)
-  for the exact four-line change.
+* **The container screen draws flat icons but not 3-D block items** — issue
+  [#50](https://github.com/matteopolak/lodestone/issues/50). This bullet used to
+  say the screen "is not wired in `app.rs` yet" and kept the colour-swatch
+  fallback; that is **stale**. `app.rs` attaches both halves (`attach_items` at
+  `app.rs:1488`, `attach_item_models` at `app.rs:1496`), so sprite icons draw
+  correctly today. What is still missing is one call: the per-frame draw goes
+  through `render_scaled`, which hardcodes `depth: None, models: None`, so
+  `want_models` is `false` and `push_item_model` returns early for every block
+  item. See [`container-screen.md`](container-screen.md) for the exact swap.
+
+  The symptom's *shape* is the diagnostic: "flat, not missing" means the sprite
+  stream is fine and only the model stream is starved. A missing `attach_items`
+  would have shown swatches instead.
 * **Tint on flat sprites is still deferred** — leather armour, potions and spawn
   eggs draw untinted white. 3-D items *are* tinted, through the shared palette.
 * **The enchantment glint is not drawn** (`ItemIcon::enchanted` is carried but
@@ -259,6 +266,6 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 | `crates/lodestone-shell/src/hud.rs` | the hotbar consumer: cell layout, `Builder::item_icon`, the three passes |
 | `crates/lodestone-shell/src/container.rs` | the container consumer: slot layout, chrome/overlay split, `render_with_icons` |
 | `crates/lodestone-shell/src/gpu.rs` | the four borrowed-resource accessors on `RenderState` |
-| `crates/lodestone-shell/src/app.rs` | attach at startup, pass models + depth per frame (**hotbar only** so far) |
+| `crates/lodestone-shell/src/app.rs` | attaches both screens at startup; passes models + depth per frame for the **hotbar only** (`app.rs:1359`) — the container's `app.rs:1273` call still omits them, which is #50 |
 | `crates/lodestone-shell/tests/hotbar_block_item_pixels.rs` | hotbar pixel gate (GPU + `client.jar`, `#[ignore]`d) — 176 / 0 / 0 |
 | `crates/lodestone-shell/tests/container_item_pixels.rs` | container pixel gate (same) — 176 block / 120 sprite / 0 empty / 0 control |

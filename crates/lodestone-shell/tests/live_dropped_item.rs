@@ -24,13 +24,15 @@
 //! * **`minecraft:diamond_block`** — a full block item, so it bakes to real 3-D
 //!   geometry and its silhouette is the least ambiguous thing available. This is
 //!   the one the pixel assertions use.
-//! * **`minecraft:diamond`** — a flat `item/generated` sprite. Its identity
-//!   decodes identically, but `BlockModels` only bakes world geometry for items
-//!   whose icon resolves to an `IconPart::Model`; a sprite item resolves to
-//!   `IconPart::Sprite` and is never inserted into the item-geometry map. So it
-//!   is *known* and still draws nothing. That gap is asserted here rather than
-//!   left as a surprise: "dropped items work" is currently true only for the
-//!   3-D-modelled ones.
+//! * **`minecraft:diamond`** — a flat `item/generated` sprite, which reaches
+//!   `BlockModels::items` through a *different* baking path: `IconPart::Sprite`'s
+//!   layer stack extruded into vanilla's thin slab by
+//!   `extruded_sprite_geometry`, rather than `IconPart::Model`'s baked cuboids.
+//!   Both land in the same map under the same key, so the drop pass cannot tell
+//!   them apart — which is exactly the property worth pinning, because it was
+//!   *not* true before `9980a96` and this assertion used to read
+//!   `sprite_drops == 0`. Keeping both items here is what makes a regression in
+//!   either baking path localise to one of them.
 //!
 //! Per §12.52 this fails rather than skips when it cannot run.
 //!
@@ -331,13 +333,22 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     let (_, sprite_drops) = shoot(std::slice::from_ref(&sprite_drop));
     eprintln!("sprite item_drops_drawn = {sprite_drops}");
     assert_eq!(
-        sprite_drops, 0,
-        "known gap, asserted so it cannot be mistaken for the metadata chain \
-         failing: `BlockModels` bakes world geometry only for items whose icon \
-         resolves to an IconPart::Model, and {SPRITE_ITEM} is an item/generated \
-         sprite, so it is identified and still draws nothing. When sprite items \
-         are extruded for the world pass, this assertion is the one to flip."
+        sprite_drops, 1,
+        "a flat `item/generated` sprite must mesh exactly like a block item does: \
+         `BlockModels::build` extrudes its layer stack into vanilla's thin slab \
+         (`extruded_sprite_geometry`) and inserts it into the *same* item map, so \
+         the drop pass never learns which of the two baking paths produced the \
+         geometry. Zero here means the extrusion loop found no stitched layer for \
+         {SPRITE_ITEM} — check `BlockModels::item_bake_misses`, not this chain."
     );
+    // Deliberately **no pixel assertion for the sprite drop**: the camera above is
+    // aimed at the block item's summon position, and the two are summoned at
+    // different coordinates, so the sprite drop is not in this frame at all. Adding
+    // a "differing pixels > 0" check here would be a *world*-species vacuous test —
+    // pointed at a scene that structurally cannot contain the subject. The pixel
+    // evidence for the extruded slab lives in `lodestone-render`'s
+    // `sprite_drop_pixels`, which renders it and correlates the silhouette against
+    // the sprite's own alpha profile read out of the atlas.
 
     cleanup();
     drop_net(net);

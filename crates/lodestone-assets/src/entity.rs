@@ -230,8 +230,14 @@ pub struct EntityModelDef {
 
 /// The runtime state that selects an entity's texture variant, for mobs whose
 /// skin depends on more than their type: the temperature/biome family (26.2's
-/// `_temperate`/`_cold`/`_warm` split of pig/cow/chicken/…), dye colour (sheep,
-/// collars), breed (cat, wolf), profession/type (villager), and so on.
+/// `_temperate`/`_cold`/`_warm` split of pig/cow/chicken/…), breed (cat, wolf),
+/// profession/type (villager), and so on.
+///
+/// **Not sheep wool.** A sheep's *body* texture is dye-independent — only the
+/// separate wool *layer*'s colour varies, by a flat gamma-space tint multiply
+/// (`sheep_wool_tint`), never by selecting a different sheet. There is
+/// deliberately no `Dyed`/`Collar` arm here: a per-colour texture would be the
+/// wrong mechanism for what vanilla does with one multiply.
 ///
 /// This is a **primitive owned by `lodestone-assets`** on purpose: it lets the
 /// per-mob data in `entity_models.rs` stay a pure data module (no reach into

@@ -971,6 +971,72 @@ fn entity_models_whole_corpus_coverage() {
     assert!(verified >= 10, "priority corpus present");
 }
 
+/// The sheep wool layer's own sheet (`entity/sheep/sheep_wool`), against the
+/// real jar — `sheep_wool_model` is not registered in `entity_models()` (it is
+/// a layer over the sheep body, like humanoid armour is a layer over a wearer,
+/// not a standalone drawable type), so [`entity_models_whole_corpus_coverage`]
+/// never reaches it. Same external-authority check as that test: an
+/// integer-multiple match against the real PNG dimensions, not a number this
+/// crate also computed.
+///
+/// Also measures the sheet's own colour so the tint math has a hand-checked
+/// anchor: `sheep_wool.png` is **exactly** greyscale (every opaque texel has
+/// R==G==B), which is the whole precondition for `sheep_wool_tint` painting it
+/// by a flat multiply rather than needing a per-colour texture the way e.g.
+/// horse coats do.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar"]
+fn sheep_wool_texture_decodes_from_the_real_jar() {
+    use lodestone_assets::Image;
+    use lodestone_assets::entity_models::sheep_wool_model;
+
+    if client_jar().is_none() {
+        panic!(
+            "requires .cache/mc/26.2/client.jar — run: cargo run -p xtask -- fetch-assets --version 26.2"
+        );
+    }
+    let manager = manager();
+    let model = sheep_wool_model();
+
+    let loc = ResourceLocation::parse("minecraft:entity/sheep/sheep_wool").unwrap();
+    let bytes = manager
+        .read_asset(&loc, "textures", "png")
+        .expect("entity/sheep/sheep_wool.png not found in client.jar");
+    let img = Image::decode_png(&bytes).expect("decode sheep_wool.png");
+
+    assert!(
+        model.texture_width > 0
+            && model.texture_height > 0
+            && img.width.is_multiple_of(model.texture_width)
+            && img.height.is_multiple_of(model.texture_height)
+            && img.width / model.texture_width == img.height / model.texture_height,
+        "sheep_wool: declared UV sheet {}x{} is not an integer-multiple match for real PNG {}x{}",
+        model.texture_width,
+        model.texture_height,
+        img.width,
+        img.height
+    );
+
+    let mut opaque = 0usize;
+    let mut grey = 0usize;
+    for px in img.rgba.chunks_exact(4) {
+        if px[3] == 0 {
+            continue;
+        }
+        opaque += 1;
+        if px[0] == px[1] && px[1] == px[2] {
+            grey += 1;
+        }
+    }
+    assert!(opaque > 0, "sheep_wool.png decoded fully transparent");
+    assert_eq!(
+        grey, opaque,
+        "sheep_wool.png has {}/{opaque} non-grey opaque texels — the dye tint multiply assumes a \
+         flat greyscale base",
+        opaque - grey
+    );
+}
+
 #[test]
 #[ignore = "requires a fetched vanilla client.jar"]
 fn item_models_whole_corpus_coverage() {

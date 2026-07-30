@@ -42,7 +42,7 @@
 //! what the incoming [`EntityView`](../../lodestone_client/state/struct.EntityView.html)
 //! data supports today (position + rotation, no limb angles).
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
 use lodestone_assets::equipment::{ArmourLayer, ArmourSlot, armour_item, humanoid_armour_model};
@@ -202,7 +202,7 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
 /// skin data yet) want exactly that default.
 ///
 /// No caller in this codebase has real skin-model data yet — see
-/// `RenderState::prepare_first_person_arm`'s "the shell has no skin-model
+/// `RenderState::prepare_first_person_hand`'s "the shell has no skin-model
 /// signal" note in `lodestone-shell`, which is still true here. This function
 /// exists so that the day that signal arrives (from the tab-list player-info
 /// packet, decoded in the network layer), selecting the right rig for the
@@ -1371,6 +1371,190 @@ fn mesh_item_quads_with_light(
 }
 
 // ---------------------------------------------------------------------------
+// Thrown item projectiles: vanilla's `ThrownItemRenderer`
+// ---------------------------------------------------------------------------
+//
+// A snowball is not a cuboid rig and not a dropped item either: it is the item's
+// *own* model, posed by `display.ground`, turned to face the camera, and drawn at
+// the entity's position with no bob, no spin and no hover lift. Transcribed from
+// 26.2's `client/renderer/entity/ThrownItemRenderer.java`, whose whole `submit` is
+//
+// ```text
+// poseStack.scale(scale, scale, scale);
+// poseStack.mulPose(camera.orientation);
+// state.item.submit(...)                  // resolved in ItemDisplayContext.GROUND
+// ```
+//
+// with the entity's position already on the pose stack by the dispatcher. The
+// `GROUND` context is why [`ground_transform`] is shared with the drop path rather
+// than duplicated: `extractRenderState` calls
+// `updateForNonLiving(state.item, entity.getItem(), ItemDisplayContext.GROUND, entity)`.
+
+/// One entity type's [`ThrownItemRenderer`] registration: which item's model to
+/// draw, at what scale, and whether the renderer forces full-bright block light.
+///
+/// The `scale` and `full_bright` columns are **not** uniform, and reading them as
+/// uniform is the visible bug: a `fireball` is `3.0` and a `small_fireball`
+/// `0.75`, so the two would otherwise be the same size on screen even though the
+/// large one is four times the small one in vanilla.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThrownItem {
+    /// The item id whose baked geometry to draw, e.g. `"minecraft:snowball"`.
+    ///
+    /// This is vanilla's `getDefaultItem()`. It is only the *fallback*: the
+    /// entity's real stack rides entity metadata (`DATA_ITEM_STACK`, the same
+    /// `ITEM_STACK` serializer a dropped item uses), and a caller that has it
+    /// should prefer it — a dispenser-fired arrow-of-harming analogue for
+    /// potions is exactly the case where the two differ.
+    pub item: &'static str,
+    /// Vanilla's `ThrownItemRenderer.scale`, applied *before* the billboard
+    /// rotation.
+    pub scale: f32,
+    /// Vanilla's `fullBright`, which overrides `getBlockLightLevel` to `15`.
+    /// A fireball glows; a snowball does not.
+    pub full_bright: bool,
+}
+
+/// The [`ThrownItem`] registration for an entity type path (`"snowball"`), or
+/// `None` for every entity that is not drawn by `ThrownItemRenderer`.
+///
+/// This is the **complete** 26.2 registration list, read out of
+/// `client/renderer/entity/EntityRenderers.java` rather than guessed from the
+/// name. Two entries commonly assumed to be here are not, and adding them would
+/// draw the wrong thing:
+///
+/// * **`wind_charge` and `breeze_wind_charge` use `WindChargeRenderer`**, a real
+///   cuboid model — not an item billboard. There is no `wind_charge` *item*
+///   sprite to draw either.
+/// * **`arrow`, `spectral_arrow` and `trident` use `ArrowRenderer`/`ThrownTridentRenderer`**,
+///   a 3-D mesh oriented by `atan2` of the entity's **velocity** (not by a
+///   transmitted rotation), which needs a velocity the draw record does not
+///   carry. See `docs/thrown-projectiles.md`.
+///
+/// `dragon_fireball`, `wither_skull`, `llama_spit`, `shulker_bullet`,
+/// `fishing_bobber`, `firework_rocket` and `end_crystal` all have their own
+/// dedicated renderers too, and are likewise absent.
+#[must_use]
+pub fn thrown_item_for(type_path: &str) -> Option<ThrownItem> {
+    // `(entity type, default item, scale, full_bright)`.
+    const TABLE: &[(&str, &str, f32, bool)] = &[
+        ("egg", "minecraft:egg", 1.0, false),
+        ("ender_pearl", "minecraft:ender_pearl", 1.0, false),
+        (
+            "experience_bottle",
+            "minecraft:experience_bottle",
+            1.0,
+            false,
+        ),
+        // `EyeOfEnder.getDefaultItem()` is `Items.ENDER_EYE` — the *item* id is
+        // `ender_eye`, not `eye_of_ender`, which is the entity type. Using the
+        // entity name here resolves no item and draws nothing.
+        ("eye_of_ender", "minecraft:ender_eye", 1.0, true),
+        ("fireball", "minecraft:fire_charge", 3.0, true),
+        ("lingering_potion", "minecraft:lingering_potion", 1.0, false),
+        ("small_fireball", "minecraft:fire_charge", 0.75, true),
+        ("snowball", "minecraft:snowball", 1.0, false),
+        ("splash_potion", "minecraft:splash_potion", 1.0, false),
+    ];
+    TABLE
+        .iter()
+        .find(|(name, ..)| *name == type_path)
+        .map(|&(_, item, scale, full_bright)| ThrownItem {
+            item,
+            scale,
+            full_bright,
+        })
+}
+
+/// The **camera→world rotation**, which is what vanilla's `camera.orientation`
+/// is: apply it to a model authored facing camera-space `+Z` and the model faces
+/// the eye.
+///
+/// # Derived from the view matrix, not written out as `Ry(yaw)·Rx(pitch)`
+///
+/// Every hand-written form of this was wrong on the first try, in a different way
+/// each time, because three conventions stack: vanilla's own quaternion is
+/// `rotationYXZ(π - yRot, -xRot, 0)` (note the `π -`, which exists because MC's
+/// camera space is rotated 180° from its world space), `glam`'s right-handed view
+/// looks down **-Z**, and [`Camera::forward`](crate::Camera::forward) is
+/// Minecraft's convention (`yaw 0` faces `+Z`). Taking the view matrix and
+/// inverting its rotation cannot get any of those backwards: a view matrix is
+/// `R · T` with `R` orthonormal, so `R⁻¹ = Rᵀ`.
+///
+/// Pass [`Camera::view_matrix`](crate::Camera::view_matrix). The determinant is
+/// `+1`, so this does not flip winding — see [`thrown_item_matrix`].
+///
+/// # Why the item's front face lands the right way round either way
+///
+/// A flat sprite item is [`extruded_sprite_geometry`](crate::BlockModels)'s slab,
+/// whose `SOUTH` face (outward normal `+Z`) carries UVs `(0, 0, 16, 16)` and whose
+/// `NORTH` face carries `(16, 0, 0, 16)` — the reversed `u`. That flip is exactly
+/// what makes *both* faces read unmirrored from their own side, so a 180°
+/// yaw error here is invisible on the sprite items, which is every entity in
+/// [`thrown_item_for`]. What is **not** invisible is getting the *pitch* term
+/// wrong (an upside-down snowball) or dropping the rotation entirely (a slab seen
+/// edge-on from the side, i.e. a near-invisible sliver).
+#[must_use]
+pub fn camera_orientation(view_matrix: Mat4) -> Mat4 {
+    let mut rotation = view_matrix;
+    rotation.w_axis = Vec4::W;
+    rotation.transpose()
+}
+
+/// The world placement matrix for a thrown item projectile, matching
+/// `ThrownItemRenderer.submit`'s pose-stack order exactly:
+///
+/// ```text
+/// T(position) · S(scale) · camera_orientation · display_matrix(ground)
+/// ```
+///
+/// `orientation` is [`camera_orientation`]`(camera.view_matrix())` and `ground`
+/// the item's own [`ground_transform`] — the `GROUND` display context
+/// `extractRenderState` resolves the item in.
+///
+/// **No bob, no spin, no hover lift.** Those three are `ItemEntityRenderer`'s and
+/// are the tempting thing to reuse from [`dropped_item_matrix`]; a bobbing,
+/// spinning snowball in flight is the signature of having done so.
+///
+/// The determinant is **positive** — a translation, a positive uniform scale, a
+/// rotation and `display_matrix`'s positive scale — so this composes with
+/// `Camera::view_projection` to the same winding as terrain, exactly like a drop.
+#[must_use]
+pub fn thrown_item_matrix(
+    position: Vec3,
+    orientation: Mat4,
+    scale: f32,
+    ground: &DisplayTransform,
+) -> Mat4 {
+    Mat4::from_translation(position)
+        * Mat4::from_scale(Vec3::splat(scale))
+        * orientation
+        * display_matrix(ground)
+}
+
+/// Mesh one thrown item projectile into a world-space [`ModelMesh`], for the same
+/// pass and the same camera uniform [`dropped_item_mesh`] feeds.
+///
+/// `light` is the packed sky/block sample at the projectile, or
+/// [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) when [`ThrownItem::full_bright`] is
+/// set — vanilla's `getBlockLightLevel` override returns `15` for the fireballs
+/// and the eye of ender, which is what makes a fireball readable against a dark
+/// Nether ceiling.
+#[must_use]
+pub fn thrown_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    ground: &DisplayTransform,
+    position: Vec3,
+    orientation: Mat4,
+    scale: f32,
+    light: u8,
+) -> ModelMesh {
+    let pose = thrown_item_matrix(position, orientation, scale, ground);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
+}
+
+// ---------------------------------------------------------------------------
 // Held items, and the first-person arm
 // ---------------------------------------------------------------------------
 //
@@ -1706,8 +1890,9 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 ///   `zr'·-20°`, `xzr·-80°`) — is a **different** chain for the case where the
 ///   main hand is not empty and vanilla draws the item instead of the arm. It is
 ///   not this one and must not be folded in; see
-///   `RenderState::prepare_first_person_arm`'s note on the shell always drawing
-///   the empty-hand case.
+///   `RenderState::prepare_first_person_hand`'s `FirstPersonHand::Item` branch,
+///   which is the *other* half of vanilla's `isEmpty()` fork — see
+///   [`first_person_item_chain`].
 ///
 /// There is no `scale` anywhere in the chain, and that is not an omission — the
 /// large constants (`3.6`, `3.5`, `5.6`) are in blocks and largely cancel through
@@ -1836,6 +2021,166 @@ pub fn first_person_arm_parts(mesh: &EntityMesh, arm: Arm) -> Vec<usize> {
         parts.push(sleeve);
     }
     parts
+}
+
+// ---------------------------------------------------------------------------
+// The item in the first-person hand
+// ---------------------------------------------------------------------------
+//
+// Vanilla draws the arm **or** the item, never both: `submitArmWithItem` branches
+// on `itemStack.isEmpty()` and calls `renderPlayerArm` only in the empty case.
+// So this is not a layer on top of `first_person_arm_chain` — it is the *other*
+// branch, with its own translation and its own swing shaping, and folding one into
+// the other produces a plausible-looking wrong pose. The two share only the
+// `attackValue` scalar.
+
+/// `ItemInHandRenderer.applyItemArmTransform`'s translation, in blocks
+/// (`invert * 0.56F`, `-0.52F`, `-0.72F`). `x` is mirrored by [`Arm::invert`] and
+/// `y` additionally takes `inverseArmHeight * -0.6F`.
+///
+/// Note these are **not** [`first_person_arm_chain`]'s `0.64000005 / -0.6 /
+/// -0.71999997`. The two chains are 0.08 blocks apart in `x`, which is small
+/// enough to look like a rounding difference and is in fact the difference between
+/// an item held in view and one clipping the frame edge.
+pub const FIRST_PERSON_ITEM_OFFSET: [f32; 3] = [0.56, -0.52, -0.72];
+
+/// `applyItemArmTransform`'s `inverseArmHeight` coefficient on `y` (`-0.6F`).
+pub const FIRST_PERSON_ITEM_EQUIP_DIP: f32 = -0.6;
+
+/// The three scalars `ItemInHandRenderer.swingArm` derives from `attackValue`.
+///
+/// **Different coefficients from [`ArmSwingTerms`]** (`-0.4 / 0.2 / -0.2` against
+/// the arm's `-0.3 / 0.4 / -0.4`) and no rotation terms of its own — the rotation
+/// comes from [`first_person_item_attack_chain`]. Kept as its own type so the two
+/// cannot be swapped by autocomplete.
+struct ItemSwingTerms {
+    /// `xSwingPosition`, pre-`invert`: `-0.4 · sin(sqrt(a)·π)`.
+    x_position: f32,
+    /// `ySwingPosition`: `0.2 · sin(sqrt(a)·2π)` — the `2π`, as in the arm chain.
+    y_position: f32,
+    /// `zSwingPosition`: `-0.2 · sin(a·π)`.
+    z_position: f32,
+}
+
+impl ItemSwingTerms {
+    fn new(attack_anim: f32) -> Self {
+        use std::f32::consts::{PI, TAU};
+        let a = attack_anim.clamp(0.0, 1.0);
+        let s = a.sqrt();
+        Self {
+            x_position: -0.4 * (s * PI).sin(),
+            y_position: 0.2 * (s * TAU).sin(),
+            z_position: -0.2 * (a * PI).sin(),
+        }
+    }
+}
+
+/// `ItemInHandRenderer.applyItemArmAttackTransform`:
+///
+/// ```text
+/// Ry(i·(45 + yr·-20)) · Rz(i·xzr·-20) · Rx(xzr·-80) · Ry(i·-45)
+/// ```
+///
+/// with `yr = sin(a²·π)`, `xzr = sin(sqrt(a)·π)` and `i` = [`Arm::invert`].
+///
+/// **This is the identity at `attack_anim == 0.0`** — both shaping terms vanish and
+/// the leading `Ry(i·45)` is cancelled exactly by the trailing `Ry(i·-45)`. That is
+/// what makes the resting pose independent of the swing, and it is the property to
+/// check first if a held item sits at a strange angle while standing still: a
+/// dropped `Ry(i·-45)` looks like a permanent 45° twist, not like a broken swing.
+#[must_use]
+pub fn first_person_item_attack_chain(arm: Arm, attack_anim: f32) -> Mat4 {
+    use std::f32::consts::PI;
+    let i = arm.invert();
+    let a = attack_anim.clamp(0.0, 1.0);
+    let y_rotation = (a * a * PI).sin();
+    let xz_rotation = (a.sqrt() * PI).sin();
+    Mat4::from_rotation_y((i * (45.0 + y_rotation * -20.0)).to_radians())
+        * Mat4::from_rotation_z((i * xz_rotation * -20.0).to_radians())
+        * Mat4::from_rotation_x((xz_rotation * -80.0).to_radians())
+        * Mat4::from_rotation_y((i * -45.0).to_radians())
+}
+
+/// The camera-space chain an item in the first-person hand is posed by, matching
+/// `submitArmWithItem`'s generic (`SwingAnimation.Type.WHACK`) branch:
+///
+/// ```text
+/// T(i·0.56, -0.52 + h·-0.6, -0.72)          -- applyItemArmTransform
+///   · T(i·xs, ys, zs) · applyItemArmAttackTransform(arm, a)   -- swingArm
+/// ```
+///
+/// `inverse_arm_height` is vanilla's `inverseArmHeight` — the equip/swap dip,
+/// `swapAnimationScale(item) · (1 - lerp(oHeight, height))`. Pass `0.0` for a
+/// fully-equipped hand; the shell tracks neither height, the same gap
+/// [`first_person_arm_chain`] documents.
+///
+/// # The three swing animation types, and why `WHACK` is the one modelled
+///
+/// 26.2 branches on `itemStack.getSwingAnimation().type()`: `WHACK` runs
+/// `swingArm`, `STAB` runs `SpearAnimations.firstPersonAttack`, and `NONE` runs
+/// nothing. At `attack_anim == 0.0` **all three are the identity**
+/// ([`first_person_item_attack_chain`] cancels and the translations vanish), so a
+/// resting hand is correct for every item whatever its type. Mid-swing, a spear
+/// (`STAB`) and the handful of `NONE` items get `WHACK`'s motion here, which is
+/// wrong but is a wrong *animation*, not a wrong resting pose — and it needs the
+/// item's `SwingAnimation` component, which the item pipeline does not decode.
+///
+/// The determinant is **positive** (translations and rotations only), matching
+/// [`hand_projection`]'s requirement — see `first_person_arm_pose_preserves_winding`
+/// for why the hand pass takes the world rule and not the GUI one.
+#[must_use]
+pub fn first_person_item_chain(arm: Arm, attack_anim: f32, inverse_arm_height: f32) -> Mat4 {
+    let i = arm.invert();
+    let [ox, oy, oz] = FIRST_PERSON_ITEM_OFFSET;
+    let ItemSwingTerms {
+        x_position,
+        y_position,
+        z_position,
+    } = ItemSwingTerms::new(attack_anim);
+    Mat4::from_translation(Vec3::new(
+        i * ox,
+        oy + inverse_arm_height * FIRST_PERSON_ITEM_EQUIP_DIP,
+        oz,
+    )) * Mat4::from_translation(Vec3::new(i * x_position, y_position, z_position))
+        * first_person_item_attack_chain(arm, attack_anim)
+}
+
+/// The full camera-space pose for an item in the first-person hand:
+/// [`first_person_item_chain`] followed by the item's own
+/// `firstperson_?hand` display transform.
+///
+/// `transform` is [`hand_transform`]`(&geometry.display, arm, true)` — note the
+/// `true`. Passing `false` there is the silent failure mode: it reads
+/// `thirdperson_righthand` instead, which for `item/generated` is a *different*
+/// rotation and scale and puts the item at a visibly wrong angle without ever
+/// putting it off screen.
+#[must_use]
+pub fn first_person_item_matrix(
+    arm: Arm,
+    attack_anim: f32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+) -> Mat4 {
+    first_person_item_chain(arm, attack_anim, inverse_arm_height)
+        * display_matrix_for_hand(transform, arm.is_left())
+}
+
+/// Mesh the item in the first-person hand into a camera-space [`ModelMesh`], to be
+/// drawn through the ordinary [`ModelPipeline`](crate::ModelPipeline) with
+/// [`hand_projection`] alone as the camera uniform (the same uniform the bare arm
+/// uses, and for the same reason: the pose is already camera-space).
+#[must_use]
+pub fn first_person_item_mesh(
+    quads: &[BakedQuad],
+    gui_light: GuiLight,
+    arm: Arm,
+    attack_anim: f32,
+    inverse_arm_height: f32,
+    transform: &DisplayTransform,
+    light: u8,
+) -> ModelMesh {
+    let pose = first_person_item_matrix(arm, attack_anim, inverse_arm_height, transform);
+    mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
 #[cfg(test)]

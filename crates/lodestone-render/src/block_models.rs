@@ -44,10 +44,24 @@
 //!
 //! # Why item geometry lives here too
 //!
-//! `BlockModels` also owns [`ItemGeometry`] for every item whose inventory icon
-//! is a 3-D model ([`IconPart::Model`] — 752 of 26.2's 1,537 items). The name is
-//! a stretch; the honest framing is **"everything baked against this atlas"**,
-//! and it is worth the stretch:
+//! `BlockModels` also owns [`ItemGeometry`] for every item with a drawable icon —
+//! **both** streams, in one map keyed by item id:
+//!
+//! * [`IconPart::Model`] — a 3-D model, 752 of 26.2's 1,537 items;
+//! * [`IconPart::Sprite`] — the flat `builtin/generated` layer stack, extruded
+//!   into vanilla's thin slab by `extruded_sprite_geometry`, which is most of
+//!   the remaining ~785.
+//!
+//! **The two are indistinguishable to a consumer**, and that is deliberate: a
+//! dropped diamond, a diamond in a zombie's hand, a diamond in the first-person
+//! hand and a thrown snowball all just look the item up. There is no
+//! sprite-specific accessor and there should not be one — every consumer that
+//! wanted "the sprite stream" wanted [`BlockModels::item`], and reading the two-stream
+//! split in `ItemIcon` as a two-*map* split here has already sent four issues
+//! hunting a missing accessor that never existed.
+//!
+//! The name `BlockModels` is a stretch; the honest framing is **"everything baked
+//! against this atlas"**, and it is worth the stretch:
 //!
 //! * A block item's faces are block textures. Baking them here reuses the *same*
 //!   stitched [`Atlas`] the terrain path already uploads — no second atlas, no
@@ -1218,14 +1232,23 @@ impl BlockModels {
         &self.state(state_id).quads
     }
 
-    /// The baked inventory geometry of an item (`minecraft:stone`), or `None`
-    /// for an item whose icon is a flat sprite, a special renderer, or nothing.
+    /// The baked geometry of an item (`minecraft:stone`), or `None` for an item
+    /// whose icon is a code-driven [`IconPart::Special`] renderer (chests,
+    /// shulkers, shields, banners) or which resolves to nothing at all.
+    ///
+    /// **A flat sprite item is present**, not absent: its `builtin/generated`
+    /// layer stack is extruded into vanilla's slab and inserted into this same map
+    /// (see the module docs). This doc comment used to say "`None` for an item
+    /// whose icon is a flat sprite", which was true until `9980a96` and was then
+    /// cited as the root cause of four separate rendering issues — none of which
+    /// it was.
     #[must_use]
     pub fn item(&self, item: &ResourceLocation) -> Option<&ItemGeometry> {
         self.items.get(item)
     }
 
-    /// The baked quads of an item's 3-D inventory icon (empty when it has none).
+    /// The baked quads of an item's icon — 3-D model or extruded sprite slab
+    /// (empty when it has neither).
     /// Pose them with [`gui_item_pose`](crate::gui_item_pose) and mesh them with
     /// [`mesh_item_quads`](crate::mesh_item_quads); their UVs index
     /// [`atlas`](Self::atlas) and their tints [`tint_palette`](Self::tint_palette),
@@ -1235,13 +1258,14 @@ impl BlockModels {
         self.items.get(item).map_or(&[], |g| &g.quads)
     }
 
-    /// The number of items with baked 3-D inventory geometry.
+    /// The number of items with baked geometry of either kind.
     #[must_use]
     pub fn item_count(&self) -> usize {
         self.items.len()
     }
 
-    /// Every item with baked 3-D inventory geometry, as `(id, geometry)` pairs.
+    /// Every item with baked geometry, as `(id, geometry)` pairs — 3-D models and
+    /// extruded sprite slabs alike.
     ///
     /// The counterpart to [`item`](Self::item) for consumers that need to take a
     /// **snapshot** rather than answer one lookup. Block *states* are enumerable
