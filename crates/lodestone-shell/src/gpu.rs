@@ -1285,13 +1285,19 @@ impl std::fmt::Debug for SkyDarkenSource {
 /// # Why this reuses `EntityDraw` at all, rather than a parallel draw path
 ///
 /// The first-person arm needed a genuinely separate pose function
-/// ([`first_person_arm_pose`]) because vanilla draws it from the arm's
-/// *rest* pose with one hand-picked rotation replacing the swing — never the
-/// animated `setupAnim` result a third-person view needs. The body has no
+/// ([`first_person_arm_pose`]) because vanilla draws the arm *part* from its
+/// rest pose with one hand-picked rotation, and puts the swing in the
+/// camera-space chain the rested arm hangs off — never in the animated
+/// `setupAnim` result a third-person view needs. The body has no
 /// such divergence: vanilla's own third-person player renderer is just
 /// `PlayerModel`/`HumanoidModel.setupAnim`, exactly what
 /// [`lodestone_render::entity_anim::Skeleton::pose`] already computes for
-/// every other humanoid mob. Reusing [`EntityDraw`] means the local player's
+/// every other humanoid mob.
+///
+/// The two therefore share the swing *scalar* ([`AnimInput::attack_anim`], which
+/// is the same `Sim::hand_swing_progress` the arm pass polls) and no code at all.
+/// Feeding either pose function the other's chain produces a plausible-looking
+/// wrong arm, which is why they stay apart. Reusing [`EntityDraw`] means the local player's
 /// body goes through the *exact* resolve → cull → pose → upload path
 /// ([`RenderState::prepare_entities`]) and the *exact* held-item path
 /// ([`RenderState::merge_held_items`]) every zombie and every remote player
@@ -1322,9 +1328,9 @@ pub struct ThirdPersonBodyState {
     /// arm's existing default.
     pub slim: bool,
     /// What the local player is holding/wearing, in the shape
-    /// [`EntityDraw::equipment`] carries. Only `MainHand`/`OffHand` reach a
-    /// pixel, for the same reason they do not for any other entity — see
-    /// that field's doc comment.
+    /// [`EntityDraw::equipment`] carries: main hand, off hand, and all four
+    /// armour slots (head/chest/legs/feet), the same as any other entity's
+    /// `EntityDraw::equipment`.
     pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
 }
 
@@ -1404,6 +1410,50 @@ impl ThirdPersonBodySource {
     }
 }
 
+/// Where this frame's first-person **arm-swing progress** comes from, polled once
+/// per frame like [`SkyDarkenSource`] / [`EntityLightSource`].
+///
+/// The value is vanilla's `attackValue` — `Player.getAttackAnim(partialTick)`, in
+/// `0.0..=1.0`, already interpolated for this frame's sub-tick alpha. It must come
+/// from a **tick** clock read with a partial tick, not from anything derived from
+/// frame time: `lodestone_entity::pose::EntityPose` advances the swing in
+/// [`tick`](lodestone_entity::pose::EntityPose::tick) and interpolates in
+/// [`attack_anim_lerp`](lodestone_entity::pose::EntityPose::attack_anim_lerp), and
+/// `Sim::hand_swing_progress` is that pairing. Driving a swing per frame is the
+/// defect `entities.rs`'s `limb_swing_tracks_per_tick_travel_not_the_interpolation_gap`
+/// records for the walk cycle, where the phase ran up to 3x too fast and the
+/// animation speed became frame-rate dependent.
+///
+/// Unset — the default, the offline demo, every headless test — is `0.0`, a fully
+/// rested arm, which reproduces exactly the behaviour before the swing existed.
+#[derive(Default)]
+pub struct HandSwingSource(Option<Box<dyn Fn() -> f32 + Send + Sync>>);
+
+impl HandSwingSource {
+    /// This frame's swing progress, clamped into `0.0..=1.0`. A source handing
+    /// back a garbage or out-of-range value should look like the wrong moment of
+    /// a swing, never like an arm flung off screen —
+    /// [`lodestone_render::entity::first_person_arm_chain`]'s shaping functions
+    /// are periodic, so extrapolating past `1.0` silently animates something else.
+    #[must_use]
+    fn value(&self) -> f32 {
+        // `clamp` panics on a NaN bound and *propagates* a NaN value, so NaN is
+        // mapped to rest explicitly rather than left to reach a matrix.
+        match self.0.as_ref().map(|f| f()) {
+            Some(v) if v.is_finite() => v.clamp(0.0, 1.0),
+            _ => 0.0,
+        }
+    }
+}
+
+impl std::fmt::Debug for HandSwingSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("HandSwingSource")
+            .field(&if self.0.is_some() { "set" } else { "rest" })
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for OutlineShapeSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("OutlineShapeSource")
@@ -1472,6 +1522,10 @@ pub struct RenderState {
     /// third-person camera and a way to describe the local player's pose —
     /// see [`RenderState::set_third_person_body_source`].
     third_person_body: ThirdPersonBodySource,
+    /// How far through an arm swing the local player is *right now*. A rested
+    /// arm until the shell wires its swing clock in via
+    /// [`RenderState::set_hand_swing_source`].
+    hand_swing: HandSwingSource,
     outline_shape: OutlineShapeSource,
 }
 
@@ -1627,6 +1681,9 @@ impl RenderState {
             // No third-person camera exists yet; see
             // `set_third_person_body_source`.
             third_person_body: ThirdPersonBodySource::default(),
+            // A rested arm until the shell installs its tick-driven swing clock;
+            // see `set_hand_swing_source`.
+            hand_swing: HandSwingSource::default(),
             outline_shape: OutlineShapeSource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
@@ -1785,6 +1842,31 @@ impl RenderState {
         f: impl Fn() -> Option<ThirdPersonBodyState> + Send + Sync + 'static,
     ) {
         self.third_person_body = ThirdPersonBodySource(Some(Box::new(f)));
+    }
+
+    /// Install the source for the first-person arm's swing progress (see
+    /// [`HandSwingSource`]).
+    ///
+    /// Until installed, the arm is drawn permanently at rest, which is what it did
+    /// before the swing existed. `f` must return
+    /// `Sim::hand_swing_progress`-shaped data: a **tick**-advanced swing clock
+    /// read with this frame's partial tick.
+    ///
+    /// **Re-install it every frame**, alongside
+    /// [`set_third_person_body_source`](Self::set_third_person_body_source), which
+    /// has the identical requirement: the value is a partial-tick interpolation, so
+    /// a one-shot install at connect time freezes the arm at whatever the swing
+    /// looked like the instant we joined. Sample first and move the number into the
+    /// closure, rather than borrowing the `Sim` — the source outlives the call.
+    ///
+    /// ```no_run
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
+    /// let hand_swing = sim.hand_swing_progress();
+    /// render.set_hand_swing_source(move || hand_swing);
+    /// # }
+    /// ```
+    pub fn set_hand_swing_source(&mut self, f: impl Fn() -> f32 + Send + Sync + 'static) {
+        self.hand_swing = HandSwingSource(Some(Box::new(f)));
     }
 
     /// Install the source for the targeted block's outline shape.
@@ -2565,6 +2647,19 @@ impl RenderState {
     /// and therefore an `app.rs` call — i.e. it would have shipped as another
     /// zero-pixel island.
     ///
+    /// # The swing
+    ///
+    /// The pose is driven by [`HandSwingSource`] — vanilla's `attackValue`, a
+    /// tick-advanced clock read with this frame's partial tick. It is polled here
+    /// rather than passed in for the same reason the light and sky-darken samplers
+    /// are: `render` takes only `&[EntityDraw]`, and the local player is not in it.
+    ///
+    /// **With no source installed this is `0.0` and the arm is rested**, which is
+    /// the state to suspect first if a swing does not appear — the pass runs and
+    /// `first_person_arm_drawn` is `true` either way, so a missing
+    /// `set_hand_swing_source` looks exactly like a working rested arm. See
+    /// `docs/arm-swing-animation.md`.
+    ///
     /// # The three fidelity gaps, all of them missing *shell state*, not code
     ///
     /// * **The arm is always drawn, even holding an item.** Vanilla's
@@ -2595,7 +2690,7 @@ impl RenderState {
         let mesh = self.entities.models.get(entry.name)?;
         let gpu = self.entities.gpu_models.get(entry.name)?;
         let texture = self.entities.textures.get(entry.name)?;
-        let pose = first_person_arm_pose(mesh, ARM)?;
+        let pose = first_person_arm_pose(mesh, ARM, self.hand_swing.value())?;
 
         // The arm's light is the player's own lightmap sample, exactly as
         // `renderItemInHand` passes `getPackedLightCoords(minecraft.player, …)`.

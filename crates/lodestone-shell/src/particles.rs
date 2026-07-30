@@ -99,6 +99,17 @@ pub struct Particles {
     /// model set is loaded (the offline demo world), which is why
     /// [`ParticleFrame::unresolved`] exists rather than a silent no-op.
     state_uv: Arc<Vec<Option<[f32; 4]>>>,
+    /// Per-block-state particle **tint** multiplier, indexed by state id and
+    /// aligned with `state_uv`. `[1.0; 3]` for an untinted state.
+    ///
+    /// This exists because vanilla's `TerrainParticle` does not multiply its
+    /// `0.6` grey by white — it multiplies by
+    /// `blockColors.getTintSource(state, 0).colorAsTerrainParticle(…)`. The
+    /// blocks that have such a source are exactly the ones whose sprites are
+    /// **greyscale in the atlas** (`grass`, `fern`, the leaves, `sugar_cane`,
+    /// `redstone_dust_*`), so dropping the tint does not merely desaturate their
+    /// debris — it renders it near-**white**. See `docs/break-particles.md`.
+    state_tint: Arc<Vec<[f32; 3]>>,
     /// Per-`(Sheet, frame)` atlas UV rect. Empty when no [`ParticleAtlas`] has
     /// been attached via [`Self::with_particle_atlas`], in which case every
     /// [`SpriteSource::Sheet`] particle counts into
@@ -117,17 +128,28 @@ impl Particles {
     /// Sheet-sourced particles (smoke, flame, crits, splashes, …) start
     /// unresolved regardless — attach a stitched atlas with
     /// [`Self::with_particle_atlas`] to resolve those too.
+    ///
+    /// `models` also supplies each state's **particle tint**
+    /// ([`BlockModels::particle_tint`]). Without it every state is untinted,
+    /// which is correct for the demo palette (no colormaps) and wrong for the
+    /// vanilla one — untinted foliage debris renders white.
     #[must_use]
     pub fn new(models: Option<&BlockModels>) -> Self {
-        let state_uv = match models {
-            Some(m) => (0..m.state_count() as u32)
-                .map(|id| m.particle_uv(id))
-                .collect(),
-            None => Vec::new(),
+        let (state_uv, state_tint) = match models {
+            Some(m) => (
+                (0..m.state_count() as u32)
+                    .map(|id| m.particle_uv(id))
+                    .collect(),
+                (0..m.state_count() as u32)
+                    .map(|id| m.particle_tint(id).unwrap_or([1.0; 3]))
+                    .collect(),
+            ),
+            None => (Vec::new(), Vec::new()),
         };
         Self {
             engine: ParticleEngine::new(),
             state_uv: Arc::new(state_uv),
+            state_tint: Arc::new(state_tint),
             sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
@@ -181,6 +203,10 @@ impl Particles {
         Self {
             engine: ParticleEngine::new(),
             state_uv: Arc::new(state_uv),
+            // The demo palette has no colormaps and no tinted blocks, so every
+            // demo id is genuinely untinted — an empty table, which
+            // `state_tint_of` reads as `[1.0; 3]`.
+            state_tint: Arc::new(Vec::new()),
             sheet_uv: Arc::new(HashMap::new()),
             quads: Vec::new(),
             instances: Vec::new(),
@@ -206,7 +232,13 @@ impl Particles {
     /// exactly the blocks that matter: `short_grass` has an outline and no
     /// collision at all, so driving this from collision geometry would emit
     /// nothing when a player breaks grass.
+    ///
+    /// `tint` is an **extra** multiplier applied on top of the state's own
+    /// particle tint, not a replacement for it — see
+    /// [`state_tint_of`](Self::state_tint_of). Callers that have nothing special
+    /// to say pass `[1.0; 3]`.
     pub fn destroy_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3]) {
+        let tint = self.state_tint_of(state, tint);
         emit::destroy_block_effect(
             &mut self.engine,
             (block[0], block[1], block[2]),
@@ -218,7 +250,13 @@ impl Particles {
 
     /// Emit the single fragment vanilla throws each time a mining hit lands on a
     /// face — `ClientLevel.addBreakingBlockEffect`.
+    ///
+    /// `tint` is an extra multiplier on top of the state's own particle tint,
+    /// exactly as in [`destroy_block`](Self::destroy_block): the two emitters
+    /// both construct a `TerrainParticle`, so they must tint identically or a
+    /// block's mining flecks and its final burst come out different colours.
     pub fn breaking_block(&mut self, block: [i32; 3], state: u32, tint: [f32; 3], face: emit::Face) {
+        let tint = self.state_tint_of(state, tint);
         emit::breaking_block_effect(
             &mut self.engine,
             (block[0], block[1], block[2]),
@@ -227,6 +265,46 @@ impl Particles {
             face,
             emit::FULL_CUBE,
         );
+    }
+
+    /// `extra` multiplied by `state`'s own particle tint — the
+    /// `rCol *= tintSource.colorAsTerrainParticle(state, level, pos)` step of
+    /// vanilla's `TerrainParticle` constructor.
+    ///
+    /// # Why this is folded in here rather than passed by the caller
+    ///
+    /// It was passed by the caller, as a hardcoded `[1.0; 3]` at both emit
+    /// sites, and that is the bug this method exists to close: a *plausible*
+    /// constant. The tinted blocks are precisely the ones whose atlas sprites
+    /// are greyscale, so the missing multiply did not read as "slightly wrong
+    /// colour" — it rendered grass, fern, leaf, sugar-cane and redstone debris
+    /// **white**. Deriving it from the state id means a new emit site cannot
+    /// reintroduce the constant by omission.
+    ///
+    /// An out-of-range `state` returns `extra` unchanged rather than panicking:
+    /// the same id is about to resolve to no sprite at all and be counted into
+    /// [`ParticleFrame::unresolved`], which is the report that already covers
+    /// it. Duplicating that as a second failure mode here would just be noise.
+    fn state_tint_of(&self, state: u32, extra: [f32; 3]) -> [f32; 3] {
+        let Some(t) = self.state_tint.get(state as usize) else {
+            return extra;
+        };
+        [extra[0] * t[0], extra[1] * t[1], extra[2] * t[2]]
+    }
+
+    /// How many block states carry a non-white particle tint.
+    ///
+    /// This is an **anti-vacuity accessor**, not a game value: "no state's
+    /// debris is the wrong colour" is satisfied by a table that resolved no
+    /// tints at all, so a gate on particle tinting has to be able to prove the
+    /// table is populated. Zero on the demo palette (correctly — it has no
+    /// tinted blocks); in the thousands on a complete vanilla pack.
+    #[must_use]
+    pub fn tinted_state_count(&self) -> usize {
+        self.state_tint
+            .iter()
+            .filter(|t| *t != &[1.0f32, 1.0, 1.0])
+            .count()
     }
 
     /// Vanilla's `ClientPacketListener.handleParticleEvent` — the general
@@ -1000,6 +1078,88 @@ mod tests {
         assert!(
             (sky_only - base).abs() < 1e-5,
             "sky-lit particle {sky_only} != block-lit {base}"
+        );
+    }
+
+    /// A state's own particle tint must reach the emitted fragments, and an
+    /// untinted state must be left alone.
+    ///
+    /// This is the hermetic half of `tests/break_particle_tint.rs` (which judges
+    /// the same thing against the real vanilla atlas): here the table is
+    /// installed directly, so the assertion is on the *wiring* —
+    /// `state_tint_of`'s multiply reaching `TerrainParticle`'s colour — with no
+    /// dependency on which blocks vanilla happens to tint.
+    #[test]
+    fn a_states_particle_tint_reaches_the_emitted_fragments() {
+        let rect = [0.0f32, 0.0, 1.0, 1.0];
+        let mut p = Particles::new(None);
+        p.state_uv = Arc::new(vec![None, Some(rect), Some(rect)]);
+        // State 1 untinted, state 2 tinted green.
+        let green = [0.5f32, 0.75, 0.25];
+        p.state_tint = Arc::new(vec![[1.0; 3], [1.0; 3], green]);
+        assert_eq!(p.tinted_state_count(), 1, "one of the three states is tinted");
+
+        let colour_of = |p: &mut Particles, state: u32| -> [f32; 4] {
+            p.engine.clear();
+            p.destroy_block([0, 64, 0], state, [1.0; 3]);
+            let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert!(frame.drawn > 0, "state {state} drew nothing");
+            p.instances[0].colour
+        };
+
+        // The control: an untinted state must be pure grey, so the tinted case
+        // below cannot be satisfied by something that colours every particle.
+        let plain = colour_of(&mut p, 1);
+        assert!(
+            (plain[0] - plain[1]).abs() < 1e-6 && (plain[1] - plain[2]).abs() < 1e-6,
+            "an untinted state must stay grey, got {plain:?}"
+        );
+        assert!(plain[0] > 0.0, "a black particle makes the ratio meaningless");
+
+        let tinted = colour_of(&mut p, 2);
+        for c in 0..3 {
+            assert!(
+                (tinted[c] / plain[0] - green[c]).abs() < 1e-5,
+                "channel {c}: tinted {} / untinted {} = {}, expected the state tint {}",
+                tinted[c],
+                plain[0],
+                tinted[c] / plain[0],
+                green[c]
+            );
+        }
+
+        // A caller-supplied tint composes with the state's, rather than being
+        // ignored or replacing it.
+        p.engine.clear();
+        p.destroy_block([0, 64, 0], 2, [0.5, 0.5, 0.5]);
+        let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        let composed = p.instances[0].colour;
+        assert!(
+            (composed[1] / plain[0] - green[1] * 0.5).abs() < 1e-5,
+            "caller tint must multiply the state tint, got {}",
+            composed[1] / plain[0]
+        );
+    }
+
+    /// A state id past the end of the tint table must not panic — it is the same
+    /// id that is about to be counted into [`ParticleFrame::unresolved`], and one
+    /// report of a bad id is enough.
+    #[test]
+    fn an_out_of_range_state_id_falls_back_to_the_callers_tint() {
+        let mut p = Particles::new(None);
+        p.state_tint = Arc::new(vec![[1.0; 3]]);
+        p.destroy_block([0, 64, 0], 9_999, [1.0; 3]);
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert!(frame.alive > 0, "the burst must still be emitted");
+        assert_eq!(
+            frame.unresolved, frame.alive,
+            "an unknown state resolves to no sprite and must be reported, not drawn"
         );
     }
 
