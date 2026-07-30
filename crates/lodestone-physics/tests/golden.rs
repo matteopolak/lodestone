@@ -30,8 +30,9 @@ use golden_traces::{
     GOLDEN_SLOW_FALLING_WATER, GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP,
     GOLDEN_SNEAK_EDGE_WALK_OFF, GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP,
     GOLDEN_STAND_LOW_CORRIDOR_CONTROL, GOLDEN_SWIM_GAP_BLOCKED_CONTROL, GOLDEN_SWIM_GAP_TUNNEL,
-    GOLDEN_SWIM_SPRINT, GOLDEN_WALK_FLAT, GOLDEN_WALK_INTO_WALL, GOLDEN_WATER_CURRENT_PUSH,
-    GOLDEN_WATER_SINK, GoldenTick,
+    GOLDEN_SWIM_LOOK_DOWN_DIVES, GOLDEN_SWIM_SPRINT, GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL,
+    GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN, GOLDEN_WALK_FLAT, GOLDEN_WALK_INTO_WALL,
+    GOLDEN_WATER_CURRENT_PUSH, GOLDEN_WATER_SINK, GoldenTick,
 };
 
 #[derive(Default)]
@@ -505,6 +506,172 @@ fn swim_sprint_matches_golden() {
             sneak: false,
             sprint: true,
         },
+    );
+}
+
+#[test]
+fn swim_look_down_dives_matches_golden() {
+    // Identical fixture and input to `swim_sprint_matches_golden`, but pitch =
+    // 60 (looking steeply down: lookAngleY = -sin(60 deg) ~= -0.866, past the
+    // -0.2 threshold, so the steeper 0.085 multiplier applies, `Player.java:
+    // 1408`). Issue #59: looking down while swimming did not make the player
+    // descend, because `Player.travel`'s look-descent term
+    // (`Player.java:1401-1415`) was never ported into `tick_water`. This test
+    // is the regression signal for that fix.
+    let mut world = World::default();
+    for y in 80..=100 {
+        for x in -2..=2 {
+            for z in -2..=2 {
+                world.add_water(x, y, z);
+            }
+        }
+    }
+    let mut state = PlayerState::at(Vec3d::new(0.5, 90.0, 0.5), 0.0);
+    state.pitch = 60.0;
+    assert_tick_trace(
+        "swim_look_down_dives",
+        &world,
+        state,
+        &GOLDEN_SWIM_LOOK_DOWN_DIVES,
+        MovementInput {
+            forward: 1.0,
+            strafe: 0.0,
+            jump: false,
+            sneak: false,
+            sprint: true,
+        },
+    );
+    // Tick 0 is still STANDING in both traces (`updateSwimming` reads the
+    // *previous* tick's `isSprinting`, so the swim pose cannot appear before
+    // tick 2's dispatch, i.e. golden index 1) -- so the first tick where the
+    // pitch-0 control (`GOLDEN_SWIM_SPRINT`) and this one could possibly
+    // differ is index 1, and that is exactly where they must.
+    assert_eq!(
+        f64::from_bits(GOLDEN_SWIM_SPRINT[0].vel[1]),
+        0.0,
+        "control: no vertical motion before the swim pose exists"
+    );
+    assert_eq!(
+        f64::from_bits(GOLDEN_SWIM_LOOK_DOWN_DIVES[0].vel[1]),
+        0.0,
+        "looking down changes nothing before the swim pose exists either"
+    );
+    assert_eq!(
+        f64::from_bits(GOLDEN_SWIM_SPRINT[1].vel[1]),
+        0.0,
+        "control: pitch 0 is the blend's own fixed point (lookAngleY == vy == 0), so sprint- \
+         swimming straight ahead never drifts vertically at all"
+    );
+    let looked_down_vy = f64::from_bits(GOLDEN_SWIM_LOOK_DOWN_DIVES[1].vel[1]);
+    assert!(
+        looked_down_vy < -0.01,
+        "looking down must pull the swimmer down from the first swimming tick, got {looked_down_vy}"
+    );
+}
+
+#[test]
+fn swim_surface_look_up_no_pulldown_matches_golden() {
+    // At the surface (a 10-block pool, world y 80.0..90.0): the swim box
+    // (feet 89.5, height 0.6) sits inside the topmost water block, but
+    // `BlockPos.containing(x, y + 1.0 - 0.1, z)` = floor(89.5 + 0.9) = 90,
+    // which is air -- so `headSubmerged` is false. Looking up (pitch = -60,
+    // lookAngleY ~= +0.866) makes every term of `lookAngleY <= 0.0 ||
+    // jumping || headSubmerged` false, so the descent term never fires. Since
+    // sprint-swimming also suppresses buoyancy
+    // (`getFluidFallingAdjustedMovement`'s `!sprinting` guard) and there is no
+    // vertical input, nothing moves the player vertically at all: a flat line
+    // at y = 89.5, vy = 0.0, for all 30 ticks.
+    //
+    // The pose is seeded directly (swimming + sprinting both `true` from tick
+    // 0), exactly like `elytra_gap_glide_matches_golden` seeds `FallFlying`:
+    // naturally *entering* swimming here would need the eye submerged under
+    // the STANDING 1.62 eye height, which this 10-block-deep pool cannot
+    // provide, and `updateSwimming` reads the *previous* tick's `sprinting`,
+    // so that must be seeded too or tick 1 would immediately undo the pose.
+    let mut world = World::default();
+    for y in 80..90 {
+        for x in -2..=2 {
+            for z in -2..=2 {
+                world.add_water(x, y, z);
+            }
+        }
+    }
+    world.solid(0, 40, 0);
+    let mut state = PlayerState::at(Vec3d::new(0.5, 89.5, 0.5), 0.0).with_pose(Pose::Swimming);
+    state.pitch = -60.0;
+    state.swimming = true;
+    state.sprinting = true;
+    assert_tick_trace(
+        "swim_surface_look_up_no_pulldown",
+        &world,
+        state,
+        &GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN,
+        MovementInput {
+            forward: 0.0,
+            strafe: 0.0,
+            jump: false,
+            sneak: false,
+            sprint: true,
+        },
+    );
+    for (t, tick) in GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN.iter().enumerate() {
+        assert_eq!(
+            f64::from_bits(tick.pos[1]),
+            89.5,
+            "tick {t}: no vertical drift while looking up"
+        );
+        assert_eq!(
+            f64::from_bits(tick.vel[1]),
+            0.0,
+            "tick {t}: vy stays exactly zero"
+        );
+    }
+}
+
+#[test]
+fn swim_surface_look_down_control_matches_golden() {
+    // WORLD CONTROL for `swim_surface_look_up_no_pulldown_matches_golden`:
+    // identical fixture and seed, pitch flipped to +60 so `lookAngleY <= 0.0`
+    // is true and the descent term fires every tick with the steep 0.085
+    // multiplier. If this trace matched the look-up one, the gate that test
+    // exercises would not be doing anything -- proving it is the look angle,
+    // and not some other difference between the two setups, driving the flat
+    // line there.
+    let mut world = World::default();
+    for y in 80..90 {
+        for x in -2..=2 {
+            for z in -2..=2 {
+                world.add_water(x, y, z);
+            }
+        }
+    }
+    world.solid(0, 40, 0);
+    let mut state = PlayerState::at(Vec3d::new(0.5, 89.5, 0.5), 0.0).with_pose(Pose::Swimming);
+    state.pitch = 60.0;
+    state.swimming = true;
+    state.sprinting = true;
+    assert_tick_trace(
+        "swim_surface_look_down_control",
+        &world,
+        state,
+        &GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL,
+        MovementInput {
+            forward: 0.0,
+            strafe: 0.0,
+            jump: false,
+            sneak: false,
+            sprint: true,
+        },
+    );
+    let final_y = f64::from_bits(
+        GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL
+            .last()
+            .unwrap()
+            .pos[1],
+    );
+    assert!(
+        final_y < 89.5 - 5.0,
+        "looking down at the surface must pull the swimmer down noticeably: y = {final_y}"
     );
 }
 

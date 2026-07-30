@@ -694,29 +694,38 @@ pub struct LiveCollision {
 /// cave, in preference to whatever real block is behind it.
 const AIR_BLOCKS: [&str; 3] = ["minecraft:air", "minecraft:cave_air", "minecraft:void_air"];
 
-/// The process-wide default version data, resolved once from the compiled-in
-/// family set. See [`default_version_data`].
+/// The process-wide inferred version data, resolved once from the compiled-in
+/// family set. See [`inferred_version_data`].
 static DEFAULT_VERSION_DATA: OnceLock<Option<Arc<dyn VersionAdapter>>> = OnceLock::new();
 
-/// The version data [`LiveCollision::new`] uses when the caller injects none.
+/// Infers the connected protocol's version data from the compiled-in family
+/// set, for callers of [`LiveCollision::new`] that have no better source.
 ///
-/// A live session's protocol is settled by the time anything collides — but
-/// `LiveCollision::new` is not handed it, so rather than leave the field empty
-/// (which reduces the whole world to unit cubes: see the type docs) this resolves
-/// the **sole compiled-in family**. That inference is sound in the only case it
-/// fires: a live connection exists at all *because*
-/// [`lodestone_registry::adapter_for_protocol`] matched a compiled family
-/// (`net.rs`), so with exactly one family compiled it is that one. A default build
-/// (no `live` feature) has none, and a hypothetical multi-family build is
-/// ambiguous; both log and fall back.
+/// # Issue #42 — this used to be reached for *inside* `new`, not passed in
 ///
-/// Prefer [`LiveCollision::with_version_data`], which passes the *connected*
-/// protocol's adapter and needs no inference. This exists so that no build can
-/// silently lose collision geometry by forgetting to wire it.
+/// `LiveCollision::new` used to call this itself whenever it wasn't handed a
+/// value, which made every `LiveCollision` in the process implicitly depend on
+/// a `OnceLock` nobody could see at the call site — including in tests, where
+/// "does this fixture have real shapes" silently depended on whether the test
+/// binary happened to be built `--features live`, not on anything the test
+/// itself stated. `version` is now a required constructor parameter (see
+/// [`LiveCollision::new`]'s docs): the shell's one production caller
+/// (`Sim::live_collision`, `sim.rs`) calls this function *explicitly* and
+/// passes the result in, and a test passes whatever it wants — `None`,
+/// `Some(a_real_adapter)`, or this same function — with no hidden state either
+/// way.
+///
+/// A live session's protocol is settled by the time anything collides, but the
+/// production caller has no cheaper way to name it than this inference: a live
+/// connection exists at all *because* [`lodestone_registry::adapter_for_protocol`]
+/// matched a compiled family (`net.rs`), so with exactly one family compiled it
+/// is that one. A default build (no `live` feature) has none, and a
+/// hypothetical multi-family build is ambiguous; both log and fall back to
+/// `None` (which reduces the whole world to unit cubes — see the type docs).
 ///
 /// Resolved once for the process: `adapter_for_protocol` builds a boxed adapter
 /// per call, and `LiveCollision` is rebuilt every tick.
-fn default_version_data() -> Option<Arc<dyn VersionAdapter>> {
+pub(crate) fn inferred_version_data() -> Option<Arc<dyn VersionAdapter>> {
     DEFAULT_VERSION_DATA
         .get_or_init(|| {
             let protocols = lodestone_registry::supported_protocols();
@@ -762,14 +771,23 @@ impl LiveCollision {
     /// exactly once, here, to build the dense grid every later lookup reads.
     /// See [`Self::grid`] for why.
     ///
-    /// Version data defaults to [`default_version_data`]; override it with
-    /// [`with_version_data`](Self::with_version_data).
+    /// `version` is a required parameter, not an inferred default (issue #42):
+    /// the caller states what collision geometry this view has, rather than
+    /// `new` reaching for [`inferred_version_data`] on its own. The production
+    /// caller (`Sim::live_collision`) passes `inferred_version_data()`
+    /// explicitly; a test passes `None`, a hand-built adapter, or the same
+    /// function, whichever the case under test needs — see
+    /// [`inferred_version_data`]'s docs for why the implicit form was a
+    /// problem. [`with_version_data`](Self::with_version_data) remains for
+    /// overriding it after construction (the "degraded view" test fixtures use
+    /// it that way).
     #[must_use]
     pub fn new(
         sections: HashMap<(i32, i32, usize), Arc<ChunkSection>>,
         min_y: i32,
         section_count: usize,
         atlas: Arc<BlockAtlas>,
+        version: Option<Arc<dyn VersionAdapter>>,
     ) -> Self {
         // Three `state_id_of` lookups (a hash of a `(name, properties)` key each)
         // per snapshot. The snapshot itself already clones ~200 `Arc<ChunkSection>`
@@ -798,7 +816,7 @@ impl LiveCollision {
             min_y,
             section_count,
             atlas,
-            version: default_version_data(),
+            version,
             air_states,
         }
     }
@@ -843,11 +861,16 @@ impl LiveCollision {
         (grid, min_cx, min_cz, width_x, width_z)
     }
 
-    /// Use `version` as the source of per-state collision shapes and block names.
+    /// Override the version data [`new`](Self::new) was built with, after
+    /// construction.
     ///
-    /// This is the explicit form of what [`new`](Self::new) infers: pass the
-    /// adapter for the protocol actually connected. Cheap — the adapter is shared
-    /// by `Arc` and every lookup through it returns `&'static` rodata.
+    /// `new` already requires `version` as a constructor parameter (issue
+    /// #42), so the only remaining use for this builder is *changing* it on an
+    /// existing view — chiefly the "degraded view" test fixtures, which build
+    /// a view with real data and then call `with_version_data(None)` to
+    /// exercise the no-census fallback on the same states. Cheap either way —
+    /// the adapter is shared by `Arc` and every lookup through it returns
+    /// `&'static` rodata.
     #[must_use]
     pub fn with_version_data(mut self, version: Option<Arc<dyn VersionAdapter>>) -> Self {
         self.version = version;
@@ -904,16 +927,6 @@ impl LiveCollision {
     #[must_use]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         self.atlas.classify(self.block_at(x, y, z), 0, 0).occludes
-    }
-
-    /// The fluid occupying these coordinates, from the *same* classification the
-    /// mesher draws the water surface with ([`vanilla_fluid`]). This is the one
-    /// place the live view answers "is there fluid here"; both
-    /// [`is_water`](CollisionView::is_water) and [`is_lava`](CollisionView::is_lava)
-    /// are thin reads of it, so they cannot disagree about a waterlogged block.
-    #[must_use]
-    fn fluid_kind(&self, x: i32, y: i32, z: i32) -> Option<FluidKind> {
-        vanilla_fluid(&self.atlas, self.block_at(x, y, z))
     }
 
     /// The block-local **outline** boxes for a state — vanilla
@@ -1484,6 +1497,12 @@ mod tests {
 
     /// A one-section live view (chunk `0,0`, `min_y = 0`) whose cells at
     /// `y_range` hold `state` and whose remaining cells are air.
+    ///
+    /// Passes [`inferred_version_data`] explicitly (issue #42: `new` no longer
+    /// reaches for it on its own) — the real census when the test binary is
+    /// built `--features live` against a compiled family, `None` otherwise,
+    /// exactly [`LiveCollision::new`]'s old implicit behaviour, now visible at
+    /// the call site instead of hidden inside it.
     fn live_column(
         atlas: Arc<BlockAtlas>,
         state: u32,
@@ -1506,7 +1525,7 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        LiveCollision::new(sections, 0, 1, atlas)
+        LiveCollision::new(sections, 0, 1, atlas, inferred_version_data())
     }
 
     /// The block-local boxes this view resolves for a single cell holding
@@ -2064,7 +2083,7 @@ mod tests {
         }
         let mut sections = HashMap::new();
         sections.insert((0, 0, 0), Arc::new(section));
-        let view = LiveCollision::new(sections, 0, 1, Arc::clone(&atlas));
+        let view = LiveCollision::new(sections, 0, 1, Arc::clone(&atlas), inferred_version_data());
 
         let hit = crate::raycast::raycast([0.5, 6.5, 0.5], [0.0, -1.0, 0.0], 4.0, |x, y, z| {
             view.is_pickable(x, y, z)
@@ -2094,15 +2113,110 @@ mod tests {
         assert!(!fs.under_water(), "lava must not read as water: {fs:?}");
     }
 
+    /// **Issue #31, the world-species control.** A uniform pool — every cell
+    /// the same source, as the two spot checks above use — can satisfy every
+    /// `fluid_at` assertion even if the resolver ignored the `level` property
+    /// outright and hard-coded amount 8: the fixture never contains two
+    /// different levels to disagree about (`CLAUDE.md`'s "world" species of
+    /// vacuous test — the flaw lives in the input data, not the assertions).
+    /// This builds the one structure that can actually falsify it: a single
+    /// column stepping through every real `level` value, `0..=8`, the way a
+    /// waterfall or a draining pool actually looks in a live world.
+    ///
+    /// Layer `y` holds `minecraft:water[level=y]`. Expected `(amount,
+    /// falling)` pairs are vanilla's own `LiquidBlock` state-cache rule, read
+    /// out of `LiquidBlock.java`'s constructor — `stateCache.add(fluid.
+    /// getSource(false))` for `level 0`, then `fluid.getFlowing(8 - level,
+    /// false)` for `level` in `1..8`, then `fluid.getFlowing(8, true)` for
+    /// `level >= 8` — not derived from this crate's own encoder, per the
+    /// task's evidence standard.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn a_flowing_water_column_reports_the_real_per_level_amount_and_falling_flag() {
+        let atlas = vanilla_atlas();
+
+        let mut section = ChunkSection::new(
+            PaletteKind::block_states_with_direct_bits(20),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        for level in 0u8..=8 {
+            let id = state_id(&atlas, &format!("minecraft:water[level={level}]"));
+            for x in 0..16 {
+                for z in 0..16 {
+                    section.set_block(x, usize::from(level), z, id);
+                }
+            }
+        }
+        let mut sections = HashMap::new();
+        sections.insert((0, 0, 0), Arc::new(section));
+        let view = LiveCollision::new(sections, 0, 1, atlas, inferred_version_data());
+        assert!(
+            view.has_real_shapes(),
+            "no version collision census is wired in — run with --features live"
+        );
+
+        // (y, expected amount, expected falling)
+        let expected: &[(i32, u8, bool)] = &[
+            (0, 8, false), // level 0: source
+            (1, 7, false),
+            (2, 6, false),
+            (3, 5, false),
+            (4, 4, false),
+            (5, 3, false),
+            (6, 2, false),
+            (7, 1, false),
+            (8, 8, true), // level >= 8: falling, full again
+        ];
+        for &(y, amount, falling) in expected {
+            let cell = view
+                .fluid_at(0, y, 0)
+                .unwrap_or_else(|| panic!("y={y} must report a fluid cell"));
+            assert_eq!(cell.amount, amount, "y={y}: wrong amount");
+            assert_eq!(cell.falling, falling, "y={y}: wrong falling flag");
+        }
+
+        // The control that proves the detector fires: a cell this fixture never
+        // set (y=9, outside the column) must report no fluid at all. Without
+        // this, a resolver that reported *some* fixed cell for every `y` —
+        // vacuously "passing" by never returning `None` — would not be caught.
+        assert_eq!(
+            view.fluid_at(0, 9, 0),
+            None,
+            "control: air above the column carries no fluid"
+        );
+    }
+
     /// The boundary the four consumers now share: **eye exactly at the water
     /// surface**. Vanilla's `isEyeInFluid` test is `eyeY <= fluidTop` — inclusive
     /// — so an eye resting exactly on the surface plane counts as submerged.
     /// Pinned here because fog, overlay, sounds and pose all flip on it.
     ///
-    /// The column is water up to `y = 2` (top plane `y = 3.0`, the coarse
-    /// full-cell height this adapter commits to). The eye height is chosen so the
-    /// eye Y is *exactly* `3.0` with no float slop, and the two neighbours
-    /// straddle it.
+    /// # Correction (found while closing issue #31, `fluid_at`)
+    ///
+    /// This test used to seed a column `0..=2` and assert the surface sat at the
+    /// coarse full-cell plane `y = 3.0` (`2.0 + 1.0`). That was right *when it was
+    /// written* — `LiveCollision::fluid_at` returned `None` (nothing but
+    /// `is_water`/`is_lava` presence) until `67ff7c3`, one commit later,
+    /// implemented [`fluid_cell_of`](LiveCollision::fluid_cell_of) for real. The
+    /// moment that landed, this test started asserting a height vanilla never
+    /// produces for a *source block with air above*: `FluidState.getHeight` is
+    /// `hasSameAbove ? 1.0 : getOwnHeight()`, and a lone source's own height is
+    /// `getAmount()/9.0 = 8/9`, not `1.0` — `1.0` only applies to a cell that
+    /// itself has the *same fluid* directly above it (see [`fluid_at`]'s own
+    /// doc). This test's own bottom two cells (`y = 0, 1`) do get the `1.0`
+    /// treatment for exactly that reason; only the *top* cell of a body of water
+    /// is a fractional surface. Running this test caught the drift outright — a
+    /// hard failure (`eye_in_water: false` at the old boundary), not a silent
+    /// wrong answer — which is the point of pinning a boundary instead of an
+    /// interior point.
+    ///
+    /// The column is water up to `y = 2`; the top cell (`y = 2`) has air above
+    /// it, so its own height is `8.0/9.0`, computed here with the same `f32`
+    /// widening [`crate::collision`]'s `cell_height` uses (via
+    /// [`lodestone_physics::FluidCell::own_height`]) so the two land on the exact
+    /// same bit pattern rather than an independently-rounded approximation.
     #[test]
     #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
     fn eye_exactly_at_the_water_surface_counts_as_submerged() {
@@ -2110,9 +2224,13 @@ mod tests {
         let id = state_id(&atlas, "minecraft:water[level=0]");
         let view = live_column(Arc::clone(&atlas), id, 0..=2);
 
-        // Eye exactly on the surface plane: 2.0 + 1.0 == 3.0, both exact in f32
-        // and f64, so this is the true boundary and not a rounding artefact.
-        let on = fluid_state_at(&view, 2.0, 1.0);
+        // `FluidCell::own_height()` for a source (amount 8): `8.0f32 / 9.0f32`.
+        // The top cell (y=2) has no water above it, so `hasSameAbove` is false
+        // and this — not `1.0` — is vanilla's real surface height there.
+        let own_height = 8.0f32 / 9.0f32;
+
+        // Eye exactly on the surface plane.
+        let on = fluid_state_at(&view, 2.0, own_height);
         assert!(
             on.under_water(),
             "an eye exactly at the water surface is submerged (vanilla's <=): {on:?}"
@@ -2121,7 +2239,7 @@ mod tests {
         // A hair above the surface: dry eye, but the box is still in water, so
         // `in_water` stays true while `under_water` flips. That pair is what makes
         // this a boundary rather than an on/off.
-        let above = fluid_state_at(&view, 2.0, 1.001);
+        let above = fluid_state_at(&view, 2.0, own_height + 0.001);
         assert!(
             !above.under_water(),
             "an eye above the surface is not submerged: {above:?}"
@@ -2132,7 +2250,7 @@ mod tests {
         );
 
         // A hair below: submerged.
-        let below = fluid_state_at(&view, 2.0, 0.999);
+        let below = fluid_state_at(&view, 2.0, own_height - 0.001);
         assert!(
             below.under_water(),
             "an eye below the surface is submerged: {below:?}"

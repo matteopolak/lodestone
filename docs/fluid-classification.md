@@ -73,17 +73,55 @@ Two id spaces, two accessors, one rule:
 - `ShellClassifier::fluid(state_id)` dispatches between them for callers that hold
   the session's classifier.
 
-### Coarseness
+### Coarseness (issue #31 — closed)
 
 `CollisionView` also has a finer `fluid_at` hook that reports the cell's *level*, so
-`compute_fluid_state` can use vanilla's real `amount / 9.0` heights. The shell's
-adapters deliberately do **not** implement it: they answer only the coarse
-presence booleans, and `compute_fluid_state` then treats a present cell as a full
-cell (height `1.0`). That is exact for the fully-submerged common case and matches
-the coarseness the rest of the adapter already commits to (full-cube colliders
-only). Implementing `fluid_at` from `BlockModels::fluid` — which already carries
-`FluidState { amount, falling }` — is the natural next step if surface bobbing or
-fluid-push ever matters.
+`compute_fluid_state` can use vanilla's real `amount / 9.0` heights instead of
+treating every fluid cell as a full block.
+
+**Correction:** an earlier version of this section said the shell's adapters
+"deliberately do not implement it: they answer only the coarse presence
+booleans." That was true when written, but `67ff7c3` ("armour equips, slabs
+collide, and blocks get a real selection box") implemented
+`LiveCollision::fluid_cell_of` for real — reading `BlockModels::fluid`'s
+already-carried `FluidState { amount, falling }` one level deeper than
+`vanilla_fluid` does — and nobody updated this paragraph afterward. It survived
+the next docs pass (`f03b3cb`) too, because that commit touched other sections
+of this file and not this one. Re-verified while closing issue #31: `git blame`
+puts the real implementation a full day *before* this doc's last edit, so the
+staleness was not a case of the fix landing after the doc — the doc was simply
+never corrected.
+
+The real state, as of the collision-shape census work:
+
+- **`LiveCollision::fluid_at`** is real. It resolves the block's vanilla `level`
+  property through `BlockModels::fluid` (the same call `vanilla_fluid` makes,
+  read one level deeper) and reports `amount` (`1..=8`) and `falling`, matching
+  `LiquidBlock`'s state-cache rule exactly: `level 0` → source, amount `8`;
+  `level 1..=7` → flowing, amount `8 - level`; `level >= 8` → falling, amount
+  `8`. Pinned against a real flowing column (levels `0..=8` in one fixture, not
+  a uniform pool) by
+  `a_flowing_water_column_reports_the_real_per_level_amount_and_falling_flag`
+  in `crates/lodestone-shell/src/collision.rs`.
+- **`WorldCollision::fluid_at`** still deliberately returns `None`: the demo
+  palette's water is a single property-less id with no `level`, so there is no
+  amount to report, and fabricating "source, amount 8" would invent a current
+  in flat demo lakes that don't have one.
+- **The height rule that consumes it** — `FluidState.getHeight` =
+  `hasSameAbove ? 1.0 : getOwnHeight()` — lives in
+  `lodestone_physics::fluid_state::cell_height`, not in this module. It already
+  prefers the fine `fluid_at` level when a view provides one and falls back to
+  a full cell (height `1.0`) when it doesn't (exactly `WorldCollision`'s case).
+  See that module's doc comment for the one known approximation left in it:
+  `hasSameAbove` folds down to "same `FluidKind` above" (water-above-water or
+  lava-above-lava) rather than vanilla's exact `Fluid`-instance equality, which
+  in real vanilla distinguishes a *source* from *flowing* water as two
+  different `Fluid` objects. The two disagree only at the one cell directly
+  under a source sitting on top of a flowing column (e.g. a waterfall's inlet):
+  vanilla would *not* treat that boundary as "the same fluid above" and would
+  report the flowing cell's own fractional height there, while this port
+  reports `1.0`. Left as a documented, narrow approximation rather than fixed,
+  since it costs at most ~0.11 blocks of height on one cell per fluid body.
 
 ## How to change it
 

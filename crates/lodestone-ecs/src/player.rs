@@ -41,10 +41,20 @@
 //!
 //! ```text
 //! GameTick
-//!   TickSet::Input     (controller) tick_sprint_window ← compute_movement_intent
+//!   TickSet::Intent    apply_look_intent
+//!                      → (controller) compute_movement_intent → tick_sprint_window
 //!   TickSet::Physics   player_physics
 //!   TickSet::Send      (controller) send_move_action → send_player_input
 //! ```
+//!
+//! This diagram used to put the controller's two systems in `TickSet::Input`.
+//! They are in **`TickSet::Intent`**, alongside [`apply_look_intent`], and the
+//! ordering *within* that set is load-bearing rather than incidental:
+//! `apply_look_intent` takes `&mut PhysicsState` to commit this tick's rotation
+//! while `compute_movement_intent` takes `&PhysicsState`, so the two are a real
+//! write/read pair. Left unordered they fail the schedule build under strict
+//! ambiguity detection — see `lodestone_controller::ecs`'s
+//! `exactly_one_system_writes_movement_intent`, which is the guard that caught it.
 //!
 //! `Send` last is the point of the stage: a plugin adding a system
 //! `.after(TickSet::Physics).before(TickSet::Send)` changes what the server is
@@ -58,12 +68,14 @@ use bevy_ecs::prelude::{Entity, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::world::World;
+use lodestone_entity::attribute::{attribute_value, water_movement_efficiency_key};
 use lodestone_model::{ClientAction, PlayerInput};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
     Vec3d, compute_fluid_state, tick_among_entities,
 };
 
+use crate::entity::Attributes;
 use crate::schedules::{Extract, GameTick};
 use crate::sets::{ExtractSet, TickSet};
 
@@ -497,6 +509,17 @@ fn player_fluid_state(
 /// sprint speed maths (no double-count) while the sprint flag still drives the
 /// sprint jump boost.
 ///
+/// `WATER_MOVEMENT_EFFICIENCY` (Depth Strider) is injected the same way, via
+/// [`PlayerState::with_water_movement_efficiency`], folded each tick from the
+/// [`Attributes`] component through [`attribute_value`]'s vanilla three-stage
+/// `calculateValue` (`docs/swimming.md`). `Attributes` is `Option`al because it
+/// is only inserted on `ClientEvent::Login`
+/// (`lodestone_ecs::ingest::apply_local_player_login`) — the offline demo
+/// world and the pre-login title-screen player carry no attribute snapshot at
+/// all, and [`attribute_value`] already reads "no snapshot for this key" as
+/// the registry default (`0.0`), so `None` here folds to the same inert value
+/// an empty snapshot list would.
+///
 /// [`PrevPosition`] is captured here rather than by the driver so that a
 /// plugin adding a second `GameTick` system cannot desynchronise the camera's
 /// interpolation anchor from the tick that actually moved the player.
@@ -512,12 +535,13 @@ pub fn player_physics(
             &MovementIntent,
             &Flying,
             &SprintKeyHeld,
+            Option<&Attributes>,
         ),
         With<LocalPlayer>,
     >,
 ) {
     let profile = &profile.0;
-    for (mut state, mut fluid, mut prev, intent, flying, sprint_key) in &mut players {
+    for (mut state, mut fluid, mut prev, intent, flying, sprint_key, attributes) in &mut players {
         prev.0 = state.0.position;
         let player = &mut state.0;
         let intent = intent.0;
@@ -541,6 +565,11 @@ pub fn player_physics(
             base
         };
         *player = player.with_movement_speed(attr);
+
+        let efficiency = attributes.map_or(0.0, |attrs| {
+            attribute_value(&attrs.0, &water_movement_efficiency_key())
+        });
+        *player = player.with_water_movement_efficiency(efficiency as f32);
 
         if let PlayerCollision::View(source) = &*collision {
             source.with_view(&mut |view| {
@@ -1040,5 +1069,66 @@ mod tests {
             "the clear must have run before the plugin's write"
         );
         assert_eq!(lines[0].end, Vec3d::new(2.0, 0.0, 0.0));
+    }
+
+    /// **Depth Strider, the routing gate.** `docs/swimming.md` tracked this as
+    /// "still open, and it is one line: nothing consumes the value" — the fold
+    /// itself (`lodestone_entity::attribute`) and the read side
+    /// (`ClientHandle::local_player_attributes`) already existed, but no
+    /// scheduled system ever called them. This pins that a
+    /// `water_movement_efficiency` snapshot on the [`Attributes`] component
+    /// actually reaches [`PlayerState::water_movement_efficiency`] through a
+    /// real `GameTick` run, not merely through a hand-called function — the
+    /// same island class `CLAUDE.md` rule 1 is about, one layer downstream of
+    /// the `EntityIndex` fix.
+    ///
+    /// The modifier shape (`AddValue` `+0.99`) mirrors the worked example in
+    /// `lodestone_entity::attribute`'s own tests; the exact number is
+    /// arbitrary, chosen only to be recognisably non-default and non-1.0 so a
+    /// build that clamped or rounded would be caught.
+    #[test]
+    fn depth_strider_attribute_reaches_the_physics_state_each_tick() {
+        use lodestone_model::{EntityAttributeModifier, EntityAttributeSnapshot, Identifier};
+        use std::str::FromStr;
+
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        app.world_mut().entity_mut(entity).insert(Attributes(vec![EntityAttributeSnapshot {
+            attribute: water_movement_efficiency_key(),
+            base: 0.0,
+            modifiers: vec![EntityAttributeModifier {
+                id: Identifier::from_str("minecraft:enchantment/depth_strider").unwrap(),
+                amount: 0.99,
+                operation: 0, // AddValue
+            }],
+        }]));
+
+        run_tick(&mut app);
+
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(
+            (state.water_movement_efficiency - 0.99).abs() < 1e-6,
+            "Depth Strider's folded attribute must reach PlayerState each tick, got {}",
+            state.water_movement_efficiency
+        );
+    }
+
+    /// The control for the gate above: with no [`Attributes`] component at all
+    /// — the offline demo world and the pre-login title-screen player, per
+    /// [`player_physics`]'s own docs — the fold must read the registry default
+    /// rather than inventing a value or panicking on the missing component.
+    /// Without this, a system that always wrote a hard-coded constant would
+    /// pass the positive test above just as well.
+    #[test]
+    fn no_attributes_component_folds_to_the_registry_default() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+
+        run_tick(&mut app);
+
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert_eq!(
+            state.water_movement_efficiency, 0.0,
+            "control: no attribute snapshot at all must fold to the default, not a stale \
+             or hard-coded value"
+        );
     }
 }

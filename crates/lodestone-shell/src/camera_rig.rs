@@ -15,6 +15,57 @@
 //! the same number either way — but the value passed in was then not the feet
 //! while any non-standing pose was active, which is the kind of comment-shaped
 //! lie that costs someone an afternoon. Pass the eye height.
+//!
+//! # The eye height must be *smoothed*, not read raw (issue #59)
+//!
+//! A pose change (standing `1.62` ↔ swimming `0.4`) is a **snap** in
+//! [`PlayerState::eye_height`] — it is set once, atomically, by
+//! `crate::pose::update_player_pose` (`Player.java:343-357`). Passing that
+//! straight into [`build_camera`] every frame is exactly what vanilla does
+//! *not* do, and is the source of the entering/leaving-swim camera jerk: real
+//! `Camera` (`.cache/mc/26.2/client-src/net/minecraft/client/Camera.java`)
+//! keeps its **own** `eyeHeight`/`eyeHeightOld` pair, entirely separate from
+//! the entity's, and eases toward the target by half the remaining distance
+//! every tick:
+//!
+//! ```java
+//! // Camera.tick(), :80-88
+//! this.eyeHeightOld = this.eyeHeight;
+//! this.eyeHeight = this.eyeHeight + (this.entity.getEyeHeight() - this.eyeHeight) * 0.5F;
+//! ```
+//!
+//! and reads it with the same current/previous + partial-tick shape as the
+//! player's own position (`Camera.alignWithEntity`, `:246-264`):
+//!
+//! ```java
+//! Mth.lerp(partialTicks, this.entity.yo, this.entity.getY())
+//!    + Mth.lerp(partialTicks, this.eyeHeightOld, this.eyeHeight)
+//! ```
+//!
+//! [`EyeHeightSmoother`] is that pair. **It is not `swimAmount`.** `swimAmount`
+//! (`LivingEntity.java:174,275-276,3478-3483`, modelled as
+//! [`PlayerState::swim_amount`]/`swim_amount_o`) is a linear `0..1` ramp at
+//! `0.09`/tick that blends the swimming **model**'s body-pitch animation —
+//! grepping every `.cache/mc/26.2/client-src` hit for `swimAmount` turns up
+//! only `HumanoidModel`, `HumanoidMobRenderer`, `DrownedRenderer`/`DrownedModel`
+//! and the humanoid render state, never `Camera` or `GameRenderer`. The two
+//! ramps happen to share the "current + previous twin, partial-tick lerp"
+//! shape, but their update rules differ (exponential decay toward a target vs.
+//! a linear clamped increment) and they smooth two unrelated things, so they
+//! are kept as two separate types rather than forced into one.
+//!
+//! A working smoother needs state that outlives one frame — unlike everything
+//! else in this module, [`EyeHeightSmoother`] cannot be a pure function of the
+//! current [`PlayerState`]. The intended owner is the same place that already
+//! owns the analogous per-tick smoothing state
+//! (`lodestone_shell::sim::Sim::body_pose`, ticked once per physics tick in
+//! `Sim::step`): a `Sim`-owned `EyeHeightSmoother`, ticked once per physics
+//! tick from the *post-tick* pose's eye height, and read back through
+//! [`EyeHeightSmoother::lerp`] with the frame's interpolation alpha wherever
+//! `Sim::camera` currently reads `interp.eye_height` raw
+//! (`lodestone-shell/src/sim.rs:3429-3437`). That call site is out of this
+//! change's scope (`sim.rs` is held by another agent) — see `docs/swimming.md`
+//! for the exact patch to apply there.
 
 use glam::Vec3;
 use lodestone_physics::{Aabb, CollisionView, PlayerState};
@@ -207,6 +258,61 @@ fn sign(v: f32) -> i32 {
     }
 }
 
+/// `Camera`'s own `eyeHeight`/`eyeHeightOld` pair (`Camera.java:59-60,80-88`) —
+/// the fix for issue #59's entering/leaving-swim camera jerk.
+///
+/// This is deliberately **not** [`PlayerState::swim_amount`]; see the module
+/// docs for why the two must stay separate. Own one of these per camera (per
+/// [`PlayerState`], for split-screen or spectating another entity) and:
+///
+/// * call [`Self::tick`] exactly once per **physics** tick, with the target
+///   pose's eye height (`entity.getEyeHeight()`, i.e. [`PlayerState::eye_height`]
+///   *after* that tick's pose update) — never once per frame, or the `0.5`
+///   decay rate would not match vanilla's fixed 20 Hz tick;
+/// * read the camera's actual eye height every **frame** via [`Self::lerp`]
+///   with the frame's partial-tick alpha, exactly like the player's own
+///   position interpolation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EyeHeightSmoother {
+    /// `Camera.eyeHeightOld` — the value as of the *previous* tick.
+    previous: f32,
+    /// `Camera.eyeHeight` — the value as of the *current* tick.
+    current: f32,
+}
+
+impl EyeHeightSmoother {
+    /// A smoother with no jerk to ease out of — both the current and previous
+    /// value start at `initial_eye_height`, matching a `Camera` freshly bound
+    /// to an entity (its `eyeHeight`/`eyeHeightOld` fields default to `0.0F`,
+    /// but the very next [`Self::tick`] call, given a real target, is what
+    /// actually matters here; seeding both fields equal is what keeps that
+    /// first tick from itself producing a spurious half-jump).
+    #[must_use]
+    pub fn new(initial_eye_height: f32) -> Self {
+        Self {
+            previous: initial_eye_height,
+            current: initial_eye_height,
+        }
+    }
+
+    /// `Camera.tick()` (`Camera.java:80-88`): ease halfway from the current
+    /// smoothed value toward `target_eye_height` (the entity's real, possibly
+    /// just-snapped, pose eye height). Call this once per physics tick.
+    pub fn tick(&mut self, target_eye_height: f32) {
+        self.previous = self.current;
+        self.current += (target_eye_height - self.current) * 0.5;
+    }
+
+    /// `Mth.lerp(partialTicks, eyeHeightOld, eyeHeight)` — the frame's actual
+    /// eye height, interpolated between the last two ticks' smoothed values by
+    /// `alpha` (the same partial-tick fraction used for position
+    /// interpolation elsewhere). `alpha` is not clamped, matching `Mth.lerp`.
+    #[must_use]
+    pub fn lerp(&self, alpha: f32) -> f32 {
+        self.previous + (self.current - self.previous) * alpha
+    }
+}
+
 /// Construct the render camera for the given player state, **eye height above
 /// the feet**, viewport aspect, and render distance (in chunks).
 ///
@@ -244,6 +350,56 @@ mod tests {
     use super::*;
     use lodestone_physics::Vec3d;
     use lodestone_render::camera::PLAYER_EYE_HEIGHT;
+
+    // --- EyeHeightSmoother: Camera.tick()'s eyeHeight/eyeHeightOld pair. ---
+
+    #[test]
+    fn a_fresh_smoother_reports_the_seeded_height_before_any_tick() {
+        let s = EyeHeightSmoother::new(1.62);
+        assert_eq!(s.lerp(0.0), 1.62);
+        assert_eq!(s.lerp(1.0), 1.62);
+        assert_eq!(s.lerp(0.5), 1.62);
+    }
+
+    #[test]
+    fn one_tick_covers_exactly_half_the_remaining_distance() {
+        // Standing (1.62) diving to swimming (0.4): a real pose snap.
+        let mut s = EyeHeightSmoother::new(1.62);
+        s.tick(0.4);
+        // previous = 1.62 (pre-tick), current = 1.62 + (0.4 - 1.62) * 0.5 = 1.01.
+        assert!((s.lerp(0.0) - 1.62).abs() < 1e-6, "partial 0 reads the old value");
+        assert!((s.lerp(1.0) - 1.01).abs() < 1e-6, "partial 1 reads the new value");
+        assert!(
+            (s.lerp(0.5) - 1.315).abs() < 1e-6,
+            "partial 0.5 is the midpoint of old/new, not of target"
+        );
+    }
+
+    #[test]
+    fn repeated_ticks_converge_toward_the_target_without_ever_snapping() {
+        let mut s = EyeHeightSmoother::new(1.62);
+        let mut prev_gap = f32::INFINITY;
+        for _ in 0..20 {
+            s.tick(0.4);
+            let gap = (s.lerp(1.0) - 0.4).abs();
+            assert!(gap <= prev_gap, "distance to target must not increase");
+            prev_gap = gap;
+        }
+        assert!(prev_gap < 1e-4, "converges close to the target: {prev_gap}");
+        assert_ne!(prev_gap, 0.0, "exponential decay never exactly reaches it");
+    }
+
+    #[test]
+    fn a_pose_reverting_before_the_ramp_settles_reverses_direction_smoothly() {
+        // Dive then immediately surface: the smoother must not have "memorised"
+        // a direction — it eases toward whatever the current target is.
+        let mut s = EyeHeightSmoother::new(1.62);
+        s.tick(0.4);
+        let mid = s.lerp(1.0);
+        assert!(mid < 1.62, "eased toward swimming");
+        s.tick(1.62);
+        assert!(s.lerp(1.0) > mid, "eases back up, not stuck low");
+    }
 
     #[test]
     fn eye_is_above_feet() {

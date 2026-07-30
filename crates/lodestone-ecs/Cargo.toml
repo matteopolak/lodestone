@@ -31,6 +31,13 @@ lodestone-model = { workspace = true }
 # caller. wasm-safe: `lodestone-controller` already depends on it and is in
 # `scripts/wasm-check.sh`'s crate list.
 lodestone-physics = { workspace = true }
+# Depth Strider (docs/swimming.md): `player_physics` folds the local player's
+# `Attributes` component through vanilla's three-stage `calculateValue` to
+# reach `PlayerState::water_movement_efficiency`. `lodestone-entity` depends
+# only on `lodestone-model` + `uuid` (both already in this graph), so this adds
+# no new wasm surface. Never a version crate (§5): the fold is keyed by
+# canonical attribute id, not a version-specific wire shape.
+lodestone-entity = { workspace = true }
 # Stage 3: the session/HUD component set *is* `lodestone-game`'s canonical
 # aggregates (`scoreboard::Scoreboard`, `tablist::TabList`, `bossbar::BossBarSet`,
 # `menus::Menus`, `effect::ActiveEffects`, `player_state::{TitleState, ActionBar}`).
