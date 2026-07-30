@@ -65,6 +65,17 @@ lodestone-server = { path = "../lodestone-server" }
 # (`lodestone-game/tests/live_server.rs`) hand-rolled the whole handshake over a
 # raw `TcpStream`. See `menu/status.rs`.
 lodestone-net = { workspace = true }
+# Microsoft device-code sign-in and multi-account storage (issue #65/#66):
+# `menu/accounts.rs`'s account switcher and `net.rs`'s `connect_online` path
+# both need `lodestone_auth` directly, not just through `lodestone_client`'s
+# re-export of `Session`/`AuthError` — the switcher drives the interactive
+# flow and the keychain-backed store, neither of which `lodestone-client`
+# exposes (it only consumes an already-authenticated `Session`).
+lodestone-auth = { workspace = true }
+# `menu/accounts.rs` builds its own short-lived `reqwest::Client` to drive the
+# device-code/refresh calls interactively from the account-switcher screen
+# (the same crate `lodestone-auth`'s own chain runs on).
+reqwest = { workspace = true }
 
 # GPU / windowing / math.
 wgpu = { workspace = true }

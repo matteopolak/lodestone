@@ -4,8 +4,10 @@
 
 The GUI entry point. Running `lodestone` with no connection flags opens on a title
 screen instead of dropping straight into the local dev world: Singleplayer /
-Multiplayer / Quit, a persisted multiplayer server list with add/edit/delete, and
-a per-server status ping showing MOTD, player count, latency and favicon.
+Multiplayer / Quit, a persisted multiplayer server list with add/edit/delete, a
+per-server status ping showing MOTD, player count, latency and favicon, and an
+account list (issue #66) for the Microsoft accounts `lodestone-auth` knows
+about plus an always-present offline entry.
 
 It lives entirely under [`crates/lodestone-shell/src/menu/`](../crates/lodestone-shell/src/menu/):
 
@@ -16,6 +18,7 @@ It lives entirely under [`crates/lodestone-shell/src/menu/`](../crates/lodestone
 | `menu/render.rs` | layout, the frame builder, and a self-contained GPU pipeline |
 | `menu/servers.rs` | `ServerEntry` / `ServerList` and the on-disk JSON |
 | `menu/status.rs` | background status pings and their cache |
+| `menu/accounts.rs` | the account list + device-code sign-in flow (see `docs/accounts.md`) |
 
 ## The title screen is vanilla's layout, from vanilla's source
 
@@ -275,13 +278,84 @@ each cell is two screen pixels.
 `FaviconCache` memoises the decode by address. Without it, `frame_for` would
 inflate every visible server's PNG **every frame**.
 
+### Account list (issue #66)
+
+`Screen::Accounts`, reached from the title screen's non-vanilla `Accounts` row
+(`nav::MainButton::Accounts` — real Minecraft has no in-game account switcher
+at all; an account is chosen once, outside the game, by the separate
+Minecraft Launcher, and Lodestone has no separate launcher). Unlike every
+other `MainButton`, it has no `TitleScreen.java` line to cite and is placed
+below vanilla's own four-row grid rather than inserted into it, precisely so
+it cannot be mistaken for a reproduced vanilla rect.
+
+`menu/accounts.rs`'s `AccountsNav` owns everything about the screen: the
+loaded `AccountsMetadata`, which row is highlighted, the scroll window, and
+the device-code sign-in flow's state machine. `nav.rs`'s `key_accounts` is a
+thin dispatcher — one call to `AccountsNav::handle_key`, translating its one
+`AccountsSignal::Back` outcome into leaving the screen. See `docs/accounts.md`
+for the account/keychain/metadata side of this in detail; this file only
+covers how the *screen* is built:
+
+- **Scrollable, unlike the server list.** `VISIBLE_ROWS` (5) rows show at
+  once; `AccountsNav` tracks a `scroll` offset and keeps the highlighted row
+  inside the window on every Up/Down. The server list still has no scrolling
+  at all (see "Left for polish" below) — fixing it here first, on a new
+  screen, does not fix it there; that remains a real gap.
+- **Real nine-slice buttons on a row-stack screen, for the first time.** Add
+  account / Select / Remove / Cancel draw through the exact same
+  `draw_widget` path `MainButton`/`PauseButton` use (`widget/button`,
+  `_highlighted`, `_disabled`, borders read from the pack's `.mcmeta`, never
+  hardcoded — `button_disabled`'s border is 1, its siblings' is 3), via
+  `MenuRow::slot`. The account rows above them stay on the ordinary centred
+  stack (unslotted, like the server list), which is a genuinely new
+  combination: **`row_rect` used to sum every row's height into the centred
+  stack's total, including slotted ones, because no screen had ever mixed the
+  two kinds.** That silently corrupted the stack's math the moment a slotted
+  button row shared a frame with unslotted list rows, so `row_rect` now
+  filters to `r.slot.is_none()` before summing — a one-line fix, covered by a
+  dedicated test, invisible to every existing screen because none of them mix.
+- **The head icon is a placeholder with the texture as a parameter.** Skins
+  aren't implemented (issue #62), so every row shows
+  `render::default_head_icon()` — a small hand-authored RGBA grid — but it
+  reaches the screen through `render::head_mosaic(rgba, w, h)`, the exact same
+  entry point a decoded real skin's face region would use. Reuses
+  `FaviconMosaic`'s box-filter-to-quads drawable rather than inventing a
+  second one: a head is not a conceptually different "small square texture."
+- **The sign-in sub-screen has no `app.rs` hook at all.** `frame_for`'s
+  `Screen::Accounts` arm calls `AccountsNav::pump()` every single frame this
+  screen is showing (via the same unmodified call sites `app.rs` already uses
+  for every other screen) to drain the background worker thread's channel and
+  advance "waiting for you to sign in…" without a keystroke. That only works
+  because `AccountsNav` holds its mutable state behind a `RefCell` and `pump`
+  takes `&self` — see `menu/accounts.rs`'s module docs for why `app.rs`
+  being held by another agent made that the right call here instead of the
+  `StatusCache::pump`-style explicit `&mut` hook every other background-thread
+  consumer in this file uses.
+- **Opening the browser and copying the code are OS `Command`s, not a
+  dependency.** `open`/`xdg-open`/`cmd start` and `pbcopy`/`clip`/`xclip`,
+  spawned and never waited on — see `accounts.rs`'s `open_in_browser`/
+  `copy_to_clipboard`. Avoids a new crate for two call sites; a real
+  `open`/`arboard` dependency would be the more robust fix if either needs to
+  do more than this.
+
 ## How to change it
 
 - **Adding a screen:** a `Screen` variant, an arm in `MenuNav::key`, a branch in
   `render::frame_for`, and the variant added to `render::owns_frame`. The
   agreement test will tell you if you forget the last one.
+- **A new `Screen` variant is a breaking change to any exhaustive `match` over
+  `Screen` outside this module** — `menu.rs`'s own `on_escape` is one, and grew
+  an arm for `Screen::Accounts`. `app.rs` has none today (checked when adding
+  Accounts: it only asks boolean questions like `ui.is_menu()`), which is what
+  let that screen land with **no `app.rs` patch at all** — do not assume that
+  stays true for the next screen without checking again.
 - **Adding an action:** a `MenuAction` variant. The `match` in
-  `WindowApp::apply_menu_action` is exhaustive on purpose.
+  `WindowApp::apply_menu_action` is exhaustive on purpose. Not every screen
+  needs one, though — `Screen::Accounts` adds none; every one of its side
+  effects (starting a sign-in thread, writing `profiles.json`, opening the
+  browser) happens inline inside `nav.rs`/`accounts.rs`, the same way
+  `MenuNav::persist` already writes `servers.json` without a round trip
+  through `app.rs`.
 - **Sizes in `render.rs` are *logical* GUI pixels**, the same units vanilla's
   `Screen.width`/`height` are in: `MenuRenderer::draw` divides the framebuffer by
   `config::calculate_gui_scale` through `render::logical_canvas` before laying
@@ -317,6 +391,10 @@ server list, the edit form, Options and the error screen.
 3. **No scrolling in the server list.** Rows are laid out centred and unbounded, so
    past roughly a dozen servers they run off the viewport. Row rects are already
    computed by one function (`row_rect`), which is where a scroll offset goes.
+   The account screen *does* scroll now (`accounts::VISIBLE_ROWS`) — see
+   "Account list" above — but that scroll offset lives in `AccountsNav`, not in
+   `row_rect` itself, so this item is still open for the server list
+   specifically.
 4. **No caret positioning, selection, or clipboard in the edit form.** Typing
    appends and Backspace removes from the end; there are no arrow keys within a
    field and no paste.
@@ -344,6 +422,20 @@ server list, the edit form, Options and the error screen.
     every script and gate actually uses.
 13. **No keyboard focus ring or hover cursor change**, and no sound on
     select/confirm.
+14. **The account screen's four action buttons are mouse-only for keyboard
+    focus purposes** — Up/Down cycles the account list, matching the server
+    list's own letter-command buttons (`a`/`e`/`d`/`r`), which likewise have no
+    keyboard focus state at all. A keyboard user reaches Add/Select/Remove/
+    Cancel only via a click; there is no Tab-into-the-button-row.
+15. **No skin fetch (issue #62)** — every account row shows the same
+    hand-authored placeholder head. See `docs/accounts.md`'s "What isn't
+    built" for why the swap is designed to be a data change, not a rewrite,
+    once a real fetch lands.
+16. **No GPU pixel gate for the account screen's nine-slice buttons**, unlike
+    `tests/menu_button_pixels.rs`'s coverage of the title/pause screens. The
+    logic gates (`row_rect`'s mixed-frame fix, the button/list index math in
+    `accounts.rs`) are covered; an on-screen measurement that the real
+    `widget/button*` art actually lands under these specific buttons is not.
 
 ## Verification
 

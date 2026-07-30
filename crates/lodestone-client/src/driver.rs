@@ -8,6 +8,8 @@ use lodestone_model::{
     ServerAddress, VersionAdapter,
 };
 use lodestone_net::{Connection, NetError, Transport};
+#[cfg(not(target_arch = "wasm32"))]
+use lodestone_net::{generate_shared_secret, rsa_encrypt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{KeepAlivePolicy, PlayerLoadedPolicy, RespawnPolicy};
@@ -71,6 +73,20 @@ pub(crate) struct Driver<T: Transport> {
     /// the wire when the adapter encodes a `player_loaded` packet (older versions
     /// encode `None`).
     awaiting_player_load: bool,
+    /// The authenticated Microsoft/Minecraft session to prove ownership with
+    /// during a `Directive::BeginEncryption { should_authenticate: true, .. }`
+    /// (issue #65), or `None` for an offline-mode connection. Offline
+    /// connections that hit an online-mode server fail fast with
+    /// [`ClientError::OnlineModeSessionRequired`] rather than completing the
+    /// crypto handshake and only then failing the session-server join.
+    #[cfg(not(target_arch = "wasm32"))]
+    auth_session: Option<lodestone_auth::Session>,
+    /// The HTTP client the session-server `join` call goes through. Built once
+    /// per driver rather than per join attempt (there is at most one per
+    /// session anyway, but a fresh `reqwest::Client` per call would rebuild
+    /// its connection pool/TLS config for no reason).
+    #[cfg(not(target_arch = "wasm32"))]
+    http: reqwest::Client,
 }
 
 /// The client brand announced on entering Configuration, matching vanilla's
@@ -97,6 +113,7 @@ impl<T: Transport> Driver<T> {
         read_timeout: Option<Duration>,
         profile: LoginProfile,
         server: ServerAddress,
+        #[cfg(not(target_arch = "wasm32"))] auth_session: Option<lodestone_auth::Session>,
     ) -> Self {
         Self {
             conn,
@@ -112,6 +129,10 @@ impl<T: Transport> Driver<T> {
             server,
             chat_tracker: LastSeenTracker::vanilla(),
             awaiting_player_load: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            auth_session,
+            #[cfg(not(target_arch = "wasm32"))]
+            http: reqwest::Client::new(),
         }
     }
 
@@ -292,11 +313,147 @@ impl<T: Transport> Driver<T> {
                         .await;
                     return Step::Stop(Box::new(SessionOutcome::ServerDisconnected { reason }));
                 }
+                Directive::BeginEncryption {
+                    server_id,
+                    public_key,
+                    verify_token,
+                    should_authenticate,
+                } => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        if let Step::Stop(outcome) = self
+                            .begin_encryption(server_id, public_key, verify_token, should_authenticate)
+                            .await
+                        {
+                            return Step::Stop(outcome);
+                        }
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        // No wasm32 story exists yet (see `lodestone-net::crypto`'s
+                        // and `lodestone-auth`'s docs): `rsa`/`rand`/the session-
+                        // server HTTP call are all native-only. A browser build
+                        // reaching this directive at all would mean a version
+                        // adapter is being used somewhere it structurally cannot
+                        // complete the handshake; log and drop rather than panic.
+                        let _ = (server_id, public_key, verify_token, should_authenticate);
+                        tracing::warn!(
+                            "online-mode encryption is not supported on wasm32; ignoring BeginEncryption"
+                        );
+                    }
+                }
+                // `Directive` is `#[non_exhaustive]` (crosses the
+                // `lodestone-model` crate boundary), so a wildcard is required
+                // even though every variant that exists today is named above.
+                // This is exactly the arm that used to silently swallow
+                // `BeginEncryption` before this change — now it can only ever
+                // catch a variant added to `lodestone-model` after this crate
+                // was last updated, which is worth a loud warning.
                 other => {
                     tracing::warn!(?other, "ignoring unknown directive variant");
                 }
             }
         }
+        Step::Continue
+    }
+
+    /// Drives the online-mode encryption handshake a `Directive::BeginEncryption`
+    /// carries (issue #65): generate the shared secret, RSA-wrap it and the
+    /// verify token, hand the ciphertext to the adapter to frame the reply,
+    /// send that reply in the clear, flip the connection's cipher on, then —
+    /// only if the server asked for it — prove ownership to the session
+    /// server via [`lodestone_auth::join_server`].
+    ///
+    /// Ordering matters and mirrors [`Connection::enable_encryption`]'s own
+    /// contract: the `EncryptionResponse` packet must reach the wire
+    /// *before* the cipher is enabled (the server switches its cipher on the
+    /// instant it accepts that packet, so everything after must already be
+    /// enciphered on our side too).
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn begin_encryption(
+        &mut self,
+        server_id: String,
+        public_key: Vec<u8>,
+        verify_token: Vec<u8>,
+        should_authenticate: bool,
+    ) -> Step {
+        // Fail fast, before spending a round trip on crypto the server will
+        // reject anyway: an offline profile has nothing to prove ownership
+        // with, and completing the handshake first would only trade a clear
+        // client-side error for the server's generic "unverified username"
+        // disconnect (see `lodestone-net`'s `online_handshake` test for what
+        // that looks like from the other side of exactly this gap).
+        if should_authenticate && self.auth_session.is_none() {
+            return Step::Stop(Box::new(SessionOutcome::Failed(
+                ClientError::OnlineModeSessionRequired,
+            )));
+        }
+
+        let secret = generate_shared_secret();
+        let enc_secret = match rsa_encrypt(&public_key, &secret) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
+                    error,
+                ))));
+            }
+        };
+        let enc_token = match rsa_encrypt(&public_key, &verify_token) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
+                    error,
+                ))));
+            }
+        };
+
+        // The adapter owns only the version-specific packet id and byte-array
+        // framing (`docs/`); it performs no crypto and no I/O.
+        let directive = match self.adapter.build_encryption_response(&enc_secret, &enc_token) {
+            Ok(directive) => directive,
+            Err(error) => {
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Adapter(
+                    error,
+                ))));
+            }
+        };
+        let Directive::Send { packet_id, payload } = directive else {
+            tracing::error!(
+                ?directive,
+                "build_encryption_response returned a non-Send directive"
+            );
+            return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Adapter(
+                AdapterError::Unsupported(
+                    "build_encryption_response must return Directive::Send".to_owned(),
+                ),
+            ))));
+        };
+
+        // Cleartext: written before the cipher is enabled below.
+        if let Err(error) = self.conn.write_packet(packet_id, &payload).await {
+            return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
+                error,
+            ))));
+        }
+        if let Err(error) = self.conn.enable_encryption(&secret) {
+            return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Transport(
+                error,
+            ))));
+        }
+
+        if should_authenticate {
+            // `.expect()` is safe: the early return above guarantees `Some`
+            // whenever `should_authenticate` is true.
+            let session = self
+                .auth_session
+                .as_ref()
+                .expect("should_authenticate implies auth_session is Some (checked above)");
+            let hash = lodestone_auth::server_hash(&server_id, &secret, &public_key);
+            if let Err(error) = lodestone_auth::join_server(&self.http, session, &hash).await {
+                return Step::Stop(Box::new(SessionOutcome::Failed(ClientError::Auth(error))));
+            }
+        }
+
         Step::Continue
     }
 

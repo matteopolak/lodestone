@@ -9,19 +9,34 @@
 //!   services token chain ([`flow`]);
 //! * the session-server [`join_server`] call that proves ownership of the shared
 //!   secret;
-//! * an on-disk refresh-token [`cache`] (native only).
+//! * multi-account storage (issue #64, native only): [`store`] holds the
+//!   long-lived Microsoft **refresh** token in the real OS keychain, keyed by
+//!   profile UUID; [`metadata`] holds everything else (username, profile UUID,
+//!   skin URL, last-used time, which account is selected) in a plain JSON
+//!   file so an account switcher can draw its list without unlocking the
+//!   keychain; [`cache`]/[`migrate`] carry a pre-#64 plaintext cache forward
+//!   into the keychain exactly once, then delete it.
 //!
 //! The actual cipher (AES-128-CFB8), shared-secret generation and RSA wrapping
 //! of the secret live in `lodestone-net`, because they sit in the sans-IO codec
 //! so every transport (including the browser) inherits them. This crate is
 //! purely the *identity* half: who you are and how the session server is told.
 //!
+//! ## Design constraint: credentials never touch this process
+//!
+//! Sign-in happens on Microsoft's own page in the user's browser (the
+//! device-code flow in [`flow`]) — nothing here accepts a username or
+//! password, and nothing should ever be added that does. Every store in this
+//! crate holds **tokens only**.
+//!
 //! ## What is and isn't verified
 //!
 //! [`server_hash`] is checked against externally-reproduced vectors. The token
 //! chain cannot be exercised without a real Microsoft account, so it is written
 //! to the documented protocol but is unverified end-to-end; its tests cover only
-//! the JSON shapes it parses.
+//! the JSON shapes it parses. [`store`]'s keychain backend *is* verified against
+//! the real OS keychain, but only by an `#[ignore]`d test — run explicitly, see
+//! that module's docs — since it must not run unattended in every CI environment.
 
 mod error;
 mod hash;
@@ -33,10 +48,27 @@ pub use hash::server_hash;
 pub mod cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod flow;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod login;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod metadata;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod migrate;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod paths;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod store;
 
+pub use error::XstsErrorKind;
 #[cfg(not(target_arch = "wasm32"))]
 pub use flow::{
     DeviceCodePrompt, MOJANG_CLIENT_ID, MsToken, PendingLogin, Profile, Session,
     authenticate_with_device_code, join_server, poll_token, refresh_token, request_device_code,
     session_from_ms_token,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use login::{CachedSessionOutcome, finish_interactive, resolve_client_id, try_cached_session};
+#[cfg(not(target_arch = "wasm32"))]
+pub use metadata::{AccountProfile, AccountsMetadata};
+#[cfg(not(target_arch = "wasm32"))]
+pub use store::{AccountSecrets, KeychainStore, MemoryStore, SecretStore, StorageMode};

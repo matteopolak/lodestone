@@ -32,6 +32,7 @@
 //! [`Screen::Error`] rather than silently doing nothing (see
 //! [`crate::app`]'s staged launcher).
 
+pub mod accounts;
 pub mod nav;
 pub mod render;
 pub mod servers;
@@ -58,6 +59,14 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
+    /// The account list (issue #66): saved Microsoft accounts plus the
+    /// always-present offline entry, and the device-code sign-in flow that
+    /// adds a new account. Reached from [`Screen::MainMenu`] via
+    /// [`nav::MainButton::Accounts`]; Escape (or the screen's own Cancel
+    /// button) returns there. Not a vanilla screen at all — see
+    /// [`nav::MainButton::Accounts`]'s docs for why real Minecraft has
+    /// nothing equivalent to reproduce.
+    Accounts,
     /// The settings screen (currently just GUI scale). Reached from
     /// [`Screen::MainMenu`] (the title's Options button) or from
     /// [`Screen::Paused`] (the pause menu's Options button, mid-session);
@@ -210,8 +219,18 @@ impl UiState {
     pub fn is_menu(&self) -> bool {
         matches!(
             self.screen,
-            Screen::MainMenu | Screen::ServerList | Screen::ServerEdit | Screen::Settings
+            Screen::MainMenu
+                | Screen::ServerList
+                | Screen::ServerEdit
+                | Screen::Settings
+                | Screen::Accounts
         )
+    }
+
+    /// Whether the account list is showing.
+    #[must_use]
+    pub fn is_accounts(&self) -> bool {
+        self.screen == Screen::Accounts
     }
 
     /// The pointer should be grabbed **exactly** when playing. The app calls
@@ -335,6 +354,22 @@ impl UiState {
         }
     }
 
+    /// Open the account list. Only from the title screen, matching
+    /// [`open_server_list`](Self::open_server_list)'s reasoning: a stray call
+    /// must never pull the player out of a world.
+    pub fn open_accounts(&mut self) {
+        if self.screen == Screen::MainMenu {
+            self.screen = Screen::Accounts;
+        }
+    }
+
+    /// Back to the title screen from the account list.
+    pub fn close_accounts(&mut self) {
+        if self.screen == Screen::Accounts {
+            self.screen = Screen::MainMenu;
+        }
+    }
+
     /// Open the settings screen from the title. Only from the title screen,
     /// matching [`open_server_list`](Self::open_server_list)'s reasoning: a
     /// stray call must never pull the player out of a world.
@@ -423,6 +458,13 @@ impl UiState {
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
+            // In practice `MenuNav::key_accounts` intercepts Escape before
+            // `UiState::on_escape` is ever reached from this screen (a
+            // sign-in in progress must cancel the flow, not leave the
+            // screen) — this arm exists so the match stays exhaustive and so
+            // a caller that *does* reach here unwinds one level, matching
+            // every other menu screen's rule.
+            Screen::Accounts => self.close_accounts(),
             Screen::Settings => self.close_settings(),
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
@@ -719,6 +761,7 @@ mod tests {
             Screen::ServerList,
             Screen::ServerEdit,
             Screen::Settings,
+            Screen::Accounts,
         ] {
             let mut ui = UiState::new();
             match screen {
@@ -728,6 +771,7 @@ mod tests {
                     ui.open_server_edit();
                 }
                 Screen::Settings => ui.open_settings(),
+                Screen::Accounts => ui.open_accounts(),
                 _ => {}
             }
             assert_eq!(ui.screen(), screen);
@@ -823,6 +867,40 @@ mod tests {
     fn close_settings_is_a_no_op_off_screen() {
         let mut ui = UiState::new();
         ui.close_settings();
+        assert_eq!(ui.screen(), Screen::MainMenu, "nothing to close");
+    }
+
+    #[test]
+    fn accounts_opens_from_the_title_and_escape_returns_to_it() {
+        let mut ui = UiState::new();
+        ui.open_accounts();
+        assert_eq!(ui.screen(), Screen::Accounts);
+        assert!(ui.is_accounts() && ui.is_menu());
+        assert!(!ui.wants_cursor_grab());
+        assert!(!ui.accepts_gameplay_input());
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu, "escape unwinds to the title");
+    }
+
+    #[test]
+    fn accounts_only_opens_from_the_title_screen() {
+        // A stray call must never pull the player out of a world, matching
+        // the server list's and settings screen's own guards.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.open_accounts();
+        assert_eq!(ui.screen(), Screen::Playing);
+
+        ui.pause();
+        ui.open_accounts();
+        assert_eq!(ui.screen(), Screen::Paused);
+    }
+
+    #[test]
+    fn close_accounts_is_a_no_op_off_screen() {
+        let mut ui = UiState::new();
+        ui.close_accounts();
         assert_eq!(ui.screen(), Screen::MainMenu, "nothing to close");
     }
 

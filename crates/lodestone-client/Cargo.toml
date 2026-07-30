@@ -43,6 +43,17 @@ lodestone-registry = { workspace = true }
 # one and its behaviour, API and performance are unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
+# The identity half of online-mode login (issue #65): `Session`/`server_hash`/
+# `join_server`. `lodestone-net` already carries the crypto half
+# (`generate_shared_secret`/`rsa_encrypt`/`Connection::enable_encryption`);
+# this is the missing piece that turns a `Directive::BeginEncryption` into an
+# actual authenticated join. Native-only for the same reason `lodestone-auth`
+# itself is: the session-server call needs a real HTTP client and there is no
+# wasm32 story for it yet (see that crate's docs).
+lodestone-auth = { workspace = true }
+# Used directly (not just transitively through `lodestone-auth`) to hold the
+# one `reqwest::Client` a driver's session-server `join` call goes through.
+reqwest = { workspace = true }
 
 # --- wasm32 target dependencies ---
 # `wasm32-unknown-unknown` cannot build `mio`, so tokio must NOT pull `net`/`rt-
@@ -80,3 +91,9 @@ capture-text-oracle = ["lodestone-registry/v47", "lodestone-registry/v770"]
 tokio = { workspace = true }
 lodestone-core = { workspace = true }
 lodestone-testsupport = { workspace = true }
+# `tests/online_mode_handshake.rs` plays the server side of the encryption
+# handshake against a real (test-generated) RSA keypair, independent of the
+# `rsa`/`rand` calls the driver itself makes under test — see that file's
+# module docs for exactly what this does and does not prove.
+rsa = { workspace = true }
+rand = { workspace = true }

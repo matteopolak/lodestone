@@ -21,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{AuthError, Result};
+use crate::error::{AuthError, Result, XstsErrorKind};
 
 /// The public client ID Mojang's own launcher uses. Callers may substitute
 /// their own registered Azure application ID.
@@ -115,7 +115,7 @@ impl OAuthErrorBody {
 
 /// A Microsoft OAuth token pair. The refresh token is what we cache so a later
 /// launch can skip the interactive step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MsToken {
     /// Short-lived access token used to authenticate with Xbox Live.
     pub access_token: String,
@@ -408,11 +408,24 @@ pub async fn refresh_token(
         .await?
         .json()
         .await?;
+    classify_refresh_response(resp)
+}
+
+/// Classifies a parsed refresh-token-endpoint response, kept pure (no I/O) for
+/// the same testability reason as [`classify_token_response`].
+fn classify_refresh_response(resp: TokenResponse) -> Result<MsToken> {
     match (resp.access_token, resp.refresh_token) {
         (Some(access_token), Some(refresh_token)) => Ok(MsToken {
             access_token,
             refresh_token,
         }),
+        // `invalid_grant` is OAuth's code for "this refresh token is dead"
+        // (revoked, expired past its own renewal window, password changed —
+        // Microsoft does not distinguish which). Callers that want to fall
+        // back to an interactive sign-in on a stale cache, and only then,
+        // match this variant specifically rather than every `Service` error
+        // (a transport hiccup should not silently discard a good cache).
+        _ if resp.error.as_deref() == Some("invalid_grant") => Err(AuthError::RefreshTokenInvalid),
         _ => Err(AuthError::Service {
             step: "refresh",
             message: resp
@@ -470,6 +483,15 @@ async fn authenticate_xbl(client: &reqwest::Client, ms_access_token: &str) -> Re
     Ok(resp.token)
 }
 
+/// The shape of an XSTS `401` body: `{"Identity":"0","XErr":2148916233,
+/// "Message":"...","Redirect":"..."}`. Every field is optional here because
+/// this is read best-effort from a body we don't control the shape of.
+#[derive(Deserialize)]
+struct XstsErrorBody {
+    #[serde(rename = "XErr")]
+    x_err: Option<i64>,
+}
+
 /// Exchanges an XBL token for an XSTS token + user hash.
 async fn authorize_xsts(client: &reqwest::Client, xbl_token: &str) -> Result<XstsToken> {
     let body = serde_json::json!({
@@ -483,8 +505,17 @@ async fn authorize_xsts(client: &reqwest::Client, xbl_token: &str) -> Result<Xst
     let http = client.post(XSTS_URL).json(&body).send().await?;
     if http.status() == reqwest::StatusCode::UNAUTHORIZED {
         let text = http.text().await.unwrap_or_default();
-        return Err(AuthError::Service {
-            step: "xsts",
+        // XErr classification is best-effort: an unparsable or code-less body
+        // still surfaces as `AuthError::Xsts` (with `XstsErrorKind::Other(0)`)
+        // rather than falling back to the less specific `AuthError::Service`,
+        // so every 401 here is at least typed as "XSTS rejected this", which
+        // is what lets a caller show an XSTS-specific UI state at all.
+        let kind = serde_json::from_str::<XstsErrorBody>(&text)
+            .ok()
+            .and_then(|b| b.x_err)
+            .map_or(XstsErrorKind::Other(0), XstsErrorKind::from_code);
+        return Err(AuthError::Xsts {
+            kind,
             message: text,
         });
     }
@@ -681,6 +712,85 @@ mod tests {
         let resp: XboxResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.token, "tok");
         assert_eq!(resp.display_claims.xui[0].uhs, "user-hash");
+    }
+
+    #[test]
+    fn classifies_a_completed_refresh() {
+        let out = classify_refresh_response(token_response(
+            r#"{"access_token":"a2","refresh_token":"r2"}"#,
+        ));
+        let tok = out.expect("expected a completed token");
+        assert_eq!(tok.access_token, "a2");
+        assert_eq!(tok.refresh_token, "r2");
+    }
+
+    #[test]
+    fn classifies_invalid_grant_distinctly_from_other_refresh_failures() {
+        // The whole point: `invalid_grant` must be recognisable so a caller
+        // can fall back to interactive sign-in on exactly this case, and not
+        // on e.g. a malformed request (`invalid_request`) that retrying
+        // interactively would not fix either.
+        let out = classify_refresh_response(token_response(
+            r#"{"error":"invalid_grant","error_description":"token expired"}"#,
+        ));
+        assert!(matches!(out, Err(AuthError::RefreshTokenInvalid)));
+
+        let out = classify_refresh_response(token_response(r#"{"error":"invalid_request"}"#));
+        assert!(matches!(
+            out,
+            Err(AuthError::Service { step: "refresh", .. })
+        ));
+        assert!(
+            !matches!(out, Err(AuthError::RefreshTokenInvalid)),
+            "only invalid_grant should map to RefreshTokenInvalid"
+        );
+    }
+
+    #[test]
+    fn xsts_error_kind_maps_the_five_documented_codes() {
+        // Values as published by unrelated third-party launchers (see the
+        // type's doc comment) — this pins the mapping, not their accuracy.
+        assert_eq!(
+            XstsErrorKind::from_code(2_148_916_233),
+            XstsErrorKind::NoXboxAccount
+        );
+        assert_eq!(
+            XstsErrorKind::from_code(2_148_916_235),
+            XstsErrorKind::RegionUnavailable
+        );
+        assert_eq!(
+            XstsErrorKind::from_code(2_148_916_236),
+            XstsErrorKind::AdultVerificationRequired
+        );
+        assert_eq!(
+            XstsErrorKind::from_code(2_148_916_237),
+            XstsErrorKind::AgeVerificationRequired
+        );
+        assert_eq!(
+            XstsErrorKind::from_code(2_148_916_238),
+            XstsErrorKind::ChildAccountNeedsFamily
+        );
+        assert_eq!(XstsErrorKind::from_code(999), XstsErrorKind::Other(999));
+    }
+
+    #[test]
+    fn xsts_error_body_extracts_x_err_from_a_realistic_401_payload() {
+        // Shape as documented externally: `Identity`/`Message`/`Redirect` are
+        // always present alongside `XErr` on a real response; only `XErr` is
+        // read here, but the others must not break parsing.
+        let json = r#"{"Identity":"0","XErr":2148916233,"Message":"","Redirect":"https://start.ui.xboxlive.com/CreateAccount"}"#;
+        let body: XstsErrorBody = serde_json::from_str(json).unwrap();
+        assert_eq!(body.x_err, Some(2_148_916_233));
+        assert_eq!(XstsErrorKind::from_code(body.x_err.unwrap()), XstsErrorKind::NoXboxAccount);
+    }
+
+    #[test]
+    fn xsts_error_body_missing_x_err_does_not_fail_to_parse() {
+        // A 401 with an unrecognised shape must still parse (to `None`)
+        // rather than lose the whole error to a JSON decode failure — the
+        // call site falls back to `XstsErrorKind::Other(0)` in that case.
+        let body: XstsErrorBody = serde_json::from_str(r#"{"unexpected":"shape"}"#).unwrap();
+        assert_eq!(body.x_err, None);
     }
 
     #[test]

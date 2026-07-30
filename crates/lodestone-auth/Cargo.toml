@@ -26,9 +26,13 @@ base64 = { workspace = true }
 # HTTP client for the Microsoft OAuth / Xbox Live / XSTS / Minecraft-services
 # call chain and the session-server `join` POST. Native-only: a browser build
 # authenticates over a different path and cannot open these sockets directly.
+#
+# `keyring` (the OS credential store, `docs/accounts.md`) is native-only for
+# the same reason: no wasm32 backend exists.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest = { workspace = true }
 tokio = { workspace = true }
+keyring = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

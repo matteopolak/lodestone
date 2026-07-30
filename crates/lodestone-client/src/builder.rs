@@ -38,6 +38,11 @@ pub struct ClientBuilder {
     /// The caller's `World` and session entity, when the caller has one — §4.1(c).
     /// `None` means "mint your own", which is what a bot with no driver wants.
     ecs: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    /// The authenticated Microsoft/Minecraft session for an online-mode join
+    /// (issue #65), or `None` for the default offline-mode path — see
+    /// [`Self::online_session`].
+    #[cfg(not(target_arch = "wasm32"))]
+    online_session: Option<lodestone_auth::Session>,
 }
 
 impl ClientBuilder {
@@ -59,7 +64,30 @@ impl ClientBuilder {
             connect_timeout: None,
             event_buffer: DEFAULT_EVENT_BUFFER,
             ecs: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            online_session: None,
         }
+    }
+
+    /// Supplies an authenticated Microsoft/Minecraft session (from
+    /// `lodestone-auth`: a cached refresh silently renewed, or a completed
+    /// interactive device-code login — see `lodestone_auth::login`) to prove
+    /// ownership with when the server's login sequence demands online-mode
+    /// encryption.
+    ///
+    /// Without this, [`ClientBuilder::connect`]/[`ClientBuilder::connect_with`]
+    /// still work exactly as before against an offline-mode server (the
+    /// default, unchanged path — nothing about this method is required to
+    /// join a server that doesn't ask for encryption). Connecting to an
+    /// online-mode server *without* calling this fails fast with
+    /// [`crate::ClientError::OnlineModeSessionRequired`] the moment the
+    /// server's `EncryptionRequest`/`hello` arrives, rather than completing
+    /// the crypto handshake and only then failing the session-server join.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn online_session(mut self, session: lodestone_auth::Session) -> Self {
+        self.online_session = Some(session);
+        self
     }
 
     /// Fold this session's read-model into a `World` the caller already owns,
@@ -208,6 +236,8 @@ impl ClientBuilder {
             self.read_timeout,
             self.profile,
             self.server,
+            #[cfg(not(target_arch = "wasm32"))]
+            self.online_session,
         );
 
         let task = crate::spawn::spawn_driver(driver.run(actions_rx, shutdown_rx));
