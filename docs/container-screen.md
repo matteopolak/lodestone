@@ -51,6 +51,41 @@ case — grid at `(30, 17)`, result at `(124, 35)`, main at `(8, 84)`, hotbar at
 `(8, 142)`, panel `176×166` — expressed in terms of the grid's real dimensions so
 a differently sized grid still lands somewhere sane.
 
+### The title goes through the language table (issue #52)
+
+A server does not send the word "Crafting". `ClientboundOpenScreen` carries a
+component — `translate("container.crafting")` — and turning that into words is the
+*client's* job. The screen's title used to be built with
+
+```rust
+(Some(&open.menu), open.title.to_plain_string())   // app.rs, before
+```
+
+which drew a literal **`CONTAINER.CRAFTING`** on the panel.
+
+`Text::to_plain_string()` is not a translator. It flattens against
+`lodestone_model::text::default_translation`, a **fourteen-key stub** covering
+chat, join/leave and six death messages; there is no `container.*` entry, so the
+key falls through to itself. It is correct on a tree that has *no* `translate`
+nodes left — notably the output of `lodestone_game::text::resolve` — and in logs
+and tests. It is wrong on anything a server authored.
+
+`container::menu_title(&Text, &translate)` is the read-boundary resolution, the
+same shape `scoreboard::sidebar_from`, `tablist::player_rows` and
+`overlay::boss_bars_from` use, and `app.rs` passes `Sim::translator()`:
+
+```rust
+crate::container::menu_title(&open.title, self.sim.translator().as_ref())
+```
+
+Fallback order is `table[key]` → the component's own `fallback` → the key. The
+demo palette loads no `en_us.json`, and a renamed chest arrives as a plain
+literal; neither may cost the title.
+
+The "Inventory" title for the local inventory screen (`ui.is_container_open()`
+with no server menu) is still a Lodestone-chosen literal, not
+`container.inventory` — there is no server component to resolve in that case.
+
 ### The result slot is the server's
 
 **Do not add a local recipe matcher to fill the result slot.** Vanilla computes
@@ -104,55 +139,68 @@ draws.
 
 ## How to change it
 
-### Wiring it into the live app (still outstanding)
+### Wiring it into the live app — two of three steps are done
 
-`ContainerRenderer` can draw icons, but `app.rs` has not been updated to attach
-them, so the running client still shows the colour-swatch fallback. The change is
-mechanical — mirror what is already done for `hud` a few lines above, in
-`WindowApp::resumed`:
+**Read this before believing any claim about what is unwired here.** This section
+described three outstanding steps; two of them have since landed, and the stale
+version was cited as the cause of
+[#50](https://github.com/matteopolak/lodestone/issues/50) ("block items render flat
+in container screens — 3D geometry only reaches the hotbar").
+
+| step | state |
+|---|---|
+| `container.attach_items(...)` in `WindowApp::resumed` | **done** (`app.rs:1488`) |
+| `container.attach_item_models(...)` in `WindowApp::resumed` | **done** (`app.rs:1496`) |
+| pass `models` + `depth` in the per-frame draw | **outstanding** — this is #50 |
+
+So the container's 3-D item pass is fully constructed and fully bound, and then
+**never fed**. `app.rs:1273` calls
 
 ```rust
-let mut container = ContainerRenderer::new(gpu.device(), format);
-if let Some(items) = crate::resources::load_item_atlas() {
-    container.attach_items(gpu.device(), gpu.queue(), format, items);
-}
-if let (Some(v), Some(s), Some(p), Some(a)) = (
-    render.model_atlas_view(),
-    render.model_atlas_sampler(),
-    render.model_palette_buffer(),
-    render.model_anim_buffer(),
-) {
-    container.attach_item_models(gpu.device(), format, v, s, p, a);
-}
+container_renderer.render_scaled(device, queue, frame.view(), &container_frame, gui_scale, w, h);
 ```
 
-and in the per-frame draw, swap the `render` call for:
+and `ContainerRenderer::render_scaled` hardcodes `depth: None, models: None`
+(`container.rs:1278`). `render_with_icons_scaled` then computes
+`want_models = self.icons.models_attached() && depth.is_some()` — `false` — and
+`IconAssets { models: None }` reaches `push_item_model`, which returns early. Flat
+sprite icons still draw (they need only `attach_items`), which is precisely why the
+symptom reads as "block items render **flat**" rather than "nothing renders": the
+sprite stream is unaffected and only the mini-blocks vanish.
+
+This is the *island* shape at its purest — a complete, attached, tested capability
+with nothing calling it. It has cost this repo eleven confirmed instances.
+
+The fix is one call swap at `app.rs:1273`:
 
 ```rust
-container_renderer.render_with_icons(
-    device, queue, frame.view(), Some(render.depth_view()),
-    &container_frame, item_models, w, h,
+// `item_models` is the same value the HUD call at app.rs:1359 already computes;
+// it is currently created *after* this block, so hoist it above the
+// `if container_menu.is_some()` guard.
+let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
+container_renderer.render_with_icons_scaled(
+    device,
+    queue,
+    frame.view(),
+    Some(render.depth_view()),
+    &container_frame,
+    item_models,
+    self.nav.gui_scale(),
+    w,
+    h,
 );
 ```
 
-where `item_models` is the same `self.sim.vanilla_atlas().and_then(|a| a.models())`
-the HUD call already computes. Note the container overlay is drawn **before** the
-HUD in `WindowApp`, and both model passes clear depth, so the order is safe.
+Note the container overlay is drawn **before** the HUD in `WindowApp`, and both
+model passes clear depth, so the order is safe. Use the `_scaled` variant, not
+`render_with_icons`: the plain one lays out against `AUTO_GUI_SCALE` and would
+disagree with `hit_test_with_scale` about where the slots are.
 
-Separately — and independent of the icon wiring above — the **carried stack**
-needs one more line to actually appear: `ContainerFrame` is built with
-`.with_cursor(Some([x, y]))` using the same `(f32, f32)` mouse position
-`WindowApp` already tracks for `hit_test`:
-
-```rust
-let container_frame = ContainerFrame::new(container_menu, &container_title)
-    .with_cursor(Some([self.cursor.0, self.cursor.1]));
-```
-
-Without this the geometry builds correctly (`ContainerGeometry::build_inner`
-checks `frame.cursor` before it checks `menu.carried()`) but the field stays at
-its `None` default, so a picked-up stack never draws — the same silent-nothing
-failure mode as not calling `attach_items`.
+The third step, the **carried stack**, is also **done**: `app.rs:1270` builds the
+frame with `.with_cursor(Some([self.cursor.0, self.cursor.1]))`. Kept here because
+the failure mode is worth recording — `ContainerGeometry::build_inner` checks
+`frame.cursor` before it checks `menu.carried()`, so leaving the field at its `None`
+default builds all the geometry correctly and draws none of it.
 
 ### Gotchas
 
@@ -167,6 +215,10 @@ failure mode as not calling `attach_items`.
 * **`ContainerRenderer::render` must keep its signature.** `app.rs` and two
   integration tests call it; `render_with_icons` was added alongside rather than
   replacing it.
+* **Never hand `ContainerFrame::title` a `Text::to_plain_string()`.** It is a
+  `&str`, so the resolution has to happen at the call site, and the type cannot
+  stop you passing an unresolved one. Use `menu_title`. `container.crafting`
+  shipped to screen once already.
 
 ## Configuration
 

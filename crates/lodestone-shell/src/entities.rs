@@ -143,7 +143,7 @@ use lodestone_entity::pose::{
     ADULT_LIMB_SCALE, BABY_LIMB_SCALE, LIMB_SWING_SMOOTHING, MAX_HEAD_YAW, WalkAnimation,
     clamp_head_to_body, walk_target_speed,
 };
-use lodestone_model::event::{EquipmentSlot, Reported};
+use lodestone_model::event::{EntityVariant, EquipmentSlot, Reported};
 use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
@@ -399,6 +399,78 @@ pub struct EntitySnapshot {
     ///
     /// Only `MainHand`/`OffHand` reach a pixel today; see [`EntityDraw::equipment`].
     pub equipment: Vec<(EquipmentSlot, Option<ResourceLocation>)>,
+    /// The entity's decoded cosmetic variant (sheep dye/shear, villager type,
+    /// horse markings, …), as last reported.
+    ///
+    /// Exactly [`EntityView::variant`](lodestone_client::EntityView::variant)'s
+    /// own contract, copied through verbatim like [`Self::equipment`]: `None`
+    /// means the server has never reported an override, which is a different
+    /// state from a known-but-default variant. There is no "explicitly
+    /// cleared" state to preserve here — vanilla never un-reports a variant —
+    /// so unlike [`Self::item`] this needs no [`Reported`] wrapper.
+    ///
+    /// Only [`EntityVariant::Dyed`] reaches a pixel today, and only when
+    /// [`Self::type_path`] is `"sheep"` — see [`EntityDraw::wool`] and
+    /// `docs/entity-rendering.md`'s "Render layers: sheep wool" section.
+    pub variant: Option<EntityVariant>,
+    /// How many items the stack named by [`Self::item`] represents, as last
+    /// reported. Meaningless when [`Self::item`] is [`Reported::Unreported`]
+    /// or an explicit empty stack; `1` in both of those cases, and whenever
+    /// [`Self::type_path`] is not [`ITEM_ENTITY_TYPE_PATH`].
+    ///
+    /// This was dropped at the `net::entity_snapshot` boundary along with the
+    /// rest of the stack's data components; unlike those, it changes *how
+    /// many* copies vanilla draws rather than how one looks
+    /// (`ItemClusterRenderState::getRenderedAmount`: 1 copy at count ≤ 1, then
+    /// 2, 3, 4, 5 as the count passes 1, 16, 32 and 48), so restoring it needed
+    /// only this plain `u32` — see [`EntityDraw::count`] for where the
+    /// multi-copy draw itself still needs wiring.
+    pub count: u32,
+}
+
+/// A sheep's decoded wool state, narrowed from [`EntitySnapshot::variant`] for
+/// [`EntityDraw::wool`].
+///
+/// Kept as its own small type rather than passing [`EntityVariant`] straight
+/// through so a consumer needs no `match` on variant arms that can never apply
+/// to a sheep (`Villager`, `Horse`, `Keyed`) — [`sheep_wool`] is the one place
+/// that does that matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SheepWool {
+    /// Dye/wool colour ordinal, `0..=15` — the same value
+    /// `lodestone_assets::entity_models::sheep_wool_tint` indexes.
+    pub color: u8,
+    /// Whether the sheep has been sheared. **Not** filtered out here: a
+    /// sheared sheep still yields `Some(SheepWool { sheared: true, .. })`
+    /// rather than `None`, so the data stays honest about what the server
+    /// actually reported. Vanilla's own "sheared sheep grow no wool mesh" gate
+    /// belongs at the point that draws the mesh
+    /// (`RenderState::prepare_wool`, see `docs/entity-rendering.md`), the same
+    /// way `EntityDraw::equipment` keeps armour slots it cannot yet draw
+    /// rather than pre-filtering them.
+    pub sheared: bool,
+}
+
+/// Narrows a snapshot's decoded variant to the sheep-wool payload
+/// [`EntityDraw::wool`] carries.
+///
+/// Gated on the **resolved type path being exactly `"sheep"`**, never on
+/// `AnimFamily::Quadruped` (shared by pig, cow and wolf) — the same pig/cow
+/// trap `docs/entity-rendering.md` documents for the armour attach applies
+/// here, worse, because wool has no gate at all inside the mesh geometry
+/// itself the way a humanoid check does.
+#[must_use]
+fn sheep_wool(type_path: &str, variant: Option<&EntityVariant>) -> Option<SheepWool> {
+    if type_path != "sheep" {
+        return None;
+    }
+    match variant {
+        Some(EntityVariant::Dyed { color, sheared }) => Some(SheepWool {
+            color: *color,
+            sheared: *sheared,
+        }),
+        _ => None,
+    }
 }
 
 /// The entity-type path a **dropped item** reports (`minecraft:item`).
@@ -453,6 +525,29 @@ pub struct EntityDraw {
     /// Order follows [`EquipmentSlot::ALL`] only by accident of what the server
     /// sent; treat it as an unordered set.
     pub equipment: Vec<(EquipmentSlot, ResourceLocation)>,
+    /// This entity's wool state, when [`Self::type_path`] is `"sheep"` and a
+    /// variant has been reported — `None` for every other entity type
+    /// unconditionally, per [`sheep_wool`]'s gate.
+    ///
+    /// **Not yet drawn.** The mesh/tint/pose plumbing
+    /// (`WoolMesh`/`SheepWoolModelSet::attach` in
+    /// `lodestone-render/src/entity.rs`, `RenderState::prepare_wool` in
+    /// `gpu.rs`) is specified but not landed — see
+    /// `docs/entity-rendering.md`'s "Render layers: sheep wool" section. This
+    /// field is the last hop that was missing before that work; it does not
+    /// draw anything by itself.
+    pub wool: Option<SheepWool>,
+    /// How many items [`Self::item`] represents, when it is `Some`.
+    /// Meaningless (and left at the neutral `1`) for every entity that is not
+    /// a dropped item with a known stack.
+    ///
+    /// **Not yet drawn as more than one copy.** Vanilla's
+    /// `ItemClusterRenderState::getRenderedAmount` turns this into 1–5 jittered
+    /// copies (`prepare_item_geometry` in `gpu.rs` still draws exactly one
+    /// regardless of `count`) — see `docs/dropped-items.md`. This field is the
+    /// data half of that gap; the draw half is a specified, unlanded patch to a
+    /// held file.
+    pub count: u32,
     /// Interpolated feet position in world space.
     pub feet: Vec3,
     /// Interpolated body yaw in degrees.
@@ -576,6 +671,16 @@ pub struct ItemPhysics {
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 
+/// This entity's sheep-wool state, narrowed from [`EntitySnapshot::variant`] by
+/// [`sheep_wool`].
+///
+/// A component for the same reason [`RenderEquipment`] is one rather than a
+/// side table: it is replaced wholesale every poll (shearing is a metadata
+/// update, not a movement), so there is no "reported once, then silence"
+/// hazard and a despawn prunes it for free.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderWool(pub Option<SheepWool>);
+
 // ---------------------------------------------------------------------------
 // Resources
 // ---------------------------------------------------------------------------
@@ -602,8 +707,17 @@ pub struct FrameDelta(pub f32);
 #[derive(Resource, Debug, Default)]
 pub struct ItemCollision(pub PlayerCollision);
 
-/// Which item each dropped-item entity is carrying, keyed by **server** entity
-/// id.
+/// One dropped-item entity's carried stack: the item's identity plus how many
+/// are in it. Kept together so [`ItemStacks`] cannot record a count with no
+/// matching identity or vice versa.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedStack {
+    id: ResourceLocation,
+    count: u32,
+}
+
+/// Which item (and how many) each dropped-item entity is carrying, keyed by
+/// **server** entity id.
 ///
 /// A resource keyed by server id rather than a component, because a caller may
 /// learn an item's identity *before* the entity is tracked at all
@@ -611,7 +725,7 @@ pub struct ItemCollision(pub PlayerCollision);
 /// metadata can precede the snapshot poll). Pruned alongside the tracks, so a
 /// despawned drop leaves nothing behind.
 #[derive(Resource, Debug, Default)]
-pub struct ItemStacks(HashMap<i32, ResourceLocation>);
+pub struct ItemStacks(HashMap<i32, TrackedStack>);
 
 /// Server entity id → the ECS entity holding its render components.
 #[derive(Resource, Debug, Default)]
@@ -774,6 +888,7 @@ pub fn extract_entity_draws(
         &InterpClock,
         &WalkAnim,
         &RenderEquipment,
+        &RenderWool,
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
@@ -783,14 +898,20 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
-    for (id, kind, scale, from, to, clock, walk, equipment) in &tracks {
+    for (id, kind, scale, from, to, clock, walk, equipment, wool) in &tracks {
+        // One lookup, not two: `item` and `count` both come from the same
+        // recorded stack, and a drop with no stack yet must not manufacture a
+        // count out of nowhere.
+        let stack = (kind.0 == ITEM_ENTITY_TYPE_PATH)
+            .then(|| stacks.0.get(&id.0))
+            .flatten();
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
-            item: (kind.0 == ITEM_ENTITY_TYPE_PATH)
-                .then(|| stacks.0.get(&id.0).cloned())
-                .flatten(),
+            item: stack.map(|s| s.id.clone()),
+            count: stack.map_or(1, |s| s.count),
             equipment: equipment.0.clone(),
+            wool: wool.0,
             feet: render_feet(from, to, clock),
             yaw: render_yaw(from, to, clock),
             head_yaw: render_head_yaw(from, to, clock),
@@ -906,7 +1027,13 @@ fn fold_snapshots(world: &mut World, snapshots: &[EntitySnapshot]) {
         // only an explicit empty stack clears.
         match &snap.item {
             Reported::Reported(Some(item)) => {
-                world.resource_mut::<ItemStacks>().0.insert(snap.id, item.clone());
+                world.resource_mut::<ItemStacks>().0.insert(
+                    snap.id,
+                    TrackedStack {
+                        id: item.clone(),
+                        count: snap.count,
+                    },
+                );
             }
             Reported::Reported(None) => {
                 world.resource_mut::<ItemStacks>().0.remove(&snap.id);
@@ -970,6 +1097,7 @@ fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
             last_feet: snap.feet,
         },
         RenderEquipment(occupied_equipment(&snap.equipment)),
+        RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
@@ -1004,6 +1132,12 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
     let occupied = occupied_equipment(&snap.equipment);
     if let Some(mut equipment) = entity.get_mut::<RenderEquipment>() {
         equipment.0 = occupied;
+    }
+    // Same reasoning as equipment, outside the `moved || turned` gate: a sheep
+    // can be sheared, or a plugin can dye one, while it stands still.
+    let wool = sheep_wool(&snap.type_path, snap.variant.as_ref());
+    if let Some(mut render_wool) = entity.get_mut::<RenderWool>() {
+        render_wool.0 = wool;
     }
 
     let (Some(from), Some(to), Some(clock)) = (
@@ -1164,11 +1298,15 @@ pub fn tracked_entity_count(world: &World) -> usize {
 
 /// Record which item a dropped-item entity is carrying, in a `World` the caller
 /// owns. See [`EntityInterpolator::set_item_stack`] for the live chain.
+///
+/// Sets the stack count to `1` — the neutral value for a caller that only
+/// knows identity. [`fold_snapshots`] does not go through this function; it
+/// writes [`TrackedStack`] directly so it can carry the real reported count.
 pub fn set_item_stack_in(world: &mut World, entity_id: i32, item: ResourceLocation) {
     world
         .resource_mut::<ItemStacks>()
         .0
-        .insert(entity_id, item);
+        .insert(entity_id, TrackedStack { id: item, count: 1 });
 }
 
 /// Tracks and interpolates every visible entity between server ticks.
@@ -1258,11 +1396,27 @@ impl EntityInterpolator {
     /// An item entity with no entry here draws nothing, which is also what
     /// vanilla does with an empty stack (`ItemEntityRenderer.submit` returns
     /// early on `state.item.isEmpty()`).
+    ///
+    /// Sets the count to `1` — the neutral value for a caller that only knows
+    /// identity. See [`Self::set_item_stack_with_count`] to carry a real stack
+    /// size through to [`EntityDraw::count`].
     pub fn set_item_stack(&mut self, entity_id: i32, item: ResourceLocation) {
+        self.set_item_stack_with_count(entity_id, item, 1);
+    }
+
+    /// Same as [`Self::set_item_stack`], carrying a real stack size through to
+    /// [`EntityDraw::count`].
+    ///
+    /// [`fold_snapshots`] calls this (via the same path as
+    /// [`Self::set_item_stack`]'s doc comment describes) with
+    /// [`EntitySnapshot::count`], which `net::entity_snapshot` reads straight
+    /// off the wire's `ItemStack::count` — no model dependency needed to widen
+    /// this far, per `docs/dropped-items.md`.
+    pub fn set_item_stack_with_count(&mut self, entity_id: i32, item: ResourceLocation, count: u32) {
         self.world
             .resource_mut::<ItemStacks>()
             .0
-            .insert(entity_id, item);
+            .insert(entity_id, TrackedStack { id: item, count });
     }
 
     /// Forget the item recorded for `entity_id`, so it draws as an empty stack.
@@ -1276,7 +1430,24 @@ impl EntityInterpolator {
     /// The item recorded for `entity_id`, if any.
     #[must_use]
     pub fn item_stack(&self, entity_id: i32) -> Option<&ResourceLocation> {
-        self.world.resource::<ItemStacks>().0.get(&entity_id)
+        self.world
+            .resource::<ItemStacks>()
+            .0
+            .get(&entity_id)
+            .map(|s| &s.id)
+    }
+
+    /// The stack count recorded for `entity_id`, if any item is recorded at
+    /// all. `1` is the neutral default set by [`Self::set_item_stack`]; only
+    /// [`Self::set_item_stack_with_count`] and the live [`fold_snapshots`]
+    /// chain ever record anything else.
+    #[must_use]
+    pub fn item_count(&self, entity_id: i32) -> Option<u32> {
+        self.world
+            .resource::<ItemStacks>()
+            .0
+            .get(&entity_id)
+            .map(|s| s.count)
     }
 
     /// [`Self::update_with_view`] against [`OpenAir`] (as a [`PlayerCollision::View`])
@@ -1424,6 +1595,8 @@ mod tests {
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
+            variant: None,
+            count: 1,
         }
     }
 
@@ -1748,6 +1921,112 @@ mod tests {
         assert!(interp.draws().is_empty());
     }
 
+    // ---- sheep wool --------------------------------------------------------
+
+    #[test]
+    fn sheep_wool_narrows_only_the_dyed_variant_on_a_sheep() {
+        let dyed = EntityVariant::Dyed {
+            color: 5,
+            sheared: false,
+        };
+        assert_eq!(
+            sheep_wool("sheep", Some(&dyed)),
+            Some(SheepWool {
+                color: 5,
+                sheared: false
+            })
+        );
+        // The pig/cow trap `docs/entity-rendering.md` documents for the armour
+        // attach applies here too: `AnimFamily::Quadruped` is shared by pig,
+        // cow, sheep and wolf, so the gate must be the resolved type path,
+        // never the family. A pig carrying the same variant (a plugin could
+        // send this) must still grow no wool.
+        assert_eq!(
+            sheep_wool("pig", Some(&dyed)),
+            None,
+            "gating on family instead of type path would draw wool on a pig"
+        );
+        assert_eq!(
+            sheep_wool("sheep", None),
+            None,
+            "no reported variant at all must not synthesise wool"
+        );
+        // A sheared sheep is still `Some` — the data stays honest about what
+        // was reported; the draw-time skip belongs downstream, see
+        // `SheepWool::sheared`'s doc comment.
+        assert_eq!(
+            sheep_wool(
+                "sheep",
+                Some(&EntityVariant::Dyed {
+                    color: 0,
+                    sheared: true
+                })
+            ),
+            Some(SheepWool {
+                color: 0,
+                sheared: true
+            })
+        );
+    }
+
+    #[test]
+    fn sheep_wool_reaches_the_draw_only_for_a_sheep() {
+        let dyed = EntityVariant::Dyed {
+            color: 10,
+            sheared: false,
+        };
+        let mut sheep = snap(1, Vec3::ZERO, 0.0);
+        sheep.type_path = "sheep".into();
+        sheep.variant = Some(dyed.clone());
+        let mut pig = snap(2, Vec3::new(1.0, 0.0, 0.0), 0.0);
+        pig.variant = Some(dyed);
+
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[sheep, pig], 0.016);
+        let draws = interp.draws();
+        let sheep_draw = draws.iter().find(|d| d.id == 1).expect("sheep tracked");
+        let pig_draw = draws.iter().find(|d| d.id == 2).expect("pig tracked");
+        assert_eq!(
+            sheep_draw.wool,
+            Some(SheepWool {
+                color: 10,
+                sheared: false
+            })
+        );
+        assert_eq!(
+            pig_draw.wool, None,
+            "the same decoded variant must not reach the draw on a non-sheep"
+        );
+    }
+
+    #[test]
+    fn shearing_updates_wool_on_a_sheep_that_has_not_moved() {
+        // Mirrors `equipment_updates_on_a_mob_that_has_not_moved`: shearing is
+        // a metadata update, not a movement, so it must not be gated on the
+        // `moved || turned` check.
+        let mut s = snap(1, Vec3::new(4.0, 64.0, 4.0), 90.0);
+        s.type_path = "sheep".into();
+        s.variant = Some(EntityVariant::Dyed {
+            color: 3,
+            sheared: false,
+        });
+        let mut interp = EntityInterpolator::new();
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert_eq!(interp.draws()[0].wool.map(|w| w.sheared), Some(false));
+
+        // Identical pose, freshly sheared.
+        s.variant = Some(EntityVariant::Dyed {
+            color: 3,
+            sheared: true,
+        });
+        interp.update(std::slice::from_ref(&s), 0.016);
+        assert_eq!(
+            interp.draws()[0].wool.map(|w| w.sheared),
+            Some(true),
+            "wool state must not be gated on movement, same as equipment"
+        );
+    }
+
     // ---- dropped items ---------------------------------------------------
 
     /// An item entity whose stack the server has not (yet) reported, and
@@ -1765,6 +2044,8 @@ mod tests {
             velocity: None,
             on_ground: false,
             equipment: Vec::new(),
+            variant: None,
+            count: 1,
         }
     }
 
@@ -1816,6 +2097,40 @@ mod tests {
         interp.set_item_stack(9, stone());
         interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
         assert_eq!(interp.draws()[0].item, Some(stone()));
+    }
+
+    /// The stack count's own hop across the same boundary velocity/equipment
+    /// crossed before it: `EntitySnapshot::count` -> `TrackedStack` ->
+    /// `EntityDraw::count`, via `fold_snapshots` — the live path
+    /// `net::entity_snapshot` feeds, not the setter.
+    #[test]
+    fn item_count_reaches_the_draw() {
+        let mut interp = EntityInterpolator::new();
+
+        // No stack reported at all: the neutral default, so a consumer that
+        // multiplies by count never draws zero copies of nothing.
+        interp.update(&[item_snap(9, Vec3::new(1.0, 64.0, 2.0))], 0.016);
+        assert_eq!(interp.draws()[0].count, 1);
+
+        let mut with_count = item_snap_with(9, Vec3::new(1.0, 64.0, 2.0), Some(stone()));
+        with_count.count = 64;
+        interp.update(std::slice::from_ref(&with_count), 0.016);
+        assert_eq!(interp.draws()[0].item, Some(stone()));
+        assert_eq!(interp.draws()[0].count, 64);
+    }
+
+    /// The direct setter seam, mirroring [`a_reported_stack_reaches_the_draw`]
+    /// for the count half: [`EntityInterpolator::set_item_stack_with_count`]
+    /// and its accessors.
+    #[test]
+    fn set_item_stack_with_count_is_recorded_and_reachable() {
+        let mut interp = EntityInterpolator::new();
+        interp.set_item_stack_with_count(9, stone(), 40);
+        assert_eq!(interp.item_stack(9), Some(&stone()));
+        assert_eq!(interp.item_count(9), Some(40));
+        // The plain setter is documented as defaulting to the neutral count.
+        interp.set_item_stack(9, stone());
+        assert_eq!(interp.item_count(9), Some(1));
     }
 
     #[test]

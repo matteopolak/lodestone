@@ -249,7 +249,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
             // `gpu.rs`'s `entity_renders_to_pixels_through_shell_path` (and its
             // `off_hue_fraction`'s left-half restriction): that is where the
             // unconditional first-person arm lives
-            // (`prepare_first_person_arm` → `first_person_arm_pose`,
+            // (`prepare_first_person_hand` → `first_person_arm_pose`,
             // camera-space, roughly the right-hand 30% and bottom 30% of the
             // frame). This assertion is about the *pig*, and folding the arm's
             // own legitimate pixels into it would turn a working feature into

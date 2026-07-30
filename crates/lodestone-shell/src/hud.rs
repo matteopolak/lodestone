@@ -233,7 +233,19 @@ pub struct HudFrame<'a> {
     pub stats: &'a DebugStats,
     /// Whether the F3 debug overlay is visible.
     pub show_debug: bool,
-    /// Whether to draw the centre crosshair (suppressed on menus/pause).
+    /// Whether to draw the centre aiming reticle. Suppressed while any screen is
+    /// up (pause, chat, a container).
+    ///
+    /// Vanilla is *not* the authority for that suppression: `Hud.extractCrosshair`
+    /// (`Hud.java:439-470`) gates on camera type and spectator mode only, so a
+    /// vanilla crosshair stays visible behind an open inventory, dimmed by the
+    /// screen's own background. We hide it instead because we have no such
+    /// background yet (issue #51); revisit when container screens gain one.
+    ///
+    /// **This flag is about the crosshair and nothing else.** It used to double as
+    /// the hotbar's gate — one boolean answering two questions — which is exactly
+    /// how the hotbar came to vanish behind the pause menu (issue #61). See
+    /// [`Self::hotbar`].
     pub crosshair: bool,
     /// Recent chat lines, oldest-first; drawn bottom-left. Each is a legacy
     /// `§`-code string paired with its **age in seconds**, which drives the
@@ -251,8 +263,19 @@ pub struct HudFrame<'a> {
     pub health: Option<f32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
     pub food: Option<i32>,
-    /// The selected hotbar slot in `0..9`, `Some` while in active play. Drawn as
-    /// a 9-cell bar at the bottom centre with the selected cell highlighted.
+    /// The selected hotbar slot in `0..9`, `Some` whenever a **world** is on
+    /// screen — including behind the pause menu, the chat box and a container.
+    /// Drawn as a 9-cell bar at the bottom centre with the selected cell
+    /// highlighted.
+    ///
+    /// This used to say "`Some` while in active play", and the call site agreed
+    /// with it, so the hotbar disappeared the moment any screen opened
+    /// (issue #61). Vanilla draws the hotbar under `readyForLevelRendering`
+    /// (`GameRenderer.java:377,389` → `Gui.java:152-156`) and gates it on game
+    /// mode only (`Hud.java:534-562`); the *screen* then paints its translucent
+    /// background over the top, and that is the whole of the difference. See
+    /// `app::hud_follows_world`, and [`Self::crosshair`] for the one element we
+    /// do deliberately hide.
     pub hotbar: Option<usize>,
     /// The nine hotbar item stacks (`0..9`), `Some` on a live server once the
     /// player inventory has been folded. Each slot is `Some(HotbarSlot)` when

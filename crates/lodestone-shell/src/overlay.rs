@@ -19,6 +19,27 @@
 //! defect one layer up from the double fold `docs/bevy-migration.md` §1.1
 //! measured. [`Sidebar`] / [`SidebarLine`] stay here because they are the HUD's
 //! vocabulary, not the fold's.
+//!
+//! ## The same defect, found a second time
+//!
+//! `NetClient::boss_bars()` was the boss-bar twin of exactly that shape, and it
+//! survived Stage 3 because nothing about it looked wrong on inspection: a
+//! `pub fn` with a plausible doc comment, folding the right component, next to
+//! sibling accessors that *are* live. Nothing called it — the HUD reaches
+//! [`Sidebar`]'s counterpart through [`crate::sim::Sim::boss_bars`], which reads
+//! the same `lodestone_ecs::SessionBossBars` component directly.
+//!
+//! It was **not** merely redundant. It passed a null translator (`&|_| None`)
+//! into [`boss_bars_from`], so anything that had started calling it would have
+//! rendered boss-bar titles as raw keys like `entity.minecraft.ender_dragon` —
+//! and it only carried that null translator because the *live* path was given a
+//! real one while fixing exactly that bug, and this one had no language table to
+//! fix it with. A dead projection does not stay merely dead: it drifts, silently,
+//! away from the live one, and it is the version a future caller will find first.
+//!
+//! The lesson for the next one: **two projections of one thing is the defect**,
+//! whether or not the dead half currently misbehaves. Grep for a second folder
+//! whenever one is touched.
 
 use lodestone_game::bossbar::{BossBarColor, BossBarSet};
 
@@ -60,11 +81,21 @@ pub struct BossBarView {
 /// event family that Stage 3 collapsed to one. `BossBarSet::iter` is what
 /// carries insertion order; a `HashMap` iteration would shuffle the stack every
 /// frame.
+///
+/// `translate` is the language table (an `assets::Language` becomes one via
+/// `Language::translator`). It is **not** optional decoration: a vanilla boss
+/// bar's title is the boss entity's display name, i.e.
+/// `translate("entity.minecraft.ender_dragon")` — flattening it without a table
+/// puts the raw key on screen. Same shape as [`crate::scoreboard::sidebar_from`]
+/// and [`crate::tablist::player_rows`], deliberately.
 #[must_use]
-pub fn boss_bars_from(bars: &BossBarSet) -> Vec<BossBarView> {
+pub fn boss_bars_from(
+    bars: &BossBarSet,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> Vec<BossBarView> {
     bars.iter()
         .map(|(_, b)| BossBarView {
-            title: b.title.to_plain_string(),
+            title: lodestone_game::text::resolve_to_string(&b.title, translate),
             progress: b.progress.clamp(0.0, 1.0),
             color: boss_color_rgb(b.color),
         })
@@ -105,6 +136,46 @@ mod tests {
         }
     }
 
+    /// A tiny table so these tests depend on no real asset. Deliberately does
+    /// **not** contain the chat/death keys `Text`'s built-in stub table carries,
+    /// so a fold that ignored this closure would be visible.
+    fn tr(key: &str) -> Option<String> {
+        match key {
+            "entity.minecraft.ender_dragon" => Some("Ender Dragon".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn titles_resolve_translate_components_through_the_translator() {
+        // A vanilla boss bar's title is the boss's display name — a `translate`
+        // node, not prose. Issue #52's defect class: flattening it without the
+        // language table renders `entity.minecraft.ender_dragon`.
+        let mut bars = BossBarSet::new();
+        bars.add(
+            uuid::Uuid::from_u128(7),
+            BossBar {
+                title: Text::translate("entity.minecraft.ender_dragon", vec![]),
+                progress: 1.0,
+                color: BossBarColor::Purple,
+                overlay: BossBarOverlay::Progress,
+                darken_screen: false,
+                play_music: false,
+                create_fog: false,
+            },
+        );
+
+        let views = boss_bars_from(&bars, &tr);
+        assert_eq!(views[0].title, "Ender Dragon");
+
+        // -- negative control -------------------------------------------------
+        // The same fold against a table that knows nothing must surface the raw
+        // key, proving the assertion above is reading the translator and not a
+        // built-in table that happens to agree.
+        let empty = boss_bars_from(&bars, &|_| None);
+        assert_eq!(empty[0].title, "entity.minecraft.ender_dragon");
+    }
+
     #[test]
     fn boss_bars_fold_title_progress_and_clamp_in_insertion_order() {
         let mut bars = BossBarSet::new();
@@ -118,7 +189,7 @@ mod tests {
             boss_bar("Overshoot", 2.0, BossBarColor::Red),
         );
 
-        let views = boss_bars_from(&bars);
+        let views = boss_bars_from(&bars, &tr);
         assert_eq!(views.len(), 2, "one view per active bar");
         assert_eq!(
             views[0].title, "Ender Dragon",

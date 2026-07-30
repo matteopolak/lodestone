@@ -21,9 +21,10 @@ use lodestone_render::{
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
     entity::{
-        Arm, armour_layer_tint, armour_layers, dropped_item_mesh, first_person_arm_parts,
-        first_person_arm_pose, ground_transform, hand_projection, hand_transform, held_item_mesh,
-        item_bob_offset, model_for_type, player_model_name,
+        Arm, armour_layer_tint, armour_layers, camera_orientation, dropped_item_mesh,
+        first_person_arm_parts, first_person_arm_pose, first_person_item_mesh, ground_transform,
+        hand_projection, hand_transform, held_item_mesh, item_bob_offset, model_for_type,
+        player_model_name, thrown_item_for, thrown_item_mesh,
     },
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
@@ -666,6 +667,24 @@ pub struct RenderStats {
     /// `false` for every caller today: nothing in this shell installs the
     /// source yet.
     pub third_person_body_drawn: bool,
+    /// Thrown item projectiles drawn this frame — snowballs, eggs, pearls,
+    /// potions, fireballs and the eye of ender, each a camera-facing billboard of
+    /// its own item model ([`lodestone_render::entity::thrown_item_for`]).
+    ///
+    /// Its own counter for the same reason [`item_drops_drawn`](Self::item_drops_drawn)
+    /// is: a projectile is neither a cuboid rig (so it never reaches
+    /// `entities_drawn`) nor an item entity (so it never reaches
+    /// `item_drops_drawn`). Before this counter existed a sky full of snowballs
+    /// and an empty sky produced byte-identical stats.
+    pub projectiles_drawn: usize,
+    /// Whether the item in the local player's first-person hand was drawn this
+    /// frame *instead of* the bare arm.
+    ///
+    /// Mutually exclusive with [`first_person_arm_drawn`](Self::first_person_arm_drawn),
+    /// which is vanilla's own structure: `submitArmWithItem` renders the arm only
+    /// when the stack is empty. Both `false` in third person; both `false` also
+    /// means the `player_wide` rig failed to load, which is a defect.
+    pub first_person_item_drawn: bool,
 }
 
 #[derive(Debug)]
@@ -770,6 +789,14 @@ struct ModelRenderer {
     /// view-projection with a zero section origin, like the crack pass's.
     drop_cam_buffer: wgpu::Buffer,
     drop_cam_bind_group: wgpu::BindGroup,
+    /// The **first-person held item** pass's camera buffer + bind group. Its
+    /// `view_proj` is [`hand_projection`] *alone* (no view matrix) because the
+    /// pose `first_person_item_mesh` bakes in is already camera-space — the same
+    /// reason `EntityRenderer::hand_cam_buffer` exists for the bare arm. This is a
+    /// separate buffer from that one because the model pipeline and the entity
+    /// pipeline declare different group-0 layouts.
+    hand_cam_buffer: wgpu::Buffer,
+    hand_cam_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
 }
 
@@ -1364,6 +1391,13 @@ impl ThirdPersonBodyState {
             pitch: self.anim.head_pitch_deg,
             scale: self.scale,
             anim: self.anim,
+            // The local player is neither a sheep nor a dropped item, so both of
+            // these are their neutral values by construction rather than by
+            // omission: `wool` is `None` for every non-`sheep` type path per
+            // `entities::sheep_wool`'s gate, and `count` is meaningless when
+            // `item` is `None`.
+            wool: None,
+            count: 1,
         }
     }
 }
@@ -1454,6 +1488,43 @@ impl std::fmt::Debug for HandSwingSource {
     }
 }
 
+/// Where the **local player's main-hand item** comes from, polled once per frame
+/// like [`HandSwingSource`].
+///
+/// This exists because `render` receives only `&[EntityDraw]` and the local player
+/// is not in it — the same fact [`ThirdPersonBodySource`] and [`HandSwingSource`]
+/// exist for. Everything else in the first-person path was already present:
+/// [`lodestone_render::entity::first_person_item_mesh`] poses the geometry,
+/// `DisplaySlot::FirstPersonRightHand` is selected by
+/// [`Arm::display_slot`](lodestone_render::entity::Arm::display_slot), and
+/// `BlockModels::items` has carried flat-sprite geometry since the extrusion
+/// landed. The **only** missing link was that nothing told the renderer what the
+/// player was holding.
+///
+/// Unset — the default, the offline demo, every headless test that does not opt in
+/// — yields `None`, which draws the bare arm: exactly vanilla's empty-hand branch
+/// and exactly the behaviour before this existed.
+#[derive(Default)]
+pub struct MainHandSource(
+    #[allow(clippy::type_complexity)]
+    Option<Box<dyn Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync>>,
+);
+
+impl MainHandSource {
+    #[must_use]
+    fn value(&self) -> Option<lodestone_assets::ResourceLocation> {
+        self.0.as_ref().and_then(|f| f())
+    }
+}
+
+impl std::fmt::Debug for MainHandSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("MainHandSource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for OutlineShapeSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("OutlineShapeSource")
@@ -1526,6 +1597,10 @@ pub struct RenderState {
     /// arm until the shell wires its swing clock in via
     /// [`RenderState::set_hand_swing_source`].
     hand_swing: HandSwingSource,
+    /// What the local player is holding in their main hand, for the first-person
+    /// pass. Empty (bare arm) until the shell wires it in via
+    /// [`RenderState::set_main_hand_source`].
+    main_hand: MainHandSource,
     outline_shape: OutlineShapeSource,
 }
 
@@ -1626,6 +1701,16 @@ impl RenderState {
                 },
             );
             let drop_cam_bind_group = pipeline.camera_bind_group(device, &drop_cam_buffer);
+            // The first-person held item's own group-0: `hand_projection` alone,
+            // rewritten per frame from the live aspect ratio.
+            let hand_cam_buffer = model_camera_buffer(
+                device,
+                CameraUniform {
+                    view_proj: [[0.0; 4]; 4],
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+            );
+            let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
             ModelRenderer {
                 pipeline,
                 water_pipeline,
@@ -1645,6 +1730,8 @@ impl RenderState {
                 items,
                 drop_cam_buffer,
                 drop_cam_bind_group,
+                hand_cam_buffer,
+                hand_cam_bind_group,
                 sections: HashMap::new(),
             }
         });
@@ -1684,6 +1771,9 @@ impl RenderState {
             // A rested arm until the shell installs its tick-driven swing clock;
             // see `set_hand_swing_source`.
             hand_swing: HandSwingSource::default(),
+            // An empty hand until the shell installs a source; see
+            // `set_main_hand_source`.
+            main_hand: MainHandSource::default(),
             outline_shape: OutlineShapeSource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
@@ -1867,6 +1957,37 @@ impl RenderState {
     /// ```
     pub fn set_hand_swing_source(&mut self, f: impl Fn() -> f32 + Send + Sync + 'static) {
         self.hand_swing = HandSwingSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for the local player's **main-hand item** (see
+    /// [`MainHandSource`]), so first person draws the held item instead of a bare
+    /// arm.
+    ///
+    /// Until installed, the bare arm is drawn unconditionally — vanilla's
+    /// empty-hand branch — which is what this shell did before the item path
+    /// existed. `f` returns the item id of the *selected hotbar slot*, or `None`
+    /// for an empty hand.
+    ///
+    /// **Re-install it every frame**, for the same reason
+    /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
+    /// changes when the player scrolls the hotbar, and a one-shot install at
+    /// connect time freezes whatever was in slot 0 at join into the hand forever.
+    /// Sample first and move the value into the closure rather than borrowing the
+    /// `Sim`, which the source outlives.
+    ///
+    /// ```no_run
+    /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
+    /// // `Sim::selected_slot()` indexes the hotbar records `app.rs` already
+    /// // builds for the HUD; take that record's item id.
+    /// let held: Option<lodestone_assets::ResourceLocation> = None; // = hotbar[selected].item
+    /// render.set_main_hand_source(move || held.clone());
+    /// # }
+    /// ```
+    pub fn set_main_hand_source(
+        &mut self,
+        f: impl Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync + 'static,
+    ) {
+        self.main_hand = MainHandSource(Some(Box::new(f)));
     }
 
     /// Install the source for the targeted block's outline shape.
@@ -2230,12 +2351,13 @@ impl RenderState {
         // must never draw together. Prepared here, drawn in its own pass at
         // the end of the frame — see the note there for why it needs a
         // second pass.
-        let first_person_arm = if stats.third_person_body_drawn {
+        let first_person_hand = if stats.third_person_body_drawn {
             None
         } else {
-            self.prepare_first_person_arm(device, queue, camera)
+            self.prepare_first_person_hand(device, queue, camera)
         };
-        stats.first_person_arm_drawn = first_person_arm.is_some();
+        stats.first_person_arm_drawn = matches!(first_person_hand, Some(FirstPersonHand::Arm(_)));
+        stats.first_person_item_drawn = matches!(first_person_hand, Some(FirstPersonHand::Item(_)));
 
         // Build the mining-crack overlay mesh before the pass (buffers can't be
         // created mid-pass). It follows the target block's real model geometry;
@@ -2489,9 +2611,9 @@ impl RenderState {
         // blocks of the eye — standing in a doorway, or facing the block you are
         // mining — because the arm genuinely *is* inside that geometry. The colour
         // attachment loads rather than clears, so the world stays.
-        if let Some(arm) = &first_person_arm {
+        if let Some(hand) = &first_person_hand {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("first-person arm pass"),
+                label: Some("first-person hand pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
@@ -2513,19 +2635,40 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.entities.pipeline.pipeline);
-            // The *hand* camera uniform: `hand_projection` alone, because the arm
-            // pose is already camera-space. Binding the world one here would leave
-            // the arm sitting at the world origin.
-            pass.set_bind_group(0, &self.entities.hand_cam_bind_group, &[]);
-            pass.set_bind_group(1, arm.texture, &[]);
-            pass.set_vertex_buffer(0, arm.model.vertices.slice(..));
-            pass.set_index_buffer(arm.model.indices.slice(..), wgpu::IndexFormat::Uint32);
-            for (range, buffer) in &arm.parts {
-                pass.set_vertex_buffer(1, buffer.slice(..));
-                let end = range.index_start + range.index_count;
-                pass.draw_indexed(range.index_start..end, 0, 0..1);
-                stats.draw_calls += 1;
+            match hand {
+                // The held item is item-model geometry, so it draws through the
+                // *model* pipeline with that pipeline's four bind groups — the
+                // same atlas, palette and animation slots the terrain and the
+                // hotbar icons use. Only group 0 differs: the hand projection.
+                FirstPersonHand::Item(mesh) => {
+                    if let Some(model) = self.model.as_ref() {
+                        pass.set_pipeline(&model.pipeline.pipeline);
+                        pass.set_bind_group(0, &model.hand_cam_bind_group, &[]);
+                        pass.set_bind_group(1, &model.atlas_bind_group, &[]);
+                        pass.set_bind_group(2, &model.palette_bind_group, &[]);
+                        pass.set_bind_group(3, &model.anim_bind_group, &[]);
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
+                }
+                FirstPersonHand::Arm(arm) => {
+                    pass.set_pipeline(&self.entities.pipeline.pipeline);
+                    // The *hand* camera uniform: `hand_projection` alone, because
+                    // the arm pose is already camera-space. Binding the world one
+                    // here would leave the arm sitting at the world origin.
+                    pass.set_bind_group(0, &self.entities.hand_cam_bind_group, &[]);
+                    pass.set_bind_group(1, arm.texture, &[]);
+                    pass.set_vertex_buffer(0, arm.model.vertices.slice(..));
+                    pass.set_index_buffer(arm.model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer) in &arm.parts {
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..1);
+                        stats.draw_calls += 1;
+                    }
+                }
             }
         }
 
@@ -2573,8 +2716,25 @@ impl RenderState {
         let model = self.model.as_ref()?;
         let frustum = camera.frustum();
         let mut combined = ModelMesh::default();
+        // `camera.orientation` for every thrown projectile this frame: one
+        // matrix, not one per entity — a billboard's rotation depends only on the
+        // camera.
+        let orientation = camera_orientation(camera.view_matrix());
         for draw in entities {
             if draw.type_path != ITEM_ENTITY_TYPE_PATH {
+                if let Some(thrown) = thrown_item_for(&draw.type_path) {
+                    self.merge_thrown_item(
+                        model,
+                        draw,
+                        thrown,
+                        orientation,
+                        &frustum,
+                        &mut combined,
+                        stats,
+                    );
+                    // A projectile holds no equipment; skip the held-item scan.
+                    continue;
+                }
                 self.merge_held_items(model, draw, &frustum, &mut combined, stats);
                 continue;
             }
@@ -2626,8 +2786,23 @@ impl RenderState {
         Some(mesh)
     }
 
-    /// Build this frame's first-person arm draw, or `None` if the `player_wide`
-    /// rig, its texture, its GPU upload or its arm part is missing.
+    /// Build this frame's first-person hand draw — **the held item, or the bare
+    /// arm**, never both.
+    ///
+    /// # Which one, and why it is exclusive
+    ///
+    /// Vanilla's `ItemInHandRenderer.submitArmWithItem` branches on
+    /// `itemStack.isEmpty()`: the empty hand gets `renderPlayerArm`, and a
+    /// non-empty one gets the *item* through `applyItemArmTransform` **with no arm
+    /// drawn at all**. So this returns a [`FirstPersonHand`] and the caller draws
+    /// exactly one of its two variants. Drawing both — the tempting "add the item
+    /// on top of the arm" reading — puts an item model inside the wrist.
+    ///
+    /// [`MainHandSource`] decides. Unset yields `None` and the bare-arm branch,
+    /// which is what this shell did before the item path existed. An item that is
+    /// held but has no baked geometry (a `IconPart::Special` chest or shield) also
+    /// falls back to the arm rather than to nothing: vanilla would draw the special
+    /// renderer, and a bare arm is closer to that than an empty screen.
     ///
     /// Also rewrites the arm pass's group-0 uniform. That uniform's `view_proj`
     /// is [`hand_projection`] — **the projection alone** — because
@@ -2660,15 +2835,8 @@ impl RenderState {
     /// `set_hand_swing_source` looks exactly like a working rested arm. See
     /// `docs/arm-swing-animation.md`.
     ///
-    /// # The three fidelity gaps, all of them missing *shell state*, not code
+    /// # The two remaining fidelity gaps, both missing *shell state*, not code
     ///
-    /// * **The arm is always drawn, even holding an item.** Vanilla's
-    ///   `submitArmWithItem` draws the bare arm only when the main hand is
-    ///   `isEmpty()`, and otherwise draws the *item* (via
-    ///   `applyItemArmTransform`) with no arm. Choosing between them needs the
-    ///   local player's held stack, which never reaches [`RenderState`] — `render`
-    ///   receives only `&[EntityDraw]`, and the local player is not in it. So this
-    ///   renders vanilla's empty-hand case permanently.
     /// * **`bobView` / `bobHurt` and the `xBob`/`yBob` view lag are absent.** All
     ///   need per-tick player state the shell does not track (walk distance, hurt
     ///   time, the two smoothed view angles). All are the identity standing still.
@@ -2678,13 +2846,45 @@ impl RenderState {
     ///
     /// The rig is `player_wide` unconditionally — the shell has no skin-model
     /// signal, and `canonical_model_name` already maps `"player"` to it.
-    fn prepare_first_person_arm<'a>(
+    fn prepare_first_person_hand<'a>(
         &'a self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
-    ) -> Option<FirstPersonArm<'a>> {
+    ) -> Option<FirstPersonHand<'a>> {
         const ARM: Arm = Arm::Right;
+
+        // Group 0 for *both* branches: `hand_projection` alone. Written before
+        // either branch can return, so the arm's uniform is never left holding a
+        // stale projection from a frame that drew an item (and vice versa).
+        self.write_hand_camera(queue, camera);
+
+        // The item branch first: it needs no entity rig at all, so a missing
+        // `player_wide` mesh must not silently suppress a held item too.
+        if let Some(item) = self.main_hand.value()
+            && let Some(model) = self.model.as_ref()
+            && let Some(geometry) = model.items.get(&item)
+        {
+            // `true`: the *first-person* hand slot. `false` here reads
+            // `thirdperson_righthand`, a different rotation and scale, and puts
+            // the item at a plausible-but-wrong angle rather than off screen.
+            let transform = hand_transform(&geometry.display, ARM, true);
+            let mesh = first_person_item_mesh(
+                &geometry.quads,
+                geometry.gui_light,
+                ARM,
+                self.hand_swing.value(),
+                // `inverseArmHeight` — the equip/swap dip. Zero: the shell tracks
+                // neither `mainHandHeight` nor its previous-tick value, the same
+                // gap the arm branch documents.
+                0.0,
+                &transform,
+                u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
+            );
+            if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
+                return Some(FirstPersonHand::Item(gpu));
+            }
+        }
 
         let entry = model_for_type("player")?;
         let mesh = self.entities.models.get(entry.name)?;
@@ -2692,11 +2892,7 @@ impl RenderState {
         let texture = self.entities.textures.get(entry.name)?;
         let pose = first_person_arm_pose(mesh, ARM, self.hand_swing.value())?;
 
-        // The arm's light is the player's own lightmap sample, exactly as
-        // `renderItemInHand` passes `getPackedLightCoords(minecraft.player, …)`.
-        // Sampled at the eye rather than the feet: it is what the player is
-        // looking through, and the two only differ standing in a doorway.
-        let light = u32::from(self.entity_light.sample(camera.position));
+        let light = self.hand_light(camera);
 
         let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> =
             first_person_arm_parts(mesh, ARM)
@@ -2717,16 +2913,47 @@ impl RenderState {
             return None;
         }
 
+        Some(FirstPersonHand::Arm(FirstPersonArm {
+            model: gpu,
+            texture,
+            parts,
+        }))
+    }
+
+    /// The packed light byte the first-person hand is lit with, for both branches.
+    ///
+    /// Exactly `renderItemInHand`'s `getPackedLightCoords(minecraft.player, …)`,
+    /// sampled at the **eye** rather than the feet: it is what the player is
+    /// looking through, and the two only differ standing in a doorway.
+    #[must_use]
+    fn hand_light(&self, camera: &Camera) -> u32 {
+        u32::from(self.entity_light.sample(camera.position))
+    }
+
+    /// Rewrite both hand passes' group-0 uniforms with [`hand_projection`].
+    ///
+    /// **The projection alone, with no view matrix**, because
+    /// `GameRenderer.renderItemInHand` multiplies the pose stack by
+    /// `modelViewMatrix.invert()` while pushing `modelViewStack.mul(modelViewMatrix)`
+    /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
+    /// rotation cancels exactly, leaving a camera-space pose. Feeding
+    /// `Camera::view_projection` here instead parks the hand at the world origin,
+    /// visible only when the player stands on it.
+    ///
+    /// Two buffers, one value: the entity pipeline (bare arm) and the model
+    /// pipeline (held item) declare different group-0 layouts, so each needs its
+    /// own. Written together here so they cannot drift.
+    fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) {
+        let camera_uniform = CameraUniform {
+            view_proj: hand_projection(camera.aspect).to_cols_array_2d(),
+            section_origin: [0.0, 0.0, 0.0, 0.0],
+        };
         queue.write_buffer(
             &self.entities.hand_cam_buffer,
             0,
             bytemuck::bytes_of(
                 &EntityCameraUniform {
-                    camera: CameraUniform {
-                        // Projection only — see this method's docs.
-                        view_proj: hand_projection(camera.aspect).to_cols_array_2d(),
-                        section_origin: [0.0, 0.0, 0.0, 0.0],
-                    },
+                    camera: camera_uniform,
                     // No fog on the hand (vanilla does not fog it either, and at
                     // 0.7 blocks it could contribute nothing), but the sky-darken
                     // lane is still live so the arm dims with the world at night.
@@ -2735,12 +2962,91 @@ impl RenderState {
                 .with_sky_darken(self.sky_darken.value()),
             ),
         );
+        if let Some(model) = self.model.as_ref() {
+            queue.write_buffer(
+                &model.hand_cam_buffer,
+                0,
+                bytemuck::bytes_of(&ModelCameraUniform {
+                    camera: camera_uniform,
+                    fog: FogUniform::disabled(),
+                }),
+            );
+        }
+    }
 
-        Some(FirstPersonArm {
-            model: gpu,
-            texture,
-            parts,
-        })
+    /// Merge one thrown item projectile into `combined` as a camera-facing
+    /// billboard of its item model — vanilla's `ThrownItemRenderer`.
+    ///
+    /// # Which item id, and why the wire is preferred over the table
+    ///
+    /// `ThrowableItemProjectile`, `Fireball` and `EyeOfEnder` all sync their stack
+    /// through `DATA_ITEM_STACK` — the **same** `ITEM_STACK` serializer at the same
+    /// metadata index a dropped item uses, so `EntityDraw::item` is already
+    /// populated for a projectile with no new plumbing (`apply_entity_metadata`
+    /// inserts `DisplayItem` for any entity type, not just `item`). That value is
+    /// authoritative and takes precedence.
+    ///
+    /// [`ThrownItem::item`] is the fallback for the case the wire cannot cover:
+    /// vanilla only marks the field dirty when a constructor *sets* it, so a
+    /// snowball thrown by a snow golem — built through the position-only
+    /// constructor — arrives with the field never reported. Drawing nothing there
+    /// would be a silent hole in exactly the situation a player is being pelted.
+    ///
+    /// # Full-bright
+    ///
+    /// [`ThrownItem::full_bright`] is vanilla's `getBlockLightLevel` override
+    /// returning `15`; it maps onto [`ENTITY_FULLBRIGHT`], the same byte the GUI
+    /// item path nails every vertex to. The world sample is used otherwise, so a
+    /// snowball crossing a shadow dims and a fireball does not.
+    fn merge_thrown_item(
+        &self,
+        model: &ModelRenderer,
+        draw: &EntityDraw,
+        thrown: lodestone_render::entity::ThrownItem,
+        orientation: glam::Mat4,
+        frustum: &lodestone_render::Frustum,
+        combined: &mut ModelMesh,
+        stats: &mut RenderStats,
+    ) {
+        // The wire's stack first, the registration's default second. `and_then`
+        // rather than `or_else` on the geometry lookup: an id that resolves to no
+        // baked geometry should fall through to the default too, not draw nothing.
+        let geometry = draw
+            .item
+            .as_ref()
+            .and_then(|id| model.items.get(id))
+            .or_else(|| {
+                let id: lodestone_assets::ResourceLocation = thrown.item.parse().ok()?;
+                model.items.get(&id)
+            });
+        let Some(geometry) = geometry else {
+            return;
+        };
+        // Scaled slack: a `fireball` is drawn at 3x, so a half-block box would cull
+        // it while a third of it was still on screen.
+        let slack = glam::Vec3::splat(0.5 * thrown.scale.max(1.0));
+        if !frustum.intersects_aabb(draw.feet - slack, draw.feet + slack) {
+            return;
+        }
+        let light = if thrown.full_bright {
+            ENTITY_FULLBRIGHT
+        } else {
+            self.entity_light.sample(draw.feet)
+        };
+        // `display.ground`: `extractRenderState` resolves the item in
+        // `ItemDisplayContext.GROUND`, the same context a drop uses — which is why
+        // this is `ground_transform` and not a projectile-specific transform.
+        let ground = ground_transform(&geometry.display, geometry.gui_light);
+        combined.merge(&thrown_item_mesh(
+            &geometry.quads,
+            geometry.gui_light,
+            &ground,
+            draw.feet,
+            orientation,
+            thrown.scale,
+            light,
+        ));
+        stats.projectiles_drawn += 1;
     }
 
     /// Merge whatever `draw` is holding into `combined`, posed off its own arm.
@@ -3111,13 +3417,24 @@ impl RenderState {
     }
 }
 
+/// What the first-person hand pass draws this frame: the held item's model, or
+/// the bare arm. **Never both** — see
+/// [`RenderState::prepare_first_person_hand`], which is vanilla's own
+/// `isEmpty()` branch.
+enum FirstPersonHand<'a> {
+    /// The held item, meshed camera-space and drawn through the *model* pipeline
+    /// with the model pass's own `hand_cam_bind_group`.
+    Item(GpuModelMesh),
+    /// The bare arm, drawn through the *entity* pipeline.
+    Arm(FirstPersonArm<'a>),
+}
+
 /// The first-person arm's draw for one frame: the uploaded `player_wide` mesh and
 /// texture (borrowed — they are uploaded once at startup), plus one
 /// single-instance buffer per drawn part.
 ///
 /// Only the arm and its sleeve are listed. Both carry the *same* matrix, so this
 /// is two draw calls over one pose and not a pose per part.
-#[derive(Debug)]
 struct FirstPersonArm<'a> {
     model: &'a GpuEntityModel,
     texture: &'a wgpu::BindGroup,
@@ -3363,6 +3680,8 @@ mod tests {
                 age_ticks: 11.0,
                 aggressive: false,
             },
+            wool: None,
+            count: 1,
         };
 
         let instance = models
@@ -4127,6 +4446,8 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                wool: None,
+                count: 1,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -4141,6 +4462,8 @@ mod tests {
                 scale: 1.0,
                 anim: lodestone_render::AnimInput::REST,
                 equipment: Vec::new(),
+                wool: None,
+                count: 1,
             },
         ];
 
@@ -4308,6 +4631,8 @@ mod tests {
             scale: 1.0,
             anim: lodestone_render::AnimInput::REST,
             equipment: Vec::new(),
+            wool: None,
+            count: 1,
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the

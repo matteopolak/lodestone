@@ -128,6 +128,47 @@ fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction
         .find(|a| binds.is_mouse(*a, button))
 }
 
+/// Whether the world's own HUD — hotbar, hearts, hunger, the XP bar — draws on
+/// this screen.
+///
+/// **It belongs to the world, not to active play.** Vanilla extracts the entire
+/// HUD whenever a level is loaded and lets whatever screen is open paint its own
+/// translucent background *over* it; that background is the dim, and it is the
+/// only reason an open inventory looks different from playing:
+///
+/// - `GameRenderer.extract` computes
+///   `readyForLevelRendering = resourcesLoaded && advanceGameTime && level != null`
+///   and passes it straight into the GUI (`GameRenderer.java:377,389`) — note it
+///   asks about the *level*, never about `screen`.
+/// - `Gui.extractRenderState` calls `hud.extractRenderState` under that flag
+///   alone (`Gui.java:152-156`), then draws the open screen **afterwards**
+///   (`Gui.java:171-189`), i.e. on top.
+/// - `Hud.extractRenderState` itself gates only on F1 (`isHidden`) and
+///   `LevelLoadingScreen` (`Hud.java:218-221`). Inside it, the hotbar, hearts,
+///   hunger, the XP bar and the held-item name are gated on **game mode** only
+///   (`Hud.java:534-562`) — nothing there consults `screen()`.
+///
+/// Exactly two HUD elements in vanilla do consult `screen()`, and neither is a
+/// vital: the potion-effect icons (`Hud.java:486-488`, suppressed only when the
+/// screen `showsActiveEffects()`, which is overridden `true` by `InventoryScreen`
+/// and `CreativeModeInventoryScreen` because those draw their own) and the
+/// subtitle overlay (`Hud.java:238-241`). The crosshair is **not** one of them
+/// (`Hud.java:439-470` gates on camera type and spectator mode only) — we still
+/// hide it with [`crate::menu::UiState::is_playing`], a deliberate divergence
+/// while container screens have no dimmed background pass to hide behind
+/// (issue #51).
+///
+/// [`Screen::Connecting`] is excluded because there is no world yet — it reaches
+/// the world render path only because it is not an `owns_frame` screen. The
+/// menu and error screens never get here at all: `draw_menu` returns early.
+fn hud_follows_world(screen: crate::menu::Screen) -> bool {
+    use crate::menu::Screen;
+    matches!(
+        screen,
+        Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+    )
+}
+
 /// Which input surface owns the keyboard this instant.
 ///
 /// The four flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
@@ -1183,6 +1224,55 @@ impl WindowApp {
         // advances on the 20 Hz tick inside `Sim::step`.
         let hand_swing = self.sim.hand_swing_progress();
         render.set_hand_swing_source(move || hand_swing);
+
+        // Snapshot the player's nine hotbar slots into owned draw records.
+        //
+        // **Hoisted above the world render on purpose.** The HUD is the obvious
+        // consumer, but `set_main_hand_source` below is read inside
+        // `RenderState::render`, so this has to exist before that call. Doing it
+        // once here rather than twice serves both from a single `Menu` clone —
+        // `Sim::player_menu` clones all 46 slots, and a second call per frame is
+        // exactly the cost the mining-freeze fix removed from the tick path.
+        let player_menu = self.sim.player_menu();
+        let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
+            .map(|i| {
+                player_menu.player_native(i).and_then(|st| {
+                    let item = ResourceLocation::parse(&st.item().to_string()).ok()?;
+                    let damage = st
+                        .components()
+                        .get_int(lodestone_game::item::DAMAGE_COMPONENT)
+                        .and_then(|v| u32::try_from(v).ok());
+                    let max_damage = st
+                        .components()
+                        .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
+                        .and_then(|v| u32::try_from(v).ok());
+                    Some(HotbarSlot {
+                        item,
+                        count: st.count().max(0) as u32,
+                        damage,
+                        max_damage,
+                        enchanted: false,
+                    })
+                })
+            })
+            .collect();
+        drop(player_menu);
+
+        // What the player is holding, for the first-person hand pass. Vanilla's
+        // `ItemInHandRenderer` forks on `isEmpty()` and draws *either* the item or
+        // the bare arm, never both — `None` here is that empty hand, which is also
+        // what the demo path and every headless test get.
+        //
+        // Installed every frame for the same reason as the swing above: the value
+        // changes the instant the player scrolls the hotbar, so a one-shot install
+        // would freeze slot 0 into the hand forever. Sampled and moved, because the
+        // source outlives this call and must not borrow `Sim`.
+        let held = hotbar_records
+            .get(self.sim.selected_slot())
+            .and_then(|record| record.as_ref())
+            .map(|record| record.item.clone());
+        render.set_main_hand_source(move || held.clone());
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the
@@ -1252,10 +1342,23 @@ impl WindowApp {
         self.sim.stats.frame_ms = frame_ms;
         self.sim.stats.fps = self.fps_ema;
 
+        // The baked 3-D item geometry, shared by the container screen below and the
+        // HUD hotbar further down. It borrows `self.sim`, so it cannot be hoisted
+        // above the `self.sim.stats` writes just above — but it must exist before
+        // the container overlay, which is the pass that was missing it.
+        let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
+
         let open_menu = self.sim.open_menu();
         let player_menu;
         let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
-            (Some(&open.menu), open.title.to_plain_string())
+            // Through the language table, not `Text::to_plain_string` — the
+            // server sends `translate("container.crafting")`, and the model's
+            // stub table has no `container.*` key, so flattening it directly put
+            // the raw key on screen (issue #52). See `container::menu_title`.
+            (
+                Some(&open.menu),
+                crate::container::menu_title(&open.title, self.sim.translator().as_ref()),
+            )
         } else if self.ui.is_container_open() {
             player_menu = self.sim.player_menu();
             (Some(&player_menu), "Inventory".to_string())
@@ -1270,11 +1373,25 @@ impl WindowApp {
             let container_frame = ContainerFrame::new(container_menu, &container_title)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
                 .with_recipe_book(self.recipe_book.as_ref());
-            container_renderer.render_scaled(
+            // `render_with_icons_scaled`, **not** `render_scaled`: the latter
+            // hardcodes `depth: None, models: None`, so `want_models` was always
+            // false and `push_item_model` returned early. Flat sprite icons still
+            // drew (they need only `attach_items`), which is exactly why the symptom
+            // read as "block items render *flat*" rather than "nothing renders" —
+            // and why it survived as an island with `attach_items` *and*
+            // `attach_item_models` both already wired.
+            //
+            // The `_scaled` variant is required: the plain one lays out against
+            // `AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about
+            // where the slots are. The container overlay draws before the HUD and
+            // both model passes clear depth, so the order is safe.
+            container_renderer.render_with_icons_scaled(
                 device,
                 queue,
                 frame.view(),
+                Some(render.depth_view()),
                 &container_frame,
+                item_models,
                 self.nav.gui_scale(),
                 w,
                 h,
@@ -1303,35 +1420,13 @@ impl WindowApp {
         let food = self.sim.food();
         let sidebar = self.sim.sidebar();
         let boss_bars = self.sim.boss_bars();
+        // Two different questions, and they used to share one boolean named
+        // `crosshair` — which is why the hotbar vanished behind the pause menu
+        // and the inventory (issue #61). The crosshair is the aiming reticle and
+        // belongs to *active* play; the hotbar belongs to the **world**, and
+        // vanilla keeps it on screen behind every in-game screen.
         let crosshair = self.ui.is_playing();
-
-        // Snapshot the player's nine hotbar slots into owned draw records. The
-        // owned `Menu` is dropped once the icons are built; `hotbar_records`
-        // outlives `hud.render` below because the frame borrows it.
-        let player_menu = self.sim.player_menu();
-        let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
-            .map(|i| {
-                player_menu.player_native(i).and_then(|st| {
-                    let item = ResourceLocation::parse(&st.item().to_string()).ok()?;
-                    let damage = st
-                        .components()
-                        .get_int(lodestone_game::item::DAMAGE_COMPONENT)
-                        .and_then(|v| u32::try_from(v).ok());
-                    let max_damage = st
-                        .components()
-                        .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
-                        .and_then(|v| u32::try_from(v).ok());
-                    Some(HotbarSlot {
-                        item,
-                        count: st.count().max(0) as u32,
-                        damage,
-                        max_damage,
-                        enchanted: false,
-                    })
-                })
-            })
-            .collect();
-        drop(player_menu);
+        let world_hud = hud_follows_world(self.ui.screen());
 
         let mut hud_frame = HudFrame::new(&self.sim.stats);
         hud_frame.show_debug = self.show_debug;
@@ -1343,8 +1438,8 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.health = health;
         hud_frame.food = food;
-        hud_frame.hotbar = crosshair.then(|| self.sim.selected_slot());
-        hud_frame.hotbar_items = crosshair.then_some(hotbar_records.as_slice());
+        hud_frame.hotbar = world_hud.then(|| self.sim.selected_slot());
+        hud_frame.hotbar_items = world_hud.then_some(hotbar_records.as_slice());
         hud_frame.xp = self.sim.xp();
         hud_frame.title = self.sim.title_overlay();
         hud_frame.action_bar = self.sim.action_bar_overlay();
@@ -1355,7 +1450,6 @@ impl WindowApp {
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
-        let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
         hud.render_with_item_models(
             device,
             queue,
@@ -2109,6 +2203,71 @@ mod tests {
         let before = sim.tick_count();
         sim.step(dt);
         sim.tick_count() - before
+    }
+
+    /// Issue #61: the hotbar belongs to the world, not to active play.
+    ///
+    /// Oracle is vanilla, not our own reasoning — see `hud_follows_world`'s docs
+    /// for the four source lines. The regression was one boolean
+    /// (`self.ui.is_playing()`, *named* `crosshair`) gating both the reticle and
+    /// the hotbar, so opening the pause menu or the inventory took the hotbar with
+    /// it.
+    #[test]
+    fn the_hotbar_survives_every_screen_drawn_over_the_world() {
+        use crate::menu::Screen;
+
+        for screen in [
+            Screen::Playing,
+            Screen::Chat,
+            Screen::Container,
+            Screen::Paused,
+        ] {
+            assert!(
+                hud_follows_world(screen),
+                "{screen:?} draws the world, so it must draw the world's hotbar"
+            );
+        }
+
+        // -- negative control ------------------------------------------------
+        // The predicate has to be able to say no, or the loop above is vacuous.
+        // `Connecting` reaches the world render path (it is not an `owns_frame`
+        // screen) but has no world yet; the menu screens never get here at all
+        // because `draw_menu` returns first — asserted anyway so a future
+        // `owns_frame` change cannot quietly turn this into `true` everywhere.
+        for screen in [
+            Screen::Connecting,
+            Screen::MainMenu,
+            Screen::ServerList,
+            Screen::ServerEdit,
+            Screen::Settings,
+            Screen::Error,
+        ] {
+            assert!(
+                !hud_follows_world(screen),
+                "{screen:?} has no world on screen, so it must have no hotbar"
+            );
+        }
+    }
+
+    /// The two questions must not collapse back into one boolean. `Paused` is the
+    /// screen that separates them: the crosshair goes, the hotbar stays.
+    #[test]
+    fn the_crosshair_and_the_hotbar_disagree_behind_a_screen() {
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Singleplayer);
+        ui.session_ready();
+        assert!(ui.is_playing(), "a ready session is in the world");
+        assert!(hud_follows_world(ui.screen()));
+
+        ui.pause();
+        assert!(
+            !ui.is_playing(),
+            "the reticle's gate must go false behind the pause menu"
+        );
+        assert!(
+            hud_follows_world(ui.screen()),
+            "the hotbar's gate must stay true behind the pause menu"
+        );
     }
 
     #[test]

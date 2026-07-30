@@ -65,7 +65,7 @@ use crate::worldgen;
 /// A borrowed translation closure: `key → resolved format string`, the shape
 /// [`lodestone_game::text::resolve`] consumes. Factored out so the projection
 /// helpers and the `Sim` accessors share one name for it.
-type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
+pub(crate) type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
 
 // The fixed timestep constant used to live here as `TICK_DT`. It is
 // `lodestone_ecs::TICK_PERIOD` now, beside the one accumulator that counts in it
@@ -552,6 +552,17 @@ pub struct Sim {
     /// [`Self::hand_swing_progress`] for the first-person arm's swing. The swing
     /// half is started by [`Self::swing_hand`].
     body_pose: EntityPose,
+    /// The camera's own eased eye height — vanilla's `Camera.eyeHeight` /
+    /// `eyeHeightOld` pair, **not** the entity's.
+    ///
+    /// `Camera.tick()` does `eyeHeight += (entity.getEyeHeight() - eyeHeight) * 0.5F`,
+    /// so the camera *chases* the entity's eye rather than adopting it. We had no
+    /// equivalent, so [`Self::camera`] was handed the raw pose eye height every
+    /// frame — and since the pose fit gate made that atomically snap between
+    /// `1.62` standing and `0.4` swimming, entering or leaving water jerked the
+    /// view by 1.22 blocks in a single frame. Ticked once per physics tick beside
+    /// [`Self::body_pose`], read interpolated in [`Self::camera`].
+    eye_height_smoother: crate::camera_rig::EyeHeightSmoother,
 }
 
 impl Sim {
@@ -780,6 +791,10 @@ impl Sim {
             audio: ShellAudio::from_env(),
             third_person: false,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
+            // Seeded from the spawn pose so the very first frame does not ease up
+            // from zero — vanilla's `Camera` is likewise aligned before its first
+            // tick, not zero-initialised.
+            eye_height_smoother: crate::camera_rig::EyeHeightSmoother::new(player.eye_height),
         };
         sim.refresh_mesh_policy();
         sim
@@ -1206,7 +1221,7 @@ impl Sim {
     /// The table itself stays owned centrally by the `Sim`; only this borrowed
     /// closure is handed to the pure projection helpers, matching how vanilla
     /// resolves components at the render boundary.
-    fn translator(&self) -> Translator<'_> {
+    pub(crate) fn translator(&self) -> Translator<'_> {
         match &self.language {
             Some(lang) => Box::new(lang.translator()),
             None => Box::new(|_: &str| None),
@@ -1597,7 +1612,9 @@ impl Sim {
     pub fn boss_bars(&self) -> Vec<BossBarView> {
         self.read(|w| {
             w.get::<lodestone_ecs::SessionBossBars>(self.local)
-                .map_or_else(Vec::new, |bars| crate::overlay::boss_bars_from(&bars.0))
+                .map_or_else(Vec::new, |bars| {
+                    crate::overlay::boss_bars_from(&bars.0, self.translator().as_ref())
+                })
         })
     }
 
@@ -2208,6 +2225,9 @@ impl Sim {
             let p = self.player();
             self.body_pose
                 .tick(p.position.x, p.position.z, p.yaw, p.yaw, p.pitch);
+            // The camera's eye chases the entity's, half the gap per tick, so a
+            // pose change eases instead of snapping. Same read guard as above.
+            self.eye_height_smoother.tick(p.eye_height);
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and
@@ -2377,7 +2397,13 @@ impl Sim {
             }
         }
 
-        Some(LiveCollision::new(sections, min_y, section_count, atlas))
+        Some(LiveCollision::new(
+            sections,
+            min_y,
+            section_count,
+            atlas,
+            crate::collision::inferred_version_data(),
+        ))
     }
 
     /// Whether this session is rendering a live server world (as opposed to the
@@ -3430,7 +3456,11 @@ impl Sim {
         let interp = self.interpolated_player();
         build_camera(
             &interp,
-            interp.eye_height,
+            // The *camera's* eased eye, not `interp.eye_height` — see the field's
+            // doc. Interpolating the entity's eye height would still snap, because
+            // the value being interpolated between two ticks is itself the
+            // post-snap one.
+            self.eye_height_smoother.lerp(self.clock().interp_alpha),
             aspect,
             self.config.render_distance,
         )
@@ -5841,11 +5871,17 @@ mod tests {
 
         sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
         sim.input_mut(|i| i.set(lodestone_controller::Action::Sprint, true));
-        for _ in 0..10 {
+        // Step until the pose flips, so the tick the change lands on is known.
+        let mut ticks_to_swim = None;
+        for tick in 0..10 {
             sim.step(1.0 / 20.0);
+            if sim.player().swimming {
+                ticks_to_swim = Some(tick);
+                break;
+            }
         }
         assert!(
-            sim.player().swimming,
+            ticks_to_swim.is_some(),
             "sprinting while submerged must enter the swim pose"
         );
         assert_eq!(
@@ -5853,17 +5889,46 @@ mod tests {
             "the shell owns the pose eye height; physics only reads it"
         );
 
-        // Pin the interpolation so the camera assertion is about the pose and not
-        // about where between two ticks we happen to be.
-        let settled = sim.player().position;
-        sim.set_prev_position(settled);
-        sim.clock_mut(|c| c.interp_alpha = 0.0);
-        let cam = sim.camera(1.0);
-        let expected = sim.player().position.y as f32 + SWIMMING_EYE_HEIGHT;
+        // Helper: pin the *position* interpolation so a camera assertion is about
+        // the eye height, not about where between two ticks the feet are.
+        //
+        // `alpha` is deliberately a parameter, because it selects **which** of the
+        // smoother's two values you see: `lerp(0.0)` is the *previous* tick's eased
+        // eye height and `lerp(1.0)` is this tick's. That is the whole point of the
+        // `O` twin, and reading at `0.0` right after a pose flip therefore shows the
+        // pre-flip height — correct, and not what a mid-ease assertion wants.
+        let camera_offset = |sim: &mut Sim, alpha: f32| {
+            let settled = sim.player().position;
+            sim.set_prev_position(settled);
+            sim.clock_mut(|c| c.interp_alpha = alpha);
+            sim.camera(1.0).position.y - sim.player().position.y as f32
+        };
+
+        // **The camera must NOT have snapped.** `Camera.tick()` eases its own eye
+        // height toward the entity's — `eyeHeight += (target - eyeHeight) * 0.5F` —
+        // so one tick after the pose flips it is still most of the way up at the
+        // standing height. This is the assertion that proves `Sim::camera` reads
+        // `eye_height_smoother` and not the raw pose value; before that existed the
+        // view jerked 1.22 blocks in a single frame on entering water.
+        let standing = lodestone_physics::player::DEFAULT_EYE_HEIGHT;
+        let after_flip = camera_offset(&mut sim, 1.0);
         assert!(
-            (cam.position.y - expected).abs() < 1e-4,
-            "swim camera should sit {SWIMMING_EYE_HEIGHT} above the feet: got {} want {expected}",
-            cam.position.y
+            after_flip > SWIMMING_EYE_HEIGHT + 0.1 && after_flip < standing,
+            "camera should be mid-ease between {SWIMMING_EYE_HEIGHT} and {standing} \
+             one tick after the pose flip, got {after_flip}"
+        );
+
+        // …and it must converge. Each tick halves the remaining gap, so the
+        // original `1e-4` tolerance needs ~14 ticks from a 1.22-block step; 24 is
+        // comfortably past it without being sensitive to the exact rate.
+        for _ in 0..24 {
+            sim.step(1.0 / 20.0);
+        }
+        let settled_offset = camera_offset(&mut sim, 1.0);
+        assert!(
+            (settled_offset - SWIMMING_EYE_HEIGHT).abs() < 1e-4,
+            "swim camera should settle {SWIMMING_EYE_HEIGHT} above the feet: got \
+             {settled_offset}"
         );
     }
 
@@ -6591,6 +6656,8 @@ mod tests {
             velocity: None,
             on_ground: true,
             equipment: Vec::new(),
+            variant: None,
+            count: 1,
         };
         sim.write(|w| crate::entities::fold_entity_snapshots(w, &[snap]));
         assert_eq!(
