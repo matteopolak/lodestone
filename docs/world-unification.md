@@ -203,6 +203,52 @@ second per-tick collision resource with its own documented decision". It is.
 
 Three rules, on `lodestone_ecs::EcsHandle`. None of them is style.
 
+> ### Rule 1 broke the client, and the record was not wrong
+>
+> `accb993` **hard-froze on the first tick of the first block dig**: 72 fps for thirty seconds, a
+> status line showing a live pick target, and then nothing — no panic, no error, no log line, a
+> window that had to be force-quit. A silent stop is a hang, not a crash.
+>
+> `crate::interact::drive_mining` resolved the held item with
+> `net.get().map(ClientHandle::player_menu)`. `SharedState::player_menu` takes `self.ecs.read()`;
+> `drive_mining` is a `TickSet::Send` system, so it runs inside `run_schedule(GameTick)`, which runs
+> inside `hold_write`. Write guard held, read guard requested, same `parking_lot::RwLock`, same
+> thread. `crates/lodestone-shell/tests/mining_deadlock.rs` reproduces it hermetically and is the
+> gate; its control observes `player_menu()` wedging under the guard while
+> `ClientHandle::block_at()` returns normally in the same guard.
+>
+> **The interesting part is that this section already said so.** `player_menu` is named in the
+> rule-1 set below, and has been since the vitals collapse. What went wrong was the *exception*: the
+> paragraph establishing that the four chunk-backed reads are legal from a system was read as
+> clearing `ClientHandle` in general. It clears four methods, and the sentence naming
+> `drive_mining`'s `block_at` as legal sat two lines above the list containing the method that
+> deadlocked it. A correct, carefully-hedged note is not a mechanism.
+>
+> So there is a mechanism now, and one deleted call site:
+>
+> - **`hold_read`/`hold_write` panic on reentrancy** instead of hanging. They keep a thread-local
+>   ledger of guards (handle address + `#[track_caller]` location) and abort with a message naming
+>   *both* sites. The three always-fatal combinations (write⊃read, write⊃write, read⊃write) abort in
+>   every build; read⊃read is conditional — it deadlocks only when a writer is queued — so it aborts
+>   under `debug_assertions` and is left alone in release, rather than trading an intermittent hang
+>   for a certain crash. `handle.rs`'s tests carry both halves: the fatal cases panic, and two
+>   negative controls (two *different* worlds nesting, and ten *sequential* guards) prove it does not
+>   fire on the normal path.
+> - **`NetHandle::get` is private.** The `ClientHandle` no longer leaves the resource; what
+>   `interact.rs` exposes is `block_at` and nothing else, so a future system cannot name a
+>   `World`-backed accessor to begin with.
+> - **`drive_mining` reads the `SessionMenus` component** off the local player instead. This is what
+>   §4.1(c) was *for*: there is one `World`, the ingest fold writes `SessionMenus` into it, and the
+>   round trip through `ClientHandle` was returning a clone of bytes already in the `World` the
+>   system was holding — at the cost of a 46-slot `Menu` clone per tick and, as it turned out, the
+>   whole client.
+>
+> Still only-by-review: **the ledger only sees guards taken through `hold_read`/`hold_write`.**
+> `lodestone_client::state`'s ~12 accessors call `self.ecs.read()` directly, so a *new* reentrant
+> call through one of them still hangs rather than panicking. Routing them through `hold_read` closes
+> that and also fills the gap `LockHolds` documents (the net thread's own holds are unmeasured); it
+> is the obvious next change and is deliberately not in this one, which is release-blocking.
+
 1. **Never hold a guard across a call that might take the same lock.** `parking_lot::RwLock` is
    neither reentrant nor upgradable: `write()` → `read()` on one thread deadlocks instantly, and
    `read()` → `read()` deadlocks whenever a writer is already queued (that is what `read_recursive`

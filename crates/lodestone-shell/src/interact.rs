@@ -21,6 +21,25 @@
 //! `Send + Sync + 'static`, and every write already has a sanctioned egress in
 //! `lodestone_ecs::ActionQueue`. See `docs/sim-dissolution.md`.
 //!
+//! # The freeze that shipped with Stage 5, and what it cost
+//!
+//! "Every read goes through `SharedHandle`" was true and **not sufficient**, and
+//! this is the correction. A `GameTick` system runs inside the `World` **write**
+//! guard, and most of `ClientHandle`'s read-model accessors take a *read* guard on
+//! that same `parking_lot::RwLock`. `drive_mining` called one — `player_menu`, for
+//! the held item — so the client hard-froze on the first tick of the first dig:
+//! no panic, no log line, just a window that stopped.
+//!
+//! The §4.1(c) audit had narrowed the lock rule to "the *chunk*-backed reads take
+//! only the chunk lock", which is **correct** ([`NetHandle::block_at`] is one) and
+//! was read as clearing `ClientHandle` generally. It does not: `player_menu`,
+//! `open_menu`, `scoreboard`, `player_rows`, `boss_bars`, `health`, `player` and
+//! the rest read `SharedState.ecs`. The lesson is the one §4.1(c) itself
+//! implies — **there is one `World`, so a system should read the component, not
+//! call the client** — and [`NetHandle::get`] is private now so the shape cannot
+//! come back. `tests/mining_deadlock.rs` is the gate, with a control that
+//! observes `player_menu` wedging under the guard.
+//!
 //! # How it works
 //!
 //! [`InteractPlugin`] registers two systems in `TickSet::Send`, ordered after
@@ -74,9 +93,8 @@ use lodestone_ecs::player::{
     ActionQueue, Dead, Egress, Flying, LastSprintingSent, LocalPlayer, PhysicsState, SelectedSlot,
     Submersion,
 };
-use lodestone_ecs::session::ServerEntityId;
+use lodestone_ecs::session::{ServerEntityId, SessionMenus};
 use lodestone_ecs::{GameTick, TickSet, VersionData};
-use lodestone_game::menu::Menu;
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::Placement;
 use lodestone_model::PlayerCommand;
@@ -139,14 +157,44 @@ pub struct NetHandle(pub Option<SharedHandle>);
 
 impl NetHandle {
     /// The published client handle, or `None` before login.
-    #[must_use]
-    pub fn get(&self) -> Option<&ClientHandle> {
+    ///
+    /// # Deliberately private, and this is the whole bug fix
+    ///
+    /// A `GameTick` system runs inside `run_schedule(GameTick)`, which the driver
+    /// runs inside [`lodestone_ecs::hold_write`] — i.e. under the `World`
+    /// **write** guard. Most of [`ClientHandle`]'s read-model accessors
+    /// (`player_menu`, `open_menu`, `scoreboard`, `player_rows`, `boss_bars`,
+    /// `health`, `player`, …) take `ecs.read()` on **that same**
+    /// `Arc<parking_lot::RwLock<World>>`, and `parking_lot`'s `RwLock` is not
+    /// reentrant. Calling one from a system is an immediate, silent, permanent
+    /// deadlock — no panic, no log line, the window simply stops.
+    ///
+    /// That is exactly what shipped: `drive_mining` resolved the held item with
+    /// `net.get().map(ClientHandle::player_menu)`, so the client froze on the
+    /// first tick of the first dig. It reproduces hermetically in
+    /// `tests/mining_deadlock.rs`.
+    ///
+    /// So the handle does not leave this type. What the accessors below expose is
+    /// exactly the set that is **chunk**-backed — a different lock, taken and
+    /// released inside the call, never nested with the `World` guard. Adding one
+    /// here is safe only after checking `lodestone_client::state`: if the body
+    /// touches `self.ecs`, it must not be reachable from a system, and the right
+    /// answer is to read the component out of the `World` the system is already
+    /// inside (which is where `SessionMenus` comes from now — there is one
+    /// `World`, so the round trip through the client bought nothing anyway).
+    fn get(&self) -> Option<&ClientHandle> {
         self.0.as_ref()?.get().map(std::convert::AsRef::as_ref)
     }
 
     /// The single block state at a world position in the client-owned world, or
     /// `None` when that column/section is not held (before login, or outside the
     /// loaded region).
+    ///
+    /// **Chunk lock only.** `SharedState::block_at` reads `self.world` (the
+    /// `std::sync::RwLock` chunk store), never `self.ecs`, so this is legal from
+    /// inside the `World` write guard — the §4.1(c) audit's conclusion on that
+    /// point is correct and `tests/mining_deadlock.rs` pins it with a positive
+    /// assertion rather than leaving it as prose.
     #[must_use]
     pub fn block_at(&self, pos: BlockPos) -> Option<u32> {
         self.get()?.block_at(pos)
@@ -252,12 +300,21 @@ pub fn drive_mining(
     mut mining: ResMut<MiningPredictor>,
     mut particles: ResMut<ParticleSim>,
     mut queue: ResMut<ActionQueue>,
-    players: Query<(&PhysicsState, &Submersion, &SelectedSlot, Option<&Dead>), With<LocalPlayer>>,
+    players: Query<
+        (
+            &PhysicsState,
+            &Submersion,
+            &SelectedSlot,
+            Option<&Dead>,
+            Option<&SessionMenus>,
+        ),
+        With<LocalPlayer>,
+    >,
 ) {
     if !(egress.in_world && egress.live) {
         return;
     }
-    let Ok((state, submersion, slot, dead)) = players.single() else {
+    let Ok((state, submersion, slot, dead, menus)) = players.single() else {
         return;
     };
 
@@ -290,11 +347,23 @@ pub fn drive_mining(
     // not a guess: it is what an empty main hand *is* — when nothing is held, and,
     // defensively, when the version's tool census has nothing for this state
     // either (which `entry` above already proves should not happen).
-    let held = net
-        .get()
-        .map(ClientHandle::player_menu)
-        .unwrap_or_else(Menu::player)
-        .player_native(slot.0)
+    //
+    // Read straight off the component, **never** through
+    // `ClientHandle::player_menu`. That accessor takes a read guard on the very
+    // `World` this system is running inside, which deadlocked the client on the
+    // first tick of every dig (see `NetHandle::get`). Since §4.1(c) there is one
+    // `World` and `lodestone_ecs::session`'s `NetIngest` fold writes `SessionMenus`
+    // into *this* one, so the component and the accessor were already the same
+    // bytes — the round trip only added the lock. It is also cheaper: the accessor
+    // cloned the whole 46-slot menu per tick to read one stack.
+    //
+    // `Option<&SessionMenus>` rather than a required term, so a `World` whose local
+    // player carries no session components degrades to bare-handed instead of
+    // failing `single()` and aborting every dig — and *no* `Menu::player()`
+    // fallback is needed, because a fresh player menu is empty, so it would answer
+    // `None` for every slot anyway. That is the pre-fix behaviour exactly.
+    let held = menus
+        .and_then(|menus| menus.0.player().player_native(slot.0))
         .map(crate::sim::tool_mining_item);
     let tool = version
         .tool_mining(held.as_ref(), id_value)

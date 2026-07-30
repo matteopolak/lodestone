@@ -1,5 +1,7 @@
 //! The handle non-driver code uses to reach a live `World`.
 
+use std::cell::RefCell;
+use std::panic::Location;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -21,14 +23,27 @@ use parking_lot::RwLock;
 ///
 /// # Lock discipline — three rules, and the reasons are not style
 ///
-/// 1. **Never hold a guard across a call that might take the same lock.** In
-///    particular the driver must not hold one while calling into
-///    `NetClient`/`ClientHandle`: every read on those locks this same `World`,
-///    and `parking_lot::RwLock` is neither reentrant nor upgradable, so
+/// 1. **Never hold a guard across a call that might take the same lock.** The
+///    driver must not hold one while calling into `NetClient`/`ClientHandle`:
+///    most read-model accessors on those lock this same `World`, and
+///    `parking_lot::RwLock` is neither reentrant nor upgradable, so
 ///    `write()` → `…read()` on one thread is an instant deadlock and
 ///    `read()` → `read()` deadlocks too whenever a writer is already queued
 ///    (that is what `read_recursive` exists for, and we do not rely on it).
 ///    Take the lock for one statement, or one `run_schedule`, and let it go.
+///
+///    **This one is now enforced, not merely documented** — [`hold_read`] and
+///    [`hold_write`] panic on a second guard from the same thread instead of
+///    hanging. See [`check`]. It was documented before and still shipped a
+///    total client freeze the first tick of a block dig (`accb993`), which is
+///    what a "don't do this" comment is worth against a silent hang.
+///
+///    Note the qualifier "most": the **chunk**-backed accessors (`block_at`,
+///    `sections_and_light_at`, `world_dimensions`, `loaded_chunks`) take the
+///    *chunk* lock, not this one, and are legal from inside a guard. The
+///    rule as first written said "every read", which was too strong; the
+///    §4.1(c) audit corrected it, and then the correction was over-read as
+///    clearing `ClientHandle` generally, which is what shipped the freeze.
 /// 2. **Never hold a guard across an `.await`.** `lodestone_client`'s driver
 ///    already promised this for the scalar read-model
 ///    (`state.rs`); it now matters for this lock too, because a task parked with
@@ -147,6 +162,126 @@ impl LockHolds {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Rule 1, enforced rather than reviewed
+// ---------------------------------------------------------------------------
+
+/// One guard this thread is currently holding: which handle, whether it is a
+/// writer, and where it was taken.
+#[derive(Debug, Clone, Copy)]
+struct Held {
+    /// The `RwLock`'s address, so two different `World`s do not alias. Compared,
+    /// never dereferenced.
+    handle: usize,
+    write: bool,
+    at: &'static Location<'static>,
+}
+
+thread_local! {
+    /// The guards *this thread* holds, innermost last.
+    ///
+    /// Thread-local because reentrancy is a per-thread property: the driver taking
+    /// a write guard while the net thread waits for a read is the ordinary
+    /// contention [`EcsHandle`] is designed around, and only a *second* take on the
+    /// *same* thread is the fatal shape.
+    static HELD: RefCell<Vec<Held>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Pushes a [`Held`] for as long as the guard lives, checking rule 1 first.
+///
+/// A `Drop` guard rather than a matching `pop` call, so an unwinding `f` — a bevy
+/// system panicking inside `run_schedule`, an `expect` on a missing resource —
+/// leaves the thread's ledger clean instead of poisoning every later guard on
+/// that thread with a phantom holder.
+struct Ledger;
+
+impl Ledger {
+    /// # Panics
+    ///
+    /// If this thread already holds a guard on the same handle in a combination
+    /// that cannot make progress. See [`check`](Self::check).
+    #[track_caller]
+    fn enter(handle: &EcsHandle, write: bool) -> Self {
+        let entry = Held {
+            handle: Arc::as_ptr(handle) as usize,
+            write,
+            at: Location::caller(),
+        };
+        HELD.with_borrow_mut(|held| {
+            check(held, &entry);
+            held.push(entry);
+        });
+        Self
+    }
+}
+
+impl Drop for Ledger {
+    fn drop(&mut self) {
+        HELD.with_borrow_mut(|held| {
+            held.pop();
+        });
+    }
+}
+
+/// Rule 1 as a function: refuse a second guard on a handle this thread is
+/// already inside.
+///
+/// # Why this is a panic and not a comment
+///
+/// `parking_lot::RwLock` is neither reentrant nor upgradable, so three of the four
+/// combinations **cannot make progress at all**:
+///
+/// | held | requested | outcome |
+/// |---|---|---|
+/// | write | read | deadlock, always |
+/// | write | write | deadlock, always |
+/// | read | write | deadlock, always |
+/// | read | read | deadlock **whenever a writer is queued** |
+///
+/// The first three abort in every build. The fourth is a real defect — it is why
+/// `read_recursive` exists and why this crate does not rely on it — but it is
+/// *conditional*, so making it fatal in a release build would trade an
+/// intermittent hang for a certain crash on paths that happen to work today. It
+/// aborts under `debug_assertions` (so tests and dev builds see it) and is left
+/// alone in release.
+///
+/// A hang is the worst failure mode this repo has: `accb993` froze the whole
+/// client on the first tick of the first block dig, with no panic, no error and no
+/// log line, because a `GameTick` system called `ClientHandle::player_menu` — a
+/// `World` read — from inside the schedule's write guard. This turns that into a
+/// message naming both sites.
+fn check(held: &[Held], want: &Held) {
+    let Some(outer) = held.iter().rev().find(|h| h.handle == want.handle) else {
+        return;
+    };
+    let fatal = outer.write || want.write;
+    if !fatal && !cfg!(debug_assertions) {
+        return;
+    }
+    let outer_kind = if outer.write { "write" } else { "read" };
+    let want_kind = if want.write { "write" } else { "read" };
+    let why = if fatal {
+        "parking_lot's RwLock is not reentrant, so this can never make progress"
+    } else {
+        "parking_lot's read() queues behind a waiting writer, so this deadlocks \
+         intermittently — whenever the net thread happens to want the lock"
+    };
+    panic!(
+        "reentrant World guard: a {want_kind} guard was requested at {want_at} while \
+         this thread's {outer_kind} guard from {outer_at} is still held. {why}.\n\
+         \n\
+         This is EcsHandle's lock rule 1. The usual cause is code inside the guard \
+         calling out to `NetClient`/`ClientHandle` — most of its read-model \
+         accessors take a read guard on this same World. From a system, read the \
+         component out of the World you are already in; there is only one World \
+         (see docs/world-unification.md). Chunk-backed reads (`block_at`, \
+         `sections_and_light_at`, `world_dimensions`, `loaded_chunks`) take the \
+         chunk lock instead and are fine.",
+        want_at = want.at,
+        outer_at = outer.at,
+    );
+}
+
 /// Take a **read** guard on `handle`, run `f`, and fold the hold duration into
 /// the `World`'s [`LockHolds`] — the measured form of rule 1's "one statement,
 /// then let it go".
@@ -154,7 +289,15 @@ impl LockHolds {
 /// A `World` with no [`LockHolds`] (anything built by [`new_handle`] or
 /// [`new_ingest_handle`] rather than by [`crate::CorePlugin`]) is simply
 /// unmeasured, never a panic.
+///
+/// # Panics
+///
+/// If this thread already holds a guard on `handle` — see [`check`]. Prefer this
+/// over `handle.read()` for exactly that reason: the bare lock hangs where this
+/// reports.
+#[track_caller]
 pub fn hold_read<R>(handle: &EcsHandle, f: impl FnOnce(&World) -> R) -> R {
+    let _ledger = Ledger::enter(handle, false);
     let world = handle.read();
     let started = Instant::now();
     let out = f(&world);
@@ -165,7 +308,13 @@ pub fn hold_read<R>(handle: &EcsHandle, f: impl FnOnce(&World) -> R) -> R {
 }
 
 /// [`hold_read`]'s **write** twin.
+///
+/// # Panics
+///
+/// If this thread already holds a guard on `handle` — see [`check`].
+#[track_caller]
 pub fn hold_write<R>(handle: &EcsHandle, f: impl FnOnce(&mut World) -> R) -> R {
+    let _ledger = Ledger::enter(handle, true);
     let mut world = handle.write();
     let started = Instant::now();
     let out = f(&mut world);
@@ -289,6 +438,102 @@ mod tests {
         let handle = new_handle();
         assert_eq!(hold_write(&handle, |_| 7), 7);
         assert_eq!(hold_read(&handle, |_| 7), 7);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 1's enforcement
+    // -----------------------------------------------------------------------
+
+    /// Runs `f` and reports whether it panicked, keeping the panic message off
+    /// the test log.
+    ///
+    /// The hook swap is global and these tests run in one binary, so it is held
+    /// for as short a window as possible. The alternative — letting four
+    /// deliberate panics print — makes a real failure in this file impossible to
+    /// spot.
+    ///
+    /// `AssertUnwindSafe` because the payload is always an [`EcsHandle`], which is
+    /// not `RefUnwindSafe` (a `World` behind a lock never is). That is sound here
+    /// for the reason the marker exists to check: every case below either drops the
+    /// handle immediately or re-guards it through [`hold_write`], and the ledger's
+    /// `Drop` is what guarantees the unwound guard is not still recorded.
+    fn panicked(f: impl FnOnce()) -> bool {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        std::panic::set_hook(previous);
+        out.is_err()
+    }
+
+    /// **The bug that shipped, as an assertion.** A read guard taken while this
+    /// thread holds the write guard is the `accb993` client freeze; it must now
+    /// panic rather than hang.
+    ///
+    /// This is what makes the whole rule testable at all: the failure it replaces
+    /// has no observable behaviour to assert on — the process simply stops.
+    #[test]
+    fn a_read_inside_a_write_panics_instead_of_hanging() {
+        let handle = new_handle();
+        assert!(panicked(|| {
+            hold_write(&handle, |_| {
+                hold_read(&handle, |_| ());
+            });
+        }));
+    }
+
+    /// The other two always-fatal combinations, for completeness: a write inside
+    /// a write, and a write inside a read.
+    #[test]
+    fn the_other_fatal_combinations_panic_too() {
+        let handle = new_handle();
+        assert!(panicked(|| hold_write(&handle, |_| hold_write(&handle, |_| ()))));
+        assert!(panicked(|| hold_read(&handle, |_| hold_write(&handle, |_| ()))));
+    }
+
+    /// **The negative control.** Two *different* `World`s nest freely — the
+    /// ledger keys on the handle's identity, so without this the check above is
+    /// satisfied by one that fires on any nesting at all and would break every
+    /// caller holding two worlds.
+    #[test]
+    fn guards_on_two_different_worlds_nest_freely() {
+        let a = new_handle();
+        let b = new_handle();
+        assert!(!panicked(|| {
+            hold_write(&a, |_| {
+                hold_write(&b, |_| ());
+                hold_read(&b, |_| ());
+            });
+        }));
+    }
+
+    /// **The second negative control.** Guards taken one *after* another are the
+    /// normal case and must stay silent — otherwise the check would fire on every
+    /// frame, since the driver takes many short guards per frame by design.
+    #[test]
+    fn sequential_guards_on_one_world_are_not_reentrancy() {
+        let handle = new_handle();
+        assert!(!panicked(|| {
+            for _ in 0..10 {
+                hold_write(&handle, |_| ());
+                hold_read(&handle, |_| ());
+            }
+        }));
+    }
+
+    /// A panic *inside* the guard must not leave a phantom holder behind, or the
+    /// first real guard after any system panic would report a bogus reentrancy
+    /// and mask the actual failure. This is why the ledger entry is a `Drop`
+    /// guard rather than a matching `pop`.
+    #[test]
+    fn an_unwinding_closure_leaves_the_ledger_clean() {
+        let handle = new_handle();
+        assert!(panicked(|| hold_write(&handle, |_| panic!("a system blew up"))));
+        assert_eq!(
+            hold_write(&handle, |_| 7),
+            7,
+            "the ledger still holds the unwound guard, so every later guard on this \
+             thread now reports a reentrancy that is not there"
+        );
     }
 
     /// [`LockHolds::reset`] zeroes the interval, which is what lets a caller

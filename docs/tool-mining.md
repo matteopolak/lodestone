@@ -16,9 +16,8 @@ unbroken holding regardless of what was in hand.
 **This doc covers the data/evaluation seam** —
 `crates/protocol/v770/src/tool.rs`, `lodestone_model::VersionAdapter::tool_mining`,
 and the generated tables — plus, as of the session that followed `875f452`, its
-consumer. `crates/lodestone-shell/src/sim.rs`'s `Sim::drive_mining` now resolves
-the selected hotbar slot (`self.player_menu().player_native(self.selected_slot)`)
-through `tool_mining_item`, calls `VersionAdapter::tool_mining(held, state_id)`,
+consumer. `crates/lodestone-shell/src/interact.rs`'s `drive_mining` resolves the
+selected hotbar slot through `tool_mining_item`, calls `VersionAdapter::tool_mining(held, state_id)`,
 and feeds the result's `speed`/`correct_tool` into `dig_break_inputs`, falling
 back to `bare_handed_tool_mining` when nothing is held or the version has no
 entry for the state. This closed the island noted below: `tool_mining` briefly
@@ -27,6 +26,16 @@ diamond pickaxe mined at bare-hand speed. It no longer does.
 `mining_efficiency`/`haste_amplifier`/`mining_fatigue`/`block_break_speed`
 remain unmodelled (no enchantment/potion/attribute inputs yet); see
 [`block-break-timing.md`](./block-break-timing.md)'s "How to change it".
+
+**Where the held stack is read from, and why it is not `player_menu()`.** Since
+`drive_mining` became a `GameTick` *system* it runs under the `World` write guard,
+and `ClientHandle::player_menu` takes a read guard on that same lock — which froze
+the client on the first tick of every dig. The stack now comes off the
+`lodestone_ecs::SessionMenus` **component** on the local player, which the ingest
+fold writes into the same one `World` the system is already holding. Same bytes,
+no lock, no 46-slot clone per tick. See
+[`world-unification.md`](./world-unification.md)'s lock-discipline section, and do
+not reintroduce a `ClientHandle` read here.
 
 ## How it works
 

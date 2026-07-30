@@ -82,6 +82,17 @@ block-outline source. So `interact.rs` adds a `NetHandle(Option<SharedHandle>)`
 resource holding *the same* `Arc` the net thread publishes into, and the two systems
 read the client through that. It is not a second copy of anything.
 
+**`Send + Sync` was necessary and not sufficient, and the gap froze the client.** A
+handle that a system can *hold* is not a handle a system can *call*: most of
+`ClientHandle`'s read-model accessors take a read guard on the very `World` the
+schedule is running inside, and `drive_mining` called one (`player_menu`) for the
+held item — a silent deadlock on the first tick of the first dig. `NetHandle` now
+exposes only the **chunk**-backed `block_at` (`get()` is private), and the held item
+comes off the `SessionMenus` component instead. See
+[`world-unification.md`](./world-unification.md)'s lock-discipline section for the
+incident and the reentrancy tripwire that now aborts on it, and
+`crates/lodestone-shell/tests/mining_deadlock.rs` for the gate.
+
 ### Wire order is unchanged, and that took care
 
 Before Stage 5 the per-tick order was:
