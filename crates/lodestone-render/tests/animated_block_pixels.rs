@@ -39,8 +39,9 @@
 //! `cargo test -p lodestone-render --test animated_block_pixels -- --ignored --nocapture`.
 
 use lodestone_render::{
-    AnimFrame, AnimSlotUniform, CameraUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline,
-    ModelVertex, SpriteAnimation, model_anim_buffer, model_camera_buffer, model_palette_buffer,
+    AnimFrame, AnimSlotUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
+    SpriteAnimation, model_anim_buffer, model_palette_buffer, model_shared_camera_buffer,
+    section_origin_buffer,
 };
 
 const W: u32 = 64;
@@ -170,14 +171,9 @@ fn render_scene(gpu: &Gpu, tick: u64, force_static: bool) -> ((u8, u8, u8), (u8,
     let anim_buffer = model_anim_buffer(device, &slots);
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
 
-    let cam_buffer = model_camera_buffer(
-        device,
-        CameraUniform {
-            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-            section_origin: [0.0, 0.0, 0.0, 0.0],
-        },
-    );
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer);
+    let cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
+    let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer, &origin_buffer);
 
     // LEFT half: animated sprite, uv over frame 0 (u∈[0,0.5], v∈[0,0.5]).
     let anim_slot = if force_static { 0 } else { 1 };
@@ -244,7 +240,7 @@ fn render_scene(gpu: &Gpu, tick: u64, force_static: bool) -> ((u8, u8, u8), (u8,
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_bind_group(2, &palette_bg, &[]);
         pass.set_bind_group(3, &anim_bg, &[]);

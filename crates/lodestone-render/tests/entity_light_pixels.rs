@@ -32,8 +32,8 @@ use lodestone_render::entity::{EntityInstance, EntityMesh, plan_entities};
 use lodestone_render::entity_anim::AnimInput;
 use lodestone_render::entity_pipeline::{EntityPipeline, GpuEntityModel, upload_instances};
 use lodestone_render::{
-    CameraUniform, GpuAtlas, GpuModelMesh, ModelPipeline, ModelSectionView, mesh_models,
-    model_anim_buffer, model_camera_buffer, model_palette_buffer,
+    GpuAtlas, GpuModelMesh, ModelPipeline, ModelSectionView, mesh_models, model_anim_buffer,
+    model_palette_buffer, model_shared_camera_buffer, section_origin_buffer,
 };
 
 const W: u32 = 192;
@@ -186,14 +186,9 @@ fn terrain_luma(gpu: &Gpu, dir: Direction, light: u8) -> u8 {
     let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
     let anim_buffer = model_anim_buffer(device, &[]);
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
-    let cam_buffer = model_camera_buffer(
-        device,
-        CameraUniform {
-            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-            section_origin: [0.0, 0.0, 0.0, 0.0],
-        },
-    );
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer);
+    let cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
+    let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer, &origin_buffer);
 
     let view = OneQuad {
         quads: vec![face_quad(dir)],
@@ -209,7 +204,7 @@ fn terrain_luma(gpu: &Gpu, dir: Direction, light: u8) -> u8 {
     {
         let mut pass = enc.begin_render_pass(&pass_desc!(&color_view, &depth.view));
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_bind_group(2, &palette_bg, &[]);
         pass.set_bind_group(3, &anim_bg, &[]);

@@ -1174,7 +1174,7 @@ impl WindowApp {
 
         // Upload any freshly-meshed sections, and drop sections emptied by edits.
         for meshed in self.sim.drain_meshes() {
-            render.upload_section(device, meshed.key, &meshed.mesh);
+            render.upload_section(device, queue, meshed.key, &meshed.mesh);
         }
         for key in self.sim.drain_removals() {
             render.remove_section(&key);
@@ -1599,7 +1599,7 @@ impl ApplicationHandler for WindowApp {
 
         // Upload whatever has already meshed; the rest streams in per frame.
         for meshed in self.sim.drain_meshes() {
-            render.upload_section(gpu.device(), meshed.key, &meshed.mesh);
+            render.upload_section(gpu.device(), gpu.queue(), meshed.key, &meshed.mesh);
         }
 
         let menu = MenuRenderer::new(gpu.device(), format);
@@ -2063,7 +2063,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     let mut meshed_quads = 0usize;
     for m in &meshes {
         meshed_quads += m.mesh.quad_count();
-        render.upload_section(device, m.key, &m.mesh);
+        render.upload_section(device, queue, m.key, &m.mesh);
     }
 
     // Let the player settle onto the ground so the camera sits at a sane height.

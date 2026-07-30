@@ -446,8 +446,8 @@ fn disabled_fog_leaves_the_two_depths_identical() {
 // ---------------------------------------------------------------- draw order
 
 use lodestone_render::{
-    CameraUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
-    model_anim_buffer, model_camera_buffer_with_fog,
+    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex, model_anim_buffer,
+    model_shared_camera_buffer_with_fog, section_origin_buffer,
 };
 
 /// Where the water plane sits between the eye and the mob.
@@ -540,15 +540,13 @@ fn mob_blue_with_water(gpu: &Gpu, entities_first: bool, with_water: bool) -> f32
     let water_atlas_bg = fluid.atlas_bind_group(device, &water_atlas);
     let water_anim = model_anim_buffer(device, &[]);
     let water_anim_bg = fluid.anim_bind_group(device, &water_anim);
-    let water_cam = model_camera_buffer_with_fog(
+    let water_cam = model_shared_camera_buffer_with_fog(
         device,
-        CameraUniform {
-            view_proj: camera.view_projection().to_cols_array_2d(),
-            section_origin: [0.0, 0.0, 0.0, 0.0],
-        },
+        camera.view_projection().to_cols_array_2d(),
         fog,
     );
-    let water_cam_bg = fluid.camera_bind_group(device, &water_cam);
+    let water_origin = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+    let water_cam_bg = fluid.camera_bind_group(device, &water_cam, &water_origin);
     // tint != 255 so the shader applies its water colour.
     let water_mesh = plane_mesh(WATER_Z, 4.0, 0.9, 0);
     let water_gpu = GpuModelMesh::upload(device, &water_mesh).expect("non-empty water");
@@ -597,7 +595,7 @@ fn mob_blue_with_water(gpu: &Gpu, entities_first: bool, with_water: bool) -> f32
                 return;
             }
             pass.set_pipeline(&fluid.pipeline);
-            pass.set_bind_group(0, &water_cam_bg, &[]);
+            pass.set_bind_group(0, &water_cam_bg, &[0]);
             pass.set_bind_group(1, &water_atlas_bg, &[]);
             pass.set_bind_group(2, &water_anim_bg, &[]);
             pass.set_vertex_buffer(0, water_gpu.vertices.slice(..));

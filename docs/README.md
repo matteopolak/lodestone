@@ -46,6 +46,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   surfacing swimmer from being clipped into one.
 - [Item GUI geometry](./item-gui-geometry.md) — baking block items into 3-D
   inventory-slot geometry, and the pose/projection matrices that place them.
+- [Section camera uniform](./section-camera-uniform.md) — the group-0 camera
+  binding split into a shared per-frame half (view-projection + fog) and a
+  per-section origin arena addressed by a dynamic offset, fixing a profiled
+  ~4000 `queue.write_buffer` calls/frame (issue #75), and why the crack,
+  entity and demo-world paths were deliberately left alone.
 - [Dimension visuals](./dimension-visuals.md) — what already renders differently in
   the Nether/End (the sky-light default, now End-correct), what is still a hardcoded
   overworld sky and fog colour, the fog presets built and waiting to wire, and the

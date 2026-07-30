@@ -42,8 +42,9 @@ use std::sync::Arc;
 use lodestone_assets::font::metrics as font_metrics;
 use lodestone_assets::{IconPart, ItemAtlas, ResourceLocation};
 use lodestone_render::{
-    BlockModels, CameraUniform, GpuAtlas, GuiSpriteQuad, ModelCameraUniform, ModelPipeline,
-    ModelVertex, RenderLayer, gui_item_pose, gui_ortho, mesh_item_quads, model_camera_buffer,
+    BlockModels, GpuAtlas, GuiSpriteQuad, ModelPipeline, ModelVertex, RenderLayer, gui_item_pose,
+    gui_ortho, mesh_item_quads, model_shared_camera_buffer, section_origin_buffer,
+    update_model_shared_camera_buffer,
 };
 
 use super::font;
@@ -388,9 +389,10 @@ struct SpriteIcons {
 /// model shader declares — camera (0), atlas (1), palette (2), animation (3) —
 /// and `wgpu`'s portable `max_bind_groups` floor is **4**, so there is no room
 /// for a fifth. That is why the GUI camera and its (disabled) fog share group 0
-/// as a single [`ModelCameraUniform`], and why nothing here introduces a new
-/// group: a five-group variant validates on an adapter that reports 8 and fails
-/// on the floor, which is a bug no local screenshot can find.
+/// binding 0, with the (always-zero) origin at binding 1 — two *bindings*, not
+/// a fifth *group* — and why nothing here introduces a new group: a
+/// five-group variant validates on an adapter that reports 8 and fails on the
+/// floor, which is a bug no local screenshot can find.
 ///
 /// The three sharings are each load-bearing rather than merely tidy:
 ///
@@ -403,9 +405,18 @@ struct SpriteIcons {
 #[derive(Debug)]
 struct ModelIcons {
     pipeline: ModelPipeline,
-    /// Group 0: the GUI orthographic `view_proj` with a zero section origin and
-    /// fog disabled. Rewritten each frame because it depends on the target size.
+    /// Group 0 binding 0: the GUI orthographic `view_proj` with fog disabled.
+    /// Rewritten each frame because it depends on the target size.
     camera_buffer: wgpu::Buffer,
+    /// Group 0 binding 1: a permanent zero section origin — icon geometry is
+    /// placed by its own vertex positions, not a per-section offset, so this
+    /// is never rewritten after construction. Never read back either: kept
+    /// alive purely so the buffer [`Self::camera_bind_group`] references
+    /// outlives it (`wgpu` resources are `Arc`-backed, so this would be safe
+    /// to drop right after building the bind group, but keeping the handle is
+    /// clearer than relying on that).
+    #[allow(dead_code)]
+    origin_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     /// Group 1: the shared block atlas (view + sampler borrowed at attach time;
     /// the bind group holds its own strong reference).
@@ -596,13 +607,13 @@ impl IconRenderer {
         // near-transparent texels, so a cross-shaped model does not paint a box.
         let pipeline = ModelPipeline::for_layer(device, color_format, RenderLayer::Solid);
         // A placeholder view_proj; `upload` rewrites it from the live target size
-        // before every draw. `model_camera_buffer` sizes the buffer for the
-        // camera **and** the folded fog block, and writes fog disabled.
-        let camera_buffer = model_camera_buffer(device, CameraUniform {
-            view_proj: [[0.0; 4]; 4],
-            section_origin: [0.0; 4],
-        });
-        let camera_bind_group = pipeline.camera_bind_group(device, &camera_buffer);
+        // before every draw. `model_shared_camera_buffer` sizes the buffer for
+        // the camera **and** the folded fog block, and writes fog disabled.
+        let camera_buffer = model_shared_camera_buffer(device, [[0.0; 4]; 4]);
+        // Icon geometry carries its own screen position in its vertices, so
+        // its origin binding is a permanent zero — built once, never rewritten.
+        let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+        let camera_bind_group = pipeline.camera_bind_group(device, &camera_buffer, &origin_buffer);
         let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),
             layout: &pipeline.atlas_layout,
@@ -629,6 +640,7 @@ impl IconRenderer {
         self.models = Some(ModelIcons {
             pipeline,
             camera_buffer,
+            origin_buffer,
             camera_bind_group,
             atlas_bind_group,
             palette_bind_group,
@@ -702,16 +714,11 @@ impl IconRenderer {
                 });
             }
             queue.write_buffer(&m.buffer, 0, bytemuck::cast_slice(model_verts));
-            queue.write_buffer(
+            update_model_shared_camera_buffer(
+                queue,
                 &m.camera_buffer,
-                0,
-                bytemuck::bytes_of(&ModelCameraUniform {
-                    camera: CameraUniform {
-                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
-                        section_origin: [0.0; 4],
-                    },
-                    fog: lodestone_render::fog::FogUniform::disabled(),
-                }),
+                gui_ortho(width, height).to_cols_array_2d(),
+                lodestone_render::fog::FogUniform::disabled(),
             );
             model_count = model_verts.len() as u32;
         }
@@ -773,7 +780,9 @@ impl IconRenderer {
             multiview_mask: None,
         });
         pass.set_pipeline(&m.pipeline.pipeline);
-        pass.set_bind_group(0, &m.camera_bind_group, &[]);
+        // The dynamic offset is always 0: `origin_buffer` is a single
+        // permanent zero slot (see `ModelIcons::origin_buffer`'s doc).
+        pass.set_bind_group(0, &m.camera_bind_group, &[0]);
         pass.set_bind_group(1, &m.atlas_bind_group, &[]);
         pass.set_bind_group(2, &m.palette_bind_group, &[]);
         pass.set_bind_group(3, &m.anim_bind_group, &[]);

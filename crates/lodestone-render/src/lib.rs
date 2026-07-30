@@ -124,8 +124,11 @@ pub use mesher::{
     dirty_jobs, neighbour_columns, neighbourhood_coords,
 };
 pub use model_pipeline::{
-    GpuModelMesh, ModelCameraUniform, ModelPipeline, model_anim_buffer, model_camera_buffer,
-    model_camera_buffer_with_fog, model_palette_buffer, update_model_anim_buffer,
+    GpuModelMesh, ModelCameraUniform, ModelPipeline, ModelSharedCameraUniform,
+    SectionOriginUniform, model_anim_buffer, model_camera_buffer, model_camera_buffer_with_fog,
+    model_palette_buffer, model_shared_camera_buffer, model_shared_camera_buffer_with_fog,
+    section_origin_buffer, update_model_anim_buffer, update_model_shared_camera_buffer,
+    write_section_origin,
 };
 pub use models::{
     FluidMeshes, FluidSectionView, GUI_ITEM_LIGHT, ModelMesh, ModelSectionView, ModelVertex,

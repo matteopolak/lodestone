@@ -17,9 +17,10 @@
 //! `cargo test -p lodestone-render --test fog_gate -- --ignored --nocapture`.
 
 use lodestone_render::{
-    CameraUniform, GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
+    GpuAtlas, GpuModelMesh, ModelMesh, ModelPipeline, ModelVertex,
     fog::{FogSettings, FogUniform},
-    model_anim_buffer, model_camera_buffer_with_fog, model_palette_buffer,
+    model_anim_buffer, model_palette_buffer, model_shared_camera_buffer_with_fog,
+    section_origin_buffer,
 };
 
 const W: u32 = 64;
@@ -90,15 +91,13 @@ fn render_center(gpu: &Gpu, fog: FogUniform) -> (u8, u8, u8) {
     let atlas = GpuAtlas::from_rgba(device, queue, 4, 4, &[255, 255, 255, 255].repeat(16), &[]);
     let atlas_bg = pipeline.atlas_bind_group(device, &atlas);
 
-    let cam_buffer = model_camera_buffer_with_fog(
+    let cam_buffer = model_shared_camera_buffer_with_fog(
         device,
-        CameraUniform {
-            view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-            section_origin: [0.0, 0.0, 0.0, 0.0],
-        },
+        glam::Mat4::IDENTITY.to_cols_array_2d(),
         fog,
     );
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer);
+    let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer, &origin_buffer);
     let palette_buffer = model_palette_buffer(device, &[[1.0, 1.0, 1.0, 1.0]; 256]);
     let palette_bg = pipeline.palette_bind_group(device, &palette_buffer);
     let anim_buffer = model_anim_buffer(device, &[]);
@@ -163,7 +162,7 @@ fn render_center(gpu: &Gpu, fog: FogUniform) -> (u8, u8, u8) {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_bind_group(2, &palette_bg, &[]);
         pass.set_bind_group(3, &anim_bg, &[]);

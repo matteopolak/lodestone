@@ -133,7 +133,7 @@ fn breaking_a_block_puts_debris_on_screen() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut render = RenderState::new(device, queue, format, W, H, sim.vanilla_atlas());
     for m in &sim.drain_all_meshes() {
-        render.upload_section(device, m.key, &m.mesh);
+        render.upload_section(device, queue, m.key, &m.mesh);
     }
 
     assert!(
@@ -143,7 +143,7 @@ fn breaking_a_block_puts_debris_on_screen() {
     );
     // Upload the post-break mesh so both frames below see identical terrain.
     for m in &sim.drain_all_meshes() {
-        render.upload_section(device, m.key, &m.mesh);
+        render.upload_section(device, queue, m.key, &m.mesh);
     }
     // Let the debris move off the block centre so it is not hidden inside the
     // neighbouring geometry.
