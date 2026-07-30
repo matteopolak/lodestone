@@ -20,6 +20,18 @@ members = [
 # `cargo` invocation dies on a manifest error and reports nothing about any other
 # crate. Delete this line in the same change that gives it a manifest.
 exclude = ["crates/plugins/lodestone-autopilot"]
+# So `cargo run --release` from the repo root launches the game.
+#
+# Without this, a bare `cargo run` in a virtual workspace fails ("could not
+# determine which package to use") and needs `-p lodestone-shell`. Note the
+# binary is `lodestone` while the crate is `lodestone-shell`, so the error does
+# not point at the fix.
+#
+# It only changes what a *default-member* command picks — `cargo run`, and
+# `cargo build`/`test` with no `-p`/`--workspace`. It does **not** narrow
+# `--workspace`, which is what every command in `CLAUDE.md` uses, so the health
+# checks still cover every crate.
+default-members = ["crates/lodestone-shell"]
 
 [workspace.package]
 version = "0.1.0"

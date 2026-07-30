@@ -104,8 +104,22 @@ memory-stats = "1"
 png = { workspace = true }
 
 [features]
-# Version-free by default. `live` compiles the vanilla-26.2 (protocol 776)
-# family into the registry so `--connect`/`--live` can resolve an adapter. The
-# shell still names no version in code — only the feature name selects a family.
-default = []
+# `live` compiles the vanilla-26.2 (protocol 776) family into the registry so
+# `--connect`/`--live` can resolve an adapter. The shell still names no version in
+# code — only the feature name selects a family, and that property is unchanged by
+# `live` being on by default.
+#
+# **On by default because off was a silent failure.** Without it the client still
+# starts, still renders, and reports a plausible `chunks=169` while whispering
+# `no version family compiled in for protocol 776` into the log — so a forgotten
+# flag looked like a working game with a broken server. `CLAUDE.md` carried a rule
+# about remembering the flag; making it the default deletes the trap instead of
+# documenting it.
+#
+# The cost is that a default build no longer proves the shell compiles with **no**
+# version family, which is the version seam's whole point. That is now checked
+# explicitly instead — `cargo check -p lodestone-shell --no-default-features` is in
+# `CLAUDE.md`'s health checks. Keep it there; it is the only thing standing between
+# the seam and a hardcoded `v770` dependency creeping into shell code.
+default = ["live"]
 live = ["lodestone-registry/v770"]

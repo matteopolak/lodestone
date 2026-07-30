@@ -14,7 +14,8 @@ Per-subsystem detail goes in [`docs/`](./docs/README.md).
 ```bash
 cargo check --workspace --all-targets     # the health check
 cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
-cargo build --release --bin lodestone --features live
+cargo check -p lodestone-shell --no-default-features   # the version seam still holds
+cargo run --release                       # launch the game
 ```
 
 - **`cargo build` is NOT a health check.** It skips test targets, so a crate whose lib compiles and
@@ -32,9 +33,19 @@ cargo build --release --bin lodestone --features live
   because `serverbound_change_game_mode` sorts first. **Use `--no-fail-fast` when assessing crate
   health.**
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
-- **`--features live` is mandatory for multiplayer and fails silently without it.** The client still
-  starts, renders the demo world, and reports a plausible `chunks=169` while whispering
-  `no version family compiled in for protocol 776` into the log.
+- **`live` is now a default feature, and `cargo run --release` launches the game.** It used to need
+  `--features live`, and forgetting it failed *silently*: the client still started, still rendered,
+  and reported a plausible `chunks=169` while whispering `no version family compiled in for protocol
+  776` into the log. That trap is deleted rather than documented — but the flag still exists, so
+  `--no-default-features` is the way to reproduce the version-free build.
+- **`cargo check -p lodestone-shell --no-default-features` is now a required health check.** With
+  `live` on by default, an ordinary build no longer proves the shell compiles with **no** version
+  family — which is the entire point of the version seam. This is the only thing stopping a
+  hardcoded `v770` dependency creeping into shell code, and its failure mode is architectural
+  rather than a broken test, so nothing else will catch it.
+- `default-members` makes a bare `cargo run`/`build`/`test` target `lodestone-shell` only. Every
+  command above says `--workspace` explicitly for that reason; a health check that loses the flag
+  silently narrows to one crate.
 - Live and GPU gates are `#[ignore]`d. Run them explicitly: `-- --ignored --nocapture`.
 - A test total gathered while another agent is mid-edit is a **sample, not a measurement**. The
   invariant is *zero failures and zero non-compiling targets*, never the absolute count.
