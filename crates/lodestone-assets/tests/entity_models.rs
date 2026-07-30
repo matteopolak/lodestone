@@ -580,3 +580,199 @@ fn part_bake_recomposes_to_the_whole_model_bake() {
         "only {checked} quads compared — the corpus loop did not run (vacuous)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sheep wool layer (issue #53)
+// ---------------------------------------------------------------------------
+//
+// `sheep_wool_model` is deliberately *not* registered in `entity_models()`: like
+// the humanoid armour meshes in `equipment.rs`, it is a layer drawn over another
+// rig's own part matrices, not a standalone drawable entity type. These tests
+// therefore call it directly rather than looping the corpus.
+
+/// The wool mesh's parts must share `sheep_model`'s part *names* and *pivots*
+/// exactly, in the same pre-order — that equivalence is the whole precondition
+/// for posing wool off the sheep body's own `part_transforms` by name, the way
+/// `ArmourMesh::attach` poses armour off a wearer's. If a future edit to either
+/// model renames or re-pivots a part without updating the other, a wool layer
+/// would either fail to attach (name mismatch) or attach at the wrong joint
+/// (pivot mismatch) — both silent, both exactly the "resolves perfectly and is
+/// completely wrong" shape `CLAUDE.md` warns about for the armour/pig trap.
+#[test]
+fn sheep_wool_model_shares_sheep_body_part_names_and_pivots() {
+    use lodestone_assets::entity_models::{sheep_model, sheep_wool_model};
+
+    let body_parts = bake_entity_parts(&sheep_model());
+    let wool_parts = bake_entity_parts(&sheep_wool_model());
+
+    assert_eq!(
+        body_parts.len(),
+        wool_parts.len(),
+        "sheep body has {} parts, wool has {} — they must match 1:1 for attach-by-name",
+        body_parts.len(),
+        wool_parts.len()
+    );
+    for (b, w) in body_parts.iter().zip(&wool_parts) {
+        assert_eq!(
+            b.name, w.name,
+            "part order diverged between sheep_model and sheep_wool_model"
+        );
+        assert_eq!(
+            b.parent, w.parent,
+            "{}: parent index diverged between sheep_model and sheep_wool_model",
+            b.name
+        );
+        assert_eq!(
+            b.rest, w.rest,
+            "{}: pivot/pose diverged between sheep_model and sheep_wool_model — a wool layer \
+             posed off the sheep body's part_transforms would be at the wrong joint",
+            b.name
+        );
+    }
+    // Non-vacuity: the real part set, not an accidental empty match.
+    let names: Vec<&str> = body_parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "",
+            "head",
+            "body",
+            "right_hind_leg",
+            "left_hind_leg",
+            "right_front_leg",
+            "left_front_leg"
+        ]
+    );
+}
+
+/// Per-part inflation, measured on the **baked local geometry** rather than
+/// asserted on the constructor's `.grown(_)` arguments — the armour doc's
+/// "pin these on the baked geometry, not the constants" rule, because a
+/// deformation dropped anywhere between the table and the bake would still
+/// pass a test that only re-reads the argument. Every value here is computed
+/// by hand from `SheepFurModel.java`'s literal box constants
+/// (`origin ± grow`, independent of this crate's `CubeDef::grown`), not
+/// re-derived from the code under test.
+#[test]
+fn sheep_wool_inflations_match_vanilla_sheepfurmodel() {
+    use lodestone_assets::entity_models::sheep_wool_model;
+
+    let parts = bake_entity_parts(&sheep_wool_model());
+    let x_half_extent = |name: &str| -> f32 {
+        let part = parts.iter().find(|p| p.name == name).unwrap();
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for q in &part.quads {
+            for p in &q.positions {
+                lo = lo.min(p[0]);
+                hi = hi.max(p[0]);
+            }
+        }
+        (hi - lo) / 2.0
+    };
+
+    // head: origin.x=-3, size.x=6 (symmetric), grow=0.6 -> half-extent (3+0.6)/16.
+    let head = x_half_extent("head");
+    assert!(
+        (head - 3.6 / 16.0).abs() < 1e-5,
+        "head X half-extent {head}, want {}",
+        3.6 / 16.0
+    );
+    // body: origin.x=-4, size.x=8 (symmetric), grow=1.75 -> half-extent (4+1.75)/16.
+    let body = x_half_extent("body");
+    assert!(
+        (body - 5.75 / 16.0).abs() < 1e-5,
+        "body X half-extent {body}, want {}",
+        5.75 / 16.0
+    );
+    // legs: origin.x=-2, size.x=4 (symmetric), grow=0.5 -> half-extent (2+0.5)/16.
+    for leg in [
+        "right_hind_leg",
+        "left_hind_leg",
+        "right_front_leg",
+        "left_front_leg",
+    ] {
+        let got = x_half_extent(leg);
+        assert!(
+            (got - 2.5 / 16.0).abs() < 1e-5,
+            "{leg} X half-extent {got}, want {}",
+            2.5 / 16.0
+        );
+    }
+
+    // The legs are a *shorter* box, not a scaled copy: fur covers only the top
+    // half of a leg (vanilla's "socks"), so its part-local Y span (6+0.5*2=7
+    // texels) is well under the body model's full 12-texel leg.
+    let leg_y_span = {
+        let part = parts.iter().find(|p| p.name == "right_hind_leg").unwrap();
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        for q in &part.quads {
+            for p in &q.positions {
+                lo = lo.min(p[1]);
+                hi = hi.max(p[1]);
+            }
+        }
+        hi - lo
+    };
+    assert!(
+        (leg_y_span - 7.0 / 16.0).abs() < 1e-5,
+        "wool leg Y span {leg_y_span}, want {} (6 texels + 2*0.5 grow)",
+        7.0 / 16.0
+    );
+}
+
+/// `sheep_wool_model` declares the same 64×32 sheet as `sheep_model`
+/// (`LayerDefinition.create(mesh, 64, 32)` in both `SheepModel` and
+/// `SheepFurModel`) — the real-PNG check against `entity/sheep/sheep_wool.png`
+/// lives in `real_jar.rs`, since that needs the client jar.
+#[test]
+fn sheep_wool_model_sheet_is_64x32() {
+    use lodestone_assets::entity_models::sheep_wool_model;
+
+    let model = sheep_wool_model();
+    assert_eq!((model.texture_width, model.texture_height), (64, 32));
+    let quads = bake_entity(&model);
+    assert_eq!(quads.len(), 6 * 6, "6 boxes (head, body, 4 legs) = 36 quads");
+}
+
+/// `sheep_wool_tint`'s 16-entry table, hand-computed from `DyeColor.java`'s
+/// literal `textureDiffuseColor` constants and `ColorLerper`'s fixed
+/// `brightness = 0.75` for `Type.SHEEP` (`floor(channel * 0.75)`), with
+/// `DyeColor.WHITE` special-cased to vanilla's own literal `-1644826`
+/// (`0xE6E6E6`). Computed independently of `sheep_wool_tint`'s source, not by
+/// calling the same formula the function under test uses.
+#[test]
+fn sheep_wool_tint_matches_vanilla_color_lerper() {
+    use lodestone_assets::entity_models::sheep_wool_tint;
+
+    let expected: [[u8; 3]; 16] = [
+        [230, 230, 230], // white (special-cased)
+        [186, 96, 21],   // orange
+        [149, 58, 141],  // magenta
+        [43, 134, 163],  // light_blue
+        [190, 162, 45],  // yellow
+        [96, 149, 23],   // lime
+        [182, 104, 127], // pink
+        [53, 59, 61],    // gray
+        [117, 117, 113], // light_gray
+        [16, 117, 117],  // cyan
+        [102, 37, 138],  // purple
+        [45, 51, 127],   // blue
+        [98, 63, 37],    // brown
+        [70, 93, 16],    // green
+        [132, 34, 28],   // red
+        [21, 21, 24],    // black
+    ];
+    for (ordinal, want) in expected.iter().enumerate() {
+        let got = sheep_wool_tint(ordinal as u8);
+        assert_eq!(got, *want, "dye ordinal {ordinal}");
+    }
+    // Out-of-range ordinals fail open to undyed white, matching
+    // `armour_layer_tint`'s rule for an unrecognised colour.
+    assert_eq!(sheep_wool_tint(16), [230, 230, 230]);
+    assert_eq!(sheep_wool_tint(255), [230, 230, 230]);
+
+    // Non-vacuity: the table is not sixteen copies of the same entry.
+    let unique: std::collections::HashSet<_> = expected.iter().collect();
+    assert_eq!(unique.len(), 16, "dye table has duplicate entries");
+}

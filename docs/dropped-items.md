@@ -22,13 +22,13 @@ add_entity (type "item")  +  set_entity_data (index 8, ITEM_STACK)
   → ClientHandle::entities()      → EntityView { entity_type, item, .. }
   → NetClient::entity_snapshots() → EntitySnapshot { type_path: "item", item, .. }
   → EntityInterpolator            → EntityDraw { id, type_path, item, feet, anim }
-  → RenderState::prepare_item_drops
+  → RenderState::prepare_item_geometry
       BlockModels::item_quads  +  entity::dropped_item_mesh
   → one ModelMesh, one draw, through ModelPipeline
 ```
 
 `EntityModelSet::resolve` has no corpus entry named `item` and never will, so the
-instanced entity pass skips a drop entirely; `prepare_item_drops` picks them out
+instanced entity pass skips a drop entirely; `prepare_item_geometry` picks them out
 of the same `&[EntityDraw]` by `type_path` before the pass opens.
 
 ### The placement, from `ItemEntityRenderer.submit` (26.2)
@@ -98,37 +98,123 @@ sample from `RenderState`'s `EntityLightSource` — the same source the mobs use
   `u32` count needs no model dependency and is the intended way to restore the
   visible half.
 
-- **`display.ground` is not reachable** from a baked `ItemGeometry`.
-  `lodestone-assets`' `icon.rs` keeps only the `gui` slot
-  (`resolved.display.get("gui")`), discarding the rest of `ResolvedModel::display`,
-  so `entity.rs` names vanilla's two ground transforms as constants
-  (`BLOCK_ITEM_GROUND`, `GENERATED_ITEM_GROUND`) and picks between them on
-  `gui_light`. Both are verbatim from 26.2's `block/block.json` and
-  `item/generated.json`. If `IconPart::Model` ever carries the whole `display`
-  map, replace `ground_transform_for` with a lookup and delete the constants.
-  Posing a drop with the *gui* transform instead is the tempting shortcut and is
-  visibly wrong in two ways at once: 30°/225° of tilt, and 2.5× the size.
+- **`display.ground` *is* reachable now — this section said the opposite for a
+  while, and that stale note was cited as fact.** `ItemGeometry::display` carries
+  every one of the nine `display` slots, and `ground_transform(&display, gui_light)`
+  reads the item's own declared `ground`. `BLOCK_ITEM_GROUND` and
+  `GENERATED_ITEM_GROUND` survive as the **fallback** for a model chain that
+  declares no `ground` at all (an undeclared slot would otherwise pose a full-size
+  1×1×1 block lying in the grass), and `ground_transform_for` is only that
+  fallback's `gui_light` keying. Both constants are verbatim from 26.2's
+  `block/block.json` and `item/generated.json`.
 
-- **Flat sprite items are the remaining hole, and it is a big one.**
-  `collect_item_model_parts` keeps only `IconPart::Model` parts, so an
-  `item/generated` icon (`gui_light: front`) never enters `BlockModels::items()`
-  and a dropped stick, diamond or apple draws **nothing even though its identity
-  decodes correctly**. That is the majority of items. Vanilla extrudes the sprite
-  into a thin slab and fans a stack of them along `z`
-  (`FLAT_ITEM_DEPTH_THRESHOLD`); that extrusion is not baked anywhere yet.
-  `live_dropped_item.rs` asserts this explicitly (`minecraft:diamond` →
-  `item == Some(minecraft:diamond)`, `item_drops_drawn == 0`) so it cannot be
-  mistaken for the metadata chain failing.
+  Posing a drop with the *gui* transform instead is still the tempting shortcut,
+  and is visibly wrong in two ways at once: 30°/225° of tilt, and 2.5× the size.
 
-- **Stack count is dropped at the `EntitySnapshot` boundary**, so a drop always
-  renders one copy where vanilla renders up to five with a seeded jitter
-  (`ItemEntityRenderer.getRenderedAmount`: 1 copy at count ≤ 1, then 2, 3, 4, 5
-  as the count passes 1, 16, 32 and 48). The count *is* decoded — it reaches
-  `EntityView::item` as a real `ItemStack` — and is discarded in
-  `net::entity_snapshot`. Data components (dye colour, trim, custom model data)
-  are discarded at the same point; unlike the count they change how an item looks
-  rather than how many of it there are, and nothing in the item pipeline reads
-  them.
+- **Flat sprite items are no longer a hole, and the note that said they were
+  outlived the fix by long enough to cause real damage.** `9980a96` added
+  `extruded_sprite_geometry` — vanilla's `ItemModelGenerator` transcribed, a
+  1/16-block slab with a `SOUTH` face, a u-reversed `NORTH` face and one edge quad
+  per boundary texel of the sprite's alpha outline — and `BlockModels::build`
+  inserts the result into **the same `items` map** the 3-D models go into, under
+  the same key. So `BlockModels::item` answers a diamond exactly as it answers a
+  stone, and the drop pass cannot tell which baking path produced the geometry.
+
+  The stale version of this bullet ("`collect_item_model_parts` keeps only
+  `IconPart::Model`, so an `item/generated` icon never enters
+  `BlockModels::items()`") was propagated verbatim into **four** GitHub issues
+  (#33, #50, #54, #56) as their shared root cause. Three of the four had entirely
+  different causes; see [Thrown projectiles](./thrown-projectiles.md) and
+  [First-person held item](./first-person-held-item.md). The cost of a stale note
+  is not that it is wrong — it is that it is *specific and plausible*, so nobody
+  re-checks it.
+
+  Two pieces of vanilla's flat-item handling are genuinely still missing: the
+  multi-copy fan along `z` for a large stack (`FLAT_ITEM_DEPTH_THRESHOLD`, which is
+  defined and unused), and the stack count that would drive it — see the next
+  bullet.
+
+- **Stack count used to be dropped at the `EntitySnapshot` boundary; it no
+  longer is, though the *draw* still renders exactly one copy.** The count is
+  decoded — it reaches `EntityView::item` as a real `ItemStack` — and
+  `net::entity_snapshot` now reads `stack.count` into `EntitySnapshot::count:
+  u32` (defaulting to `1` whenever there is no reported stack, never `0`, so a
+  consumer that multiplies by count never draws zero copies of nothing).
+  `entities.rs` carries it the rest of the way: `ItemStacks`'s map value
+  widened from a bare `ResourceLocation` to a `TrackedStack { id, count }`,
+  `fold_snapshots` records the real count instead of implicitly always `1`,
+  and `extract_entity_draws` copies it onto `EntityDraw::count`. Hermetic tests
+  (`item_count_reaches_the_draw`, `set_item_stack_with_count_is_recorded_and_reachable`
+  in `entities.rs`; `entity_snapshot_carries_item_count_through` in `net.rs`)
+  pin the chain, including the "no stack at all" control reading `1`.
+
+  **The draw itself is still one copy regardless of count** — that half is
+  outside `entities.rs`'s files. `gpu.rs::prepare_item_geometry` is what would
+  turn `EntityDraw::count` into the extra `dropped_item_mesh` calls, and it is
+  held; read from `.cache/mc/26.2/client-src/net/minecraft/client/renderer/entity/{ItemEntityRenderer,state/ItemClusterRenderState}.java`,
+  not summarised:
+
+  ```java
+  // ItemClusterRenderState.java
+  public static int getRenderedAmount(final int stackCount) {
+     if (stackCount <= 1) return 1;
+     else if (stackCount <= 16) return 2;
+     else if (stackCount <= 32) return 3;
+     else return stackCount <= 48 ? 4 : 5;
+  }
+
+  // ItemEntityRenderer.submitMultipleFromCount, amount = getRenderedAmount(count)
+  if (modelDepth > 0.0625F) {           // FLAT_ITEM_DEPTH_THRESHOLD
+     submit(pose);                      // the first copy, unperturbed
+     for (i in 1..amount) {
+        jitter = random_in(-0.15, 0.15) on each of x, y, z;
+        submit(pose translated by jitter);
+     }
+  } else {                              // a flat sprite: fan along Z instead
+     offsetZ = modelDepth * 1.5;
+     translate(0, 0, -offsetZ * (amount - 1) / 2); submit(pose);
+     for (i in 1..amount) {
+        translate(0, 0, offsetZ);
+        jitter = random_in(-0.075, 0.075) on x, y only;
+        submit(pose translated by jitter);
+     }
+  }
+  ```
+
+  Two things worth knowing before landing it: vanilla branches on the
+  posed model's own Z-depth against `FLAT_ITEM_DEPTH_THRESHOLD` (defined,
+  unused, in `lodestone-render/src/entity.rs`) — a 3-D model jitters in X/Y/Z,
+  a flat sprite instead fans along Z, evenly spaced, with a smaller jitter —
+  and vanilla seeds its per-copy jitter from `RandomSource` keyed on
+  `Item.getId(item) + damageValue`, which we cannot observe or reproduce
+  bit-for-bit any more than `item_bob_offset` can observe the spawn-time RNG
+  for bob phase. The precedent that function set — hash something we *can*
+  see (there, the entity id) for the same *property* (two drops do not pulse
+  in lockstep) rather than the exact bytes — is the right template here too;
+  do not spend effort trying to match vanilla's `RandomSource` output exactly.
+  Data components (dye colour, trim, custom model data) are still discarded at
+  the `net::entity_snapshot` boundary; unlike the count they change how an item
+  looks rather than how many of it there are, and nothing in the item pipeline
+  reads them.
+
+  **What landing it needs, concretely:**
+  1. `lodestone-render/src/entity.rs` — a `posed_item_z_extent(quads, ground) ->
+     (f32, f32)` mirroring `posed_item_y_extent` (same file, ~line 1274), so
+     `prepare_item_geometry` can read the posed model's Z-size and pick the
+     branch above.
+  2. `lodestone-render/src/entity.rs` — a jitter function in
+     [`item_bob_offset`]'s idiom, e.g. `item_cluster_jitter(id: i32, copy: u32)
+     -> Vec3`, hashing `(id, copy)` rather than trying to reproduce
+     `RandomSource`.
+  3. `lodestone-shell/src/gpu.rs::prepare_item_geometry` — where it currently
+     calls `dropped_item_mesh` once per drop, call `rendered_amount(draw.count)`
+     (vanilla's `getRenderedAmount`, transcribed above) and loop that many
+     times, merging one `dropped_item_mesh`-equivalent call per copy at
+     `draw.feet + jitter` (copy `0` unperturbed, matching vanilla's own
+     unperturbed first `submit`). This needs either a new `dropped_item_mesh`
+     overload taking an extra world-space offset, or computing the offset
+     `Vec3` here and adding it to `draw.feet` before the existing call — the
+     latter needs no render-crate signature change at all.
 
 - **Pickup animation.** `TakeItemEntity` *does* decode — into
   `ClientEvent::ItemPickup`, folded by `lodestone-game`'s `PickupFeed` — but
@@ -165,7 +251,18 @@ None. Every number is a vanilla constant in `lodestone-render/src/entity.rs`:
   with type path `item` **and** `item == Some(minecraft:diamond_block)` decoded
   off the wire, renders it against a control built from the same entity with its
   identity removed (2383 lit px vs 0, opposite corner 0), then repeats the summon
-  with `minecraft:diamond` to pin the sprite-item gap above.
+  with `minecraft:diamond` and asserts **`item_drops_drawn == 1`** — the assertion
+  that used to read `== 0` and was the visible marker of the sprite gap. It carries
+  no pixel check, on purpose: the camera is aimed at the *block* item's summon
+  position and the two items are summoned at different coordinates, so a
+  "differing pixels > 0" assertion there would be a *world*-species vacuous test —
+  pointed at a scene that structurally cannot contain its subject.
+
+- `lodestone-render/tests/sprite_drop_pixels.rs` — the pixel evidence for the
+  extruded slab specifically: a silhouette inside the item's own projected box,
+  strictly smaller than that box (it is a cutout, not a slab), correlated against
+  the sprite's **own alpha row profile read out of the atlas**, with the
+  vertically-reversed profile required to score worse.
 
   The negative control for the decode is the fold arm itself: deleting the
   `metadata.item` arm in `apply_metadata` makes the same summon arrive as

@@ -49,6 +49,19 @@
 //! Fail-closed like its siblings: a missing GPU or a missing `client.jar` is a
 //! failure, never a skip.
 //!
+//! # The second gate in this file: a thrown projectile
+//!
+//! `a_thrown_snowball_reaches_pixels_through_the_real_render_call` is the *island*
+//! check for [`thrown-projectiles.md`](../../../docs/thrown-projectiles.md).
+//! `lodestone-render`'s `thrown_and_held_item_pixels` proves the pose math and the
+//! pipeline; it cannot prove that `RenderState::render` ever reaches
+//! `merge_thrown_item`, which is exactly the failure this repo has shipped eleven
+//! times. This one drives the same `render` call `app.rs` makes, with an
+//! `EntityDraw` whose `type_path` is `"snowball"` and — deliberately — whose
+//! `item` is `None`, because `extract_entity_draws` populates `EntityDraw::item`
+//! **only** for `type_path == "item"` today. So it exercises the registration
+//! table's default-item fallback, which is the path a live frame actually takes.
+//!
 //! ```text
 //! cargo test -p lodestone-shell --test dropped_item_pixels -- --ignored --nocapture
 //! ```
@@ -104,6 +117,12 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // A dropped item entity carries no equipment; this gate is about the
         // item's own ground pose, not a held-item layer.
         equipment: Vec::new(),
+        // Not a sheep, and a single-item stack: `count` above 1 would ask for
+        // vanilla's 1-5 jittered copies, which `prepare_item_geometry` does not
+        // draw yet, so a value other than the neutral 1 would make this gate's
+        // silhouette measurement depend on unlanded work.
+        wool: None,
+        count: 1,
     }
 }
 
@@ -338,5 +357,165 @@ fn a_dropped_item_reaches_pixels_and_bobs() {
         "half a bob period must visibly raise the item: centroid moved {travel:.2} px \
          (expected ~20, upward). A value near 0 means the age never reaches the \
          bob, and a negative one means the sine is inverted"
+    );
+}
+
+/// The **island check** for thrown projectiles: `RenderState::render` — the same
+/// call `app.rs` makes — must reach `merge_thrown_item` and put a snowball on
+/// screen, with no argument the shell does not already pass.
+///
+/// # Why `item: None` is the interesting case, not a weakened one
+///
+/// `extract_entity_draws` fills `EntityDraw::item` only when
+/// `type_path == ITEM_ENTITY_TYPE_PATH`, so **a live snowball arrives with
+/// `item: None`** even though `ItemStacks` holds its stack (`fold_snapshots` inserts
+/// for any entity type). The renderer therefore falls back to
+/// `thrown_item_for(type_path).item`, and that fallback is the *only* path a real
+/// frame takes today. A gate that helpfully supplied `Some(minecraft:snowball)`
+/// would test a branch nothing reaches and pass while the live client drew nothing.
+///
+/// # Controls, both executed
+///
+/// * **the same snowball behind the camera.** `projectiles_drawn` must be `0` and the
+///   frame identical to the empty one — the proof that the subject's pixels come from
+///   *this* entity at *that* position, and that the frustum cull is live rather than
+///   dead code. This control is deliberately independent of the entity-model corpus.
+/// * **a `pig` at the same position** must produce `projectiles_drawn == 0`: a type
+///   absent from `thrown_item_for` must never be billboarded. **No pixel assertion on
+///   this one**, and the reason is a mistake worth recording: the first version of
+///   this gate asserted the pig frame was identical to the empty one and it failed at
+///   **10254** differing pixels, because `pig` *does* have a corpus model and the
+///   entity pass drew it correctly. "An unregistered type draws nothing" is false in
+///   general; the counter is what discriminates, not the pixels.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
+    let ctx = GpuContext::new_headless_blocking().expect(
+        "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU — do NOT treat a skip as a pass",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+    let resources = BlockResources::load(true);
+    let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
+        panic!(
+            "GPU gate opted in but the vanilla pack did not load; set LODESTONE_ASSETS \
+             to a pack root with client.jar + generated/reports/blocks.json. Banner: {:?}",
+            resources.banner
+        )
+    });
+    // The default item of the `snowball` entity must have baked geometry, or this
+    // gate would be measuring the absence of an item rather than the absence of a
+    // draw. `minecraft:snowball` is a flat sprite, so this is also a live check that
+    // the extruded-slab stream reaches `BlockModels::item`.
+    let thrown = lodestone_render::entity::thrown_item_for("snowball")
+        .expect("snowball is a ThrownItemRenderer type");
+    let default_item: ResourceLocation = thrown.item.parse().expect("valid item id");
+    {
+        let models: &BlockModels = atlas
+            .models()
+            .expect("the vanilla load must attach baked block models");
+        assert!(
+            models.item(&default_item).is_some(),
+            "{} must have baked geometry (an extruded sprite slab); without it this \
+             gate measures the absence of an item, not the absence of a draw",
+            thrown.item
+        );
+    }
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let cam = camera();
+
+    let mut shoot = |draws: &[EntityDraw], cam: &Camera| -> (Vec<u8>, usize) {
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), cam, None, draws);
+        (target.read_texels(device, queue), stats.projectiles_drawn)
+    };
+
+    let projectile = |type_path: &str| EntityDraw {
+        id: DROP_ID + 1,
+        type_path: type_path.to_owned(),
+        // Exactly what `extract_entity_draws` produces for a non-`item` entity.
+        item: None,
+        feet: DROP_POS,
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        scale: 1.0,
+        anim: AnimInput::REST,
+        equipment: Vec::new(),
+        wool: None,
+        count: 1,
+    };
+    // The same camera, turned to put the projectile squarely behind it.
+    let away = Camera {
+        yaw: 180.0,
+        ..camera()
+    };
+
+    let (empty, empty_count) = shoot(&[], &cam);
+    let (behind, behind_count) = shoot(&[projectile("snowball")], &away);
+    let (_, unregistered_count) = shoot(&[projectile("pig")], &cam);
+    let (subject, subject_count) = shoot(&[projectile("snowball")], &cam);
+
+    let d_subject = diff(&subject, &empty);
+    let corner = diff_in_far_corner(&subject, &empty);
+    // The behind-the-camera frame is compared against its *own* baseline, since a
+    // 180° turn changes the sky gradient and not just the projectile.
+    let (empty_away, _) = shoot(&[], &away);
+    let d_behind = diff(&behind, &empty_away);
+
+    eprintln!(
+        "projectiles_drawn = empty {empty_count}, behind {behind_count}, pig \
+         {unregistered_count}, snowball {subject_count}"
+    );
+    eprintln!(
+        "lit px            = behind {}, snowball {}",
+        d_behind.count, d_subject.count
+    );
+    eprintln!(
+        "snowball box      = x {}..{}, y {}..{}",
+        d_subject.min_x, d_subject.max_x, d_subject.min_y, d_subject.max_y
+    );
+    eprintln!("far-corner px     = {corner}");
+
+    assert_eq!(
+        empty_count, 0,
+        "a frame with no entities cannot have drawn a projectile"
+    );
+    assert_eq!(
+        unregistered_count, 0,
+        "`pig` is not a ThrownItemRenderer type and must not be billboarded"
+    );
+    assert_eq!(
+        behind_count, 0,
+        "a projectile behind the camera must be frustum-culled, not meshed"
+    );
+    assert_eq!(
+        d_behind.count, 0,
+        "the same snowball behind the camera changed {} px, so the subject's pixels \
+         are not attributable to the projectile being in front of the camera",
+        d_behind.count
+    );
+    assert_eq!(
+        subject_count, 1,
+        "exactly one projectile should have been meshed. Zero means \
+         `prepare_item_geometry` never called `merge_thrown_item` — the island shape: \
+         the renderer is complete and nothing invokes it"
+    );
+    assert!(
+        d_subject.count > 100,
+        "a snowball two blocks away should cover a real run of pixels; only {} differ \
+         from the empty frame. A count of 1 with zero pixels is the mesh being built \
+         and then clipped or culled away",
+        d_subject.count
+    );
+    assert_eq!(
+        corner, 0,
+        "the corner opposite the projectile must be untouched; {corner} differing px \
+         there means the count above is measuring a full-screen change"
     );
 }
