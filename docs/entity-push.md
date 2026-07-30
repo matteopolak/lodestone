@@ -253,6 +253,16 @@ attribute fold in [`swimming.md`](./swimming.md) and rule 1 in
 * **`noBorderCollision`** is still unmodelled (no world border). It is now the
   *only* remaining unmodelled term of `noCollision`'s three.
 
+**Update (2026-07-29): `no_collision_among_entities` now has a production
+consumer.** `Player.updatePlayerPose`'s fit gate is exactly this predicate over a
+`deflate(1.0E-7)`d pose box, and `lodestone_physics::tick_among_entities` passes
+its neighbour slice to it — so a boat, shulker or happy ghast overlapping the
+player can veto a pose. `tick`'s block-only form is unchanged. See
+[`pose-dimensions.md`](./pose-dimensions.md). That doc also depends on the
+measurement above: it is *because* `canBeCollidedWith` is false for every player
+and mob that the entity term did not block the swimming-hitbox work, which an
+earlier investigation had concluded it did.
+
 ## How to change it, and the gotchas
 
 * **`MoveContext` did not gain a field, on purpose.** It is a `Copy` value type of
@@ -293,7 +303,10 @@ server-side game rule affecting damage only and is not read here.
   the block half of `noCollision`), `collide_among_entities`.
 * `lodestone-physics::mth` — `abs_max`, `java_max_f64`, `floor`.
 * `lodestone-physics::geometry` — `Aabb::{intersects, inflate, size}`, `Vec3d`.
-* Consumers: **none yet.** See [Wiring](#wiring-what-is-still-owed).
+* Consumers: the **push** still has none — see
+  [Wiring](#wiring-what-is-still-owed). `no_collision_among_entities` does:
+  `lodestone-physics::pose`'s fit gate
+  ([`pose-dimensions.md`](./pose-dimensions.md)).
 
 ## Gates
 

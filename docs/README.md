@@ -29,16 +29,33 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   block state carry water?", shared by the mesher and by physics (swimming, fog,
   overlay, ambient sounds) — and why that is a different question from "can I break
   what is in this cell", which the pick ray answers on its own.
+- [Fluid rendering](./fluid-rendering.md) — given that a cell carries water, what
+  gets drawn: vanilla `FluidRenderer`'s three different face predicates, which
+  sprite each face takes, and the shoreline bug that proved occlusion is a
+  **per-face** question and not a whole-block one derived from the render layer
+  (`grass_block`'s transparent overlay decal made every lake edge draw a
+  waterfall).
 - [Swimming](./swimming.md) — the water-movement port: the missing `PlayerCommand`
   packet that meant the server never believed a sprint-swim, double-tap-to-sprint's
-  fixed-tick timing, and the deliberate gaps (swimming hitbox, `WATER_MOVEMENT_
-  EFFICIENCY`, bubble columns).
+  fixed-tick timing, and the deliberate gaps (`WATER_MOVEMENT_EFFICIENCY`, bubble
+  columns).
+- [Pose-dependent dimensions](./pose-dimensions.md) — why the player box is
+  `0.6 × 0.6` swimming and `0.6 × 1.5` crouching, and why that is a **fit-gated
+  state machine** rather than a pose lookup: vanilla has no recovery for a player
+  whose box grows into a ceiling, so the veto is the only thing preventing a
+  surfacing swimmer from being clipped into one.
 - [Item GUI geometry](./item-gui-geometry.md) — baking block items into 3-D
   inventory-slot geometry, and the pose/projection matrices that place them.
 - [Dimension visuals](./dimension-visuals.md) — what already renders differently in
   the Nether/End (the sky-light default, now End-correct), what is still a hardcoded
   overworld sky and fog colour, the fog presets built and waiting to wire, and the
   stale-`player.dimension`-after-a-portal bug that undermined both.
+- [Time-of-day lighting](./time-of-day-lighting.md) — the day clock and
+  `sky_darken`, the one number that darkens terrain *and* mobs at night. Why 26.2's
+  `set_time` clock map is empty in 19 packets out of 20, how reading the world age
+  for those pinned the factor to a **session constant** (permanent noon: the
+  reported "fullbright world" and "daytime mobs", one root cause), why breaking a
+  block appeared to fix it, and why two green shader gates could not see any of it.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob.
@@ -57,6 +74,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Block-break timing](./block-break-timing.md) — how long a block takes to mine
   and how fast its crack fills: the per-state hardness seam, the two ways to wire
   it that break blocks *too fast*, and the server branch the real numbers change.
+- [Break particles](./break-particles.md) — the debris a breaking block throws: the
+  `#particle` sprite (which is not the texture of any face), the per-state tint that
+  vanilla applies with a *different* virtual method from the in-world one, and the
+  hardcoded `[1.0; 3]` that rendered every greyscale-sprite block's debris white —
+  plus the two hypotheses about that bug that captured server bytes refuted.
 - [GUI item icons](./gui-item-icons.md) — the draw half of putting an item in a
   slot: which of the two icon streams a part reaches, the pass order, and the
   four GPU resources borrowed from the world renderer rather than uploaded twice.
@@ -91,6 +113,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `Clear` pass; pause overlays with `LoadOp::Load` instead), and `Sim::end_session`
   — what it resets, what it deliberately keeps, and why reconnecting is the actual
   acceptance test.
+- [Keybindings](./keybindings.md) — the rebindable action → input table behind every
+  gameplay key, why a `Binding` must hold a mouse button (vanilla's attack and use
+  are mouse-bound by default), the `resolve_key` precedence chain that lets chat and
+  container screens swallow keys before gameplay sees them, and the persisted format
+  in `options.json` — plus the check that F3 *is* a real `KeyMapping` in 26.2 while
+  Escape genuinely is not.
 - [Tool mining speeds](./tool-mining.md) — how a held item's mining speed and
   correct-tool-for-drops verdict are resolved from the vanilla `minecraft:tool`
   census, the `correct_tool`/`requires_correct_tool` inversion trap, the
@@ -131,9 +159,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [The third-person player body](./third-person-player-body.md) — the render
   path that folds the local player's own state into an ordinary `EntityDraw` so
   it draws through the same resolve/cull/pose/upload pipeline every mob does,
-  why it must never share a pose function with the first-person arm, and why it
-  is zero pixels until a third-person camera mode and a collision-aware
-  pullback exist.
+  why it must never share a pose function with the first-person arm (and why
+  sharing the arm-swing *scalar* is not the same thing), and how the
+  camera-mode toggle is a single `Option` rather than an enum.
+- [Arm swing animation](./arm-swing-animation.md) — vanilla's `attackAnim` clock
+  and the `sin(sqrt(a)·π)` shaping the first-person arm is posed by, why the
+  interpolation wraps forward across the sawtooth instead of lerping (a plain
+  lerp rewinds the whole arc every time a held mine re-swings), the four sites
+  that start a swing, and the exact remaining wiring for remote players' and
+  mobs' swings — `ClientboundAnimatePacket` is decoded but consumed by nothing.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded

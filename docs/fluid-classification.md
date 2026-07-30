@@ -6,6 +6,11 @@ The single answer to **"does this block state carry water (or lava)?"** — shar
 the mesher (which draws the water surface) and by physics (which decides whether
 you swim, and whether your eye is submerged).
 
+Given that a cell *does* carry water, what gets drawn is a separate subsystem:
+see [fluid rendering](./fluid-rendering.md). The two have been confused once —
+a shoreline bug that looked like "water picks the wrong sprite" turned out to be
+about the **bank block's** occlusion, with the classifier entirely correct.
+
 Before this existed the two disagreed: the mesher classified any `waterlogged=true`
 block plus kelp/seagrass/bubble columns as carrying water, while
 `CollisionView::is_water` matched an exact `minecraft:water` state id. The visible

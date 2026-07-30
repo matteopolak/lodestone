@@ -65,24 +65,41 @@ unconditionally, below.
 The first-person arm (`first_person_arm_chain` / `first_person_arm_pose`,
 `crates/lodestone-render/src/entity.rs`) and the third-person body **must never
 share a pose function**, and this is not an accident of scope — it was called
-out before this change existed. `first_person_arm_pose`'s own doc comment
-(unmodified by this change, because it was already correct) says why:
+out before this change existed. `first_person_arm_pose`'s own doc comment says
+why:
 
 > `AvatarRenderer.renderHand` calls `arm.resetPose()` and then forces
-> `zRot = ±0.1F`, so the arm is drawn from its **authored rest pose** with one
-> rotation replaced — never from the third-person `setupAnim` result. That is
-> why this is a separate function from `EntityInstance::part_transforms` and
-> must stay one: the deferred third-person player body needs the animated
-> chain, and sharing a code path would silently give one of the two the
-> other's pose.
+> `zRot = ±0.1F`, so the arm **part** is drawn from its authored rest pose with
+> one rotation replaced — never from the third-person `setupAnim` result. That
+> is why this is a separate function from `EntityInstance::part_transforms` and
+> must stay one: the third-person player body needs the animated chain, and
+> sharing a code path would silently give one of the two the other's pose.
 
-Concretely: the arm's pose is *authored rest pose, one rotation swapped in* —
-it never bends with a walk cycle or looks with the head. The body's pose is
-the *animated* `Skeleton::pose` result every mob uses — it must swing its arms
-when walking and turn its head to look around. Point one function at the
+Concretely: the arm part's pose is *authored rest pose, one rotation swapped
+in* — it never bends with a walk cycle or looks with the head. The body's pose
+is the *animated* `Skeleton::pose` result every mob uses — it must swing its
+arms when walking and turn its head to look around. Point one function at the
 other's job and either the first-person arm starts animating (wrong — vanilla
 never does this) or the third-person body freezes into the arm's static rest
 pose (wrong — it would not visibly walk).
+
+**The arm swing does not change this, and is worth understanding as the
+example.** Since [`arm-swing-animation.md`](./arm-swing-animation.md) both paths
+*are* driven by the same swing scalar — `Sim::hand_swing_progress`, on
+`AnimInput::attack_anim` for the body and via `HandSwingSource` for the arm — and
+they still share no code, because vanilla puts the swing in two structurally
+different places:
+
+- **first person**: the swing is in the *camera-space chain* that a **rested**
+  arm part hangs off (`first_person_arm_chain`'s five `attackValue` terms). The
+  part pose stays rest.
+- **third person**: the swing is in the *arm part* inside an otherwise ordinary
+  body (`HumanoidModel.setupAttackAnimation`, i.e. `Skeleton::pose`'s
+  `attack_anim`). The chain is the ordinary world model matrix.
+
+So the sameness stops at the scalar. Feeding either pose function the other's
+chain produces a plausible-looking wrong arm — the failure this section exists to
+prevent, now with a concrete instance rather than a hypothetical one.
 
 **The two are also mutually exclusive on screen, by construction, not by
 convention.** `render_inner` skips `prepare_first_person_arm` entirely on any
