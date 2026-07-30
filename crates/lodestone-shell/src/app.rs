@@ -1794,7 +1794,16 @@ impl ApplicationHandler for WindowApp {
                 let gate = KeyGate {
                     menu: crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused(),
                     chat_open: self.ui.is_chat_open(),
-                    container_open: self.ui.is_container_open(),
+                    // `active_container_menu`, **not** `ui.is_container_open()`.
+                    // That flag only tracks the *locally* opened player inventory;
+                    // a server-opened menu (crafting table, chest, furnace) lives
+                    // in `sim.open_menu()` and leaves it `false`. Reading the flag
+                    // meant the swallow arm never fired for a server menu, so the
+                    // inventory binding could not close a crafting table and every
+                    // gameplay key stayed live behind it. This is the same
+                    // predicate `redraw` draws from, so hit-testing, drawing and
+                    // key dispatch cannot disagree about what is on screen.
+                    container_open: self.active_container_menu().is_some(),
                     gameplay: self.ui.accepts_gameplay_input(),
                 };
                 let code = match event.physical_key {
@@ -1823,11 +1832,24 @@ impl ApplicationHandler for WindowApp {
                         }
                     }
                     Some(KeyOutcome::Pause) => {
-                        // Context-sensitive: Playing↔Paused, Error→menu, etc.
-                        if self.ui.is_container_open() {
+                        // Escape on a container screen **closes the container and
+                        // returns to gameplay** — it does not open the pause menu.
+                        // That is `Screen.onClose()` in vanilla, and it is why this
+                        // is an `else` rather than a close followed by `on_escape`:
+                        // the old form paused *as well*, leaving the pause menu
+                        // drawn over a menu that was still open server-side.
+                        //
+                        // Also note it must clear both halves. `close_open_menu`
+                        // only releases the *server* menu; `close_container` clears
+                        // the local inventory flag. Whichever one was showing, the
+                        // other is already false and clearing it is a no-op.
+                        if self.active_container_menu().is_some() {
                             self.sim.close_open_menu();
+                            self.ui.close_container();
+                        } else {
+                            // Context-sensitive: Playing↔Paused, Error→menu, etc.
+                            self.ui.on_escape();
                         }
-                        self.ui.on_escape();
                         self.set_grab(self.ui.wants_cursor_grab());
                     }
                     Some(KeyOutcome::CloseContainer) => {
