@@ -374,9 +374,28 @@ fn measure_neighbour_light_cost() {
         hood_best / single_best
     );
 
-    // Sanity ceiling only; the printed factor is the deliverable.
+    // Sanity ceiling only; the printed factor is the deliverable — so the ceiling
+    // is expressed against that factor rather than as an absolute millisecond
+    // count.
+    //
+    // It used to be `hood_best < 200.0`, which was **inconsistent with the
+    // deliverable it guards**. A 3x3 neighbourhood is nine columns and the
+    // measured factor is ~8.7x, i.e. essentially exactly linear — so a 200 ms
+    // ceiling silently asserts `single_best < 22.2 ms`, an undocumented
+    // constraint on an absolute machine-speed number that nothing in this test
+    // is about. Measured here at 25.083 ms single / 218.564 ms hood: a perfectly
+    // healthy 8.7x that failed the ceiling purely because the machine was busy.
+    //
+    // This is the **duration** species from `CLAUDE.md` — test lifetime measured
+    // against wall-clock, unjudgeable by reading the assert. A ratio is the
+    // load-robust form: it still catches the thing worth catching (neighbour
+    // light going *superlinear* in column count, e.g. re-walking the centre per
+    // neighbour), and it cannot be reddened by a busy CPU, because both halves
+    // are measured in the same conditions microseconds apart.
+    let factor = hood_best / single_best;
     assert!(
-        hood_best < 200.0,
-        "neighbourhood light unexpectedly slow: {hood_best:.3} ms"
+        factor < 12.0,
+        "neighbourhood light is superlinear in column count: {factor:.1}x single \
+         for a 9-column neighbourhood ({hood_best:.3} ms vs {single_best:.3} ms)"
     );
 }

@@ -9,7 +9,27 @@ once you know what already exists and what will silently mislead you.
 confidently held and turned out false, and [`README.md`](./README.md) for the
 per-subsystem index.
 
-Session task lists do not survive a restart. **This file is the backlog of record.**
+Session task lists do not survive a restart.
+
+**What is open now lives in [GitHub issues](https://github.com/matteopolak/lodestone/issues)**, as seven
+Tier epics with sub-issues:
+[Tier 1](https://github.com/matteopolak/lodestone/issues/1) ·
+[Tier 1½](https://github.com/matteopolak/lodestone/issues/2) ·
+[Tier 2](https://github.com/matteopolak/lodestone/issues/3) ·
+[Tier 3](https://github.com/matteopolak/lodestone/issues/4) ·
+[Tier 4](https://github.com/matteopolak/lodestone/issues/5) ·
+[Infrastructure](https://github.com/matteopolak/lodestone/issues/6) ·
+[Architecture](https://github.com/matteopolak/lodestone/issues/7).
+
+**This file remains the record of the *traps*** — the tier definitions below, and the per-item
+"what already exists and what will silently mislead you" notes, which are the expensive part and do
+not belong in an issue title. Treat the tracker as the answer to *what is open* and this file as the
+answer to *what will go wrong when you start*. When they disagree, the tracker is newer; fix this
+file rather than working around it.
+
+The `island`, `stale-record` and `vacuous-test` labels exist because those are this repo's three
+recurring defect classes, not because they are generically useful — see
+[`../CLAUDE.md`](../CLAUDE.md).
 
 ---
 

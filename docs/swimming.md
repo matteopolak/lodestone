@@ -69,14 +69,19 @@ a naive per-frame call would age it once regardless.
 runs the actual integration and documents its own gaps in a "Not modelled"
 list rather than leaving them to be rediscovered:
 
-- **The swimming hitbox is not modelled.** Vanilla's `Pose.SWIMMING` is a
-  flat `0.6 × 0.6` box (down from the standing `0.6 × 1.8`) with eye height
-  `0.4`. This port keeps the standing `EntityDimensions::PLAYER` for every
-  pose, so a swimmer cannot squeeze through a one-block gap the way vanilla
-  can. Only the **eye height** is modelled as a pose input —
-  `SWIMMING_EYE_HEIGHT: f32 = 0.4` (`sim.rs`), applied by
-  `Sim::update_pose` to `PlayerState::eye_height` — the collision box stays
-  standing-sized regardless of pose.
+- ~~**The swimming hitbox is not modelled.**~~ **Closed (2026-07-29).** The
+  box is now pose-dependent, through vanilla's fit-gated
+  `Player.updatePlayerPose` rather than a pose→dimensions lookup — see
+  [`pose-dimensions.md`](./pose-dimensions.md). `Pose.SWIMMING` is the flat
+  `0.6 × 0.6` box with eye `0.4`, crouching is `0.6 × 1.5` / `1.27`, and both
+  are *vetoed* against the world before they are adopted, because vanilla has
+  no size-growth recovery for a player (`Entity.refreshDimensions` excludes
+  both clients and `Player`). A swimmer fits a one-block gap; the golden
+  traces `swim_gap_tunnel` and `swim_gap_blocked_control` are the pair.
+  `lodestone-physics::tick` owns the decision and writes both
+  `PlayerState::pose` and `PlayerState::eye_height`; `lodestone-ecs`'s own
+  `update_pose` is now redundant on the physics-walk path and is the one edit
+  still owed (spelled out in `pose-dimensions.md`).
 - **`WATER_MOVEMENT_EFFICIENCY` has no reachable value.** The field defaults
   to `0.0` and the formula that consumes it (halved when airborne, lerps
   between the water slowdown and normal speed) is fully wired at the point
@@ -162,6 +167,11 @@ targeting the block a metre *beyond* it. This compounded with the separate
 `LiveCollision::is_pickable` in `crates/lodestone-shell/src/collision.rs`) —
 between the two, a swimmer trying to break kelp was both aiming at the wrong
 cell and unable to target the right one even by luck.
+
+Note the pick-ray consequence compounds the other way now, too: with the box
+*and* the eye following the pose, `PlayerState::eye_height` is an output mirror
+rather than an input — nothing inside `lodestone_physics::tick` reads it, so a
+driver that writes it cannot move the player, only the camera.
 
 There's also a sneak-vetoes-sprint exception specific to swimming-while-
 descending: `Sim::swim_adjusted_intent` (`sim.rs`), which ports
@@ -249,6 +259,10 @@ matching vanilla's default, not a runtime option.
 
 - `lodestone-physics::player` — `tick_water`, `PlayerState::eye_height`,
   `WATER_MOVEMENT_EFFICIENCY`.
+- `lodestone-physics::pose` — the pose the swim flag feeds
+  ([`pose-dimensions.md`](./pose-dimensions.md)): `state.swimming` is
+  `getDesiredPose`'s top-priority input, and the fit gate decides whether it is
+  granted.
 - `lodestone-entity::attribute` — `AttributeInstance::value` (the vanilla
   three-stage fold), `instance_from_snapshot`/`attribute_value` (the
   wire-shaped `EntityAttributeSnapshot` → fold conversion),
