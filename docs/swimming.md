@@ -325,20 +325,23 @@ smoothed values, exactly mirroring `Camera.tick()`/`alignWithEntity`. It is
 unit-tested (`camera_rig.rs`'s own tests: a fresh smoother reports the seed
 before any tick, one tick covers exactly half the remaining distance, repeated
 ticks converge without ever snapping, and reversing direction mid-ramp still
-eases rather than jumping) but **not yet wired in** — `Sim::camera`
-(`crates/lodestone-shell/src/sim.rs:3429-3437`) still reads
-`interp.eye_height` raw. `sim.rs` is outside the crates this fix was scoped
-to touch; wiring it needs:
+eases rather than jumping), **and it is wired**.
 
-1. A persistent `EyeHeightSmoother` field on `Sim` (parallel to the existing
-   `body_pose`, which is ticked the same way — once per physics tick, inside
-   `Sim::step`'s `GameTick` loop).
-2. `.tick(post_tick_pose_eye_height)` called once per physics tick, from
-   whatever already has the just-ticked `PlayerState` in hand — the same tick
-   that currently reads `p.position`/`p.yaw`/`p.pitch` for `body_pose.tick(...)`
-   at `sim.rs:2208-2210` also has `p.eye_height`.
-3. `Sim::camera` (`sim.rs:3429-3437`) replacing `interp.eye_height` with
-   `self.eye_height_smoother.lerp(self.clock().interp_alpha)`.
+`Sim` holds a persistent `eye_height_smoother` field (`sim.rs:565`), seeded from
+the spawn pose (`:797`) so the first frame does not ease up from zero, ticked once
+per physics tick beside `body_pose` (`:2256`), and read interpolated by
+`Sim::camera` (`:3489`) in place of the raw `interp.eye_height`.
+
+Note *why* interpolating the entity's own eye height would not have worked: the
+value being interpolated between two ticks is itself already the post-snap one.
+
+The gate is `sprinting_underwater_enters_the_swim_pose_and_drops_the_camera`, which
+asserts the camera is **mid-ease** one tick after the pose flips — that is the
+assertion proving `Sim::camera` reads the smoother rather than the pose — and then
+that it converges. One subtlety it encodes: `lerp(0.0)` returns the *previous*
+tick's smoothed value (that is what the `O` twin is for), so reading at alpha 0.0
+straight after a flip shows the pre-flip height. Correct semantics, and not what a
+mid-ease assertion wants.
 
 **Pose oscillation was checked and ruled out as a second jerk source.** The
 pose fit gate (`ab9351c`) is a pure, deterministic function of position each
@@ -470,7 +473,7 @@ matching vanilla's default, not a runtime option.
 - `lodestone-physics::player` — `tick_water`, `PlayerState::eye_height`,
   `PlayerState::swim_amount`/`swim_amount_o`, `WATER_MOVEMENT_EFFICIENCY`.
 - `lodestone-shell::camera_rig` — `EyeHeightSmoother`, the issue #59 camera-jerk
-  fix (not yet wired into `Sim`; see above).
+  fix (wired into `Sim`; see above).
 - `lodestone-physics::pose` — the pose the swim flag feeds
   ([`pose-dimensions.md`](./pose-dimensions.md)): `state.swimming` is
   `getDesiredPose`'s top-priority input, and the fit gate decides whether it is
