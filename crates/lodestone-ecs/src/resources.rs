@@ -225,11 +225,99 @@ impl VersionData {
     ) -> Option<lodestone_model::ToolMining> {
         self.0.as_ref()?.tool_mining(held, state_id)
     }
+
+    /// The version's per-entity-type physics facts for a resolved entity type, or
+    /// `None` when there is no adapter or the type is outside its census.
+    ///
+    /// Keyed by [`lodestone_model::ResourceKey`] because that is the only entity
+    /// identity that survives ingest — `ClientEvent::EntitySpawned` resolves the
+    /// `add_entity` varint away and stores the key in `EntityKind`, so a physics
+    /// consumer has no wire id to hand [`lodestone_model::VersionAdapter::entity_dimensions`].
+    ///
+    /// As with [`Self::block_hardness`], the two `None` causes are deliberately
+    /// not distinguished: the correct response to both is the same, and for the
+    /// entity-push producer that response is **treat it as not a pusher**. See
+    /// [`lodestone_model::EntityFacts::pushes_players`] on why the default has to
+    /// be deny.
+    #[must_use]
+    pub fn entity_facts(
+        &self,
+        entity_type: &lodestone_model::ResourceKey,
+    ) -> Option<lodestone_model::EntityFacts> {
+        self.0.as_ref()?.entity_facts(entity_type)
+    }
+
+    /// Whether an entity of this type can shove the local player — the
+    /// [`Self::entity_facts`] field the push producer gates on, with the
+    /// default-deny already applied so no caller can forget it.
+    ///
+    /// `false` for an unknown type and for a build with no version family
+    /// compiled in, which is the honest answer in both cases: nothing about an
+    /// unrecognised entity licenses letting it move the player.
+    #[must_use]
+    pub fn entity_pushes_players(&self, entity_type: &lodestone_model::ResourceKey) -> bool {
+        self.entity_facts(entity_type)
+            .is_some_and(|facts| facts.pushes_players)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entity_push_defaults_to_deny_with_no_version_family_compiled_in() {
+        // A build without `--features live` has `VersionData(None)`. Every entity
+        // must then be reported as *not* a pusher — the honest degradation, and the
+        // one that cannot make a dropped item shove the player.
+        let version = VersionData::default();
+        for name in ["minecraft:zombie", "minecraft:item", "someplugin:custom"] {
+            let key: lodestone_model::ResourceKey = name.parse().expect("parses");
+            assert!(version.entity_facts(&key).is_none());
+            assert!(
+                !version.entity_pushes_players(&key),
+                "{name} must not push with no adapter"
+            );
+        }
+    }
+
+    #[test]
+    fn the_push_producer_borrow_shape_holds() {
+        // Pins the borrow pattern `lodestone-shell`'s `Sim::tick_nearby_entities`
+        // uses: build the `QueryState` from `&mut World` (which ends that mutable
+        // borrow), then hold `&VersionData` and iterate the query *simultaneously*,
+        // both as immutable reborrows. Reading the resource before the loop is what
+        // avoids a second `hold_write` pass or a per-entity resource lookup, and it
+        // only compiles because neither borrow is mutable — so it is worth a test
+        // rather than a comment.
+        use crate::entity::{EntityKind, Position};
+        use lodestone_model::Vec3;
+
+        let mut world = bevy_ecs::world::World::new();
+        world.insert_resource(VersionData::default());
+        world.spawn((
+            Position(Vec3 {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            }),
+            EntityKind("minecraft:zombie".parse().expect("parses")),
+        ));
+
+        // `&mut World` is what `lodestone_ecs::hold_write` hands its closure, so
+        // the reborrow is exercised through the same shape the shell has.
+        let admitted = (|w: &mut bevy_ecs::world::World| {
+            let mut state = w.query::<(&Position, &EntityKind)>();
+            let version = w.resource::<VersionData>();
+            state
+                .iter(w)
+                .filter(|(_, kind)| version.entity_pushes_players(&kind.0))
+                .count()
+        })(&mut world);
+        // No adapter, so nothing is admitted — the assertion that matters here is
+        // that this compiles at all, but a count keeps the test non-vacuous.
+        assert_eq!(admitted, 0);
+    }
 
     /// Drain one frame's worth of `dt` and report how many fixed ticks it bought.
     fn ticks_in_one_frame(dt: f64) -> u32 {

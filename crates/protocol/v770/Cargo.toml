@@ -110,3 +110,15 @@ live-tool = []
 # fixtures still match the live wire. Off by default and `#[ignore]`d so
 # `cargo test -p lodestone-v770` stays hermetic.
 live-item-entity = []
+
+# Enables the live `level_event` 2001 gate (`live_destroy_block_event`): joins
+# the flat creative 26.2 oracle (game :25570, RCON :25571), stands a torch on a
+# block, pulls the block out over RCON, and captures the `PARTICLES_DESTROY_BLOCK`
+# frame the *server* authored for the resulting cascade. The `data` field is
+# hand-decoded from the captured bytes and cross-checked against the generated
+# `Block.BLOCK_STATE_REGISTRY` census, so the block-state id that break particles
+# take their texture from is never validated against our own encoder. A cascade
+# rather than a punch is deliberate: a punched block has a second, locally-driven
+# particle emitter that masks a wrong id. Off by default and `#[ignore]`d so
+# `cargo test -p lodestone-v770` stays hermetic.
+live-destroy-block = []

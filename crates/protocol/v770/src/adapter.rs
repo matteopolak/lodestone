@@ -14,6 +14,7 @@ use lodestone_model::{
     ContainerSlotChange, DeathLocation, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
     EntityBaseDimensions,
     EntityEquipment,
+    EntityFacts,
     EntityInteraction, EntityMovement, EquipmentSlot, GameMode, Hand, ItemComponents,
     ItemEnchantment, ItemPrototype, ItemStack, ItemTool, LoginProfile,
     LookAnchor, MainHand, NumberFormat, ObjectiveMode, ObjectiveRenderType, PackedMessageSignature,
@@ -103,6 +104,76 @@ pub struct V770Adapter {
     /// mobs actually present; self-identifying registry-holder variants need no
     /// entry. Populated on `add_entity`, cleared on `remove_entities`.
     variants: Arc<Mutex<HashMap<i32, MetadataClass>>>,
+    /// The overworld day clock, held across packets because `set_time` mostly
+    /// does **not** carry it. See [`DayClock`].
+    clock: Arc<Mutex<DayClock>>,
+}
+
+/// The client's copy of the server's overworld day clock.
+///
+/// # Why any state is needed here at all
+///
+/// 26.2's `set_time` is `(gameTime, Map<Holder<WorldClock>, ClockNetworkState>)`,
+/// and the map is **empty in almost every packet**: the once-a-second
+/// `MinecraftServer::forceGameTimeSynchronization` sends `Map.of()`, while
+/// `ServerClockManager::modifyClock` sends a one-entry map only when a clock
+/// changes and `createFullSyncPacket` sends the full map once, at join. So a
+/// stateless adapter has no day time to report for 19 packets out of 20, and the
+/// previous code filled that hole with the monotonic world age — which pinned
+/// `sky_darken_for_time_of_day` to one value for the whole session. See
+/// [`SetTime::day_clock`] for the measurement.
+///
+/// Vanilla's client has the same problem and solves it the same way: it holds the
+/// clock and advances it locally, the server only correcting it. Here the
+/// correction *and* the elapsed-tick reference both ride on `set_time`'s own
+/// `gameTime`, so no local tick loop is needed — `time_of_day` simply advances in
+/// ~20-tick steps, one per sync. That granularity is invisible in the only
+/// consumer (`sky_darken_for_time_of_day`, whose curve moves over thousands of
+/// ticks).
+///
+/// # How to change it
+///
+/// If a second clock ever needs to be surfaced (the End clock, id `1`), widen
+/// this to a map keyed by `holder_id` and pick per dimension; `ClientEvent`'s
+/// single `time_of_day` field is the constraint, not this struct.
+#[derive(Debug, Clone, Copy)]
+struct DayClock {
+    /// The clock's tick count at [`Self::at_game_time`].
+    total_ticks: i64,
+    /// Ticks of clock per tick of world age. **`0.0` means paused** — that is
+    /// how `/gamerule advanceTime false` and a paused clock arrive on the wire.
+    rate: f32,
+    /// The `set_time.game_time` this anchor was taken at.
+    at_game_time: i64,
+    /// Whether a real clock update has ever been seen. Until it has, the anchor
+    /// is seeded from the world age, reproducing the old behaviour exactly
+    /// rather than reporting a confidently wrong `0`. In practice this window is
+    /// closed by the join-time full sync before any gameplay packet arrives.
+    synced: bool,
+}
+
+impl DayClock {
+    /// The clock's tick count at world age `game_time`, extrapolated from the
+    /// anchor at the server's own rate. Never runs backwards: a `game_time`
+    /// behind the anchor (a re-anchor from a *later* packet, or a wrapped clock)
+    /// contributes zero rather than a negative offset.
+    fn time_of_day(&self, game_time: i64) -> i64 {
+        let elapsed = game_time.saturating_sub(self.at_game_time).max(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let advanced = (elapsed as f64 * f64::from(self.rate)) as i64;
+        self.total_ticks.saturating_add(advanced)
+    }
+}
+
+impl Default for DayClock {
+    fn default() -> Self {
+        Self {
+            total_ticks: 0,
+            rate: 1.0,
+            at_game_time: 0,
+            synced: false,
+        }
+    }
 }
 
 /// Per-connection chunk-batch flow-control state: the running rate estimator and
@@ -163,6 +234,7 @@ impl V770Adapter {
             })),
             movement: Arc::new(Mutex::new(MovementSendState::default())),
             variants: Arc::new(Mutex::new(HashMap::new())),
+            clock: Arc::new(Mutex::new(DayClock::default())),
         }
     }
 
@@ -2886,17 +2958,46 @@ impl V770Adapter {
         if packet_id == play::clientbound::SET_TIME {
             // 26.2 reshaped set_time: a monotonic world age followed by a map of
             // per-world-clock updates (see `packets::time`). Decode it fully so
-            // the trailing zero-length check guards the variable-length map, and
-            // surface the world age plus a best-effort day time.
+            // the trailing zero-length check guards the variable-length map.
             let mut reader = Reader::new(payload);
             let time = SetTime::decode(&mut reader, CTX)
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
             reader
                 .ensure_empty()
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
+            // The day time is *held*, not read off the packet: 19 of every 20
+            // `set_time`s carry an empty clock map (the once-a-second game-time
+            // sync), and treating that as "the day time is the world age" pinned
+            // `sky_darken` to a session constant. Re-anchor only on a real clock
+            // update; otherwise extrapolate the held anchor at the server's own
+            // rate. See `DayClock` and `SetTime::day_clock`.
+            let time_of_day = {
+                let mut clock = self.clock.lock().expect("day clock poisoned");
+                if let Some(update) = time.day_clock() {
+                    *clock = DayClock {
+                        total_ticks: update.total_ticks,
+                        rate: update.rate,
+                        at_game_time: time.game_time,
+                        synced: true,
+                    };
+                } else if !clock.synced {
+                    // No clock update has ever arrived (we are ahead of the
+                    // join-time full sync). Seed from the world age, which is
+                    // exactly what this arm used to report unconditionally, so
+                    // this window is no worse than before and closes on the
+                    // first real update.
+                    *clock = DayClock {
+                        total_ticks: time.game_time,
+                        rate: 1.0,
+                        at_game_time: time.game_time,
+                        synced: false,
+                    };
+                }
+                clock.time_of_day(time.game_time)
+            };
             return Ok(vec![Directive::Emit(ClientEvent::TimeChanged {
                 world_age: time.game_time,
-                time_of_day: time.day_time(),
+                time_of_day,
             })]);
         }
         if packet_id == play::clientbound::GAME_EVENT {
@@ -4050,6 +4151,22 @@ impl VersionAdapter for V770Adapter {
         // names v770. Base dims only — the caller folds SCALE/STEP_HEIGHT from
         // the entity's attribute map.
         crate::entity_dimensions::base_dimensions(entity_type_id)
+    }
+
+    fn entity_facts(&self, entity_type: &ResourceKey) -> Option<EntityFacts> {
+        // The same two censuses `entity_dimensions` and `entity_census` expose,
+        // read by resource key instead of wire id — which is the only identity a
+        // consumer downstream of ingest still holds. Both lookups are indexed by
+        // the same id, so resolving the key once serves both, and a type outside
+        // either census misses whole rather than half-answering.
+        let id = crate::entity_types::entity_type_id_parts(
+            entity_type.namespace(),
+            entity_type.path(),
+        )?;
+        Some(EntityFacts {
+            dimensions: crate::entity_dimensions::base_dimensions(id)?,
+            pushes_players: crate::entity_census::pushes_players(id)?,
+        })
     }
 
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {

@@ -175,6 +175,54 @@ fn set_time_golden() -> Vec<u8> {
     bytes
 }
 
+/// A `set_time` body with `game_time` and **no** clock updates — the shape
+/// `MinecraftServer::forceGameTimeSynchronization` broadcasts roughly once a
+/// second, forever, and therefore the shape that dominates a real session.
+fn set_time_sync_only(game_time: i64) -> Vec<u8> {
+    let mut bytes = game_time.to_be_bytes().to_vec();
+    bytes.push(0x00); // zero clock updates
+    bytes
+}
+
+/// A `set_time` body carrying one clock update, as `/time set` produces.
+fn set_time_with_clock(game_time: i64, holder_id: u8, total_ticks: u32, rate: f32) -> Vec<u8> {
+    let mut bytes = game_time.to_be_bytes().to_vec();
+    bytes.push(0x01); // clock count varint 1
+    bytes.push(holder_id);
+    // VarLong, unsigned LEB128 over the i64 bit pattern; `total_ticks` is small
+    // and positive so plain 7-bit groups suffice.
+    let mut v = u64::from(total_ticks);
+    loop {
+        let byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            bytes.push(byte);
+            break;
+        }
+        bytes.push(byte | 0x80);
+    }
+    bytes.extend_from_slice(&0.0_f32.to_be_bytes()); // partial_tick
+    bytes.extend_from_slice(&rate.to_be_bytes());
+    bytes
+}
+
+/// Drive `adapter` with one `set_time` payload and return the `time_of_day` it
+/// surfaced.
+fn time_of_day_after(adapter: &V770Adapter, payload: &[u8]) -> i64 {
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::SET_TIME,
+            payload,
+        )
+        .expect("handle set_time");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::TimeChanged { time_of_day, .. })] => *time_of_day,
+        other => panic!("expected one TimeChanged, got {other:?}"),
+    }
+}
+
 #[test]
 fn set_time_decodes_from_golden_bytes() {
     let body: SetTime = decode(&set_time_golden());
@@ -185,16 +233,129 @@ fn set_time_decodes_from_golden_bytes() {
     assert_eq!(clock.total_ticks, 6000);
     assert_eq!(clock.partial_tick, 0.0);
     assert_eq!(clock.rate, 1.0);
-    assert_eq!(body.day_time(), 6000);
+    assert_eq!(body.day_clock().map(|c| c.total_ticks), Some(6000));
 }
 
+/// The wire-level half of the fullbright defect: a `set_time` with an empty clock
+/// map names **no** day clock. It does *not* name the world age as the day time,
+/// which is what `day_time()` used to return and what pinned `sky_darken` to a
+/// session constant.
 #[test]
-fn set_time_day_time_falls_back_to_world_age_when_no_clocks() {
-    let mut bytes = 42_i64.to_be_bytes().to_vec();
-    bytes.push(0x00); // zero clock updates
-    let body: SetTime = decode(&bytes);
+fn an_empty_clock_map_names_no_day_clock() {
+    let body: SetTime = decode(&set_time_sync_only(42));
     assert!(body.clocks.is_empty());
-    assert_eq!(body.day_time(), 42);
+    assert!(
+        body.day_clock().is_none(),
+        "an empty clock map must name no clock; returning the world age here is the \
+         permanent-noon bug"
+    );
+}
+
+/// `clockUpdates` is a Java `HashMap`, so the join-time full sync's two entries
+/// (`minecraft:overworld` = 0, `minecraft:the_end` = 1) can arrive in either
+/// order. The day clock is selected by holder id, never by wire position.
+#[test]
+fn day_clock_selects_the_lowest_holder_id_not_the_wire_order() {
+    // Two updates, the End clock (id 1) first on the wire.
+    let mut bytes = 500_i64.to_be_bytes().to_vec();
+    bytes.push(0x02); // two clock updates
+    bytes.push(0x01); // holder_id 1 (the_end)
+    bytes.push(0x0A); // total_ticks 10
+    bytes.extend_from_slice(&0.0_f32.to_be_bytes());
+    bytes.extend_from_slice(&1.0_f32.to_be_bytes());
+    bytes.push(0x00); // holder_id 0 (overworld)
+    bytes.extend_from_slice(&[0xF0, 0x2E]); // total_ticks 6000
+    bytes.extend_from_slice(&0.0_f32.to_be_bytes());
+    bytes.extend_from_slice(&1.0_f32.to_be_bytes());
+
+    let body: SetTime = decode(&bytes);
+    assert_eq!(body.clocks.len(), 2);
+    assert_eq!(body.clocks[0].holder_id, 1, "the End clock is first on the wire");
+    let day = body.day_clock().expect("a day clock");
+    assert_eq!(
+        (day.holder_id, day.total_ticks),
+        (0, 6000),
+        "the overworld clock (id 0) is the day clock even when it arrives second"
+    );
+}
+
+/// **The regression gate for "the world is fullbright / the mobs look like
+/// daytime".** A held day clock must survive the once-a-second empty-map sync and
+/// advance at the server's rate — never be replaced by the world age.
+///
+/// The negative control is *run*, not described: the same packet sequence is
+/// scored a second time under the old rule (day time = world age when the map is
+/// empty), and this test asserts that rule produces a **different** answer. If
+/// the two ever agreed the gate would be measuring nothing, which is exactly how
+/// the defect survived — on a fresh world `age` and the day clock start out equal.
+#[test]
+fn an_empty_clock_map_does_not_overwrite_the_held_day_time() {
+    let adapter = V770Adapter::new();
+
+    // Join: the full sync anchors the overworld clock at 6000 (noon) while the
+    // world is already 500_000 ticks old — the divergence every long-lived world
+    // has and a fresh one does not.
+    let anchored = time_of_day_after(&adapter, &set_time_with_clock(500_000, 0, 6000, 1.0));
+    assert_eq!(anchored, 6000, "the full sync must be taken verbatim");
+
+    // Then twenty seconds of game-time-only syncs, 20 ticks apart.
+    let mut last = anchored;
+    for step in 1..=20_i64 {
+        let age = 500_000 + step * 20;
+        let got = time_of_day_after(&adapter, &set_time_sync_only(age));
+        assert_eq!(
+            got,
+            6000 + step * 20,
+            "the held clock must advance at rate 1.0 from its anchor, not jump to the world age"
+        );
+        assert!(got > last, "the day clock must keep moving across sync-only packets");
+        last = got;
+    }
+
+    // The control: what the retired rule would have reported for that last
+    // packet. It must differ, or this gate cannot tell the fix from the bug.
+    let old_rule_would_say = 500_000 + 20 * 20;
+    assert_ne!(
+        last, old_rule_would_say,
+        "NEGATIVE CONTROL DID NOT FIRE: the held clock and the world age agree ({last}), so this \
+         sequence cannot distinguish the fix from the permanent-noon bug. Widen the age/clock \
+         divergence in the fixture."
+    );
+}
+
+/// `/gamerule advanceTime false` and a paused clock both arrive as `rate = 0.0`
+/// (`ClockInstance::packNetworkState`), so a frozen sun must stay frozen even as
+/// the world age keeps climbing.
+#[test]
+fn a_paused_clock_does_not_advance_with_the_world_age() {
+    let adapter = V770Adapter::new();
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_with_clock(1_000, 0, 18_000, 0.0)),
+        18_000
+    );
+    for step in 1..=5_i64 {
+        assert_eq!(
+            time_of_day_after(&adapter, &set_time_sync_only(1_000 + step * 20)),
+            18_000,
+            "a rate-0 clock must not advance"
+        );
+    }
+}
+
+/// Before the join-time full sync there is no clock to hold, and this arm then
+/// reports the world age — exactly what it always did. Pinned so the seeding
+/// branch is a deliberate fallback rather than an accident, and so the window it
+/// covers stays visible.
+#[test]
+fn an_unsynced_clock_falls_back_to_the_world_age() {
+    let adapter = V770Adapter::new();
+    assert_eq!(time_of_day_after(&adapter, &set_time_sync_only(777)), 777);
+    // …and the first real update takes over permanently.
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_with_clock(800, 0, 13_000, 1.0)),
+        13_000
+    );
+    assert_eq!(time_of_day_after(&adapter, &set_time_sync_only(820)), 13_020);
 }
 
 #[test]
