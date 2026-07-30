@@ -674,6 +674,25 @@ fn render_anim(
         head_pitch_deg: render_pitch(from, to, clock),
         limb_swing: walk.walk.position_lerp(partial_tick),
         limb_swing_amount: walk.walk.speed_lerp(partial_tick),
+        // **Remote swings are not wired**, so every other player and mob mines,
+        // hits and places with a rigid arm. This zero is the island marker, and
+        // the only missing piece is on *this* side of the wire: v770 already
+        // decodes `ClientboundAnimatePacket` (`adapter.rs`'s
+        // `play::clientbound::ANIMATE` → `ClientEvent::EntityAnimation` with
+        // `AnimationAction::SwingMainHand`, covered by
+        // `v770/tests/entity_events.rs`) and **nothing consumes that event
+        // anywhere**. Downstream of this line is already done and tested:
+        // `Skeleton::pose`'s `attack_anim` is a faithful
+        // `HumanoidModel.setupAttackAnimation`, and it early-returns on `<= 0.0`,
+        // which is exactly why it is currently dead code for network entities.
+        //
+        // Closing it needs a swing timer component beside `WalkAnim`, advanced in
+        // `tick_walk_animation`'s `TickSet::Animate` slot (tick-driven — see this
+        // module's note on why the walk cycle is not per frame), started from an
+        // ingest system on `EntityAnimation` resolved through `EntityIndex`. The
+        // local player's own swing is *not* this path: it is not a tracked network
+        // entity, and it goes through `Sim::body_pose` instead. See
+        // `docs/arm-swing-animation.md`.
         attack_anim: 0.0,
         age_ticks: clock.age,
         // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.

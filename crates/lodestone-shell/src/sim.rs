@@ -12,10 +12,11 @@ use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
+use lodestone_ecs::entity::{EntityKind, Position};
 use lodestone_ecs::player::{
     ActionQueue, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin, MovementIntent,
-    PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot, Submersion,
-    reset_local_player, spawn_local_player,
+    NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot,
+    Submersion, reset_local_player, spawn_local_player,
 };
 use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionChat,
@@ -34,7 +35,9 @@ use lodestone_game::placement::{
 use lodestone_model::event::EquipmentSlot;
 use lodestone_model::{BlockFace, Vec3f};
 use lodestone_particle::emit as particle_emit;
-use lodestone_physics::{CollisionView, FluidState, PhysicsProfile, PlayerState, Vec3d};
+use lodestone_physics::{
+    CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,
+};
 use lodestone_render::{AnimInput, BlockAtlas, Camera};
 use lodestone_world::{ChunkPos, World};
 
@@ -538,12 +541,16 @@ pub struct Sim {
     ///
     /// [`RenderState::set_third_person_body_source`]: crate::gpu::RenderState::set_third_person_body_source
     third_person: bool,
-    /// The local player's own walk/head-look animation clock, driven once per
-    /// physics tick from its real position/orientation exactly the way
-    /// `entities.rs` drives an [`EntityPose`] for a tracked network entity
-    /// (see [`Self::step`]). Exists so a third-person body can visibly walk;
-    /// ticked unconditionally (cheap, and always correct if the mode flips
-    /// mid-flight) but only ever read by [`Self::third_person_body_state`].
+    /// The local player's own walk/head-look/**arm-swing** animation clock,
+    /// driven once per physics tick from its real position/orientation exactly the
+    /// way `entities.rs` drives an [`EntityPose`] for a tracked network entity
+    /// (see [`Self::step`]). Ticked unconditionally (cheap, and always correct if
+    /// the camera mode flips mid-flight).
+    ///
+    /// Read by **two** consumers, and it is the only thing they share:
+    /// [`Self::third_person_body_state`] for the self-avatar's whole pose, and
+    /// [`Self::hand_swing_progress`] for the first-person arm's swing. The swing
+    /// half is started by [`Self::swing_hand`].
     body_pose: EntityPose,
 }
 
@@ -1869,6 +1876,86 @@ impl Sim {
         PlayerCollision::View(self.chunk_collision())
     }
 
+    /// This tick's entity-push neighbourhood — an owned snapshot handed to the
+    /// ECS as [`NearbyEntities`] so [`lodestone_ecs::player::player_physics`]
+    /// can stay a plain scheduled system, exactly the pattern
+    /// [`Self::tick_collision`] already established for [`PlayerCollision`].
+    ///
+    /// # Which entities: a jar-dumped census, default-**deny**
+    ///
+    /// [`VersionData::entity_facts`] answers it, from
+    /// `lodestone_v770::entity_census` — a table generated from a headless 26.2
+    /// server dump of all 158 entity types (`EntityCensusOracle.java`). A
+    /// neighbour pushes the player only if vanilla's crowd pass reaches
+    /// `player.push(neighbour)`, which needs three things: the type is a
+    /// `LivingEntity` (the sole caller of `pushEntities()`, at
+    /// `LivingEntity.java:3163`), its `pushEntities()` can still see a player
+    /// (`Bat.java:95` empties it; `ArmorStand.java:178` narrows it to ridable
+    /// minecarts), and its `doPush(Entity)` still reaches `entity.push(this)`
+    /// for one (`Parrot.java:390` skips players outright).
+    ///
+    /// Note this is *not* the neighbour's `isPushable()`. That gates the
+    /// **pushee** — it is the `input` of `EntitySelector.pushableBy` — which is
+    /// why `lodestone_physics::push::pair_admitted` takes our own
+    /// `self_pushable` and never reads the neighbour's. Keying the census on
+    /// `isPushable()` would admit boats and minecarts, which both override it
+    /// to `true`.
+    ///
+    /// An unknown type — and a build with no version family compiled in —
+    /// reports `false`. That polarity is the whole point. The denylist this
+    /// replaced wrongly admitted seven real 26.2 types: `bamboo_raft` and
+    /// `bamboo_chest_raft` (its substring check looked for `boat`, and 1.21.2
+    /// named those *rafts*), `splash_potion` and `lingering_potion` (26.2 split
+    /// `potion` in two), `ominous_item_spawner`, and the living-but-inert `bat`
+    /// and `parrot`. Every one of them would have shoved the player.
+    ///
+    /// # What the census deliberately excludes
+    ///
+    /// Boats and rideable minecarts do push players in vanilla, but from their
+    /// own ticks — `AbstractBoat.push(Entity)` (`AbstractBoat.java:289`, with a
+    /// Y-ordering condition at `:181`) and
+    /// `NewMinecartBehavior.pushEntities(AABB)` (`:537`, gated on
+    /// `isRideable()` and querying a `1.0E-7`-inflated box). Those cannot join
+    /// this list without changing the gate, so the census reports them `false`
+    /// rather than approximating them into the wrong pass. See
+    /// [`lodestone_model::EntityFacts::pushes_players`].
+    fn tick_nearby_entities(&mut self) -> NearbyEntities {
+        let center = self.player().position;
+        let nearby = self.write(|w| {
+            let mut state = w.query::<(&Position, &EntityKind)>();
+            // Read once, before the loop. Building the `QueryState` ends the
+            // mutable borrow, so the resource handle and the iteration coexist
+            // as two immutable reborrows — which is what lets this stay a single
+            // `write` pass instead of a resource lookup per candidate.
+            let version = w.resource::<VersionData>();
+            state
+                .iter(w)
+                .filter_map(|(pos, kind)| {
+                    let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
+                    if (feet.x - center.x).abs() > NEARBY_ENTITY_RADIUS
+                        || (feet.y - center.y).abs() > NEARBY_ENTITY_RADIUS
+                        || (feet.z - center.z).abs() > NEARBY_ENTITY_RADIUS
+                    {
+                        return None;
+                    }
+                    // A type outside the census, or no adapter at all, is a
+                    // miss — never a permissive fallthrough.
+                    let facts = version.entity_facts(&kind.0)?;
+                    if !facts.pushes_players {
+                        return None;
+                    }
+                    // `step_height` plays no part in vanilla's `makeBoundingBox`;
+                    // the `RangedAttribute` default is passed so the field never
+                    // reads as a real step height resolved from an attribute map.
+                    let dims =
+                        EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
+                    Some(NearbyEntity::living(feet, dims.bounding_box(feet)))
+                })
+                .collect::<Vec<_>>()
+        });
+        NearbyEntities(nearby)
+    }
+
     /// A `'static` sampler of the **outline** boxes of the block at a world
     /// position, for `RenderState::set_outline_shape_source`.
     ///
@@ -1958,18 +2045,91 @@ impl Sim {
     /// The queue is drained (not read) even with no connection, so a
     /// disconnected session cannot accumulate a session's worth of stale
     /// actions to deliver on reconnect.
+    ///
+    /// # Also the animation half of every queued swing
+    ///
+    /// A [`ClientAction::SwingArm`] on this queue is the *same* event vanilla's
+    /// `LivingEntity.swing` handles: it both sends `ClientboundAnimatePacket` to
+    /// everyone else **and** starts the swinger's own animation clock. This is the
+    /// single funnel every tick-driven swing passes through — notably
+    /// `interact.rs`'s hold-to-mine loop via `lodestone_game::mining`, which is
+    /// what makes the arm swing while breaking a block — so hooking it here means
+    /// a new producer of swings animates for free rather than having to remember
+    /// to. [`Self::use_item_live`] is the one swing that does *not* come through
+    /// here (it writes to the socket directly, to control wire order) and calls
+    /// [`Self::swing_hand`] itself.
+    ///
+    /// Deliberately **outside** the `if let Some(net)` below: the animation is
+    /// client-side and must not depend on having a live socket, exactly as the
+    /// demo world's [`Self::break_block`] swings with no connection at all.
     fn drain_action_queue(&mut self) {
         // The guard is released before `net.send_action`, per `EcsHandle`'s rule 1:
         // `send_action` is a channel push today, but the whole `NetClient` surface
         // otherwise reads this same `World` through `ClientHandle`, and holding a
         // write guard into it would deadlock the moment one of those was reached.
         let actions = self.write(|w| std::mem::take(&mut w.resource_mut::<ActionQueue>().0));
+        // Only the *main* hand drives the first-person arm and the self-avatar's
+        // right arm. An off-hand swing animates the left arm, which neither
+        // consumer draws — treating it as a main-hand swing would swing the wrong
+        // limb, so it is ignored rather than approximated.
+        if actions
+            .iter()
+            .any(|a| matches!(a, ClientAction::SwingArm { hand: Hand::Main }))
+        {
+            self.swing_hand();
+        }
         if let Some(net) = &self.net {
             for action in actions {
                 // Best-effort — a closed session just drops it.
                 net.send_action(action);
             }
         }
+    }
+
+    /// Start the local player's arm-swing animation, like `LivingEntity.swing`.
+    ///
+    /// Idempotent within the first half of a running swing — [`EntityPose::start_swing`]
+    /// swallows a restart before its half-way point, which is what turns
+    /// `interact.rs`'s once-per-tick swing during a held mine into a continuous
+    /// arc instead of a stutter.
+    ///
+    /// # One-tick offset from vanilla, and why it is left alone
+    ///
+    /// Vanilla calls `swing()` from `Minecraft.handleKeybinds`, which runs
+    /// *before* `updateSwingTime` in the same tick, so `swingTime` reaches `0` on
+    /// the tick the click happened. Here [`Self::step`] ticks `body_pose` before
+    /// draining the action queue, so the clock starts on the **next** tick — a
+    /// 50 ms delay on the animation beginning, invisible at any frame rate, and
+    /// worth less than reordering a tick loop whose wire ordering is load-bearing.
+    ///
+    /// The duration is [`lodestone_entity::pose::swing_duration`] with **no**
+    /// effect inputs: neither Haste nor Mining Fatigue has a modelled source in
+    /// this engine (`lodestone_game::mining::BreakInputs` has the identical hole —
+    /// see `tool_inputs_stay_at_bare_hand_defaults`), so this is vanilla's
+    /// component default of 6 ticks. Closing that hole is a change of arguments
+    /// here, not a change of clock.
+    pub(crate) fn swing_hand(&mut self) {
+        self.body_pose.start_swing(lodestone_entity::pose::swing_duration(
+            lodestone_entity::pose::DEFAULT_SWING_DURATION,
+            None,
+            None,
+        ));
+    }
+
+    /// How far through an arm swing the local player is **this frame**, in
+    /// `0.0..=1.0` — vanilla's `Player.getAttackAnim(partialTick)`.
+    ///
+    /// This is the value `RenderState::set_hand_swing_source`'s closure returns and
+    /// the value `third_person_body_state` puts on [`AnimInput::attack_anim`]; both
+    /// consumers read this one accessor so they can never disagree about where in
+    /// the swing the player is.
+    ///
+    /// The swing clock advances in [`Self::step`]'s 20 Hz loop and is only
+    /// *interpolated* here, so calling this more often does not make the arm swing
+    /// faster. Reading it per frame is the correct and intended use.
+    #[must_use]
+    pub fn hand_swing_progress(&self) -> f32 {
+        self.body_pose.attack_anim_lerp(self.clock().interp_alpha)
     }
 
     /// Advance the simulation by real elapsed time, running fixed 20 Hz `GameTick`
@@ -2031,9 +2191,11 @@ impl Sim {
             }
             let collision = self.tick_collision();
             let item_collision = self.item_collision();
+            let nearby = self.tick_nearby_entities();
             self.write(|w| {
                 w.insert_resource(collision);
                 w.insert_resource(item_collision);
+                w.insert_resource(nearby);
                 w.run_schedule(GameTick);
             });
             // Drive the local player's own walk/head-look clock off the
@@ -2376,6 +2538,12 @@ impl Sim {
         // cell is air and that information is gone.
         let broken = self.block_at_world(hit.block);
         if self.set_block_world(hit.block, id::AIR) {
+            // The demo world has no `ActionQueue` swing to piggy-back on (see
+            // `drain_action_queue`), so the animation is started here. Without
+            // this the offline demo — including every headless scene — could not
+            // exercise the swing at all, which is the one world structurally
+            // guaranteed not to.
+            self.swing_hand();
             // Full-cube shape: vanilla derives the fragment grid from the
             // block's outline shape, which the shell does not carry, so debris
             // from a slab or fence fills the whole cell rather than hugging the
@@ -2481,6 +2649,12 @@ impl Sim {
             net.send_action(action);
             net.send_action(ClientAction::SwingArm { hand: Hand::Main });
         }
+        // This swing bypasses `ActionQueue` (the two sends above go straight to
+        // the socket so their wire order is fixed), so it also bypasses
+        // `drain_action_queue`'s hook and has to start the animation itself.
+        // Unconditional, not inside the `if let` above: the animation is
+        // client-side and does not need a socket.
+        self.swing_hand();
     }
 
     /// Place [`PLACE_BLOCK`] against the targeted face on the **demo world**, if
@@ -2501,6 +2675,8 @@ impl Sim {
         }
         if self.set_block_world(pos, PLACE_BLOCK) {
             self.remesh_around(pos);
+            // Demo-world placement, same reasoning as `break_block`.
+            self.swing_hand();
             true
         } else {
             false
@@ -3311,8 +3487,8 @@ impl Sim {
     /// [`RenderState::set_third_person_body_source`](crate::gpu::RenderState::set_third_person_body_source)'s
     /// closure every frame.
     ///
-    /// The walk cycle and idle age come from [`Self::body_pose`], ticked once
-    /// per physics tick the same way `entities.rs`'s `Track::render_anim`
+    /// The walk cycle, **arm swing** and idle age come from [`Self::body_pose`],
+    /// ticked once per physics tick the same way `entities.rs`'s `render_anim`
     /// drives one for a tracked network entity, and interpolated here for the
     /// current sub-tick alpha. Facing does **not** come from that pose,
     /// though: `body_yaw_deg`/`head_pitch_deg` are read straight off the
@@ -3330,11 +3506,11 @@ impl Sim {
     /// * **`slim`/skin data**: [`ThirdPersonBodyState::slim`]'s own doc
     ///   already records that no real skin-model bit exists yet; `false`
     ///   reproduces the first-person arm's existing default.
-    /// * **Equipment covers main hand and off hand only** (armour is not
-    ///   carried, matching every other entity's `EntityDraw::equipment`
-    ///   contract — see that field's own doc). Main hand is the selected
-    ///   hotbar slot; off hand is native inventory index `40`
-    ///   (`lodestone_game::menu`'s own table: `0..=8` hotbar, `40` off-hand).
+    /// * **Equipment covers main hand, off hand, and all four armour
+    ///   slots.** Main hand is the selected hotbar slot; off hand is native
+    ///   inventory index `40`; the armour slots are native indices
+    ///   `39/38/37/36` for head/chest/legs/feet (`lodestone_game::menu`'s own
+    ///   table, `Menu::player`).
     #[must_use]
     pub fn third_person_body_state(&self) -> Option<ThirdPersonBodyState> {
         if !self.third_person {
@@ -3365,6 +3541,24 @@ impl Sim {
         {
             equipment.push((EquipmentSlot::OffHand, loc));
         }
+        // Native player-inventory indices of the four armour slots
+        // (`lodestone_game::menu::Menu::player`'s own table: menu slots
+        // `5..=8` are head/chest/legs/feet at native indices `39/38/37/36` —
+        // the native indices run backwards, feet-first).
+        const ARMOUR_NATIVE_SLOTS: [(usize, EquipmentSlot); 4] = [
+            (39, EquipmentSlot::Head),
+            (38, EquipmentSlot::Chest),
+            (37, EquipmentSlot::Legs),
+            (36, EquipmentSlot::Feet),
+        ];
+        for (native, eq) in ARMOUR_NATIVE_SLOTS {
+            if let Some(loc) = menu
+                .player_native(native)
+                .and_then(|st| ResourceLocation::parse(&st.item().to_string()).ok())
+            {
+                equipment.push((eq, loc));
+            }
+        }
         Some(ThirdPersonBodyState {
             feet,
             body_yaw_deg: interp.yaw,
@@ -3373,7 +3567,19 @@ impl Sim {
                 head_pitch_deg: interp.pitch,
                 limb_swing: walk.limb_swing,
                 limb_swing_amount: walk.limb_swing_amount,
-                attack_anim: 0.0,
+                // The self-avatar's *body* half of the swing:
+                // `HumanoidModel.setupAttackAnimation`, via
+                // `lodestone_render::entity_anim::Skeleton::pose`. The same scalar
+                // the first-person arm pass polls through
+                // `Sim::hand_swing_progress`, but a completely different pose
+                // function — see `ThirdPersonBodyState`'s docs on why the two must
+                // never share one.
+                //
+                // `walk.attack_anim` rather than `self.hand_swing_progress()`: both
+                // are `body_pose.attack_anim_lerp(partial_tick)`, and this one is
+                // already in hand from the `render` call above at the *same*
+                // partial tick, so the arm and the body cannot drift by a frame.
+                attack_anim: walk.attack_anim,
                 age_ticks: walk.age,
                 aggressive: false,
             },
@@ -3394,6 +3600,32 @@ struct NoCollision;
 impl CollisionView for NoCollision {
     fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
 }
+
+/// Radius, in blocks, within which [`Sim::tick_nearby_entities`] hands a
+/// tracked entity to the crowd push as a candidate.
+///
+/// Vanilla queries `getPushableEntities(this, this.getBoundingBox())` — the
+/// *un-inflated* player box — but `docs/entity-push.md`'s own wiring note is
+/// explicit that "a generous neighbourhood is fine: candidates that fail a
+/// gate contribute nothing". This is a coarse pre-filter, not the gate: the
+/// real predicate is `lodestone_physics::push::pair_admitted` downstream, so a
+/// too-large radius costs only a few wasted overlap tests while a too-small one
+/// **silently drops real candidates** and no test can see it.
+///
+/// It was `4.0`, chosen for "a happy-ghast-sized neighbour" back when every
+/// candidate was handed the player's own `0.6 × 1.8` box. Now that the census
+/// supplies real dimensions that value is provably too small, and the bound
+/// follows from the census maxima rather than from a guess:
+///
+/// - widest pusher is `ender_dragon` at `16.0`, and two boxes touch when their
+///   centres are within `(0.6 + 16.0) / 2 = 8.3` — so x/z needs `>= 8.3`;
+/// - tallest is `giant` at `12.0`, and this compares *feet* to *feet*, so a
+///   giant whose feet are `12.0` below ours still overlaps — y needs `>= 12.0`.
+///
+/// `16.0` is the largest extent in the census and covers both with margin.
+/// Deriving it programmatically from the census maxima, rather than restating
+/// them here, is the remaining nit — see `docs/entity-push.md`.
+const NEARBY_ENTITY_RADIUS: f64 = 16.0;
 
 #[cfg(test)]
 mod tests {
@@ -5794,6 +6026,183 @@ mod tests {
         assert!(sim.break_block(), "should break the solid block");
         assert!(sim.target().is_none(), "target cleared after break");
         assert!(sim.pending_meshes() > 0, "a remesh was scheduled");
+    }
+
+    // -----------------------------------------------------------------------
+    // Arm swing: the producer -> consumer wiring
+    // -----------------------------------------------------------------------
+    //
+    // `lodestone_entity::pose` proves the swing clock ticks and
+    // `lodestone_render::entity` proves the arm matrix moves. Neither can prove
+    // that anything in this shell ever *starts* a swing — the failure this repo
+    // has hit nine times. These gates assert the seam: a swing produced the way
+    // the real producers produce one reaches `hand_swing_progress` (which
+    // `app.rs` hands `RenderState::set_hand_swing_source`) and
+    // `third_person_body_state` (which feeds the self-avatar's
+    // `setupAttackAnimation`).
+
+    /// Aim straight down at the block under the player's feet, like
+    /// `breaking_the_target_clears_it_and_schedules_a_remesh`.
+    fn aim_at_the_floor(sim: &mut Sim) {
+        let feet = sim.player().position;
+        sim.set_target(Some(crate::raycast::RayHit {
+            block: [
+                feet.x.floor() as i32,
+                feet.y.floor() as i32 - 1,
+                feet.z.floor() as i32,
+            ],
+            normal: [0, 1, 0],
+        }));
+    }
+
+    /// Run whole ticks and report the largest swing progress seen.
+    fn peak_swing_over(sim: &mut Sim, ticks: u32) -> f32 {
+        let mut peak = 0.0f32;
+        for _ in 0..ticks {
+            sim.step(1.0 / 20.0);
+            peak = peak.max(sim.hand_swing_progress());
+        }
+        peak
+    }
+
+    #[test]
+    fn a_queued_main_hand_swing_reaches_the_arm_pose() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+
+        // The negative control first, and it is the one that matters: with no
+        // swing produced, the arm must sit at exact rest for the whole window.
+        // Without this, "progress > 0" is also satisfied by a clock that free-runs
+        // off frame time — which is the specific bug `entities.rs` documents
+        // finding in the limb-swing code.
+        let idle_peak = peak_swing_over(&mut sim, 20);
+        assert_eq!(
+            idle_peak, 0.0,
+            "an idle player's arm must be at rest, but progress peaked at {idle_peak}"
+        );
+
+        // Now produce a swing exactly the way `lodestone_game::mining` does — it
+        // pushes `SwingArm { Main }` onto `ActionQueue`, and `drive_mining`
+        // forwards that queue verbatim. `mining.rs`'s own tests already pin that
+        // it emits one; this pins that the shell animates it.
+        sim.write(|w| {
+            w.resource_mut::<ActionQueue>()
+                .0
+                .push(ClientAction::SwingArm { hand: Hand::Main });
+        });
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "a queued main-hand swing must drive the arm pose, but progress \
+             peaked at only {peak} — `drain_action_queue` is not calling `swing_hand`, \
+             or `hand_swing_progress` is not reading the clock it sets"
+        );
+
+        // And it ends: the swing is 6 ticks, so well after that the arm is rested
+        // again. A swing that never finishes reads as a permanently cocked arm.
+        let after = peak_swing_over(&mut sim, 30);
+        assert_eq!(
+            after, 0.0,
+            "the swing must return to rest, but progress still peaked at {after}"
+        );
+    }
+
+    /// An **off-hand** swing must not drive the arm. `drain_action_queue` matches
+    /// on `Hand::Main` specifically; without this control that match is untested
+    /// and a `SwingArm { .. }` wildcard would swing the right arm for a left-hand
+    /// action.
+    #[test]
+    fn an_off_hand_swing_does_not_drive_the_main_arm() {
+        let mut sim = Sim::new(test_config());
+        sim.write(|w| {
+            w.resource_mut::<ActionQueue>()
+                .0
+                .push(ClientAction::SwingArm { hand: Hand::Off });
+        });
+        let peak = peak_swing_over(&mut sim, 10);
+        assert_eq!(
+            peak, 0.0,
+            "an off-hand swing must leave the main arm at rest, got {peak}"
+        );
+    }
+
+    /// The demo world has no action queue to piggy-back on, so `break_block` and
+    /// `place_block` start the swing themselves. This is the only world a headless
+    /// scene can exercise, so if it did not swing, no offline gate ever could.
+    #[test]
+    fn a_demo_world_break_swings_the_arm() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        aim_at_the_floor(&mut sim);
+        // Load-bearing: if the break did not happen this test would pass
+        // vacuously by asserting nothing about a swing that was never produced.
+        assert!(sim.break_block(), "the demo block should have broken");
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "a demo-world break must swing the arm, progress peaked at {peak}"
+        );
+    }
+
+    /// The swing is a **tick** state machine. Reading it across many sub-tick
+    /// frames must not advance it — the defect
+    /// `limb_swing_tracks_per_tick_travel_not_the_interpolation_gap` records for
+    /// the walk cycle, where a per-frame drive made the animation up to 3x too
+    /// fast and frame-rate dependent.
+    #[test]
+    fn swing_progress_is_tick_driven_not_frame_driven() {
+        let mut sim = Sim::new(test_config());
+        sim.swing_hand();
+        sim.step(1.0 / 20.0); // one whole tick: the clock starts
+        sim.step(1.0 / 20.0); // and advances once
+        let after_two_ticks = sim.hand_swing_progress();
+
+        // 200 sub-tick frames at 1 ms. `FrameClock` accumulates them, so a few
+        // whole ticks *will* elapse across 200 ms — the claim is not "nothing
+        // changes", it is that the change tracks elapsed *ticks*, so 200 tiny
+        // frames advance the swing no further than the 4 ticks their total
+        // duration contains.
+        for _ in 0..200 {
+            sim.step(0.001);
+        }
+        let after_frames = sim.hand_swing_progress();
+        let ticks_elapsed = 4; // 200 ms / 50 ms
+        let ceiling = after_two_ticks + (ticks_elapsed + 1) as f32 / 6.0;
+        assert!(
+            after_frames <= ceiling,
+            "200 sub-tick frames advanced the swing to {after_frames}, past the {ceiling} \
+             that {ticks_elapsed} ticks of elapsed time allows — the clock is being \
+             driven per frame"
+        );
+    }
+
+    /// Both consumers read the same clock, so the first-person arm and the
+    /// self-avatar's body can never disagree about where in the swing we are.
+    #[test]
+    fn the_third_person_body_swings_off_the_same_clock_as_the_arm() {
+        let mut sim = Sim::new(test_config());
+        sim.toggle_third_person();
+        sim.swing_hand();
+        // Step to a tick where the swing is genuinely mid-arc, so `assert_eq` is
+        // comparing something other than two zeroes.
+        let mut arm = 0.0;
+        for _ in 0..4 {
+            sim.step(1.0 / 20.0);
+            arm = sim.hand_swing_progress();
+            if arm > 0.1 {
+                break;
+            }
+        }
+        assert!(arm > 0.1, "the swing should be mid-arc, got {arm}");
+        let body = sim
+            .third_person_body_state()
+            .expect("third person is on")
+            .anim
+            .attack_anim;
+        assert!(
+            (body - arm).abs() < 1e-6,
+            "the self-avatar's attack_anim ({body}) must match the arm's ({arm})"
+        );
     }
 
     #[test]

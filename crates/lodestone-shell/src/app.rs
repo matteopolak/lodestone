@@ -26,6 +26,7 @@ use crate::container::{
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
 use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
+use crate::keybinds::{InputAction, Keybinds};
 use crate::menu::nav::{MenuAction, MenuKey, MenuNav};
 use crate::menu::render::MenuRenderer;
 use crate::menu::status::StatusCache;
@@ -64,23 +65,15 @@ fn sky_fog(render_distance: u32) -> FogSettings {
     crate::sim::fog_for_render_distance(render_distance)
 }
 
-/// Map a physical key to a movement [`Action`].
-fn action_for(code: KeyCode) -> Option<Action> {
-    Some(match code {
-        KeyCode::KeyW => Action::Forward,
-        KeyCode::KeyS => Action::Back,
-        KeyCode::KeyA => Action::Left,
-        KeyCode::KeyD => Action::Right,
-        KeyCode::Space => Action::Jump,
-        KeyCode::ShiftLeft | KeyCode::ShiftRight => Action::Sneak,
-        KeyCode::ControlLeft | KeyCode::ControlRight => Action::Sprint,
-        _ => return None,
-    })
-}
-
 /// Maps a winit mouse button to the container-click gesture it drives.
 /// `None` for anything but left/right/middle (e.g. the back/forward mouse
 /// buttons some mice send), which the container screen has no use for.
+///
+/// **Deliberately not routed through [`crate::keybinds`]**, and vanilla agrees:
+/// `AbstractContainerScreen` tests raw button indices 0/1/2 rather than
+/// consulting a `KeyMapping`. Slot-click gestures are container-UI chrome, not
+/// gameplay bindings — the same boundary that keeps the arrow keys out of the
+/// keybind table (see that module's docs).
 fn menu_button_for(button: MouseButton) -> Option<MenuButton> {
     Some(match button {
         MouseButton::Left => MenuButton::Left,
@@ -90,21 +83,199 @@ fn menu_button_for(button: MouseButton) -> Option<MenuButton> {
     })
 }
 
-/// Maps the number-row keys `1`..`9` to a hotbar slot index `0..8`. Returns
-/// `None` for any other key.
-fn hotbar_slot_for(code: KeyCode) -> Option<usize> {
-    Some(match code {
-        KeyCode::Digit1 => 0,
-        KeyCode::Digit2 => 1,
-        KeyCode::Digit3 => 2,
-        KeyCode::Digit4 => 3,
-        KeyCode::Digit5 => 4,
-        KeyCode::Digit6 => 5,
-        KeyCode::Digit7 => 6,
-        KeyCode::Digit8 => 7,
-        KeyCode::Digit9 => 8,
-        _ => return None,
-    })
+/// The movement [`Action`], if any, that `code` drives under `binds`.
+///
+/// Replaces the old hardcoded `action_for`. Two behavioural notes:
+///
+/// * The old table bound Sneak to **either** shift and Sprint to **either**
+///   control. A [`Binding`] names one physical key, matching vanilla (whose
+///   defaults are `LEFT_SHIFT` / `LEFT_CONTROL` specifically), so the
+///   right-hand modifiers no longer walk. This is the one intentional
+///   behaviour change in the refactor; the right-hand keys are now rebindable
+///   to whatever the player wants instead of being a silent alias.
+/// * The scan is over [`InputAction::ALL`] in declaration order, so the
+///   movement actions are checked before anything else and a key bound to two
+///   movement actions resolves to the earlier one — deterministic rather than
+///   map-iteration-order dependent.
+fn movement_action_for(binds: &Keybinds, code: KeyCode) -> Option<Action> {
+    InputAction::ALL
+        .into_iter()
+        .filter(|a| binds.is(*a, code))
+        .find_map(InputAction::movement)
+}
+
+/// The hotbar slot index `0..=8` that `code` selects under `binds`, or `None`.
+///
+/// Replaces the old hardcoded number-row table. The `Hotbar1 → 0` off-by-one
+/// lives in [`InputAction::hotbar_slot`], not here, so there is one place to get
+/// it wrong.
+fn hotbar_slot_for(binds: &Keybinds, code: KeyCode) -> Option<usize> {
+    InputAction::ALL
+        .into_iter()
+        .filter(|a| binds.is(*a, code))
+        .find_map(InputAction::hotbar_slot)
+}
+
+/// The gameplay action, if any, that this **mouse button** invokes under
+/// `binds` — the mouse-side twin of [`movement_action_for`].
+///
+/// Only attack and use are mouse-bindable in practice, but this scans the whole
+/// table so a player who binds, say, jump to the middle button gets what they
+/// asked for rather than nothing.
+fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction> {
+    InputAction::ALL
+        .into_iter()
+        .find(|a| binds.is_mouse(*a, button))
+}
+
+/// Which input surface owns the keyboard this instant.
+///
+/// The four flags [`resolve_key`] needs, read off [`crate::menu::UiState`] at
+/// the call site. Split out as plain data so the precedence below is testable
+/// without a window, a GPU or a `Sim`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct KeyGate {
+    /// A menu screen owns the frame (`menu::render::owns_frame`), or the pause
+    /// overlay is up. Either way the whole keyboard belongs to the menu.
+    pub menu: bool,
+    /// The chat prompt is open.
+    pub chat_open: bool,
+    /// A container/inventory screen is open over the world.
+    pub container_open: bool,
+    /// `UiState::accepts_gameplay_input()` — i.e. `screen == Playing`.
+    pub gameplay: bool,
+}
+
+/// The single thing a key event means, once precedence has been applied.
+///
+/// One variant per side effect the driver can perform, so the effects `match` in
+/// `window_event` is exhaustive: a new variant must fail to compile there rather
+/// than silently do nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOutcome {
+    /// Hand the event to the menu navigator (needs the full `KeyEvent`, so the
+    /// driver does the work — this only says *who* gets it).
+    Menu,
+    /// Hand the event to the chat prompt's editor.
+    Chat,
+    Pause,
+    CloseContainer,
+    ToggleDebugOverlay,
+    /// Hold-to-show the player list; carries the new held state.
+    PlayerList(bool),
+    /// Open the chat prompt. `command` pre-fills the `/` prefix.
+    OpenChat { command: bool },
+    OpenContainer,
+    ToggleFly,
+    TogglePerspective,
+    /// Select hotbar slot `0..=8`.
+    SelectSlot(usize),
+    /// Begin (`true`) or end (`false`) a dig.
+    Attack(bool),
+    Use,
+    /// Set a movement action's held state on the controller.
+    Movement(Action, bool),
+}
+
+/// Resolve one key event to at most one [`KeyOutcome`].
+///
+/// # The order of this chain is behaviour, not layout
+///
+/// Every arm is `else if`, so the **first** match wins and every later arm is
+/// skipped. Three arms exist wholly or partly to *swallow* keys, and reordering
+/// them breaks things that no type error would catch:
+///
+/// 1. **`gate.menu` is first.** A menu screen captures the entire keyboard — the
+///    server-address edit form needs every printable key, and no gameplay
+///    binding may fire behind it. `Screen::Paused` is folded in here even though
+///    it is not an `owns_frame` screen, because it has its own keyboard
+///    navigation that needs identical routing.
+/// 2. **`gate.chat_open` is second.** Same reason: while the prompt is up, `W`
+///    types a `w`, it does not walk.
+/// 3. **`gate.container_open` is checked before every gameplay binding.** While
+///    a container is open the key press is consumed whether or not it is bound
+///    to anything — which is why this arm returns `None` for an unrecognised key
+///    rather than falling through. The debug overlay, player list, chat, hotbar
+///    and movement arms below therefore cannot fire behind an open inventory.
+///
+/// The `Pause` arm sits *above* the container arm, so Escape closes a container
+/// through `on_escape` rather than through `CloseContainer`. That ordering is
+/// why the container arm handles only the inventory binding: its Escape case in
+/// the original chain was unreachable, and spelling out dead code invites
+/// someone to "fix" it by moving it up.
+///
+/// Everything from the debug overlay down is additionally gated on
+/// `gate.gameplay`, so those arms are inert behind any screen regardless of
+/// order — but the order is still what stops the *swallowing* arms above from
+/// being bypassed.
+///
+/// `code` is `None` for a physical key winit could not name (`PhysicalKey::
+/// Unidentified`). Note such an event still reaches the menu and chat arms —
+/// they route the whole `KeyEvent`, whose `text` may well be meaningful — and
+/// only the keybind chain needs a `KeyCode` to match against.
+pub(crate) fn resolve_key(
+    binds: &Keybinds,
+    gate: KeyGate,
+    code: Option<KeyCode>,
+    pressed: bool,
+) -> Option<KeyOutcome> {
+    if gate.menu {
+        return Some(KeyOutcome::Menu);
+    }
+    if gate.chat_open {
+        return Some(KeyOutcome::Chat);
+    }
+    let code = code?;
+    if binds.is(InputAction::Pause, code) && pressed {
+        Some(KeyOutcome::Pause)
+    } else if gate.container_open && pressed {
+        // The inventory binding doubles as "close the inventory". Anything else
+        // is swallowed — hence `None`, not a fall-through.
+        binds
+            .is(InputAction::Inventory, code)
+            .then_some(KeyOutcome::CloseContainer)
+    } else if binds.is(InputAction::DebugOverlay, code) && pressed {
+        Some(KeyOutcome::ToggleDebugOverlay)
+    } else if binds.is(InputAction::PlayerList, code) && gate.gameplay {
+        // Deliberately *not* gated on `pressed`: this tracks a held state, so it
+        // needs both edges. Gating it would leave the overlay stuck on.
+        Some(KeyOutcome::PlayerList(pressed))
+    } else if (binds.is(InputAction::Chat, code) || binds.is(InputAction::Command, code))
+        && pressed
+        && gate.gameplay
+    {
+        // The command binding pre-fills `/`. Asked directly rather than inferred
+        // from the `||` above, so binding both actions to one key yields the
+        // command prefix instead of depending on which side matched first.
+        Some(KeyOutcome::OpenChat {
+            command: binds.is(InputAction::Command, code),
+        })
+    } else if binds.is(InputAction::Inventory, code) && pressed && gate.gameplay {
+        Some(KeyOutcome::OpenContainer)
+    } else if binds.is(InputAction::ToggleFly, code) && pressed && gate.gameplay {
+        Some(KeyOutcome::ToggleFly)
+    } else if binds.is(InputAction::TogglePerspective, code) && pressed && gate.gameplay {
+        Some(KeyOutcome::TogglePerspective)
+    } else if let Some(slot) = hotbar_slot_for(binds, code)
+        && pressed
+        && gate.gameplay
+    {
+        Some(KeyOutcome::SelectSlot(slot))
+    } else if binds.is(InputAction::Attack, code) && gate.gameplay {
+        // Only reachable once `key.attack` has been rebound off its default
+        // mouse button; the mouse path is what fires out of the box. Both edges
+        // matter — mining is hold-to-dig.
+        Some(KeyOutcome::Attack(pressed))
+    } else if binds.is(InputAction::Use, code) && pressed && gate.gameplay {
+        // As above: dormant under the default mouse binding.
+        Some(KeyOutcome::Use)
+    } else if let Some(action) = movement_action_for(binds, code)
+        && gate.gameplay
+    {
+        Some(KeyOutcome::Movement(action, pressed))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,10 +577,36 @@ struct WindowApp {
     /// mixing in logical coordinates puts the hit rects at half scale on a
     /// Retina display.
     cursor: (f32, f32),
-    /// F3 debug overlay visibility (starts on — it's the instrument, §S4).
+    /// F3 debug overlay visibility. **Starts off, as vanilla does** — press F3
+    /// to bring it up.
+    ///
+    /// It used to start on, because §S4 treats it as the instrument rather than
+    /// a feature. That reasoning still holds for the *content*, but it does not
+    /// require the thing to be on screen by default, and a permanently-visible
+    /// overlay is simply not what the game looks like. The stdout status line
+    /// (`pos=… fps=… chunks=…`) is unaffected and remains the instrument that
+    /// does not depend on anyone having pressed a key.
     show_debug: bool,
-    /// Whether Tab is currently held (shows the player-list overlay).
+    /// Whether the player-list binding is currently held (shows the overlay).
     tab_held: bool,
+    /// The rebindable action → input table (`docs/keybindings.md`), loaded from
+    /// the persisted [`crate::config::Options`] at construction.
+    ///
+    /// Held here rather than reached for through [`MenuNav`] because this is the
+    /// *consumer*: every input event reads it, and `Keybinds` is `Copy` so the
+    /// read is a field access rather than a borrow that would fight the
+    /// `&mut self` effect calls in `window_event`.
+    ///
+    /// **A Controls menu will need a writer**, and this field is the reason that
+    /// is a small addition rather than a rewrite: `MenuNav` already owns the
+    /// loaded `Options` and the path to persist them to, so the menu's rebind
+    /// call belongs there (a `nav.rebind(action, binding)` that sets the field
+    /// and calls the existing `persist_options`), and this field then becomes
+    /// `*self.nav.keybinds()`, re-read once per frame or on change. Deliberately
+    /// not done yet: `nav.rs` is a shared file and an accessor with no caller is
+    /// the island pattern `CLAUDE.md` §1 warns about. See `docs/keybindings.md`
+    /// for the exact patch.
+    keybinds: Keybinds,
     /// Editable buffer for the chat prompt; only consumed while chat is open.
     chat_input: ChatInput,
     /// Press/drag/release state machine for the open container screen; see
@@ -476,8 +673,12 @@ impl WindowApp {
             menu: None,
             favicons: crate::menu::render::FaviconCache::new(),
             cursor: (0.0, 0.0),
-            show_debug: true,
+            show_debug: false,
             tab_held: false,
+            // Read from `options.json` via the same loader the menu uses.
+            // Missing, partial or corrupt is vanilla's defaults, never an error
+            // — see `Keybinds::from_json_value`.
+            keybinds: crate::config::Options::load().keybinds,
             chat_input: ChatInput::new(),
             menu_input: MenuInput::new(),
             shift_held: false,
@@ -969,6 +1170,19 @@ impl WindowApp {
         let render_camera = self.sim.render_camera(aspect);
         let body_state = self.sim.third_person_body_state();
         render.set_third_person_body_source(move || body_state.clone());
+        // This frame's arm-swing progress, for the first-person arm pass. Sampled
+        // here and moved into the closure rather than captured by reference, for
+        // the same reason as `body_state` above: the source outlives this call and
+        // must not borrow `Sim`.
+        //
+        // **Installed every frame, and it has to be** — the value is a partial-tick
+        // interpolation, so a one-shot install at connect time would freeze the arm
+        // at whatever the swing looked like the instant we joined. `body_state`
+        // right above it has the identical requirement, which is why the two sit
+        // together. Only the *reading* is per frame; the swing clock itself
+        // advances on the 20 Hz tick inside `Sim::step`.
+        let hand_swing = self.sim.hand_swing_progress();
+        render.set_hand_swing_source(move || hand_swing);
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the
@@ -1512,17 +1726,28 @@ impl ApplicationHandler for WindowApp {
                 // every click while paused (hover + activate the highlighted
                 // pause-menu row, including Back to Game via `MenuKey::Enter`).
                 if self.grabbed {
-                    // Left mines (hold-to-mine on live; one-shot break on demo),
-                    // right uses/places against the targeted face.
-                    match (button, state) {
-                        (MouseButton::Left, ElementState::Pressed) => {
+                    // `key.attack` mines (hold-to-mine on live; one-shot break on
+                    // demo) and `key.use` uses/places against the targeted face.
+                    // Both default to a mouse button — left and right
+                    // respectively — which is exactly why `Binding` has to be
+                    // able to hold a mouse button and not just a key.
+                    match (mouse_action_for(&self.keybinds, button), state) {
+                        (Some(InputAction::Attack), ElementState::Pressed) => {
                             self.sim.begin_attack();
                         }
-                        (MouseButton::Left, ElementState::Released) => {
+                        (Some(InputAction::Attack), ElementState::Released) => {
                             self.sim.end_attack();
                         }
-                        (MouseButton::Right, ElementState::Pressed) => {
+                        (Some(InputAction::Use), ElementState::Pressed) => {
                             self.sim.use_item();
+                        }
+                        // A movement action bound to a mouse button still drives
+                        // the controller, on both edges.
+                        (Some(action), _) => {
+                            if let Some(movement) = action.movement() {
+                                let held = state == ElementState::Pressed;
+                                self.sim.input_mut(|i| i.set(movement, held));
+                            }
                         }
                         _ => {}
                     }
@@ -1545,25 +1770,45 @@ impl ApplicationHandler for WindowApp {
                 let pressed = event.state == ElementState::Pressed;
 
                 // Tracked unconditionally (not gated on `accepts_gameplay_input`
-                // like `action_for`'s Sneak binding below): a container
-                // shift-click is a `QuickMove`, not movement, and must still
-                // work while gameplay input is not being accepted.
+                // like the movement bindings below): a container shift-click is a
+                // `QuickMove`, not movement, and must still work while gameplay
+                // input is not being accepted.
+                //
+                // **Deliberately still a literal key, and vanilla agrees**: it
+                // checks `Screen.hasShiftDown()` — the raw modifier state — not
+                // `options.keyShift`, so rebinding sneak does *not* move
+                // shift-click. Same boundary as `menu_button_for`: container
+                // gestures are UI chrome, not gameplay bindings. Both shifts
+                // count, because this is asking "is a shift modifier down".
                 if let PhysicalKey::Code(code) = event.physical_key
                     && matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
                 {
                     self.shift_held = pressed;
                 }
 
-                // A menu screen captures every key: the edit form needs the
-                // whole keyboard, and no gameplay binding may fire behind it.
-                // `Screen::Paused` shares this arm too — it is not `owns_frame`
-                // (see that function's doc), but it has its own keyboard
-                // navigation (`MenuNav::key_paused`) that needs exactly the same
-                // routing, including the grab re-sync just below for Back to
-                // Game.
-                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() {
-                    if pressed {
-                        if let Some(key) = Self::menu_key_for(&event) {
+                // Resolve *what this key means* before touching any state, then
+                // perform the one side effect it names. The precedence lives in
+                // [`resolve_key`] — a pure function, so the swallowing order can
+                // be unit-tested without a window (see its docs and the tests at
+                // the bottom of this file). This match is only the effects half.
+                let gate = KeyGate {
+                    menu: crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused(),
+                    chat_open: self.ui.is_chat_open(),
+                    container_open: self.ui.is_container_open(),
+                    gameplay: self.ui.accepts_gameplay_input(),
+                };
+                let code = match event.physical_key {
+                    PhysicalKey::Code(code) => Some(code),
+                    _ => None,
+                };
+                // Resolved into a local first so the immutable borrow of
+                // `self.keybinds` ends before the `&mut self` calls below.
+                let outcome = resolve_key(&self.keybinds, gate, code, pressed);
+                match outcome {
+                    Some(KeyOutcome::Menu) => {
+                        if pressed
+                            && let Some(key) = Self::menu_key_for(&event)
+                        {
                             self.handle_menu_key(key);
                             // Entering the world grabs; leaving it releases.
                             let want = self.ui.wants_cursor_grab();
@@ -1572,68 +1817,61 @@ impl ApplicationHandler for WindowApp {
                             }
                         }
                     }
-                } else if self.ui.is_chat_open() {
-                    if pressed {
-                        self.handle_chat_key(&event);
+                    Some(KeyOutcome::Chat) => {
+                        if pressed {
+                            self.handle_chat_key(&event);
+                        }
                     }
-                } else if let PhysicalKey::Code(code) = event.physical_key {
-                    if code == KeyCode::Escape && pressed {
+                    Some(KeyOutcome::Pause) => {
                         // Context-sensitive: Playing↔Paused, Error→menu, etc.
                         if self.ui.is_container_open() {
                             self.sim.close_open_menu();
                         }
                         self.ui.on_escape();
                         self.set_grab(self.ui.wants_cursor_grab());
-                    } else if self.ui.is_container_open() && pressed {
-                        match code {
-                            KeyCode::Escape | KeyCode::KeyE => {
-                                self.sim.close_open_menu();
-                                self.ui.close_container();
-                                self.set_grab(self.ui.wants_cursor_grab());
-                            }
-                            _ => {}
-                        }
-                    } else if code == KeyCode::F3 && pressed {
-                        // Toggle the debug instrument (§S4).
+                    }
+                    Some(KeyOutcome::CloseContainer) => {
+                        self.sim.close_open_menu();
+                        self.ui.close_container();
+                        self.set_grab(self.ui.wants_cursor_grab());
+                    }
+                    Some(KeyOutcome::ToggleDebugOverlay) => {
+                        // Toggle the debug instrument (§S4). Unlike older
+                        // vanilla, 26.2 makes this a real `KeyMapping`, so it
+                        // belongs in the table — see `keybinds`' module docs.
                         self.show_debug = !self.show_debug;
-                    } else if code == KeyCode::Tab && self.ui.accepts_gameplay_input() {
-                        // Hold-to-show player list; released on key-up.
-                        self.tab_held = pressed;
-                    } else if (code == KeyCode::KeyT || code == KeyCode::Slash)
-                        && pressed
-                        && self.ui.accepts_gameplay_input()
-                    {
-                        // Open the chat prompt; `/` pre-fills the command prefix.
+                    }
+                    Some(KeyOutcome::PlayerList(held)) => self.tab_held = held,
+                    Some(KeyOutcome::OpenChat { command }) => {
                         // Release held movement so we don't walk while typing.
                         self.sim.input_mut(InputState::release_all);
                         let _ = self.chat_input.take();
-                        if code == KeyCode::Slash {
+                        if command {
                             self.chat_input.push_char('/');
                         }
                         self.ui.open_chat();
                         self.tab_held = false;
                         self.set_grab(false);
-                    } else if code == KeyCode::KeyE && pressed && self.ui.accepts_gameplay_input() {
+                    }
+                    Some(KeyOutcome::OpenContainer) => {
                         self.sim.input_mut(InputState::release_all);
                         self.ui.open_container();
                         self.tab_held = false;
                         self.set_grab(false);
-                    } else if code == KeyCode::KeyF && pressed && self.ui.accepts_gameplay_input() {
-                        self.sim.toggle_fly();
-                    } else if code == KeyCode::F5 && pressed && self.ui.accepts_gameplay_input() {
-                        // Vanilla's own third-/first-person toggle.
-                        self.sim.toggle_third_person();
-                    } else if let Some(slot) = hotbar_slot_for(code)
-                        && pressed
-                        && self.ui.accepts_gameplay_input()
-                    {
-                        // Number keys 1..9 select the hotbar slot directly.
-                        self.sim.select_slot(slot);
-                    } else if let Some(action) = action_for(code)
-                        && self.ui.accepts_gameplay_input()
-                    {
-                        self.sim.input_mut(|i| i.set(action, pressed));
                     }
+                    Some(KeyOutcome::ToggleFly) => self.sim.toggle_fly(),
+                    // Vanilla's own third-/first-person toggle.
+                    Some(KeyOutcome::TogglePerspective) => self.sim.toggle_third_person(),
+                    Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
+                    Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
+                    Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
+                    Some(KeyOutcome::Use) => self.sim.use_item(),
+                    Some(KeyOutcome::Movement(action, held)) => {
+                        self.sim.input_mut(|i| i.set(action, held));
+                    }
+                    // Either nothing is bound to this key, or a screen above
+                    // swallowed it. Both are "do nothing", deliberately.
+                    None => {}
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -2127,6 +2365,432 @@ mod tests {
             other => panic!("unfocused must sleep, not spin or wait forever: {other:?}"),
         }
         assert!(!pacer.focused());
+    }
+
+    // -- key dispatch and precedence ----------------------------------------
+    //
+    // These drive [`resolve_key`] directly. It is the whole of the key chain's
+    // decision-making, so a precedence regression shows up here rather than
+    // needing a window, a GPU and a live `Sim` to observe.
+
+    use crate::keybinds::{Binding, InputAction};
+
+    /// The gate while the world is being played normally.
+    fn playing() -> KeyGate {
+        KeyGate {
+            gameplay: true,
+            ..KeyGate::default()
+        }
+    }
+
+    fn resolve(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcome> {
+        resolve_key(&Keybinds::new(), gate, Some(code), pressed)
+    }
+
+    /// Every key the default table binds, with what it should resolve to while
+    /// playing. Written out rather than derived from the table, so this is a
+    /// second statement of intent and not a restatement of the implementation.
+    fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
+        vec![
+            (KeyCode::KeyW, KeyOutcome::Movement(Action::Forward, true)),
+            (KeyCode::KeyS, KeyOutcome::Movement(Action::Back, true)),
+            (KeyCode::KeyA, KeyOutcome::Movement(Action::Left, true)),
+            (KeyCode::KeyD, KeyOutcome::Movement(Action::Right, true)),
+            (KeyCode::Space, KeyOutcome::Movement(Action::Jump, true)),
+            (KeyCode::ShiftLeft, KeyOutcome::Movement(Action::Sneak, true)),
+            (
+                KeyCode::ControlLeft,
+                KeyOutcome::Movement(Action::Sprint, true),
+            ),
+            (KeyCode::KeyE, KeyOutcome::OpenContainer),
+            (KeyCode::KeyT, KeyOutcome::OpenChat { command: false }),
+            (KeyCode::Slash, KeyOutcome::OpenChat { command: true }),
+            (KeyCode::Tab, KeyOutcome::PlayerList(true)),
+            (KeyCode::KeyF, KeyOutcome::ToggleFly),
+            (KeyCode::F5, KeyOutcome::TogglePerspective),
+            (KeyCode::F3, KeyOutcome::ToggleDebugOverlay),
+            (KeyCode::Escape, KeyOutcome::Pause),
+            (KeyCode::Digit1, KeyOutcome::SelectSlot(0)),
+            (KeyCode::Digit2, KeyOutcome::SelectSlot(1)),
+            (KeyCode::Digit3, KeyOutcome::SelectSlot(2)),
+            (KeyCode::Digit4, KeyOutcome::SelectSlot(3)),
+            (KeyCode::Digit5, KeyOutcome::SelectSlot(4)),
+            (KeyCode::Digit6, KeyOutcome::SelectSlot(5)),
+            (KeyCode::Digit7, KeyOutcome::SelectSlot(6)),
+            (KeyCode::Digit8, KeyOutcome::SelectSlot(7)),
+            (KeyCode::Digit9, KeyOutcome::SelectSlot(8)),
+        ]
+    }
+
+    #[test]
+    fn the_default_bindings_dispatch_exactly_as_they_did_before_the_refactor() {
+        // The no-regression gate for the whole change: every key the hardcoded
+        // chain used to handle still resolves to the same effect.
+        for (code, want) in default_playing_expectations() {
+            assert_eq!(
+                resolve(playing(), code, true),
+                Some(want),
+                "{code:?} regressed"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hotbar_number_keys_select_the_slot_one_below_their_digit() {
+        // Called out as one of the two things most likely to break quietly: the
+        // digits are 1..9 and the slots are 0..8, so an off-by-one here shifts
+        // every hotbar key by one and looks almost right.
+        let digits = [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        for (i, code) in digits.into_iter().enumerate() {
+            assert_eq!(
+                resolve(playing(), code, true),
+                Some(KeyOutcome::SelectSlot(i)),
+                "{code:?} should select slot {i}"
+            );
+        }
+        // Digit0 is unbound in vanilla and must stay unbound — binding it to
+        // slot 9 would be a tenth hotbar slot that does not exist.
+        assert_eq!(resolve(playing(), KeyCode::Digit0, true), None);
+        // Releasing a hotbar key does nothing (it is not a held state).
+        assert_eq!(resolve(playing(), KeyCode::Digit1, false), None);
+    }
+
+    #[test]
+    fn slash_opens_chat_with_the_command_prefix_and_t_opens_it_without() {
+        // The other quiet-breakage candidate. The distinction is a single bool,
+        // and getting it backwards means every chat message starts with `/`
+        // (or no command can ever be typed).
+        assert_eq!(
+            resolve(playing(), KeyCode::Slash, true),
+            Some(KeyOutcome::OpenChat { command: true })
+        );
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyT, true),
+            Some(KeyOutcome::OpenChat { command: false })
+        );
+
+        // …and the prefix follows the *`key.command` binding*, not the physical
+        // slash key. Rebinding chat and command to other keys must carry the
+        // distinction with them.
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Command, Binding::Key(KeyCode::Backquote));
+        binds.set(InputAction::Chat, Binding::Key(KeyCode::KeyY));
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::Backquote), true),
+            Some(KeyOutcome::OpenChat { command: true })
+        );
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyY), true),
+            Some(KeyOutcome::OpenChat { command: false })
+        );
+        // The old keys stop opening chat at all.
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::Slash), true),
+            None
+        );
+    }
+
+    #[test]
+    fn an_open_container_swallows_every_gameplay_key() {
+        // The precedence that matters most: while a container is up, keys must
+        // not reach gameplay.
+        //
+        // Two gates are checked, and the second is the one that actually tests
+        // the *arm*. In production `container_open` implies `!gameplay` (the
+        // screen is `Container`, so `accepts_gameplay_input()` is false), which
+        // means the first gate would swallow most keys through the `gate.gameplay`
+        // guards even if the container arm were deleted — a vacuous test of the
+        // "world" species, passing because of the input it was handed rather than
+        // the code it names. The `gameplay: true` gate cannot occur in practice
+        // but isolates the container arm: with it, *only* the arm's early return
+        // stands between these keys and gameplay.
+        for gate in [
+            KeyGate {
+                container_open: true,
+                ..KeyGate::default()
+            },
+            KeyGate {
+                container_open: true,
+                gameplay: true,
+                ..KeyGate::default()
+            },
+        ] {
+            for (code, would_have) in default_playing_expectations() {
+                // Escape and the inventory key have their own jobs on this screen.
+                if matches!(code, KeyCode::Escape | KeyCode::KeyE) {
+                    continue;
+                }
+                assert_eq!(
+                    resolve(gate, code, true),
+                    None,
+                    "{code:?} leaked through an open container (gate {gate:?})"
+                );
+                // -- negative control -----------------------------------------
+                // The same key on the same table *does* resolve while playing, so
+                // this test is observing the swallow and not a dead resolver.
+                assert_eq!(
+                    resolve(playing(), code, true),
+                    Some(would_have),
+                    "control failed: {code:?} does nothing even while playing, so \
+                     asserting it is swallowed proves nothing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_inventory_key_closes_a_container_and_escape_pauses_instead() {
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve(gate, KeyCode::KeyE, true),
+            Some(KeyOutcome::CloseContainer)
+        );
+        // Escape is resolved by the arm *above* the container arm, so it pauses
+        // (and `Pause`'s handler closes the menu on the way). If the container
+        // arm were moved above it, this would be `CloseContainer` and Escape
+        // would stop reaching the pause screen from an open inventory.
+        assert_eq!(resolve(gate, KeyCode::Escape, true), Some(KeyOutcome::Pause));
+        // A key release while a container is open does nothing at all — but must
+        // also not fall through to the gameplay arms.
+        assert_eq!(resolve(gate, KeyCode::KeyE, false), None);
+        assert_eq!(resolve(gate, KeyCode::KeyW, false), None);
+    }
+
+    #[test]
+    fn an_open_chat_prompt_swallows_every_key_into_the_editor() {
+        // `W` must type a `w`, not walk.
+        let gate = KeyGate {
+            chat_open: true,
+            ..KeyGate::default()
+        };
+        for (code, _) in default_playing_expectations() {
+            assert_eq!(
+                resolve(gate, code, true),
+                Some(KeyOutcome::Chat),
+                "{code:?} should route to the chat editor"
+            );
+        }
+        // Including keys nothing is bound to — the editor wants those too.
+        assert_eq!(resolve(gate, KeyCode::KeyZ, true), Some(KeyOutcome::Chat));
+        // And an unnameable physical key still reaches the editor, whose `text`
+        // may be the only thing that identifies it.
+        assert_eq!(
+            resolve_key(&Keybinds::new(), gate, None, true),
+            Some(KeyOutcome::Chat)
+        );
+    }
+
+    #[test]
+    fn a_menu_screen_outranks_the_chat_prompt_and_everything_below_it() {
+        let gate = KeyGate {
+            menu: true,
+            ..KeyGate::default()
+        };
+        for (code, _) in default_playing_expectations() {
+            assert_eq!(resolve(gate, code, true), Some(KeyOutcome::Menu));
+        }
+        // Both flags set: the menu wins. This is the documented order, and a
+        // swapped pair would send the edit form's keystrokes to the chat buffer.
+        let both = KeyGate {
+            menu: true,
+            chat_open: true,
+            container_open: true,
+            gameplay: true,
+        };
+        assert_eq!(resolve(both, KeyCode::KeyW, true), Some(KeyOutcome::Menu));
+        assert_eq!(resolve(both, KeyCode::Escape, true), Some(KeyOutcome::Menu));
+        // Chat outranks the container and gameplay in turn.
+        let chat_over_container = KeyGate {
+            chat_open: true,
+            container_open: true,
+            gameplay: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve(chat_over_container, KeyCode::KeyE, true),
+            Some(KeyOutcome::Chat)
+        );
+    }
+
+    #[test]
+    fn gameplay_bindings_are_inert_when_no_screen_accepts_gameplay_input() {
+        // Every flag false: no menu, no chat, no container, and not playing —
+        // e.g. the loading screen. Only the two ungated arms may still fire.
+        let gate = KeyGate::default();
+        for (code, _) in default_playing_expectations() {
+            let got = resolve(gate, code, true);
+            match code {
+                // `Pause` is intentionally ungated: Escape must work on the
+                // loading and error screens, which is how it did before.
+                KeyCode::Escape => assert_eq!(got, Some(KeyOutcome::Pause)),
+                // So is the debug overlay — it is an instrument, and gating it
+                // on `Playing` would make it unavailable exactly when a stuck
+                // connection is the thing being debugged.
+                KeyCode::F3 => assert_eq!(got, Some(KeyOutcome::ToggleDebugOverlay)),
+                _ => assert_eq!(got, None, "{code:?} fired outside gameplay"),
+            }
+        }
+    }
+
+    #[test]
+    fn held_bindings_report_both_edges_and_one_shot_bindings_only_the_press() {
+        // Movement and the player list are held states; the rest are one-shots.
+        // A one-shot that fired on release would double-toggle perspective, and
+        // a held binding gated on `pressed` would stick on forever.
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyW, false),
+            Some(KeyOutcome::Movement(Action::Forward, false))
+        );
+        assert_eq!(
+            resolve(playing(), KeyCode::Tab, false),
+            Some(KeyOutcome::PlayerList(false))
+        );
+        for one_shot in [
+            KeyCode::KeyE,
+            KeyCode::KeyT,
+            KeyCode::Slash,
+            KeyCode::KeyF,
+            KeyCode::F5,
+            KeyCode::F3,
+            KeyCode::Escape,
+            KeyCode::Digit1,
+        ] {
+            assert_eq!(
+                resolve(playing(), one_shot, false),
+                None,
+                "{one_shot:?} must not fire on release"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rebind_moves_the_behaviour_to_the_new_key_and_off_the_old_one() {
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyI), true),
+            Some(KeyOutcome::OpenContainer)
+        );
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyE), true),
+            None,
+            "the old default must stop opening the inventory"
+        );
+        // …and the rebound key also closes the container, because both sites ask
+        // the table rather than naming `KeyE`.
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        assert_eq!(
+            resolve_key(&binds, gate, Some(KeyCode::KeyI), true),
+            Some(KeyOutcome::CloseContainer)
+        );
+        assert_eq!(resolve_key(&binds, gate, Some(KeyCode::KeyE), true), None);
+    }
+
+    #[test]
+    fn unbinding_an_action_disables_it_without_disturbing_the_rest() {
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Jump, Binding::Unbound);
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::Space), true),
+            None
+        );
+        // The neighbouring arms are untouched.
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyW), true),
+            Some(KeyOutcome::Movement(Action::Forward, true))
+        );
+    }
+
+    #[test]
+    fn attack_and_use_are_keyboard_dispatchable_once_rebound_off_the_mouse() {
+        // Under the defaults these arms are dormant, because attack and use are
+        // mouse-bound — assert that, so "it works" cannot be an accident of the
+        // key path firing too.
+        assert_eq!(resolve(playing(), KeyCode::KeyR, true), None);
+
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
+        binds.set(InputAction::Use, Binding::Key(KeyCode::KeyV));
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyR), true),
+            Some(KeyOutcome::Attack(true))
+        );
+        // Hold-to-dig: the release edge must arrive, or mining never stops.
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyR), false),
+            Some(KeyOutcome::Attack(false))
+        );
+        assert_eq!(
+            resolve_key(&binds, playing(), Some(KeyCode::KeyV), true),
+            Some(KeyOutcome::Use)
+        );
+    }
+
+    #[test]
+    fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
+        // The mouse half of dispatch, which is why `Binding` is not `KeyCode`.
+        let binds = Keybinds::new();
+        assert_eq!(
+            mouse_action_for(&binds, MouseButton::Left),
+            Some(InputAction::Attack)
+        );
+        assert_eq!(
+            mouse_action_for(&binds, MouseButton::Right),
+            Some(InputAction::Use)
+        );
+        // Middle is the container pick gesture, not a gameplay binding.
+        assert_eq!(mouse_action_for(&binds, MouseButton::Middle), None);
+
+        // Swapping the two buttons is a supported rebind.
+        let mut swapped = binds;
+        swapped.set(InputAction::Attack, Binding::Mouse(MouseButton::Right));
+        swapped.set(InputAction::Use, Binding::Mouse(MouseButton::Left));
+        assert_eq!(
+            mouse_action_for(&swapped, MouseButton::Right),
+            Some(InputAction::Attack)
+        );
+        assert_eq!(
+            mouse_action_for(&swapped, MouseButton::Left),
+            Some(InputAction::Use)
+        );
+    }
+
+    #[test]
+    fn a_movement_action_can_be_driven_from_a_mouse_button() {
+        // Not something vanilla offers, but it falls out of `Binding` covering
+        // both input kinds — and the mouse handler routes it, so it is not an
+        // island.
+        let mut binds = Keybinds::new();
+        binds.set(InputAction::Jump, Binding::Mouse(MouseButton::Middle));
+        let action = mouse_action_for(&binds, MouseButton::Middle);
+        assert_eq!(action, Some(InputAction::Jump));
+        assert_eq!(action.and_then(InputAction::movement), Some(Action::Jump));
+    }
+
+    #[test]
+    fn an_unnameable_physical_key_is_ignored_by_the_binding_chain() {
+        // `PhysicalKey::Unidentified` reaches the menu and chat arms (tested
+        // above) but must not match any binding — there is nothing to match on.
+        assert_eq!(
+            resolve_key(&Keybinds::new(), playing(), None, true),
+            None
+        );
     }
 
     #[test]

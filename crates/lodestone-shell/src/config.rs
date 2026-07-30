@@ -15,14 +15,17 @@
 //! divided into less than that minimum. See the function's own docs for the
 //! one deliberate omission (the legacy `enforceUnicode` even-scale rounding).
 //!
-//! [`Options`] is the persisted settings model built on top of it — today just
-//! `gui_scale`. It is written to `options.json` next to `servers.json`, in the
+//! [`Options`] is the persisted settings model built on top of it — today
+//! `gui_scale` plus the [`crate::keybinds`] table. It is written to
+//! `options.json` next to `servers.json`, in the
 //! **same** platform data directory [`crate::menu::servers::data_dir`] already
 //! discovers; see [`options_path`]. That reuse is deliberate — see that
 //! module's docs for why the directory lookup lives there and not here.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::keybinds::Keybinds;
 
 /// Sentinel `gui_scale` value meaning "auto": the largest integer scale that
 /// still fits [`MIN_SCALED_WIDTH`]x[`MIN_SCALED_HEIGHT`] into the framebuffer.
@@ -103,21 +106,28 @@ pub fn calculate_gui_scale(desired: u32, framebuffer_width: u32, framebuffer_hei
 
 /// Persisted user settings that must survive a restart — distinct from
 /// [`Config`], which is parsed fresh from argv every run and never written
-/// back. Currently just the GUI scale; add fields here as more settings need
-/// to persist, following [`crate::menu::servers::ServerList`]'s rule that a
-/// missing or corrupt file is the default, never an error.
+/// back. Add fields here as more settings need to persist, following
+/// [`crate::menu::servers::ServerList`]'s rule that a missing or corrupt file
+/// is the default, never an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     /// The user's chosen `gui_scale`: [`AUTO_GUI_SCALE`] or an explicit
     /// ceiling. This is fed to [`calculate_gui_scale`] against the live
     /// framebuffer size — never used directly as a pixel count.
     pub gui_scale: u32,
+    /// The rebindable action → input table (`docs/keybindings.md`).
+    ///
+    /// [`Keybinds`] is deliberately `Copy` (a fixed array, not a map) so this
+    /// struct stays `Copy` and the menu layer that reads it by value does not
+    /// have to change.
+    pub keybinds: Keybinds,
 }
 
 impl Default for Options {
     fn default() -> Self {
         Self {
             gui_scale: AUTO_GUI_SCALE,
+            keybinds: Keybinds::new(),
         }
     }
 }
@@ -147,7 +157,17 @@ impl Options {
             .and_then(serde_json::Value::as_u64)
             .and_then(|v| u32::try_from(v).ok())
             .unwrap_or(AUTO_GUI_SCALE);
-        Self { gui_scale }
+        // A missing `keybinds` key is the vanilla defaults, and so is a
+        // malformed one — `Keybinds::from_json_value` degrades per-entry and
+        // never fails, so one stale binding cannot cost the whole table (let
+        // alone `gui_scale`, read above and independent of it).
+        let keybinds = obj
+            .get("keybinds")
+            .map_or_else(Keybinds::new, Keybinds::from_json_value);
+        Self {
+            gui_scale,
+            keybinds,
+        }
     }
 
     /// Writes to the real on-disk location.
@@ -170,6 +190,13 @@ impl Options {
         }
         let mut obj = serde_json::Map::new();
         obj.insert("gui_scale".into(), self.gui_scale.into());
+        // Written only when something was actually rebound, so an untouched
+        // install has no `keybinds` key at all rather than a noisy block of
+        // defaults — see `Keybinds::to_json_value` for why defaults are omitted.
+        let keybinds = self.keybinds.to_json_value();
+        if !keybinds.as_object().is_some_and(serde_json::Map::is_empty) {
+            obj.insert("keybinds".into(), keybinds);
+        }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
         std::fs::write(path, text)
@@ -530,9 +557,78 @@ mod tests {
     #[test]
     fn options_round_trip_through_a_real_file() {
         let path = temp_options_path("roundtrip");
-        let opts = Options { gui_scale: 3 };
+        let opts = Options {
+            gui_scale: 3,
+            ..Options::default()
+        };
         opts.save_to(&path).expect("save should create parents");
         assert_eq!(Options::load_from(&path), opts);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- persisted keybinds --------------------------------------------------
+
+    #[test]
+    fn rebound_keys_survive_a_real_save_and_load() {
+        use crate::keybinds::{Binding, InputAction};
+        use winit::keyboard::KeyCode;
+
+        let path = temp_options_path("keybinds-roundtrip");
+        let mut opts = Options {
+            gui_scale: 2,
+            ..Options::default()
+        };
+        opts.keybinds
+            .set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
+        opts.keybinds
+            .set(InputAction::Jump, Binding::Mouse(winit::event::MouseButton::Middle));
+        opts.save_to(&path).unwrap();
+
+        let loaded = Options::load_from(&path);
+        assert_eq!(loaded, opts);
+        assert!(loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyI));
+        assert!(
+            !loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyE),
+            "the old default must not still fire"
+        );
+        // The unrelated setting rode along untouched.
+        assert_eq!(loaded.gui_scale, 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_untouched_install_writes_no_keybinds_key_at_all() {
+        // The file should show what the user changed. A default table writes
+        // nothing, so a fresh `options.json` is exactly as small as it was
+        // before the keybinding layer existed.
+        let path = temp_options_path("keybinds-absent");
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("keybinds"),
+            "defaults should not be written: {text}"
+        );
+        assert_eq!(Options::load_from(&path), Options::default());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_corrupt_keybinds_block_costs_neither_the_other_settings_nor_the_launch() {
+        // The rule this shares with the server list: a broken settings file must
+        // degrade, never fail. A `keybinds` value of the wrong *type* is the
+        // worst case — an implementation that indexed into it would panic.
+        let path = temp_options_path("keybinds-corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["\"nope\"", "[1,2,3]", "null", "17"] {
+            std::fs::write(&path, format!("{{\"gui_scale\": 4, \"keybinds\": {bad}}}")).unwrap();
+            let loaded = Options::load_from(&path);
+            assert_eq!(
+                loaded.keybinds,
+                crate::keybinds::Keybinds::new(),
+                "keybinds: {bad} should degrade to the defaults"
+            );
+            assert_eq!(loaded.gui_scale, 4, "gui_scale must survive keybinds: {bad}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
