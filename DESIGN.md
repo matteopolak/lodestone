@@ -2329,3 +2329,31 @@ I had been quoting **"~40 of 141 clientbound"** — in agent briefs and in statu
 **What it does and does not say.** `emits 89/141` is the decode→seam layer, and it is genuinely strong — only **2** decoded-but-stranded packets (`CHUNK_BATCH_START`, `RESPAWN`). It does **not** contradict §12.88: 37 of 66 `ClientEvent` variants still have no consumer. Both are true. Packets now decode and reach the seam well; **consumption is the binding constraint**, and it sits in UI and rendering, not in the protocol crates.
 
 **Consequence for prioritisation, acted on immediately:** packets are in far better shape than I told the keepers, so relative weight should shift toward **UI, entities and lighting** — the three workstreams that *consume*. I have corrected the baseline with the agents rather than letting a wrong figure keep steering them.
+
+---
+
+**12.93 One stale note produced four misdirected diagnoses — and it was cited as the *shared root cause* of all four.**
+
+`docs/backlog.md` said: "`collect_item_model_parts` keeps only `IconPart::Model`, so an `item/generated` icon never enters `BlockModels::items()`. That is most items in the game."
+
+**It was true when written and false when read.** `9980a96` added `extruded_sprite_geometry` — vanilla's `ItemModelGenerator` transcribed — and `BlockModels::build` inserts the resulting slab into **the same `items` map** the 3-D models go into, under the same key. `sprite_drop_pixels` had been passing since. Two doc comments on `BlockModels::item`/`items()` still said "3-D" and "`None` for a flat sprite"; `docs/dropped-items.md` still had a bullet titled "Flat sprite items are the remaining hole".
+
+That sentence was then copied verbatim into **four** GitHub issues as their common cause. #54 said "**That is probably a shared root cause and #33 should be fixed first**"; #56 said "**#33 is a prerequisite, not a coincidence**". It was a prerequisite for neither. Measured causes:
+
+| issue | claimed cause | real cause |
+|---|---|---|
+| #33 flat sprite drops | the sprite stream | **already fixed**; the issue itself was stale |
+| #50 container block items flat | the sprite stream | `app.rs:1273` calls `render_scaled`, which hardcodes `models: None`/`depth: None` — a fully attached, fully tested model pass that nothing feeds |
+| #54 first-person hand empty | the sprite stream | nothing ever told `RenderState` what the local player was holding; `render` takes only `&[EntityDraw]` and the local player is not in it |
+| #56 no projectiles | the sprite stream | **no projectile renderer existed at all** |
+
+**Why review could not catch it.** The note names a real function, a real enum variant and a real map, and describes a mechanism that genuinely existed. Grepping the function it names finds the function. Only reading the *whole* function — past the `IconPart::Model` arm to the `IconPart::Sprite` arm 16 lines below — refutes it. This is §12's staleness failure mode with a cost attached: **four diagnoses, three of them pointed at the wrong crate.**
+
+**Two further beliefs in the briefing that measurement refuted:**
+
+- **"`wind_charge` and `fire_charge` are cross-billboard thrown items."** `WIND_CHARGE` and `BREEZE_WIND_CHARGE` use `WindChargeRenderer`, a real cuboid model, and `AbstractWindCharge.getItem()` returns `ItemStack.EMPTY` — there is no sprite to billboard. `fire_charge` *is* one, but as the **item** of the `fireball`/`small_fireball` entities, at scale **3.0** and **0.75** respectively. `eye_of_ender`'s item is `minecraft:ender_eye`, not `minecraft:eye_of_ender`; a table derived from entity names draws nothing for it, silently.
+- **"The gap is the consumer, so look for a missing accessor."** There is no missing accessor and there should not be one. Every consumer that wanted "the sprite stream" wanted `BlockModels::item`, which already answers both kinds. Reading the two-*stream* split in `ItemIcon` as a two-*map* split in `BlockModels` is what made a nonexistent accessor plausible.
+
+**A measurement worth keeping, because it looks exactly like a bug.** `applyItemArmTransform` puts the held item 0.56 blocks right of the eye and 0.72 forward, and `hand_projection`'s 70° FOV is *vertical*. On a **square** viewport the item is outside the right edge entirely: measured on a working build, 256×256 → **0** lit pixels, aspect 1.5 → **2722**, 16:9 → **4191**. A pixel gate written on the repo's usual 256×256 target reads "the held item does not render" and sends the next reader after a chain bug that is not there. Vanilla's window is never square; the gate now renders 448×256 and says why.
+
+**The negative control that had to be loosened, and why that is not a weakening.** The projectile gate's edge-on control (identity in place of `camera_orientation`) draws **494** px against the billboard's **3788** — 13%, not the ~6% a 1/16-thick slab's face-to-edge ratio predicts. `ItemModelGenerator` fans one edge quad per boundary texel of the alpha outline, and side-on those quads are the widest thing left. A 10% ceiling **failed on a working build**; 20% keeps a 7.7× separation and keeps the control able to fail.

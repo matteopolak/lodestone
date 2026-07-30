@@ -131,6 +131,23 @@ evidence.
 "no trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have
 fired. Run the control and observe it fail; do not describe what it would do.
 
+**A shell pipeline will destroy the evidence you are about to reason from.** Two instances in one
+session, both of which produced a confident wrong conclusion:
+
+- **`| head` read as absence.** `grep -rn -A4 0.085 …/world/entity/ | head -24` was flooded by
+  `DropChances.java` and showed no hit in `Player.java`, so the swim-descent constants were declared
+  unverifiable and an agent was told to distrust them. They are real, at `Player.java:1408`. A
+  truncated search is not a negative result — `grep -c`, or narrow the path, before concluding a
+  thing does not exist.
+- **`| grep | tail` swallowed a non-zero exit.** `cargo test --workspace | grep … | tail -30`
+  reported "exit code 0" because that is `tail`'s status, while cargo's own last line was
+  `error: 1 target failed:` — and the grep pattern then cut the target name off. This came within
+  one command of a commit on a red tree. **Let cargo write its own output to a file and check its
+  real exit status**; filter the file afterwards.
+
+The general rule: the transform that makes output readable is also the transform that can invent a
+green. When a conclusion depends on what was *not* in the output, re-run without the filter.
+
 **Four species of vacuous test.** Two cannot be found by reading the test — the source is exemplary
 and the flaw is a property of what it was pointed at:
 

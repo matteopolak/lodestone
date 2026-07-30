@@ -560,7 +560,29 @@ successor rather than drift.
 
 ## 5. Online-mode authentication
 
-### State: crypto path works end to end; a full authenticated join is untested and not claimed
+### State (updated, issue #65): wired end to end; the live join itself is still untested
+
+Everything below this state line described the crypto-only measurement from before issue #65.
+That gap is now closed: `lodestone-client`'s driver has a `Directive::BeginEncryption` arm
+(previously there was **none at all** — the directive fell into the generic "ignoring unknown
+directive variant" catch-all, a textbook island since the v770 adapter side was already built
+and tested). It generates the shared secret, RSA-wraps it against the server's real public key,
+writes the response, enables the cipher, and — when the server asks for it — calls
+`lodestone_auth::join_server` with a `lodestone_auth::Session` supplied via the new
+`ClientBuilder::online_session`. `lodestone-auth::login` is the new composition layer (cached
+refresh → silent renewal → session, falling back to interactive sign-in), and `AuthError` grew a
+typed XSTS-failure taxonomy (no Xbox account, region, age/adult verification, child-needs-family)
+plus a distinct `RefreshTokenInvalid`/`MissingClientId`. See
+[`docs/accounts.md`](./docs/accounts.md#join-flow-wiring-issue-65) for the full account.
+
+**What is still exactly as before:** a real authenticated join against
+`sessionserver.mojang.com` needs a real Microsoft account and a registered Azure client id
+(`LODESTONE_MS_CLIENT_ID`), neither of which exist in this environment. Hermetic tests
+(`crates/lodestone-client/tests/online_mode_handshake.rs`) prove the driver's own RSA/AES
+sequencing and its `should_authenticate`-without-a-session fail-fast path; they do **not** prove
+Mojang accepts a real join, for the same reason `flow.rs`'s own tests never could.
+
+### State (original, pre-#65): crypto path works end to end; a full authenticated join is untested and not claimed
 
 ```
 $ cargo test -p lodestone-net --test online_handshake -- --ignored --nocapture
@@ -604,10 +626,12 @@ CFB8-AES128 is checked against NIST SP800-38A F.3.7.
 
 ### What is left
 
-A real authenticated join, which needs Microsoft credentials. `rsa`/`rand` are native-only
-(`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`) — deliberately, since the
-session-server call is native-only anyway. The docs name that seam as where a browser auth story
-would land.
+~~A real authenticated join, which needs Microsoft credentials.~~ **The wiring is done (#65,
+see the updated state note above); a real join against a real account is still the only
+remaining gap, and still needs Microsoft credentials this environment doesn't have.** `rsa`/`rand`
+are native-only (`[target.'cfg(not(target_arch = "wasm32"))'.dependencies]`) — deliberately, since
+the session-server call is native-only anyway. The docs name that seam as where a browser auth
+story would land.
 
 ---
 
@@ -1855,3 +1879,36 @@ tree and one consumer doesn't read it.** A1 has a correct water classifier that 
 use; A2 has a working fog term that two of four pipelines don't apply. Neither is a missing
 algorithm. Before building anything for these, ask the question that has now found nine islands:
 *what actually consumes this?*
+
+## Open — two one-call wirings, both spec'd, both in files another agent holds
+
+These are the *entire* remaining work for issues #50 and #54. Both are islands in the exact
+sense this file keeps re-proving: the capability is built, attached and pixel-tested, and one
+call site does not feed it.
+
+**#50 — block items render flat in container screens.** `app.rs:1273` calls
+`container_renderer.render_scaled(...)`, and `ContainerRenderer::render_scaled`
+(`container.rs:1278`) hardcodes `depth: None, models: None`. `render_with_icons_scaled` then
+computes `want_models = models_attached() && depth.is_some()` → `false`, and
+`push_item_model` returns early for every block item. Flat sprites are unaffected, which is
+why the symptom reads "flat" rather than "missing" — that shape is the diagnosis.
+
+Both `attach_items` (`app.rs:1488`) and `attach_item_models` (`app.rs:1496`) are already
+done; `docs/gui-item-icons.md` and `docs/container-screen.md` both said otherwise until now.
+The fix is one call swap, spelled out verbatim in
+[`docs/container-screen.md`](./docs/container-screen.md#wiring-it-into-the-live-app--two-of-three-steps-are-done)
+— note it must be the `_scaled` variant, or the drawn slots disagree with
+`hit_test_with_scale` about where they are.
+
+**#54 — the first-person hand shows no item.** `RenderState::set_main_hand_source` exists,
+`prepare_first_person_hand` draws the item instead of the arm when it yields one, and
+`thrown_and_held_item_pixels` proves 7124 pixels in the bottom-right quadrant with an
+executed mirrored control that fails the same assertion. Nothing in `app.rs` installs the
+source, so the shell still draws the bare arm. Three lines, next to the existing
+`set_hand_swing_source` call, spelled out in
+[`docs/first-person-held-item.md`](./docs/first-person-held-item.md#the-wiring-that-is-still-outstanding).
+`stats.first_person_item_drawn` is the check that it landed.
+
+**And the reason both were mis-diagnosed for a session:** one stale sentence in
+`docs/backlog.md` was cited as the shared root cause of #33, #50, #54 and #56. See
+DESIGN.md §12.93 — it is the highest-cost staleness incident recorded here so far.

@@ -77,9 +77,30 @@ recurring defect classes, not because they are generically useful — see
   `hasSkyLight` flag if the client ever models the dimension-type registry.
 - **A pickaxe makes nothing faster.** `minecraft:tool` is unmodeled, so `tool_speed`
   stays at bare-hand defaults and obsidian is ~4m10s of unbroken holding.
-- **Flat sprite items draw nothing as drops.** `collect_item_model_parts` keeps only
-  `IconPart::Model`, so an `item/generated` icon never enters `BlockModels::items()`.
-  That is most items in the game.
+- ~~**Flat sprite items draw nothing as drops.**~~ **Fixed** in `9980a96` /
+  `a9f263f`, and this entry's wording is the single most expensive stale note this
+  repo has produced. `collect_item_model_parts` collects `IconPart::Sprite` too
+  (`block_models.rs:515`), `extruded_sprite_geometry` bakes it into vanilla's thin
+  slab, and the result goes into **the same `BlockModels::items` map** as the 3-D
+  models. `sprite_drop_pixels` proves the pixels.
+
+  The stale sentence — "`collect_item_model_parts` keeps only `IconPart::Model`, so
+  an `item/generated` icon never enters `BlockModels::items()`" — was copied
+  verbatim into **four** issues (#33, #50, #54, #56) as their shared root cause, and
+  #54 and #56 each said "#33 is a prerequisite, not a coincidence". It was a
+  prerequisite for neither, because it was already done. Three of the four had
+  entirely unrelated causes:
+
+  | issue | real cause |
+  |---|---|
+  | #33 drops | already fixed |
+  | #50 container block items | `app.rs:1273` calls `render_scaled`, which hardcodes `models: None` — an island; see [`container-screen.md`](./container-screen.md) |
+  | #54 first-person hand | nothing told `RenderState` what the player was holding; see [`first-person-held-item.md`](./first-person-held-item.md) |
+  | #56 projectiles | no projectile renderer existed at all; see [`thrown-projectiles.md`](./thrown-projectiles.md) |
+
+  The lesson is the one `CLAUDE.md` rule 2 already states, with a number attached:
+  **one stale note cost four misdirected diagnoses.** Grep for the producer across
+  the whole tree before believing a note about a consumer.
 
 ---
 
@@ -102,10 +123,17 @@ recurring defect classes, not because they are generically useful — see
    density from `rainLevel`, rain-vs-snow from biome temperature per column, sky and
    light darkened by `thunderLevel`, looping ambient audio, lightning flashes. Server
    sends state via `GAME_EVENT` — check those ids reach a consumer first.
-5. **First-person hand, held item, arm swing.** No first-person renderer of any kind.
-   We already *send* `SwingArm`, so other players see us swing; we have nothing to draw
-   it on. Needs `display.firstperson_righthand`, which is **not reachable** — `icon.rs`
-   keeps only the `gui` slot.
+5. **First-person hand: the special-cased item poses.** The arm, the swing and the
+   **generic held item** all landed (`1ffbdee`, `22dc0ee`, and
+   [`first-person-held-item.md`](./first-person-held-item.md)); `display.firstperson_righthand`
+   *is* reachable — `ItemGeometry::display` carries all nine slots, and the claim
+   that "`icon.rs` keeps only the `gui` slot" was stale for two sessions before
+   being deleted from here. What remains: `RenderState::set_main_hand_source` is
+   **unwired in `app.rs`**, so the shell still draws the bare arm (three lines,
+   specified in that doc), plus bow/crossbow-while-drawing, shield, spyglass, map,
+   trident, and the eating/drinking and brush animations — each needing use-item
+   state the shell does not track. The off hand is not drawn either, though every
+   function supports `Arm::Left`.
 6. **Full inventory interaction verbs.** Audit `click.rs` against
    `AbstractContainerMenu.doClick`: drag-split (left even / right one-each / middle fill
    in creative), double-click gather, number-key swap, offhand swap, drop and drop-stack,
