@@ -154,6 +154,32 @@ impl<'a> ContainerFrame<'a> {
     }
 }
 
+/// Resolve an open menu's server-authored title into the plain string
+/// [`ContainerFrame::title`] draws.
+///
+/// A server does not send the words "Crafting"; it sends
+/// `translate("container.crafting")` in `ClientboundOpenScreen`. Flattening that
+/// with [`lodestone_model::Text::to_plain_string`] consults the model's tiny
+/// built-in stub table (fourteen chat/death keys — `text.rs`'s
+/// `default_translation`), which has no `container.*` entry, so the key falls
+/// through to itself and **the raw key is what the panel draws** (issue #52).
+///
+/// This is the same read-boundary resolution the chat feed, the tab list and the
+/// scoreboard sidebar already do; the container screen was the one HUD surface
+/// that skipped it. `translate` is the language table — an
+/// `lodestone_assets::Language` becomes one via `Language::translator`, and
+/// `Sim::translator` hands out exactly that closure.
+///
+/// A missing key still falls back to the component's own `fallback`, then to the
+/// key: losing a translation must never cost the title.
+#[must_use]
+pub fn menu_title(
+    title: &lodestone_model::Text,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    lodestone_game::text::resolve_to_string(title, translate)
+}
+
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
 /// is attached, real slot icons on the two icon streams.
 #[derive(Debug, Clone, PartialEq)]
@@ -1462,6 +1488,66 @@ mod tests {
     use lodestone_game::item::ItemStack;
 
     const VIEW: (u32, u32) = (1280, 720);
+
+    /// A stand-in for `en_us.json`, holding only the `container.*` keys these
+    /// tests need. Deliberately narrow: `lodestone_model`'s built-in stub table
+    /// (`text::default_translation`) carries *no* `container.*` key at all, so a
+    /// title path that ignored this closure could not accidentally pass.
+    fn lang(key: &str) -> Option<String> {
+        match key {
+            "container.crafting" => Some("Crafting".to_owned()),
+            "container.chest" => Some("Chest".to_owned()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_translate_menu_title_renders_words_not_the_raw_key() {
+        // Issue #52, exactly as the server sends it: `ClientboundOpenScreen`
+        // carries `translate("container.crafting")`, never the word "Crafting".
+        let title = lodestone_model::Text::translate("container.crafting", vec![]);
+        assert_eq!(menu_title(&title, &lang), "Crafting");
+
+        // -- negative control -------------------------------------------------
+        // The call this replaced. If this ever stops producing the raw key, the
+        // assertion above has stopped proving anything — either the model grew a
+        // `container.*` entry into its stub table, or something upstream is
+        // resolving the component before we see it.
+        assert_eq!(
+            title.to_plain_string(),
+            "container.crafting",
+            "the translator-free flatten must still leak the key, or the test above is vacuous"
+        );
+
+        // …and the resolved title is what the panel actually draws, uppercased
+        // by `build_chrome` the way vanilla's container titles are not — the
+        // point here is only that it is words. A chest proves the key is read
+        // rather than one hard-coded answer.
+        let chest = lodestone_model::Text::translate("container.chest", vec![]);
+        assert_eq!(menu_title(&chest, &lang), "Chest");
+    }
+
+    #[test]
+    fn a_menu_title_survives_a_missing_language_table() {
+        // The demo palette loads no `en_us.json`, and a server may send a key we
+        // have no entry for. Neither may cost the title: `fallback` first, then
+        // the key. A literal title (a renamed chest) is untouched either way.
+        let with_fallback = lodestone_model::Text {
+            content: lodestone_model::TextContent::Translate {
+                key: "container.barrel".to_owned(),
+                with: vec![],
+                fallback: Some("Barrel".to_owned()),
+            },
+            ..lodestone_model::Text::default()
+        };
+        assert_eq!(menu_title(&with_fallback, &|_| None), "Barrel");
+
+        let bare = lodestone_model::Text::translate("container.shulker_box", vec![]);
+        assert_eq!(menu_title(&bare, &|_| None), "container.shulker_box");
+
+        let named = lodestone_model::Text::literal("Bob's Loot");
+        assert_eq!(menu_title(&named, &|_| None), "Bob's Loot");
+    }
 
     fn survival() -> MenuContext {
         MenuContext {

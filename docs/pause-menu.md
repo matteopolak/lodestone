@@ -168,6 +168,51 @@ calls this after the world/HUD/container passes, gated on
 just "pause renders correctly" but "pause is provably absent from the set
 that would break it."
 
+### The HUD keeps drawing behind it (issue #61)
+
+Keeping the world rendering is only half of it. The **HUD** has to keep drawing
+too, and for a while it did not: `app.rs` computed one boolean
+
+```rust
+let crosshair = self.ui.is_playing();
+hud_frame.hotbar       = crosshair.then(|| self.sim.selected_slot());
+hud_frame.hotbar_items = crosshair.then_some(hotbar_records.as_slice());
+```
+
+and used it for both the aiming reticle *and* the hotbar, so opening the pause
+menu (or the inventory, or the chat box) took the hotbar with it. One boolean,
+two questions, and the name told you which question its author had in mind.
+
+Vanilla's answer is unambiguous, and it is about the **world**, not about play:
+
+| source | says |
+| --- | --- |
+| `GameRenderer.java:377,389` | `readyForLevelRendering = resourcesLoaded && advanceGameTime && level != null` is what the GUI is handed — it asks about the *level*, never about `screen` |
+| `Gui.java:152-156` | `hud.extractRenderState(...)` runs under that flag **alone** |
+| `Gui.java:171-189` | the open screen is extracted *after* the HUD, i.e. painted on top |
+| `Hud.java:218-221` | `Hud.extractRenderState` gates only on F1 (`isHidden`) and `LevelLoadingScreen` |
+| `Hud.java:534-562` | hotbar, hearts, hunger, XP bar, held-item name — **game mode** gates only |
+
+So the dim you see over an open inventory is not the HUD switching off; it is the
+screen's own translucent background drawn over a HUD that is still there.
+
+`app::hud_follows_world(Screen)` is now that predicate — true for `Playing`,
+`Chat`, `Container`, `Paused`; false for `Connecting` (no world yet) and every
+menu screen. `HudFrame::crosshair` keeps `is_playing()`.
+
+Exactly two vanilla HUD elements *do* consult `screen()`, and neither is a vital:
+the potion-effect icons (`Hud.java:486-488` — suppressed only when the screen
+`showsActiveEffects()`, overridden `true` by `InventoryScreen` and
+`CreativeModeInventoryScreen`, which draw their own) and the subtitle overlay
+(`Hud.java:238-241`). **The crosshair is not one of them** — `Hud.java:439-470`
+gates on camera type and spectator mode only, so vanilla's reticle is still there
+behind an open inventory, dimmed. Hiding ours is a deliberate divergence for as
+long as container screens have no background pass to dim behind (issue #51).
+
+There is no per-element dimming here, and adding one would be the wrong shape:
+the dim belongs to the screen's background pass, not to an alpha on every HUD
+widget. An undimmed hotbar under the pause overlay is the correct interim state.
+
 ### Leaving a session: the pause menu → `Sim::end_session`
 
 The button path: `MenuNav::key_paused`'s `PauseButton::QuitToTitle` arm

@@ -339,6 +339,29 @@ impl Text {
     /// table (see [`default_translation`]). Style and interactivity are
     /// ignored; this is the canonical "what does the message say" operation and
     /// the basis of the cross-format oracle.
+    ///
+    /// # This is not a translator
+    ///
+    /// [`default_translation`] is a **fourteen-key stub** — chat, join/leave and
+    /// six death messages. Every other key falls through to the component's
+    /// `fallback`, then to the key itself. So on any component a real server
+    /// authored, this method is only as correct as the tree is *already resolved*:
+    ///
+    /// ```text
+    /// Text::translate("container.crafting", vec![]).to_plain_string()
+    ///     == "container.crafting"      // the raw key, on screen (issue #52)
+    /// ```
+    ///
+    /// Safe uses are (a) a tree with no `translate` nodes at all — notably the
+    /// output of `lodestone_game::text::resolve`, which lowers every `translate`
+    /// node to a literal first, and (b) logs, panics and tests, where a key is a
+    /// perfectly good identifier.
+    ///
+    /// **Anything that reaches a pixel must go through the language table**, i.e.
+    /// `lodestone_game::text::resolve_to_string(&text, translate)` or
+    /// [`Self::to_plain_string_with`]. Four shell surfaces already do (chat, the
+    /// tab list, the scoreboard sidebar, boss bars); the container-screen title
+    /// did not, and shipped `container.crafting` where "Crafting" belonged.
     #[must_use]
     pub fn to_plain_string(&self) -> String {
         self.to_plain_string_with(&default_translation)

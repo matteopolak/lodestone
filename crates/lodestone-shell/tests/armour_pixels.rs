@@ -176,6 +176,8 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         pitch: 0.0,
         scale: 1.0,
         anim: AnimInput::REST,
+        wool: None,
+        count: 1,
     };
     // The negative control: identical in every respect except equipment.
     let control = EntityDraw {

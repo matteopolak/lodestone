@@ -111,7 +111,6 @@ use lodestone_model::event::SoundCategory;
 pub use lodestone_testsupport::unique_username;
 
 use crate::entities::EntitySnapshot;
-use crate::overlay::{BossBarView, boss_bars_from};
 
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
@@ -382,6 +381,41 @@ impl NetClient {
         protocol: i32,
         session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
     ) -> Self {
+        Self::connect_impl(host, port, protocol, session, None)
+    }
+
+    /// As [`Self::connect`], but for an **online-mode** server: `auth` is an
+    /// authenticated Microsoft/Minecraft session (issue #65 — see
+    /// `lodestone_auth::login` for how to obtain one from a cached refresh
+    /// token or a completed interactive device-code sign-in) that the net
+    /// thread hands to [`lodestone_client::ClientBuilder::online_session`],
+    /// and the real profile identity (`auth.profile.name`/`.id`) replaces the
+    /// [`unique_username`] offline-mode name path for the login-start packet.
+    ///
+    /// This is purely additive: [`Self::connect`] is completely unchanged and
+    /// remains the offline-mode default every existing caller uses. Nothing
+    /// in the shell calls this yet — wiring an actual "sign in" UI action to
+    /// it is issue #66's job; this method is the seam that work connects to.
+    #[must_use]
+    pub fn connect_online(
+        host: String,
+        port: u16,
+        protocol: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        auth: lodestone_client::Session,
+    ) -> Self {
+        Self::connect_impl(host, port, protocol, session, Some(auth))
+    }
+
+    /// Shared implementation behind [`Self::connect`]/[`Self::connect_online`]:
+    /// spawns the background net thread and returns immediately.
+    fn connect_impl(
+        host: String,
+        port: u16,
+        protocol: i32,
+        session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+        auth: Option<lodestone_client::Session>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel();
         let (action_tx, action_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -401,6 +435,7 @@ impl NetClient {
                     stop_thread,
                     handle_thread,
                     session,
+                    auth,
                 )
             })
             .expect("spawn net thread");
@@ -556,22 +591,6 @@ impl NetClient {
                 .unwrap_or_default();
         }
         self.handle.get().map(|h| h.tab_list()).unwrap_or_default()
-    }
-
-    /// The active boss bars to draw, folded from the live snapshot, in server
-    /// render order. Empty when none are shown (or before login).
-    #[must_use]
-    pub fn boss_bars(&self) -> Vec<BossBarView> {
-        #[cfg(test)]
-        if let Some((ecs, entity)) = &self.session {
-            return ecs
-                .read()
-                .get::<lodestone_ecs::SessionBossBars>(*entity)
-                .map_or_else(Vec::new, |bars| boss_bars_from(&bars.0));
-        }
-        self.handle
-            .get()
-            .map_or_else(Vec::new, |h| boss_bars_from(&h.boss_bars()))
     }
 
     /// The folded player inventory menu (window 0), when a live client handle
@@ -739,6 +758,7 @@ fn run(
     stop: Arc<AtomicBool>,
     shared_handle: SharedHandle,
     session: Option<(lodestone_ecs::EcsHandle, lodestone_ecs::ecs::entity::Entity)>,
+    auth: Option<lodestone_client::Session>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -760,9 +780,20 @@ fn run(
         };
 
         let _ = tx.send(NetUpdate::Connecting);
-        let profile = LoginProfile {
-            username: unique_username(),
-            uuid: uuid::Uuid::new_v4(),
+        // Online mode (issue #65) supplies the account's real identity;
+        // offline mode keeps the existing unique-per-run name so
+        // `lodestone-testsupport`'s dead-player-blackout hazard (see that
+        // crate's docs and `CLAUDE.md`) stays avoided for every test oracle,
+        // every one of which is an offline server.
+        let profile = match &auth {
+            Some(session) => LoginProfile {
+                username: session.profile.name.clone(),
+                uuid: session.profile.id,
+            },
+            None => LoginProfile {
+                username: unique_username(),
+                uuid: uuid::Uuid::new_v4(),
+            },
         };
         let server = ServerAddress { host, port };
 
@@ -772,6 +803,9 @@ fn run(
         // `Sim.local` — because `add_systems` does not deduplicate.
         let mut builder =
             ClientBuilder::new(server, profile, adapter).connect_timeout(Some(Duration::from_secs(10)));
+        if let Some(session) = auth {
+            builder = builder.online_session(session);
+        }
         if let Some((world, entity)) = session {
             builder = builder.ecs(world, entity);
         }
@@ -1007,24 +1041,27 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 /// # What the item stack loses here, and why the loss is on this side
 ///
 /// [`EntitySnapshot`] deliberately depends on neither `lodestone-client` nor
-/// `lodestone-model` — that is what lets `entities.rs` be unit-tested with no
-/// server and no GPU — so the model's [`ItemStack`](lodestone_model::ItemStack)
-/// cannot cross into it. This function is the one place that knows both types,
-/// so the conversion lives here and keeps only the item *key*, as a
-/// [`ResourceLocation`](lodestone_assets::ResourceLocation). Two things are
-/// dropped:
+/// `lodestone-model` for its *typed* payloads — that is what lets `entities.rs`
+/// be unit-tested with no server and no GPU — so the model's
+/// [`ItemStack`](lodestone_model::ItemStack) cannot cross into it wholesale.
+/// This function is the one place that knows both types, so the conversion
+/// lives here and keeps only the item *key*, as a
+/// [`ResourceLocation`](lodestone_assets::ResourceLocation), plus its `count`
+/// as a plain `u32` (see [`EntitySnapshot::count`] — a bare integer needs no
+/// model dependency, unlike the key). One thing is still dropped:
 ///
-/// * **`count`** — and this one is *visible*. Vanilla's `ItemEntityRenderer`
-///   draws up to five jittered copies of the model for a large stack
-///   (`getRenderedAmount`: 1 copy at count ≤ 1, then 2, 3, 4, 5 as the count
-///   passes 1, 16, 32 and 48), so until the count reaches the renderer a stack
-///   of 64 diamonds is drawn as a single diamond.
-///   Restoring it means widening `EntitySnapshot` with a plain `u32` — no model
-///   dependency needed — and teaching `EntityDraw`/the item pipeline to emit the
-///   extra instances. It is left out here rather than faked.
 /// * **`components`** — dyed leather colour, custom model data, trim, and the
 ///   `has_unmodeled` marker. These change how an item *looks* but not *which*
 ///   item it is, and nothing in the item pipeline reads them yet.
+///
+/// `count` used to be dropped here too, and that loss was *visible*: vanilla's
+/// `ItemEntityRenderer` draws up to five jittered copies of the model for a
+/// large stack (`ItemClusterRenderState::getRenderedAmount`: 1 copy at count ≤
+/// 1, then 2, 3, 4, 5 as the count passes 1, 16, 32 and 48), so a stack of 64
+/// diamonds drew as a single diamond. The multi-copy *draw* is not wired yet —
+/// see `docs/dropped-items.md` — but the count itself now reaches
+/// [`EntityDraw::count`](crate::entities::EntityDraw::count) with no model
+/// dependency needed to get it there.
 ///
 /// The three states are preserved: [`Reported::Unreported`] stays "never
 /// reported", [`Reported::Reported(None)`](Reported::Reported) stays
@@ -1040,6 +1077,14 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 /// colour in a mob's hand.
 fn entity_snapshot(view: EntityView) -> EntitySnapshot {
     let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
+    // Borrowed, ahead of the by-value `item` match below: `count` only exists
+    // on the wire's `ItemStack`, which that match consumes converting the key.
+    // `1` is the neutral default for every case where there is no stack to
+    // count — matches `EntitySnapshot::count`'s documented contract.
+    let count = match &view.item {
+        Reported::Reported(Some(stack)) => stack.count,
+        _ => 1,
+    };
     let item = match view.item {
         Reported::Unreported => Reported::Unreported,
         Reported::Reported(None) => Reported::Reported(None),
@@ -1110,6 +1155,13 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
         // to know a zombie was holding a sword even though the wire data was
         // sitting right here. Nothing downstream of this function could see it.
         equipment,
+        // A third instance of the same gap: `EntityView::variant` has been fully
+        // decoded (down to `EntityVariant::Dyed`'s sheep colour/shear bit) since
+        // `lodestone_client::state`'s `Variant` component fold, and this function
+        // simply never read it either. See `docs/entity-rendering.md`'s "Render
+        // layers: sheep wool" section for the rest of the chain this unblocks.
+        variant: view.variant,
+        count,
     }
 }
 
@@ -1423,6 +1475,59 @@ mod tests {
         // consumer cannot mistake "no data" for "empty hands confirmed".
         let bare = entity_snapshot(bare_entity_view(None, true));
         assert!(bare.equipment.is_empty());
+    }
+
+    /// A third instance of the velocity/equipment gap:
+    /// `EntityView::variant` was already fully decoded and simply never read
+    /// past this boundary. This is the fix `docs/entity-rendering.md`'s
+    /// "Render layers: sheep wool" section describes as the missing last hop.
+    #[test]
+    fn entity_snapshot_carries_variant_through() {
+        use lodestone_model::event::EntityVariant;
+
+        let mut view = bare_entity_view(None, true);
+        view.variant = Some(EntityVariant::Dyed {
+            color: 14,
+            sheared: false,
+        });
+        let snap = entity_snapshot(view);
+        assert_eq!(
+            snap.variant,
+            Some(EntityVariant::Dyed {
+                color: 14,
+                sheared: false
+            }),
+            "a decoded variant must survive the EntityView -> EntitySnapshot boundary"
+        );
+
+        // Control: a mob the server has never sent a variant for must read as
+        // `None`, not as some default variant.
+        let bare = entity_snapshot(bare_entity_view(None, true));
+        assert_eq!(bare.variant, None);
+    }
+
+    /// The visible half of the stack-count gap `docs/dropped-items.md`
+    /// describes: `ItemStack::count` was decoded all the way to
+    /// `EntityView::item` and dropped exactly at this conversion, so a stack of
+    /// 64 diamonds and a single diamond were indistinguishable past this point.
+    #[test]
+    fn entity_snapshot_carries_item_count_through() {
+        use lodestone_client::ResourceKey;
+        use std::str::FromStr;
+
+        let mut view = bare_entity_view(None, true);
+        view.item = Reported::Reported(Some(lodestone_model::ItemStack::new(
+            ResourceKey::from_str("minecraft:diamond").unwrap(),
+            64,
+        )));
+        let snap = entity_snapshot(view);
+        assert_eq!(snap.count, 64);
+
+        // Control: no stack at all must read as the neutral `1`, not `0` — a
+        // consumer that multiplies by count must never draw zero copies of
+        // nothing.
+        let bare = entity_snapshot(bare_entity_view(None, true));
+        assert_eq!(bare.count, 1);
     }
 
     /// The hermetic half of the entity-light contract: before login, the

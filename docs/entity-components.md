@@ -194,6 +194,46 @@ a tracked entity and the next extract puts it on screen.
   components. The two "no apex" controls correctly keep passing when nothing
   moves; they are controls for the apex assertion, not for physics existing.
 
+### Widened, not deleted (issue #47), and why
+
+Issue #47 proposes deleting `EntitySnapshot` outright now that entity state
+lives in one component set, reordering the schedule to `NetIngest` → `GameTick`
+→ `Update` → `Extract` so ingest writes the render components directly. That
+was weighed against simply widening `EntitySnapshot`/`EntityDraw` by three
+fields (sheep wool's `variant`, dropped-item `count`) for issues #29/#53, and
+widening won — deletion was **not** free enough to be worth doing as a side
+effect of an unrelated widening pass:
+
+- **The blocker is structural, not size.** Per the gotcha above,
+  `fold_snapshots` is the one fold left that is not a system precisely because
+  its input is a borrowed `&[EntitySnapshot]` slice `sim.rs` (held, and
+  contested by other in-flight work this session) owns as a plain `Vec` — the
+  same class of `'static`-resource problem `tick_item_physics` solved with
+  `CollisionSource`, but with no equivalent adapter available here. Deleting
+  the type requires ingest to write `InterpFrom`/`InterpTo`/`RenderEquipment`/
+  `RenderWool`/`ItemStacks` directly, which only makes sense *after* that
+  ownership move, not before.
+- **The schedule reorder is a behaviour change, not a refactor.** Every
+  numeric expectation across this module's ~30 hermetic tests (interpolation
+  windows, walk-cycle sampling, the physics re-anchor) is written against the
+  current clocks → ticks → fold order. Reordering to the plan's `NetIngest` →
+  `GameTick` → `Update` → `Extract` would need re-deriving and re-verifying
+  most of them in the same change — exactly the kind of change CLAUDE.md's
+  "one working seam plus a clear list beats twelve half-done layers" argues
+  against doing opportunistically.
+- **Three added fields is cheap by comparison.** `EntitySnapshot::variant` and
+  `::count`, `EntityDraw::wool` and `::count`, one new `TrackedStack` struct
+  and one new `RenderWool` component — all additive, none of it touching the
+  schedule or the fold's control flow, verified by the existing ~30 tests
+  continuing to pass unmodified plus a handful of new ones for the two new
+  fields.
+
+Net: deletion is very likely still the better end state — collapsing
+`RenderKind`/`EntityKind` and the three-copy pipeline this doc's intro
+describes is real debt — but it is a separate, larger, schedule-reordering
+change with its own verification burden, not something to fold into a
+three-field widening. #47 stays open.
+
 ## Configuration
 
 None. No feature flags, no env vars. `bevy_ecs` is
