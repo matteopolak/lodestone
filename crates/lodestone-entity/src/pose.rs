@@ -44,7 +44,56 @@ pub const MAX_HEAD_YAW: f32 = 75.0;
 /// Maximum head pitch, in degrees (`Mob.getMaxHeadXRot`).
 pub const MAX_HEAD_PITCH: f32 = 40.0;
 /// Default arm-swing duration in ticks for an empty hand.
+///
+/// 26.2 moved this onto the held stack: `LivingEntity.getCurrentSwingDuration`
+/// reads `handStack.getSwingAnimation().duration()`, and
+/// `SwingAnimation.DEFAULT` is `(WHACK, 6)` — so `6` is the *component default*,
+/// not a hard-coded constant, and an item shipping its own `swing_animation`
+/// component swings for a different number of ticks. Nothing in this engine
+/// decodes that component yet; see [`swing_duration`].
 pub const DEFAULT_SWING_DURATION: i32 = 6;
+
+/// Vanilla's `LivingEntity.getCurrentSwingDuration`, as a pure function of the
+/// held item's base duration and the two mining effects.
+///
+/// ```text
+/// haste (DIG_SPEED / Conduit Power) present -> base - (1 + amplifier)
+/// mining fatigue present                    -> base + (1 + amplifier) * 2
+/// neither                                   -> base
+/// ```
+///
+/// Haste wins outright when both are present — this is `if/else if`, not two
+/// independent adjustments. `amplifier` is vanilla's raw 0-based amplifier, so
+/// `Some(0)` is Haste I / Mining Fatigue I.
+///
+/// The result is clamped to at least `1`: Haste is uncapped through
+/// `/effect give`, and vanilla itself will happily compute a zero or negative
+/// duration here, which divides by zero in `updateSwingTime`. Clamping is a
+/// deliberate divergence from a division-by-zero, not a modelling choice.
+///
+/// # Nothing feeds the effect arguments today
+///
+/// Both are `None` at every call site in this workspace, because **no local
+/// mob-effect state is reachable**: the v770 adapter decodes
+/// `update_mob_effect` and `lodestone-shell` forwards it as
+/// `NetUpdate::EffectApplied`, but nothing folds it into a per-entity effect set
+/// that a swing (or a dig) can query. `lodestone_game::mining::BreakInputs` has
+/// the identical hole for the identical reason — its `haste_amplifier` /
+/// `mining_fatigue` fields are also always `None` (see
+/// `tool_inputs_stay_at_bare_hand_defaults` in `lodestone-shell`'s `sim.rs`).
+/// This function exists so that closing that hole is a change of *arguments* at
+/// one call site rather than a rewrite of the swing clock.
+#[must_use]
+pub fn swing_duration(base: i32, haste_amplifier: Option<u32>, mining_fatigue: Option<u32>) -> i32 {
+    let duration = if let Some(amp) = haste_amplifier {
+        base - (1 + i32::try_from(amp).unwrap_or(i32::MAX - 1))
+    } else if let Some(amp) = mining_fatigue {
+        base.saturating_add((1 + i32::try_from(amp).unwrap_or(i32::MAX / 4)).saturating_mul(2))
+    } else {
+        base
+    };
+    duration.max(1)
+}
 
 /// The target limb-swing amplitude for a given horizontal distance moved this
 /// tick: `min(distance * 4, 1)`, exactly as `updateWalkAnimation`.
@@ -225,7 +274,22 @@ impl EntityPose {
     }
 
     /// Begins an arm swing if one is not already past its half-way point, like
-    /// `LivingEntity.swing`. `duration` is the swing length in ticks.
+    /// `LivingEntity.swing`. `duration` is the swing length in ticks — build it
+    /// with [`swing_duration`].
+    ///
+    /// The "not already past its half-way point" test is what makes a held
+    /// mine look like continuous swinging rather than a stutter: vanilla's
+    /// `continueAttack` calls `swing` **every tick**, and all but every third
+    /// call is swallowed here.
+    ///
+    /// # One deliberate divergence: the duration is latched
+    ///
+    /// Vanilla re-reads `getCurrentSwingDuration()` inside `updateSwingTime`
+    /// every tick, so gaining Haste mid-swing changes the denominator under a
+    /// running animation. This latches the duration at the start of the swing
+    /// instead. The difference is unobservable today — see [`swing_duration`]
+    /// for why both effect inputs are always `None` — and re-reading it would
+    /// mean handing this type an effect source it has no other use for.
     pub fn start_swing(&mut self, duration: i32) {
         if !self.swinging || self.swing_time >= duration / 2 || self.swing_time < 0 {
             self.swing_time = -1;
@@ -325,10 +389,35 @@ impl EntityPose {
         wrap_degrees(self.head_yaw - self.body_yaw)
     }
 
-    /// The interpolated attack-swing progress for a partial tick.
+    /// The interpolated attack-swing progress for a partial tick — vanilla's
+    /// `LivingEntity.getAttackAnim`.
+    ///
+    /// # This is not a plain lerp, and the difference is visible
+    ///
+    /// Vanilla wraps a *negative* delta forward by one whole swing:
+    ///
+    /// ```text
+    /// diff = attackAnim - oAttackAnim;  if (diff < 0) diff++;
+    /// return oAttackAnim + diff * partialTick;
+    /// ```
+    ///
+    /// `attack_anim` is a sawtooth — it climbs to `(duration-1)/duration` and
+    /// then drops to `0` in one tick, either because the swing ended or because
+    /// [`start_swing`](Self::start_swing) restarted it past its half-way point.
+    /// A plain lerp across that drop runs the arm **backwards** through the whole
+    /// arc inside one 50 ms tick; the wrap instead carries it forward to `1.0`,
+    /// which is where `sin(sqrt(t) · π)` returns to zero, so the arm arrives at
+    /// rest instead of rewinding.
+    ///
+    /// This is load-bearing for hold-to-mine specifically, which re-swings every
+    /// few ticks and therefore hits the drop repeatedly rather than once.
     #[must_use]
     pub fn attack_anim_lerp(&self, partial_tick: f32) -> f32 {
-        self.o_attack_anim + (self.attack_anim - self.o_attack_anim) * partial_tick
+        let mut diff = self.attack_anim - self.o_attack_anim;
+        if diff < 0.0 {
+            diff += 1.0;
+        }
+        self.o_attack_anim + diff * partial_tick
     }
 
     /// Whether an arm swing is currently in progress.
@@ -472,6 +561,118 @@ mod tests {
         pose.tick(0.0, 0.0, 0.0, 0.0, 0.0); // swing_time 1 -> anim 1/6
         let mid = pose.attack_anim_lerp(0.5);
         assert!(mid > pose.o_attack_anim - 1e-6 && mid <= pose.attack_anim + 1e-6);
+    }
+
+    #[test]
+    fn attack_anim_wraps_forward_across_the_sawtooth_drop() {
+        // Hand-built rather than driven, so the drop is placed exactly: the last
+        // tick of a 6-tick swing reports 5/6 and the next reports 0.
+        let mut pose = EntityPose::new(0.0, 0.0, 0.0, false);
+        pose.o_attack_anim = 5.0 / 6.0;
+        pose.attack_anim = 0.0;
+
+        // A plain lerp would run *backwards* through the whole arc here; vanilla
+        // carries it forward, so every sample is >= where it started and the
+        // final one lands on 1.0 (== 0.0 in the sawtooth, but 1.0 in the shaping
+        // function, which is where the arm is back at rest).
+        assert!(
+            (pose.attack_anim_lerp(1.0) - 1.0).abs() < 1e-6,
+            "end of the wrap should be 1.0, got {}",
+            pose.attack_anim_lerp(1.0)
+        );
+        let mut previous = pose.o_attack_anim - 1e-6;
+        for step in 0..=10 {
+            let value = pose.attack_anim_lerp(step as f32 / 10.0);
+            assert!(
+                value >= previous,
+                "the wrapped arc must be monotonically forward, but {value} < {previous}"
+            );
+            previous = value;
+        }
+    }
+
+    /// The counterpart control: an *ordinary* rising tick must not be wrapped.
+    /// Without this, "the wrap fires" is also satisfied by a function that adds
+    /// 1.0 unconditionally.
+    #[test]
+    fn attack_anim_does_not_wrap_a_rising_delta() {
+        let mut pose = EntityPose::new(0.0, 0.0, 0.0, false);
+        pose.o_attack_anim = 1.0 / 6.0;
+        pose.attack_anim = 2.0 / 6.0;
+        assert!((pose.attack_anim_lerp(0.5) - 0.25).abs() < 1e-6);
+        assert!((pose.attack_anim_lerp(1.0) - 2.0 / 6.0).abs() < 1e-6);
+    }
+
+    /// The swing clock is a **tick** state machine, and reading it per frame must
+    /// not advance it. This is the same defect class `entities.rs`'s
+    /// `limb_swing_tracks_per_tick_travel_not_the_interpolation_gap` documents
+    /// for the walk cycle, where driving the phase per frame made it run up to 3x
+    /// too fast and made the speed frame-rate dependent.
+    #[test]
+    fn swing_progress_advances_per_tick_not_per_render_read() {
+        let mut pose = EntityPose::new(0.0, 0.0, 0.0, false);
+        pose.start_swing(6);
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0);
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0);
+        let before = (pose.o_attack_anim, pose.attack_anim);
+
+        // 300 render reads — 5 seconds of frames inside one 50 ms tick.
+        let mut samples = Vec::new();
+        for i in 0..300 {
+            samples.push(pose.render(i as f32 / 300.0).attack_anim);
+        }
+        assert_eq!(
+            before,
+            (pose.o_attack_anim, pose.attack_anim),
+            "render() must be a pure read; it moved the clock"
+        );
+        // Every sample stays inside the one tick's window, so no number of frames
+        // can carry the animation past where the tick put it.
+        let ceiling = pose.attack_anim + 1e-6;
+        assert!(
+            samples.iter().all(|&s| s <= ceiling),
+            "a render read escaped the current tick's window (ceiling {ceiling}): {:?}",
+            samples.iter().copied().fold(f32::MIN, f32::max)
+        );
+    }
+
+    /// Vanilla's `getCurrentSwingDuration`, including the fact that Haste wins
+    /// outright when both effects are present (`if`/`else if`, not additive).
+    #[test]
+    fn swing_duration_models_haste_and_mining_fatigue() {
+        assert_eq!(swing_duration(6, None, None), 6);
+        // Haste I: 6 - (1 + 0) = 5. Haste II: 6 - (1 + 1) = 4.
+        assert_eq!(swing_duration(6, Some(0), None), 5);
+        assert_eq!(swing_duration(6, Some(1), None), 4);
+        // Mining Fatigue I: 6 + (1 + 0) * 2 = 8. II: 6 + (1 + 1) * 2 = 10.
+        assert_eq!(swing_duration(6, None, Some(0)), 8);
+        assert_eq!(swing_duration(6, None, Some(1)), 10);
+        // Both: haste branch only.
+        assert_eq!(swing_duration(6, Some(0), Some(3)), 5);
+        // Uncapped Haste cannot produce a zero denominator.
+        assert_eq!(swing_duration(6, Some(50), None), 1);
+    }
+
+    #[test]
+    fn a_second_swing_is_swallowed_until_half_way() {
+        let mut pose = EntityPose::new(0.0, 0.0, 0.0, false);
+        pose.start_swing(6);
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0); // swing_time 0
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0); // swing_time 1
+        // Below duration/2 == 3, so this call must not restart the swing.
+        pose.start_swing(6);
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            pose.attack_anim > 1.0 / 6.0,
+            "the swing was restarted; attack_anim fell back to {}",
+            pose.attack_anim
+        );
+        // Now at/past half way, a re-swing does restart it.
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0); // swing_time 3
+        pose.start_swing(6);
+        pose.tick(0.0, 0.0, 0.0, 0.0, 0.0);
+        assert_eq!(pose.attack_anim, 0.0, "a re-swing past half way restarts");
+        assert!(pose.is_swinging(), "and it is still swinging");
     }
 
     #[test]

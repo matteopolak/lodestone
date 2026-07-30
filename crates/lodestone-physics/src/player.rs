@@ -23,12 +23,13 @@ use crate::fluid::apply_fluid_push;
 use crate::fluid_state::{FluidState, compute_fluid_state};
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth::{self};
+use crate::pose::{Pose, update_player_pose};
 use crate::profile::{FluidModel, InputModel, PhysicsProfile};
 
 /// `Avatar.DEFAULT_EYE_HEIGHT` — the player standing eye offset (`1.62F`), used
 /// as the default pose [`eye height`](PlayerState::eye_height). The swimming /
-/// crawling / gliding pose lowers it to `0.4`, crouching to `1.27`; a driver
-/// modelling those poses sets [`PlayerState::eye_height`] accordingly.
+/// crawling / gliding pose lowers it to `0.4`, crouching to `1.27`; [`crate::pose`]
+/// owns that mapping and [`tick`] applies it.
 pub const DEFAULT_EYE_HEIGHT: f32 = 1.62;
 
 /// Raw player intent for one tick, before any client-side transformation.
@@ -160,12 +161,48 @@ pub struct PlayerState {
     /// one-tick delay between entering the block and being slowed is observable
     /// and reproduced.
     pub stuck_speed_multiplier: Vec3d,
+    /// The player's current [`Pose`], which decides the **collision box** (via
+    /// [`Self::dimensions`]) and the [`eye height`](Self::eye_height).
+    ///
+    /// **An output of [`tick`], not an input to it.** `Player.updatePlayerPose`
+    /// runs at the end of `Player.tick()` and is fit-gated — a pose whose box
+    /// would not fit where the player stands is vetoed — so it cannot be
+    /// meaningfully set from outside per tick. [`Self::with_pose`] exists to seed
+    /// an initial pose (a test fixture, or a session resuming mid-swim); after the
+    /// first [`tick`] the machine owns it. See [`crate::pose`] for the state
+    /// machine and for why skipping its gate would clip a surfacing swimmer into
+    /// a ceiling with nothing to catch them.
+    ///
+    /// The narrower travel entry points ([`tick_air`], [`tick_water`],
+    /// [`tick_lava`], [`tick_elytra`]) are vanilla's `travel`, not `Player.tick`:
+    /// they *read* the pose for the box and never write it.
+    pub pose: Pose,
     /// Pose **eye height** (`getEyeHeight`), the offset from feet to eye used by
     /// [`crate::compute_fluid_state`] to decide eye-in-fluid. Standing is
     /// `1.62` (`Avatar.DEFAULT_EYE_HEIGHT`); the swimming/crawling/gliding pose is
-    /// `0.4`, crouching `1.27`. It is an **input**: the pose layer sets it (see
-    /// [`Self::with_eye_height`]) so the eye check tracks the pose the box does.
+    /// `0.4`, crouching `1.27`.
     /// `getEyeY()` widens it to `double` and adds `position.y`, reproduced exactly.
+    ///
+    /// **Derived from [`Self::pose`], and rewritten by every [`tick`].** In
+    /// vanilla the two are one record — `refreshDimensions` sets
+    /// `this.eyeHeight = newDim.eyeHeight()` in the same three lines that set the
+    /// box (`Entity.java:3395-3400`) — and splitting them is observable: a
+    /// `0.6`-high box with a `1.62` eye makes a fully submerged swimmer read
+    /// `eye_in_water == false`, because `compute_fluid_state`'s cell sweep is
+    /// bounded by the *box* and so never reaches the eye's cell. That kills the
+    /// fog, the overlay and `updateSwimming`'s entry condition at once.
+    ///
+    /// It is therefore an **output mirror**, published for the camera and the fog:
+    /// nothing inside [`tick`] reads this field. Both places that need an eye
+    /// height (`compute_fluid_state`'s eye sweep and `getFluidJumpThreshold`) call
+    /// [`Pose::eye_height`] directly, so a caller that overwrites this field
+    /// between ticks — as `lodestone-ecs`'s own pose layer currently does — can
+    /// mislead the camera but can never desynchronise the eye from the box inside
+    /// physics.
+    ///
+    /// [`Self::with_eye_height`] therefore only usefully models a pose this crate
+    /// does not have (`SLEEPING`, `DYING`), and only for a driver that does not
+    /// call [`tick`].
     pub eye_height: f32,
     /// **Output.** `isEyeInFluid(WATER)` from the last [`tick`], i.e. the eye
     /// block-column held water spanning the eye Y. Combine with in-water via
@@ -265,6 +302,7 @@ impl PlayerState {
             effects: StatusEffects::default(),
             movement_speed: None,
             stuck_speed_multiplier: Vec3d::ZERO,
+            pose: Pose::Standing,
             eye_height: DEFAULT_EYE_HEIGHT,
             eye_in_water: false,
             eye_in_lava: false,
@@ -293,10 +331,40 @@ impl PlayerState {
 
     /// Returns a copy of this state with the pose [`eye height`](Self::eye_height)
     /// set (e.g. `0.4` for the swimming/crawling pose, `1.62` standing).
+    ///
+    /// Prefer [`Self::with_pose`], which sets the box and the eye together. This
+    /// setter survives for the poses [`crate::pose`] does not model and for
+    /// drivers that never call [`tick`]; a [`tick`] will overwrite it.
     #[must_use]
     pub fn with_eye_height(mut self, eye_height: f32) -> Self {
         self.eye_height = eye_height;
         self
+    }
+
+    /// Returns a copy of this state seeded with `pose`, setting the derived
+    /// [`eye height`](Self::eye_height) to match — the pair that vanilla's
+    /// `refreshDimensions` always writes together.
+    ///
+    /// This seeds an *initial* pose. [`tick`] re-decides it every tick through the
+    /// fit gate ([`crate::pose::update_player_pose`]), so this is not a way to
+    /// hold a pose the world does not admit.
+    #[must_use]
+    pub fn with_pose(mut self, pose: Pose) -> Self {
+        self.pose = pose;
+        self.eye_height = pose.eye_height();
+        self
+    }
+
+    /// The hitbox dimensions for this state's [`pose`](Self::pose) —
+    /// `Entity.getDimensions(getPose())` for an `Avatar`.
+    ///
+    /// This is what the collision sweep is handed, and the whole reason the pose
+    /// exists: `0.6 × 1.8` standing, `0.6 × 1.5` crouching, `0.6 × 0.6` swimming
+    /// or gliding. `step_height` is pose-independent (the `STEP_HEIGHT`
+    /// attribute).
+    #[must_use]
+    pub fn dimensions(&self) -> EntityDimensions {
+        self.pose.dimensions()
     }
 
     /// Returns a copy of this state with the given status effects applied.
@@ -314,16 +382,19 @@ impl PlayerState {
         self
     }
 
-    /// The player's bounding box at its current position.
+    /// The player's bounding box at its current position, **in its current
+    /// pose** — `Entity.getBoundingBox()`.
     ///
-    /// The player's `0.6 × 1.8` hitbox is per-entity data ([`EntityDimensions`]),
-    /// not version data, so it no longer comes from the profile. The `profile`
-    /// parameter is retained (as `_profile`) purely for source compatibility with
-    /// existing callers; it is unused, and a caller may drop the argument once its
-    /// call sites are updated.
+    /// The hitbox is per-entity data ([`EntityDimensions`]), not version data, so
+    /// it does not come from the profile. The `profile` parameter is retained (as
+    /// `_profile`) purely for source compatibility with existing callers; it is
+    /// unused, and a caller may drop the argument once its call sites are updated.
+    ///
+    /// Since `makeBoundingBox` anchors `minY` at the feet, a pose change moves
+    /// only the top face (and, for poses this crate does not model, the width).
     #[must_use]
     pub fn bounding_box(&self, _profile: &PhysicsProfile) -> Aabb {
-        EntityDimensions::PLAYER.bounding_box(self.position)
+        self.dimensions().bounding_box(self.position)
     }
 }
 
@@ -455,7 +526,7 @@ pub(crate) fn friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// apply the block speed factor.
 ///
 /// This is a thin wrapper: it lifts the player's motion into an [`EntityMotion`],
-/// supplies the player's [`EntityDimensions::PLAYER`] hitbox/step height and a
+/// supplies the player's current-pose hitbox ([`PlayerState::dimensions`]) and a
 /// [`MoveContext`] (Slow Falling, and `suppress_bounce` = the player sneaking,
 /// which both zeroes the base entity restitution and vetoes the block-bounce
 /// branch), runs the shared core, and writes the result back. A mob loop would
@@ -490,7 +561,7 @@ fn do_move(
             fall_distance: state.fall_distance,
         },
     };
-    move_entity(&mut motion, EntityDimensions::PLAYER, view, profile, ctx);
+    move_entity(&mut motion, state.dimensions(), view, profile, ctx);
     state.position = motion.position;
     state.velocity = motion.velocity;
     state.on_ground = motion.on_ground;
@@ -1020,7 +1091,7 @@ pub fn tick_air(
     };
     travel_in_air(
         &mut motion,
-        EntityDimensions::PLAYER,
+        state.dimensions(),
         (xxa, zza),
         effective_speed(profile, state),
         ctx,
@@ -1155,7 +1226,11 @@ fn apply_fluid_jump(
         fluid.water_height
     };
     let in_water_and_has_height = fluid.in_water() && fluid_height > 0.0;
-    let threshold = fluid_jump_threshold(state.eye_height);
+    // `getEyeHeight()` is *always* `getDimensions(getPose()).eyeHeight()` in
+    // vanilla — one record, no way for the two to disagree. Read it from the pose
+    // rather than from [`PlayerState::eye_height`] so an out-of-band write to that
+    // field cannot make the box and the eye disagree here either.
+    let threshold = fluid_jump_threshold(state.pose.eye_height());
     // The outer test is vanilla's `!(fluidHeight > threshold)` and the two inner
     // ones are its `<=` — transcribed as written rather than normalised, because the
     // two forms differ on NaN and the source is the specification here.
@@ -1227,12 +1302,6 @@ fn jump_out_of_fluid(
 ///
 /// # Not modelled
 ///
-/// * The **swimming hitbox**. Vanilla's `Pose.SWIMMING` is `0.6 × 0.6` with eye
-///   `0.4` (`Avatar.java:28`); this engine keeps [`EntityDimensions::PLAYER`] for
-///   every pose, so a swimmer cannot squeeze through a one-block gap. The *eye*
-///   height is modelled, because it is an explicit input
-///   ([`PlayerState::eye_height`]) that the pose layer sets, and it is what
-///   `getFluidJumpThreshold` and the eye-in-fluid tests read.
 /// * Bubble columns (`BubbleColumnBlock`'s own up/down impulses).
 /// * `WATER_MOVEMENT_EFFICIENCY` has no source in this repo — see
 ///   [`PlayerState::water_movement_efficiency`]. The arithmetic is here; the value
@@ -1553,9 +1622,36 @@ fn update_stuck_multiplier(
 }
 
 /// Advances the player one tick: dispatches to the fluid/elytra/air travel path
-/// exactly as vanilla's `LivingEntity.travel()`, then records any stuck-in-block
-/// multiplier for the next tick to consume (`Entity.checkInsideBlocks`).
+/// exactly as vanilla's `LivingEntity.travel()`, records any stuck-in-block
+/// multiplier for the next tick to consume (`Entity.checkInsideBlocks`), and
+/// finally re-decides the **pose** through vanilla's fit gate
+/// ([`crate::pose::update_player_pose`]).
+///
+/// The pose runs last because `Player.updatePlayerPose` is the last statement of
+/// `Player.tick()` (`Player.java:284`), after `super.tick()` has done all the
+/// moving. So this tick's movement used the pose decided at the end of the
+/// *previous* tick, and the fit gate probes the post-move position.
 pub fn tick(
+    state: &mut PlayerState,
+    input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    travel_and_check_inside_blocks(state, input, view, profile);
+    // `Player.updatePlayerPose()` with no entity snapshot: the block half of the
+    // fit gate. See `tick_among_entities` for the full predicate.
+    update_player_pose(state, input, view, &[]);
+}
+
+/// Everything vanilla's `super.tick()` does to a player's motion — `baseTick`'s
+/// fluid/swim summary, then `travel` — up to but excluding the pose decision.
+///
+/// Split out so [`tick`] and [`tick_among_entities`] can share it while keeping
+/// vanilla's ordering: `pushEntities` is the end of `aiStep`, *inside*
+/// `super.tick()`, and therefore **before** `updatePlayerPose`. That order is
+/// observable, because the push's pair test reads `getBoundingBox()` — which the
+/// pose sizes.
+fn travel_and_check_inside_blocks(
     state: &mut PlayerState,
     input: MovementInput,
     view: &dyn CollisionView,
@@ -1565,10 +1661,18 @@ pub fn tick(
     // `travel` reads `isInWater`/`isInLava`. Do the same: one source of truth for
     // eye/box submersion, recorded on the state for the swimming pose and for the
     // shell's fog / overlay / ambient-sound consumers.
+    //
+    // **Both the box and the eye come from the pose**, never from
+    // [`PlayerState::eye_height`]. They are one `EntityDimensions` record in
+    // vanilla and cannot disagree; deriving both here means an out-of-band write to
+    // that field cannot desynchronise them either. `tests/pose_dimensions.rs`
+    // measures what the disagreement would cost: a `0.6` box with a `1.62` eye
+    // reports dry eyes twenty blocks under water, because this sweep is bounded by
+    // the box and never visits the eye's cell.
     let fluid = compute_fluid_state(
         state.bounding_box(profile),
         state.position,
-        state.eye_height,
+        state.pose.eye_height(),
         view,
     );
     state.eye_in_water = fluid.eye_in_water;
@@ -1623,8 +1727,13 @@ pub fn tick_among_entities(
     nearby: &[crate::push::NearbyEntity],
     self_flags: crate::push::PushSelf,
 ) {
-    tick(state, input, view, profile);
+    travel_and_check_inside_blocks(state, input, view, profile);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
+    // The pose comes *after* the push, because `pushEntities` is the tail of
+    // `aiStep` (inside `super.tick()`) and `updatePlayerPose` is the tail of
+    // `Player.tick()`. `nearby` also supplies the entity term of the fit gate —
+    // vacuous unless one of them is a boat, a shulker or a happy ghast.
+    update_player_pose(state, input, view, nearby);
 }
 
 /// `Entity.updateSwimming()` (`Entity.java:1644-1652`) — the sprint-swimming pose
