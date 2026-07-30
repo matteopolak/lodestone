@@ -19,6 +19,21 @@ is the whole of what was taken.
 dependency precisely, and §9's first milestone is deliberately something that ships *before* them
 and is visible on its own.
 
+> **CORRECTION (superseded).** §3.2's headline finding — that the world data answers "three
+> questions out of twelve" — **is no longer true**, and was the most load-bearing claim in this
+> document. All twelve `CollisionView` methods are now backed by real per-block-state data: the
+> collision-shape census (32,366 states), the outline/interaction census, `blocks_motion` as its own
+> dumped census (a shape-derived version got **2,618 states wrong**), block physics constants, and
+> `fluid_at` reading real per-state amount/falling. Computed paths are *executable* today.
+>
+> Two other gaps this document lists are also closed: **`maybeBackOffFromEdge`** is fully modelled
+> with golden traces (see [`edge-back-off.md`](./edge-back-off.md)), and the pathfinding search
+> itself exists and is callable (`lodestone-entity/src/pathfinding`). What is still missing is a
+> *consumer* — the `lodestone-autopilot` shell.
+>
+> The original text is kept below because the *reasoning* about why executability matters more than
+> search quality is still the right frame. Only the measurements are stale.
+
 **Read §3.2 first if you read nothing else.** The most important finding in this document is that
 this client's physics *library* is excellent and the *world data feeding it* currently answers
 three questions out of twelve, which makes computed paths unexecutable today for reasons that have
@@ -395,7 +410,7 @@ so JVM ≡ golden ≡ Rust.
 
 | gap | consequence |
 |---|---|
-| **`maybeBackOffFromEdge`** — zero occurrences in the tree | **a likely desync source, not just a feel issue.** See the box below |
+| ~~**`maybeBackOffFromEdge`** — zero occurrences in the tree~~ **CLOSED** — fully modelled with golden traces, see [`edge-back-off.md`](./edge-back-off.md) | was **a likely desync source, not just a feel issue.** The box below explains why, and the reasoning still stands |
 | **`isHorizontalCollisionMinor`** — zero occurrences | vanilla's *client* keeps sprinting through a collision within ~8° of the desired direction (`client-src/.../LocalPlayer.java`). Our engine never cancels sprint on collision at all, so it is divergent in the *safe* direction (we slide along walls slightly faster than a vanilla client, and the server does not care because it tracks sprint from our own `PlayerCommand`). Low priority; note it so nobody "fixes" it into a desync |
 | auto-jump | fine, and arguably good: the executor should press jump explicitly |
 | flight / creative movement | `Sim::fly_tick` is a debug camera; creative-flight navigation is out of scope |

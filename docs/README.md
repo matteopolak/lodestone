@@ -199,8 +199,59 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded
   frame-driven ECS, the 0.25-block-per-packet agreement the server actually
-  enforces, and the finding that the live `CollisionView` answers three questions
-  out of twelve.
+  enforces, and its (now **superseded**) finding that the live `CollisionView` answered
+  three questions out of twelve — all twelve are backed by real per-state data today.
+- [**Roadmap index**](./roadmap/README.md) — the top of the plan to 1:1 parity, client and
+  server: what "parity" means in falsifiable terms, the nine tracks and their epics, and the
+  invariants every issue inherits. **Start here** rather than at any single area doc.
+- [Benchmarks and performance roadmap](./roadmap/benchmarks.md) — what is measured and why,
+  the harness design, and how a regression is caught without turning CI into a flake
+  generator; includes the 2.08x per-section-uniform win as the worked example of what
+  good evidence looks like, and why a wall-clock ceiling is the wrong shape for a gate.
+- [Client simulation, physics and input roadmap](./roadmap/client-simulation.md) — the
+  ordered decomposition of movement modes not yet modelled, vitals, damage, prediction
+  and reconciliation, and input, for epics #1–#4; what in `docs/baritone-port.md`'s own
+  parity verdict is now stale (the live `CollisionView` answers all twelve questions,
+  not three), and why the new-issue count came in under the ~35–60 guideline on
+  purpose rather than by padding.
+- [Client rendering and UI roadmap](./roadmap/client-rendering.md) — the ordered
+  decomposition of block entity renderers, sky/weather, smooth lighting, particles, the
+  remaining GUI screens, HUD, camera/post effects, item/entity visuals, audio and text
+  breadth for epics #1–#4; the items a shallow grep would have re-flagged as missing but
+  which already render (durability bars, animated textures, boss bar/scoreboard/tab
+  list, third-person switching), and two claims in the drafting brief itself that were
+  stale.
+- [Plugin framework roadmap](./roadmap/plugin-framework.md) — the capability audit
+  against the real Bukkit/Paper/Fabric surface for epic #77: events and cancellation,
+  the scheduler, commands, permissions, world/entity/inventory access, persistence,
+  packet interception, the escape hatch, and the client-only surface, each checked
+  against the tree rather than the plan; a port-feasibility verdict for eight real
+  plugin archetypes; a stale gap-list claim in `docs/plugin-api.md` found and fixed
+  along the way (issue #180); and the one capability family — bidirectional low-latency
+  packet mutation — where "port any Java plugin" needs an asterisk rather than a yes.
+- [Server entities, AI and gameplay mechanics roadmap](./roadmap/server-entities.md) —
+  the ordered decomposition of mob AI, spawning, breeding/taming/villagers, farming and
+  processing blocks, and damage/health for epic #5; why most of Phase 0 is closing
+  islands (`damage.rs`, `projectile.rs`, `explosion.rs`, the `brain` system and the
+  dumped `path_types.rs` census all have zero consumers today) rather than new
+  invention, and the correction that the goal-AI-plus-pathfinder composition the
+  drafting brief called "groundwork" is in fact already ticking in production.
+- [Server-side world simulation roadmap](./roadmap/server-simulation.md) — the ordered
+  decomposition of chunk lifecycle, persistence, block behaviour and ticks, redstone,
+  world state, and the rest of server plumbing for epic #5; two corrections to the
+  drafting brief's own research (explosion block-destruction is genuinely absent but
+  entity-exposure math for it already exists and is a separate island, and a real
+  `WorldTime` resource exists but only client-side, never owned by `lodestone-server`);
+  and why 9 of the 46 filed issues could not be attached to epic #5 directly — GitHub's
+  100-sub-issue-per-parent cap, hit from concurrent filing across every Tier-4 audit.
+- [Protocol, networking and multi-version roadmap](./roadmap/protocol.md) — the
+  measured packet-coverage table for epics #4–#5: serverbound *decode* (being a
+  server) is 0/69, a completely different axis from the 53/69 *encode* figure the
+  connectedness tool reports; secure chat signing has real bookkeeping but zero
+  cryptography in either role; `registry_data` is ingested by neither side, which is
+  the root cause of two already-filed bugs; the `CHUNK_BATCH_START` "island" that
+  turned out to be a benign side-effect-only packet; and the multi-version cost
+  analysis, left as a design question rather than a recommendation.
 - [Microsoft account storage and online-mode join](./accounts.md) — multi-account
   credentials, the keychain/plain-file split (issue #64), wiring it into the
   join flow (issue #65), and the account list screen that draws it (issue #66):
