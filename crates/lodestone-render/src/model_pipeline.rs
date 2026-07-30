@@ -141,20 +141,53 @@ impl ModelPipeline {
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
 
+        // Two bindings, not one: binding 0 is the *shared* per-frame half
+        // (view-projection + fog), identical for every section and every other
+        // consumer of this pipeline (dropped items, the held item); binding 1
+        // is the per-section world origin, selected per draw by a **dynamic
+        // offset** into one physically resident buffer. Splitting them is the
+        // fix for issue #75 — profiling a live session found `render_inner`
+        // rewriting *every* section's whole camera uniform (view_proj bytes
+        // included) every frame, ~4000 `queue.write_buffer` calls landing in
+        // `RenderState::render`'s hot path (52.9% of main-thread CPU, mostly
+        // `StagingBuffer::new`/`create_buffer`). `section_origin` is constant
+        // for a section's life, so it only needs writing once, at upload; only
+        // `view_proj`/fog actually change per frame, and there is exactly one
+        // of those. See `docs/section-camera-uniform.md`.
+        //
+        // This still fits the pipeline's four-bind-group floor: it is a second
+        // *binding* inside the existing group 0, not a fifth group.
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-model-camera-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                // Vertex reads the view-projection; fragment reads the folded fog
-                // block (eye, colour, range), so the group must be visible to both.
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    // Vertex reads the view-projection; fragment reads the folded
+                    // fog block (eye, colour, range), so the group must be
+                    // visible to both.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    // The origin only ever feeds `world = position + origin.xyz`
+                    // in the vertex stage.
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(
+                            core::mem::size_of::<SectionOriginUniform>() as u64,
+                        ),
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -304,20 +337,44 @@ impl ModelPipeline {
         }
     }
 
-    /// Create the camera bind group from an existing uniform buffer.
+    /// Create the group-0 bind group from the shared per-frame buffer
+    /// (binding 0: view-projection + fog, built with
+    /// [`model_shared_camera_buffer`] or [`model_shared_camera_buffer_with_fog`])
+    /// and an origin buffer (binding 1, dynamic offset).
+    ///
+    /// `origin_buffer` may be a single [`SectionOriginUniform`] slot (one-off
+    /// draws: a dropped item, the held item, a test's synthetic section) or a
+    /// large arena backing many sections at different offsets — the *window*
+    /// bound here is always one `SectionOriginUniform` (16 bytes); a caller
+    /// addressing many sections through one arena builds this bind group
+    /// **once** and picks a section by the dynamic offset passed to
+    /// `set_bind_group`, not by rebuilding the bind group.
     #[must_use]
     pub fn camera_bind_group(
         &self,
         device: &wgpu::Device,
-        camera_buffer: &wgpu::Buffer,
+        shared_buffer: &wgpu::Buffer,
+        origin_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lodestone-model-camera-bg"),
             layout: &self.camera_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shared_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: origin_buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(
+                            core::mem::size_of::<SectionOriginUniform>() as u64
+                        ),
+                    }),
+                },
+            ],
         })
     }
 
@@ -446,6 +503,14 @@ fn padded_anim_slots(slots: &[AnimSlotUniform]) -> [AnimSlotUniform; ANIM_SLOT_U
 /// binding carries both the view-projection and the distance fog. Callers that
 /// want fog build the buffer with [`model_camera_buffer_with_fog`] or overwrite
 /// it each frame with a full `ModelCameraUniform`.
+///
+/// **Legacy, single-binding shape.** [`ModelPipeline::camera_layout`] now has
+/// *two* bindings (see [`ModelPipeline::camera_bind_group`]), so this builder
+/// and [`ModelCameraUniform`] are no longer wired to that bind group. They
+/// remain for [`CrackPipeline`](crate::crack_pipeline::CrackPipeline), whose own
+/// (unrelated) single-binding layout still expects one buffer carrying camera,
+/// origin and fog together, and whose crack overlay never has more than one
+/// draw's worth of state to write, so there was nothing to fix there.
 #[must_use]
 pub fn model_camera_buffer(device: &wgpu::Device, uniform: CameraUniform) -> wgpu::Buffer {
     model_camera_buffer_with_fog(device, uniform, crate::fog::FogUniform::disabled())
@@ -454,6 +519,9 @@ pub fn model_camera_buffer(device: &wgpu::Device, uniform: CameraUniform) -> wgp
 /// Build the group-0 uniform buffer for the model/fluid pass with an explicit
 /// fog block. `fog` fades distant fragments toward the fog colour; pass
 /// [`FogUniform::disabled`](crate::fog::FogUniform::disabled) to turn fog off.
+///
+/// See [`model_camera_buffer`]'s doc: legacy shape, kept for
+/// [`CrackPipeline`](crate::crack_pipeline::CrackPipeline).
 #[must_use]
 pub fn model_camera_buffer_with_fog(
     device: &wgpu::Device,
@@ -473,6 +541,10 @@ pub fn model_camera_buffer_with_fog(
 /// shader within the portable `max_bind_groups` floor of 4 — camera, atlas,
 /// palette and animation already occupy four groups on Metal's guaranteed
 /// minimum. Rewrite the whole struct each frame via [`queue.write_buffer`].
+///
+/// See [`model_camera_buffer`]'s doc: legacy shape, kept for
+/// [`CrackPipeline`](crate::crack_pipeline::CrackPipeline). Live terrain uses
+/// [`ModelSharedCameraUniform`] + [`SectionOriginUniform`] instead.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ModelCameraUniform {
@@ -482,18 +554,142 @@ pub struct ModelCameraUniform {
     pub fog: crate::fog::FogUniform,
 }
 
+/// The *shared* half of the model/fluid group-0 uniform (binding 0):
+/// view-projection plus this frame's fog, identical for every section drawn
+/// this frame. Paired with [`SectionOriginUniform`] at binding 1, which varies
+/// per section and is addressed by a dynamic offset instead of being part of
+/// this struct.
+///
+/// This split is the fix for issue #75: a live-play profile found
+/// `RenderState::render_inner` rewriting a *whole* per-section camera uniform
+/// (view_proj bytes included) via `queue.write_buffer` once per section, every
+/// frame — up to ~4000 calls/frame at the measured `sections=3880`, and 52.9%
+/// of main-thread CPU (mostly `StagingBuffer::new` → `create_buffer`). Only
+/// `view_proj`/fog actually change frame to frame; `section_origin` is the
+/// section's fixed world position and is constant for its whole lifetime. This
+/// struct is written **once per frame**, not once per section.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ModelSharedCameraUniform {
+    /// Column-major view-projection matrix, shared by every section this
+    /// frame.
+    pub view_proj: [[f32; 4]; 4],
+    /// Distance fog for this frame (eye position, colour, start/end).
+    pub fog: crate::fog::FogUniform,
+}
+
+/// A section's world-space origin (group 0 binding 1): `vec4(origin.xyz, 0)`,
+/// added to the section-local vertex position in the vertex shader.
+///
+/// Bound with a **dynamic offset**, so one physically resident buffer (an
+/// arena of these, or a single slot for a one-off draw) serves every section:
+/// written once when the section is uploaded — the origin never changes for a
+/// section's lifetime — and selected per draw by the offset passed to
+/// `wgpu::RenderPass::set_bind_group`, not by rebuilding a bind group.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SectionOriginUniform {
+    /// `xyz` = the section's world-space origin; `w` unused.
+    pub origin: [f32; 4],
+}
+
+impl SectionOriginUniform {
+    /// Build from a plain `[x, y, z]` world origin.
+    #[must_use]
+    pub const fn new(origin: [f32; 3]) -> Self {
+        Self {
+            origin: [origin[0], origin[1], origin[2], 0.0],
+        }
+    }
+}
+
+/// Build the shared group-0 buffer (binding 0) with fog disabled. Rewrite it
+/// each frame via [`update_model_shared_camera_buffer`] — this is now the
+/// **only** per-frame write the model/fluid camera group needs, however many
+/// sections are resident.
+#[must_use]
+pub fn model_shared_camera_buffer(device: &wgpu::Device, view_proj: [[f32; 4]; 4]) -> wgpu::Buffer {
+    model_shared_camera_buffer_with_fog(device, view_proj, crate::fog::FogUniform::disabled())
+}
+
+/// Build the shared group-0 buffer (binding 0) with an explicit fog block.
+#[must_use]
+pub fn model_shared_camera_buffer_with_fog(
+    device: &wgpu::Device,
+    view_proj: [[f32; 4]; 4],
+    fog: crate::fog::FogUniform,
+) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lodestone-model-shared-camera-uniform"),
+        contents: bytemuck::bytes_of(&ModelSharedCameraUniform { view_proj, fog }),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+/// Rewrite the shared group-0 buffer for a new frame. One call replaces what
+/// used to be one `queue.write_buffer` per **section**, per frame.
+pub fn update_model_shared_camera_buffer(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    view_proj: [[f32; 4]; 4],
+    fog: crate::fog::FogUniform,
+) {
+    queue.write_buffer(
+        buffer,
+        0,
+        bytemuck::bytes_of(&ModelSharedCameraUniform { view_proj, fog }),
+    );
+}
+
+/// Build a single-slot origin buffer (binding 1) for a one-off draw that does
+/// not need the shared multi-section arena: a dropped item, the held item, or
+/// a test's synthetic section. Real terrain instead shares one arena of many
+/// slots across all resident sections — see `SectionOriginArena` in
+/// `lodestone-shell`'s `gpu.rs`.
+#[must_use]
+pub fn section_origin_buffer(device: &wgpu::Device, origin: [f32; 3]) -> wgpu::Buffer {
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("lodestone-model-section-origin"),
+        contents: bytemuck::bytes_of(&SectionOriginUniform::new(origin)),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+    })
+}
+
+/// Rewrite a section-origin slot (any buffer built to hold one or more
+/// [`SectionOriginUniform`]s, at `offset`). Real sections call this exactly
+/// once, at upload — the origin is constant for the section's lifetime — never
+/// per frame.
+pub fn write_section_origin(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    offset: u64,
+    origin: [f32; 3],
+) {
+    queue.write_buffer(buffer, offset, bytemuck::bytes_of(&SectionOriginUniform::new(origin)));
+}
+
 const MODEL_WGSL: &str = r"
 // Camera plus this frame's distance fog, folded into one group-0 uniform. Fog
 // lives here (rather than in its own bind group) so the model shader stays
 // within the portable `max_bind_groups` floor of 4. `fog_eye.xyz` is the camera
 // world position; `fog_color_start.rgb` is the fog colour and `.w` the distance
 // where fog begins; `fog_end_enabled.x` is where fog is full and `.y` is 0/1.
+//
+// Shared by every section drawn this frame — written once per frame, not once
+// per section (see `ModelSharedCameraUniform`'s doc for the profile that made
+// this a separate binding from `Origin`, below).
 struct Camera {
     view_proj: mat4x4<f32>,
-    section_origin: vec4<f32>,
     fog_eye: vec4<f32>,
     fog_color_start: vec4<f32>,
     fog_end_enabled: vec4<f32>,
+};
+
+// A section's world-space origin, bound at group 0 binding 1 with a dynamic
+// offset: one physically resident buffer of these serves every section, so
+// re-aiming the camera (binding 0, above) never needs to touch this one.
+struct Origin {
+    section_origin: vec4<f32>,
 };
 
 // The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
@@ -533,6 +729,7 @@ struct AnimSlots {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
 @group(2) @binding(0) var<uniform> palette: Palette;
@@ -589,7 +786,7 @@ fn vs_main(
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
     let block = f32(light_byte & 15u) / 15.0;
 
-    let world = position + camera.section_origin.xyz;
+    let world = position + origin.section_origin.xyz;
     // Lift a dark floor so unlit faces read dim rather than pure black.
     let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
@@ -649,13 +846,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // foliage green. Water's greyscale texture becomes blue here.
 const FLUID_WGSL: &str = r"
 // Camera plus this frame's distance fog (see the model shader); folded into
-// group 0 so the fluid shader stays within four bind groups.
+// group 0 so the fluid shader stays within four bind groups. Shared by every
+// section this frame — written once per frame, not once per section.
 struct Camera {
     view_proj: mat4x4<f32>,
-    section_origin: vec4<f32>,
     fog_eye: vec4<f32>,
     fog_color_start: vec4<f32>,
     fog_end_enabled: vec4<f32>,
+};
+
+// A section's world-space origin (see the model shader's `Origin`); bound at
+// group 0 binding 1 with a dynamic offset.
+struct Origin {
+    section_origin: vec4<f32>,
 };
 
 // The factor the *sky* half of the lightmap is scaled by, so terrain darkens at
@@ -674,6 +877,7 @@ fn sky_darken() -> f32 {
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var<uniform> origin: Origin;
 @group(1) @binding(0) var atlas_tex: texture_2d<f32>;
 @group(1) @binding(1) var atlas_smp: sampler;
 
@@ -735,7 +939,7 @@ fn vs_main(
     let block = f32(light_byte & 15u) / 15.0;
     let tint_idx = packed.y;
 
-    let world = position + camera.section_origin.xyz;
+    let world = position + origin.section_origin.xyz;
     let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;

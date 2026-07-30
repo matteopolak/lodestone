@@ -61,9 +61,9 @@ use lodestone_render::entity::{
     dropped_item_matrix, dropped_item_mesh, ground_transform_for, item_hover_lift,
 };
 use lodestone_render::{
-    BlockModels, Camera, CameraUniform, GpuAtlas, GpuModelMesh, ItemGeometry, ModelMesh,
-    ModelPipeline, blocks_json_registry, model_anim_buffer, model_camera_buffer,
-    model_palette_buffer,
+    BlockModels, Camera, GpuAtlas, GpuModelMesh, ItemGeometry, ModelMesh, ModelPipeline,
+    blocks_json_registry, model_anim_buffer, model_palette_buffer, model_shared_camera_buffer,
+    section_origin_buffer,
 };
 
 mod gate_harness;
@@ -201,14 +201,9 @@ fn render(gpu: &Gpu, models: &BlockModels, mesh: &ModelMesh, cam: &Camera) -> Ve
     let anim_bg = pipeline.anim_bind_group(device, &anim_buffer);
     // A *world* camera with a zero section origin — exactly what
     // `prepare_item_drops` writes into `drop_cam_buffer`.
-    let cam_buffer = model_camera_buffer(
-        device,
-        CameraUniform {
-            view_proj: cam.view_projection().to_cols_array_2d(),
-            section_origin: [0.0, 0.0, 0.0, 0.0],
-        },
-    );
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer);
+    let cam_buffer = model_shared_camera_buffer(device, cam.view_projection().to_cols_array_2d());
+    let origin_buffer = section_origin_buffer(device, [0.0, 0.0, 0.0]);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buffer, &origin_buffer);
 
     let color = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("sprite drop target"),
@@ -271,7 +266,7 @@ fn render(gpu: &Gpu, models: &BlockModels, mesh: &ModelMesh, cam: &Camera) -> Ve
         // it has to go through the identical path to be a fair control.
         if let Some(gpu_mesh) = &gpu_mesh {
             pass.set_pipeline(&pipeline.pipeline);
-            pass.set_bind_group(0, &cam_bg, &[]);
+            pass.set_bind_group(0, &cam_bg, &[0]);
             pass.set_bind_group(1, &atlas_bg, &[]);
             pass.set_bind_group(2, &palette_bg, &[]);
             pass.set_bind_group(3, &anim_bg, &[]);

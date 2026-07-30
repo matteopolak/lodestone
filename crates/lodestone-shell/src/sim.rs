@@ -1704,14 +1704,40 @@ impl Sim {
         })
     }
 
-    /// Best-effort close request for the open server menu.
-    pub fn close_open_menu(&self) {
+    /// Close the open server menu: clear it locally **and** tell the server.
+    ///
+    /// # Both halves are required, and the local one is why this takes `&mut self`
+    ///
+    /// This used to only send `ContainerClose`, and the screen therefore never went
+    /// away — you could open a crafting table and not get out of it. A vanilla
+    /// server does **not** echo a close back; `ClientboundContainerClosePacket` is
+    /// sent only when the *server* forces a close. So waiting for the wire to clear
+    /// [`Self::open_menu`] waits forever, and every consumer that keys off it —
+    /// `active_container_menu`, the key-dispatch gate, the container draw — stayed
+    /// convinced a menu was open.
+    ///
+    /// Vanilla's `Player.closeContainer()` clears the client's own menu immediately
+    /// and *then* notifies the server, which is what this now mirrors. The local
+    /// clear reuses [`ClientEvent::ScreenClosed`] rather than poking the component,
+    /// so the close travels the same fold as a server-driven one and cannot drift
+    /// from it (`lodestone_game::menus::Menus::apply`).
+    ///
+    /// It needs `&mut self` for that write. The old `&self` signature was not a
+    /// style choice — it made the local clear *unrepresentable*, which is why the
+    /// bug survived a fix to the key dispatch that reached this function correctly.
+    pub fn close_open_menu(&mut self) {
         let Some(open) = self.open_menu() else { return };
         if let Some(net) = &self.net {
             net.send_action(ClientAction::ContainerClose {
                 window_id: open.window_id,
             });
         }
+        let window_id = open.window_id;
+        self.write_local(|w, local| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus.0.apply(&lodestone_model::ClientEvent::ScreenClosed { window_id });
+            }
+        });
     }
 
     /// Compose a typed chat line onto the outbound [`ClientAction`] seam and hand
@@ -6638,6 +6664,55 @@ mod tests {
     /// (and therefore of dropping its `World`). With one `World` it has to be an
     /// explicit despawn, which is exactly the kind of thing that gets dropped in a
     /// refactor and shows up as the previous server's mobs still drawn on the title
+    /// **You could open a crafting table and not get out of it.**
+    ///
+    /// `close_open_menu` sent `ContainerClose` and nothing else, so
+    /// [`Sim::open_menu`] stayed `Some` forever — a vanilla server does not echo a
+    /// close back. Everything downstream keys off that: `active_container_menu`,
+    /// the key-dispatch gate, the container draw. The dispatch was fixed first and
+    /// the bug survived, because the function the keys correctly reached did not
+    /// clear anything.
+    ///
+    /// The control matters as much as the assertion: it proves the menu really was
+    /// open first, so a fold that silently failed to open it could not make this
+    /// pass vacuously.
+    #[test]
+    fn closing_a_server_menu_clears_it_locally_without_waiting_for_the_server() {
+        use lodestone_model::ClientEvent;
+
+        let mut sim = Sim::with_demo_world(test_config());
+        let local = sim.local;
+        sim.write(|w| {
+            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
+                menus.0.apply(&ClientEvent::ScreenOpened {
+                    window_id: 5,
+                    menu_type: lodestone_model::Identifier::new("minecraft", "crafting").unwrap(),
+                    title: lodestone_model::Text::literal("Crafting"),
+                });
+                // 3x3 grid + result + 36 player slots: the content packet is what
+                // actually promotes `pending` to `opened`.
+                menus.0.apply(&ClientEvent::ContainerContent {
+                    window_id: 5,
+                    state_id: 1,
+                    items: vec![None; 46],
+                    carried_item: None,
+                });
+            }
+        });
+        assert!(
+            sim.open_menu().is_some(),
+            "control: the menu must actually be open, or this gate proves nothing"
+        );
+
+        sim.close_open_menu();
+
+        assert!(
+            sim.open_menu().is_none(),
+            "closing must clear the local menu immediately — a vanilla server sends \
+             no close back, so anything that waits for the wire waits forever"
+        );
+    }
+
     /// screen.
     #[test]
     fn end_session_clears_the_entity_tracks() {

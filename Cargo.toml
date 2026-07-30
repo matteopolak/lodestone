@@ -131,3 +131,16 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Debug info in release, for `samply`/`Instruments` profiling.
+#
+# **This does not change the generated code.** `debug` controls what DWARF is
+# emitted alongside the machine code; optimisation level, LTO and codegen-units
+# are what decide performance, and all three are untouched above. The only costs
+# are a larger binary and a longer link.
+#
+# `2` rather than `1` on purpose: with `lto = "thin"` and one codegen unit,
+# almost everything hot is inlined, and level 1 (line tables only) attributes a
+# sample to the *outer* function — so a mesher inner loop shows up as whatever
+# called it. Level 2 keeps inline frames, which is the difference between "time
+# is in meshing" and knowing which part of meshing.
+debug = 2

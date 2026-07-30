@@ -70,9 +70,10 @@ use lodestone_model::{
     BlockStateRegistry, Identifier, LoginProfile, ResolvedBlockState, ServerAddress,
 };
 use lodestone_render::{
-    Camera, CameraUniform, DepthBuffer, GpuAtlas, GpuContext, GpuModelMesh, HeadlessTarget,
-    ModelMesh, ModelPipeline, ModelSectionView, RenderTarget, SECTION_SIZE, is_full_cube,
-    is_packed_cube, mesh_models, model_anim_buffer, model_camera_buffer, model_palette_buffer,
+    Camera, DepthBuffer, GpuAtlas, GpuContext, GpuModelMesh, HeadlessTarget, ModelMesh,
+    ModelPipeline, ModelSectionView, RenderTarget, SECTION_SIZE, is_full_cube, is_packed_cube,
+    mesh_models, model_anim_buffer, model_palette_buffer, model_shared_camera_buffer,
+    section_origin_buffer,
 };
 use uuid::Uuid;
 
@@ -419,10 +420,11 @@ fn live_gate_real_chunk_to_pixels() {
         near: 0.05,
         far: Camera::far_for_render_distance(32, 0),
     };
-    let cam_buf = model_camera_buffer(device, CameraUniform::new(&camera, [0.0, 0.0, 0.0]));
+    let cam_buf = model_shared_camera_buffer(device, camera.view_projection().to_cols_array_2d());
+    let origin_buf = section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
     let pipeline = ModelPipeline::new(device, format);
-    let cam_bg = pipeline.camera_bind_group(device, &cam_buf);
+    let cam_bg = pipeline.camera_bind_group(device, &cam_buf, &origin_buf);
     let atlas_bg = pipeline.atlas_bind_group(device, &gpu_atlas);
     // The model shader also carries the tint palette (group 2) and animation
     // slots (group 3). This gate checks geometry, not tint, so an all-white
@@ -467,7 +469,7 @@ fn live_gate_real_chunk_to_pixels() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline.pipeline);
-        pass.set_bind_group(0, &cam_bg, &[]);
+        pass.set_bind_group(0, &cam_bg, &[0]);
         pass.set_bind_group(1, &atlas_bg, &[]);
         pass.set_bind_group(2, &palette_bg, &[]);
         pass.set_bind_group(3, &anim_bg, &[]);

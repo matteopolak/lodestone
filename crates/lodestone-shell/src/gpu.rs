@@ -2,21 +2,32 @@
 //! buffer, and a per-section table of uploaded meshes + camera uniforms, and
 //! draws them all in one pass.
 //!
-//! Every section carries its own camera-uniform buffer because the block
-//! shader's uniform bundles `view_proj` *with* the section's world origin (the
-//! packed vertex only stores a 0..16 local position). Each frame we rewrite all
-//! section uniforms with the current `view_proj` *before* opening the render
-//! pass — buffers can't be written mid-pass — then issue one draw per section.
-
+//! The **packed** (demo-world) path still gives every section its own
+//! camera-uniform buffer, rewritten with the current `view_proj` each frame
+//! before the pass opens (see [`upload_packed_section`](RenderState::upload_packed_section)
+//! and the top of [`render_inner`](RenderState::render_inner)) — the demo
+//! world is capped at a few thousand sections and never runs live, so this was
+//! never the measured cost.
+//!
+//! The **model** (live-vanilla) path does not: issue #75 profiled a live
+//! session and found this same per-section-buffer shape responsible for 52.9%
+//! of main-thread CPU, rewriting *every* resident section's whole camera
+//! uniform every frame — thousands of `queue.write_buffer` calls for data that
+//! is almost entirely constant (`view_proj` is identical for every section;
+//! only `section_origin` differs, and it never changes for a section's
+//! lifetime). [`ModelRenderer`] instead keeps one shared camera+fog buffer
+//! (written once per frame) and one [`SectionOriginArena`] of per-section
+//! origins addressed by a dynamic offset at draw time (written once, at
+//! upload). See `docs/section-camera-uniform.md`.
 use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
-    AnimInput, AnimSlotUniform, ArmourModelSet, BlockAtlas, BlockPipeline, Camera, CameraUniform,
-    DEPTH_FORMAT, DepthBuffer, ENTITY_FULLBRIGHT, EntityCameraUniform, EntityModelSet,
-    EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh, GpuModelMesh, ItemGeometry, Mesh,
-    ModelCameraUniform, ModelMesh, ModelPipeline, SpriteAnimation,
+    AnimInput, AnimSlotUniform, ArenaAllocation, ArenaBuffer, ArmourModelSet, BlockAtlas,
+    BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, ENTITY_FULLBRIGHT,
+    EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh,
+    GpuModelMesh, ItemGeometry, Mesh, ModelMesh, ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
@@ -28,9 +39,11 @@ use lodestone_render::{
     },
     entity_camera_buffer,
     fog::{FogSettings, FogUniform},
-    model_anim_buffer, model_camera_buffer, plan_entities, update_model_anim_buffer,
-    upload_instances, upload_instances_tinted,
+    model_anim_buffer, model_camera_buffer, model_shared_camera_buffer, plan_entities,
+    update_model_anim_buffer, update_model_shared_camera_buffer, upload_instances,
+    upload_instances_tinted,
     vertex::vram_bytes,
+    write_section_origin,
 };
 
 use glam::Vec3;
@@ -699,6 +712,13 @@ struct SectionGpu {
 /// One uploaded section of wide baked-model geometry (the vanilla path). Mirrors
 /// [`SectionGpu`] but holds a [`GpuModelMesh`] and draws through the
 /// [`ModelPipeline`].
+///
+/// Unlike [`SectionGpu`], this carries no camera buffer or bind group of its
+/// own: [`ModelRenderer::cam_bind_group`] is shared by every section (and by
+/// the dropped-item pass), and `origin_alloc` is only this section's *slot*
+/// within [`ModelRenderer::origin_arena`] — its offset is what selects this
+/// section's origin at draw time via `set_bind_group`'s dynamic offset. See
+/// `docs/section-camera-uniform.md`.
 #[derive(Debug)]
 struct ModelSectionGpu {
     /// Opaque block geometry (with lava merged in), if any.
@@ -708,9 +728,102 @@ struct ModelSectionGpu {
     /// fluid pass after all opaque geometry so the sea floor shows through.
     water: Option<GpuModelMesh>,
     water_quad_count: usize,
-    origin: [f32; 3],
-    cam_buffer: wgpu::Buffer,
-    cam_bind_group: wgpu::BindGroup,
+    /// This section's slot in [`ModelRenderer::origin_arena`], written once at
+    /// upload. Freed (via [`SectionOriginArena::free`]) when the section is
+    /// removed or remeshed away to nothing.
+    origin_alloc: ArenaAllocation,
+}
+
+/// Generous fixed capacity for [`SectionOriginArena`]; see that type's doc for
+/// the sizing rationale.
+const MODEL_ORIGIN_ARENA_SLOTS: u64 = 131_072;
+
+/// Shared GPU storage for every live model section's world origin (group 0
+/// binding 1 of the model/fluid pipelines), addressed by a dynamic offset at
+/// draw time instead of one buffer + one bind group per section. This is the
+/// fix for issue #75: see the module doc and
+/// [`ModelSharedCameraUniform`](lodestone_render::ModelSharedCameraUniform)'s
+/// doc for the profile that motivated it.
+///
+/// Slot 0 is permanently reserved and zeroed at construction: the
+/// dropped-item and first-person-held-item passes bind it (their geometry
+/// already carries world positions baked into its vertices, so their
+/// "origin" is always zero), so they share this arena's buffer through
+/// [`ModelRenderer::cam_bind_group`] rather than needing one of their own.
+///
+/// # Capacity
+///
+/// [`MODEL_ORIGIN_ARENA_SLOTS`] is a fixed ceiling, not a growable one. At the
+/// device-reported dynamic-uniform-offset stride (`min_uniform_buffer_offset_alignment`,
+/// 256 B on every backend this client targets), 131072 slots cost 32 MiB —
+/// comfortably above both the demo world's own hard cap (its section count is
+/// bounded by a `MAX_WORLD_RADIUS` of 6 chunks, ~4056 sections) and vanilla's
+/// maximum view distance (32 chunks), whose worst case — every column
+/// populated top to bottom — is still under 101k sections, the measured live
+/// run peaked near 5000, and the vast majority of far columns are not fully
+/// populated in practice. Should a pathological world still exhaust it,
+/// [`alloc`](Self::alloc) returns `None` rather than panicking, and the caller
+/// drops that one section's geometry (a visible gap, logged once) instead of
+/// crashing the client — see `upload_section`.
+#[derive(Debug)]
+struct SectionOriginArena {
+    arena: ArenaBuffer,
+    stride: u64,
+    zero_slot: ArenaAllocation,
+}
+
+impl SectionOriginArena {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, capacity_slots: u64) -> Self {
+        // wgpu requires a dynamic uniform-buffer offset to be a multiple of
+        // this device limit (typically 256 B; never below `ArenaBuffer`'s own
+        // floor), so every slot is padded out to it — checking the *limit*,
+        // not the adapter, per this repo's own hard-won rule about the
+        // 4-bind-group floor.
+        let stride =
+            (device.limits().min_uniform_buffer_offset_alignment as u64).max(ArenaBuffer::MIN_ALIGN);
+        let mut arena = ArenaBuffer::new(
+            device,
+            "lodestone-model-section-origin-arena",
+            capacity_slots * stride,
+            stride,
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let zero_slot = arena
+            .allocate(stride)
+            .expect("a freshly created arena has room for its one reserved slot");
+        write_section_origin(queue, arena.buffer(), zero_slot.offset(), [0.0, 0.0, 0.0]);
+        Self {
+            arena,
+            stride,
+            zero_slot,
+        }
+    }
+
+    /// The backing buffer, bound whole as group 0 binding 1; a draw selects
+    /// its section by the dynamic offset passed to `set_bind_group`.
+    fn buffer(&self) -> &wgpu::Buffer {
+        self.arena.buffer()
+    }
+
+    /// The dynamic offset selecting the permanent zero-origin slot.
+    fn zero_offset(&self) -> u32 {
+        self.zero_slot.offset() as u32
+    }
+
+    /// Allocate and write a fresh slot for a newly uploaded section, returning
+    /// both the allocation (to free later) and the dynamic offset to draw
+    /// with. `None` if the arena is exhausted — see the type's doc.
+    fn alloc(&mut self, queue: &wgpu::Queue, origin: [f32; 3]) -> Option<(ArenaAllocation, u32)> {
+        let slot = self.arena.allocate(self.stride).ok()?;
+        write_section_origin(queue, self.arena.buffer(), slot.offset(), origin);
+        let offset = slot.offset() as u32;
+        Some((slot, offset))
+    }
+
+    /// Return a section's slot to the free pool.
+    fn free(&mut self, alloc: ArenaAllocation) {
+        let _ = self.arena.free(alloc);
+    }
 }
 
 /// GPU resources for the model render pass: the model pipeline, the complete
@@ -783,18 +896,31 @@ struct ModelRenderer {
     /// supply is which item each drop is carrying, which rides on
     /// [`EntityDraw::item`].
     items: HashMap<ResourceLocation, ItemGeometry>,
-    /// The dropped-item pass's camera buffer + bind group. Item drops are meshed
-    /// with **world** positions baked in (the spin and bob are folded into the
-    /// vertex positions, not an instance matrix), so this carries the plain
-    /// view-projection with a zero section origin, like the crack pass's.
-    drop_cam_buffer: wgpu::Buffer,
-    drop_cam_bind_group: wgpu::BindGroup,
-    /// The **first-person held item** pass's camera buffer + bind group. Its
-    /// `view_proj` is [`hand_projection`] *alone* (no view matrix) because the
-    /// pose `first_person_item_mesh` bakes in is already camera-space — the same
-    /// reason `EntityRenderer::hand_cam_buffer` exists for the bare arm. This is a
-    /// separate buffer from that one because the model pipeline and the entity
-    /// pipeline declare different group-0 layouts.
+    /// The shared group-0 buffer (binding 0: view-projection + this frame's
+    /// fog), written **once per frame** by `update_model_shared_camera_buffer`
+    /// in [`RenderState::render_inner`] — replacing what used to be one
+    /// `queue.write_buffer` per *section*, per frame (issue #75).
+    shared_cam_buffer: wgpu::Buffer,
+    /// The bind group over [`Self::shared_cam_buffer`] and
+    /// [`Self::origin_arena`], built **once** at construction and shared by
+    /// every opaque/fluid section draw and the dropped-item pass — all of
+    /// which share the world camera and this frame's fog. A draw picks its
+    /// section by the dynamic offset it passes to `set_bind_group`, not by
+    /// rebuilding this bind group. Dropped items (whose geometry already
+    /// carries world positions baked into its vertices, like the crack pass's)
+    /// draw with [`SectionOriginArena::zero_offset`].
+    cam_bind_group: wgpu::BindGroup,
+    /// Per-section world origins, addressed by a dynamic offset — see
+    /// [`SectionOriginArena`]'s doc.
+    origin_arena: SectionOriginArena,
+    /// The **first-person held item** pass's own shared-camera buffer + bind
+    /// group. Its `view_proj` is [`hand_projection`] *alone* (no view matrix)
+    /// because the pose `first_person_item_mesh` bakes in is already
+    /// camera-space — the same reason `EntityRenderer::hand_cam_buffer` exists
+    /// for the bare arm. This is a separate buffer from [`Self::shared_cam_buffer`]
+    /// because its `view_proj` genuinely differs (no world position), but its
+    /// bind group's binding 1 still points at [`Self::origin_arena`], drawn
+    /// with [`SectionOriginArena::zero_offset`] like the drop pass.
     hand_cam_buffer: wgpu::Buffer,
     hand_cam_bind_group: wgpu::BindGroup,
     sections: HashMap<SectionKey, ModelSectionGpu>,
@@ -1686,31 +1812,29 @@ impl RenderState {
                 },
             );
             let crack_cam_bind_group = crack_pipeline.camera_bind_group(device, &crack_cam_buffer);
-            // Dropped items: snapshot the baked item geometry and build the
-            // pass's own world-space camera buffer, both while `models` is still
-            // in scope.
+            // Dropped items: snapshot the baked item geometry while `models` is
+            // still in scope. The pass's camera bind group is built below,
+            // shared with every section (see `origin_arena`).
             let items: HashMap<ResourceLocation, ItemGeometry> = models
                 .items()
                 .map(|(id, geometry)| (id.clone(), geometry.clone()))
                 .collect();
-            let drop_cam_buffer = model_camera_buffer(
-                device,
-                CameraUniform {
-                    view_proj: [[0.0; 4]; 4],
-                    section_origin: [0.0, 0.0, 0.0, 0.0],
-                },
-            );
-            let drop_cam_bind_group = pipeline.camera_bind_group(device, &drop_cam_buffer);
-            // The first-person held item's own group-0: `hand_projection` alone,
-            // rewritten per frame from the live aspect ratio.
-            let hand_cam_buffer = model_camera_buffer(
-                device,
-                CameraUniform {
-                    view_proj: [[0.0; 4]; 4],
-                    section_origin: [0.0, 0.0, 0.0, 0.0],
-                },
-            );
-            let hand_cam_bind_group = pipeline.camera_bind_group(device, &hand_cam_buffer);
+            // The shared per-frame half of the section camera (view_proj +
+            // fog) and the per-section origin arena (issue #75 — see the
+            // module doc). One bind group over both, built once; every
+            // section draw and the dropped-item pass reuse it, varying only
+            // the dynamic offset.
+            let origin_arena = SectionOriginArena::new(device, queue, MODEL_ORIGIN_ARENA_SLOTS);
+            let shared_cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
+            let cam_bind_group =
+                pipeline.camera_bind_group(device, &shared_cam_buffer, origin_arena.buffer());
+            // The first-person held item's own group-0: `hand_projection` alone
+            // (no world position), rewritten per frame from the live aspect
+            // ratio. Its origin binding still points at the shared arena's
+            // reserved zero slot.
+            let hand_cam_buffer = model_shared_camera_buffer(device, [[0.0; 4]; 4]);
+            let hand_cam_bind_group =
+                pipeline.camera_bind_group(device, &hand_cam_buffer, origin_arena.buffer());
             ModelRenderer {
                 pipeline,
                 water_pipeline,
@@ -1728,8 +1852,9 @@ impl RenderState {
                 crack_cam_buffer,
                 crack_cam_bind_group,
                 items,
-                drop_cam_buffer,
-                drop_cam_bind_group,
+                shared_cam_buffer,
+                cam_bind_group,
+                origin_arena,
                 hand_cam_buffer,
                 hand_cam_bind_group,
                 sections: HashMap::new(),
@@ -2048,6 +2173,7 @@ impl RenderState {
     pub fn upload_section(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         key: SectionKey,
         mesh: &SectionGeometry,
     ) {
@@ -2061,22 +2187,37 @@ impl RenderState {
                 let origin_f = [origin[0] as f32, origin[1] as f32, origin[2] as f32];
                 let opaque_gpu = GpuModelMesh::upload(device, opaque);
                 let water_gpu = GpuModelMesh::upload(device, water);
+                // A remesh of an already-resident coord (the dirty-propagation
+                // case) reuses that coord's origin slot rather than leaking it —
+                // the origin is a pure function of `key`, so it never actually
+                // changes.
+                let existing = model.sections.remove(&key);
                 // A section may carry only opaque terrain, only water (an ocean
                 // surface section with no solid blocks), or both. Drop it only
                 // when neither has geometry.
                 if opaque_gpu.is_none() && water_gpu.is_none() {
-                    model.sections.remove(&key);
+                    if let Some(old) = existing {
+                        model.origin_arena.free(old.origin_alloc);
+                    }
                     return;
                 }
-                // Placeholder uniform; overwritten every frame with the live camera.
-                let cam_buffer = model_camera_buffer(
-                    device,
-                    CameraUniform {
-                        view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                        section_origin: [origin_f[0], origin_f[1], origin_f[2], 0.0],
+                let origin_alloc = match existing {
+                    Some(old) => old.origin_alloc,
+                    None => match model.origin_arena.alloc(queue, origin_f) {
+                        Some((alloc, _offset)) => alloc,
+                        None => {
+                            // Should not happen — see `SectionOriginArena`'s
+                            // doc for the capacity margin — but degrade to a
+                            // dropped (missing) section rather than a panic if
+                            // it ever does.
+                            tracing::warn!(
+                                "section-origin arena exhausted at {key:?}; \
+                                 dropping this section's geometry"
+                            );
+                            return;
+                        }
                     },
-                );
-                let cam_bind_group = model.pipeline.camera_bind_group(device, &cam_buffer);
+                };
                 model.sections.insert(
                     key,
                     ModelSectionGpu {
@@ -2084,9 +2225,7 @@ impl RenderState {
                         quad_count: opaque.quad_count(),
                         water: water_gpu,
                         water_quad_count: water.quad_count(),
-                        origin: origin_f,
-                        cam_buffer,
-                        cam_bind_group,
+                        origin_alloc,
                     },
                 );
             }
@@ -2128,8 +2267,10 @@ impl RenderState {
     /// Remove a section (e.g. an unloaded chunk).
     pub fn remove_section(&mut self, key: &SectionKey) {
         self.sections.remove(key);
-        if let Some(model) = self.model.as_mut() {
-            model.sections.remove(key);
+        if let Some(model) = self.model.as_mut()
+            && let Some(old) = model.sections.remove(key)
+        {
+            model.origin_arena.free(old.origin_alloc);
         }
     }
 
@@ -2267,28 +2408,20 @@ impl RenderState {
             queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
         }
 
-        // Same for the model sections (live vanilla path). Fog is folded into
-        // the group-0 uniform: the eye position (for per-fragment view
-        // distance) and this frame's fog settings travel with each section's
-        // camera buffer, keeping the model shader within four bind groups.
+        // The model sections' (live vanilla path) shared camera+fog buffer:
+        // **one** write, not one per section. Fog is folded into the group-0
+        // uniform: the eye position (for per-fragment view distance) and this
+        // frame's fog settings travel with it, keeping the model shader within
+        // four bind groups. Each section's own origin was written once, at
+        // upload (`upload_section`/`SectionOriginArena::alloc`) — it is
+        // constant for the section's life, so there is nothing left to
+        // rewrite here. This replaced a `queue.write_buffer` per *section*
+        // per frame (up to ~4000/frame at the `sections=3880` measured in
+        // issue #75's profile); see the module doc.
         if let Some(model) = &self.model {
             let eye = camera.position;
             let fog = self.fog_with_clock(eye);
-            for section in model.sections.values() {
-                let uniform = ModelCameraUniform {
-                    camera: CameraUniform {
-                        view_proj,
-                        section_origin: [
-                            section.origin[0],
-                            section.origin[1],
-                            section.origin[2],
-                            0.0,
-                        ],
-                    },
-                    fog,
-                };
-                queue.write_buffer(&section.cam_buffer, 0, bytemuck::bytes_of(&uniform));
-            }
+            update_model_shared_camera_buffer(queue, &model.shared_cam_buffer, view_proj, fog);
         }
 
         // Outline vertices/uniform must be written before the pass opens.
@@ -2344,7 +2477,7 @@ impl RenderState {
         // (possibly body-extended) `entities` slice above, so the local
         // player's own held item renders through `merge_held_items` exactly
         // like a mob's does, for free.
-        let item_mesh = self.prepare_item_geometry(device, queue, camera, entities, &mut stats);
+        let item_mesh = self.prepare_item_geometry(device, camera, entities, &mut stats);
 
         // The first-person arm. Skipped whenever a third-person body drew this
         // frame — see `set_third_person_body_source`'s doc for why the two
@@ -2438,7 +2571,14 @@ impl RenderState {
                     let Some(mesh) = section.mesh.as_ref() else {
                         continue;
                     };
-                    pass.set_bind_group(0, &section.cam_bind_group, &[]);
+                    // One shared bind group for every section; only the
+                    // dynamic offset (this section's slot in the origin
+                    // arena) changes per draw.
+                    pass.set_bind_group(
+                        0,
+                        &model.cam_bind_group,
+                        &[section.origin_alloc.offset() as u32],
+                    );
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..mesh.index_count, 0, 0..1);
@@ -2531,7 +2671,10 @@ impl RenderState {
                 // are (see the entity note above).
                 if let Some(mesh) = &item_mesh {
                     pass.set_pipeline(&model.pipeline.pipeline);
-                    pass.set_bind_group(0, &model.drop_cam_bind_group, &[]);
+                    // Dropped-item geometry bakes world positions into its own
+                    // vertices (spin/bob included), so it has no origin of its
+                    // own: bind the shared arena's reserved zero slot.
+                    pass.set_bind_group(0, &model.cam_bind_group, &[model.origin_arena.zero_offset()]);
                     pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                     pass.set_bind_group(2, &model.palette_bind_group, &[]);
                     pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -2568,7 +2711,11 @@ impl RenderState {
                     let Some(water) = section.water.as_ref() else {
                         continue;
                     };
-                    pass.set_bind_group(0, &section.cam_bind_group, &[]);
+                    pass.set_bind_group(
+                        0,
+                        &model.cam_bind_group,
+                        &[section.origin_alloc.offset() as u32],
+                    );
                     pass.set_vertex_buffer(0, water.vertices.slice(..));
                     pass.set_index_buffer(water.indices.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..water.index_count, 0, 0..1);
@@ -2643,7 +2790,15 @@ impl RenderState {
                 FirstPersonHand::Item(mesh) => {
                     if let Some(model) = self.model.as_ref() {
                         pass.set_pipeline(&model.pipeline.pipeline);
-                        pass.set_bind_group(0, &model.hand_cam_bind_group, &[]);
+                        // The held item's pose is already camera-space (see
+                        // `write_hand_camera`'s doc), so like the dropped-item
+                        // pass it has no origin of its own: the shared arena's
+                        // reserved zero slot.
+                        pass.set_bind_group(
+                            0,
+                            &model.hand_cam_bind_group,
+                            &[model.origin_arena.zero_offset()],
+                        );
                         pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                         pass.set_bind_group(2, &model.palette_bind_group, &[]);
                         pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -2708,7 +2863,6 @@ impl RenderState {
     fn prepare_item_geometry(
         &self,
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
         camera: &Camera,
         entities: &[EntityDraw],
         stats: &mut RenderStats,
@@ -2771,18 +2925,9 @@ impl RenderState {
         }
         let mesh = GpuModelMesh::upload(device, &combined)?;
         stats.total_quads += combined.quad_count();
-        let eye = camera.position;
-        queue.write_buffer(
-            &model.drop_cam_buffer,
-            0,
-            bytemuck::bytes_of(&ModelCameraUniform {
-                camera: CameraUniform {
-                    view_proj: camera.view_projection().to_cols_array_2d(),
-                    section_origin: [0.0, 0.0, 0.0, 0.0],
-                },
-                fog: self.fog_with_clock(eye),
-            }),
-        );
+        // No camera write here: dropped items draw through `model.cam_bind_group`,
+        // the same shared view_proj+fog buffer every section uses, written once
+        // per frame at the top of `render_inner` — not a buffer of their own.
         Some(mesh)
     }
 
@@ -2963,13 +3108,14 @@ impl RenderState {
             ),
         );
         if let Some(model) = self.model.as_ref() {
-            queue.write_buffer(
+            // The origin binding is untouched here: it always points at the
+            // shared arena's reserved zero slot (see the draw site), so only
+            // the shared view_proj/fog half needs rewriting.
+            update_model_shared_camera_buffer(
+                queue,
                 &model.hand_cam_buffer,
-                0,
-                bytemuck::bytes_of(&ModelCameraUniform {
-                    camera: camera_uniform,
-                    fog: FogUniform::disabled(),
-                }),
+                camera_uniform.view_proj,
+                FogUniform::disabled(),
             );
         }
     }
@@ -3854,6 +4000,7 @@ mod tests {
                         sections += 1;
                         state.upload_section(
                             device,
+                            queue,
                             key,
                             &crate::mesher::SectionGeometry::Packed(mesh),
                         );
@@ -3971,6 +4118,7 @@ mod tests {
                         let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
                         state.upload_section(
                             device,
+                            queue,
                             key,
                             &crate::mesher::SectionGeometry::Packed(mesh),
                         );
