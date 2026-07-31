@@ -89,47 +89,90 @@ pub const ENTITY_FULLBRIGHT: u8 = 15 << 4;
 /// So a mob sampling world light perfectly is still full-bright at midnight.
 /// Vanilla applies the darkening client-side only.
 ///
-/// # The curve
+/// # The curve (issue #49)
 ///
-/// Three vanilla steps composed, in order:
+/// 26.2 **deleted** `Level.getSkyDarken` and `LightTexture`'s lift entirely,
+/// replacing both with a data-driven timeline track,
+/// `EnvironmentAttributes.SKY_LIGHT_FACTOR` on `Timelines.OVERWORLD_DAY`
+/// (`.cache/mc/26.2/src/net/minecraft/world/timeline/Timelines.java:77-80`).
+/// This is a direct port of that track's sampling machinery, not a
+/// re-derivation of a curve shape:
 ///
-/// 1. `DimensionType::timeOfDay(dayTime)` — the celestial angle, `0.0` at noon
-///    and `0.5` at midnight.
-/// 2. `Level::getSkyDarken(partialTick)` — `1.0` in full day, floored at `0.2`.
-/// 3. `LightTexture::updateLightTexture`'s `skyDarken * 0.95 + 0.05` lift, which
-///    maps that `[0.2, 1.0]` onto `[0.24, 1.0]`.
+/// * Keyframes (tick → value): `730 → 1.0`, `11270 → 1.0`, `13140 → 0.24`,
+///   `22860 → 0.24`, applied via `FloatModifier.MULTIPLY` over the attribute's
+///   own default of `1.0` (`EnvironmentAttributes.java:79`) — multiplying by
+///   `1.0` is a no-op, so the sampled keyframe value *is* the final factor.
+/// * The easing is **linear, not cubic-bezier**. `KeyframeTrack.Builder`
+///   defaults to `EasingType.LINEAR` (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrack.java:78`)
+///   and the `SKY_LIGHT_FACTOR` track never calls `.setEasing(...)` — only the
+///   neighbouring `SUN_ANGLE`/`MOON_ANGLE`/`STAR_ANGLE` tracks in the same file
+///   opt into `EasingType.symmetricCubicBezier(0.362, 0.241)`. Issue #49's own
+///   text said "cubic-bezier eased"; that was a transcription error caught by
+///   reading `Timelines.java` itself rather than trusting the summary (exactly
+///   the failure mode `CLAUDE.md` warns about) — see
+///   `docs/time-of-day-lighting.md`.
+/// * `KeyframeTrackSampler.bakeSegments` wraps the segment between the
+///   *last* and *first* keyframe through the timeline's 24000-tick period
+///   (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrackSampler.java`, the
+///   `periodTicks.isPresent()` branch), so the dawn ramp is **one continuous
+///   1870-tick segment running from 22860 through the tick-0 seam to 730**,
+///   not a ramp that resets at midnight-wrap. The implementation below
+///   collapses that wraparound into a single contiguous range by shifting the
+///   day so it starts at the first keyframe, rather than replicating Java's
+///   two-segment split.
 ///
-/// Step 3 is included so the returned number is *directly* the shader's
-/// multiplier and no caller has to remember the lift.
+/// No `* 0.95 + 0.05` lift: that was specifically `LightTexture`'s second step
+/// of 1.21's *two*-step pipeline (`getSkyDarken` into `[0.2, 1.0]`, then the
+/// lift into `[0.24, 1.0]`). 26.2's keyframes are already expressed directly
+/// in `[0.24, 1.0]`, and the consumer
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/LightmapRenderStateExtractor.java`
+/// into `assets/minecraft/shaders/core/lightmap.fsh`'s
+/// `sky_brightness = get_brightness(sky_level) * lightmapInfo.SkyFactor`)
+/// applies no further affine transform to it.
+///
+/// Verified against every one of the 24000 ticks in a real JVM's
+/// `Timeline`/`AttributeTrackSampler` — not hand-derived interpolation math,
+/// and not this function's own output pasted back. See
+/// `crates/lodestone-render/tests/sky_light_factor_timeline.rs` and
+/// `oracle-java/SkyLightTimelineOracle.java` for provenance.
 ///
 /// # How to change it
 ///
-/// Rain and thunder are two further multipliers inside step 2
-/// (`1 - rainLevel * 5/16`, likewise thunder). They are omitted because the
-/// shell tracks neither yet; add them as arguments here rather than at the call
-/// site, so the one place that knows vanilla's curve stays the one place. The
-/// `0.0`-means-daylight sentinel lives in the shader, not here — this function
-/// never returns `0.0`.
+/// Rain and thunder further blend this factor toward `0.24` at the game-attribute
+/// layer (`WeatherAttributes.java`'s `FloatModifier.ALPHA_BLEND` on the same
+/// attribute) — omitted here because the shell tracks neither yet. Add them as
+/// arguments to this function rather than at the call site, so the one place
+/// that knows vanilla's curve stays the one place. The `0.0`-means-daylight
+/// sentinel lives in the shader, not here — this function never returns `0.0`.
 #[must_use]
 pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {
-    // 1. Celestial angle. `time_of_day` counts up without wrapping, so reduce
-    //    into the day first; f64 because the day fraction is what `Mth.frac`
-    //    operates on and f32 loses ticks at large world ages.
-    let day = time_of_day.rem_euclid(24_000) as f64 / 24_000.0;
-    let frac = (day - 0.25).rem_euclid(1.0);
-    let eased = 0.5 - (frac * std::f64::consts::PI).cos() / 2.0;
-    let celestial = ((frac * 2.0 + eased) / 3.0) as f32;
+    // The two ramps are symmetric and this many ticks long: 13140-11270 (dusk)
+    // and (730+24000)-22860 (dawn, unwrapped across the tick-0 seam) are both
+    // exactly 1870 ticks — not a coincidence, the track is built that way.
+    const RAMP_LEN: f64 = 1_870.0;
+    // Keyframe ticks, re-expressed relative to the first keyframe (730) so the
+    // wraparound dawn ramp becomes one contiguous range instead of two
+    // segments split across tick 0.
+    const DUSK_START: f64 = 11_270.0 - 730.0; // 10540
+    const DUSK_END: f64 = 13_140.0 - 730.0; // 12410
+    const DAWN_START: f64 = 22_860.0 - 730.0; // 22130
 
-    // 2. `Level::getSkyDarken`. The double negation is vanilla's, kept literal:
-    //    a cosine that saturates the clamp for most of the day, inverted, then
-    //    lifted onto [0.2, 1.0].
-    let mut f = 1.0 - ((celestial * std::f32::consts::TAU).cos() * 2.0 + 0.2);
-    f = f.clamp(0.0, 1.0);
-    f = 1.0 - f;
-    let darken = f * 0.8 + 0.2;
+    let day = time_of_day.rem_euclid(24_000);
+    let shifted = (day - 730).rem_euclid(24_000) as f64;
 
-    // 3. `LightTexture`'s lift.
-    darken * 0.95 + 0.05
+    let factor = if shifted < DUSK_START {
+        1.0
+    } else if shifted < DUSK_END {
+        let alpha = (shifted - DUSK_START) / RAMP_LEN;
+        1.0 + (0.24 - 1.0) * alpha
+    } else if shifted < DAWN_START {
+        0.24
+    } else {
+        let alpha = (shifted - DAWN_START) / RAMP_LEN;
+        0.24 + (1.0 - 0.24) * alpha
+    };
+
+    factor as f32
 }
 
 /// Look up the ported entity model for a canonical entity-type path (the
@@ -2588,15 +2631,19 @@ mod tests {
         assert_eq!(armour_layer_tint(&diamond[0]), [255, 255, 255]);
     }
 
-    /// The two vanilla anchor values, hand-derived from the decompiled curve
-    /// rather than from this implementation, so agreement is evidence rather
-    /// than a tautology:
+    /// The two vanilla anchor values, hand-derived from the real timeline
+    /// keyframes (`Timelines.java:79`) rather than from this implementation,
+    /// so agreement is evidence rather than a tautology:
     ///
-    /// * noon (6000): `timeOfDay` = 0 → `cos(0)*2 + 0.2` = 2.2 → `1 - 2.2` =
-    ///   −1.2 → clamps to 0 → `1 - 0` = 1 → `1*0.8 + 0.2` = 1.0 → lift = 1.0.
-    /// * midnight (18000): `timeOfDay` = 0.5 → `cos(π)*2 + 0.2` = −1.8 →
-    ///   `1 + 1.8` = 2.8 → clamps to 1 → `1 - 1` = 0 → `0*0.8 + 0.2` = 0.2 →
-    ///   lift = `0.2*0.95 + 0.05` = 0.24.
+    /// * noon (6000) falls inside the `[730, 11270)` plateau segment, both of
+    ///   whose keyframes are `1.0` — constant `1.0` regardless of where in the
+    ///   segment 6000 lands.
+    /// * midnight (18000) falls inside the `[13140, 22860)` plateau segment,
+    ///   both of whose keyframes are `0.24` — constant `0.24` likewise.
+    ///
+    /// Both are covered far more thoroughly, tick-by-tick against a real JVM,
+    /// by `tests/sky_light_factor_timeline.rs`; these two stay as a fast
+    /// same-crate smoke check.
     #[test]
     fn sky_darken_hits_vanillas_noon_and_midnight_anchors() {
         assert!((sky_darken_for_time_of_day(6_000) - 1.0).abs() < 1e-5);
