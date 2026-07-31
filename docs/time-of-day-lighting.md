@@ -211,23 +211,133 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
   which this crate does not ingest. Only necessary if a data pack reorders the
   registry.
 * **The curve** is `sky_darken_for_time_of_day` in
-  `crates/lodestone-render/src/entity.rs`. It is a port of 1.21's
-  `Level.getSkyDarken` plus `LightTexture`'s `* 0.95 + 0.05` lift.
+  `crates/lodestone-render/src/entity.rs`. It is a direct port of 26.2's
+  `EnvironmentAttributes.SKY_LIGHT_FACTOR` timeline track
+  (`Timelines.OVERWORLD_DAY`, `.cache/mc/26.2/src/net/minecraft/world/timeline/Timelines.java:77-80`),
+  which **replaced** 1.21's `Level.getSkyDarken` entirely (issue #49, fixed).
 
-  **Known divergence, deliberately not chased here.** 26.2 deleted
-  `getSkyDarken` and replaced it with a data-driven timeline track,
-  `EnvironmentAttributes.SKY_LIGHT_FACTOR` (`Timelines::OVERWORLD_DAY`), with
-  keyframes `730 → 1.0`, `11270 → 1.0`, `13140 → 0.24`, `22860 → 0.24` under a
-  symmetric cubic-bezier ease, read by `LightmapRenderStateExtractor`. The two
-  agree exactly on both **plateaus** — `1.0` by day and `0.24` at night, and
-  `0.24` is literally `Timelines::NIGHT_SKY_LIGHT_FACTOR` — but their **ramp
-  shapes differ** across dusk and dawn. Our `night` (13 000) reads `0.300` where
-  the timeline is already at `0.24`. Porting the timeline is the correct
-  end state and is a separate piece of work; it would also bring
-  `SKY_LIGHT_COLOR` (night sky light is tinted blue, `0.48, 0.48, 1.0`), which we
-  do not model at all.
+  **What the real track is, read from the jar rather than from the issue's
+  own transcription** (which got one thing wrong — see below):
+
+  * Keyframes: `730 → 1.0`, `11270 → 1.0`, `13140 → 0.24`, `22860 → 0.24`,
+    applied via `FloatModifier.MULTIPLY` over the attribute's default of
+    `1.0` — the multiply is a no-op, so the sampled keyframe value *is* the
+    final factor. `0.24` is literally `Timelines.NIGHT_SKY_LIGHT_FACTOR`.
+  * **The easing is linear, not cubic-bezier.** `KeyframeTrack.Builder`
+    defaults to `EasingType.LINEAR`
+    (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrack.java:78`), and the
+    `SKY_LIGHT_FACTOR` track never calls `.setEasing(...)` — only the
+    neighbouring `SUN_ANGLE`/`MOON_ANGLE`/`STAR_ANGLE` tracks in the same file
+    opt into `EasingType.symmetricCubicBezier(0.362, 0.241)`. The original
+    issue text said "cubic-bezier eased between them"; that was a
+    transcription error, corrected by reading `Timelines.java` itself rather
+    than trusting the earlier summary — exactly the trap `CLAUDE.md` names
+    ("read the record definition, not a summary of the call site").
+  * `KeyframeTrackSampler.bakeSegments` wraps the segment between the *last*
+    and *first* keyframe through the timeline's 24000-tick period, so the
+    dawn ramp is one continuous **1870-tick** segment running from 22860
+    through the tick-0 seam to 730, not a ramp that resets at midnight.
+  * No `LightTexture`-style `* 0.95 + 0.05` lift: that was specifically the
+    second step of 1.21's two-step pipeline. 26.2's keyframes are already
+    expressed directly in `[0.24, 1.0]`, and the consumer
+    (`LightmapRenderStateExtractor` into `assets/minecraft/shaders/core/lightmap.fsh`'s
+    `sky_brightness = get_brightness(sky_level) * lightmapInfo.SkyFactor`)
+    applies no further transform.
+
+  **The quantified divergence this section used to cite was itself wrong.**
+  It said "our `night` (13 000) reads `0.300` where the timeline is already at
+  `0.24`" — but a JVM oracle sampling the real `Timeline`/`AttributeTrackSampler`
+  at every tick (`crates/lodestone-render/oracle-java/SkyLightTimelineOracle.java`,
+  dumped to `crates/lodestone-render/tests/support/sky_light_timeline_jvm.txt`)
+  shows vanilla is `0.2969` at tick 13000, not `0.24` — tick 13000 sits
+  partway down the `[11270, 13140)` dusk ramp, 140 ticks before the plateau
+  starts. The retired cosine port's `0.300` there was actually *close*. The
+  real, measured divergence peaks mid-ramp (**~0.016** at ticks 12080 and
+  23917, e.g. vanilla `0.6692` vs the old port's `0.6851`) — real, worth
+  fixing, but a much smaller and differently-shaped defect than the "night
+  already at the floor" framing implied. The new port matches the JVM to
+  within `1e-4` at all 24000 ticks
+  (`crates/lodestone-render/tests/sky_light_factor_timeline.rs`).
+
+  **`SKY_LIGHT_COLOR` — assessed, not implemented; costed below.**
 * **Adding a consumer**: install it off `RenderState::sky_darken()` rather than
   re-deriving from `world_time()`, so there stays exactly one clock on screen.
+
+## `SKY_LIGHT_COLOR`: what it is and why it was not ported (issue #49)
+
+Vanilla does not just scale the sky half of the lightmap at night — it **tints**
+it. Read from the jar rather than assumed:
+
+* Same track, `EnvironmentAttributes.SKY_LIGHT_COLOR`
+  (`Timelines.java:71-75`), keyframes `730 → -1 (white)`, `11270 → -1`,
+  `13140 → NIGHT_SKY_LIGHT_COLOR`, `22860 → NIGHT_SKY_LIGHT_COLOR`, same
+  segment/wraparound/linear-easing machinery as the factor track, applied via
+  `ColorModifier.MULTIPLY_RGB` (`ARGB.multiply`, a no-op against the `-1`
+  white base) and interpolated between keyframes with `ARGB.srgbLerp` — a
+  plain per-channel `0..255` lerp in gamma space, consistent with `CLAUDE.md`'s
+  "vanilla is not colour-managed" rule, not a linear-light blend.
+  `NIGHT_SKY_LIGHT_COLOR = ARGB.colorFromFloat(1.0, 0.48, 0.48, 1.0)` =
+  `0xFF7A7AFF` (`Mth.floor(0.48 * 255) = 122` per channel, full blue) — a
+  light, unsaturated blue, not a deep or dark one. Sampled ground truth for
+  this whole track is the third
+  column of `crates/lodestone-render/tests/support/sky_light_timeline_jvm.txt`
+  (produced alongside the factor dump, unused by any Rust code today).
+* **Where the tint is applied matters more than the values, and this is the
+  real finding.** `LightmapRenderStateExtractor.extract` feeds `skyFactor`
+  and `skyLightColor` into a per-frame 16×16 RGB lightmap **texture**,
+  generated by a real fragment shader
+  (`assets/minecraft/shaders/core/lightmap.fsh`):
+  ```wgsl
+  sky_brightness = get_brightness(sky_level) * SkyFactor   // curved, not linear
+  color = max(AmbientColor, NightVisionColor * NightVisionFactor)
+  color += SkyLightColor * sky_brightness                   // tint only the sky term
+  color += mix(BlockLightTint, vec3(1.0), 0.9 * parabolic(block_level)) * block_brightness
+  color = clamp(color, 0, 1)                                 // additive combine, then clamp
+  ```
+  Terrain/entity shaders then *sample* that texture by `(block_level,
+  sky_level)` UV. Vanilla's combine rule is **additive per-channel**, and the
+  sky and block contributions are computed and tinted independently before
+  summing.
+* **Our lighting model is structurally different, not just missing a
+  uniform.** There is no lightmap texture at all — `model_pipeline.rs` and
+  `entity_pipeline.rs` compute one grayscale scalar per vertex,
+  `light_term = 0.2 + 0.8 * max(sky * sky_darken(), block)`, and multiply it
+  uniformly into the sampled texel (`out.shade = ao * light_term`). Block and
+  sky already lose their separate identities via `max()` before any tint
+  could apply. Porting the tint faithfully — sky tinted, block light not,
+  summed rather than maxed — means splitting that scalar into (at minimum)
+  a sky-contribution and a block-contribution carried separately through both
+  the vertex and fragment stages of **both** shaders, then recombining them
+  additively instead of via `max`. That is a change to the shading model
+  itself, not an additive feature.
+* **Uniform-lane budget is tighter than it looks but not the binding
+  constraint.** `FogUniform` (shared by both shaders, folded into the
+  4-bind-group-floor'd group-0 camera uniform — see the rendering-constraints
+  section of `CLAUDE.md`) has exactly two unused `f32` lanes left:
+  `eye.w` and `end_enabled.w` (`end_enabled.z` already carries `sky_darken`).
+  One packed lane (bit-pack the tint as 24-bit RGB, `bitcast<u32>` to unpack
+  in WGSL) would technically fit without growing the struct or adding a bind
+  group. So the "no room" framing this section used to gesture at is not
+  actually the blocker — the shading-model rewrite is.
+* **Blast radius if built anyway.** Both `model_pipeline.rs` and
+  `entity_pipeline.rs` (vertex *and* fragment WGSL, plus their Rust-side
+  uniform builders); every existing night-time pixel gate that hardcodes an
+  expected grayscale value would need re-baselining against a fresh oracle
+  once sky light stops being pure grayscale after dusk —
+  `entity_night_pixels.rs`, `grass_light_response_gate.rs`,
+  `model_shade_gamma_gate.rs`, `entity_light_pixels.rs` at minimum, by
+  inspection of what each currently asserts. Daytime scenes are unaffected
+  (`SkyLightColor` is white `-1` through the `[730, 11270)` plateau, so the
+  tint is a no-op there), which bounds the risk somewhat, but the change
+  touches the one formula every terrain and mob pixel on screen currently
+  runs through.
+
+**Decision: not built.** The factor is the well-bounded, high-value half and
+is done. The colour half is a real shading-model change spanning two shaders
+and several existing gates, not a value to plumb through an existing lane —
+exactly the "changing several consumers" case where a half-wired version
+would be worse than none. Left as a scoped follow-up with the ground-truth
+data (`sky_light_timeline_jvm.txt`'s third column) already captured.
 
 ## Gates
 
@@ -239,6 +349,7 @@ Kept deliberately separate so a pass on one cannot mask the other.
 | `crates/lodestone-shell/tests/live_time_of_day.rs` | **the runtime feed**: the client's day clock follows the real server's `/time set`, and the derived `sky_darken` spans the curve | pixels |
 | `crates/lodestone-render/tests/entity_night_pixels.rs` | the entity shader responds to a `sky_darken` it is *handed* | where that value comes from |
 | `crates/lodestone-render/tests/grass_light_response_gate.rs` | the model shader responds to a light byte it is *handed* | where that value comes from |
+| `crates/lodestone-render/tests/sky_light_factor_timeline.rs` | **the curve shape**: `sky_darken_for_time_of_day` against a JVM dump of the real timeline at all 24000 ticks, including a negative control proving the scan would have failed the retired cosine port | the runtime feed (that's `live_time_of_day.rs`'s job) or pixels |
 
 The live gate carries the control this defect specifically needs. On a *fresh*
 world the world age and the day clock coincide, so a broken feed and a working one
@@ -273,5 +384,13 @@ None. No flags, no env vars. Two things are worth knowing:
 * `crates/lodestone-shell/src/app.rs` — installs the source on both connect paths.
 * `crates/lodestone-render/src/{model_pipeline.rs,entity_pipeline.rs}` — the two
   shaders that read the lane.
+* `crates/lodestone-render/oracle-java/SkyLightTimelineOracle.java` — the JVM
+  oracle for the `SKY_LIGHT_FACTOR`/`SKY_LIGHT_COLOR` timeline, and
+  `crates/lodestone-render/tests/support/sky_light_timeline_jvm.txt`, its
+  committed dump.
 * Behavioural reference: `.cache/mc/26.2/src/net/minecraft/world/clock/*`,
-  `world/timeline/Timelines.java`, `client-src/.../LightmapRenderStateExtractor.java`.
+  `world/timeline/Timelines.java`, `world/attribute/EnvironmentAttributes.java`,
+  `util/{Keyframe,KeyframeTrack,KeyframeTrackSampler,EasingType}.java`,
+  `util/ARGB.java`, `client-src/.../LightmapRenderStateExtractor.java`,
+  `client-src/.../renderer/Lightmap.java`,
+  `client-src/assets/minecraft/shaders/core/lightmap.fsh`.
