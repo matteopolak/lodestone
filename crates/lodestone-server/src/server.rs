@@ -9,12 +9,49 @@
 //! `TcpStream` client (open-to-LAN).
 
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 use lodestone_core::State;
 use lodestone_net::{Connection, NetError, Transport};
 
 use crate::chunk::ChunkSource;
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+
+/// Server-initiated keep-alive interval, and the width of the window in
+/// which an echo must arrive before the connection is treated as dead.
+///
+/// Vanilla's `LATENCY_CHECK_INTERVAL` and `CLOSED_LISTENER_TIMEOUT`
+/// (`ServerCommonPacketListenerImpl.java:35-36`) are both the literal
+/// constant `15000` (milliseconds) — **not** two different numbers.
+/// `keepConnectionAlive` (`ServerCommonPacketListenerImpl.java:118-133`)
+/// sends a fresh challenge once `now - keepAliveTime >= 15000`, and
+/// disconnects immediately if the *previous* challenge is still pending at
+/// that point — so an unanswered challenge is caught within one more
+/// interval of being sent (up to ~15s later), not two intervals (~30s).
+#[cfg(not(target_arch = "wasm32"))]
+const KEEP_ALIVE_INTERVAL: Duration = Duration::from_millis(15_000);
+
+/// Cadence of the periodic time-of-day broadcast.
+///
+/// Vanilla re-broadcasts the world's monotonic game time every 20 ticks
+/// (`MinecraftServer::forceGameTimeSynchronization`,
+/// `MinecraftServer.java:1095-1099`: `if (this.tickCount % 20 == 0)`) —
+/// carrying an *empty* clock-update map, which is what tells a client to keep
+/// its held day/night anchor rather than resetting it (see
+/// `packets::time::SetTime::day_clock`'s doc comment in the `v770` crate).
+/// This crate has no fixed server tick loop (see the module docs), so a
+/// 1-second wall-clock interval stands in for "every 20 ticks" at vanilla's
+/// normal 20 TPS.
+#[cfg(not(target_arch = "wasm32"))]
+const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
+
+/// Milliseconds per tick at vanilla's normal 20 TPS, used to convert
+/// wall-clock elapsed time into the tick-based `game_time`
+/// [`ServerProtocol::encode_set_time`] carries, in the absence of a real
+/// per-tick server loop.
+#[cfg(not(target_arch = "wasm32"))]
+const MILLIS_PER_TICK: u128 = 50;
 
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
@@ -97,6 +134,99 @@ impl EntityStreamer {
     }
 }
 
+/// Per-connection view-streaming bookkeeping: which chunk columns has this
+/// connection been sent, and around which chunk column.
+///
+/// Mirrors vanilla's `ChunkMap`/`ChunkTrackingView`
+/// (`ChunkMap.java:1110-1132`'s `updateChunkTracking`/`applyChunkTrackingView`,
+/// `ChunkTrackingView.java`'s `difference`), simplified to the same square
+/// window `serve_connection`'s own initial view already uses
+/// (`[-view_radius, view_radius]²`) rather than vanilla's rounded
+/// `ChunkTrackingView.Positioned::contains` (a buffered Euclidean-distance
+/// test). Keeping the join-time and move-time shapes identical is what stops
+/// a live connection from immediately forgetting chunks it only just
+/// finished sending at join; matching vanilla's exact circular shape is not
+/// otherwise load-bearing for "the world keeps up as the player walks".
+#[derive(Debug)]
+struct ViewTracker {
+    center: (i32, i32),
+    loaded: HashSet<(i32, i32)>,
+}
+
+impl ViewTracker {
+    /// Seeds the tracker with the square already sent for the initial join
+    /// view (`center`, `[-view_radius, view_radius]²` around it), so the
+    /// first [`recenter`](Self::recenter) diffs against what the client
+    /// actually has rather than an empty set.
+    fn new(center: (i32, i32), view_radius: i32) -> Self {
+        let mut loaded = HashSet::new();
+        for dz in -view_radius..=view_radius {
+            for dx in -view_radius..=view_radius {
+                loaded.insert((center.0 + dx, center.1 + dz));
+            }
+        }
+        Self { center, loaded }
+    }
+
+    /// Recomputes the view for a new player chunk position `(cx, cz)`,
+    /// returning the directives that bring the client's tracked chunks back
+    /// in sync — and returning nothing at all if `(cx, cz)` is still the
+    /// tracked center (the same "did the 2D chunk position actually change"
+    /// guard `ChunkMap::updateChunkTracking` applies before touching the
+    /// view at all).
+    ///
+    /// Order mirrors vanilla's `applyChunkTrackingView`
+    /// (`ChunkMap.java:1122-1132`): the cache-center update is sent first
+    /// (unconditionally, since by this point the center *did* change —
+    /// vanilla additionally guards this send on the center changing, which
+    /// is already implied here), then every column that left the window is
+    /// forgotten, then every column that entered it is sent as one chunk
+    /// batch.
+    fn recenter<P, S>(
+        &mut self,
+        proto: &P,
+        source: &S,
+        cx: i32,
+        cz: i32,
+        view_radius: i32,
+    ) -> Vec<ServerDirective>
+    where
+        P: ServerProtocol,
+        S: ChunkSource,
+    {
+        if (cx, cz) == self.center {
+            return Vec::new();
+        }
+
+        let mut next = HashSet::new();
+        for dz in -view_radius..=view_radius {
+            for dx in -view_radius..=view_radius {
+                next.insert((cx + dx, cz + dz));
+            }
+        }
+
+        let mut directives = vec![proto.encode_chunk_cache_center(cx, cz)];
+
+        for &(x, z) in self.loaded.difference(&next) {
+            directives.push(proto.encode_forget_chunk(x, z));
+        }
+
+        let added: Vec<(i32, i32)> = next.difference(&self.loaded).copied().collect();
+        if !added.is_empty() {
+            directives.push(proto.begin_chunk_batch());
+            for &(x, z) in &added {
+                let column = source.column(x, z);
+                directives.push(proto.encode_chunk(x, z, &column));
+            }
+            directives.push(proto.end_chunk_batch(added.len() as i32));
+        }
+
+        self.center = (cx, cz);
+        self.loaded = next;
+        directives
+    }
+}
+
 /// Outcome of serving a connection's initial view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServeSummary {
@@ -115,6 +245,15 @@ pub enum ServerError {
     /// The client disconnected before completing login.
     #[error("client closed before login completed")]
     ClosedBeforeLogin,
+    /// The client did not echo the server's keep-alive challenge before the
+    /// next one was due (a fixed 15-second interval, matching vanilla's
+    /// `TIMEOUT_DISCONNECTION_MESSAGE` disconnect path —
+    /// `ServerCommonPacketListenerImpl.java:121-129`). Native-only in
+    /// practice: nothing constructs this on `wasm32`, since that build never
+    /// starts the keep-alive timer in the first place (see
+    /// `serve_play`'s doc comment).
+    #[error("keep-alive timeout: client did not echo the server's challenge in time")]
+    KeepAliveTimeout,
 }
 
 async fn apply<T: Transport>(
@@ -168,11 +307,18 @@ async fn apply<T: Transport>(
 /// refinement that only changes *when* `sync` is called, not the diff it
 /// computes. Pass [`NoEntities`] to keep the chunk-only behaviour.
 ///
+/// [`State::Play`] itself is served by [`serve_play`], which adds the parts
+/// that have no place before a client has a world to live in: a
+/// server-initiated keep-alive (with vanilla's disconnect-on-timeout),
+/// periodic time-of-day, and view streaming as the player's chunk column
+/// changes. See that function's doc comment for the scheduling.
+///
 /// # Errors
 ///
-/// Returns [`ServerError::Net`] on a transport/codec failure, or
+/// Returns [`ServerError::Net`] on a transport/codec failure,
 /// [`ServerError::ClosedBeforeLogin`] if the client hangs up before it ever
-/// reaches [`ServerBound::LoginStart`].
+/// reaches [`ServerBound::LoginStart`], or whatever [`serve_play`] returns
+/// once [`State::Play`] is reached.
 pub async fn serve_connection<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -188,7 +334,6 @@ where
 {
     let mut state = State::Handshaking;
     let mut username: Option<String> = None;
-    let mut chunks_sent = 0usize;
     let mut streamer = EntityStreamer::default();
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
@@ -217,6 +362,15 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
 
+                // Full clock sync at join, mirroring vanilla's
+                // `ServerClockManager::createFullSyncPacket`, sent by
+                // `PlayerList.sendLevelInfo` before chunk streaming starts
+                // (`PlayerList.java:648-651`): anchor a fresh session's
+                // day/night clock at tick 0. This crate has no persisted
+                // world age, so "tick 0" is the session's own join moment,
+                // not a restored save.
+                apply(conn, &mut state, proto.encode_set_time(0, Some(0))).await?;
+
                 apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                 let mut batch_size = 0;
                 for cz in -view_radius..=view_radius {
@@ -227,32 +381,273 @@ where
                     }
                 }
                 apply(conn, &mut state, proto.end_chunk_batch(batch_size)).await?;
-                chunks_sent = batch_size as usize;
+                let chunks_sent = batch_size as usize;
 
                 for directive in proto.welcome_message() {
                     apply(conn, &mut state, directive).await?;
                 }
-            }
-            ServerBound::Ignored => {}
-        }
 
-        // Stream entity changes to the client once it is in Play. The client's
-        // inbound traffic drives the cadence for this MVP; entity directives are
-        // only Send/None, so this never changes `state`.
-        if state == State::Play {
-            for directive in streamer.sync(proto, &entities.snapshots()) {
-                apply(conn, &mut state, directive).await?;
+                // Initial entity sync — the same pass the old single-loop
+                // version ran on this same iteration via its trailing
+                // `if state == State::Play` check, now made explicit because
+                // `serve_play` below takes over the loop entirely.
+                for directive in streamer.sync(proto, &entities.snapshots()) {
+                    apply(conn, &mut state, directive).await?;
+                }
+
+                // `ConfigurationFinished` cannot be reached without an
+                // earlier `LoginStart` in any correct `ServerProtocol` (the
+                // documented ack-driven state machine above), so `username`
+                // is always `Some` here; falling back to an empty string
+                // rather than panicking keeps a protocol that violates that
+                // contract merely wrong, not a crash.
+                let username = username.clone().unwrap_or_default();
+                let view = ViewTracker::new((0, 0), view_radius);
+                return serve_play(
+                    conn,
+                    proto,
+                    source,
+                    entities,
+                    view_radius,
+                    state,
+                    streamer,
+                    view,
+                    username,
+                    chunks_sent,
+                )
+                .await;
             }
+            ServerBound::KeepAlive { .. } | ServerBound::PlayerMoved { .. } | ServerBound::Ignored => {}
         }
     }
 
     match username {
         Some(username) => Ok(ServeSummary {
             username,
-            chunks_sent,
+            chunks_sent: 0,
         }),
         None => Err(ServerError::ClosedBeforeLogin),
     }
+}
+
+/// Decodes and applies one inbound packet once the connection is in
+/// [`State::Play`]: matches a keep-alive echo against the pending challenge
+/// (clearing it, so the next keep-alive tick does not mistake a live client
+/// for a dead one), or streams the view when the player's chunk column
+/// changed. Every other packet decodes to [`ServerBound::Ignored`] in
+/// `State::Play` under the current protocols (no further state transitions
+/// are modeled — no respawn/dimension change yet) and is a no-op here.
+async fn dispatch_play_packet<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    view_radius: i32,
+    state: &mut State,
+    view: &mut ViewTracker,
+    pending_keep_alive: &mut Option<i64>,
+    packet_id: i32,
+    payload: &[u8],
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
+    match proto.decode(*state, packet_id, payload) {
+        ServerBound::KeepAlive { id } => {
+            if *pending_keep_alive == Some(id) {
+                *pending_keep_alive = None;
+            }
+        }
+        ServerBound::PlayerMoved { x, z, .. } => {
+            // Chunk coordinate = floor(block / 16), not truncating division —
+            // `-1.0_f64 / 16.0` must floor to chunk `-1`, matching vanilla's
+            // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
+            let cx = (x / 16.0).floor() as i32;
+            let cz = (z / 16.0).floor() as i32;
+            for directive in view.recenter(proto, source, cx, cz, view_radius) {
+                apply(conn, state, directive).await?;
+            }
+        }
+        ServerBound::Handshake { .. }
+        | ServerBound::LoginStart { .. }
+        | ServerBound::LoginAcknowledged
+        | ServerBound::ConfigurationFinished
+        | ServerBound::Ignored => {}
+    }
+    Ok(())
+}
+
+/// Converts wall-clock elapsed time into a tick count at vanilla's normal 20
+/// TPS, for the `game_time` the periodic [`ServerProtocol::encode_set_time`]
+/// broadcast carries.
+#[cfg(not(target_arch = "wasm32"))]
+fn ticks_since(start: tokio::time::Instant) -> i64 {
+    (start.elapsed().as_millis() / MILLIS_PER_TICK) as i64
+}
+
+/// Serves a connection that has just reached [`State::Play`] until the client
+/// disconnects.
+///
+/// This is where [`serve_connection`] hands off once the join sequence and
+/// initial chunk view are out: everything here runs on the connection's own
+/// schedule rather than strictly in response to one inbound packet —
+/// * a server-initiated keep-alive, matching vanilla's fixed 15-second
+///   interval and the same-length disconnect timeout
+///   (`ServerCommonPacketListenerImpl.java:35-36,118-133`; see the
+///   `KEEP_ALIVE_INTERVAL` doc comment for why that is one interval, not two);
+/// * a periodic time-of-day broadcast, matching vanilla's every-20-ticks
+///   cadence (`MinecraftServer.java:1095-1099`; see `TIME_SYNC_INTERVAL`);
+/// * view streaming (chunk-cache-center, forget, and send) whenever a
+///   [`ServerBound::PlayerMoved`] packet crosses into a new chunk column
+///   (`ChunkMap::move`/`updateChunkTracking`, `ChunkMap.java:1071-1120`);
+///
+/// all layered over the same entity-streaming pass the join sequence already
+/// ran once, now repeated on every inbound packet exactly as the original
+/// single-loop version did.
+///
+/// # Why this is a separate function, and why it forks on `wasm32`
+///
+/// Only this phase needs a real timer racing against the socket read, via
+/// `tokio::select!` — and `tokio::time`'s timer is unavailable on `wasm32`
+/// (see [`Connection::read_packet_timeout`](lodestone_net::Connection::read_packet_timeout)'s
+/// own doc comment, the existing precedent for this split in this workspace).
+/// The `wasm32` build below degrades to the old packet-driven-only loop
+/// through the same [`dispatch_play_packet`] helper: it still answers
+/// keep-alive echoes and streams the view reactively, it just never
+/// *initiates* a keep-alive challenge or a periodic time broadcast, since
+/// nothing can wake it when the client goes quiet. This is a real, documented
+/// gap on that target, not a silent one.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Net`] on a transport/codec failure, or
+/// [`ServerError::KeepAliveTimeout`] if the client does not echo a challenge
+/// in time (native only — see above).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+async fn serve_play<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    mut state: State,
+    mut streamer: EntityStreamer,
+    mut view: ViewTracker,
+    username: String,
+    chunks_sent: usize,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+    E: EntitySource,
+{
+    let mut pending_keep_alive: Option<i64> = None;
+    let mut keep_alive_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
+        KEEP_ALIVE_INTERVAL,
+    );
+    // `interval_at`, not the bare `interval` constructor: `Interval::tick`'s
+    // *first* call resolves immediately for an interval built with
+    // `tokio::time::interval`, which would otherwise fire a redundant
+    // game-time-only broadcast in the same instant as the join-time full
+    // sync `serve_connection` just sent. Anchoring the first tick a full
+    // `TIME_SYNC_INTERVAL` out avoids that, and mirrors `keep_alive_tick`
+    // above for the same reason.
+    let mut time_sync_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + TIME_SYNC_INTERVAL,
+        TIME_SYNC_INTERVAL,
+    );
+    let play_start = tokio::time::Instant::now();
+    let mut next_keep_alive_id: i64 = 0;
+
+    loop {
+        tokio::select! {
+            packet = conn.read_packet() => {
+                let Some((packet_id, payload)) = packet? else {
+                    return Ok(ServeSummary { username, chunks_sent });
+                };
+                dispatch_play_packet(
+                    conn,
+                    proto,
+                    source,
+                    view_radius,
+                    &mut state,
+                    &mut view,
+                    &mut pending_keep_alive,
+                    packet_id,
+                    &payload,
+                )
+                .await?;
+                for directive in streamer.sync(proto, &entities.snapshots()) {
+                    apply(conn, &mut state, directive).await?;
+                }
+            }
+
+            _ = keep_alive_tick.tick() => {
+                if pending_keep_alive.is_some() {
+                    return Err(ServerError::KeepAliveTimeout);
+                }
+                next_keep_alive_id += 1;
+                pending_keep_alive = Some(next_keep_alive_id);
+                apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
+            }
+
+            _ = time_sync_tick.tick() => {
+                let game_time = ticks_since(play_start);
+                apply(conn, &mut state, proto.encode_set_time(game_time, None)).await?;
+            }
+        }
+    }
+}
+
+/// `wasm32` counterpart of the native [`serve_play`] above — same signature,
+/// same [`dispatch_play_packet`] dispatch, but degraded to the old
+/// packet-driven-only loop (no `tokio::select!`, no timers). See the native
+/// definition's doc comment for why the two forked instead of sharing one
+/// body with an internal `cfg`.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+async fn serve_play<T, P, S, E>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    entities: &E,
+    view_radius: i32,
+    mut state: State,
+    mut streamer: EntityStreamer,
+    mut view: ViewTracker,
+    username: String,
+    chunks_sent: usize,
+) -> Result<ServeSummary, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+    E: EntitySource,
+{
+    let mut pending_keep_alive: Option<i64> = None;
+
+    while let Some((packet_id, payload)) = conn.read_packet().await? {
+        dispatch_play_packet(
+            conn,
+            proto,
+            source,
+            view_radius,
+            &mut state,
+            &mut view,
+            &mut pending_keep_alive,
+            packet_id,
+            &payload,
+        )
+        .await?;
+        for directive in streamer.sync(proto, &entities.snapshots()) {
+            apply(conn, &mut state, directive).await?;
+        }
+    }
+    Ok(ServeSummary { username, chunks_sent })
 }
 
 #[cfg(test)]

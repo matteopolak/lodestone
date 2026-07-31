@@ -14,10 +14,13 @@
 //! [`State::Play`] and receive a rendered view: handshake, login, the
 //! (empty) configuration phase, the play join sequence (join game, default
 //! spawn, initial teleport, chunk-cache center), `level_chunk_with_light`
-//! for every column in the initial view, a post-join welcome chat, and
-//! entity spawn/update/remove for the mob simulation. It does not yet cover
-//! keep-alives or time — those are follow-up work (see the crate's
-//! `tests/server_integration.rs`).
+//! for every column in the initial view, a post-join welcome chat, entity
+//! spawn/update/remove for the mob simulation, server-initiated keep-alive
+//! with a disconnect-on-timeout, time-of-day, and view streaming
+//! (chunk-cache-center / forget / send) as the player moves between chunk
+//! columns — the scheduling for all three lives in `lodestone-server`'s
+//! `serve_play`; this module only supplies their encoders (and, for
+//! keep-alive and movement, decoders).
 //!
 //! # Why hand-written encoding is correct, not just convenient
 //!
@@ -43,11 +46,21 @@ use crate::block_states::block_name;
 use crate::entity_types::entity_type_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
+use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
-use crate::packets::game::{GameLogin, GlobalPos, SetDefaultSpawnPosition, SetHealth};
+use crate::packets::game::{
+    GameLogin, GlobalPos, MovePlayerPos, MovePlayerPosRot, SetDefaultSpawnPosition, SetHealth,
+};
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
+
+/// The overworld world-clock's registry holder id
+/// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
+/// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
+/// doc comment). The only clock this crate ever anchors: the integrated
+/// server always joins into the overworld (this type's own doc comment).
+const OVERWORLD_CLOCK_HOLDER_ID: i32 = 0;
 
 /// Fixed decoding/encoding context for protocol 776 (mirrors [`crate::adapter`]'s
 /// own `CTX`; kept private to this module since only this file names raw
@@ -137,10 +150,58 @@ fn encode_player_position_teleport(
 
 /// Hand-written encoder for the clientbound `set_chunk_cache_center` packet:
 /// two VarInt chunk coordinates, no other fields.
-fn encode_chunk_cache_center(cx: i32, cz: i32) -> Vec<u8> {
+fn encode_chunk_cache_center_body(cx: i32, cz: i32) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(cx);
     w.var_i32(cz);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `forget_level_chunk` packet: a
+/// single packed `i64` — `x` in the low 32 bits, `z` in the high 32 — mirroring
+/// vanilla's `ChunkPos.pack` exactly as `V770Adapter::handle_play`'s
+/// `FORGET_LEVEL_CHUNK` decode arm already reads it (`adapter.rs`, the
+/// `packed as i32` / `(packed >> 32) as i32` pair).
+fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
+    let packed = (i64::from(cx) & 0xFFFF_FFFF) | ((i64::from(cz) & 0xFFFF_FFFF) << 32);
+    let mut w = Writer::default();
+    w.i64(packed);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `set_time` packet, mirroring
+/// `packets::time::SetTime`'s `Decode` impl exactly (that struct has no
+/// `Encode` impl to reuse — the map-valued field it decodes cannot come from
+/// an existing bidirectional struct the way this module's other reused types
+/// do, so a hand-written mirror is the documented fallback here, same as
+/// `encode_player_position_teleport`/`encode_chunk_cache_center_body` above).
+///
+/// Wire layout: `i64` `game_time`, then a VarInt-counted list of clock
+/// updates. `day_time` of `None` sends an empty list (vanilla's
+/// once-a-second `forceGameTimeSynchronization` broadcast, which
+/// deliberately leaves the client's held day/night anchor untouched — see
+/// `packets::time::SetTime::day_clock`'s doc comment). `day_time` of
+/// `Some(total_ticks)` sends exactly one update, anchoring the overworld
+/// clock (`OVERWORLD_CLOCK_HOLDER_ID`) to `total_ticks` at the normal 1:1
+/// rate: a **plain** VarInt holder id (no `+1`/inline convention — see
+/// `packets::time::ClockUpdate::holder_id`'s doc comment on why that
+/// differs from the *other* holder codec), a VarLong tick count, then two
+/// big-endian `f32`s (partial tick `0.0`, rate `1.0`).
+fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.i64(game_time);
+    match day_time {
+        Some(total_ticks) => {
+            w.var_i32(1);
+            w.var_i32(OVERWORLD_CLOCK_HOLDER_ID);
+            w.var_i64(total_ticks);
+            w.f32(0.0); // partial_tick
+            w.f32(1.0); // rate: normal day/night speed, never paused
+        }
+        None => {
+            w.var_i32(0);
+        }
+    }
     w.into_vec()
 }
 
@@ -398,6 +459,36 @@ impl ServerProtocol for V770ServerProtocol {
             {
                 ServerBound::ConfigurationFinished
             }
+            State::Play if packet_id == play::serverbound::KEEP_ALIVE => {
+                match decode_full::<KeepAlive>(payload) {
+                    Some(keep_alive) => ServerBound::KeepAlive { id: keep_alive.id },
+                    None => ServerBound::Ignored,
+                }
+            }
+            // Only the two movement packets that carry a position matter to
+            // the loop (view streaming needs x/z, nothing else); rotation-only
+            // and status-only movement stay `Ignored` — see
+            // `ServerBound::PlayerMoved`'s doc comment.
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS => {
+                match decode_full::<MovePlayerPos>(payload) {
+                    Some(m) => ServerBound::PlayerMoved {
+                        x: m.x,
+                        y: m.y,
+                        z: m.z,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::MOVE_PLAYER_POS_ROT => {
+                match decode_full::<MovePlayerPosRot>(payload) {
+                    Some(m) => ServerBound::PlayerMoved {
+                        x: m.x,
+                        y: m.y,
+                        z: m.z,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -464,8 +555,6 @@ impl ServerProtocol for V770ServerProtocol {
             0.0,
         );
 
-        let cache_center_payload = encode_chunk_cache_center(0, 0);
-
         vec![
             send(play::clientbound::LOGIN, &login),
             send(
@@ -476,10 +565,12 @@ impl ServerProtocol for V770ServerProtocol {
                 packet_id: play::clientbound::PLAYER_POSITION,
                 payload: teleport_payload,
             },
-            ServerDirective::Send {
-                packet_id: play::clientbound::SET_CHUNK_CACHE_CENTER,
-                payload: cache_center_payload,
-            },
+            // Spawn is chunk (0, 0) (`spawn_x`/`spawn_z` = 8, inside that
+            // column), matching `serve_connection`'s own initial view
+            // center — reused via the trait method rather than duplicating
+            // the encoder so join-time and move-time cache-center packets
+            // can never drift apart.
+            self.encode_chunk_cache_center(0, 0),
             // Vanilla fresh-spawn defaults. Without this the client's
             // `PlayerSnapshot::health` stays `None` (never having received a
             // `SetHealth`), which a HUD would show as absent/dead rather than
@@ -569,6 +660,35 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::REMOVE_ENTITIES,
             payload: w.into_vec(),
+        }
+    }
+
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        // `KeepAlive` (`packets::common`) is identical on the wire in both
+        // directions, so the same bidirectional struct this module's
+        // `decode` arm above decodes the echo with also encodes the
+        // challenge — no mirror-image encoder needed.
+        send(play::clientbound::KEEP_ALIVE, &KeepAlive { id })
+    }
+
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_TIME,
+            payload: encode_set_time_body(game_time, day_time),
+        }
+    }
+
+    fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_CHUNK_CACHE_CENTER,
+            payload: encode_chunk_cache_center_body(cx, cz),
+        }
+    }
+
+    fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::FORGET_LEVEL_CHUNK,
+            payload: encode_forget_chunk_body(cx, cz),
         }
     }
 }

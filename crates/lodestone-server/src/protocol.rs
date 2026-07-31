@@ -53,8 +53,10 @@ pub struct EntitySnapshot {
 /// client's [`ConfigurationFinished`](Self::ConfigurationFinished) arrives.
 /// This is the same handshake vanilla's server performs and the same one the
 /// client-side `VersionAdapter` walks from the other side.
+// `PartialEq` only, not `Eq`: `PlayerMoved`'s `f64` fields have no total
+// order, so `f64: Eq` does not exist and a derived `Eq` cannot be added here.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ServerBound {
     /// The handshake selected a next connection state (Status or Login).
     Handshake {
@@ -81,9 +83,31 @@ pub enum ServerBound {
     /// begin the join sequence, mirroring
     /// `ServerboundFinishConfigurationPacket`.
     ConfigurationFinished,
-    /// A packet the loop does not need to act on (keep-alive echoes, movement,
-    /// chunk-batch acknowledgements, teleport confirmations). The loop ignores
-    /// these but stays connected.
+    /// The client echoed a previously-sent keep-alive challenge (mirrors
+    /// `ServerboundKeepAlivePacket`). `id` is the value that was echoed; the
+    /// loop compares it against the challenge it is waiting on before
+    /// treating the connection as alive again.
+    KeepAlive {
+        /// The challenge id the client echoed back.
+        id: i64,
+    },
+    /// The client's absolute position changed (`move_player_pos` /
+    /// `move_player_pos_rot` — the only two serverbound movement packets that
+    /// carry a position; `move_player_rot` and `move_player_status_only`
+    /// carry none and stay [`Ignored`](Self::Ignored)). This is what drives
+    /// chunk-cache-center and view-streaming updates; the loop needs no
+    /// look/on-ground data for that.
+    PlayerMoved {
+        /// New absolute x position, in blocks.
+        x: f64,
+        /// New absolute y position (feet), in blocks.
+        y: f64,
+        /// New absolute z position, in blocks.
+        z: f64,
+    },
+    /// A packet the loop does not need to act on (chunk-batch
+    /// acknowledgements, teleport confirmations, look-only or status-only
+    /// movement). The loop ignores these but stays connected.
     Ignored,
 }
 
@@ -131,6 +155,21 @@ pub enum ServerDirective {
 ///    [`end_chunk_batch`](ServerProtocol::end_chunk_batch) — mirroring
 ///    vanilla's `PlayerChunkSender` flow control, which allows exactly one
 ///    unacknowledged batch until the client's first acknowledgement.
+///
+/// Once in [`State::Play`], the loop additionally drives, on its own
+/// schedule rather than in response to any one inbound packet:
+/// [`encode_keep_alive`](ServerProtocol::encode_keep_alive) (a fixed
+/// interval, disconnecting on an unanswered challenge),
+/// [`encode_set_time`](ServerProtocol::encode_set_time) (once at join with a
+/// day/night anchor, then periodically with just the game-time broadcast),
+/// and [`encode_chunk_cache_center`](ServerProtocol::encode_chunk_cache_center)
+/// / [`encode_forget_chunk`](ServerProtocol::encode_forget_chunk) /
+/// [`begin_chunk_batch`](ServerProtocol::begin_chunk_batch) /
+/// [`encode_chunk`](ServerProtocol::encode_chunk) /
+/// [`end_chunk_batch`](ServerProtocol::end_chunk_batch) (whenever a
+/// [`ServerBound::PlayerMoved`] crosses into a new chunk column). See
+/// `crate::server`'s module docs for the scheduling itself, which is
+/// version-free and lives entirely outside this trait.
 pub trait ServerProtocol: Send + Sync {
     /// Lifts one inbound (server-bound) packet into [`ServerBound`].
     ///
@@ -204,6 +243,51 @@ pub trait ServerProtocol: Send + Sync {
     /// `REMOVE_ENTITIES`, a count-prefixed id list). The default emits nothing.
     fn encode_remove_entity(&self, ids: &[i32]) -> ServerDirective {
         let _ = ids;
+        ServerDirective::None
+    }
+
+    /// Encodes a server-initiated keep-alive challenge (vanilla
+    /// `ClientboundKeepAlivePacket`, wire id `keep_alive`). `id` is the
+    /// challenge value the loop expects echoed back as
+    /// [`ServerBound::KeepAlive`]. The default emits nothing, so a protocol
+    /// without keep-alive support need not override it.
+    fn encode_keep_alive(&self, id: i64) -> ServerDirective {
+        let _ = id;
+        ServerDirective::None
+    }
+
+    /// Encodes a time-of-day update (vanilla `ClientboundSetTimePacket`, wire
+    /// id `set_time`).
+    ///
+    /// `game_time` is the monotonic world age in ticks. `day_time`, when
+    /// `Some`, anchors the day/night clock to that many elapsed ticks at the
+    /// normal 1:1 rate — sent once at join, mirroring vanilla's full clock
+    /// sync (`ServerClockManager::createFullSyncPacket`, sent from
+    /// `PlayerList.sendLevelInfo`). `None` sends only the monotonic
+    /// game-time broadcast vanilla repeats every 20 ticks
+    /// (`MinecraftServer::forceGameTimeSynchronization`) without touching the
+    /// client's already-held day/night anchor. The default emits nothing.
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        let _ = (game_time, day_time);
+        ServerDirective::None
+    }
+
+    /// Encodes a chunk-cache-center update (vanilla
+    /// `ClientboundSetChunkCacheCenterPacket`, wire id
+    /// `set_chunk_cache_center`), sent whenever the player's tracked chunk
+    /// column changes (`ChunkMap::applyChunkTrackingView`). The default emits
+    /// nothing.
+    fn encode_chunk_cache_center(&self, cx: i32, cz: i32) -> ServerDirective {
+        let _ = (cx, cz);
+        ServerDirective::None
+    }
+
+    /// Encodes a forget/unload signal for one chunk column leaving view
+    /// (vanilla `ClientboundForgetLevelChunkPacket`, wire id
+    /// `forget_level_chunk`; `ChunkMap::dropChunk`). The default emits
+    /// nothing.
+    fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
+        let _ = (cx, cz);
         ServerDirective::None
     }
 }
