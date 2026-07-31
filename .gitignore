@@ -30,6 +30,10 @@
 # artifacts, not comparable across machines, never committed.
 /bench-results/
 
+# A vanilla server booted in the repo root writes here (oracle/JVM dump runs).
+# Never repo state.
+/logs/
+
 # OS
 .DS_Store
 
