@@ -532,6 +532,51 @@ pub fn apply_entity_metadata(
     }
 }
 
+/// `IngestSet::Apply`: `ClientEvent::EntityMetadataUpdated` → the local
+/// player's own [`crate::session::Vitals::air`], when the event names our id.
+///
+/// # Why this is not a third arm inside [`apply_entity_metadata`]
+///
+/// That system writes the *generic* per-entity component set (any tracked
+/// entity — a drowning zombie's air supply is metadata too), and has no
+/// [`crate::session::Vitals`] to write into: `Vitals` lives on the **session**
+/// entity, folded by [`crate::session::apply_local_player_state`] off
+/// `set_health` for the other three fields. Air supply is the one HUD vital
+/// that does *not* arrive on `set_health` — it is metadata — so it needs this
+/// second, session-scoped fold off the same event family instead.
+///
+/// # "Is this us"
+///
+/// Resolves the same way [`apply_entity_velocity`] does for its local-player
+/// fork: look the event's id up in [`EntityIndex`], then check the resolved
+/// entity carries [`LocalPlayer`]. A `Query` miss (a real mob's metadata, or
+/// an id metadata arrived for before its `Vitals`-bearing session entity
+/// exists) is silently skipped, matching every other id-addressed system here.
+pub fn apply_local_player_air_supply(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut locals: Query<&mut crate::session::Vitals, With<LocalPlayer>>,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        } = event
+        else {
+            continue;
+        };
+        let Some(air) = metadata.air_supply else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        if let Ok(mut vitals) = locals.get_mut(entity) {
+            vitals.air = Some(air);
+        }
+    }
+}
+
 /// `IngestSet::Apply`: `ClientEvent::EntityAttributesUpdated` → [`Attributes`],
 /// merged per attribute id (a later snapshot replaces the same attribute,
 /// attributes not named are left alone).
@@ -667,6 +712,13 @@ impl Plugin for IngestPlugin {
                 apply_entity_velocity,
                 apply_entity_head_rotation,
                 apply_entity_metadata,
+                // Reads the *same* `EntityMetadataUpdated` batch `apply_entity_metadata`
+                // just walked, folding the local player's own air supply into `Vitals`
+                // (a different component, on a different entity, than the generic
+                // per-entity set above — see the system's own doc). Order relative to
+                // `apply_entity_metadata` does not matter (disjoint components), but it
+                // is placed right after it so the two stay visibly paired.
+                apply_local_player_air_supply,
                 apply_entity_attributes,
                 apply_entity_equipment,
                 apply_entity_damaged,
@@ -1017,6 +1069,64 @@ mod tests {
             "the local player must not also get the generic `Velocity` \
              component — nothing reads it for the local player, and it would \
              be a second, wrong source of truth"
+        );
+    }
+
+    /// Metadata naming our own id folds `air_supply` into the session
+    /// entity's [`crate::session::Vitals::air`] — the wiring
+    /// [`apply_local_player_air_supply`] exists for.
+    #[test]
+    fn entity_metadata_naming_the_local_player_folds_air_into_vitals() {
+        let (mut world, local) = ingest_world_with_local_player();
+        world.entity_mut(local).insert(crate::session::Vitals::default());
+        feed(&mut world, login_event(3));
+
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().air,
+            None,
+            "unreported until the first metadata update naming us"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    air_supply: Some(247),
+                    ..EntityMetadataUpdate::default()
+                },
+                3,
+            ),
+        );
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().air,
+            Some(247),
+        );
+    }
+
+    /// **Control.** Air-supply metadata for a *different* (remote) entity must
+    /// not leak into the local player's `Vitals` — proving the "is this us"
+    /// resolution actually discriminates, not just that the happy path works.
+    #[test]
+    fn entity_metadata_for_a_remote_entity_does_not_touch_local_vitals() {
+        let (mut world, local) = ingest_world_with_local_player();
+        world.entity_mut(local).insert(crate::session::Vitals::default());
+        feed(&mut world, login_event(3));
+        feed(&mut world, spawn_event(9, "minecraft:zombie"));
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    air_supply: Some(11),
+                    ..EntityMetadataUpdate::default()
+                },
+                9,
+            ),
+        );
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().air,
+            None,
+            "a zombie's own air supply must not be mistaken for ours"
         );
     }
 

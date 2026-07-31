@@ -84,6 +84,12 @@ pub struct PlayerSnapshot {
     pub food: i32,
     /// Current saturation, once known.
     pub saturation: f32,
+    /// Current air supply in ticks (`0..=300`). Unlike `health`/`food`, this
+    /// has no `_known` companion: it arrives on entity metadata, not
+    /// `set_health`, and a plausible-looking `HudState::MAX_AIR` default before
+    /// the first report is the same "not yet reported reads as full" convention
+    /// `HudState::default` already uses (`docs/air-supply.md`).
+    pub air: i32,
     /// Current game mode, once known.
     pub game_mode: Option<GameMode>,
     /// Current dimension, once known.
@@ -113,6 +119,7 @@ impl Default for PlayerSnapshot {
             health: 0.0,
             food: 0,
             saturation: 0.0,
+            air: lodestone_game::player_state::HudState::MAX_AIR,
             game_mode: None,
             dimension: None,
             alive: true,
@@ -568,6 +575,12 @@ impl SharedState {
             health: vitals.health.unwrap_or(0.0),
             food: vitals.food.unwrap_or(0),
             saturation: vitals.saturation.unwrap_or(0.0),
+            // Unreported reads as full air, not zero — an un-drowning player,
+            // matching `HudState::default`'s own convention, rather than the
+            // "unknown reads as empty" shape `health`/`food` use (those have a
+            // `_known` bit precisely because zero is a plausible real value;
+            // air has no such ambiguity worth a second field for).
+            air: vitals.air.unwrap_or(lodestone_game::player_state::HudState::MAX_AIR),
             health_known: vitals.health.is_some(),
             game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
             dimension: world

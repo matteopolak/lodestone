@@ -63,11 +63,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   block appeared to fix it, and why two green shader gates could not see any of it.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
-  silently picked the wrong mob. Also the sheep wool render layer (issue #53):
-  the mesh, the dye tint table, the `EntitySnapshot`/`EntityDraw` wiring that
-  now carries the decoded variant all the way to `EntityDraw::wool`, and the
-  `WoolMesh`/`prepare_wool` mesh-and-draw work still needed in the held render
-  files to put a pixel on screen.
+  silently picked the wrong mob. Also the sheep wool render layer (issue #53,
+  now landed end to end): the mesh, the dye tint table, the
+  `EntitySnapshot`/`EntityDraw` wiring, and `WoolMesh`/`prepare_wool` putting
+  it on screen — gated on the wearer's resolved model name being exactly
+  `"sheep"`, never its animation family, since pig/cow/wolf share that family
+  and would otherwise grow wool too.
 - [Humanoid armour rendering](./armour-rendering.md) — the four slot meshes and
   the **two inflations** they are baked at (the detail that makes leggings clip
   when a port loses it), why every piece is posed off the wearer's own part
@@ -88,9 +89,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [First-person held item](./first-person-held-item.md) — vanilla's arm-**or**-item
   fork: the `applyItemArmTransform` chain and how its constants differ from the bare
   arm's by just enough to look like rounding, the `Ry(45)/Ry(-45)` cancellation that
-  keeps the resting pose swing-independent, the `MainHandSource` seam that was the
-  *only* missing link, and the measured reason a square viewport draws zero pixels
-  from a working build.
+  keeps the resting pose swing-independent, the `MainHandSource` seam (now landed
+  in `app.rs`), and the measured reason a square viewport draws zero pixels from a
+  working build. Also issue #74: why the held item stayed lit as if it were noon
+  after dark while the arm right next to it correctly dimmed — one `FogUniform`
+  never carrying the world's sky-darken factor, not a missing light sample.
 - [Entity metadata: the item field](./entity-metadata-item.md) — decoding the
   `ITEM_STACK` serializer so a dropped item knows what it is, why the item codec
   is shared rather than duplicated, and the one place the decoder deliberately
@@ -195,6 +198,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   lerp rewinds the whole arc every time a held mine re-swings), the four sites
   that start a swing, and the exact remaining wiring for remote players' and
   mobs' swings — `ClientboundAnimatePacket` is decoded but consumed by nothing.
+- [Combat](./combat.md) — issues #72 and #12: why the arm now swings
+  unconditionally on every left-click (miss, entity, or the start of a dig),
+  the entity-targeting ray that reuses the block pick's own geometry and a
+  shorter vanilla reach, the serverbound `Attack` packet that had a fully
+  built encoder and zero callers, why server-sent knockback used to be
+  silently absorbed into a component nothing reads, the `HurtTime` countdown
+  that closes two more decoded-but-unconsumed events, and why the
+  attack-strength ticker/crit/sweep feedback is deliberately left unbuilt
+  until something can consume it.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded
@@ -208,6 +220,23 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the harness design, and how a regression is caught without turning CI into a flake
   generator; includes the 2.08x per-section-uniform win as the worked example of what
   good evidence looks like, and why a wall-clock ceiling is the wrong shape for a gate.
+- [Surface-stage generation performance](./worldgen-surface-perf.md) — two
+  profile-driven, bit-identical memoisation fixes to `lodestone-worldgen`'s
+  surface stage (a corner-cell value recomputed 256x more than needed per
+  chunk, and a 98,304-entry `HashMap` pre-fill that only ever needed to hold
+  the much smaller set of positions surface rules actually rewrote), taking
+  measured per-chunk generation from ~24.5 ms to ~12.6 ms, plus the
+  `Density::compute`-vs-`NoiseChunkSampler` caching asymmetry found along
+  the way and left as the next lever.
+- [Benchmark harness](./benchmark-harness.md) — the criterion-based implementation of
+  that design for `lodestone-worldgen`, `lodestone-v770`, `lodestone-world` and
+  `lodestone-entity`: the `support.rs` recording helper, the `bench-results/*.jsonl`
+  format, why it is duplicated per-crate rather than a shared crate, and how to add a
+  bench or a new site. `lodestone-world`'s and `lodestone-entity`'s benches are also the
+  harness's worked examples of the "vacuous world" and "duration species" traps
+  `CLAUDE.md` names — a light-propagation bench over flat terrain, a pathfinding bench
+  over open ground, and a per-tick mob bench that lets a `b.iter` closure run a mob to
+  completion would each look perfectly healthy while measuring nothing.
 - [Client simulation, physics and input roadmap](./roadmap/client-simulation.md) — the
   ordered decomposition of movement modes not yet modelled, vitals, damage, prediction
   and reconciliation, and input, for epics #1–#4; what in `docs/baritone-port.md`'s own
@@ -232,10 +261,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Server entities, AI and gameplay mechanics roadmap](./roadmap/server-entities.md) —
   the ordered decomposition of mob AI, spawning, breeding/taming/villagers, farming and
   processing blocks, and damage/health for epic #5; why most of Phase 0 is closing
-  islands (`damage.rs`, `projectile.rs`, `explosion.rs`, the `brain` system and the
-  dumped `path_types.rs` census all have zero consumers today) rather than new
-  invention, and the correction that the goal-AI-plus-pathfinder composition the
-  drafting brief called "groundwork" is in fact already ticking in production.
+  islands (originally `damage.rs`, `projectile.rs`, `explosion.rs`, the `brain` system
+  and the dumped `path_types.rs` census all had zero consumers — `damage.rs` and
+  `explosion.rs` are now wired into `MobSim`, `projectile.rs`/`brain`/`path_types.rs`
+  are not) rather than new invention, and the correction that the goal-AI-plus-pathfinder
+  composition the drafting brief called "groundwork" is in fact already ticking in
+  production.
 - [Server-side world simulation roadmap](./roadmap/server-simulation.md) — the ordered
   decomposition of chunk lifecycle, persistence, block behaviour and ticks, redstone,
   world state, and the rest of server plumbing for epic #5; two corrections to the
@@ -252,6 +283,21 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the root cause of two already-filed bugs; the `CHUNK_BATCH_START` "island" that
   turned out to be a benign side-effect-only packet; and the multi-version cost
   analysis, left as a design question rather than a recommendation.
+- [Version table](./version-table.md) — the derived, provenance-tracked protocol
+  number / `DataVersion` / release date for epic #343's sixteen target versions
+  (1.7.10 through 26.2); the empirically-settled 1.13.2→1.14.4 boundary where the
+  jar's own `version.json` starts existing; zero disagreements found between the
+  jar and `vendor/minecraft-data` everywhere both were available; and the
+  correction that 1.7.10 has *some* minecraft-data coverage, just not a
+  per-version directory.
+- [Protocol version crate naming](./protocol-crate-naming.md) — what the `vNNN`
+  crate suffix actually denotes (two different rules already coexist between
+  `v47`/`v340` and `v735`/`v770`, not just introduced by `v770`/protocol-776), a
+  recommended single convention for the next fifteen crates with the exact
+  mechanical rename steps costed out but not executed, and a factual survey of
+  what `v47`/`v340`/`v735` already are: real client-direction translation layers
+  into the canonical model, live-verified, incomplete in action-encode breadth,
+  and with no server-direction (inbound) counterpart built for any of the three.
 - [Microsoft account storage and online-mode join](./accounts.md) — multi-account
   credentials, the keychain/plain-file split (issue #64), wiring it into the
   join flow (issue #65), and the account list screen that draws it (issue #66):
@@ -264,3 +310,25 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   hand-rolls `login::finish_interactive`'s equivalent instead of calling it, and
   exactly which steps are verified versus unverifiable without a real Microsoft
   account.
+- [`/givedebug` client command](./givedebug-command.md) — the testing-only
+  `/givedebug <item> <amount>` chat intercept that composes the server's real
+  `/give @s <item> <amount>` rather than mutating local inventory state, why op
+  is required, and why the oracle scripts now op the interactive player over
+  RCON rather than pre-writing `ops.json`.
+- [The sky pass and the air-bubble row](./sky-and-air-bubbles.md) — two features
+  that landed as complete, tested, unreachable modules and then got wired: the
+  sky's own pass before the terrain pass and the `Clear`-vs-`Load` handover that
+  must key off whether the sky *actually drew*, the six-hop `airSupply` decode
+  chain that did not exist at all, why every sky pipeline deliberately has no
+  depth attachment, the deliberate omissions (flat clouds, no sunrise tint, an
+  approximated sky colour), and the two pixel gates — both of which were wrong
+  before they were right, in ways that generalise: a frame percentage cannot
+  tell a uniform-but-wrong clear from a localised blob, and a control premise
+  can be false before the feature under test ever existed.
+- [Served session liveness](./served-session-liveness.md) — keep-alive (vanilla's
+  own 15s interval and disconnect-on-timeout, not two different numbers), the
+  day/night clock actually advancing over a live connection instead of a
+  hermetic decode test, and view streaming (chunk-cache-center / forget / send)
+  following the player between chunk columns — the three things a served
+  session needed to survive, keep time, and follow the player, and why every
+  piece the client needed already existed and drew nothing until this landed.

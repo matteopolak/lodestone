@@ -95,6 +95,12 @@ const MAX_ATTRIBUTES: usize = 128;
 // ambience, 12 arrow-count, 13 stinger-count, 14 sleeping-pos.
 // Mob: 15 mob-flags. AgeableMob: 16 baby.
 const IDX_SHARED_FLAGS: u8 = 0;
+// `Entity`'s second `defineId` call (`Entity.java:268`, right after
+// `DATA_SHARED_FLAGS_ID` at :260 and right before `DATA_CUSTOM_NAME` at :269)
+// — `SynchedEntityData.defineId` assigns ids by a class-static counter in
+// declaration order, so this is index 1, verified against the jar's own
+// source rather than trusted from a briefing.
+const IDX_AIR_SUPPLY: u8 = 1;
 const IDX_CUSTOM_NAME: u8 = 2;
 const IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
 const IDX_POSE: u8 = 6;
@@ -415,6 +421,7 @@ pub fn read_entity_metadata(
         }
         match (index, value) {
             (IDX_SHARED_FLAGS, Value::Byte(b)) => md.flags = Some(b as u8),
+            (IDX_AIR_SUPPLY, Value::Int(v)) => md.air_supply = Some(v),
             (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Reported::Reported(t),
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
             (IDX_POSE, Value::Pose(p)) => md.pose = Some(pose_from_id(p)),
@@ -595,6 +602,24 @@ mod tests {
             md.variant,
             Some(EntityVariant::Keyed("minecraft:cold".parse().unwrap()))
         );
+    }
+
+    /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to
+    /// close (`docs/air-supply.md`). Verified against `Entity.java:268`'s
+    /// `defineId` declaration order, not assumed.
+    #[test]
+    fn decodes_air_supply_at_index_1() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_AIR_SUPPLY);
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(247));
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, None)
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.air_supply, Some(247));
     }
 
     /// An empty list (just the terminator) decodes to an empty update.

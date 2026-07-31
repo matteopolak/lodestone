@@ -708,6 +708,12 @@ pub struct RenderStats {
     /// when the stack is empty. Both `false` in third person; both `false` also
     /// means the `player_wide` rig failed to load, which is a defect.
     pub first_person_item_drawn: bool,
+    /// Whether the sky pass ran this frame — i.e. whether
+    /// [`RenderState::install_sky`] has been called. `false` for every caller
+    /// today that has not installed one (every headless test, a jar-less run);
+    /// also what the block pass's clear-vs-load choice keys off, so a wrong
+    /// value here is not just a missing counter, it is a missing frame clear.
+    pub sky_drawn: bool,
 }
 
 #[derive(Debug)]
@@ -1521,6 +1527,38 @@ impl std::fmt::Debug for SkyDarkenSource {
     }
 }
 
+/// Where the sky pass's **world clock** comes from: the raw `time_of_day`
+/// tick [`lodestone_render::SkyRenderer::render`] places the sun/moon from and
+/// phases the star/cloud animation with.
+///
+/// Separate from [`SkyDarkenSource`] even though both are driven by the same
+/// server clock: that source hands back the already-*derived* darken factor
+/// (`sky_darken_for_time_of_day`) the entity/model passes fold into their
+/// lightmap lane, while the sky pass needs the raw tick itself — placing the
+/// sun at a fixed factor of 1.0 would freeze it at noon's position forever.
+///
+/// Unset — no sky installed, a headless test — is noon (`6000`), matching
+/// every other per-frame source in this file's "unset means noon" convention.
+#[derive(Default)]
+struct TimeOfDaySource(Option<Box<dyn Fn() -> Option<i64> + Send + Sync>>);
+
+impl TimeOfDaySource {
+    /// This frame's `time_of_day`, or noon (`6000`) when there is no source or
+    /// the world clock is not known yet (pre-login).
+    #[must_use]
+    fn value(&self) -> i64 {
+        self.0.as_ref().and_then(|f| f()).unwrap_or(6000)
+    }
+}
+
+impl std::fmt::Debug for TimeOfDaySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TimeOfDaySource")
+            .field(&if self.0.is_some() { "set" } else { "noon" })
+            .finish()
+    }
+}
+
 /// The local player's own third-person body for one frame: everything
 /// [`EntityInstance::new`](lodestone_render::EntityInstance::new) (via
 /// [`RenderState::prepare_entities`]) needs to pose it, plus which skin rig to
@@ -1828,6 +1866,18 @@ pub struct RenderState {
     /// [`RenderState::set_main_hand_source`].
     main_hand: MainHandSource,
     outline_shape: OutlineShapeSource,
+    /// The sky pass (disc/sun/moon/stars/clouds), built once the vanilla
+    /// celestial atlas and cloud texture are available. `None` — no
+    /// `client.jar`, a headless test, or simply before [`RenderState::install_sky`]
+    /// runs — reproduces this struct's behaviour before the sky existed
+    /// exactly: [`render_inner`](Self::render_inner) clears straight to
+    /// [`Self::clear`] and draws no sky pass at all.
+    sky: Option<lodestone_render::SkyRenderer>,
+    /// The world clock the sky pass reads (see [`TimeOfDaySource`]). Permanent
+    /// noon until the shell wires a world clock in via
+    /// [`RenderState::set_time_of_day_source`] — the same "unset means noon"
+    /// convention [`SkyDarkenSource`] already uses.
+    time_of_day: TimeOfDaySource,
 }
 
 impl RenderState {
@@ -2000,6 +2050,11 @@ impl RenderState {
             // `set_main_hand_source`.
             main_hand: MainHandSource::default(),
             outline_shape: OutlineShapeSource::default(),
+            // No sky until the shell installs one; see `install_sky`.
+            sky: None,
+            // Permanent noon until the shell installs a world clock; see
+            // `set_time_of_day_source`.
+            time_of_day: TimeOfDaySource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -2114,6 +2169,35 @@ impl RenderState {
     #[must_use]
     pub fn sky_darken(&self) -> f32 {
         self.sky_darken.value()
+    }
+
+    /// Install the sky pass, built once by the caller (typically
+    /// `crate::resources::load_sky`, which owns the `client.jar` IO this file
+    /// deliberately has none of). `None` — no call, a jar-less run — leaves
+    /// [`render_inner`](Self::render_inner) exactly as it behaved before the
+    /// sky existed: no sky pass runs, and the block pass clears straight to
+    /// [`Self::clear`].
+    pub fn install_sky(&mut self, sky: lodestone_render::SkyRenderer) {
+        self.sky = Some(sky);
+    }
+
+    /// Whether a sky pass is installed. Exposed for the same reason
+    /// [`sky_darken`](Self::sky_darken) is: a wrong *value* and a missing
+    /// *wiring* must not look identical from outside this module.
+    #[must_use]
+    pub fn has_sky(&self) -> bool {
+        self.sky.is_some()
+    }
+
+    /// Install the world clock the sky pass reads (see [`TimeOfDaySource`]).
+    /// Install once, at connect time, next to
+    /// [`set_sky_darken_source`](Self::set_sky_darken_source) — `f` is polled
+    /// once per frame and may return `None` until the world clock is known.
+    ///
+    /// Without this, an installed sky renders permanently at noon: the sun sits
+    /// fixed overhead and the stars/moon never appear.
+    pub fn set_time_of_day_source(&mut self, f: impl Fn() -> Option<i64> + Send + Sync + 'static) {
+        self.time_of_day = TimeOfDaySource(Some(Box::new(f)));
     }
 
     /// Install the source for the local player's own third-person body (see
@@ -2628,6 +2712,34 @@ impl RenderState {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame"),
         });
+
+        // The sky pass, if installed — its own render pass with no depth
+        // attachment, run *before* the block pass (`SkyRenderer::render`'s own
+        // doc: it must run first and take no depth, so it can never occlude
+        // terrain and terrain always draws over it normally). It clears the
+        // target itself (`Color::BLACK`, overwritten by every pixel the four
+        // sky draws touch), so the block pass below must switch from its own
+        // `Clear` to a `Load` — clearing twice would just discard the sky.
+        stats.sky_drawn = if let Some(sky) = &self.sky {
+            let day_sky_color = [
+                self.clear.r as f32,
+                self.clear.g as f32,
+                self.clear.b as f32,
+            ];
+            sky.render(
+                device,
+                queue,
+                &mut encoder,
+                view,
+                camera,
+                self.time_of_day.value(),
+                day_sky_color,
+            );
+            true
+        } else {
+            false
+        };
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass"),
@@ -2636,7 +2748,16 @@ impl RenderState {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear),
+                        // `Load` only when the sky actually drew this frame —
+                        // never unconditionally. With no sky installed there is
+                        // nothing upstream that touched `view` at all, and
+                        // `Load` over an untouched/previous-frame target reads
+                        // as garbage or smeared history, not as "missing sky".
+                        load: if stats.sky_drawn {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(self.clear)
+                        },
                         store: wgpu::StoreOp::Store,
                     },
                 })],
