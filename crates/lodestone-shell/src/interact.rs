@@ -113,6 +113,27 @@ use crate::sim::{bare_handed_tool_mining, dig_break_inputs, face_from_normal, pa
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct RayTarget(pub Option<RayHit>);
 
+/// The living entity the view ray currently points at, for a left-click to
+/// attack — vanilla's `Minecraft.hitResult` resolving to `HitResult.Type.ENTITY`
+/// rather than `BLOCK`.
+///
+/// Recomputed alongside [`RayTarget`] by `Sim::update_target`, from the same
+/// camera and against a *shorter* range: vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE`
+/// is `3.0` blocks (`Player.java:134`) versus `DEFAULT_BLOCK_INTERACTION_RANGE`'s
+/// `4.5` (`Player.java:133`), and further capped by the block hit distance when
+/// a block sits closer than that — an entity behind a wall cannot be targeted
+/// through it. Holds the target's [`lodestone_ecs::entity::MinecraftEntityId`]
+/// (the wire id `ClientAction::InteractEntity` needs), not a `bevy_ecs::Entity`,
+/// so a consumer never has to resolve one through `EntityIndex` just to attack.
+///
+/// **A `Some` here takes priority over [`RayTarget`]** for `begin_attack`: a
+/// closer entity is what vanilla's combined `clip()`/entity-pick would return
+/// as the single `hitResult`, and `case ENTITY` never falls through to
+/// `case BLOCK`. This resource does not itself suppress mining — `Sim::begin_attack`
+/// is the one place that reads both and decides.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct EntityRayTarget(pub Option<i32>);
+
 /// Whether the attack (left) button is currently held.
 ///
 /// Drives the live hold-to-mine loop. A demo-world break is a one-shot on press
@@ -394,6 +415,59 @@ pub fn drive_mining(
             .0
             .breaking_block(hit.block, id_value, [1.0; 3], particle_face(face));
     }
+    // Issue #360: the debris burst at the moment a block actually breaks.
+    //
+    // This is the local **prediction** half of vanilla's
+    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java:114-141`):
+    // it clears the block and throws the destroy-effect debris synchronously
+    // on the acting client, without waiting for a server round trip.
+    // `StopDestroy` is this predictor's equivalent moment — `mining.rs`'s
+    // `continue_` emits it the tick its own progress reaches `1.0`, driven by
+    // the version's real per-state hardness (see this function's own docs).
+    //
+    // Before this, the **only** burst trigger anywhere in the shell was the
+    // server-driven `NetUpdate::BlockDestroyed` arm (`Sim::step`'s live-update
+    // match, fed by `ClientboundLevelEventPacket` id `2001`) — which
+    // structurally **never fires for our own break**, verified against
+    // `.cache/mc/26.2/src` rather than assumed:
+    // `ServerPlayerGameMode.destroyBlock` (`ServerPlayerGameMode.java:262-298`,
+    // the server's handler for a player's own break) calls
+    // `this.level.removeBlock(pos, false)` — a plain block-state write with no
+    // `levelEvent` call anywhere in it. The `2001` particle event instead lives
+    // in the *separate* `Level.destroyBlock(pos, drop, breaker, limit)` method
+    // (`Level.java:280-289`, `this.levelEvent(2001, pos, ...)`), which is what a
+    // cascading break (a torch losing support, fire, an explosion) goes through
+    // instead — and that call broadcasts to **every** nearby player
+    // unconditionally, our own client included, which is exactly the
+    // "cascaded breaks already showed particles, my own break never did"
+    // asymmetry that was reported. There is no player-exclusion filter to rely
+    // on; the two break paths are simply different methods, and only one of
+    // them ever touches `levelEvent` at all.
+    //
+    // No double-burst risk from adding this: our own break structurally cannot
+    // reach the `levelEvent`/`2001` path in the first place, so this predicted
+    // emit and a `NetUpdate::BlockDestroyed` for the *same* break can never
+    // both fire. A **mispredicted** break (the server rejects the dig) is a
+    // pre-existing, unrelated gap — nothing currently rolls back a
+    // wrongly-predicted client-side block edit either — and is no worse here
+    // than it already is for the progressive mining chips a few lines above,
+    // which predict exactly as eagerly.
+    if actions.iter().any(|a| {
+        matches!(
+            a,
+            ClientAction::BlockAction {
+                action: lodestone_model::BlockActionKind::StopDestroy,
+                ..
+            }
+        )
+    }) {
+        // Full-cube shape and untinted white, for the same reason as the
+        // mining-chip particle a few lines up: the shell does not carry a
+        // block's outline shape, and `destroy_block` itself resolves the
+        // real per-state tint (see its own docs) — `[1.0; 3]` is the
+        // multiplier, not a placeholder colour.
+        particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
+    }
     queue.0.extend(actions);
 }
 
@@ -427,6 +501,7 @@ impl Plugin for InteractPlugin {
              not deduplicate — see docs/session-components.md)"
         );
         app.init_resource::<RayTarget>();
+        app.init_resource::<EntityRayTarget>();
         app.init_resource::<Attacking>();
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();

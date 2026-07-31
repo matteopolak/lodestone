@@ -110,6 +110,57 @@ pub fn raycast(
     None
 }
 
+/// Ray-vs-AABB slab test, mirroring vanilla's `AABB.clip(Vec3, Vec3)` used by
+/// `Entity.getClippedBounds`/`ProjectileUtil`-style entity picking.
+///
+/// `dir` need not be normalised (matches [`raycast`]'s convention); `reach` is
+/// in the same blocks-along-the-normalised-ray units as [`raycast`]'s. Returns
+/// the entry distance in blocks when the ray hits the box within
+/// `0..=reach`, `None` on a miss, behind the origin, or a degenerate
+/// direction. The box itself is given as plain `min`/`max` triples rather than
+/// [`lodestone_physics::Aabb`] so this module keeps the "no `lodestone-world`,
+/// no GPU" independence its own docs promise — a caller with an `Aabb` passes
+/// `[aabb.min_x, aabb.min_y, aabb.min_z]` / `[aabb.max_x, ...]`.
+#[must_use]
+pub fn ray_aabb(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    reach: f64,
+    aabb_min: [f64; 3],
+    aabb_max: [f64; 3],
+) -> Option<f64> {
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    if !len.is_finite() || len < 1e-9 {
+        return None;
+    }
+    let d = [dir[0] / len, dir[1] / len, dir[2] / len];
+
+    let mut t_min = 0.0f64;
+    let mut t_max = reach;
+    for a in 0..3 {
+        if d[a].abs() < 1e-12 {
+            // Parallel to this axis: a hit requires the origin to already lie
+            // within the slab, or the ray never enters it on this axis.
+            if origin[a] < aabb_min[a] || origin[a] > aabb_max[a] {
+                return None;
+            }
+            continue;
+        }
+        let inv = 1.0 / d[a];
+        let mut t1 = (aabb_min[a] - origin[a]) * inv;
+        let mut t2 = (aabb_max[a] - origin[a]) * inv;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        t_min = t_min.max(t1);
+        t_max = t_max.min(t2);
+        if t_min > t_max {
+            return None;
+        }
+    }
+    Some(t_min)
+}
+
 fn sign(v: f64) -> i32 {
     if v > 0.0 {
         1
@@ -173,5 +224,69 @@ mod tests {
             "landed on the floor surface, got {:?}",
             hit.block
         );
+    }
+
+    #[test]
+    fn ray_aabb_hits_a_box_dead_ahead() {
+        // A 1x2x1 box (a player-shaped hitbox) centred on the origin's +X
+        // axis, hit head-on.
+        let t = ray_aabb(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            10.0,
+            [2.0, -1.0, -0.5],
+            [3.0, 1.0, 0.5],
+        )
+        .expect("ray should enter the box");
+        assert!((t - 2.0).abs() < 1e-9, "entry distance was {t}");
+    }
+
+    #[test]
+    fn ray_aabb_misses_a_box_off_to_the_side() {
+        assert!(
+            ray_aabb(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                10.0,
+                [2.0, 5.0, 5.0],
+                [3.0, 6.0, 6.0],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ray_aabb_respects_reach() {
+        // Box entry is at t=8, reach is only 4.5 — same "in range but too far"
+        // case REACH enforces for blocks.
+        assert!(
+            ray_aabb(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                4.5,
+                [8.0, -1.0, -1.0],
+                [9.0, 1.0, 1.0],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn ray_aabb_picks_the_nearer_of_two_boxes() {
+        let near = ray_aabb(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            10.0,
+            [2.0, -1.0, -1.0],
+            [3.0, 1.0, 1.0],
+        );
+        let far = ray_aabb(
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            10.0,
+            [5.0, -1.0, -1.0],
+            [6.0, 1.0, 1.0],
+        );
+        assert!(near.unwrap() < far.unwrap(), "the closer box must win a min-by comparison");
     }
 }
