@@ -245,6 +245,16 @@ impl RenderTarget for HeadlessTarget {
 pub struct SurfaceTarget<'window> {
     surface: wgpu::Surface<'window>,
     config: wgpu::SurfaceConfiguration,
+    /// The present mode `get_default_config` chose for this adapter/surface,
+    /// kept so [`Self::set_present_mode`] can restore *exactly* what we started
+    /// with rather than a mode that merely sounds equivalent.
+    ///
+    /// [`wgpu::PresentMode::AutoVsync`] is **not** that equivalent: it resolves
+    /// to `FifoRelaxed` wherever that exists, which permits tearing on a late
+    /// frame, whereas wgpu's default config picks plain `Fifo`. Restoring by
+    /// name instead of by remembered value would quietly change the default
+    /// presentation of every platform that has `FifoRelaxed`.
+    default_present_mode: wgpu::PresentMode,
 }
 
 impl<'window> SurfaceTarget<'window> {
@@ -261,11 +271,50 @@ impl<'window> SurfaceTarget<'window> {
     ) -> Option<Self> {
         let config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
         surface.configure(device, &config);
-        Some(Self { surface, config })
+        let default_present_mode = config.present_mode;
+        Some(Self {
+            surface,
+            config,
+            default_present_mode,
+        })
     }
 
     /// Re-apply the current configuration (surface-lost / outdated recovery).
     pub fn reconfigure(&self, device: &wgpu::Device) {
+        self.surface.configure(device, &self.config);
+    }
+
+    /// The present mode currently in force.
+    #[must_use]
+    pub const fn present_mode(&self) -> wgpu::PresentMode {
+        self.config.present_mode
+    }
+
+    /// The present mode the adapter itself chose at bring-up — pass this back to
+    /// [`Self::set_present_mode`] to undo an override. See
+    /// [`Self::default_present_mode`]'s field docs for why this is remembered
+    /// rather than reconstructed.
+    #[must_use]
+    pub const fn default_present_mode(&self) -> wgpu::PresentMode {
+        self.default_present_mode
+    }
+
+    /// Switch the swapchain's present mode — the vsync knob.
+    ///
+    /// A no-op when the mode already matches, which is what makes this safe to
+    /// call every frame: `surface.configure` **recreates the swapchain**, so an
+    /// unconditional version would rebuild it 60+ times a second and stutter.
+    /// The guard is the feature, not an optimisation.
+    ///
+    /// `mode` is passed to wgpu as given, so prefer the `Auto*` variants: a
+    /// concrete `Immediate`/`Mailbox` that the adapter does not advertise is a
+    /// validation error, whereas [`wgpu::PresentMode::AutoNoVsync`] degrades to
+    /// `Fifo` and simply stays capped.
+    pub fn set_present_mode(&mut self, device: &wgpu::Device, mode: wgpu::PresentMode) {
+        if self.config.present_mode == mode {
+            return;
+        }
+        self.config.present_mode = mode;
         self.surface.configure(device, &self.config);
     }
 }

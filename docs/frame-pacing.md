@@ -104,6 +104,51 @@ this module exists to fix.
 `app::tests::the_unfocused_frame_schedule_does_not_drift_below_its_target` keeps
 the naive gate as a live control and requires it to be observed *failing*.
 
+### The uncapped-frame-rate debug option
+
+`OPTIONS` → `UNCAP FRAMERATE` (Enter toggles it) exists so the F3 `fps=` figure is
+a **measurement** rather than a readout of the display's refresh rate. Vsynced,
+every frame that fits inside the refresh interval reports the same number, so the
+counter cannot tell a 2× speedup from a 20% one — it is the wrong instrument for
+judging a perf change.
+
+It is a **debug knob, not a video setting.** Vanilla's real equivalent ("Max
+Framerate", `Options.framerateLimit`, with `Unlimited` at the top of the range) is
+a proper option with a slider; this is one boolean added ahead of that screen
+existing, and should be replaced by the real thing rather than grown.
+
+What it actually does is switch the swapchain's present mode:
+
+| `unlock_framerate` | present mode |
+|---|---|
+| `false` | whatever `Surface::get_default_config` chose at bring-up (`Fifo` in practice) |
+| `true` | `wgpu::PresentMode::AutoNoVsync` |
+
+Three details that are load-bearing:
+
+- **Off restores a *remembered* mode, not `AutoVsync`.** Those are not the same:
+  `AutoVsync` resolves to `FifoRelaxed` wherever that exists, which permits
+  tearing on a late frame, while the default config picks plain `Fifo`. Restoring
+  by name would quietly change the default presentation on every platform that
+  has `FifoRelaxed`. `SurfaceTarget` stores `default_present_mode` for this.
+- **`AutoNoVsync`, never a concrete `Immediate`/`Mailbox`.** A concrete mode the
+  adapter does not advertise is a validation error; `AutoNoVsync` degrades to
+  `Fifo` and simply stays capped. (wgpu's Metal backend does advertise
+  `Immediate` on macOS — `wgpu-hal/src/metal/adapter.rs` gates it on
+  `OsFeatures::display_sync()` — so it resolves to that here.)
+- **`WindowApp::sync_present_mode` runs every presented frame and is a no-op
+  unless the mode changed.** `surface.configure` *recreates the swapchain*, so
+  the equality guard inside `SurfaceTarget::set_present_mode` is the feature, not
+  an optimisation. Polling beats firing on the toggle because the menu layer is
+  pure and GPU-free by design, and threading a `wgpu::Device` into it to save one
+  `PresentMode` comparison per frame would be a bad trade.
+
+This only removes *our* cap on a **focused** window. Everything in the table above
+still holds: an unfocused window is still throttled to `UNFOCUSED_FPS`, and an
+occluded one still presents nothing. Neither of those is vsync, and neither should
+follow a debug knob — the occluded case in particular exists to stop `acquire()`
+stalling, which uncapping would make worse rather than better.
+
 ## How to change it
 
 - The constants (`MAX_TICKS_PER_UPDATE`, `TICK_SECS`, `UNFOCUSED_FPS`,
@@ -120,12 +165,19 @@ the naive gate as a live control and requires it to be observed *failing*.
 
 ## Configuration
 
-None at runtime. All pacing is compile-time constants; there is no frame-rate
-limiter setting yet (see [Main menu](./main-menu.md) for where a video-settings
-screen would go).
+The pacing itself is all compile-time constants — `MAX_TICKS_PER_UPDATE`,
+`TICK_SECS`, `UNFOCUSED_FPS`, `BACKGROUND_POLL`, none of them settings.
+
+One runtime knob, described above: `unlock_framerate` in
+[`Options`](../crates/lodestone-shell/src/config.rs), persisted to `options.json`
+beside `gui_scale` and only written when set, so an untouched install has no key
+for it. There is still no real frame-rate *limiter* setting (see
+[Main menu](./main-menu.md) for where a video-settings screen would go).
 
 ## Dependencies
 
 - `winit` — `ControlFlow`, and the `Focused` / `Occluded` window events that feed
   the pacer.
 - `crate::sim::Sim` — `step(dt)` and `tick_count()`; the pacer only supplies `dt`.
+- `lodestone_render::SurfaceTarget` — owns the swapchain configuration, so the
+  present mode is set through it rather than from `app.rs` directly.
