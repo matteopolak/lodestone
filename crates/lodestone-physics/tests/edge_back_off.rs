@@ -21,6 +21,21 @@
 //!    Z are probed independently before jointly, and that `fallDistance` gates the
 //!    airborne branch — each with the number derived from the inequality in
 //!    `Player.canFallAtLeast`, not from running this crate.
+//!
+//! **On `fall_distance` specifically:** `fall_distance_gates_the_airborne_branch`
+//! below tests the gate's *sensitivity* to the input at the [`move_entity`]
+//! primitive level, with a hand-set `fall_distance` — that is still the right
+//! tool for isolating the gate's own arithmetic from everything upstream of it.
+//! What it does *not* cover, and what used to make the hand-set value the whole
+//! story: whether `PlayerState::fall_distance` itself is ever anything other than
+//! the permanent `0.0` it started as (issue #194). It no longer is —
+//! `PlayerState::fall_distance`'s own doc lists every accumulation/reset site
+//! this crate now reproduces from the jar — and `tests/fall_distance.rs` is
+//! where that maintenance is tested: every reset driven by real ticks through
+//! the public `tick`/`tick_air`/`tick_water`/`tick_lava`/`tick_elytra` entry
+//! points (never by hand-setting the field under test), plus one flagship test
+//! that drives a real fall to a real `fall_distance > maxDownStep` and shows it
+//! changes the *committed position* at this exact gate, against a zero control.
 
 use std::collections::HashSet;
 
