@@ -128,23 +128,46 @@ both of these wrong.
   after the stuck-speed multiplier is consumed and before `collide`
   (`Entity.java:735-744`). So a cobweb-slowed delta is what gets probed and stepped.
   Moving it before or after the move changes results.
-* **`fall_distance` is an input this crate does not maintain.** It reaches the rule as
-  `PlayerState::fall_distance` → `EdgeBackOff::Player::fall_distance`, defaults to
-  `0.0`, and is read by **one** place: `isAboveGround`'s airborne branch, only when
-  `on_ground` is false. Maintaining it properly means porting `Entity.checkFallDamage`'s
-  `-= (float) ya` accumulation and grounded reset (`Entity.java:1564-1582`), the
-  `movementLength >= 1.0` clip-through reset inside `move` (`:747-754`), the `*= 0.5`
-  lava halving in `baseTick` (`:555-557`), `checkFallDistanceAccumulation`'s clamp to
-  `1.0` (`:2904-2908`), `LivingEntity`'s override (`LivingEntity.java:363`), and the
-  water/vehicle/teleport resets. That is a subsystem; a partial model feeding a
-  position-affecting gate would be worse than an explicit input.
+* **`fall_distance` is now maintained by `PlayerState`'s own tick, not just an input
+  (issue #194 closed this).** It reaches the rule as `PlayerState::fall_distance` →
+  `EdgeBackOff::Player::fall_distance`, and is read by **one** place:
+  `isAboveGround`'s airborne branch, only when `on_ground` is false. What maintains it
+  now, each cited against the jar (full detail lives on
+  `PlayerState::fall_distance`'s own doc comment, which is the source of truth — this
+  is a summary):
+  - accumulation + grounded reset, `Entity.checkFallDamage`'s `-= (float) ya`
+    (`Entity.java:1564-1582`), called from inside `Entity.move()` itself
+    (`Entity.java:783-784`) — reproduced right after every `do_move`/`travel_in_air`
+    call in `tick_air`/`tick_water`/`tick_lava`/`tick_elytra`;
+  - the water reset (`Entity.java:1658-1659`), at the top of `tick_water`;
+  - the `*= 0.5` lava halving in `baseTick` (`:555-557`), at the top of `tick_lava`;
+  - the climbable reset (`LivingEntity.java:2693-2695`), in `tick_air` only — vanilla
+    reaches it only through `travelInAir`;
+  - the Slow Falling/Levitation reset (`LivingEntity.java:3123-3125`) and the elytra
+    `checkFallDistanceAccumulation` clamp to `1.0` (`:2904-2908`, called from
+    `updateFallFlying`, `LivingEntity.java:3117-3119`), both in `tick`, before the
+    travel dispatch;
+  - the stuck-in-block reset (`Entity.makeStuckInBlock`, `:2945-2947`), riding along
+    with `update_stuck_multiplier`'s existing block scan.
 
-  **Know the direction of the default's error.** The airborne branch probes
-  `maxDownStep - fallDistance`, so a `0.0` stand-in probes the *full* step height — a
-  strictly weaker `canFallAtLeast` — and the gate therefore opens **more** often than
-  vanilla's, never less. Grounded, the value is unread and the server resets it to
-  `0.0` on every grounded tick anyway, so the entire bridging / sneak-placing case is
-  exact today.
+  **Still not modelled**, matching pre-existing gaps elsewhere in this crate: the
+  `movementLength >= 1.0` clip-through reset inside `move` (`:747-754`, needs a world
+  raycast against `FALLDAMAGE_RESETTING` this crate's `CollisionView` has no
+  equivalent of), creative flight's reset (`Player.java:449-451` — this crate has no
+  creative flight at all), riding/vehicles (this crate has no riding state), and
+  bubble columns. **Teleport is the driver's responsibility**: this crate has no
+  teleport primitive of its own, so a caller that snaps `PlayerState::position`
+  directly (a server correction, a respawn, an ender pearl) must call
+  `PlayerState::reset_fall_distance()` itself.
+
+  **Know the direction of the *old* default's error**, for context on why this
+  mattered: the airborne branch probes `maxDownStep - fallDistance`, so the old
+  permanent `0.0` probed the *full* step height — a strictly weaker `canFallAtLeast`
+  — and the gate opened **more** often than vanilla's, never less. Grounded, the
+  value was unread and the server resets it to `0.0` on every grounded tick anyway,
+  so the bridging/sneak-placing case was exact even before this — the divergence was
+  specifically an **airborne** sneak (a mid-air ledge probe, e.g. sneaking during a
+  fall) opening the gate when vanilla's would have stayed shut.
 * **Note what this makes newly relevant.** `move_entity`'s doc says it models "the
   parts of `Entity.move` that affect an entity's reported position", and fall distance
   used to be outside that — it drove fall *damage*, which the server owns. This rule
@@ -218,7 +241,15 @@ path ever bypasses `movement_intent`, it must set both or neither.
 * `crates/lodestone-physics/tests/edge_back_off.rs` — the pure control (one delta,
   one world, `EdgeBackOff::Player` vs `EdgeBackOff::Entity`, nothing else varying) plus
   hand-derived expectations for the step loop, the X/Z independence, the
-  `fall_distance` gate, and the velocity-survives-the-cancel property.
+  `fall_distance` gate (at the `move_entity` primitive level, `fall_distance`
+  hand-set), and the velocity-survives-the-cancel property.
+* `crates/lodestone-physics/tests/fall_distance.rs` — whether `PlayerState`
+  actually *maintains* `fall_distance` (issue #194): every accumulation/reset site
+  driven by real ticks through the public `tick`/`tick_air`/`tick_water`/
+  `tick_lava`/`tick_elytra` entry points, plus a flagship test that drives a real
+  fall past `maxDownStep` and shows it changes the committed position at this gate
+  versus a zero control — the end-to-end version of what the hand-set test above
+  checks in isolation.
 
 ### The live gate that is still owed
 
