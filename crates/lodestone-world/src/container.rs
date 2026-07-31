@@ -435,12 +435,41 @@ impl PalettedContainer {
     /// Heap bytes owned by this container (palette and packed longs).
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
+        self.palette_heap_bytes() + self.packed_heap_bytes()
+    }
+
+    /// Heap bytes owned by the palette `Vec<u32>` alone (`0` for [`Single`] and
+    /// [`Direct`], which hold no palette).
+    ///
+    /// Split out from [`heap_bytes`](Self::heap_bytes) for issue #362's
+    /// pool-footprint question: the palette is the allocation with **no length
+    /// guard**, growing by ordinary `Vec` push-doubling and never shrinking on
+    /// its own, unlike the packed array's fixed size classes (see
+    /// [`packed_heap_bytes`](Self::packed_heap_bytes)). A caller sizing a
+    /// recycling strategy needs to see these two numbers separately, not just
+    /// their sum.
+    ///
+    /// [`Single`]: Storage::Single
+    /// [`Direct`]: Storage::Direct
+    #[must_use]
+    pub fn palette_heap_bytes(&self) -> usize {
+        match &self.storage {
+            Storage::Indirect { palette, .. } => palette.capacity() * core::mem::size_of::<u32>(),
+            Storage::Single(_) | Storage::Direct(_) => 0,
+        }
+    }
+
+    /// Heap bytes owned by the packed index array alone (`0` for [`Single`],
+    /// which allocates none). This is the size-classed allocation issue #362's
+    /// pool would recycle; see [`palette_heap_bytes`](Self::palette_heap_bytes)
+    /// for the other half of [`heap_bytes`](Self::heap_bytes).
+    ///
+    /// [`Single`]: Storage::Single
+    #[must_use]
+    pub fn packed_heap_bytes(&self) -> usize {
         match &self.storage {
             Storage::Single(_) => 0,
-            Storage::Indirect { palette, data } => {
-                palette.capacity() * core::mem::size_of::<u32>() + data.heap_bytes()
-            }
-            Storage::Direct(data) => data.heap_bytes(),
+            Storage::Indirect { data, .. } | Storage::Direct(data) => data.heap_bytes(),
         }
     }
 
@@ -975,6 +1004,41 @@ mod tests {
         let c = PalettedContainer::from_values(kind, &values);
         assert!(c.is_single());
         assert_eq!(c.single_value(), Some(5));
+    }
+
+    #[test]
+    fn palette_and_packed_heap_bytes_split_sum_to_heap_bytes() {
+        let kind = PaletteKind::block_states();
+
+        // Single: both halves are zero.
+        let single = PalettedContainer::new(kind, 7);
+        assert_eq!(single.palette_heap_bytes(), 0);
+        assert_eq!(single.packed_heap_bytes(), 0);
+        assert_eq!(single.heap_bytes(), 0);
+
+        // Indirect: palette half is non-zero and accounts for the gap between
+        // heap_bytes() and the packed array alone.
+        let mut indirect = PalettedContainer::new(kind, 0);
+        for i in 0..30 {
+            indirect.set(i * 7, (i + 1) as u32);
+        }
+        assert!(indirect.palette_heap_bytes() > 0, "indirect must own a palette");
+        assert!(indirect.packed_heap_bytes() > 0, "indirect must own packed longs too");
+        assert_eq!(
+            indirect.palette_heap_bytes() + indirect.packed_heap_bytes(),
+            indirect.heap_bytes(),
+            "the split must sum to the combined total"
+        );
+
+        // Direct: palette half is zero (no palette at all), packed half carries
+        // everything.
+        let mut direct = PalettedContainer::new(kind, 0);
+        for i in 0..400 {
+            direct.set(i, (1 + i) as u32);
+        }
+        assert!(matches!(direct.storage, Storage::Direct(_)));
+        assert_eq!(direct.palette_heap_bytes(), 0);
+        assert_eq!(direct.packed_heap_bytes(), direct.heap_bytes());
     }
 
     #[test]

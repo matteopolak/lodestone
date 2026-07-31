@@ -14,6 +14,14 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Path dev-dependency, test-only: `tests/pool_footprint.rs` (issue #362) needs
+# real, JVM-verified overworld terrain rather than hand-built uniform sections
+# to measure the chunk-memory-pool question honestly. `lodestone-worldgen` has
+# no dependency on `lodestone-world` (confirmed before adding this — see the
+# doc comment at the top of that test), so this edge closes no cycle; it only
+# ever compiles for this crate's own test/bench targets, never for the
+# `lodestone-world` library itself or for anything that depends on it.
+lodestone-worldgen = { path = "../lodestone-worldgen" }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
 # for its statistically-robust sampling and free local `--baseline` diffing.
