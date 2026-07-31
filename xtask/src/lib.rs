@@ -836,6 +836,10 @@ pub enum CliCommand {
         minecraft_version: String,
         force: bool,
     },
+    VersionTable {
+        check: bool,
+        fetch_missing: bool,
+    },
     GenRegistries {
         options: GenRegistriesOptions,
     },
@@ -861,7 +865,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar plus asset index into .cache/mc/<version>/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report v770 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/protocol/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory under crates/protocol/*/src/generated\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses v770's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v47), folder (v47), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family folder/label to check, e.g. v735\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -889,6 +893,7 @@ where
         "codegen-ratio" => Ok(CliCommand::CodegenRatio),
         "new-version" => parse_new_version_args(&args[1..]),
         "fetch-version" => parse_fetch_version_args(&args[1..]),
+        "version-table" => parse_version_table_args(&args[1..]),
         "conformance" => parse_conformance_args(&args[1..]),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
@@ -954,6 +959,24 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
                 std::env::current_dir().context("determine current workspace directory")?;
             let summary = fetch_version(&workspace_root, &minecraft_version, force)?;
             println!("{}", summary.render());
+            Ok(())
+        }
+        CliCommand::VersionTable {
+            check,
+            fetch_missing,
+        } => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            if check {
+                let check = check_version_table(&workspace_root, fetch_missing)?;
+                if !check.is_identical() {
+                    bail!("{}", check.summary);
+                }
+                println!("{} is up to date", check.out_path.display());
+            } else {
+                let path = generate_version_table(&workspace_root, fetch_missing)?;
+                println!("generated {}", path.display());
+            }
             Ok(())
         }
         CliCommand::GenRegistries { options } => {
@@ -1165,6 +1188,27 @@ fn parse_fetch_version_args(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::FetchVersion {
         minecraft_version: minecraft_version.ok_or_else(|| anyhow!("--version is required"))?,
         force,
+    })
+}
+
+fn parse_version_table_args(args: &[String]) -> Result<CliCommand> {
+    let mut check = false;
+    let mut fetch_missing = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--check" => check = true,
+            "--fetch-missing" => fetch_missing = true,
+            unknown => bail!("unknown version-table option {unknown:?}"),
+        }
+        index += 1;
+    }
+
+    Ok(CliCommand::VersionTable {
+        check,
+        fetch_missing,
     })
 }
 
@@ -5376,6 +5420,430 @@ pub fn fetch_version(
     })
 }
 
+/// The sixteen versions GitHub epic #343 committed to: the latest patch of
+/// every major Minecraft release from 1.7.10 through the current 26.2.
+///
+/// This is the one place that list is spelled out; [`version_table_report`]
+/// walks it in order, so adding or removing a target version is a one-line
+/// change here plus a `cargo run -p xtask -- version-table` regen.
+pub const EPIC_343_VERSIONS: &[&str] = &[
+    "1.7.10", "1.8.9", "1.9.4", "1.10.2", "1.11.2", "1.12.2", "1.13.2", "1.14.4", "1.15.2",
+    "1.16.5", "1.17.1", "1.18.2", "1.19.4", "1.20.6", "1.21.11", "26.2",
+];
+
+/// Relative path (from the workspace root) to `vendor/minecraft-data`'s
+/// cross-version protocol/data-version index. Covers 1.8 (as `1.7`/`1.7.10`
+/// entries in this specific file) through 1.21.11, plus — measured directly,
+/// contrary to this repo's usual "no 26.x data" caveat about
+/// `vendor/minecraft-data` — a 26.2 entry too. See `docs/version-table.md`
+/// for what that means and does not mean.
+const MINECRAFT_DATA_PROTOCOL_VERSIONS: &str =
+    "vendor/minecraft-data/data/pc/common/protocolVersions.json";
+
+/// Where one field of a [`VersionTableEntry`] was sourced from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VersionSource {
+    /// `version.json` at the root of the vanilla server jar. Present since
+    /// 18w47b; the oldest version in `EPIC_343_VERSIONS` that ships it is
+    /// 1.14.4. Authoritative per `CLAUDE.md`'s "Data sources, in order".
+    JarVersionJson,
+    /// `vendor/minecraft-data`'s `protocolVersions.json`. Used only for
+    /// versions whose jar predates `version.json`; cross-check-grade, never
+    /// authoritative, per `CLAUDE.md`.
+    MinecraftData,
+}
+
+impl VersionSource {
+    #[must_use]
+    pub const fn as_rust_expr(self) -> &'static str {
+        match self {
+            Self::JarVersionJson => "Source::JarVersionJson",
+            Self::MinecraftData => "Source::MinecraftData",
+        }
+    }
+}
+
+/// One resolved row of the version table.
+#[derive(Clone, Debug)]
+pub struct VersionTableEntry {
+    pub minecraft_version: String,
+    pub protocol_version: i32,
+    pub data_version: i32,
+    /// ISO-8601 `releaseTime` from Mojang's version manifest.
+    pub release_date: String,
+    pub protocol_source: VersionSource,
+    pub data_version_source: VersionSource,
+    /// True when both a jar `version.json` and a `minecraft-data` entry were
+    /// available and cross-checked in agreement. False when only one source
+    /// was available (nothing to cross-check) or the two disagreed — a
+    /// disagreement is a hard error in [`resolve_version_table_entry`], not a
+    /// row you can see with this flag set, so `false` here just means
+    /// single-sourced.
+    pub cross_checked: bool,
+}
+
+/// Minimal parsed shape of Mojang's per-version JSON, just the pieces
+/// `version-table` needs beyond what [`parse_asset_downloads`] already
+/// extracts.
+fn manifest_release_time(manifest_json: &str, minecraft_version: &str) -> Result<String> {
+    let root: Value =
+        serde_json::from_str(manifest_json).context("parse Mojang version manifest")?;
+    let versions = root
+        .get("versions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("version manifest is missing versions array"))?;
+
+    for version in versions {
+        if version.get("id").and_then(Value::as_str) == Some(minecraft_version) {
+            return version
+                .get("releaseTime")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| anyhow!("version {minecraft_version} is missing releaseTime"));
+        }
+    }
+
+    bail!("Minecraft version {minecraft_version} was not found in Mojang version manifest")
+}
+
+/// A `(protocol_version, data_version)` pair sourced from the vanilla server
+/// jar's embedded `version.json`, when present.
+struct JarVersionInfo {
+    protocol_version: i32,
+    data_version: i32,
+}
+
+/// Reads `version.json` from the root of a vanilla server jar, if present.
+///
+/// Returns `Ok(None)` for jars that predate the file (18w47b / 1.14) rather
+/// than treating absence as an error — the caller falls back to
+/// `minecraft-data` in that case.
+fn read_jar_version_json(jar_path: &Path) -> Result<Option<JarVersionInfo>> {
+    let file =
+        File::open(jar_path).with_context(|| format!("open jar {}", jar_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .with_context(|| format!("read zip {}", jar_path.display()))?;
+
+    let mut entry = match archive.by_name("version.json") {
+        Ok(entry) => entry,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("read version.json from {}", jar_path.display())
+            });
+        }
+    };
+
+    let mut contents = String::new();
+    entry
+        .read_to_string(&mut contents)
+        .with_context(|| format!("read version.json contents from {}", jar_path.display()))?;
+    drop(entry);
+
+    let root: Value = serde_json::from_str(&contents)
+        .with_context(|| format!("parse version.json from {}", jar_path.display()))?;
+    let protocol_version = root
+        .get("protocol_version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("{}: version.json missing protocol_version", jar_path.display()))?;
+    let data_version = root
+        .get("world_version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("{}: version.json missing world_version", jar_path.display()))?;
+
+    Ok(Some(JarVersionInfo {
+        protocol_version: i32::try_from(protocol_version)
+            .with_context(|| format!("protocol_version {protocol_version} out of i32 range"))?,
+        data_version: i32::try_from(data_version)
+            .with_context(|| format!("world_version {data_version} out of i32 range"))?,
+    }))
+}
+
+/// One row of `vendor/minecraft-data`'s `protocolVersions.json`, filtered to
+/// the fields `version-table` needs.
+struct MinecraftDataProtocolEntry {
+    protocol_version: i32,
+    data_version: i32,
+}
+
+/// Looks up `minecraft_version` in `vendor/minecraft-data`'s
+/// `protocolVersions.json` by exact `minecraftVersion` string match.
+///
+/// Returns `Ok(None)` when the file has no entry for that exact version
+/// string (this repo's cross-check source, never its authority — see
+/// `CLAUDE.md`'s "Data sources, in order").
+fn minecraft_data_protocol_entry(
+    workspace_root: &Path,
+    minecraft_version: &str,
+) -> Result<Option<MinecraftDataProtocolEntry>> {
+    let path = workspace_root.join(MINECRAFT_DATA_PROTOCOL_VERSIONS);
+    let json = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let entries: Vec<Value> =
+        serde_json::from_str(&json).with_context(|| format!("parse {}", path.display()))?;
+
+    for entry in &entries {
+        if entry.get("minecraftVersion").and_then(Value::as_str) != Some(minecraft_version) {
+            continue;
+        }
+        let protocol_version = entry
+            .get("version")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| anyhow!("{}: entry for {minecraft_version} missing version", path.display()))?;
+        let data_version = entry
+            .get("dataVersion")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                anyhow!("{}: entry for {minecraft_version} missing dataVersion", path.display())
+            })?;
+        return Ok(Some(MinecraftDataProtocolEntry {
+            protocol_version: i32::try_from(protocol_version)
+                .with_context(|| format!("protocol_version {protocol_version} out of i32 range"))?,
+            data_version: i32::try_from(data_version)
+                .with_context(|| format!("dataVersion {data_version} out of i32 range"))?,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Resolves one [`VersionTableEntry`] for `minecraft_version`.
+///
+/// Prefers the jar's `version.json` (authoritative) when a server jar is
+/// already cached at `.cache/mc/<minecraft_version>/server.jar` — or,
+/// with `fetch_missing`, downloads it first via [`fetch_version`]. Falls
+/// back to `minecraft-data` when the jar has no `version.json` (every
+/// version in `EPIC_343_VERSIONS` at or before 1.13.2, confirmed empirically:
+/// see `docs/version-table.md`). When both sources are available, disagreement
+/// is a hard error — this table has no silent-drift path.
+fn resolve_version_table_entry(
+    workspace_root: &Path,
+    manifest_json: &str,
+    minecraft_version: &str,
+    fetch_missing: bool,
+) -> Result<VersionTableEntry> {
+    let release_date = manifest_release_time(manifest_json, minecraft_version)?;
+
+    let jar_path = workspace_root
+        .join(".cache")
+        .join("mc")
+        .join(minecraft_version)
+        .join("server.jar");
+
+    if fetch_missing && !jar_path.exists() {
+        fetch_version(workspace_root, minecraft_version, false)
+            .with_context(|| format!("fetch server.jar for {minecraft_version}"))?;
+    }
+
+    let jar_info = if jar_path.exists() {
+        read_jar_version_json(&jar_path)?
+    } else {
+        None
+    };
+    let data_entry = minecraft_data_protocol_entry(workspace_root, minecraft_version)?;
+
+    let (protocol_version, protocol_source) = match (&jar_info, &data_entry) {
+        (Some(jar), Some(data)) if jar.protocol_version != data.protocol_version => bail!(
+            "{minecraft_version}: jar version.json protocol_version {} disagrees with minecraft-data {}",
+            jar.protocol_version,
+            data.protocol_version
+        ),
+        (Some(jar), _) => (jar.protocol_version, VersionSource::JarVersionJson),
+        (None, Some(data)) => (data.protocol_version, VersionSource::MinecraftData),
+        (None, None) => bail!(
+            "{minecraft_version}: no protocol_version source available (no cached jar with \
+             version.json, and no minecraft-data entry) — re-run with --fetch-missing or add a \
+             minecraft-data entry rather than guessing"
+        ),
+    };
+
+    let (data_version, data_version_source) = match (&jar_info, &data_entry) {
+        (Some(jar), Some(data)) if jar.data_version != data.data_version => bail!(
+            "{minecraft_version}: jar version.json world_version {} disagrees with minecraft-data \
+             dataVersion {}",
+            jar.data_version,
+            data.data_version
+        ),
+        (Some(jar), _) => (jar.data_version, VersionSource::JarVersionJson),
+        (None, Some(data)) => (data.data_version, VersionSource::MinecraftData),
+        (None, None) => bail!(
+            "{minecraft_version}: no data_version source available (no cached jar with \
+             version.json, and no minecraft-data entry) — re-run with --fetch-missing or add a \
+             minecraft-data entry rather than guessing"
+        ),
+    };
+
+    Ok(VersionTableEntry {
+        minecraft_version: minecraft_version.to_owned(),
+        protocol_version,
+        data_version,
+        release_date,
+        protocol_source,
+        data_version_source,
+        cross_checked: jar_info.is_some() && data_entry.is_some(),
+    })
+}
+
+/// Resolves every row of the epic-343 version table, in `EPIC_343_VERSIONS`
+/// order.
+///
+/// Fetches Mojang's version manifest once. With `fetch_missing`, also
+/// downloads (and SHA-1-verifies, via [`fetch_version`]) any target
+/// version's server jar not already cached under `.cache/mc/<version>/` —
+/// this is the only network-heavy path and is off by default specifically so
+/// routine `--check` runs do not silently pull a dozen jars.
+pub fn version_table_report(
+    workspace_root: &Path,
+    fetch_missing: bool,
+) -> Result<Vec<VersionTableEntry>> {
+    let manifest_json = curl_to_string(VERSION_MANIFEST_URL)?;
+    EPIC_343_VERSIONS
+        .iter()
+        .map(|minecraft_version| {
+            resolve_version_table_entry(
+                workspace_root,
+                &manifest_json,
+                minecraft_version,
+                fetch_missing,
+            )
+        })
+        .collect()
+}
+
+const VERSION_TABLE_OUT: &str = "crates/lodestone-registry/src/generated/version_table.rs";
+
+fn version_table_out_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(VERSION_TABLE_OUT)
+}
+
+/// Renders [`VersionTableEntry`] rows as the checked-in generated Rust
+/// source, matching the `generated_*.rs` convention used throughout
+/// `crates/protocol/*/src/generated/`.
+pub fn render_version_table_source(entries: &[VersionTableEntry]) -> Result<String> {
+    let mut source = String::new();
+    writeln!(
+        source,
+        "// @generated by `cargo run -p xtask -- version-table`. DO NOT EDIT BY HAND.\n\
+         // Regenerate with `cargo run -p xtask -- version-table [--fetch-missing]` (see\n\
+         // `crates/lodestone-registry/src/version_table.rs` module docs and\n\
+         // `docs/version-table.md` for provenance and how to refresh).\n\
+         //! Generated version table for GitHub epic #343 (multi-version support,\n\
+         //! the latest patch of every major Minecraft release, 1.7.10 through 26.2).\n\
+         //! See [`crate::version_table`] for the public API and full provenance notes.\n"
+    )?;
+    writeln!(
+        source,
+        "/// Where one field of an [`Entry`] was sourced from."
+    )?;
+    writeln!(
+        source,
+        "#[derive(Clone, Copy, Debug, Eq, PartialEq)]\npub enum Source {{"
+    )?;
+    writeln!(
+        source,
+        "    /// `version.json` embedded in the vanilla server jar (present since 18w47b / 1.14)."
+    )?;
+    writeln!(source, "    JarVersionJson,")?;
+    writeln!(
+        source,
+        "    /// `vendor/minecraft-data`'s `protocolVersions.json`; used only where the jar\n    /// predates `version.json`."
+    )?;
+    writeln!(source, "    MinecraftData,")?;
+    writeln!(source, "}}\n")?;
+
+    writeln!(source, "/// One row of the version table.")?;
+    writeln!(source, "#[derive(Clone, Copy, Debug)]\npub struct Entry {{")?;
+    writeln!(source, "    pub minecraft_version: &'static str,")?;
+    writeln!(source, "    pub protocol_version: i32,")?;
+    writeln!(source, "    pub data_version: i32,")?;
+    writeln!(
+        source,
+        "    /// ISO-8601 `releaseTime` from Mojang's version_manifest_v2.json.\n    pub release_date: &'static str,"
+    )?;
+    writeln!(source, "    pub protocol_source: Source,")?;
+    writeln!(source, "    pub data_version_source: Source,")?;
+    writeln!(
+        source,
+        "    /// Whether jar and minecraft-data agreed (both present and equal). False means\n    /// only one source was available; the two never disagree in a committed row.\n    pub cross_checked: bool,"
+    )?;
+    writeln!(source, "}}\n")?;
+
+    writeln!(
+        source,
+        "pub static VERSIONS: [Entry; {}] = [",
+        entries.len()
+    )?;
+    for entry in entries {
+        writeln!(
+            source,
+            "    Entry {{ minecraft_version: {:?}, protocol_version: {}, data_version: {}, release_date: {:?}, protocol_source: {}, data_version_source: {}, cross_checked: {} }},",
+            entry.minecraft_version,
+            entry.protocol_version,
+            entry.data_version,
+            entry.release_date,
+            entry.protocol_source.as_rust_expr(),
+            entry.data_version_source.as_rust_expr(),
+            entry.cross_checked,
+        )?;
+    }
+    writeln!(source, "];")?;
+
+    format_rust_source(&source)
+}
+
+/// Regenerates `crates/lodestone-registry/src/generated/version_table.rs`
+/// from the network + any cached jars, and writes it.
+pub fn generate_version_table(workspace_root: &Path, fetch_missing: bool) -> Result<PathBuf> {
+    let entries = version_table_report(workspace_root, fetch_missing)?;
+    let source = render_version_table_source(&entries)?;
+    let out_path = version_table_out_path(workspace_root);
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create output directory {}", parent.display()))?;
+    }
+    std::fs::write(&out_path, source)
+        .with_context(|| format!("write generated version table to {}", out_path.display()))?;
+    Ok(out_path)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionTableCheck {
+    pub out_path: PathBuf,
+    pub summary: String,
+    identical: bool,
+}
+
+impl VersionTableCheck {
+    #[must_use]
+    pub const fn is_identical(&self) -> bool {
+        self.identical
+    }
+}
+
+/// Recomputes the version table and compares it against the checked-in file
+/// without writing, for use as a drift-guard CI check.
+pub fn check_version_table(workspace_root: &Path, fetch_missing: bool) -> Result<VersionTableCheck> {
+    let entries = version_table_report(workspace_root, fetch_missing)?;
+    let expected = render_version_table_source(&entries)?;
+    let out_path = version_table_out_path(workspace_root);
+    let actual = std::fs::read_to_string(&out_path)
+        .with_context(|| format!("read generated version table at {}", out_path.display()))?;
+
+    if actual == expected {
+        return Ok(VersionTableCheck {
+            out_path,
+            summary: "version_table.rs is up to date".to_owned(),
+            identical: true,
+        });
+    }
+
+    Ok(VersionTableCheck {
+        summary: packet_id_diff_summary(&out_path, &expected, &actual),
+        out_path,
+        identical: false,
+    })
+}
+
 fn file_sha1_hex(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = sha1::Sha1::new();
@@ -5619,6 +6087,7 @@ mod tests {
         assert!(help.contains("gen-packet-ids"));
         assert!(help.contains("fetch-assets"));
         assert!(help.contains("fetch-version"));
+        assert!(help.contains("version-table"));
         assert!(help.contains("gen-reports"));
         assert!(help.contains("gen-registries"));
         assert!(help.contains("codegen-ratio"));
@@ -5629,6 +6098,71 @@ mod tests {
     #[test]
     fn cli_parses_codegen_ratio_command() -> Result<()> {
         assert_eq!(parse_cli_args(["codegen-ratio"])?, CliCommand::CodegenRatio);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_version_table_command() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["version-table"])?,
+            CliCommand::VersionTable {
+                check: false,
+                fetch_missing: false,
+            }
+        );
+        assert_eq!(
+            parse_cli_args(["version-table", "--check", "--fetch-missing"])?,
+            CliCommand::VersionTable {
+                check: true,
+                fetch_missing: true,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn epic_343_versions_lists_exactly_sixteen_versions_in_release_order() {
+        assert_eq!(EPIC_343_VERSIONS.len(), 16);
+        assert_eq!(EPIC_343_VERSIONS[0], "1.7.10");
+        assert_eq!(EPIC_343_VERSIONS[EPIC_343_VERSIONS.len() - 1], "26.2");
+        // No duplicates.
+        let unique: BTreeSet<&str> = EPIC_343_VERSIONS.iter().copied().collect();
+        assert_eq!(unique.len(), EPIC_343_VERSIONS.len());
+    }
+
+    #[test]
+    fn render_version_table_source_is_deterministic_and_parses_expected_rows() -> Result<()> {
+        let entries = vec![
+            VersionTableEntry {
+                minecraft_version: "1.7.10".to_owned(),
+                protocol_version: 5,
+                data_version: 18,
+                release_date: "2014-05-14T17:29:23+00:00".to_owned(),
+                protocol_source: VersionSource::MinecraftData,
+                data_version_source: VersionSource::MinecraftData,
+                cross_checked: false,
+            },
+            VersionTableEntry {
+                minecraft_version: "26.2".to_owned(),
+                protocol_version: 776,
+                data_version: 4903,
+                release_date: "2026-06-16T12:03:33+00:00".to_owned(),
+                protocol_source: VersionSource::JarVersionJson,
+                data_version_source: VersionSource::JarVersionJson,
+                cross_checked: true,
+            },
+        ];
+
+        let first = render_version_table_source(&entries)?;
+        let second = render_version_table_source(&entries)?;
+        assert_eq!(first, second, "rendering must be deterministic");
+        assert!(first.contains("\"1.7.10\""));
+        assert!(first.contains("\"26.2\""));
+        assert!(first.contains("protocol_version: 5"));
+        assert!(first.contains("protocol_version: 776"));
+        assert!(first.contains("Source::MinecraftData"));
+        assert!(first.contains("Source::JarVersionJson"));
+        assert!(first.contains("@generated by `cargo run -p xtask -- version-table`"));
         Ok(())
     }
 

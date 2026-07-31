@@ -28,6 +28,14 @@
 
 use lodestone_model::VersionAdapter;
 
+/// Generated protocol/data-version table for GitHub epic #343's sixteen
+/// target versions. Use the [`version_table`] module for the public API and
+/// provenance docs; this holds only the raw generated data.
+#[path = "generated/version_table.rs"]
+pub(crate) mod generated_version_table;
+
+pub mod version_table;
+
 /// A compiled-in protocol version family.
 ///
 /// `make` constructs a fresh boxed adapter; `supports` reports whether the
