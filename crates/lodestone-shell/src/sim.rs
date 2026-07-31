@@ -1534,6 +1534,15 @@ impl Sim {
         self.vitals().food
     }
 
+    /// Server-reported air supply in ticks (`0..=300`), or `None` before the
+    /// first entity-metadata update naming the local player arrives (see
+    /// [`Vitals::air`]'s doc for why this rides a different event family than
+    /// `health`/`food`).
+    #[must_use]
+    pub fn air(&self) -> Option<i32> {
+        self.vitals().air
+    }
+
     /// The [`Vitals`] component.
     ///
     /// # Read-only from this side

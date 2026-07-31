@@ -864,7 +864,11 @@ impl WindowApp {
             // factor into the fog lane both the model and entity passes sample.
             // Installing it for one and not the other makes mobs darker than the
             // blocks they stand on at midnight.
-            let clock = net_handle;
+            let clock = net_handle.clone();
+            // The sky pass's own clock — see `set_time_of_day_source`'s doc for
+            // why it needs the raw tick rather than `set_sky_darken_source`'s
+            // already-derived factor.
+            let sky_clock = net_handle;
             render.set_sky_darken_source(move || {
                 clock
                     .get()
@@ -878,6 +882,22 @@ impl WindowApp {
                     feet.z.floor() as i32,
                 )
             });
+            render.set_time_of_day_source(move || sky_clock.get().map(|h| h.world_time().1));
+        }
+        // The sky pass itself needs GPU handles `RenderState::set_*_source`'s
+        // closures don't (it uploads the celestial atlas + cloud texture
+        // immediately, via `crate::resources::load_sky`), so it is installed
+        // from a separate `self.gpu`/`self.target` borrow rather than folded
+        // into the block above. `has_sky` guards a re-connect from re-loading
+        // and re-uploading the same jar's textures a second time.
+        if let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_ref()) {
+            let (device, queue, format) = (gpu.device(), gpu.queue(), target.format());
+            if let Some(render) = self.render.as_mut()
+                && !render.has_sky()
+                && let Some(sky) = crate::resources::load_sky(device, queue, format)
+            {
+                render.install_sky(sky);
+            }
         }
         self.install_outline_source();
         self.install_debug_lines_source();
@@ -1406,6 +1426,12 @@ impl WindowApp {
         };
         let health = self.sim.health();
         let food = self.sim.food();
+        // `HudState::MAX_AIR` — the same constant `PlayerSnapshot::air` fills
+        // an unreported value with — rather than a second hardcoded `300`.
+        let air = self
+            .sim
+            .air()
+            .map(|a| (a, lodestone_game::player_state::HudState::MAX_AIR, self.sim.player().eye_in_water));
         let sidebar = self.sim.sidebar();
         let boss_bars = self.sim.boss_bars();
         // Two different questions, and they used to share one boolean named
@@ -1426,6 +1452,7 @@ impl WindowApp {
         hud_frame.boss_bars = &boss_bars;
         hud_frame.health = health;
         hud_frame.food = food;
+        hud_frame.air = air;
         hud_frame.hotbar = world_hud.then(|| self.sim.selected_slot());
         hud_frame.hotbar_items = world_hud.then_some(hotbar_records.as_slice());
         hud_frame.xp = self.sim.xp();
@@ -1692,6 +1719,9 @@ impl ApplicationHandler for WindowApp {
             // See `connect_to`: same clock for terrain and mobs, installed here
             // too because this is the second, independent connect path.
             let clock = net.shared_handle();
+            // See `connect_to`: the sky pass's own clock, next to (but distinct
+            // from) `set_sky_darken_source`'s already-derived factor.
+            let sky_clock = net.shared_handle();
             render.set_sky_darken_source(move || {
                 clock
                     .get()
@@ -1705,6 +1735,15 @@ impl ApplicationHandler for WindowApp {
                     feet.z.floor() as i32,
                 )
             });
+            render.set_time_of_day_source(move || sky_clock.get().map(|h| h.world_time().1));
+            // See `connect_to`: the sky pass itself, from the GPU handles this
+            // path already has locally (`self.gpu`/`self.target` are not set
+            // until the end of this function).
+            if !render.has_sky()
+                && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
+            {
+                render.install_sky(sky);
+            }
         }
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`
         // already put us on. Nothing else to do.

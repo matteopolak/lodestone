@@ -296,6 +296,9 @@ pub struct EntityMetadataUpdate {
     /// unrecognised component costs detail, never the answer to "which item is
     /// this".
     pub item: Reported<ItemStack>,
+    /// Current air supply in ticks, when present (`Entity.DATA_AIR_SUPPLY_ID`).
+    /// Feeds the HUD's underwater bubble row (`docs/air-supply.md`).
+    pub air_supply: Option<i32>,
 }
 
 impl EntityMetadataUpdate {
@@ -310,6 +313,7 @@ impl EntityMetadataUpdate {
             && self.baby.is_none()
             && self.variant.is_none()
             && !self.item.is_reported()
+            && self.air_supply.is_none()
     }
 }
 

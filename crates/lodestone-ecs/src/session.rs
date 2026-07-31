@@ -155,6 +155,17 @@ pub struct Vitals {
     /// `PlayerSnapshot::saturation` is a public bot-API field and dropping it in
     /// the collapse would have been a silent API regression, not a cleanup.
     pub saturation: Option<f32>,
+    /// Current air supply in ticks (`0..=300`), or `None` before the first
+    /// entity-metadata update naming our own id arrives.
+    ///
+    /// Unlike `health`/`food`/`saturation`, this does **not** arrive on
+    /// `set_health` — it is `Entity.DATA_AIR_SUPPLY_ID`, a per-entity metadata
+    /// field broadcast for any entity (not a session-scoped packet), so it is
+    /// folded by [`crate::ingest::apply_local_player_air_supply`] off
+    /// `ClientEvent::EntityMetadataUpdated` instead of by
+    /// [`apply_local_player_state`] alongside the other three. See
+    /// `docs/air-supply.md`.
+    pub air: Option<i32>,
 }
 
 /// Server-reported experience as `(progress, level, total)`, `None` until

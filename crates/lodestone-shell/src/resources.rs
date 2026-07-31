@@ -16,7 +16,7 @@ use lodestone_assets::{
     ItemAtlas, Language, ParticleAtlas, ResourceManager, ResourceSource, ZipSource,
 };
 use lodestone_render::{
-    BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, blocks_json_registry,
+    BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, SkyRenderer, blocks_json_registry,
     entity_texture_candidates,
 };
 
@@ -233,6 +233,39 @@ pub fn load_gui_atlas() -> Option<Arc<GuiAtlas>> {
         }
         Err(e) => {
             tracing::warn!(target: "assets", "build GUI atlas from {}: {e}", root.display());
+            None
+        }
+    }
+}
+
+/// Load and build the sky pass (celestial atlas + cloud texture, from
+/// `client.jar`) via [`SkyRenderer::new`]. Version-free and fail-open like
+/// [`load_gui_atlas`]: `None` on a jar-less run, or on a pack missing the
+/// sun/moon/cloud textures, leaves [`crate::gpu::RenderState`] with no sky
+/// installed — the pre-existing "clear straight to the fog colour" behaviour,
+/// not a startup failure.
+///
+/// Unlike the other `load_*` helpers here, this one needs GPU handles
+/// (`SkyRenderer::new` uploads the atlas/cloud textures immediately rather than
+/// deferring to a later `attach_*` call): it does the `client.jar` IO this
+/// crate's `gpu.rs` deliberately has none of, then hands `RenderState::install_sky`
+/// an already-built renderer, mirroring how `RenderState::new` itself is handed
+/// an already-built [`BlockAtlas`] rather than opening its own jar.
+#[must_use]
+pub fn load_sky(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color_format: wgpu::TextureFormat,
+) -> Option<SkyRenderer> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match SkyRenderer::new(device, queue, color_format, &manager) {
+        Ok(sky) => {
+            tracing::info!(target: "assets", "loaded vanilla sky (sun/moon/stars/clouds)");
+            Some(sky)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "build sky renderer from {}: {e}", root.display());
             None
         }
     }

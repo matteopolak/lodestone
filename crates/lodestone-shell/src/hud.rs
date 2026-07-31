@@ -29,7 +29,10 @@ pub use item_icon::ItemIcon as HotbarSlot;
 
 use std::sync::Arc;
 
-use lodestone_render::{BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex};
+use lodestone_render::{
+    BUBBLE_SIZE, BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex, bubble_position,
+    bubble_row,
+};
 
 use lodestone_assets::ItemAtlas;
 
@@ -263,6 +266,15 @@ pub struct HudFrame<'a> {
     pub health: Option<f32>,
     /// Current food level in `0..=20`, `Some` only on a live survival server.
     pub food: Option<i32>,
+    /// `(air, max_air, eye_in_water)`, `Some` only on a live survival server.
+    /// Drives the underwater bubble row (`lodestone_render::bubble_row`) —
+    /// `Some` does not by itself mean the row draws; [`bubble_row_visible`]
+    /// (full air and not underwater draws nothing, matching vanilla's own
+    /// guard) decides that per-frame, same as vanilla never showing bubbles at
+    /// full air on dry land.
+    ///
+    /// [`bubble_row_visible`]: lodestone_render::bubble_row_visible
+    pub air: Option<(i32, i32, bool)>,
     /// The selected hotbar slot in `0..9`, `Some` whenever a **world** is on
     /// screen — including behind the pause menu, the chat box and a container.
     /// Drawn as a 9-cell bar at the bottom centre with the selected cell
@@ -317,6 +329,7 @@ impl<'a> HudFrame<'a> {
             boss_bars: &[],
             health: None,
             food: None,
+            air: None,
             hotbar: None,
             hotbar_items: None,
             xp: None,
@@ -925,6 +938,30 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame) -> f32 {
             } else if units >= 1.0 {
                 b.sprite("hud/food_half", x, row_y, icon, icon, white);
             }
+        }
+    }
+
+    // Air bubbles, one row above hearts/hunger — vanilla's `yLineAir =
+    // yLineBase - 10` (`Hud.java:791,806`): the row sits `AIR_BUBBLE_SIZE` (9)
+    // plus a 1px gap above the health/hunger line, not on top of it. Anchored
+    // at the same right edge (`hx + hw`) the hunger row uses, matching
+    // vanilla's shared `xRight`.
+    if let Some((air, max_air, eye_in_water)) = frame.air {
+        let air_row_y = row_y - icon - 1.0;
+        // `wobble` is vanilla's `tickCount % 2 == 0` (a 0/1px jitter vanilla
+        // applies to a fully-empty row's last bubble) — no per-frame tick
+        // parity is piped into `HudFrame` yet, so this always reads `false`.
+        // Purely cosmetic, deliberately left unwired rather than approximated.
+        let wobble = false;
+        for (i, slot) in bubble_row(air, max_air, eye_in_water, wobble)
+            .into_iter()
+            .enumerate()
+        {
+            let Some(sprite_id) = slot.sprite_id() else {
+                continue;
+            };
+            let (x, y) = bubble_position(i, hx + hw, air_row_y);
+            b.sprite(sprite_id, x, y, BUBBLE_SIZE, BUBBLE_SIZE, white);
         }
     }
 
