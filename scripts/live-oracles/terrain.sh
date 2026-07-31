@@ -12,11 +12,23 @@
 #
 # Runs `--rm` so the container self-cleans on stop. Reuses the bundled 26.2
 # server.jar already fetched for the creative oracle.
+#
+# Once up, the interactive account named by $LODESTONE_OP_NAME (default
+# below) is opped over RCON via rcon-op.py — see that file for why RCON
+# `op <name>` and not a hand-written ops.json. This assumes RCON is already
+# enabled in this world's server.properties (rcon.port=25581,
+# rcon.password=lodestone), which — like creative.sh — this script does not
+# manage: server.properties here isn't generated fresh each run, so a world
+# regenerated from scratch (`rm -rf .cache/mc/terrain`) needs RCON turned on
+# by hand before this op step can do anything; the op step degrades to a
+# harmless warning if it can't connect.
 set -euo pipefail
 
 NAME=lodestone-terrain-oracle
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORLD="$ROOT/.cache/mc/terrain"
+RCON_PORT=25581
+RCON_PASSWORD=lodestone
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
@@ -32,9 +44,26 @@ docker run -d --rm --name "$NAME" \
   eclipse-temurin:25-jdk \
   java -Xmx2G -jar server.jar nogui
 
+# Best-effort: op the interactive account so client-side testing affordances
+# (e.g. `/givedebug`) work. Never fails the script — a live gate that starts
+# this oracle must not break because RCON wasn't enabled or hiccupped.
+op_interactive_player() {
+  local op_name="${LODESTONE_OP_NAME:-LodestonePlayer}"
+  local attempt
+  for attempt in $(seq 1 10); do
+    if python3 "$ROOT/scripts/live-oracles/rcon-op.py" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" "op $op_name" >/dev/null; then
+      echo "opped '$op_name' on :$RCON_PORT (override with LODESTONE_OP_NAME)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "warning: could not op '$op_name' via RCON on :$RCON_PORT — /givedebug and other op-gated commands will be refused (override the name with LODESTONE_OP_NAME, or enable RCON in $WORLD/server.properties)" >&2
+}
+
 echo "waiting for '$NAME' to finish generating the world..."
 for _ in $(seq 1 60); do
   if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+    op_interactive_player
     echo "ready: game on :25580"
     exit 0
   fi

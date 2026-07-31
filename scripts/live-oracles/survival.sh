@@ -15,12 +15,22 @@
 #
 # online-mode=false so any username can join without a Mojang account.
 # Runs `--rm` so the container self-cleans on stop.
+#
+# Once up, the interactive account named by $LODESTONE_OP_NAME (default
+# below) is opped over RCON via rcon-op.py, so client-side testing
+# affordances (e.g. `/givedebug`) work without the player having joined
+# before — see that file for why RCON `op <name>` and not a hand-written
+# ops.json. This is separate from `unique_username()`'s per-test names
+# (`crates/lodestone-testsupport`): a fixed interactive name is opped once
+# here and never collides with those, and no live gate depends on being op.
 set -euo pipefail
 
 NAME=lodestone-survival
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORLD="$ROOT/.cache/mc/survival"
 JAR_SRC="$ROOT/.cache/mc/26.2/server.jar"
+RCON_PORT=25566
+RCON_PASSWORD=lodestone
 
 if [ ! -f "$WORLD/server.jar" ]; then
   if [ ! -f "$JAR_SRC" ]; then
@@ -68,9 +78,26 @@ docker run -d --rm --name "$NAME" \
   eclipse-temurin:25-jdk \
   java -Xmx2G -jar server.jar nogui
 
+# Best-effort: op the interactive account so client-side testing affordances
+# (e.g. `/givedebug`) work. Never fails the script — this is the oracle a
+# human plays against, and a live gate script must not break from it.
+op_interactive_player() {
+  local op_name="${LODESTONE_OP_NAME:-LodestonePlayer}"
+  local attempt
+  for attempt in $(seq 1 10); do
+    if python3 "$ROOT/scripts/live-oracles/rcon-op.py" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" "op $op_name" >/dev/null; then
+      echo "opped '$op_name' on :$RCON_PORT (override with LODESTONE_OP_NAME)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "warning: could not op '$op_name' via RCON on :$RCON_PORT — /givedebug and other op-gated commands will be refused (override the name with LODESTONE_OP_NAME)" >&2
+}
+
 echo "waiting for '$NAME' to generate terrain (first run takes a minute)..."
 for _ in $(seq 1 90); do
   if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+    op_interactive_player
     echo "ready: survival world on :25565 (RCON :25566)"
     exit 0
   fi

@@ -1750,7 +1750,29 @@ impl Sim {
     /// it to the live client (a leading `/` is a command, else a chat message).
     /// A blank line sends nothing. No-op without a live connection. Returns
     /// whether anything was sent, so the caller can echo command feedback.
-    pub fn send_chat(&self, line: &str) -> bool {
+    ///
+    /// `/givedebug <item> <amount>` is intercepted first (see
+    /// [`crate::chat::intercept_give_debug`]): a well-formed line is translated to
+    /// the server's real `/give @s <item> <amount>` and both the translation and
+    /// the send happen here, so the user always sees what was actually sent. A
+    /// malformed line produces a local-only chat message and never reaches the
+    /// network — a debug command that fails silently is worse than none.
+    pub fn send_chat(&mut self, line: &str) -> bool {
+        match crate::chat::intercept_give_debug(line) {
+            crate::chat::GiveDebugOutcome::Send { local_echo, action } => {
+                self.push_local_chat(local_echo);
+                if let Some(net) = &self.net {
+                    net.send_action(action);
+                    return true;
+                }
+                return false;
+            }
+            crate::chat::GiveDebugOutcome::Error(message) => {
+                self.push_local_chat(message);
+                return false;
+            }
+            crate::chat::GiveDebugOutcome::NotGiveDebug => {}
+        }
         let Some(action) = compose_chat_action(line) else {
             return false;
         };
@@ -1760,6 +1782,20 @@ impl Sim {
         } else {
             false
         }
+    }
+
+    /// Append a client-local line (never sent to the server) to the session's
+    /// chat feed, stamped with the driver's own clock. Used for local-only
+    /// feedback such as a malformed `/givedebug` line, mirroring how the
+    /// `NetUpdate::Chat` handler stamps an inbound server line.
+    fn push_local_chat(&mut self, text: impl Into<String>) {
+        let now = self.clock().secs;
+        let text = lodestone_model::Text::literal(text.into());
+        self.write_local(|w, local| {
+            if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
+                chat.0.push_system(text, now);
+            }
+        });
     }
 
     /// The currently selected hotbar slot, `0..9`.
