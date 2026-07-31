@@ -16,7 +16,7 @@
 
 use lodestone_entity::ai::goals::MeleeAttackGoal;
 use lodestone_entity::pathfinding::MobShape;
-use lodestone_entity::AttributeMap;
+use lodestone_entity::{AttributeMap, DamageFlags, Defenses};
 use lodestone_model::Vec3;
 use lodestone_model::action::ClientAction;
 use lodestone_model::adapter::{
@@ -486,5 +486,247 @@ fn census_height_decides_whether_a_mob_fits_a_two_high_tunnel() {
     assert!(
         wrong_z > 8.0,
         "a wrong 1.8-height enderman should clear the tunnel (bite check): z = {wrong_z:.2}"
+    );
+}
+
+/// Closes the `damage.rs` island: before this, `MeleeAttackGoal` calling
+/// `mob.attack(target)` only pushed to a `Vec` for test assertions — no health
+/// value anywhere ever changed. A freshly spawned mob's stats must now be the
+/// *real* per-type attributes (`Zombie.createAttributes()`: `max_health` 20,
+/// `attack_damage` 3, `armor` 2 — `lodestone_entity::attribute`'s own
+/// hand-verified template, not a number invented for this test), proving the
+/// wiring reads real data rather than a hardcoded placeholder.
+#[test]
+fn spawned_mob_combat_stats_are_the_real_zombie_attributes() {
+    let world = ChunkWorld::new(-4, 24);
+    let mut sim = MobSim::new(&world);
+    let m = sim.spawn(Vec3::new(0.5, 0.0, 0.5), MobShape::land(0.6, 1.95), 0.15, 100);
+    assert_eq!(m.health(), 20.0, "zombie max_health is 20");
+    assert_eq!(m.attack_damage(), 3.0, "zombie attack_damage override is 3.0");
+    assert_eq!(m.defenses().armor, 2.0, "zombie armor override is 2.0");
+}
+
+/// The load-bearing acceptance gate for the damage pipeline's real consumer.
+///
+/// Two mobs: an attacker chasing a defender's position *and* id (the identity
+/// a goal's `Vec3`-only seam cannot carry, which is why `SimMob` now tracks
+/// `attack_target_id` separately), and a third, untouched bystander as the
+/// control. The defender's health is staged at exactly the attacker's raw
+/// damage with zero armor, so **one** connecting hit is exactly lethal — an
+/// unambiguous, closed-form expected value, not "health went down some".
+#[test]
+fn melee_attack_reduces_target_health_and_a_lethal_hit_removes_the_mob() {
+    let mut world = ChunkWorld::new(-4, 24);
+    for x in -4..=12 {
+        for z in -4..=4 {
+            world.set_solid(x, -1, z, true);
+        }
+    }
+
+    let mut sim = MobSim::new(&world);
+    let attacker_pos = Vec3::new(0.5, 0.0, 0.5);
+    let defender_pos = Vec3::new(4.5, 0.0, 0.5);
+
+    let defender_id = {
+        let d = sim.spawn(defender_pos, MobShape::land(0.6, 1.95), 0.0, 100);
+        // Zero armor and health exactly equal to the attacker's raw damage:
+        // the first connecting hit must be exactly lethal, nothing more.
+        d.set_defenses(Defenses::default());
+        d.set_health(3.0);
+        d.id()
+    };
+    let bystander_id = {
+        // Never targeted by anything — the control proving health changes are
+        // per-mob, not some global decay this mechanism could hide behind.
+        let b = sim.spawn(Vec3::new(0.5, 0.0, 8.5), MobShape::land(0.6, 1.95), 0.0, 100);
+        b.id()
+    };
+    let attacker_id = {
+        let a = sim.spawn(attacker_pos, MobShape::land(0.6, 1.95), 0.2, 400);
+        a.set_attack_damage(3.0);
+        a.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        a.set_attack_target(Some(defender_pos));
+        a.set_attack_target_id(Some(defender_id));
+        a.id()
+    };
+
+    assert_eq!(
+        sim.get(defender_id).unwrap().health(),
+        3.0,
+        "defender starts at the staged 3.0 health"
+    );
+
+    let mut ticks_run = 0;
+    for _ in 0..2000 {
+        sim.tick();
+        ticks_run += 1;
+        if sim.get(defender_id).is_none() {
+            break;
+        }
+    }
+
+    assert!(
+        sim.get(defender_id).is_none(),
+        "a lethal hit must remove the defender from the sim (ran {ticks_run} ticks)"
+    );
+    assert!(
+        sim.get(attacker_id).is_some(),
+        "the attacker is untouched and must still be present"
+    );
+    // Control: the bystander was never in anyone's attack_target_id and must
+    // be exactly as healthy as it spawned — the mechanism is per-target, not a
+    // blanket health decay that would kill it too.
+    assert_eq!(
+        sim.get(bystander_id).unwrap().health(),
+        20.0,
+        "an untargeted mob's health must be untouched"
+    );
+    assert_eq!(sim.len(), 2, "exactly the defender was removed");
+}
+
+/// The i-frame gate must actually gate: two attackers hitting the *same*
+/// defender the same tick apply only one full hit's worth of damage, not two —
+/// the control that the mechanism (not just the arithmetic) is wired. Without
+/// `HurtCooldown` in the loop, `apply_damage` would be called twice and the
+/// defender would take double damage.
+#[test]
+fn two_attackers_hitting_the_same_tick_only_land_one_full_hit() {
+    let mut world = ChunkWorld::new(-4, 24);
+    for x in -4..=4 {
+        for z in -4..=4 {
+            world.set_solid(x, -1, z, true);
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let defender_pos = Vec3::new(2.5, 0.0, 0.5);
+    let defender_id = {
+        let d = sim.spawn(defender_pos, MobShape::land(0.6, 1.95), 0.0, 100);
+        d.set_defenses(Defenses::default());
+        d.set_health(100.0);
+        d.id()
+    };
+    // Both attackers start already adjacent, so the very first tick both
+    // strike (no travel needed to desync who lands first).
+    for start in [Vec3::new(2.5, 0.0, 1.4), Vec3::new(2.5, 0.0, -0.4)] {
+        let a = sim.spawn(start, MobShape::land(0.6, 1.95), 0.0, 100);
+        a.set_attack_damage(10.0);
+        a.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        a.set_attack_target(Some(defender_pos));
+        a.set_attack_target_id(Some(defender_id));
+    }
+
+    sim.tick();
+
+    let health = sim.get(defender_id).unwrap().health();
+    assert_eq!(
+        health, 90.0,
+        "the i-frame gate must cap the same tick to one full hit's damage, got health={health}"
+    );
+}
+
+/// Closes the `explosion.rs` island: before this, `seen_percent` /
+/// `entity_damage` had no consumer anywhere in the tree — only their own
+/// hermetic unit tests exercised them (against `OpenAir` or a hand-rolled
+/// blocked stub, never a real terrain query). [`MobSim::explode`] is the real
+/// consumer: it samples exposure against the sim's own [`ChunkWorld`] and
+/// lands the result through the same [`SimMob::apply_damage`] pipeline a
+/// melee hit uses.
+///
+/// A point-blank mob (staged at low health) must die, and a mob roughly twice
+/// as far — but still within the blast's `2 * radius` — must take strictly
+/// less damage and survive. Both start with zero armor so the only thing
+/// separating them is distance/exposure, not defense.
+#[test]
+fn explosion_damages_exposed_mobs_more_up_close_and_kills_at_ground_zero() {
+    // Deliberately blank terrain: every ray is unobstructed, isolating the
+    // distance/exposure falloff from any wall effects (that is the next test).
+    let world = ChunkWorld::new(-8, 32);
+    let mut sim = MobSim::new(&world);
+    let centre = Vec3::new(0.0, 0.0, 0.0);
+
+    let near_id = {
+        let m = sim.spawn(Vec3::new(0.5, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 10);
+        m.set_defenses(Defenses::default());
+        m.set_health(5.0);
+        m.id()
+    };
+    let far_id = {
+        let m = sim.spawn(Vec3::new(6.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 10);
+        m.set_defenses(Defenses::default());
+        m.id()
+    };
+
+    let dealt = sim.explode(centre, 4.0, DamageFlags::default());
+
+    let near_dealt = dealt
+        .iter()
+        .find(|(id, _)| *id == near_id)
+        .map(|(_, d)| *d)
+        .expect("the point-blank mob must be in the damaged set");
+    let far_dealt = dealt
+        .iter()
+        .find(|(id, _)| *id == far_id)
+        .map(|(_, d)| *d)
+        .unwrap_or(0.0);
+
+    assert!(
+        sim.get(near_id).is_none(),
+        "a point-blank TNT-scale blast (46+ raw damage) must kill a 5-health mob"
+    );
+    assert!(
+        near_dealt > far_dealt,
+        "the nearer mob must take strictly more damage: near={near_dealt} far={far_dealt}"
+    );
+    assert!(far_dealt > 0.0, "the far mob is still within 2*radius and must take some damage");
+    let far_health = sim.get(far_id).unwrap().health();
+    assert!(
+        far_health < 20.0 && far_health > 0.0,
+        "the far mob should be hurt but survive: health={far_health}"
+    );
+}
+
+/// The control for the previous test: exposure is *ray-sampled*, not a bare
+/// distance falloff. A solid wall placed only in the +x plane between the
+/// blast and one mob must fully shield it, while a second mob at the exact
+/// same distance but on the +z axis (where there is no wall) takes real
+/// damage — proving `ChunkWorld`'s new [`RayView`] impl is what the exposure
+/// model actually reads, not a stand-in that always reports clear.
+#[test]
+fn explosion_exposure_is_ray_sampled_a_wall_fully_shields_a_mob() {
+    let mut world = ChunkWorld::new(-8, 32);
+    for y in -1..=3 {
+        for z in -3..=3 {
+            world.set_solid(1, y, z, true);
+        }
+    }
+    let mut sim = MobSim::new(&world);
+    let centre = Vec3::new(0.0, 0.0, 0.0);
+
+    let shielded_id = {
+        let m = sim.spawn(Vec3::new(3.0, 0.0, 0.0), MobShape::land(0.6, 1.95), 0.0, 10);
+        m.set_defenses(Defenses::default());
+        m.id()
+    };
+    let exposed_id = {
+        let m = sim.spawn(Vec3::new(0.0, 0.0, 3.0), MobShape::land(0.6, 1.95), 0.0, 10);
+        m.set_defenses(Defenses::default());
+        m.id()
+    };
+
+    let dealt = sim.explode(centre, 4.0, DamageFlags::default());
+
+    assert!(
+        dealt.iter().all(|(id, _)| *id != shielded_id),
+        "the wall must fully block exposure, so the shielded mob takes no damage"
+    );
+    assert_eq!(
+        sim.get(shielded_id).unwrap().health(),
+        20.0,
+        "shielded mob's health must be exactly untouched"
+    );
+    let exposed_dealt = dealt.iter().find(|(id, _)| *id == exposed_id).map(|(_, d)| *d);
+    assert!(
+        exposed_dealt.is_some_and(|d| d > 0.0),
+        "the unshielded mob at the same distance must take real damage: {exposed_dealt:?}"
     );
 }

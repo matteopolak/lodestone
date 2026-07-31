@@ -52,6 +52,64 @@ real design and implementation work.
 | 7 | [#215](https://github.com/matteopolak/lodestone/issues/215) | `item_entity.rs`'s despawn/pickup-delay/merge lifecycle is unconsumed; only the fall-dynamics half reaches the client renderer. |
 | 8 | [#217](https://github.com/matteopolak/lodestone/issues/217) | `MobSim` never streams positions to a connected client (the module's own doc says so). The last mile that makes every other issue in this roadmap invisible to a player. |
 
+### Phase 0 progress (session closing #207/#213, partial #205)
+
+**#207 closed.** `SimMob` now carries real health, `Defenses` and a `HurtCooldown`,
+seeded from `lodestone_entity::attribute::default_attributes` (real per-type data —
+a spawned zombie starts at the actual `max_health` 20 / `attack_damage` 3 / `armor` 2
+from `Zombie.createAttributes()`, not an invented number). `NavigatingMob::attack`
+still only records the *intent* to strike (it has no entity identity, only a `Vec3`),
+so `SimMob::attack_target_id` was added alongside the existing `Vec3` target and
+`MobSim::tick` resolves each tick's connected attacks into a real
+`SimMob::apply_damage` call — `HurtCooldown::on_hurt` then `apply_reductions`, in
+that order, exactly as `damage.rs`'s own module doc specifies. A mob whose health
+reaches zero is removed from the sim. See
+`crates/lodestone-server/tests/mob_sim.rs`:
+`melee_attack_reduces_target_health_and_a_lethal_hit_removes_the_mob` (a staged
+lethal hit removes the target; an untargeted bystander is provably untouched — the
+control) and `two_attackers_hitting_the_same_tick_only_land_one_full_hit` (the
+i-frame gate control: without `HurtCooldown` wired in, two hits landing the same
+tick would double the damage).
+
+**#213 closed.** `ChunkWorld` now implements `explosion::RayView` (a coarse but real
+quarter-block raymarch over its own `is_solid`), and `MobSim::explode` is the first
+consumer of `seen_percent`/`entity_damage` anywhere in the tree — it samples real
+exposure per mob and lands the result through the same `apply_damage` pipeline #207
+built. See `explosion_damages_exposed_mobs_more_up_close_and_kills_at_ground_zero`
+(distance falloff, point-blank kill) and
+`explosion_exposure_is_ray_sampled_a_wall_fully_shields_a_mob` (the control: two
+mobs at the *same distance*, one behind a wall takes zero damage, the other takes
+real damage — proving the mechanism reads real terrain, not just distance).
+
+**#205 partially closed.** The species→attributes/shape registry this issue is
+mostly about is still absent (`MobSim::spawn` still hardcodes
+`minecraft:zombie`) — that needs real spawn-rule/registry data this version-free
+crate cannot originate, unchanged from the original filing. What *was* closed:
+`MobSim::run_spawn_cycle` gave every naturally spawned mob an empty `GoalSelector`,
+which meant a mob produced by natural spawning never moved or looked around —
+`MobSim::tick` on it was a provable no-op even though the goal scheduler was
+"wired". Spawned mobs now get a baseline `RandomStrollGoal` + `RandomLookAroundGoal`
+so they actually do something; combat goals are still the caller's job (they need a
+target, which the spawn cycle has no way to name yet).
+
+**#204 investigated, left open — architectural, not a wiring gap.** The fix this
+issue wants (a `PathWorld` that reads real per-block-state collision/path-type data
+instead of solid/air) has to live in a version crate: `lodestone-v770::path_types`
+already generates exactly that 32,366-state census, `PathType` in
+`lodestone-model`/`lodestone-entity` already mirrors it variant-for-variant, and the
+bridge is a mechanical id-lookup — genuinely cheap *if* `lodestone-server` could see
+it. It cannot: `lodestone-server/Cargo.toml` documents, in its own dependency
+comment, that `lodestone-entity` (and by construction the whole server crate) adds
+"no version/protocol coupling" — `lodestone-server` has zero dependency on any
+`protocol/*` crate today, only `lodestone-shell` does. Wiring the real census into
+the server's own `MobSim::ChunkWorld` would mean either giving `lodestone-server` a
+version dependency (reversing a documented, deliberate boundary) or having
+`lodestone-shell` supply a richer `PathWorld` — and `lodestone-shell` is out of this
+session's edit scope (held by another agent). Closing this for real needs a
+cross-crate decision, not a local patch; flagging rather than guessing, per this
+project's own standing warning against inventing block classification by hand
+instead of sourcing it from the JVM census.
+
 ## Phase 1 — Spawning
 
 Depends on Phase 0 issues #2 (species registry) and #1 (real terrain classification for

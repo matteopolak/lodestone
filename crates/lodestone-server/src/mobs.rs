@@ -35,9 +35,16 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
+use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
+use lodestone_entity::attribute::default_attributes;
+use lodestone_entity::explosion::Aabb as ExplosionAabb;
 use lodestone_entity::pathfinding::{Aabb, MobShape, PathType, PathWorld};
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_entity::{
+    AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
+    seen_percent,
+};
+use lodestone_model::{Identifier, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
@@ -177,6 +184,67 @@ impl PathWorld for ChunkWorld {
     }
 }
 
+impl RayView for ChunkWorld {
+    /// A coarse but sound raymarch over [`is_solid`](ChunkWorld::is_solid):
+    /// steps the segment at quarter-block spacing (fine enough that a
+    /// full-block cell can never be skipped between samples) and reports
+    /// blocked the moment any sample lands in a solid cell. This is not
+    /// vanilla's exact voxel traversal (`ClipContext`), but it is a real
+    /// terrain query — not the `OpenAir` stand-in [`explosion::seen_percent`]'s
+    /// own tests use — which is what makes "a wall shields a mob from a blast"
+    /// an observable, testable consequence rather than an assumption.
+    fn is_clear(&self, from: Vec3, to: Vec3) -> bool {
+        let delta = to - from;
+        let dist = delta.length();
+        if dist < 1e-9 {
+            return true;
+        }
+        let steps = (dist / 0.25).ceil().max(1.0) as u32;
+        for i in 0..=steps {
+            let t = f64::from(i) / f64::from(steps);
+            let p = from + delta.scale(t);
+            if self.is_solid(p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Reads a computed attribute value from `attrs` by bare path (e.g.
+/// `"max_health"`), applying the registry default when the attribute is not
+/// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
+/// caller never has to special-case an absent key.
+fn attr(attrs: &AttributeMap, path: &str) -> f64 {
+    Identifier::from_str(&format!("minecraft:{path}"))
+        .ok()
+        .and_then(|id| attrs.value(&id))
+        .unwrap_or(0.0)
+}
+
+/// The health and combat-stat defaults for a mob type: `(max_health,
+/// attack_damage, defenses)`.
+///
+/// Folds through [`default_attributes`] when `entity_type` is one of the
+/// vanilla templates that module knows (the zombie family, skeleton family,
+/// creeper, spider, and the common animals); for anything else it falls back
+/// to an empty [`AttributeMap`], whose [`AttributeMap::value`] already resolves
+/// every path to the generic `RangedAttribute` default (`max_health` 20,
+/// `attack_damage` 2, no armor) — the same "unknown type gets the generic
+/// default, never a guess" shape [`resolve_mob_shape`](crate::resolve_mob_shape)
+/// uses for census geometry.
+fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses) {
+    let attrs = default_attributes(entity_type).unwrap_or_else(AttributeMap::new);
+    let max_health = attr(&attrs, "max_health") as f32;
+    let attack_damage = attr(&attrs, "attack_damage") as f32;
+    let defenses = Defenses {
+        armor: attr(&attrs, "armor") as f32,
+        armor_toughness: attr(&attrs, "armor_toughness") as f32,
+        ..Defenses::default()
+    };
+    (max_health, attack_damage, defenses)
+}
+
 /// One live mob in the simulation: its [`NavigatingMob`] body and its own
 /// [`GoalSelector`].
 ///
@@ -205,6 +273,26 @@ pub struct SimMob<'w> {
     /// `Monster` category) until species-aware spawning lands; a consumer that
     /// knows the species sets it with [`set_entity_type`](SimMob::set_entity_type).
     entity_type: ResourceKey,
+    /// Current health. A hit that drives this to `0.0` removes the mob from
+    /// the sim at the end of the tick that landed it (vanilla's immediate
+    /// death removal).
+    health: f32,
+    /// Armour/resistance/absorption state `damage::apply_reductions` reads for
+    /// every incoming hit; absorption is written back after each hit.
+    defenses: Defenses,
+    /// Raw melee damage this mob's own attacks deal (`ATTACK_DAMAGE`
+    /// attribute), applied to whatever [`attack_target_id`](SimMob::attack_target_id)
+    /// names when a `MeleeAttackGoal` connects.
+    attack_damage: f32,
+    /// The invulnerability-frame gate for hits landing on *this* mob
+    /// (`damage::HurtCooldown`), ticked once per sim tick regardless of
+    /// whether anything hit this tick.
+    hurt_cooldown: HurtCooldown,
+    /// The id of another live [`SimMob`] this mob's melee attacks should
+    /// damage, set alongside [`set_attack_target`](SimMob::set_attack_target)'s
+    /// `Vec3` (which only drives movement — the goal/navigation seam has no
+    /// entity identity, just positions).
+    attack_target_id: Option<i32>,
 }
 
 impl<'w> SimMob<'w> {
@@ -226,10 +314,99 @@ impl<'w> SimMob<'w> {
         self.mob.set_attack_target(target);
     }
 
+    /// Sets which live mob (by id) this mob's connecting melee attacks damage.
+    /// The goal/navigation seam only ever deals in positions
+    /// ([`set_attack_target`](Self::set_attack_target)); this is the identity
+    /// [`MobSim::tick`] needs to resolve a strike into an actual
+    /// [`apply_damage`](Self::apply_damage) call on the right mob.
+    pub fn set_attack_target_id(&mut self, target_id: Option<i32>) -> &mut Self {
+        self.attack_target_id = target_id;
+        self
+    }
+
+    /// The id of the mob this one's connecting attacks currently damage, if set.
+    #[must_use]
+    pub fn attack_target_id(&self) -> Option<i32> {
+        self.attack_target_id
+    }
+
+    /// Current health. Reaches `0.0` (never negative) when the mob has taken
+    /// lethal damage; [`MobSim::tick`] removes a mob whose health is `0.0` at
+    /// the end of the tick that landed the killing blow.
+    #[must_use]
+    pub fn health(&self) -> f32 {
+        self.health
+    }
+
+    /// Overrides current health (e.g. to stage a near-death mob in a test).
+    /// Clamped to `>= 0.0`.
+    pub fn set_health(&mut self, health: f32) -> &mut Self {
+        self.health = health.max(0.0);
+        self
+    }
+
+    /// Overrides the raw melee damage this mob's attacks deal, in place of the
+    /// type's `ATTACK_DAMAGE` default resolved at spawn.
+    pub fn set_attack_damage(&mut self, attack_damage: f32) -> &mut Self {
+        self.attack_damage = attack_damage;
+        self
+    }
+
+    /// The raw melee damage this mob's attacks currently deal.
+    #[must_use]
+    pub fn attack_damage(&self) -> f32 {
+        self.attack_damage
+    }
+
+    /// Overrides this mob's defensive state (armour/toughness/absorption) in
+    /// place of the type's defaults resolved at spawn.
+    pub fn set_defenses(&mut self, defenses: Defenses) -> &mut Self {
+        self.defenses = defenses;
+        self
+    }
+
+    /// This mob's current defensive state.
+    #[must_use]
+    pub fn defenses(&self) -> &Defenses {
+        &self.defenses
+    }
+
+    /// Runs the full vanilla hit pipeline against this mob for one incoming
+    /// hit of `raw_damage`: the invulnerability-frame gate
+    /// ([`HurtCooldown::on_hurt`]), then armour/resistance/enchantment/
+    /// absorption reduction ([`apply_reductions`](lodestone_entity::apply_reductions)),
+    /// then subtracts the result from [`health`](Self::health) (floored at
+    /// `0.0`). A hit fully inside the i-frame window and no stronger than the
+    /// one that opened it is ignored entirely, exactly as vanilla drops a
+    /// weaker follow-up hit.
+    ///
+    /// Returns the damage that actually reached health (`0.0` if the hit was
+    /// ignored, if it was fully absorbed, or if the mob was already dead).
+    pub fn apply_damage(&mut self, raw_damage: f32, flags: DamageFlags) -> f32 {
+        if self.health <= 0.0 {
+            return 0.0;
+        }
+        let amount = match self.hurt_cooldown.on_hurt(raw_damage, flags) {
+            HurtDecision::Ignored => return 0.0,
+            HurtDecision::Full { amount } | HurtDecision::Topup { amount } => amount,
+        };
+        let outcome = lodestone_entity::apply_reductions(amount, &self.defenses, flags);
+        self.defenses.absorption = outcome.remaining_absorption;
+        self.health = (self.health - outcome.to_health).max(0.0);
+        outcome.to_health
+    }
+
     /// The mob's current position.
     #[must_use]
     pub fn position(&self) -> Vec3 {
         self.mob.position()
+    }
+
+    /// The mob's collision body — the box [`MobSim::explode`] samples for
+    /// blast exposure.
+    #[must_use]
+    pub fn shape(&self) -> &MobShape {
+        self.mob.shape()
     }
 
     /// How many A\* searches this mob has run — the count that proves the
@@ -387,6 +564,9 @@ impl<'w> MobSim<'w> {
     ) -> &mut SimMob<'w> {
         let id = self.next_id;
         self.next_id += 1;
+        let entity_type =
+            ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
+        let (max_health, attack_damage, defenses) = combat_defaults(&entity_type);
         self.mobs.push(SimMob {
             id,
             mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget),
@@ -395,8 +575,12 @@ impl<'w> MobSim<'w> {
             no_action_time: 0,
             persistent: false,
             uuid: Uuid::new_v4(),
-            entity_type: ResourceKey::from_str("minecraft:zombie")
-                .expect("static key is valid"),
+            entity_type,
+            health: max_health,
+            defenses,
+            attack_damage,
+            hurt_cooldown: HurtCooldown::default(),
+            attack_target_id: None,
         });
         self.mobs.last_mut().expect("just pushed")
     }
@@ -406,11 +590,37 @@ impl<'w> MobSim<'w> {
     /// Each mob's `no_action_time` ages by one tick, mirroring vanilla
     /// `serverAiStep`'s `noActionTime++`; [`despawn_pass`](MobSim::despawn_pass)
     /// consumes and resets it.
+    ///
+    /// A `MeleeAttackGoal` that connected this tick is resolved into a real
+    /// [`SimMob::apply_damage`] call against whichever mob its
+    /// [`attack_target_id`](SimMob::attack_target_id) names — the goal
+    /// scheduler only ever produces the *intent* to strike (a position, via
+    /// [`NavigatingMob::take_new_attacks`]); this is where that intent becomes
+    /// a real health change. Resolution runs in a second pass over collected
+    /// events, after every mob's own AI has ticked, so an attacker damaging
+    /// another mob never needs two simultaneous mutable borrows into the same
+    /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
+    /// tick that killed it (vanilla's immediate death removal).
     pub fn tick(&mut self) {
+        let mut hits: Vec<(Option<i32>, f32)> = Vec::new();
         for m in &mut self.mobs {
+            // Vanilla ages `invulnerableTime`/`hurtTime` every tick regardless
+            // of whether the mob was hit this tick.
+            m.hurt_cooldown.tick();
             m.mob.tick(&mut m.goals);
             m.no_action_time = m.no_action_time.saturating_add(1);
+            if !m.mob.take_new_attacks().is_empty() {
+                hits.push((m.attack_target_id, m.attack_damage));
+            }
         }
+        for (target_id, raw_damage) in hits {
+            if let Some(target_id) = target_id
+                && let Some(target) = self.mobs.iter_mut().find(|m| m.id == target_id)
+            {
+                target.apply_damage(raw_damage, DamageFlags::default());
+            }
+        }
+        self.mobs.retain(|m| m.health > 0.0);
         self.tick_count += 1;
     }
 
@@ -425,6 +635,57 @@ impl<'w> MobSim<'w> {
     #[must_use]
     pub fn tick_count(&self) -> u64 {
         self.tick_count
+    }
+
+    /// Applies an explosion centred at `centre` with blast `radius` (TNT is
+    /// `4.0`) to every live mob, through the real ray-sampled exposure model
+    /// (`explosion::seen_percent`, sampled against the sim's own
+    /// [`ChunkWorld`] via its [`RayView`] impl) and damage formula
+    /// (`explosion::entity_damage`), landing through the same
+    /// [`SimMob::apply_damage`] pipeline a melee hit uses. Before this,
+    /// `explosion.rs` had no consumer anywhere in the tree — its exposure grid
+    /// and damage formula were exercised only by their own hermetic unit
+    /// tests, with no path from "an explosion happened" to a health value
+    /// anywhere changing.
+    ///
+    /// `flags` lets the caller pick which reduction stages the blast bypasses;
+    /// a plain `DamageFlags::default()` runs armour/absorption normally.
+    ///
+    /// Returns `(id, damage_dealt)` for every mob that took nonzero damage,
+    /// and removes any mob the blast killed. A mob whose exposure is fully
+    /// blocked (every sampled ray hits terrain before the centre) takes no
+    /// damage and is absent from the result — a wall genuinely shields it,
+    /// this is not a distance cutoff.
+    pub fn explode(&mut self, centre: Vec3, radius: f32, flags: DamageFlags) -> Vec<(i32, f32)> {
+        let mut dealt = Vec::new();
+        for m in &mut self.mobs {
+            let shape = m.shape();
+            let box_ = ExplosionAabb::from_size(
+                m.position(),
+                f64::from(shape.width),
+                f64::from(shape.height),
+            );
+            let box_center = Vec3::new(
+                (box_.min.x + box_.max.x) / 2.0,
+                (box_.min.y + box_.max.y) / 2.0,
+                (box_.min.z + box_.max.z) / 2.0,
+            );
+            let exposure = seen_percent(centre, box_, self.world);
+            if exposure <= 0.0 {
+                continue;
+            }
+            let distance = (box_center - centre).length();
+            let raw = entity_damage(radius, distance, exposure);
+            if raw <= 0.0 {
+                continue;
+            }
+            let applied = m.apply_damage(raw, flags);
+            if applied > 0.0 {
+                dealt.push((m.id, applied));
+            }
+        }
+        self.mobs.retain(|m| m.health > 0.0);
+        dealt
     }
 
     /// The number of live mobs.
@@ -502,6 +763,16 @@ impl<'w> MobSim<'w> {
     /// honoured for the rest of the cycle. Nothing here decides *which* mob or
     /// *where* — that is the source's version/terrain-dependent job.
     ///
+    /// Every naturally spawned mob gets a baseline goal set
+    /// ([`RandomStrollGoal`] + [`RandomLookAroundGoal`]) so it actually moves
+    /// and looks around instead of standing frozen at its spawn point — before
+    /// this, a mob produced by this cycle had an empty [`GoalSelector`] and
+    /// [`tick`](MobSim::tick) on it was a provable no-op. Combat goals are not
+    /// added here: they need a target (a player or another mob) this
+    /// version-free crate has no notion of naming yet, so a caller that does
+    /// (species-aware spawning) adds them via [`SimMob::add_goal`] on the
+    /// returned handle's id.
+    ///
     /// Returns the number of mobs spawned.
     pub fn run_spawn_cycle(
         &mut self,
@@ -516,6 +787,7 @@ impl<'w> MobSim<'w> {
                     continue;
                 }
                 if let Some(candidate) = source.candidate(category, cx, cz) {
+                    let speed = candidate.step_per_tick;
                     let mob = self.spawn(
                         candidate.pos,
                         candidate.shape,
@@ -523,7 +795,9 @@ impl<'w> MobSim<'w> {
                         candidate.visited_budget,
                     );
                     mob.set_category(category)
-                        .set_persistent(category.is_persistent());
+                        .set_persistent(category.is_persistent())
+                        .add_goal(0, Box::new(RandomStrollGoal::new(speed)))
+                        .add_goal(1, Box::new(RandomLookAroundGoal::new()));
                     state.record(category);
                     spawned += 1;
                 }

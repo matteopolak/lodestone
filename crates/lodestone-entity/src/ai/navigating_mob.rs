@@ -165,10 +165,25 @@ impl<'w> NavigatingMob<'w> {
         self.pos
     }
 
+    /// The mob's collision body (width/height/step and traversal parameters).
+    #[must_use]
+    pub fn shape(&self) -> &MobShape {
+        &self.shape
+    }
+
     /// The targets the mob has struck, in order (for tests).
     #[must_use]
     pub fn attacks(&self) -> &[Vec3] {
         &self.attacks
+    }
+
+    /// Drains the attacks recorded since the last call, returning them in
+    /// order. Unlike [`attacks`](Self::attacks) (an inspection peek used
+    /// throughout this module's tests), this **consumes** them — the shape a
+    /// real per-tick consumer needs so it resolves each strike exactly once
+    /// instead of re-processing the whole history every tick.
+    pub fn take_new_attacks(&mut self) -> Vec<Vec3> {
+        std::mem::take(&mut self.attacks)
     }
 
     /// How many times a goal asked this mob to move.
