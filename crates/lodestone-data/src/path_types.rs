@@ -55,12 +55,12 @@ pub fn path_type(id: u32) -> Option<PathType> {
 ///
 /// ```
 /// use lodestone_model::{PathType, PathTypeRegistry};
-/// use lodestone_v770::path_types::PathTypes;
+/// use lodestone_data::path_types::PathTypes;
 ///
 /// let reg = PathTypes;
 /// assert_eq!(reg.path_type(0), Some(PathType::Open)); // air
 /// assert_eq!(reg.path_type(1), Some(PathType::Blocked)); // stone
-/// assert_eq!(reg.state_count(), lodestone_v770::path_types::STATE_COUNT);
+/// assert_eq!(reg.state_count(), lodestone_data::path_types::STATE_COUNT);
 /// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PathTypes;
