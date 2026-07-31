@@ -457,11 +457,22 @@ class State:
         self.dolphins_grace = False
         self.jump_boost = None   # None or amplifier (0-based)
         # Entity.fallDistance (a double since 26.2). Read only by the airborne
-        # branch of Player.isAboveGround. Like the Rust port, this oracle does NOT
-        # maintain it: vanilla's accounting is spread over checkFallDamage, the
-        # clip-through reset in move(), the lava halving in baseTick,
-        # checkFallDistanceAccumulation and the water/vehicle/teleport resets. Both
-        # ports treat it as a caller-supplied input defaulting to 0.0.
+        # branch of Player.isAboveGround. This oracle maintains it the same way the
+        # Rust port does: checkFallDamage's accumulation + grounded reset, the
+        # water reset, the lava halving, the climbable reset, the Slow
+        # Falling/Levitation reset and the elytra checkFallDistanceAccumulation
+        # clamp -- see accumulate_fall_distance() and
+        # check_fall_distance_accumulation() below. NOT modelled (matching the
+        # Rust port, which has no equivalent state): creative flight (no flying
+        # here), riding/vehicles (no riding here), bubble columns, the
+        # movementLength>=1.0 clip-through reset (needs a world raycast this
+        # oracle's World has no equivalent of), and teleport resets (this oracle
+        # has no teleport primitive; scenarios that want one must zero this field
+        # by hand at the seam, exactly like the Rust port's `reset_fall_distance`).
+        # The stuck-in-block reset (makeStuckInBlock) is additionally unmodelled
+        # HERE ONLY: this oracle's do_move has no stuck-speed-multiplier concept
+        # at all (no scenario needs one), unlike the Rust port, which already
+        # tracks it for `tests/stuck_movement.rs` and rides the reset along.
         self.fall_distance = 0.0
         # Entity.getPose(). Decided at the END of Player.tick by
         # update_player_pose(); the box this tick's movement collides with is
@@ -730,6 +741,28 @@ def clamp_f64(value, lo, hi):
     return min(value, hi)
 
 
+def accumulate_fall_distance(s, ya, in_water):
+    # Entity.checkFallDamage(ya, onGround, ...), restricted to the accumulation
+    # and grounded reset (Entity.java:1564-1582). `ya` is the actual Y position
+    # delta the move achieved this tick (`movement.y`), not the pre-move
+    # velocity. Note the `(float)` truncation of the `double` ya *before* the
+    # subtraction into the `double` field -- this is vanilla's, not an
+    # approximation.
+    if not in_water and ya < 0.0:
+        s.fall_distance -= float(f32(ya))
+    if s.on_ground:
+        s.fall_distance = 0.0
+
+
+def check_fall_distance_accumulation(s):
+    # Entity.checkFallDistanceAccumulation() (Entity.java:2904-2908), called only
+    # from LivingEntity.updateFallFlying, itself only reached if isFallFlying(),
+    # ahead of the Slow Falling/Levitation reset and travel() -- so this reads
+    # s.vel as it stood at the END of the PREVIOUS tick.
+    if s.vel[1] > -0.5 and s.fall_distance > 1.0:
+        s.fall_distance = 1.0
+
+
 def handle_on_climbable(vel, sneak):
     # Bounds are the float literals -0.15F/0.15F promoted to double.
     bound = f32(0.15)
@@ -805,8 +838,17 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[2] += az
     climbing = world.is_climbable(math.floor(s.pos[0]), math.floor(s.pos[1]), math.floor(s.pos[2]))
     if climbing:
+        # LivingEntity.handleOnClimbable's resetFallDistance() (LivingEntity.java:
+        # 2693-2695), evaluated once pre-move and reused for the velocity clamp
+        # below, exactly as the Rust port does. Only travelInAir reaches
+        # handleOnClimbable, so this is tick_air-only.
+        s.fall_distance = 0.0
         s.vel = handle_on_climbable(s.vel, sneak)
+    old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
+    # Entity.move()'s checkFallDamage call (Entity.java:783-784). Not water on
+    # this path.
+    accumulate_fall_distance(s, s.pos[1] - old_y, False)
     mvx, mvy, mvz = s.vel
     if (s.hcol or jump) and climbing:
         mvy = 0.2
@@ -856,6 +898,11 @@ def fluid_falling_adjusted_movement(base_gravity, is_falling, sprinting, mv):
 
 
 def tick_water(world, s, forward, strafe, jump, sneak, sprint):
+    # updateFluidInteraction's `if (inWater) resetFallDistance()` (Entity.java:
+    # 1658-1659). This function is only reached when the per-tick fluid summary
+    # already said in_water(), matching vanilla's predicate deciding both this
+    # reset and the travelInFluid dispatch.
+    s.fall_distance = 0.0
     apply_fluid_push(world, s, "water", 0.014)
     if s.no_jump_delay > 0:
         s.no_jump_delay -= 1
@@ -908,7 +955,12 @@ def tick_water(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[0] += ax
     s.vel[1] += ay
     s.vel[2] += az
+    old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
+    # Entity.move()'s checkFallDamage call. in_water=True: the reset above already
+    # zeroed fall_distance for this whole tick, so this is only reachable for its
+    # grounded-reset half.
+    accumulate_fall_distance(s, s.pos[1] - old_y, True)
     mv = (
         s.vel[0] * float(slow_down),
         s.vel[1] * float(f32(0.8)),
@@ -934,6 +986,11 @@ def is_in_lava(world, s):
 
 
 def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
+    # baseTick's `if (isInLava()) fallDistance *= 0.5;` (Entity.java:555-557).
+    # This function is only reached when the per-tick fluid summary already said
+    # in_lava(), matching vanilla's predicate deciding both this halving and the
+    # travelInLava dispatch.
+    s.fall_distance *= 0.5
     apply_fluid_push(world, s, "lava", 0.0023333333333333335)
     if s.no_jump_delay > 0:
         s.no_jump_delay -= 1
@@ -955,7 +1012,10 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
     s.vel[0] += ax
     s.vel[1] += ay
     s.vel[2] += az
+    old_y = s.pos[1]
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
+    # Entity.move()'s checkFallDamage call. Not water on this path.
+    accumulate_fall_distance(s, s.pos[1] - old_y, False)
     # deep-lava branch: scale(0.5) then -baseGravity/4
     s.vel = [s.vel[0] * 0.5, s.vel[1] * 0.5, s.vel[2] * 0.5]
     if base_gravity != 0.0:
@@ -1013,8 +1073,11 @@ def tick_elytra(world, s, sneak=False):
     if abs(s.vel[1]) < 0.003:
         dy = 0.0
     s.vel = update_fall_flying_movement(s, dx, dy, dz)
+    old_y = s.pos[1]
     do_move(world, s, list(s.vel), suppress_bounce=False,
             staying_on_ground_surface=sneak)
+    # Entity.move()'s checkFallDamage call. Not water on this path.
+    accumulate_fall_distance(s, s.pos[1] - old_y, False)
 
 
 # ---- Pose: dimensions and the fit gate --------------------------------------
@@ -1137,6 +1200,17 @@ def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
     Player.tick's own last statement -- and therefore runs AFTER pushEntities."""
     # Entity.baseTick -> updateSwimming, before travel reads isInWater.
     update_swimming(world, s)
+    # LivingEntity.aiStep: `if (isFallFlying()) updateFallFlying();`
+    # (LivingEntity.java:3117-3119), checkFallDistanceAccumulation's only call
+    # site for a player. Before the Slow Falling/Levitation check and travel(),
+    # on s.vel as it stood at the end of the PREVIOUS tick.
+    if s.fall_flying:
+        check_fall_distance_accumulation(s)
+    # LivingEntity.aiStep: `if (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION))
+    # resetFallDistance();` (LivingEntity.java:3123-3125), unconditionally before
+    # the travel() dispatch below, regardless of which path it picks.
+    if s.slow_falling or s.levitation is not None:
+        s.fall_distance = 0.0
     if is_in_water(world, s):
         tick_water(world, s, forward, strafe, jump, sneak, sprint)
     elif is_in_lava(world, s):

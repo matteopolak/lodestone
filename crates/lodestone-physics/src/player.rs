@@ -280,34 +280,84 @@ pub struct PlayerState {
     /// plausible number for it.
     pub water_movement_efficiency: f32,
     /// `Entity.fallDistance` (`Entity.java:245` — a `double`, not a `float`, since
-    /// 26.2), as an **input** from the driver, exactly like
-    /// [`Self::water_movement_efficiency`].
+    /// 26.2).
     ///
-    /// **Why it is suddenly load-bearing.** [`move_entity`] is documented as
-    /// modelling only "the parts of `Entity.move` that affect an entity's reported
-    /// position", and fall distance used to be squarely outside that: it drives
-    /// fall *damage*, which the server owns. `Player.maybeBackOffFromEdge` changes
-    /// that — `isAboveGround` consults `fallDistance`, and the back-off moves you,
-    /// so fall distance is now a position input.
+    /// **Why it is load-bearing.** [`move_entity`] is documented as modelling only
+    /// "the parts of `Entity.move` that affect an entity's reported position", and
+    /// fall distance used to be squarely outside that: it drives fall *damage*,
+    /// which the server owns. `Player.maybeBackOffFromEdge` changes that —
+    /// `isAboveGround` consults `fallDistance`, and the back-off moves you, so fall
+    /// distance is now a position input.
     ///
-    /// **This crate does not maintain it, deliberately.** Vanilla's accounting is
-    /// spread over at least six sites: the `-= (float) ya` accumulation and the
-    /// grounded reset in `Entity.checkFallDamage` (`Entity.java:1564-1582`, and note
-    /// the `float` cast of a `double` argument into a `double` field), the
-    /// `movementLength >= 1.0` clip-through reset inside `move` itself
-    /// (`Entity.java:747-754`), the `*= 0.5` lava halving in `baseTick`
-    /// (`Entity.java:555-557`), `checkFallDistanceAccumulation`'s clamp to `1.0`
-    /// (`Entity.java:2904-2908`), `LivingEntity`'s override (`LivingEntity.java:363`),
-    /// and the water/vehicle/teleport resets. A partial model feeding a
-    /// position-affecting gate is worse than an explicit input, so this is an
-    /// input.
+    /// **This crate maintains it.** [`tick`]/[`tick_air`]/[`tick_water`]/
+    /// [`tick_lava`]/[`tick_elytra`] reproduce every site vanilla touches it:
     ///
-    /// **The default `0.0` is exact for the grounded case and errs in a known
-    /// direction otherwise**: `Player.isAboveGround`'s airborne branch probes
-    /// `maxDownStep - fallDistance`, so a `0.0` stand-in probes the *full* step
-    /// height, a strictly weaker `canFallAtLeast`, and the gate opens *more* often
-    /// than vanilla's rather than less. Every scenario that
-    /// motivated the rule (bridging, sneak-placing, walking a ledge) is grounded.
+    /// * **Accumulation + grounded reset** — `Entity.checkFallDamage`
+    ///   (`Entity.java:1564-1582`, reached through `LivingEntity`'s override at
+    ///   `LivingEntity.java:363-394`, which spawns landing particles and then calls
+    ///   `super.checkFallDamage` unchanged): `if (!isInWater() && ya < 0.0)
+    ///   fallDistance -= (float) ya;` then, unconditionally, `if (onGround)
+    ///   resetFallDistance();`. Note the `(float)` truncation of the `double` delta
+    ///   *before* the subtraction into the `double` field — reproduced here as
+    ///   `state.fall_distance -= f64::from(ya as f32)`. In vanilla this call sits
+    ///   inside `Entity.move()` itself (`Entity.java:783-784`), gated on
+    ///   `isLocalInstanceAuthoritative()` — always `true` for `LocalPlayer`
+    ///   (`Entity.java:3594-3596`, `Player.java:1276-1283`,
+    ///   `LocalPlayer.java:376`), which is the only player this crate models. The
+    ///   `movementLength >= 1.0` clip-through reset that also lives inside `move()`
+    ///   (`Entity.java:747-754`) needs a world raycast against
+    ///   `ClipContext.Block.FALLDAMAGE_RESETTING` and is **not** modelled — see
+    ///   [`crate::entity::move_entity`]'s own scope note.
+    /// * **Water reset** — `Entity.updateFluidInteraction`: `if (inWater)
+    ///   resetFallDistance();` (`Entity.java:1658-1659`), called from `baseTick`
+    ///   before `travel`. This crate's dispatch already computes the same
+    ///   per-tick fluid summary before choosing [`tick_water`], so the reset lands
+    ///   at the top of that function.
+    /// * **Lava halving** — `Entity.baseTick`: `if (isInLava()) fallDistance *=
+    ///   0.5;` (`Entity.java:555-557`), applied at the top of [`tick_lava`] for the
+    ///   same reason.
+    /// * **Climbable reset** — `LivingEntity.handleOnClimbable`: `if
+    ///   (onClimbable()) resetFallDistance();` (`LivingEntity.java:2693-2695`),
+    ///   reached only through `travelInAir` (`LivingEntity.java:2666-2669`), so
+    ///   only [`tick_air`] applies it — matching vanilla, where a climbable never
+    ///   resets fall distance while swimming or gliding.
+    /// * **Slow Falling / Levitation reset** — `LivingEntity.aiStep`: `if
+    ///   (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION)) resetFallDistance();`
+    ///   (`LivingEntity.java:3123-3125`), unconditionally before the `travel()`
+    ///   dispatch — applied in [`tick`] before it picks a travel path.
+    /// * **Elytra accumulation clamp** — `Entity.checkFallDistanceAccumulation`:
+    ///   `if (deltaMovement.y() > -0.5 && fallDistance > 1.0) fallDistance = 1.0;`
+    ///   (`Entity.java:2904-2908`), called from `LivingEntity.updateFallFlying`
+    ///   (`LivingEntity.java:3183-3184`), itself only reached `if (isFallFlying())`
+    ///   in `aiStep` (`LivingEntity.java:3117-3119`) — before the Slow
+    ///   Falling/Levitation check and before `travel()`. Applied in [`tick`]
+    ///   alongside that check, gated on [`Self::fall_flying`].
+    /// * **Stuck-in-block reset** — `Entity.makeStuckInBlock`: `resetFallDistance();
+    ///   this.stuckSpeedMultiplier = speedMultiplier;` (`Entity.java:2945-2947`),
+    ///   fired every tick `Block.entityInside` finds a stuck-triggering block
+    ///   (cobweb, powder snow, sweet berry bush, honey). This crate's
+    ///   `update_stuck_multiplier` already reproduces the block scan that feeds
+    ///   `stuckSpeedMultiplier`; the reset rides along whenever it finds one.
+    ///
+    /// **Not modelled, matching pre-existing gaps elsewhere in this crate.**
+    /// Creative flight (`Player.aiStep`: `if (abilities.flying &&
+    /// !isPassenger()) resetFallDistance();`, `Player.java:449-451`) does not
+    /// apply — see [`tick_air`]'s own doc on `!abilities.flying`, "this crate has
+    /// no creative flight". Riding/vehicles do not apply — "this engine has no
+    /// riding state" (see the `on_ground` doc on
+    /// [`Self::on_ground`]/`tests/on_ground.rs`'s `spectator_or_passenger_note`).
+    /// Bubble columns do not apply — see [`tick_water`]'s "Not modelled" list.
+    /// **Teleport is a driver responsibility**: this crate has no teleport
+    /// primitive of its own (a driver sets [`Self::position`] directly), so a
+    /// caller that snaps the position (server correction, respawn, an ender pearl
+    /// or chorus fruit consume effect, all of which call `resetFallDistance()` in
+    /// vanilla) must also call [`Self::reset_fall_distance`] itself.
+    ///
+    /// **Sign, verified against the jar rather than assumed.** A negative `ya`
+    /// (moving down) makes `fallDistance -= (float) ya` an *increase* — e.g.
+    /// `ya = -0.5` gives `fallDistance -= -0.5`, i.e. `+= 0.5`. This is invisible
+    /// in any test where the player never leaves the ground, and it is exactly the
+    /// input this field exists for.
     pub fall_distance: f64,
 }
 
@@ -346,6 +396,20 @@ impl PlayerState {
     pub fn with_fall_distance(mut self, value: f64) -> Self {
         self.fall_distance = value;
         self
+    }
+
+    /// `Entity.resetFallDistance()` (`Entity.java:2910-2912`) — zeroes
+    /// [`Self::fall_distance`].
+    ///
+    /// Every reset condition this crate's own tick reaches (landing, water,
+    /// climbable, Slow Falling/Levitation, a stuck-in-block match) is applied
+    /// internally already; this is for the sites that are the *driver's*
+    /// responsibility because this crate has no primitive of its own for them —
+    /// chiefly a teleport (server correction, respawn, an ender pearl or chorus
+    /// fruit landing) that snaps [`Self::position`] outside of [`tick`]. See the
+    /// "Not modelled" list on [`Self::fall_distance`].
+    pub fn reset_fall_distance(&mut self) {
+        self.fall_distance = 0.0;
     }
 
     /// Returns a copy of this state with the
@@ -1089,11 +1153,21 @@ pub fn tick_air(
         state.no_jump_delay = 0;
     }
 
+    // `LivingEntity.handleOnClimbable`'s `resetFallDistance()` — evaluated once,
+    // pre-move, and reused (`travel_in_air` below re-derives the same `climbing`
+    // test for its own velocity clamp; both read the pre-move position, so the two
+    // checks agree). Only `travelInAir` reaches `handleOnClimbable`
+    // (`LivingEntity.java:2666-2669`), so this is `tick_air`-only, matching vanilla.
+    if on_climbable(state, view) {
+        state.fall_distance = 0.0;
+    }
+
     // --- travelInAir ----------------------------------------------------------
     // The gravity + drag + collision core is the entity-agnostic `travel_in_air`
     // seam (shared with mobs); the player supplies only the transformed input,
     // `getSpeed()`, and its per-situation flags. Thread the player's motion state
     // through `EntityMotion` and back so the arithmetic is byte-identical.
+    let old_y = state.position.y;
     let mut motion = EntityMotion {
         position: state.position,
         velocity: state.velocity,
@@ -1131,6 +1205,11 @@ pub fn tick_air(
     state.on_ground = motion.on_ground;
     state.horizontal_collision = motion.horizontal_collision;
     state.stuck_speed_multiplier = motion.stuck_speed_multiplier;
+
+    // `Entity.move()`'s `checkFallDamage(movement.y, onGround, …)` call
+    // (`Entity.java:783-784`) — not in water on this path (see
+    // `accumulate_fall_distance`'s doc).
+    accumulate_fall_distance(state, state.position.y - old_y, false);
 }
 
 /// `LivingEntity.handleOnClimbable(Vec3)` — the pre-move clamp applied while on
@@ -1217,6 +1296,48 @@ fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
         mth::floor(state.position.y),
         mth::floor(state.position.z),
     )
+}
+
+/// `Entity.checkFallDamage(ya, onGround, onState, pos)`, restricted to the
+/// accumulation and the grounded reset — `LivingEntity`'s override
+/// (`LivingEntity.java:363-394`) adds only landing particles and a
+/// server/`onChangedBlock` call before delegating to this via `super`
+/// (`LivingEntity.java:390`), neither of which affects position or
+/// `fallDistance` itself.
+///
+/// `ya` is `movement.y` from vanilla's `Entity.move()` (`Entity.java:783-784`):
+/// the actual Y position delta this move achieved, *not* the pre-move velocity.
+/// Callers pass `state.position.y - old_y`, captured immediately before the move.
+///
+/// `in_water` is vanilla's `isInWater()` (`wasTouchingWater`), frozen for the
+/// whole tick by `updateFluidInteraction` before `travel()` runs — callers pass a
+/// constant matching which travel path they are in (only [`tick_water`] can have
+/// it `true`; the dispatch in [`travel_and_check_inside_blocks`] guarantees the
+/// other three paths are only reached when it is `false`).
+///
+/// The `(float)` cast is vanilla's, not an approximation: `fallDistance` is a
+/// `double` field but the tick's `ya` is truncated to `float` precision *before*
+/// the subtraction (`Entity.java:1566`).
+fn accumulate_fall_distance(state: &mut PlayerState, ya: f64, in_water: bool) {
+    if !in_water && ya < 0.0 {
+        state.fall_distance -= f64::from(ya as f32);
+    }
+    if state.on_ground {
+        state.fall_distance = 0.0;
+    }
+}
+
+/// `Entity.checkFallDistanceAccumulation()` (`Entity.java:2904-2908`) — clamps
+/// `fallDistance` to at most `1.0` while not descending fast. Called only from
+/// `LivingEntity.updateFallFlying`, itself only reached `if (isFallFlying())` in
+/// `aiStep`, ahead of the Slow Falling/Levitation reset and `travel()`
+/// (`LivingEntity.java:3117-3125`) — so this reads `state.velocity` as it stood
+/// at the *end of the previous* tick, exactly as vanilla's pre-`travel()`
+/// placement does.
+fn check_fall_distance_accumulation(state: &mut PlayerState) {
+    if state.velocity.y > -0.5 && state.fall_distance > 1.0 {
+        state.fall_distance = 1.0;
+    }
 }
 
 /// `LivingEntity.aiStep`'s **jump** block for an entity standing in fluid
@@ -1351,6 +1472,13 @@ pub fn tick_water(
             unimplemented!("1.8 fluid movement is not implemented yet")
         }
     }
+    // --- baseTick: `updateFluidInteraction`'s `if (inWater) resetFallDistance()`
+    // (`Entity.java:1658-1659`) ------------------------------------------------
+    // This function is only reached when the per-tick fluid summary already says
+    // `in_water()` (see `travel_and_check_inside_blocks`'s dispatch), so the
+    // condition is unconditionally true here — matching vanilla, where the same
+    // predicate decides both the reset and the `travelInFluid` dispatch.
+    state.fall_distance = 0.0;
     // --- baseTick: fluid current push (`updateFluidInteraction`) ---------------
     // Vanilla applies the flow current in `baseTick`, before `aiStep`/`travel`
     // within the same tick, so it lands here (ahead of the snap-to-zero prologue)
@@ -1458,6 +1586,12 @@ pub fn tick_water(
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak, input.sneak);
 
+    // `Entity.move()`'s `checkFallDamage` call. `in_water` is `true` — the reset
+    // above already zeroed `fall_distance` for this whole tick, and vanilla's own
+    // `!isInWater()` guard would block any accumulation here too, so this is only
+    // reachable for its grounded-reset half (e.g. touching a submerged floor).
+    accumulate_fall_distance(state, state.position.y - old_y, true);
+
     // `if (horizontalCollision && onClimbable()) movement = (x, 0.2, z)` — a ladder
     // still lifts you while submerged, and it does so *before* the water drag.
     let mut movement = state.velocity;
@@ -1502,6 +1636,11 @@ pub fn tick_lava(
             unimplemented!("1.8 fluid movement is not implemented yet")
         }
     }
+    // baseTick's `if (isInLava()) fallDistance *= 0.5;` (`Entity.java:555-557`).
+    // This function is only reached when the per-tick fluid summary already says
+    // `in_lava()`, matching vanilla's `isInLava()` predicate deciding both this
+    // halving and the `travelInLava` dispatch.
+    state.fall_distance *= 0.5;
     // baseTick fluid current push (see `tick_water`); lava uses its own scale.
     apply_fluid_push(
         state,
@@ -1526,6 +1665,10 @@ pub fn tick_lava(
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak, input.sneak);
+
+    // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
+    accumulate_fall_distance(state, state.position.y - old_y, false);
+
     state.velocity = state.velocity.scale(0.5);
     if base_gravity != 0.0 {
         state.velocity = state
@@ -1646,7 +1789,11 @@ pub fn tick_elytra(
     let collapsed = snap_small_velocity(state.velocity);
 
     state.velocity = update_fall_flying_movement(state, profile, collapsed);
+    let old_y = state.position.y;
     do_move(state, view, profile, false, input.sneak);
+
+    // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
+    accumulate_fall_distance(state, state.position.y - old_y, false);
 }
 
 /// `Entity.checkInsideBlocks` → `Block.entityInside` → `makeStuckInBlock`: after
@@ -1683,6 +1830,14 @@ fn update_stuck_multiplier(
                 }
             }
         }
+    }
+    // `Entity.makeStuckInBlock`: `resetFallDistance(); this.stuckSpeedMultiplier =
+    // speedMultiplier;` (`Entity.java:2945-2947`) — the reset rides along with
+    // every call that finds a stuck-triggering block (cobweb, powder snow, sweet
+    // berry bush, honey), which is every tick `Block.entityInside` sees one, not
+    // just the first.
+    if found != Vec3d::ZERO {
+        state.fall_distance = 0.0;
     }
     state.stuck_speed_multiplier = found;
 }
@@ -1753,6 +1908,21 @@ fn travel_and_check_inside_blocks(
     // `LivingEntity.updateSwimAmount()` — see its doc for why this sits here,
     // between `updateSwimming` and the travel dispatch below.
     update_swim_amount(state);
+
+    // `LivingEntity.aiStep`: `if (isFallFlying()) updateFallFlying();`
+    // (`LivingEntity.java:3117-3119`), which is `checkFallDistanceAccumulation`'s
+    // only call site for a player. Runs before the Slow Falling/Levitation check
+    // and before `travel()`, on the velocity as it stood at the end of the
+    // *previous* tick — see `check_fall_distance_accumulation`'s doc.
+    if state.fall_flying {
+        check_fall_distance_accumulation(state);
+    }
+    // `LivingEntity.aiStep`: `if (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION))
+    // resetFallDistance();` (`LivingEntity.java:3123-3125`), unconditionally before
+    // the `travel()` dispatch below, regardless of which path it picks.
+    if state.effects.slow_falling || state.effects.levitation.is_some() {
+        state.fall_distance = 0.0;
+    }
 
     if fluid.in_water() {
         tick_water(state, input, &fluid, view, profile);

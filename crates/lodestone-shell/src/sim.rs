@@ -3392,6 +3392,13 @@ impl Sim {
                         rotation.pitch
                     };
                     player.velocity = Vec3d::ZERO;
+                    // A teleport is not a fall. Vanilla resets fall distance on
+                    // every position snap, and this one handler covers server
+                    // corrections, respawn and every teleport packet — so
+                    // without it, a corrective teleport mid-fall leaves the
+                    // accumulated distance behind to feed `maybeBackOffFromEdge`
+                    // (and, later, fall damage) as though the fall continued.
+                    player.reset_fall_distance();
                     player.position
                     });
                     self.set_prev_position(placed);
