@@ -7,11 +7,103 @@
 //! by the noise's registry id), and evaluates the resulting tree at a block
 //! position.
 //!
-//! Point evaluation matches vanilla's `SinglePointContext`: the cache/marker
-//! wrappers (`interpolated`, `flat_cache`, `cache_2d`, `cache_once`,
-//! `blend_density`) are transparent, exactly as `DensityFunctions.Marker.compute`
-//! delegates to its wrapped function. (The cell interpolation those markers drive
-//! inside `NoiseChunk` is a separate, later stage.)
+//! Point evaluation matches vanilla's `SinglePointContext` *value-wise*: no
+//! marker wrapper ever changes *what* is computed, only how many times. One of
+//! the five marker kinds (`cache_2d`) does real caching here — see
+//! `## Caching` below; the raw, uninstantiated `DensityFunctions.Marker.compute`
+//! (`DensityFunctions.java:793-797`) is fully transparent for all five, and
+//! that remains true here for the other four (`interpolated`, `flat_cache`,
+//! `cache_once`, `cache_all_in_cell`) and, deliberately, for `blend_density`.
+//!
+//! ## Caching
+//!
+//! Vanilla only gives these markers real caching behaviour when a tree is
+//! wrapped by `NoiseChunk::wrap` (`NoiseChunk.java:374-407`), which swaps each
+//! marker for a `NoiseChunk`-private class carrying real cache state. This
+//! evaluator has no `NoiseChunk` instance and is never wrapped that way — it
+//! is vanilla's `SinglePointContext` path (`preliminary_surface_level`'s
+//! `find_top_surface` scan, `spline`'s `coordinate` inputs, the aquifer's own
+//! `preliminary_surface_level`) — so "what would vanilla's wrapped version
+//! cache here" has to be answered per node kind, not assumed uniformly:
+//!
+//! * **`cache_2d`** (`NoiseChunk.Cache2D`, `NoiseChunk.java:531-569`) marks a
+//!   subtree whose value is a pure function of `(x, z)` — vanilla's own
+//!   `Cache2D.compute` keys on exactly `(blockX, blockZ)` and ignores `y`
+//!   outright. [`Density::Cache2D`] gets a real [`Cache2DSlot`] here: a
+//!   single-slot last-`(x,z)`-value cache, exact for *any* caller (see
+//!   [`Cache2DSlot`]'s own doc for why a single slot, not vanilla's
+//!   whole-chunk prefilled array, is the bit-exact-for-any-caller choice).
+//!   Measured win: `preliminarySurfaceLevel`'s own `cache2d(offset)` /
+//!   `cache2d(factor)` wrapping (`NoiseRouterData.java:489-490`) sits directly
+//!   above `find_top_surface`'s per-`y` scan loop, so one corner's scan (up to
+//!   ~56 candidate `y` values, `NoiseSettings.OVERWORLD_NOISE_SETTINGS`'s
+//!   `[-64, 320]` range in 8-block steps) now evaluates that `(x, z)`-only
+//!   subtree once instead of once per candidate `y`. A criterion
+//!   `--baseline`/`--baseline` paired comparison (`docs/benchmark-harness.md`)
+//!   measured **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s
+//!   median from this alone — real, but modest, because
+//!   `preliminary_surface_level` is a minority of total column cost even
+//!   within the surface stage (§ `docs/worldgen-surface-perf.md`'s corner-cell
+//!   hoist already eliminated the *outer*, 256×-per-chunk redundancy; this
+//!   catches the *inner*, per-`y`-step redundancy that hoist could not touch).
+//! * **`flat_cache`** (`NoiseChunk.FlatCache`, `NoiseChunk.java:673-716`)
+//!   marks the *same kind* of `(x, z)`-only boundary as `cache_2d` — vanilla's
+//!   `overworld/continents.json` / `overworld/erosion.json` /
+//!   `overworld/ridges.json` are each literally `flat_cache(shifted_noise(...,
+//!   shift_y: 0.0, y_scale: 0.0))`, so the *value* reasoning above applies
+//!   here too. It nonetheless stays **deliberately uncached, transparent —
+//!   measured, not assumed.** A first attempt caching `flat_cache` the same
+//!   way as `cache_2d` **regressed `column()`'s median by +11–13%** across
+//!   every bench function (`worldgen/column_real_generator`,
+//!   `column_timed_overhead`, both `linearity` scenes; all p < 0.05). Cause,
+//!   confirmed by reading where `flat_cache` nodes actually sit in this
+//!   crate's data: `continents`/`erosion`/`ridges` are reached almost
+//!   entirely as `spline` `coordinate` inputs (`spline.rs`'s
+//!   `coordinate.compute(ctx)`), and `spline` is one of
+//!   [`NoiseChunkSampler`]'s designated "leaf" node kinds (`chunk.rs`) — i.e.
+//!   every such call already arrives at a **distinct, already-deduplicated**
+//!   `(x, z)` (one per unique interpolation corner, via
+//!   [`NoiseChunkSampler`]'s own `slot_get` *before* raw `compute` is ever
+//!   reached). A last-value cache that (almost) never has a matching prior
+//!   `(x, z)` pays a `Mutex` lock on every visit for (almost) no hits. The
+//!   asymmetry with `cache_2d` is call-site frequency and reuse shape, not
+//!   node semantics: `cache_2d` in this router sits directly over a scan that
+//!   revisits one `(x, z)` dozens of times in a row; `flat_cache` sits mostly
+//!   over corner-leaf lookups that don't. Caching by node *kind* alone,
+//!   ignoring where each kind is actually called from, would have shipped a
+//!   net regression — the concrete instance of "measure, don't assume" this
+//!   module's evidence standard exists for.
+//! * **`interpolated`** (`NoiseChunk.NoiseInterpolator`, `NoiseChunk.java:735+`)
+//!   marks a *different* boundary: vanilla only gives it real behaviour
+//!   (trilinear interpolation between 4×8×4 cell corners) when driven by
+//!   `NoiseChunk`'s own cell-filling loop state (`cellStartBlockY`,
+//!   `inCellX/Y/Z`, `interpolationCounter`) — state this point evaluator has
+//!   none of, and that [`NoiseChunkSampler`] (`chunk.rs`) already
+//!   reimplements correctly and separately for the shape stage. Caching this
+//!   node here (by whatever key) would be simulating the wrong machinery, not
+//!   a slower version of the right one, so it stays transparent.
+//! * **`cache_once`** and **`cache_all_in_cell`** (`NoiseChunk.CacheOnce`/
+//!   `CacheAllInCell`, `NoiseChunk.java:571-644`) both explicitly check
+//!   `context != NoiseChunk.this` and fall through to a plain, uncached
+//!   `wrapped.compute(context)` whenever that holds — which is *always* true
+//!   for a `SinglePointContext`, the only context this evaluator ever
+//!   constructs. So even inside a real, wrapped `NoiseChunk`, these two are
+//!   transparent for exactly the call shape used here; vanilla itself never
+//!   caches them off the cell-filling loop. Concretely: `cache_once` wraps
+//!   `sloped_cheese` (`NoiseRouterData.java:342`), a genuinely 3-D function —
+//!   caching it by `(x, z)` alone the way `cache_2d` is cached above would
+//!   silently return a stale value for a different `y` at the same `(x, z)`,
+//!   which is exactly the "both slower and wrong" trap of treating every
+//!   marker as one generic memo.
+//! * **`blend_density`** (`NoiseChunk.BlendDensity`) only gets real behaviour
+//!   when `!blender.isEmpty()` (`NoiseChunk.java:392-393`); with no blender
+//!   this crate ever constructs, it is `wrapped` unchanged in vanilla too, so
+//!   transparent is the correct — not merely unimplemented — behaviour.
+//!
+//! (The cell interpolation `interpolated` drives inside a real `NoiseChunk` is
+//! a separate, later stage — [`NoiseChunkSampler`], not this module.)
+
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -23,6 +115,55 @@ mod chunk;
 mod spline;
 pub use chunk::NoiseChunkSampler;
 pub use spline::{Spline, SplinePoint};
+
+/// A single-slot last-value `(x, z) -> f64` cache backing [`Density::Cache2D`]
+/// — see the `## Caching` section on [`Density`] for which vanilla node kinds
+/// this is (and, per a measured regression, is *not*) worth applying to.
+///
+/// `Mutex`, not `Cell`: [`Density`] must stay `Sync` — real `ChunkSource`
+/// implementations (`lodestone-server`) share one generator, and therefore one
+/// `Density` tree, across threads behind `&self`. A poisoned lock (only
+/// possible if a panic previously unwound out of `inner.compute` while this
+/// slot's lock was held) is recovered from rather than propagated: a cache is
+/// not a correctness-critical invariant, so losing a poisoned slot's stale
+/// entry and carrying on is preferable to panicking the whole evaluation.
+///
+/// `Clone` deliberately does **not** clone the cached entry — a cloned tree
+/// (e.g. `OverworldGenerator::shape_stage`'s per-chunk
+/// `self.final_density.clone()`) starts cold, exactly as a fresh `Builder`
+/// output would. Cloning lock state across a `Mutex` isn't meaningful anyway.
+/// Opaque: the only public operations are [`Default`], [`Clone`] and
+/// [`Debug`] (all needed since [`Density`] itself derives them); the field
+/// and [`Self::get_or_compute`] stay private to this module, so no external
+/// caller can observe or depend on the cache's contents or keying.
+#[derive(Debug, Default)]
+pub struct Cache2DSlot(Mutex<Option<(i32, i32, f64)>>);
+
+impl Clone for Cache2DSlot {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl Cache2DSlot {
+    /// Returns the cached value for `(x, z)` if the slot's last entry was for
+    /// this exact position, else computes it via `f`, stores it, and returns
+    /// it. `y` is not part of the key: the node kind this backs (`cache_2d`)
+    /// is, by construction, asked to cache a subtree whose value cannot
+    /// depend on `y` (see `## Caching` on [`Density`]).
+    fn get_or_compute(&self, x: i32, z: i32, f: impl FnOnce() -> f64) -> f64 {
+        let mut slot = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((cached_x, cached_z, value)) = *slot
+            && cached_x == x
+            && cached_z == z
+        {
+            return value;
+        }
+        let value = f();
+        *slot = Some((x, z, value));
+        value
+    }
+}
 
 /// Noise parameters loaded from a `worldgen/noise/*.json` file.
 #[derive(Debug, Clone)]
@@ -114,26 +255,43 @@ pub enum Density {
         /// Upper bound.
         max: f64,
     },
-    /// `interpolated` — for point evaluation this is transparent, but for the
-    /// block field it samples the wrapped fn at 4×8×4 cell corners and
-    /// trilinearly interpolates (see [`chunk`]). `slot` indexes the sampler's
-    /// per-node corner cache.
+    /// `interpolated` — for point evaluation this is transparent (see the
+    /// module's `## Caching` section for why), but for the block field it
+    /// samples the wrapped fn at 4×8×4 cell corners and trilinearly
+    /// interpolates (see [`chunk`]). `slot` indexes the sampler's per-node
+    /// corner cache.
     Interpolated {
         /// Wrapped function.
         inner: Box<Density>,
         /// Cache slot for the block-field sampler.
         slot: usize,
     },
-    /// `flat_cache` — for point evaluation this is transparent, but for the
-    /// block field it snaps XZ to the quart grid and forces `y = 0`.
+    /// `flat_cache` — for point evaluation this is transparent (module
+    /// `## Caching`: same `(x, z)`-only value shape as `cache_2d`, but a real
+    /// cache here measured as a net *regression*, so it deliberately stays
+    /// uncached); for the block field it snaps XZ to the quart grid and
+    /// forces `y = 0` (see [`chunk`], unaffected by this module's caching).
     FlatCache {
         /// Wrapped function.
         inner: Box<Density>,
         /// Cache slot for the block-field sampler.
         slot: usize,
     },
-    /// A transparent marker (`cache_2d`, `cache_once`, `cache_all_in_cell`,
-    /// `blend_density`): mathematically identical to its wrapped function.
+    /// `cache_2d` — for point evaluation, caches the wrapped fn's value by
+    /// exact `(x, z)` (module `## Caching`). For the block field this stays
+    /// transparent, matching [`chunk::NoiseChunkSampler`]'s existing,
+    /// JVM-cross-checked handling.
+    Cache2D {
+        /// Wrapped function.
+        inner: Box<Density>,
+        /// Last-`(x, z)`-value cache for point evaluation.
+        cache: Cache2DSlot,
+    },
+    /// A transparent marker (`cache_once`, `cache_all_in_cell`,
+    /// `blend_density`): mathematically identical to its wrapped function in
+    /// both point evaluation and the block field — see the module's
+    /// `## Caching` section for why these three specifically stay
+    /// transparent rather than joining `flat_cache`/`cache_2d`.
     Marker(Box<Density>),
     /// `noise`.
     Noise {
@@ -251,8 +409,11 @@ impl Density {
             Density::Invert(a) => 1.0 / a.compute(ctx),
             Density::Clamp { input, min, max } => clamp(input.compute(ctx), *min, *max),
             Density::Interpolated { inner, .. }
-            | Density::FlatCache { inner, .. }
-            | Density::Marker(inner) => inner.compute(ctx),
+            | Density::Marker(inner)
+            | Density::FlatCache { inner, .. } => inner.compute(ctx),
+            Density::Cache2D { inner, cache } => {
+                cache.get_or_compute(ctx.x, ctx.z, || inner.compute(ctx))
+            }
             Density::Noise {
                 noise,
                 xz_scale,
@@ -468,7 +629,11 @@ impl<'a> Builder<'a> {
                 inner: self.child(node, "argument"),
                 slot: self.next_slot(),
             },
-            "cache_2d" | "cache_once" | "cache_all_in_cell" | "blend_density" => {
+            "cache_2d" => Density::Cache2D {
+                inner: self.child(node, "argument"),
+                cache: Cache2DSlot::default(),
+            },
+            "cache_once" | "cache_all_in_cell" | "blend_density" => {
                 Density::Marker(self.child(node, "argument"))
             }
             "noise" => Density::Noise {
