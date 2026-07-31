@@ -33,9 +33,9 @@ use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
 use lodestone_game::recipe::RecipeBook;
-use lodestone_render::{BlockModels, ModelVertex};
+use lodestone_render::{BlockModels, GpuAtlas, GuiSpriteQuad, ModelVertex};
 
-use lodestone_assets::{ItemAtlas, ResourceLocation};
+use lodestone_assets::{Atlas, AtlasBuilder, AtlasError, ItemAtlas, ResourceLocation, ResourceManager};
 
 use std::sync::Arc;
 
@@ -180,6 +180,152 @@ pub fn menu_title(
     lodestone_game::text::resolve_to_string(title, translate)
 }
 
+/// Vanilla's real container-background art (issue #51): `container/inventory`,
+/// `container/crafting_table` and `container/generic_54`, stitched into one
+/// small atlas.
+///
+/// Reproduced by hand rather than through
+/// [`lodestone_render::GuiAtlas`](lodestone_render::GuiAtlas): these three PNGs
+/// live at `textures/gui/container/**`, not `textures/gui/sprites/**`, so they
+/// carry no sibling `.mcmeta` and vanilla does not scale them through any of
+/// [`lodestone_assets::gui::GuiScaling`]'s three modes. Instead it blits
+/// hand-placed sub-rectangles of each 256×256 sheet at native size —
+/// `ContainerScreen.java:21-27` draws the chest background as *two* blits (the
+/// row-count-dependent top part, then a fixed 96 px bottom part immediately
+/// below it), `CraftingScreen.java:29-34` and `InventoryScreen.java:96-101` each
+/// draw one whole-panel blit. `GuiScaling` has no variant for an arbitrary
+/// sub-rect, so this reads the sheets' atlas placement directly and computes
+/// the same UV windows vanilla's `blit` calls use, rather than forcing the
+/// three-mode abstraction to do something it was never built for.
+///
+/// Deliberately GPU-free (mirrors [`lodestone_render::GuiAtlas`]'s own
+/// producer/consumer split): [`ContainerBackground::build`] is the producer,
+/// [`ContainerBackground::quads`] the pure consumer a test can call with no
+/// device.
+#[derive(Debug)]
+pub struct ContainerBackground {
+    atlas: Atlas,
+    generic: ResourceLocation,
+    crafting: ResourceLocation,
+    inventory: ResourceLocation,
+}
+
+/// Which vanilla `container/*.png` sheet a menu's background draws from, and
+/// (for the generic-chest case) how many rows are actually shown — vanilla
+/// truncates the top blit's height to `rows * 18 + 17` rather than always
+/// drawing all six.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundKind {
+    Inventory,
+    Crafting,
+    Generic { rows: usize },
+}
+
+/// Mirrors [`slot_layout`]'s own dispatch: a menu with a [`Menu::craft_layout`]
+/// draws the crafting table's background regardless of container size (today
+/// that is always the 3×3 table), everything else generic draws the chest
+/// sheet at its own row count, and [`MenuKind::Player`] draws the player
+/// inventory sheet.
+fn background_kind(menu: &Menu) -> BackgroundKind {
+    match menu.kind() {
+        MenuKind::Player => BackgroundKind::Inventory,
+        MenuKind::Generic { container_size } => match menu.craft_layout() {
+            Some(_) => BackgroundKind::Crafting,
+            None => BackgroundKind::Generic {
+                rows: container_size.div_ceil(9).clamp(1, 6),
+            },
+        },
+    }
+}
+
+impl ContainerBackground {
+    /// Loads and stitches the three sheets from a resource manager (in
+    /// practice, `client.jar`).
+    pub fn build(manager: &ResourceManager) -> Result<Self, AtlasError> {
+        let generic = ResourceLocation::new("minecraft", "gui/container/generic_54")
+            .expect("hardcoded location is always valid");
+        let crafting = ResourceLocation::new("minecraft", "gui/container/crafting_table")
+            .expect("hardcoded location is always valid");
+        let inventory = ResourceLocation::new("minecraft", "gui/container/inventory")
+            .expect("hardcoded location is always valid");
+        let mut builder = AtlasBuilder::new();
+        builder.load(manager, &generic)?;
+        builder.load(manager, &crafting)?;
+        builder.load(manager, &inventory)?;
+        let atlas = builder.build()?;
+        Ok(Self {
+            atlas,
+            generic,
+            crafting,
+            inventory,
+        })
+    }
+
+    /// The stitched atlas, for GPU upload via
+    /// [`GpuAtlas::from_atlas`](lodestone_render::GpuAtlas::from_atlas).
+    #[must_use]
+    pub fn atlas(&self) -> &Atlas {
+        &self.atlas
+    }
+
+    /// The textured quad(s) vanilla's own `extractBackground` would blit for
+    /// `menu`'s screen, with the panel's own top-left corner at `(x, y)` —
+    /// see [`BackgroundKind`]'s doc comment for the Java call sites. `None`
+    /// only if a sheet is missing from the atlas (never true of
+    /// [`Self::build`]'s own output), which keeps this total rather than
+    /// panicking on a hostile input.
+    #[must_use]
+    fn quads(&self, menu: &Menu, x: f32, y: f32) -> Option<Vec<GuiSpriteQuad>> {
+        let (aw, ah) = (self.atlas.width as f32, self.atlas.height as f32);
+        let uv = |loc: &ResourceLocation, local: [f32; 4]| -> Option<([f32; 2], [f32; 2])> {
+            let sprite = self.atlas.sprite(loc)?;
+            let [lx, ly, lw, lh] = local;
+            Some((
+                [(sprite.x as f32 + lx) / aw, (sprite.y as f32 + ly) / ah],
+                [
+                    (sprite.x as f32 + lx + lw) / aw,
+                    (sprite.y as f32 + ly + lh) / ah,
+                ],
+            ))
+        };
+        match background_kind(menu) {
+            BackgroundKind::Inventory => {
+                let (uv_min, uv_max) = uv(&self.inventory, [0.0, 0.0, 176.0, 166.0])?;
+                Some(vec![GuiSpriteQuad {
+                    dst: [x, y, 176.0, 166.0],
+                    uv_min,
+                    uv_max,
+                }])
+            }
+            BackgroundKind::Crafting => {
+                let (uv_min, uv_max) = uv(&self.crafting, [0.0, 0.0, 176.0, 166.0])?;
+                Some(vec![GuiSpriteQuad {
+                    dst: [x, y, 176.0, 166.0],
+                    uv_min,
+                    uv_max,
+                }])
+            }
+            BackgroundKind::Generic { rows } => {
+                let top_h = (rows * 18 + 17) as f32;
+                let (top_min, top_max) = uv(&self.generic, [0.0, 0.0, 176.0, top_h])?;
+                let (bot_min, bot_max) = uv(&self.generic, [0.0, 126.0, 176.0, 96.0])?;
+                Some(vec![
+                    GuiSpriteQuad {
+                        dst: [x, y, 176.0, top_h],
+                        uv_min: top_min,
+                        uv_max: top_max,
+                    },
+                    GuiSpriteQuad {
+                        dst: [x, y + top_h, 176.0, 96.0],
+                        uv_min: bot_min,
+                        uv_max: bot_max,
+                    },
+                ])
+            }
+        }
+    }
+}
+
 /// Geometry for the container overlay: coloured chrome plus, when an item atlas
 /// is attached, real slot icons on the two icon streams.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,6 +339,26 @@ pub struct ContainerGeometry {
     /// The 3-D **block-item** icons, already posed into GUI pixel space on the
     /// CPU. Empty unless a [`BlockModels`] was supplied.
     pub model_verts: Vec<ModelVertex>,
+    /// Flat `[x, y, u, v, r, g, b, a]` per vertex sampling
+    /// [`ContainerBackground`]'s atlas — vanilla's real `container/*.png` panel
+    /// art (issue #51). Empty unless a background was supplied; drawn on its
+    /// own pipeline (a different atlas than [`item_verts`](Self::item_verts))
+    /// in its own pass, **before** the chrome pass, so the panel/well fills
+    /// this stream would otherwise draw are suppressed in favour of the real
+    /// art's own baked-in slot wells.
+    pub bg_verts: Vec<f32>,
+    /// How many leading vertices of [`verts`](Self::verts) are the full-canvas
+    /// dim gradient (vanilla's `extractTransparentBackground`, see
+    /// [`Builder::gradient_rect_px`]). This has to draw in its own pass
+    /// **before** [`bg_verts`](Self::bg_verts): the dim sits *under* the real
+    /// panel art (vanilla's own `container/*.png` blit is the next thing
+    /// drawn after its dim, not the other way around), while everything else
+    /// in `verts` past this marker — the flat-fill fallback, the title, the
+    /// wells — belongs *on top of* the panel art. A caller ignoring this and
+    /// drawing all of `verts` as one "chrome" range would either dim the panel
+    /// texture itself or draw the panel texture over an undimmed screen,
+    /// depending on which pass it sandwiched the texture into.
+    pub dim_vertex_count: usize,
     /// How many leading vertices of [`verts`](Self::verts) are *chrome* — the
     /// panel, the title and the slot wells. The remainder (stack counts,
     /// durability bars, the atlas-less swatch fallback) belongs **on top of**
@@ -231,6 +397,7 @@ impl ContainerGeometry {
                 models: None,
             },
             None,
+            None,
         )
     }
 
@@ -255,9 +422,11 @@ impl ContainerGeometry {
                 models,
             },
             None,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_inner(
         frame: &ContainerFrame<'_>,
         width: u32,
@@ -265,12 +434,15 @@ impl ContainerGeometry {
         gui_scale: u32,
         assets: &IconAssets<'_>,
         font: Option<&VanillaFont>,
+        background: Option<&ContainerBackground>,
     ) -> Self {
         let Some(menu) = frame.menu else {
             return Self {
                 verts: Vec::new(),
                 item_verts: Vec::new(),
                 model_verts: Vec::new(),
+                bg_verts: Vec::new(),
+                dim_vertex_count: 0,
                 chrome_vertex_count: 0,
                 widget_rect: None,
             };
@@ -287,38 +459,88 @@ impl ContainerGeometry {
         let (x, y) = panel_origin_with_scale(&layout, gui_scale, width, height);
         let mut b = Builder::new(w, h, font);
 
-        b.rect_px(
-            x,
-            y,
-            layout.width,
-            layout.height,
-            [0.08, 0.075, 0.065, 0.88],
+        // Vanilla's own dim behind an open container screen (issue #61's
+        // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
+        // (`AbstractContainerScreen.java:535-538`), which routes
+        // `Screen::extractBackground` to `extractTransparentBackground`
+        // (`Screen.java:375-377`) — a full-canvas vertical **gradient**, not the
+        // pause menu's tiled dirt texture (that is the `else` branch, for
+        // `isInGameUi() == false` screens). `-1072689136`/`-804253680` decoded:
+        // ARGB (192,16,16,16) top to (208,16,16,16) bottom.
+        //
+        // This is what dims the HUD hotbar for free: the HUD draws unconditionally
+        // behind any world-following screen (issue #61's `hud_follows_world`),
+        // and `app.rs` now draws this container pass *after* the HUD pass, so
+        // this gradient paints straight over it — draw order, not a per-element
+        // alpha (see `docs/container-screen.md`).
+        b.gradient_rect_px(
+            0.0,
+            0.0,
+            w,
+            h,
+            [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 192.0 / 255.0],
+            [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 208.0 / 255.0],
         );
-        b.rect_px(
-            x + 3.0,
-            y + 3.0,
-            layout.width - 6.0,
-            layout.height - 6.0,
-            [0.22, 0.20, 0.17, 0.70],
-        );
+        let dim_floats = b.verts.len();
+
+        // Vanilla's real `container/*.png` art (issue #51), if attached. `None`
+        // degrades to the flat programmatic panel this screen has always drawn
+        // — the jar-less path and the negative control the pixel gate leans on.
+        let bg_quads = background.and_then(|bg| bg.quads(menu, x, y));
+        if let Some(quads) = &bg_quads {
+            for q in quads {
+                b.bg_sprite(*q);
+            }
+        } else {
+            b.rect_px(
+                x,
+                y,
+                layout.width,
+                layout.height,
+                [0.08, 0.075, 0.065, 0.88],
+            );
+            b.rect_px(
+                x + 3.0,
+                y + 3.0,
+                layout.width - 6.0,
+                layout.height - 6.0,
+                [0.22, 0.20, 0.17, 0.70],
+            );
+        }
+        // Vanilla's real background bakes dark grey title text
+        // (`-12566464` == `0xFF404040`, `InventoryScreen.java:76`) into a light
+        // wood/stone panel; the programmatic fallback's warm-light text was
+        // chosen for contrast against its own dark flat fill, so the two must
+        // not share a colour.
+        let title_colour = if bg_quads.is_some() {
+            [64.0 / 255.0, 64.0 / 255.0, 64.0 / 255.0, 1.0]
+        } else {
+            [0.88, 0.84, 0.73, 1.0]
+        };
         b.text(
             &frame.title.to_ascii_uppercase(),
             x + 8.0,
             y + 7.0,
             1.0,
-            [0.88, 0.84, 0.73, 1.0],
+            title_colour,
         );
 
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
         // halves (they are a separate pass, and the 3-D ones need a depth
         // buffer), so a stack count emitted in the same loop as its well would
-        // end up *underneath* the sprite it is counting.
-        for slot in &layout.slots {
-            let sx = x + slot.x;
-            let sy = y + slot.y;
-            b.rect_px(sx - 1.0, sy - 1.0, SLOT, SLOT, [0.04, 0.035, 0.032, 0.92]);
-            b.rect_px(sx, sy, CELL, CELL, [0.32, 0.30, 0.27, 0.86]);
+        // end up *underneath* the sprite it is counting. Skipped when the real
+        // background is attached: its own art already bakes in every slot well
+        // at these exact pixel offsets (the layout constants were themselves
+        // derived from vanilla's sheets — see `slot_layout`'s doc comment), so a
+        // second flat well drawn on top would just be visual noise.
+        if bg_quads.is_none() {
+            for slot in &layout.slots {
+                let sx = x + slot.x;
+                let sy = y + slot.y;
+                b.rect_px(sx - 1.0, sy - 1.0, SLOT, SLOT, [0.04, 0.035, 0.032, 0.92]);
+                b.rect_px(sx, sy, CELL, CELL, [0.32, 0.30, 0.27, 0.86]);
+            }
         }
         let chrome_floats = b.verts.len();
 
@@ -381,10 +603,12 @@ impl ContainerGeometry {
         }
 
         Self {
+            dim_vertex_count: dim_floats / FLOATS_PER_VERTEX,
             chrome_vertex_count: chrome_floats / FLOATS_PER_VERTEX,
             verts: b.verts,
             item_verts: b.item_verts,
             model_verts: b.model_verts,
+            bg_verts: b.bg_verts,
             widget_rect: Some(Rect {
                 x,
                 y,
@@ -1042,9 +1266,10 @@ fn item_color(path: &str) -> [f32; 4] {
     [r, g, b, 0.95]
 }
 
-/// The overlay's three vertex streams, filled in one pass over the layout. The
-/// colour stream is this module's own; the two icon streams are the shared
-/// hotbar ones (see [`crate::hud::item_icon`]).
+/// The overlay's four vertex streams, filled in one pass over the layout. The
+/// colour stream is this module's own; the item-sprite and block-model streams
+/// are the shared hotbar ones (see [`crate::hud::item_icon`]); the background
+/// stream samples [`ContainerBackground`]'s own atlas.
 #[derive(Debug)]
 struct Builder<'a> {
     w: f32,
@@ -1052,6 +1277,9 @@ struct Builder<'a> {
     verts: Vec<f32>,
     item_verts: Vec<f32>,
     model_verts: Vec<ModelVertex>,
+    /// Flat `[x, y, u, v, r, g, b, a]` per vertex, off
+    /// [`ContainerBackground`]'s atlas.
+    bg_verts: Vec<f32>,
     /// The vanilla proportional font, for stack counts. `None` on a jar-less
     /// run, where [`item_icon::draw_item_icon`] falls back to the fixed-advance
     /// 5×7 debug font — the same degradation the HUD's own text uses.
@@ -1066,12 +1294,25 @@ impl<'a> Builder<'a> {
             verts: Vec::new(),
             item_verts: Vec::new(),
             model_verts: Vec::new(),
+            bg_verts: Vec::new(),
             font,
         }
     }
 
     fn rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, c: [f32; 4]) {
         self.colour().rect(x, y, w, h, c);
+    }
+
+    /// A pixel-space rectangle with a vertical gradient from `top` (its own top
+    /// edge) to `bottom` (its bottom edge) — see [`ColourStream::gradient_rect`].
+    fn gradient_rect_px(&mut self, x: f32, y: f32, w: f32, h: f32, top: [f32; 4], bottom: [f32; 4]) {
+        self.colour().gradient_rect(x, y, w, h, top, bottom);
+    }
+
+    /// One [`GuiSpriteQuad`] onto the background stream, untinted.
+    fn bg_sprite(&mut self, q: GuiSpriteQuad) {
+        let (w, h) = (self.w, self.h);
+        item_icon::push_sprite_quad(&mut self.bg_verts, w, h, q, [1.0, 1.0, 1.0, 1.0]);
     }
 
     fn text(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
@@ -1155,6 +1396,27 @@ pub struct ContainerRenderer {
     /// [`HudRenderer`](crate::hud::HudRenderer)'s. `None` on a jar-less run,
     /// where stack counts draw with the fixed-advance debug font.
     font: Option<Arc<VanillaFont>>,
+    /// Vanilla's real `container/*.png` panel art (issue #51). Starts detached,
+    /// so [`render`](Self::render)/[`render_with_icons`](Self::render_with_icons)
+    /// alone keep the pre-texture flat-fill behaviour — the jar-less path and
+    /// the negative control the pixel gate leans on.
+    background: Option<ContainerBackgroundGpu>,
+}
+
+/// The GPU half of [`ContainerBackground`]: its own tiny textured pipeline,
+/// sampling a **different** atlas than [`IconRenderer`]'s item-sprite pass, so
+/// it cannot share that pipeline or bind group.
+#[derive(Debug)]
+struct ContainerBackgroundGpu {
+    /// Kept alive because the bind group's texture view is derived from it, and
+    /// so [`ContainerBackground::quads`] stays reachable from the render path.
+    data: Arc<ContainerBackground>,
+    #[allow(dead_code)]
+    gpu: GpuAtlas,
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+    capacity_floats: usize,
 }
 
 impl ContainerRenderer {
@@ -1226,7 +1488,141 @@ impl ContainerRenderer {
             capacity_floats,
             icons: IconRenderer::new(),
             font: VanillaFont::shared(),
+            background: None,
         }
+    }
+
+    /// Attach vanilla's real `container/*.png` panel art (issue #51), so the
+    /// screen draws the real texture instead of the flat programmatic fill.
+    /// Independent of [`attach_items`](Self::attach_items)/
+    /// [`attach_item_models`](Self::attach_item_models) — an atlas-less run can
+    /// still have the real panel art (or vice versa).
+    pub fn attach_background(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        background: Arc<ContainerBackground>,
+    ) {
+        let gpu = GpuAtlas::from_atlas(device, queue, background.atlas());
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("container-bg-shader"),
+            source: wgpu::ShaderSource::Wgsl(CONTAINER_BG_WGSL.into()),
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("container-bg-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("container-bg-layout"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("container-bg-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: (8 * 4) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 8,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                    ],
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: color_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("container-bg-bind"),
+            layout: &bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&gpu.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                },
+            ],
+        });
+        let capacity_floats = 512;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("container-bg-verts"),
+            size: (capacity_floats * 4) as wgpu::BufferAddress,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.background = Some(ContainerBackgroundGpu {
+            data: background,
+            gpu,
+            pipeline,
+            bind_group,
+            buffer,
+            capacity_floats,
+        });
+    }
+
+    /// Whether the real vanilla `container/*.png` art is bound — the gate for
+    /// "this screen looks like vanilla" (issue #51) must assert this, exactly
+    /// as [`MenuRenderer::gui_attached`](crate::menu::render::MenuRenderer::gui_attached)
+    /// gates the title/pause screens' buttons: without it a missing jar
+    /// silently degrades to the flat-fill fallback and a coverage-only
+    /// assertion still passes.
+    #[must_use]
+    pub fn background_attached(&self) -> bool {
+        self.background.is_some()
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so container slots draw real
@@ -1382,8 +1778,13 @@ impl ContainerRenderer {
                 models: models.filter(|_| want_models),
             },
             self.font.as_deref(),
+            self.background.as_ref().map(|bg| bg.data.as_ref()),
         );
-        if geo.verts.is_empty() && geo.item_verts.is_empty() && geo.model_verts.is_empty() {
+        if geo.verts.is_empty()
+            && geo.item_verts.is_empty()
+            && geo.model_verts.is_empty()
+            && geo.bg_verts.is_empty()
+        {
             return;
         }
         if geo.verts.len() > self.capacity_floats {
@@ -1398,6 +1799,25 @@ impl ContainerRenderer {
         if !geo.verts.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&geo.verts));
         }
+        // The background pass's own dynamic buffer, grown the same way as the
+        // chrome one above.
+        let bg_count = if let Some(bg) = self.background.as_mut() {
+            if geo.bg_verts.len() > bg.capacity_floats {
+                bg.capacity_floats = geo.bg_verts.len().next_power_of_two();
+                bg.buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("container-bg-verts"),
+                    size: (bg.capacity_floats * 4) as wgpu::BufferAddress,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+            }
+            if !geo.bg_verts.is_empty() {
+                queue.write_buffer(&bg.buffer, 0, bytemuck::cast_slice(&geo.bg_verts));
+            }
+            (geo.bg_verts.len() / 8) as u32
+        } else {
+            0
+        };
         // As in `HudRenderer::render_with_item_models`: `upload` feeds these
         // straight to `gui_ortho`, which must match the logical canvas
         // `ContainerGeometry::build_inner` posed the 3-D block-item vertices
@@ -1415,10 +1835,48 @@ impl ContainerRenderer {
 
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
+        let dim_count = (geo.dim_vertex_count as u32).min(chrome_count);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("container"),
         });
-        if chrome_count > 0 {
+        // Draw order matters here and mirrors vanilla's own
+        // `extractBackground`: the dim gradient goes down first (it sits under
+        // everything, including the panel art), then the real panel texture (if
+        // attached) draws on top of it, and only *then* the rest of this
+        // stream's "chrome" — the flat-fill fallback (when there is no texture),
+        // the title, the slot wells. Sandwiching the texture between the two
+        // `verts` ranges is what keeps the dim from also darkening the panel
+        // itself.
+        if dim_count > 0 {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-dim-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_vertex_buffer(0, self.buffer.slice(..));
+            pass.draw(0..dim_count, 0..1);
+        }
+        if bg_count > 0
+            && let Some(bg) = self.background.as_ref()
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-bg-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&bg.pipeline);
+            pass.set_bind_group(0, &bg.bind_group, &[]);
+            pass.set_vertex_buffer(0, bg.buffer.slice(..));
+            pass.draw(0..bg_count, 0..1);
+        }
+        if chrome_count > dim_count {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("container-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(view))],
@@ -1429,7 +1887,7 @@ impl ContainerRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
-            pass.draw(0..chrome_count, 0..1);
+            pass.draw(dim_count..chrome_count, 0..1);
         }
 
         self.icons.draw_models(
@@ -1479,6 +1937,39 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return in.color;
+}
+";
+
+/// A plain textured quad shader for [`ContainerBackground`]'s atlas — the same
+/// shape as `menu/render.rs`'s `MENU_SPRITE_WGSL`, restated here rather than
+/// shared because that one is `menu`'s own module-private constant.
+const CONTAINER_BG_WGSL: &str = r"
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
+@group(0) @binding(1) var atlas_smp: sampler;
+
+@vertex
+fn vs_main(
+    @location(0) pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) color: vec4<f32>,
+) -> VsOut {
+    var out: VsOut;
+    out.clip = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = uv;
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(atlas_tex, atlas_smp, in.uv);
+    return texel * in.color;
 }
 ";
 
@@ -2002,6 +2493,159 @@ mod tests {
             Vec::new(),
             "an empty slot's captured stack is vanilla's ItemStack.EMPTY, which suppresses \
              the shift+double-click gather"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Container background art (issue #51) and the hotbar dim (issue #61's
+    // leftover). GPU-free: `ContainerBackground` is deliberately a pure
+    // producer/consumer split (see its own doc comment) so this needs no
+    // device. The GPU pixel proof lives in
+    // `tests/container_background_pixels.rs`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn background_kind_mirrors_slot_layouts_own_dispatch() {
+        assert_eq!(background_kind(&Menu::player()), BackgroundKind::Inventory);
+        assert_eq!(
+            background_kind(&Menu::crafting(3, 3)),
+            BackgroundKind::Crafting
+        );
+        // A single chest: one row.
+        assert_eq!(
+            background_kind(&Menu::generic(9)),
+            BackgroundKind::Generic { rows: 1 }
+        );
+        // A double chest: six rows, `generic_54`'s own native row count.
+        assert_eq!(
+            background_kind(&Menu::generic(54)),
+            BackgroundKind::Generic { rows: 6 }
+        );
+        // A hopper-sized (5-slot) container still rounds up to a whole row
+        // rather than drawing a fractional one.
+        assert_eq!(
+            background_kind(&Menu::generic(5)),
+            BackgroundKind::Generic { rows: 1 }
+        );
+    }
+
+    /// A minimal in-memory pack with distinctly-sized solid-colour stand-ins
+    /// for the three real sheets, so `ContainerBackground::build` succeeds
+    /// hermetically — no `client.jar` needed for this test.
+    fn synthetic_background() -> ContainerBackground {
+        use lodestone_assets::{MemorySource, ResourceManager, ResourceSource};
+
+        fn solid_png(w: u32, h: u32) -> Vec<u8> {
+            let mut data = Vec::new();
+            let mut encoder = png::Encoder::new(&mut data, w, h);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            let pixels: Vec<u8> = (0..(w * h)).flat_map(|_| [10, 20, 30, 255]).collect();
+            writer.write_image_data(&pixels).expect("png data");
+            drop(writer);
+            data
+        }
+
+        let mut src = MemorySource::default();
+        for name in ["generic_54", "crafting_table", "inventory"] {
+            src.insert(
+                format!("assets/minecraft/textures/gui/container/{name}.png"),
+                solid_png(256, 256),
+            );
+        }
+        let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
+        ContainerBackground::build(&manager).expect("synthetic background builds")
+    }
+
+    #[test]
+    fn a_single_chest_blits_vanillas_two_part_split_at_the_right_offsets() {
+        let bg = synthetic_background();
+        let menu = Menu::generic(27); // three rows
+        let quads = bg
+            .quads(&menu, 10.0, 20.0)
+            .expect("every id used by `synthetic_background` is present");
+        assert_eq!(quads.len(), 2, "the chest background is vanilla's two blits");
+        // Top piece: `ContainerScreen.java:25` — height `rows*18+17`, at the
+        // panel's own origin.
+        assert_eq!(quads[0].dst, [10.0, 20.0, 176.0, 3.0 * 18.0 + 17.0]);
+        // Bottom piece: `:26` — 96 tall, placed immediately below the top one,
+        // sampling the sheet's fixed `v=126` row regardless of row count.
+        assert_eq!(quads[1].dst, [10.0, 20.0 + (3.0 * 18.0 + 17.0), 176.0, 96.0]);
+        assert!(
+            quads[1].uv_min[1] > quads[0].uv_max[1],
+            "the bottom piece samples further down the sheet (v=126) than the \
+             top piece's own bottom edge (v={:.3}) — it must not be sampling \
+             the same rows twice",
+            quads[0].uv_max[1]
+        );
+    }
+
+    #[test]
+    fn a_double_chest_draws_a_taller_top_piece_than_a_single_one() {
+        let bg = synthetic_background();
+        let single = bg
+            .quads(&Menu::generic(27), 0.0, 0.0)
+            .expect("present");
+        let double = bg
+            .quads(&Menu::generic(54), 0.0, 0.0)
+            .expect("present");
+        assert_eq!(single[0].dst[3], 3.0 * 18.0 + 17.0);
+        assert_eq!(double[0].dst[3], 6.0 * 18.0 + 17.0);
+        assert!(
+            double[0].dst[3] > single[0].dst[3],
+            "a double chest's top blit must be taller than a single chest's"
+        );
+    }
+
+    #[test]
+    fn inventory_and_crafting_each_blit_one_whole_panel() {
+        let bg = synthetic_background();
+        let inventory = bg
+            .quads(&Menu::player(), 4.0, 5.0)
+            .expect("present");
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].dst, [4.0, 5.0, 176.0, 166.0]);
+
+        let crafting = bg
+            .quads(&Menu::crafting(3, 3), 4.0, 5.0)
+            .expect("present");
+        assert_eq!(crafting.len(), 1);
+        assert_eq!(crafting[0].dst, [4.0, 5.0, 176.0, 166.0]);
+
+        // -- negative control ---------------------------------------------
+        // The two must not sample the same sheet: `inventory.png` and
+        // `crafting_table.png` are different files, so their UVs must land on
+        // different placed regions of the atlas even though both request the
+        // identical `(0,0,176,166)` local rect.
+        assert_ne!(
+            inventory[0].uv_min, crafting[0].uv_min,
+            "inventory and crafting table must not sample the same atlas region"
+        );
+    }
+
+    #[test]
+    fn build_inner_without_a_background_falls_back_to_the_flat_fill_and_still_dims() {
+        // No background attached: `build`/`build_with_icons` (used by every
+        // existing test and gate in this file) must keep drawing something —
+        // this is the jar-less path and the pixel gate's negative control.
+        let menu = Menu::player();
+        let frame = ContainerFrame::new(Some(&menu), "Inventory");
+        let geo = ContainerGeometry::build(&frame, VIEW.0, VIEW.1);
+        assert!(
+            geo.dim_vertex_count > 0,
+            "the full-canvas dim must draw even with no background attached — \
+             it is independent of the panel art"
+        );
+        assert!(
+            geo.bg_verts.is_empty(),
+            "with no `ContainerBackground` attached, nothing should land on the \
+             background-texture stream"
+        );
+        assert!(
+            geo.chrome_vertex_count > geo.dim_vertex_count,
+            "the flat-fill fallback panel must still draw after the dim when \
+             there is no real background"
         );
     }
 }

@@ -297,6 +297,32 @@ pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     }
 }
 
+/// Load vanilla's real container-panel art (issue #51):
+/// `container/{generic_54,crafting_table,inventory}.png`, stitched into one
+/// small atlas via [`crate::container::ContainerBackground`]. Version-free and
+/// fail-open like every other loader here: `None` when no pack is found or the
+/// jar can't be opened/stitched, so the container screen keeps its flat
+/// programmatic fill rather than the whole run failing.
+#[must_use]
+pub fn load_container_background() -> Option<Arc<crate::container::ContainerBackground>> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match crate::container::ContainerBackground::build(&manager) {
+        Ok(background) => {
+            tracing::info!(target: "assets", "loaded vanilla container background art");
+            Some(Arc::new(background))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "assets",
+                "build container background atlas from {}: {e}",
+                root.display()
+            );
+            None
+        }
+    }
+}
+
 /// Stitch the vanilla particle atlas from `client.jar`.
 ///
 /// Mirrors [`load_item_atlas`] exactly, including its fail-open contract:

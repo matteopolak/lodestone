@@ -1348,56 +1348,6 @@ impl WindowApp {
         // the container overlay, which is the pass that was missing it.
         let item_models = self.sim.vanilla_atlas().and_then(|a| a.models());
 
-        let open_menu = self.sim.open_menu();
-        let player_menu;
-        let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
-            // Through the language table, not `Text::to_plain_string` — the
-            // server sends `translate("container.crafting")`, and the model's
-            // stub table has no `container.*` key, so flattening it directly put
-            // the raw key on screen (issue #52). See `container::menu_title`.
-            (
-                Some(&open.menu),
-                crate::container::menu_title(&open.title, self.sim.translator().as_ref()),
-            )
-        } else if self.ui.is_container_open() {
-            player_menu = self.sim.player_menu();
-            (Some(&player_menu), "Inventory".to_string())
-        } else {
-            (None, String::new())
-        };
-        if container_menu.is_some() {
-            // The carried stack follows the pointer, so the frame needs the cursor
-            // in physical pixels — the same space `hit_test` and the menu layout
-            // use (see the `cursor` field). Without this the stack is built but
-            // never positioned, and nothing draws.
-            let container_frame = ContainerFrame::new(container_menu, &container_title)
-                .with_cursor(Some([self.cursor.0, self.cursor.1]))
-                .with_recipe_book(self.recipe_book.as_ref());
-            // `render_with_icons_scaled`, **not** `render_scaled`: the latter
-            // hardcodes `depth: None, models: None`, so `want_models` was always
-            // false and `push_item_model` returned early. Flat sprite icons still
-            // drew (they need only `attach_items`), which is exactly why the symptom
-            // read as "block items render *flat*" rather than "nothing renders" —
-            // and why it survived as an island with `attach_items` *and*
-            // `attach_item_models` both already wired.
-            //
-            // The `_scaled` variant is required: the plain one lays out against
-            // `AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about
-            // where the slots are. The container overlay draws before the HUD and
-            // both model passes clear depth, so the order is safe.
-            container_renderer.render_with_icons_scaled(
-                device,
-                queue,
-                frame.view(),
-                Some(render.depth_view()),
-                &container_frame,
-                item_models,
-                self.nav.gui_scale(),
-                w,
-                h,
-            );
-        }
-
         // Assemble the HUD frame: debug overlay, chat log + prompt, tab list,
         // and the survival gauges. Locals are collected up-front so their
         // borrows outlive the frame struct.
@@ -1464,6 +1414,66 @@ impl WindowApp {
         // Status-effect overlay, composited over the HUD in its own Load pass.
         if let Some(effects) = self.effects.as_mut() {
             effects.render(device, queue, frame.view(), &self.sim.active_effects(), w, h);
+        }
+
+        // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
+        // `Gui.render` draws the HUD unconditionally behind any world-following
+        // screen (`hud_follows_world` above), and the screen then paints its own
+        // translucent background over it (`Screen.java:375-386`,
+        // `AbstractContainerScreen::isInGameUi`) — the dim is draw order, not a
+        // per-element alpha. Drawing this block before the HUD (as it used to)
+        // meant the HUD painted back over the container's dim every frame and the
+        // hotbar never actually looked dimmed behind an open chest. Both this pass
+        // and the HUD's own model sub-pass independently clear the shared depth
+        // buffer immediately before drawing their own GUI items, so swapping the
+        // two relative to each other is safe — see `docs/container-screen.md`.
+        let open_menu = self.sim.open_menu();
+        let player_menu;
+        let (container_menu, container_title) = if let Some(open) = open_menu.as_ref() {
+            // Through the language table, not `Text::to_plain_string` — the
+            // server sends `translate("container.crafting")`, and the model's
+            // stub table has no `container.*` key, so flattening it directly put
+            // the raw key on screen (issue #52). See `container::menu_title`.
+            (
+                Some(&open.menu),
+                crate::container::menu_title(&open.title, self.sim.translator().as_ref()),
+            )
+        } else if self.ui.is_container_open() {
+            player_menu = self.sim.player_menu();
+            (Some(&player_menu), "Inventory".to_string())
+        } else {
+            (None, String::new())
+        };
+        if container_menu.is_some() {
+            // The carried stack follows the pointer, so the frame needs the cursor
+            // in physical pixels — the same space `hit_test` and the menu layout
+            // use (see the `cursor` field). Without this the stack is built but
+            // never positioned, and nothing draws.
+            let container_frame = ContainerFrame::new(container_menu, &container_title)
+                .with_cursor(Some([self.cursor.0, self.cursor.1]))
+                .with_recipe_book(self.recipe_book.as_ref());
+            // `render_with_icons_scaled`, **not** `render_scaled`: the latter
+            // hardcodes `depth: None, models: None`, so `want_models` was always
+            // false and `push_item_model` returned early. Flat sprite icons still
+            // drew (they need only `attach_items`), which is exactly why the symptom
+            // read as "block items render *flat*" rather than "nothing renders" —
+            // and why it survived as an island with `attach_items` *and*
+            // `attach_item_models` both already wired.
+            //
+            // The `_scaled` variant is required: the plain one lays out against
+            // `AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about
+            // where the slots are.
+            container_renderer.render_with_icons_scaled(
+                device,
+                queue,
+                frame.view(),
+                Some(render.depth_view()),
+                &container_frame,
+                item_models,
+                self.nav.gui_scale(),
+                w,
+                h,
+            );
         }
 
         // The pause overlay draws *over* the world/HUD/container passes above
@@ -1595,6 +1605,13 @@ impl ApplicationHandler for WindowApp {
                 palette,
                 anim,
             );
+        }
+        // Vanilla's real `container/*.png` panel art (issue #51). A jar-less
+        // run leaves this `None` and the screen keeps its flat programmatic
+        // fill — the same "is a thing attached" degradation as the two calls
+        // above.
+        if let Some(background) = crate::resources::load_container_background() {
+            container.attach_background(gpu.device(), gpu.queue(), format, background);
         }
 
         // Upload whatever has already meshed; the rest streams in per frame.
