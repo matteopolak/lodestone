@@ -31,8 +31,20 @@ pub mod packet_ids;
 #[path = "generated/entity_types.rs"]
 pub(crate) mod generated_entity_types;
 
+/// Generated `id:meta` (pre-Flattening) → modern block-state table for
+/// protocol 340, derived from the real 1.13.2 server jar's own
+/// `DataFixerUpper` flattening fix rather than from `minecraft-data` (which
+/// has no such table at all — this is *not* a case of "predates Mojang's
+/// data generator" like `packet_ids`/`entity_types` above; the authoritative
+/// source here is the jar itself). See `tests/flattening.rs` for the
+/// generator and `docs/protocol-340-flattening-table.md` for the full
+/// ambiguous-case enumeration.
+#[path = "generated/flattening.rs"]
+pub(crate) mod generated_flattening;
+
 pub mod adapter;
 pub mod entity_types;
+pub mod flattening;
 pub mod packets;
 
 pub use adapter::{PROTOCOL, V340Adapter, adapter};
