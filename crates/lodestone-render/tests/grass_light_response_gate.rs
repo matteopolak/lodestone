@@ -197,6 +197,23 @@ impl ModelSectionView for OneQuad {
     fn face_light_at(&self, _x: usize, _y: usize, _z: usize, _dir: Direction) -> u8 {
         self.light
     }
+    // Smooth lighting ([`quad_corner_sample`]) samples the four AO/light
+    // corners around the cell each face opens into, independently of
+    // `face_light_at`. Left at the trait's `0xF0` default, this view claimed a
+    // face lit at `SKY_NONE` (0x00) while every corner around it read
+    // full-bright — self-inconsistent input, since `occludes_at` is also
+    // hardcoded `false` above so the corner substitution that would otherwise
+    // paper over a mismatch (`smoothBlend`, centre light > threshold) never
+    // fires. The blend then averaged centre 0 with three full-bright corners
+    // to ~11/15, and the harness's own `v.light == light` sanity assertion
+    // (this file, `render_frame`) caught it as a panic rather than silently
+    // producing a wrong ratio. A lone synthetic quad with no real
+    // neighbourhood has no "different" light to report at its corners, so the
+    // only self-consistent answer is the same light the view claims for the
+    // face itself.
+    fn corner_light_at(&self, _x: i32, _y: i32, _z: i32) -> u8 {
+        self.light
+    }
 }
 
 /// Re-seat a real baked quad onto a full-frame clip-space rectangle, keeping
