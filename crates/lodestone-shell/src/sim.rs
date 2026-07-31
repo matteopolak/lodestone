@@ -12,7 +12,7 @@ use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
-use lodestone_ecs::entity::{EntityKind, Position};
+use lodestone_ecs::entity::{EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
     ActionQueue, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin, MovementIntent,
     NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot,
@@ -33,7 +33,7 @@ use lodestone_game::placement::{
     OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
 };
 use lodestone_model::event::EquipmentSlot;
-use lodestone_model::{BlockFace, Vec3f};
+use lodestone_model::{BlockFace, EntityInteraction, Vec3f};
 use lodestone_particle::emit as particle_emit;
 use lodestone_physics::{
     CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,
@@ -51,14 +51,14 @@ use crate::entities::EntityDraw;
 use crate::gpu::ThirdPersonBodyState;
 use crate::hud::{DebugStats, process_rss_bytes};
 use crate::interact::{
-    Attacking, InteractPlugin, MiningPredictor, NetHandle, ParticleSim, PlacementPredictor,
-    RayTarget,
+    Attacking, EntityRayTarget, InteractPlugin, MiningPredictor, NetHandle, ParticleSim,
+    PlacementPredictor, RayTarget,
 };
 use crate::mesher::{MeshPolicy, MeshScheduler, Meshed, SectionKey, TerrainMesh, TerrainPlugin};
 use crate::net::{NetClient, NetUpdate};
 use crate::overlay::{BossBarView, Sidebar};
 use crate::particles::{ParticleFrame, ParticleInstance, Particles};
-use crate::raycast::{REACH, RayHit, raycast};
+use crate::raycast::{REACH, RayHit, ray_aabb, raycast};
 use crate::resources::BlockResources;
 use crate::worldgen;
 
@@ -86,6 +86,12 @@ const MAX_WORLD_RADIUS: i32 = 6;
 const PRE_SESSION_FEET: [f64; 3] = [0.5, 71.0, 0.5];
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
+/// Vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE` (`Player.java:134`) — the reach
+/// for attacking/interacting with an entity, distinct from and shorter than
+/// [`REACH`] (block interaction range, `Player.java:133`'s `4.5`). Creative
+/// adds a further `+2.0` modifier (`Player.java:150`) that this shell does not
+/// track, so every session uses the unmodified survival default.
+const ENTITY_REACH: f64 = 3.0;
 /// Number of hotbar slots (vanilla is a fixed 9).
 const HOTBAR_SLOTS: usize = 9;
 
@@ -2470,20 +2476,99 @@ impl Sim {
         // column snapshot spans ±16 blocks — far more than REACH (4.5) — so a
         // face at the edge of reach is always covered. A `None` snapshot means
         // the player's own column has not streamed in; nothing is targetable.
-        if self.is_live() {
-            let hit = self
-                .live_collision()
-                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)));
-            self.set_target(hit);
-            return;
-        }
-        let hit = {
+        let hit = if self.is_live() {
+            self.live_collision()
+                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)))
+        } else {
             let store = self.chunk_world();
             let world = store.read();
             let view = WorldCollision::new(&world);
             raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z))
         };
         self.set_target(hit);
+        // Shared with the demo world too (harmlessly a no-op there — the demo
+        // ECS holds no networked entities), so `crack_target`/the outline and
+        // `EntityRayTarget` are always derived from the exact same ray.
+        self.update_entity_target(origin, dir, hit);
+    }
+
+    /// Recompute [`EntityRayTarget`] from the same ray [`Self::update_target`]
+    /// just cast against blocks — vanilla's entity half of
+    /// `GameRenderer.pick`, which [`Self::begin_attack`] reads to decide
+    /// between `case ENTITY` and `case BLOCK`.
+    ///
+    /// The search radius is [`ENTITY_REACH`] (`3.0`, vanilla's
+    /// `DEFAULT_ENTITY_INTERACTION_RANGE`, `Player.java:134`), shortened to
+    /// `block_hit`'s own entry distance when a block sits closer than that —
+    /// matching vanilla's `blockDistance` clamp, so a wall between the eye and
+    /// an entity is never picked through. The clamp treats the hit block as a
+    /// unit cube rather than its real outline shape (this module does not
+    /// carry outline geometry — see [`Self::outline_shape_source`]'s docs on
+    /// the same gap); that only ever shortens the entity search, so the worst
+    /// case is a slightly conservative cutoff, never a pick through solid
+    /// terrain.
+    ///
+    /// Candidates come from the same `(Position, EntityKind)` query
+    /// [`Self::tick_nearby_entities`] uses for pushers, resolved to a hitbox
+    /// through the identical [`VersionData::entity_facts`] seam — an unknown
+    /// type is excluded, never approximated. The local player is never a
+    /// candidate: `apply_entity_spawn`/`apply_local_player_login`
+    /// (`lodestone_ecs::ingest`) never give the local player's own `Entity` a
+    /// `Position`/`EntityKind` component, so the query structurally cannot
+    /// return it — the same property vanilla's `clip()` gets from excluding
+    /// `this` explicitly.
+    fn update_entity_target(&mut self, origin: [f64; 3], dir: [f64; 3], block_hit: Option<RayHit>) {
+        let block_limit = block_hit.and_then(|hit| {
+            let min = [
+                f64::from(hit.block[0]),
+                f64::from(hit.block[1]),
+                f64::from(hit.block[2]),
+            ];
+            let max = [min[0] + 1.0, min[1] + 1.0, min[2] + 1.0];
+            ray_aabb(origin, dir, REACH, min, max)
+        });
+        let search_limit = block_limit.map_or(ENTITY_REACH, |d| d.min(ENTITY_REACH));
+
+        let target = self.write(|w| {
+            let mut state = w.query::<(&Position, &EntityKind, &MinecraftEntityId)>();
+            let version = w.resource::<VersionData>();
+            state
+                .iter(w)
+                .filter_map(|(pos, kind, id)| {
+                    let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
+                    // Cheap pre-filter before the exact ray-vs-box test: an
+                    // entity whose *feet* are already further than the search
+                    // radius plus a generous per-axis margin for its own
+                    // hitbox cannot possibly be hit. Same shape as
+                    // `tick_nearby_entities`'s box, sized off `search_limit`
+                    // instead of the fixed push radius.
+                    let margin = search_limit + 4.0;
+                    if (feet.x - origin[0]).abs() > margin
+                        || (feet.y - origin[1]).abs() > margin
+                        || (feet.z - origin[2]).abs() > margin
+                    {
+                        return None;
+                    }
+                    let facts = version.entity_facts(&kind.0)?;
+                    let dims = EntityDimensions::new(
+                        facts.dimensions.width,
+                        facts.dimensions.height,
+                        0.6,
+                    );
+                    let aabb = dims.bounding_box(feet);
+                    let t = ray_aabb(
+                        origin,
+                        dir,
+                        search_limit,
+                        [aabb.min_x, aabb.min_y, aabb.min_z],
+                        [aabb.max_x, aabb.max_y, aabb.max_z],
+                    )?;
+                    Some((id.0, t))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(id, _)| id)
+        });
+        self.write(|w| w.resource_mut::<EntityRayTarget>().0 = target);
     }
 
     /// Distance fog for this frame: sized to the configured render distance
@@ -2609,15 +2694,126 @@ impl Sim {
         }
     }
 
-    /// Begin an attack (attack button pressed). On a live server this arms the
-    /// hold-to-mine loop that [`drive_interaction`](Self::drive_interaction)
-    /// advances each tick; on the demo world it is a one-shot direct break, so
-    /// the offline editing path is preserved.
+    /// Begin an attack (left-click / attack button pressed).
+    ///
+    /// Vanilla's `Minecraft.startAttack` (`Minecraft.java:1603-1672`) switches
+    /// on `hitResult.getType()` and swings the arm **unconditionally after the
+    /// switch**, on every arm of it, miss included:
+    ///
+    /// * `ENTITY` — `this.gameMode.attack(player, entity)`, i.e. send the
+    ///   attack.
+    /// * `BLOCK`, and the block is *not* air — `startDestroyBlock`, i.e. begin
+    ///   mining. (Vanilla deliberately **falls through** to `MISS` when the
+    ///   block at `hitResult`'s position is air; this shell's `target()`
+    ///   never reports a hit on an air cell in the first place — the ray only
+    ///   stops at a *solid* cell — so that fallthrough has no case to cover
+    ///   here.)
+    /// * `MISS` (or no target at all) — nothing happens server-side, but the
+    ///   arm still swings.
+    ///
+    /// Before this fix, only the `BLOCK`-with-a-dig-that-actually-starts arm
+    /// ever reached [`Self::swing_hand`] (through `drive_mining`'s own queued
+    /// `SwingArm`, see `drain_action_queue`'s docs) — so punching air, an
+    /// entity, or empty space produced no animation at all (issue #72). This
+    /// method is the one place all three branches now funnel through.
+    ///
+    /// `case ENTITY` takes priority over `case BLOCK`: [`EntityRayTarget`] is
+    /// already the nearer of an entity-or-block pick (see
+    /// [`Self::update_entity_target`]'s docs), so a `Some` there means mining
+    /// must not start on this click even when [`RayTarget`] also holds a
+    /// block.
+    ///
+    /// # What is deliberately not modelled here
+    ///
+    /// Vanilla's `attackStrengthTicker`/`getAttackStrengthScale` cooldown, the
+    /// crit condition and the sweep-attack condition are real per-hit vanilla
+    /// mechanics, but every one of them exists only to scale **local** sound/
+    /// particle feedback and the crosshair cooldown indicator — the damage
+    /// number itself is server-authoritative (the wire `Attack` packet
+    /// carries only the target id, no damage or strength scalar; see
+    /// `EntityInteraction::Attack`'s encoding in
+    /// `crates/protocol/v770/src/adapter.rs`). None of those consumers exist
+    /// in this shell yet: the crosshair indicator is `hud.rs`'s (held by
+    /// another agent), and sweep/crit sound-and-particle feedback is
+    /// `entities.rs`/asset work, also out of this file's scope. Building a
+    /// ticker nothing reads would be exactly the unconsumed-island class
+    /// `CLAUDE.md`'s core rule warns about, so it stays unbuilt rather than
+    /// built and orphaned — whoever adds the crosshair pip or the sweep sound
+    /// is the right owner for it, alongside the half it feeds.
     pub fn begin_attack(&mut self) {
         if self.is_live() {
-            self.write(|w| w.resource_mut::<Attacking>().0 = true);
+            self.begin_attack_live();
         } else {
-            self.break_block();
+            self.begin_attack_demo();
+        }
+    }
+
+    /// The demo-world half of [`Self::begin_attack`]: break the targeted
+    /// block if there is one ([`Self::break_block`] already swings on
+    /// success), or swing on a miss — the offline mirror of vanilla's
+    /// unconditional swing. The demo ECS holds no networked entities (see
+    /// [`Self::update_entity_target`]'s docs), so there is no `case ENTITY` to
+    /// take here; only `BLOCK` vs `MISS`.
+    fn begin_attack_demo(&mut self) {
+        if !self.break_block() {
+            self.swing_hand();
+        }
+    }
+
+    /// The live half of [`Self::begin_attack`]. See that method's docs for the
+    /// three-way switch this implements.
+    fn begin_attack_live(&mut self) {
+        if self.is_dead() {
+            return;
+        }
+        if let Some(entity_id) = self.entity_target() {
+            self.attack_entity(entity_id);
+            self.swing_hand();
+            return;
+        }
+        if self.target().is_some() {
+            // Unchanged from before this fix: arms the hold-to-mine loop.
+            // `drive_mining` itself queues the `SwingArm` the instant a dig
+            // actually starts, through the same `ActionQueue`/
+            // `drain_action_queue` funnel every other tick-driven swing uses.
+            self.write(|w| w.resource_mut::<Attacking>().0 = true);
+            return;
+        }
+        // MISS: no block, no entity. Vanilla still swings.
+        self.swing_hand();
+    }
+
+    /// The entity [`EntityRayTarget`] currently names, if any — the live
+    /// left-click's attack target.
+    #[must_use]
+    pub fn entity_target(&self) -> Option<i32> {
+        self.read(|w| w.resource::<EntityRayTarget>().0)
+    }
+
+    /// Send the serverbound attack for `entity_id` — vanilla's
+    /// `MultiPlayerGameMode.attack`'s outbound half. Lowers to
+    /// `ClientAction::InteractEntity { interaction: EntityInteraction::Attack,
+    /// .. }`, which the v770 adapter already encodes as the dedicated `Attack`
+    /// packet (26.2 split entity-attack out of the old combined interact
+    /// packet; see `crates/protocol/v770/src/adapter.rs`'s `InteractEntity`
+    /// arm) — this method is the first caller that ever constructs the
+    /// variant; the encoder was previously dead, unused code.
+    ///
+    /// Sent directly, like [`Self::use_item_live`]'s two sends, rather than
+    /// queued through [`ActionQueue`]: that queue only drains inside the tick
+    /// loop (see `crate::interact`'s "how to change it"), and an attack is a
+    /// discrete click event, not a per-tick one.
+    fn attack_entity(&mut self, entity_id: i32) {
+        // The same tick-driven intent `use_item_live` reads for its own
+        // sneaking bit, so a sneak-attack cannot disagree with what the wire
+        // already told the server this tick's crouch state is.
+        let sneaking = self.movement_intent().sneak;
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::InteractEntity {
+                entity_id,
+                interaction: EntityInteraction::Attack,
+                sneaking,
+            });
         }
     }
 
@@ -6232,6 +6428,221 @@ mod tests {
         assert!(
             peak > 0.4,
             "a demo-world break must swing the arm, progress peaked at {peak}"
+        );
+    }
+
+    /// Issue #72: a demo-world left-click with **nothing** targeted must still
+    /// swing — vanilla's `Minecraft.startAttack` reaches `player.swing(...)`
+    /// unconditionally after the switch, `MISS` included. Before this fix
+    /// `Sim::begin_attack` called `break_block()` alone on the demo world,
+    /// which swings only on a *successful* break and produces nothing when
+    /// there is no target.
+    #[test]
+    fn begin_attack_swings_the_arm_on_a_demo_world_miss() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        assert!(
+            sim.target().is_none(),
+            "test setup: nothing should be targeted yet"
+        );
+        sim.begin_attack();
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "a miss must still swing the arm (issue #72), progress peaked at {peak}"
+        );
+    }
+
+    /// Regression companion to the miss test above: routing `begin_attack`
+    /// through the new demo/live split must not break the existing
+    /// successful-break path.
+    #[test]
+    fn begin_attack_still_breaks_a_targeted_demo_block() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        aim_at_the_floor(&mut sim);
+        sim.begin_attack();
+        assert!(
+            sim.target().is_none(),
+            "a successful break clears the target, as `break_block` always did"
+        );
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "breaking a targeted demo block must still swing, progress peaked at {peak}"
+        );
+    }
+
+    /// Issue #72's live-path miss case: no block, no entity, and the arm still
+    /// swings. Exercises `begin_attack_live` directly (no net connection is
+    /// needed — the swing is client-side and does not require one, matching
+    /// every other swing site's contract).
+    #[test]
+    fn begin_attack_live_swings_on_a_miss() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        assert!(sim.target().is_none());
+        assert!(sim.entity_target().is_none());
+        sim.begin_attack_live();
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "a live miss must still swing the arm, progress peaked at {peak}"
+        );
+    }
+
+    /// The `BLOCK`-only case: with no entity targeted, `begin_attack_live`
+    /// must still arm the hold-to-mine loop exactly as it did before this
+    /// change (the pre-existing, unmodified behaviour this fix must not
+    /// regress).
+    #[test]
+    fn begin_attack_live_arms_mining_when_only_a_block_is_targeted() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        aim_at_the_floor(&mut sim);
+        sim.begin_attack_live();
+        let attacking = sim.read(|w| w.resource::<Attacking>().0);
+        assert!(
+            attacking,
+            "a block-only target must still arm the hold-to-mine loop"
+        );
+    }
+
+    /// `case ENTITY` takes priority over `case BLOCK`: with both an entity and
+    /// a block targeted, attacking the entity must swing the arm and must
+    /// **not** also arm the hold-to-mine loop — vanilla's `hitResult` is one
+    /// value, never both at once.
+    #[test]
+    fn begin_attack_live_prefers_an_entity_target_over_mining() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        aim_at_the_floor(&mut sim);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+        sim.begin_attack_live();
+        let peak = peak_swing_over(&mut sim, 10);
+        assert!(
+            peak > 0.4,
+            "attacking an entity target must swing the arm, progress peaked at {peak}"
+        );
+        let attacking = sim.read(|w| w.resource::<Attacking>().0);
+        assert!(
+            !attacking,
+            "an entity attack must not also arm the hold-to-mine loop"
+        );
+    }
+
+    /// A dead local player must not attack — mirrors `use_item_live`'s own
+    /// `is_dead()` guard, and vanilla drops input entirely on the death
+    /// screen.
+    #[test]
+    fn begin_attack_live_does_nothing_while_dead() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        let local = sim.local_player();
+        sim.write(|w| {
+            w.entity_mut(local).insert(Dead);
+            w.resource_mut::<EntityRayTarget>().0 = Some(42);
+        });
+        sim.begin_attack_live();
+        let peak = peak_swing_over(&mut sim, 10);
+        assert_eq!(peak, 0.0, "a dead player must not swing on attack");
+    }
+
+    /// The geometric half of entity targeting: [`Sim::update_entity_target`]
+    /// must find a spawned entity the ray points straight at, and report it
+    /// by its server (`MinecraftEntityId`), never a `bevy_ecs::Entity`.
+    #[test]
+    fn update_entity_target_finds_a_spawned_entity_along_the_ray() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        let feet = sim.player().position;
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::EntitySpawned {
+                entity_id: 99,
+                uuid: None,
+                entity_type: "minecraft:pig".parse().expect("valid entity type key"),
+                pos: lodestone_model::Vec3::new(feet.x + 2.0, feet.y, feet.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            },
+        );
+        // A horizontal ray at a height just above the pig's own feet — safely
+        // inside any real pig hitbox's vertical span without needing to know
+        // its exact height, and well below a human eye height (1.6), which
+        // would sail clean over a pig-sized box on a perfectly level ray.
+        let origin = [feet.x, feet.y + 0.1, feet.z];
+        let dir = [1.0, 0.0, 0.0];
+        sim.update_entity_target(origin, dir, None);
+        assert_eq!(
+            sim.entity_target(),
+            Some(99),
+            "the ray should find the spawned pig by its server entity id"
+        );
+    }
+
+    /// An entity past [`ENTITY_REACH`] must not be targetable, even though it
+    /// is well within block [`REACH`] — vanilla's shorter entity-interaction
+    /// range, not the block one.
+    #[test]
+    fn update_entity_target_ignores_an_entity_beyond_entity_reach() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        let feet = sim.player().position;
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::EntitySpawned {
+                entity_id: 7,
+                uuid: None,
+                entity_type: "minecraft:pig".parse().expect("valid entity type key"),
+                // Within block REACH (4.5) but past ENTITY_REACH (3.0).
+                pos: lodestone_model::Vec3::new(feet.x + 4.0, feet.y, feet.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            },
+        );
+        // Same height convention as `update_entity_target_finds_a_spawned_entity_along_the_ray`
+        // — this must fail on *reach*, not on the ray sailing over the box.
+        let origin = [feet.x, feet.y + 0.1, feet.z];
+        let dir = [1.0, 0.0, 0.0];
+        sim.update_entity_target(origin, dir, None);
+        assert_eq!(
+            sim.entity_target(),
+            None,
+            "an entity beyond entity-interaction range must not be targetable"
+        );
+    }
+
+    /// Issue #12's knockback half: a `ClientboundSetEntityMotionPacket`
+    /// (`ClientEvent::EntityVelocity`) naming the local player's own server
+    /// entity id must overwrite `PlayerState.velocity` outright — vanilla's
+    /// `Entity.lerpMotion` is `setDeltaMovement(movement)`, an unconditional
+    /// replace, and `LocalPlayer` declares no override (`Entity.java:2649-2651`).
+    /// Before this fix the event fell into the generic `Velocity` component
+    /// instead, which nothing reads for the local player, so a server-applied
+    /// hit never moved the client at all.
+    #[test]
+    fn server_sent_knockback_replaces_the_local_players_velocity() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        ingest(&mut sim, login_event(3));
+        assert_eq!(
+            sim.player().velocity,
+            Vec3d::ZERO,
+            "test setup: a fresh player starts at rest"
+        );
+        ingest(
+            &mut sim,
+            lodestone_client::ClientEvent::EntityVelocity {
+                entity_id: 3,
+                velocity: lodestone_model::Vec3::new(1.0, 2.0, -3.0),
+            },
+        );
+        assert_eq!(
+            sim.player().velocity,
+            Vec3d::new(1.0, 2.0, -3.0),
+            "knockback naming our own id must land in PlayerState.velocity, \
+             the field `player_physics` actually integrates"
         );
     }
 

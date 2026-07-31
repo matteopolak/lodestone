@@ -133,6 +133,23 @@ pub struct Pose(pub EntityPose);
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Health(pub f32);
 
+/// Ticks remaining in the current hurt-flash window — vanilla's `hurtTime`
+/// countdown. `LivingEntity.handleDamageEvent` (`LivingEntity.java:2044-2049`,
+/// folding [`lodestone_model::ClientEvent::EntityDamaged`]) and
+/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`, folding
+/// [`lodestone_model::ClientEvent::EntityHurtAnimation`]) both reset the
+/// identical pair of fields — `hurtDuration = 10; hurtTime = hurtDuration;` —
+/// so one countdown here covers both reports. [`crate::ingest::tick_hurt_time`]
+/// ages it toward zero, one per `GameTick`, the same rate
+/// `LivingEntity.tick()` decrements the vanilla field.
+///
+/// **Absent** until the first report, like [`Health`]. Nothing in this crate
+/// reads the countdown yet — it exists so a render-side hurt tint has real
+/// data to key off, not a guessed decay; wiring that consumer is
+/// `lodestone-shell::entities`'s, out of this crate's scope.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HurtTime(pub u32);
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

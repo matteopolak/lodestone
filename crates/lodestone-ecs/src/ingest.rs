@@ -44,15 +44,16 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use lodestone_model::{ClientEvent, EntityMovement, Reported};
+use lodestone_physics::Vec3d;
 
 use crate::entity::{
     Attributes, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags, EntityIndex,
-    EntityKind, EntityUuid, Equipment, HeadYaw, Health, MinecraftEntityId, OnGround, Pose,
-    Position, Rotation, Variant, Velocity,
+    EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId, OnGround,
+    Pose, Position, Rotation, Variant, Velocity,
 };
-use crate::player::LocalPlayer;
-use crate::schedules::NetIngest;
-use crate::sets::IngestSet;
+use crate::player::{LocalPlayer, PhysicsState};
+use crate::schedules::{GameTick, NetIngest};
+use crate::sets::{IngestSet, TickSet};
 
 /// Events handed to the ECS by the net thread, not yet folded.
 ///
@@ -124,6 +125,8 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             | ClientEvent::EntityMetadataUpdated { .. }
             | ClientEvent::EntityAttributesUpdated { .. }
             | ClientEvent::EntityEquipmentUpdated { .. }
+            | ClientEvent::EntityDamaged { .. }
+            | ClientEvent::EntityHurtAnimation { .. }
     )
 }
 
@@ -332,14 +335,39 @@ pub fn apply_entity_movement(
     }
 }
 
-/// `IngestSet::Apply`: `ClientEvent::EntityVelocity` → [`Velocity`].
+/// `IngestSet::Apply`: `ClientEvent::EntityVelocity` → [`Velocity`] for a
+/// remote entity, or a direct replace of the local player's own
+/// [`PhysicsState`] velocity when the event names **our** id.
 ///
-/// Inserts rather than assigns, because the component is absent until the
-/// server has reported a velocity at all.
+/// # Why the local player takes a different path — this is the knockback fix
+///
+/// Vanilla's `Entity.lerpMotion` (`Entity.java:2649-2651`,
+/// `handleSetEntityMotion` at `ClientPacketListener.java:623-629`) is
+/// `this.setDeltaMovement(movement)` — an unconditional **replace**, despite
+/// the "lerp" name — and `LocalPlayer` declares no override, so a
+/// `ClientboundSetEntityMotionPacket` naming our own id (server-applied
+/// knockback, an explosion, elytra push, …) means "overwrite your own
+/// velocity", the exact field [`crate::player::player_physics`] integrates
+/// every `TickSet::Physics`.
+///
+/// Before this arm existed every `EntityVelocity` — including one naming us —
+/// fell into the generic `Velocity` insert below. Nothing reads `Velocity` for
+/// the local player (motion comes from `PhysicsState`, never that component),
+/// so server-sent knockback was silently absorbed into a component the
+/// physics pipeline never looks at: the client took a hit and never moved.
+///
+/// # No staging component needed
+///
+/// This module's own docs ("How events get in") record that `NetIngest` runs
+/// synchronously on the net thread as each packet decodes, strictly before
+/// the driver's next `GameTick` — so a plain overwrite here is picked up by
+/// that tick's `player_physics` exactly once, matching vanilla's one-shot
+/// `setDeltaMovement`, with nothing buffered in between.
 pub fn apply_entity_velocity(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
     mut commands: Commands,
+    mut locals: Query<&mut PhysicsState, With<LocalPlayer>>,
 ) {
     for event in batch.events() {
         let ClientEvent::EntityVelocity {
@@ -349,9 +377,77 @@ pub fn apply_entity_velocity(
         else {
             continue;
         };
-        if let Some(entity) = index.get(*entity_id) {
-            commands.entity(entity).insert(Velocity(*velocity));
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        if let Ok(mut physics) = locals.get_mut(entity) {
+            physics.0.velocity = Vec3d::new(velocity.x, velocity.y, velocity.z);
+            continue;
         }
+        // Inserts rather than assigns, because the component is absent until
+        // the server has reported a velocity at all.
+        commands.entity(entity).insert(Velocity(*velocity));
+    }
+}
+
+/// Vanilla's `hurtDuration`/`hurtTime` reset value, in ticks —
+/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`) and
+/// `LivingEntity.handleDamageEvent` (`LivingEntity.java:2044-2049`) both write
+/// `hurtDuration = 10; hurtTime = hurtDuration;`.
+const HURT_DURATION_TICKS: u32 = 10;
+
+/// `IngestSet::Apply`: `ClientEvent::EntityDamaged` → [`HurtTime`].
+///
+/// Mirrors `LivingEntity.handleDamageEvent`'s countdown reset (see
+/// [`HURT_DURATION_TICKS`]). The damage-type/cause/direct/source-position
+/// fields the event also carries have no consumer here — this system's whole
+/// job is starting the hurt-flash countdown a render layer would fade over,
+/// which is `entities.rs`'s to add (out of this crate's scope; see
+/// `docs/combat.md`).
+pub fn apply_entity_damaged(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityDamaged { entity_id, .. } = event else {
+            continue;
+        };
+        if let Some(entity) = index.get(*entity_id) {
+            commands.entity(entity).insert(HurtTime(HURT_DURATION_TICKS));
+        }
+    }
+}
+
+/// `IngestSet::Apply`: `ClientEvent::EntityHurtAnimation` → [`HurtTime`].
+///
+/// The same countdown reset as [`apply_entity_damaged`] —
+/// `LivingEntity.animateHurt` writes the identical two fields. The packet's
+/// `yaw` is not carried into the component: vanilla's own override accepts
+/// the parameter and does not store it (`LivingEntity.java:1873`), so there is
+/// nothing to lose by not carrying it further here.
+pub fn apply_entity_hurt_animation(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityHurtAnimation { entity_id, .. } = event else {
+            continue;
+        };
+        if let Some(entity) = index.get(*entity_id) {
+            commands.entity(entity).insert(HurtTime(HURT_DURATION_TICKS));
+        }
+    }
+}
+
+/// `TickSet::Animate`: age every entity's [`HurtTime`] toward zero, one tick
+/// at a time — the same rate `LivingEntity.tick()` decrements vanilla's
+/// `hurtTime` field. Runs over every entity that carries the component, local
+/// player included, with no `With<LocalPlayer>` filter needed either way.
+pub fn tick_hurt_time(mut entities: Query<&mut HurtTime>) {
+    for mut hurt in &mut entities {
+        hurt.0 = hurt.0.saturating_sub(1);
     }
 }
 
@@ -573,10 +669,20 @@ impl Plugin for IngestPlugin {
                 apply_entity_metadata,
                 apply_entity_attributes,
                 apply_entity_equipment,
+                apply_entity_damaged,
+                apply_entity_hurt_animation,
             )
                 .chain()
                 .in_set(IngestSet::Apply),
         );
+        // `tick_hurt_time` lives in `GameTick`/`TickSet::Animate`, not
+        // `NetIngest` — it ages [`HurtTime`] once per simulated tick regardless
+        // of how many (or how few) hurt packets arrived that tick, the same way
+        // `SessionHudPlugin::tick_hud_overlays` ages its own countdowns.
+        // `IngestQueuePlugin` (added above) already guarantees `CorePlugin` is
+        // present, which is what configures `TickSet::Animate` into the
+        // schedule at all.
+        app.add_systems(GameTick, tick_hurt_time.in_set(TickSet::Animate));
     }
 }
 
@@ -872,6 +978,112 @@ mod tests {
             Some(Vec3::default()),
             "a reported zero velocity is a present component, not absence"
         );
+    }
+
+    // ---- combat: knockback and the hurt-flash countdown -------------------
+
+    /// Issue #12's knockback half. `ClientEvent::EntityVelocity` naming the
+    /// **local player's own** id must overwrite `PhysicsState.velocity`
+    /// directly — vanilla's `Entity.lerpMotion` is
+    /// `this.setDeltaMovement(movement)`, an unconditional replace, and
+    /// `LocalPlayer` declares no override — rather than falling into the
+    /// generic [`Velocity`] component the rest of this test file already pins
+    /// (`a_spawn_without_a_velocity_leaves_the_component_absent`), which
+    /// nothing reads for the local player.
+    #[test]
+    fn entity_velocity_naming_the_local_player_replaces_physics_state_velocity() {
+        let (mut world, local) = ingest_world_with_local_player();
+        world
+            .entity_mut(local)
+            .insert(PhysicsState(lodestone_physics::PlayerState::at(
+                Vec3d::ZERO,
+                0.0,
+            )));
+        feed(&mut world, login_event(3));
+        feed(
+            &mut world,
+            ClientEvent::EntityVelocity {
+                entity_id: 3,
+                velocity: Vec3::new(1.0, 2.0, -3.0),
+            },
+        );
+        assert_eq!(
+            world.get::<PhysicsState>(local).map(|p| p.0.velocity),
+            Some(Vec3d::new(1.0, 2.0, -3.0)),
+            "knockback naming our own id must land in PhysicsState.velocity"
+        );
+        assert!(
+            world.get::<Velocity>(local).is_none(),
+            "the local player must not also get the generic `Velocity` \
+             component — nothing reads it for the local player, and it would \
+             be a second, wrong source of truth"
+        );
+    }
+
+    /// Both hurt reports reset the same countdown to the same value —
+    /// `LivingEntity.handleDamageEvent` and `LivingEntity.animateHurt` write
+    /// the identical pair of fields in vanilla.
+    #[test]
+    fn entity_damaged_and_hurt_animation_both_start_the_hurt_countdown() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        assert!(
+            entity_for(&world, 1).get::<HurtTime>().is_none(),
+            "absent until the first report, like Health"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::EntityDamaged {
+                entity_id: 1,
+                damage_type_id: 0,
+                cause_id: None,
+                direct_id: None,
+                source_pos: None,
+            },
+        );
+        assert_eq!(entity_for(&world, 1).get::<HurtTime>().map(|h| h.0), Some(10));
+
+        feed(&mut world, spawn_event(2, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityHurtAnimation {
+                entity_id: 2,
+                yaw: 45.0,
+            },
+        );
+        assert_eq!(
+            entity_for(&world, 2).get::<HurtTime>().map(|h| h.0),
+            Some(10),
+            "EntityHurtAnimation resets the same countdown EntityDamaged does"
+        );
+    }
+
+    /// [`tick_hurt_time`] ages the countdown by exactly one per `GameTick`,
+    /// saturating at zero rather than wrapping — a `GameTick` run with no new
+    /// hurt report must not resurrect an expired countdown.
+    #[test]
+    fn tick_hurt_time_ages_the_countdown_to_zero_and_no_further() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityDamaged {
+                entity_id: 1,
+                damage_type_id: 0,
+                cause_id: None,
+                direct_id: None,
+                source_pos: None,
+            },
+        );
+        let entity = entity_for(&world, 1).id();
+        for expected in (0..10).rev() {
+            world.run_schedule(GameTick);
+            assert_eq!(world.get::<HurtTime>(entity).map(|h| h.0), Some(expected));
+        }
+        // One more tick past zero must not underflow.
+        world.run_schedule(GameTick);
+        assert_eq!(world.get::<HurtTime>(entity).map(|h| h.0), Some(0));
     }
 
     // ---- spawn / move / despawn ------------------------------------------
@@ -1245,6 +1457,24 @@ mod tests {
         // drift apart unnoticed.
         assert!(handles_event(&spawn_event(1, "minecraft:pig")));
         assert!(handles_event(&login_event(1)));
+        // `EntityDamaged`/`EntityHurtAnimation` were decoded islands before
+        // this fix — real `ClientEvent`s with no `matches!` arm here, so
+        // `SharedState::apply` routed them into the dead legacy `Inner::apply`
+        // fallback instead of `NetIngest` and `apply_entity_damaged`/
+        // `apply_entity_hurt_animation` never ran in production regardless of
+        // what a hermetic `feed()`-based test showed (that helper bypasses
+        // this exact gate). This is the control that would have caught it.
+        assert!(handles_event(&ClientEvent::EntityDamaged {
+            entity_id: 1,
+            damage_type_id: 0,
+            cause_id: None,
+            direct_id: None,
+            source_pos: None,
+        }));
+        assert!(handles_event(&ClientEvent::EntityHurtAnimation {
+            entity_id: 1,
+            yaw: 0.0,
+        }));
         assert!(!handles_event(&ClientEvent::TimeChanged {
             world_age: 1,
             time_of_day: 2,
