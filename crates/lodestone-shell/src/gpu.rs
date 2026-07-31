@@ -22,12 +22,13 @@
 use std::collections::HashMap;
 
 use lodestone_assets::ResourceLocation;
+use lodestone_assets::entity_models::sheep_wool_tint;
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
     AnimInput, AnimSlotUniform, ArenaAllocation, ArenaBuffer, ArmourModelSet, BlockAtlas,
     BlockPipeline, Camera, CameraUniform, DEPTH_FORMAT, DepthBuffer, ENTITY_FULLBRIGHT,
     EntityCameraUniform, EntityModelSet, EntityPipeline, GpuAtlas, GpuEntityModel, GpuMesh,
-    GpuModelMesh, ItemGeometry, Mesh, ModelMesh, ModelPipeline, SpriteAnimation,
+    GpuModelMesh, ItemGeometry, Mesh, ModelMesh, ModelPipeline, SheepWoolModelSet, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
@@ -665,6 +666,15 @@ pub struct RenderStats {
     ///
     /// Zero with no vanilla pack: armour has no synthetic-texture fallback.
     pub armour_layers_drawn: usize,
+    /// Sheep wool layers drawn this frame — one per unsheared sheep whose
+    /// wool attached to its own body (issue #53). Mirrors
+    /// [`armour_layers_drawn`](Self::armour_layers_drawn)'s role: a sheared
+    /// sheep, a non-sheep quadruped with `wool: Some(..)` (should never
+    /// happen — see `docs/entity-rendering.md`'s pig/cow trap), and a missing
+    /// vanilla pack all leave this at zero without leaving `entities_drawn`
+    /// at zero, so a broken wool attach cannot hide behind "nothing rendered
+    /// at all".
+    pub wool_layers_drawn: usize,
     /// Whether the first-person arm was drawn this frame. `false` means the
     /// `player_wide` mesh, its texture, or its arm part was missing — i.e. a
     /// real defect, not a quiet frame, because this pass is unconditional
@@ -991,6 +1001,23 @@ struct EntityRenderer {
     armour_models: ArmourModelSet,
     armour_gpu: Vec<(ArmourSlot, GpuEntityModel)>,
     armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup>,
+    /// The sheep wool layer (issue #53): the one baked mesh on the CPU (needed
+    /// per frame to pair each part with the wearer's own part index, the same
+    /// as `armour_models`), its GPU upload, and its one texture bind group.
+    ///
+    /// Drawn through the **base** entity pipeline (`self.pipeline`, `Less`),
+    /// not `armour_pipeline` (`LessEqual`) — wool has no second layer at the
+    /// same inflation as itself, so there is no coplanar z-fighting to correct
+    /// for the way leather's dyeable base and overlay need. See
+    /// `docs/entity-rendering.md`.
+    ///
+    /// `wool_texture` is `None` without a vanilla pack, and wool then draws
+    /// nothing rather than falling back to a synthetic colour — the same
+    /// asymmetry `armour_textures` documents, for the same reason: a
+    /// flat-coloured fleece shell reads as a rendering bug.
+    wool_models: SheepWoolModelSet,
+    wool_gpu: Option<GpuEntityModel>,
+    wool_texture: Option<wgpu::BindGroup>,
 }
 
 impl EntityRenderer {
@@ -1043,6 +1070,15 @@ impl EntityRenderer {
                 })
                 .collect();
 
+        // The sheep wool layer. One mesh, uploaded once — unlike armour, wool
+        // has no per-material variant to multiply it by.
+        let wool_models = SheepWoolModelSet::load();
+        let wool_gpu = GpuEntityModel::upload_wool(device, wool_models.mesh());
+        let wool_texture = load_sheep_wool_texture().map(|img| {
+            let view = entity_texture_from_image(device, queue, &img);
+            pipeline.texture_bind_group(device, &view, &sampler)
+        });
+
         // A persistent group-0 uniform, rewritten every frame before the pass.
         // Sized for camera **plus fog**: the entity shader reads both out of one
         // binding, so a buffer sized for the camera alone would leave the fog
@@ -1091,6 +1127,9 @@ impl EntityRenderer {
             armour_models,
             armour_gpu,
             armour_textures,
+            wool_models,
+            wool_gpu,
+            wool_texture,
         }
     }
 
@@ -1197,6 +1236,67 @@ fn load_humanoid_armour_textures()
         "loaded vanilla humanoid armour sheets"
     );
     out
+}
+
+/// Decode the sheep wool layer's own sheet (`entity/sheep/sheep_wool.png`)
+/// from the vanilla `client.jar`, or `None` if no pack is found — the wool
+/// equivalent of [`load_humanoid_armour_textures`], with the same duplicated
+/// pack-discovery rationale documented there (`resources::vanilla_manager` is
+/// `#[cfg(test)]`-only, so production code in this module cannot reach it).
+///
+/// Confirmed 64×32 and exactly greyscale against the real jar by
+/// `lodestone-assets/tests/real_jar.rs::sheep_wool_texture_decodes_from_the_real_jar`
+/// — that is why [`sheep_wool_tint`] can paint this sheet with a flat gamma-
+/// space multiply rather than needing a per-colour texture.
+fn load_sheep_wool_texture() -> Option<lodestone_assets::Image> {
+    use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
+    use std::path::{Path, PathBuf};
+
+    fn is_pack_root(dir: &Path) -> bool {
+        dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
+    }
+    fn pack_root() -> Option<PathBuf> {
+        if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
+            let p = PathBuf::from(dir);
+            return is_pack_root(&p).then_some(p);
+        }
+        let cwd = std::env::current_dir().ok()?;
+        for base in cwd.ancestors() {
+            let mut entries: Vec<PathBuf> = match std::fs::read_dir(base.join(".cache/mc")) {
+                Ok(rd) => rd
+                    .filter_map(|e| e.ok().map(|e| e.path()))
+                    .filter(|p| is_pack_root(p))
+                    .collect(),
+                Err(_) => continue,
+            };
+            entries.sort();
+            if let Some(root) = entries.pop() {
+                return Some(root);
+            }
+        }
+        None
+    }
+
+    let jar = pack_root()?.join("client.jar");
+    let bytes = std::fs::read(&jar)
+        .inspect_err(|_| tracing::warn!(target: "assets", "read {}", jar.display()))
+        .ok()?;
+    let zip = ZipSource::from_bytes(bytes)
+        .inspect_err(|_| tracing::warn!(target: "assets", "open {}", jar.display()))
+        .ok()?;
+    let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);
+    const PATH: &str = "assets/minecraft/textures/entity/sheep/sheep_wool.png";
+    let Some(png) = manager.read(PATH) else {
+        tracing::warn!(target: "assets", "missing sheep wool sheet {PATH}");
+        return None;
+    };
+    match Image::decode_png(&png) {
+        Ok(img) => Some(img),
+        Err(e) => {
+            tracing::warn!(target: "assets", "decode {PATH}: {e}");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2470,6 +2570,11 @@ impl RenderState {
         // usual reason: no buffer creation mid-pass.
         let armour_batches = self.prepare_armour(device, camera, entities, &mut stats);
 
+        // The sheep wool layer (issue #53), over the same instances, for the
+        // same reason armour is: no buffer creation mid-pass, and never posed
+        // off a pose the body pass did not also draw.
+        let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
+
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
         // creation mid-pass). Both are item models through the model pipeline,
@@ -2653,6 +2758,31 @@ impl RenderState {
                     pass.set_vertex_buffer(0, model.vertices.slice(..));
                     pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
                     for (range, buffer, count) in &batch.parts {
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..*count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
+            // The sheep wool layer (issue #53), right after armour and before
+            // dropped items. Through the **base** entity pipeline (`Less`),
+            // not `armour_pipeline` (`LessEqual`) — wool has no second layer
+            // at the same inflation to correct z-fighting for, so copying
+            // armour's compare function here would be picking a pipeline for
+            // the wrong reason. See `EntityRenderer::wool_texture`'s doc and
+            // `docs/entity-rendering.md`.
+            if !wool_batches.is_empty() {
+                if let (Some(model), Some(texture)) =
+                    (&self.entities.wool_gpu, &self.entities.wool_texture)
+                {
+                    pass.set_pipeline(&self.entities.pipeline.pipeline);
+                    pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer, count) in &wool_batches {
                         pass.set_vertex_buffer(1, buffer.slice(..));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
@@ -3093,19 +3223,32 @@ impl RenderState {
             view_proj: hand_projection(camera.aspect).to_cols_array_2d(),
             section_origin: [0.0, 0.0, 0.0, 0.0],
         };
+        // No distance fog on the hand for either branch (vanilla does not fog
+        // it either, and at ~0.7 blocks it could contribute nothing), but the
+        // sky-darken lane still rides along — the same lane `fog_with_clock`
+        // sets for terrain and mobs, so the hand cannot disagree with the
+        // world about what time it is.
+        //
+        // **Both branches must read this from the same place.** Before this,
+        // the arm's uniform carried it (via `EntityCameraUniform::
+        // with_sky_darken`) and the item's did not: `update_model_shared_
+        // camera_buffer` was called with a bare `FogUniform::disabled()`,
+        // which leaves the spare lane at its `0.0`/"unwired" sentinel, and the
+        // model shader's `sky_darken()` reads that sentinel as permanent
+        // noon. That was issue #74's actual bug — not a missing light sample
+        // (`hand_light` already samples real per-position world light for
+        // both branches; see its own doc), but the held item's sky component
+        // never darkening: at night, in the open, the item stayed lit as if
+        // it were noon while the arm right next to it correctly dimmed.
+        let mut hand_fog = FogUniform::disabled();
+        hand_fog.end_enabled[2] = self.sky_darken.value();
         queue.write_buffer(
             &self.entities.hand_cam_buffer,
             0,
-            bytemuck::bytes_of(
-                &EntityCameraUniform {
-                    camera: camera_uniform,
-                    // No fog on the hand (vanilla does not fog it either, and at
-                    // 0.7 blocks it could contribute nothing), but the sky-darken
-                    // lane is still live so the arm dims with the world at night.
-                    fog: FogUniform::disabled(),
-                }
-                .with_sky_darken(self.sky_darken.value()),
-            ),
+            bytemuck::bytes_of(&EntityCameraUniform {
+                camera: camera_uniform,
+                fog: hand_fog,
+            }),
         );
         if let Some(model) = self.model.as_ref() {
             // The origin binding is untouched here: it always points at the
@@ -3115,7 +3258,7 @@ impl RenderState {
                 queue,
                 &model.hand_cam_buffer,
                 camera_uniform.view_proj,
-                FogUniform::disabled(),
+                hand_fog,
             );
         }
     }
@@ -3561,6 +3704,127 @@ impl RenderState {
             })
             .collect()
     }
+
+    /// Sheep wool layers (issue #53), over the same instances `prepare_entities`
+    /// resolved — same resolver, same `AnimInput`, so wool can never be posed
+    /// off a different pose than the body it grows out of. Mirrors
+    /// [`prepare_armour`](Self::prepare_armour) exactly, minus the per-slot/
+    /// per-texture grouping armour needs: wool has one mesh and one sheet, so
+    /// every attached part accumulates into a single set of per-part buffers.
+    ///
+    /// # What is deliberately not handled
+    ///
+    /// * **Sheared sheep.** `draw.wool.sheared` is checked here, not filtered
+    ///   upstream — [`EntityDraw::wool`]'s own doc explains why the data stays
+    ///   honest about what the server reported. This is vanilla's own
+    ///   `if (!state.isSheared)` gate (`SheepWoolLayer.submit`), applied at
+    ///   exactly the point that draws the mesh.
+    /// * **The pig/cow trap.** [`WoolMesh::attach`]'s `wearer_model` argument
+    ///   is `instance.model` — the *resolved* model name — never
+    ///   `wearer.family()`. `AnimFamily::Quadruped` is shared by `pig`, `cow`
+    ///   and `wolf`; gating on family alone would grow wool on a pig the way
+    ///   an ungated armour attach once drew a breastplate on one. In practice
+    ///   `EntityDraw::wool` is already `None` for every non-sheep type
+    ///   ([`crate::entities::sheep_wool`]'s own gate), so this is a second,
+    ///   independent gate rather than the only one — belt and braces, the same
+    ///   discipline `docs/entity-rendering.md` asks for.
+    /// * **Baby sheep, the `jeb_` rainbow name, and the undercoat overlay.**
+    ///   Not built — see `docs/entity-rendering.md`'s "deliberately out of
+    ///   scope" list, unchanged by this pass.
+    fn prepare_wool(
+        &self,
+        device: &wgpu::Device,
+        camera: &Camera,
+        entities: &[EntityDraw],
+        stats: &mut RenderStats,
+    ) -> Vec<(lodestone_render::PartRange, wgpu::Buffer, u32)> {
+        // No pack, no sheet, nothing to draw — and no synthetic fallback, on
+        // purpose (see `EntityRenderer::wool_texture`).
+        let (Some(wool_texture), Some(_wool_gpu)) =
+            (&self.entities.wool_texture, &self.entities.wool_gpu)
+        else {
+            return Vec::new();
+        };
+        let _ = wool_texture; // presence check only; the bind group is read at draw time.
+        let frustum = camera.frustum();
+        let mut accum: Vec<WoolPartAccum> = Vec::new();
+
+        for draw in entities {
+            let Some(wool) = draw.wool else { continue };
+            // Vanilla's own gate: a sheared sheep grows no wool mesh at all.
+            if wool.sheared {
+                continue;
+            }
+            let Some(instance) = self.entities.models.resolve(
+                &draw.type_path,
+                draw.feet,
+                draw.yaw,
+                draw.scale,
+                &draw.anim,
+            ) else {
+                continue;
+            };
+            if !frustum.intersects_aabb(instance.aabb_min, instance.aabb_max) {
+                continue;
+            }
+            let Some(wearer) = self.entities.models.get(instance.model) else {
+                continue;
+            };
+            // The pig/cow-trap gate lives inside `attach`, keyed on the
+            // resolved model name — see this method's docs.
+            let attached: Vec<_> = self
+                .entities
+                .wool_models
+                .mesh()
+                .attach(&wearer.skeleton, instance.model)
+                .collect();
+            if attached.is_empty() {
+                continue;
+            }
+            let light = u32::from(self.entity_light.sample(draw.feet));
+            let tint = sheep_wool_tint(wool.color);
+            for (range, wearer_index) in &attached {
+                let Some(transform) = instance.part_transforms.get(*wearer_index) else {
+                    continue;
+                };
+                let part = match accum.iter_mut().position(|p| p.range == *range) {
+                    Some(i) => &mut accum[i],
+                    None => {
+                        accum.push(WoolPartAccum {
+                            range: *range,
+                            transforms: Vec::new(),
+                            lights: Vec::new(),
+                            tints: Vec::new(),
+                        });
+                        accum.last_mut().expect("just pushed")
+                    }
+                };
+                part.transforms.push(*transform);
+                part.lights.push(light);
+                part.tints.push(tint);
+            }
+            stats.wool_layers_drawn += 1;
+        }
+
+        accum
+            .into_iter()
+            .filter_map(|p| {
+                let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
+                upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)
+                    .map(|buffer| (p.range, buffer, count))
+            })
+            .collect()
+    }
+}
+
+/// Per-part instance accumulation for the sheep wool layer, before upload.
+/// Mirrors [`ArmourPartAccum`], minus the texture grouping: wool has one
+/// sheet, so there is nothing to group by beyond the part itself.
+struct WoolPartAccum {
+    range: lodestone_render::PartRange,
+    transforms: Vec<glam::Mat4>,
+    lights: Vec<u32>,
+    tints: Vec<[u8; 3]>,
 }
 
 /// What the first-person hand pass draws this frame: the held item's model, or

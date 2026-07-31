@@ -102,33 +102,62 @@ palette and animation slots the terrain and the hotbar icons use. That is four b
 groups, which is exactly `wgpu`'s portable `max_bind_groups` floor — see
 `CLAUDE.md`. Nothing here introduces a fifth.
 
-## The wiring that is still outstanding
+## The wiring: landed
 
-`RenderState::set_main_hand_source` exists and is unwired: **nothing in `app.rs`
-installs it**, so today the shell still draws the bare arm. `app.rs` is not owned
-by the change that added this, so the install is specified rather than done:
+`RenderState::set_main_hand_source` is installed in `app.rs`, re-sampled every
+frame alongside `set_hand_swing_source` from `self.sim.selected_slot()` against
+the hotbar records the HUD frame already builds — the shape this section used
+to specify as outstanding. `stats.first_person_item_drawn` is the check that
+it landed; it and `first_person_arm_drawn` are mutually exclusive, and
+**both** `false` in first person means the `player_wide` rig failed to load —
+a real defect, not a quiet frame.
 
-- `app.rs` already builds `hotbar_records: Vec<HotbarSlot>` and knows
-  `self.sim.selected_slot()` for the HUD frame (near `app.rs:1310`).
-- Install alongside `set_hand_swing_source`, **every frame** — the value changes
-  when the player scrolls the hotbar, so a one-shot install at connect time freezes
-  slot 0 into the hand forever:
+## World light (issue #74): "the hand is lit as if it were noon"
 
-  ```rust
-  let held = self
-      .sim
-      .selected_slot()
-      .and_then(|slot| hotbar_records.get(slot as usize))
-      .map(|record| record.item.clone());
-  render.set_main_hand_source(move || held.clone());
-  ```
+Vanilla lights the hand from the player's own light level, not full-bright —
+`ItemInHandRenderer` submits through the normal entity path, so it picks up
+`LightTexture` like any other entity. Reported in play as the arm/held item
+staying lit while walking into darkness.
 
-  Sample first and move the value into the closure; the source outlives the call
-  and must not borrow the `Sim`.
-- `stats.first_person_item_drawn` is the check that it landed. It and
-  `first_person_arm_drawn` are mutually exclusive, and **both** `false` in first
-  person means the `player_wide` rig failed to load — a real defect, not a quiet
-  frame.
+**What was already working, and had been for a while.** `RenderState::hand_light`
+samples real per-position world light
+(`self.entity_light.sample(camera.position)`, at the eye rather than the feet)
+for **both** branches, and `write_hand_camera` already folded
+`self.sky_darken.value()` into the **arm**'s `EntityCameraUniform` via
+`EntityCameraUniform::with_sky_darken`. Both the light sampler and the
+sky-darken source are installed in `app.rs` on both connect paths (the
+`5832ecb` fullbright fix `docs/entity-rendering.md` records) — there was
+nothing unwired at the source end.
+
+**What was actually still broken: one hop later, and only for the item.**
+`write_hand_camera`'s model-pipeline branch wrote the held item's
+`model.hand_cam_buffer` with a bare `FogUniform::disabled()`. That leaves the
+shared sky-darken lane (`fog.end_enabled[2]`, the same spare lane
+`docs/time-of-day-lighting.md` documents) at its `0.0`/"unwired" sentinel, and
+`model_pipeline.rs`'s `sky_darken()` reads `<= 0.0` as `1.0` — permanent noon.
+So the arm (entity pipeline, lane correctly set) already dimmed at night while
+the held item (model pipeline, lane left at the sentinel) stayed lit as if it
+were noon, right next to it on the same screen — exactly the reported
+symptom, and worse outdoors at night than in a literal unlit cave, where both
+branches read block light 0 either way.
+
+The fix: `write_hand_camera` now builds one `hand_fog` (`FogUniform::disabled()`
+with `end_enabled[2]` set to `self.sky_darken.value()`, mirroring
+`RenderState::fog_with_clock`'s own pattern for terrain and world mobs) and
+passes the *same* value into both the entity uniform and
+`update_model_shared_camera_buffer`, so the two branches cannot drift apart
+again.
+
+**The trap this correction avoids**: darkening the whole `light_term` rather
+than only the sky half, which blacks out a torchlit hand at night — the exact
+mistake `docs/time-of-day-lighting.md`'s
+`a_torch_lit_mob_is_identical_at_midnight_and_noon` gate exists to catch for
+world mobs. Nothing needed changing here: both shaders already compute
+`light_term = 0.2 + 0.8 * max(sky * sky_darken(), block)`, scaling only the
+sky half, and gamma-space multiply
+(`srgb_to_linear(linear_to_srgb(rgb) * shade)`) was likewise already correct
+in both. The bug was purely in which `FogUniform` reached the buffer, not in
+any shader math.
 
 ## How to change it
 
@@ -205,3 +234,26 @@ In `lodestone-render/tests/thrown_and_held_item_pixels.rs`:
   pixels, aspect 1.5 → **2722**, 16:9 → **4191**. The gate therefore renders 448×256.
   A gate on a square target would have read as "the held item does not render" and
   sent the next reader hunting a chain bug that does not exist.
+
+In `crates/lodestone-shell/tests/first_person_hand_light_pixels.rs` (GPU +
+jar, `#[ignore]`d, 448×256 for the same reason above) — issue #74's gate,
+driving the real `RenderState::render` path for **both** branches
+separately, since they draw through different pipelines and a fix to one
+does not imply the other:
+
+- `the_first_person_arm_dims_with_the_world_at_night` and
+  `the_first_person_held_item_dims_with_the_world_at_night` each render at
+  noon (`sky_darken = 1.0`) and at midnight (`sky_darken = 0.24`, with
+  `entity_light` pinned to `sky=15, block=0` so the sky term is what actually
+  moves) and assert the hand's mean channel value drops by a real margin, with
+  a same-`sky_darken`-twice determinism control that must be pixel-identical.
+  Measured on the real jar: arm noon **32.20** → midnight **4.97** (5131 px);
+  item noon **24.15** → midnight **3.67** (7124 px — the same figure
+  `thrown_and_held_item_pixels.rs` measures for the same `diamond_pickaxe`).
+- **The executed negative control**: reverting `write_hand_camera`'s item
+  branch to the pre-fix `FogUniform::disabled()` (no sky-darken lane) makes
+  `the_first_person_held_item_dims_with_the_world_at_night` fail with noon and
+  midnight reading the **identical** `24.15` — proving the gate is sensitive
+  to the actual bug, not just to *a* difference between the two renders. The
+  arm test still passes unmodified in that same run, since the arm's own
+  uniform write was never the broken half.
