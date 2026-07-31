@@ -1046,6 +1046,40 @@ impl WindowApp {
         })
     }
 
+    /// Bring the swapchain's present mode in line with the `unlock_framerate`
+    /// debug option (`OPTIONS` → `UNCAP FRAMERATE`, Enter).
+    ///
+    /// Called once per presented frame. That is cheap because
+    /// [`lodestone_render::SurfaceTarget::set_present_mode`] returns immediately
+    /// when the mode already matches — only the frame the setting actually flips
+    /// pays for a swapchain rebuild. Polling here rather than firing on the
+    /// toggle avoids threading a GPU handle into the menu layer, which is pure
+    /// and GPU-free by design.
+    ///
+    /// Off restores the adapter's **remembered** default rather than
+    /// `AutoVsync`; see `SurfaceTarget`'s field docs for why those are not the
+    /// same thing.
+    ///
+    /// Note this only removes *our* cap on a focused window. `FramePacer` still
+    /// throttles an unfocused one to `UNFOCUSED_FRAME_INTERVAL` and still skips
+    /// presentation entirely when occluded — neither is vsync, and neither
+    /// should follow a debug knob.
+    fn sync_present_mode(&mut self) {
+        let (Some(gpu), Some(target)) = (self.gpu.as_ref(), self.target.as_mut()) else {
+            return;
+        };
+        let mode = if self.nav.unlock_framerate() {
+            // `AutoNoVsync`, not a concrete `Immediate`: an unadvertised
+            // concrete mode is a validation error, while this degrades to
+            // `Fifo` and simply stays capped. On this machine's Metal backend
+            // the adapter does advertise `Immediate`, so it resolves to that.
+            wgpu::PresentMode::AutoNoVsync
+        } else {
+            target.default_present_mode()
+        };
+        target.set_present_mode(gpu.device(), mode);
+    }
+
     /// Draw one menu screen. Returns `false` when the current screen is not a
     /// menu, so the caller falls through to the world path.
     fn draw_menu(&mut self) -> bool {
@@ -1153,6 +1187,10 @@ impl WindowApp {
             // window, so it is precisely what must not run here.
             return;
         }
+
+        // Before either draw path, since the toggle lives on a menu screen and
+        // should take effect while that screen is still showing.
+        self.sync_present_mode();
 
         // A menu screen owns the whole frame — its pass clears, so there is no
         // world render behind it and none of the HUD state below is built.

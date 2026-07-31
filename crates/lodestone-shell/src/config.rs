@@ -121,6 +121,19 @@ pub struct Options {
     /// struct stays `Copy` and the menu layer that reads it by value does not
     /// have to change.
     pub keybinds: Keybinds,
+    /// **Debug/temporary.** Remove the frame-rate cap by switching the swapchain
+    /// off vsync ([`wgpu::PresentMode::AutoNoVsync`], applied in
+    /// `crate::app::WindowApp::sync_present_mode`).
+    ///
+    /// Exists to make the F3 `fps=` figure a *measurement* rather than a
+    /// readout of the display's refresh rate: vsynced, every frame that fits in
+    /// the refresh interval reports the same number, so the counter cannot tell
+    /// a 2× speedup from a 20% one. This is a profiling instrument, not a
+    /// setting a player should want — vanilla's equivalent ("Max Framerate:
+    /// Unlimited") is a real option, but this row is here for measurement and
+    /// should be replaced by the real thing when the video-settings screen
+    /// grows up.
+    pub unlock_framerate: bool,
 }
 
 impl Default for Options {
@@ -128,6 +141,7 @@ impl Default for Options {
         Self {
             gui_scale: AUTO_GUI_SCALE,
             keybinds: Keybinds::new(),
+            unlock_framerate: false,
         }
     }
 }
@@ -164,9 +178,17 @@ impl Options {
         let keybinds = obj
             .get("keybinds")
             .map_or_else(Keybinds::new, Keybinds::from_json_value);
+        // Absent (the common case — see `save_to`) or non-boolean is `false`:
+        // a debug knob must default to off, so a garbled file can never leave
+        // the frame limiter silently disabled.
+        let unlock_framerate = obj
+            .get("unlock_framerate")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         Self {
             gui_scale,
             keybinds,
+            unlock_framerate,
         }
     }
 
@@ -196,6 +218,12 @@ impl Options {
         let keybinds = self.keybinds.to_json_value();
         if !keybinds.as_object().is_some_and(serde_json::Map::is_empty) {
             obj.insert("keybinds".into(), keybinds);
+        }
+        // Same rule as `keybinds`: written only when set, so an untouched
+        // install has no key for it. That also makes this debug knob trivial to
+        // clear by hand, and leaves no trace once the row is removed.
+        if self.unlock_framerate {
+            obj.insert("unlock_framerate".into(), true.into());
         }
         let text = serde_json::to_string_pretty(&serde_json::Value::Object(obj))
             .unwrap_or_else(|_| "{}".to_string());
@@ -563,6 +591,54 @@ mod tests {
         };
         opts.save_to(&path).expect("save should create parents");
         assert_eq!(Options::load_from(&path), opts);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_framerate_debug_knob_round_trips_and_is_absent_when_off() {
+        // Two halves, and the second is the one worth having: a knob that is
+        // written whether or not it was set leaves `unlock_framerate: false` in
+        // every fresh install's file, which reads as "someone decided this".
+        let path = temp_options_path("unlock-framerate");
+        let on = Options {
+            unlock_framerate: true,
+            ..Options::default()
+        };
+        on.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("unlock_framerate"), "should be written: {text}");
+        assert_eq!(Options::load_from(&path), on);
+
+        Options::default().save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("unlock_framerate"),
+            "off is the default and should write no key: {text}"
+        );
+        assert!(!Options::load_from(&path).unlock_framerate);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_garbled_framerate_knob_reads_as_off_and_costs_nothing_else() {
+        // Same degrade-never-fail rule as the keybinds block below. `"true"` is
+        // the interesting case: a string that *looks* like the value a
+        // hand-edited file would carry, which `as_bool` correctly refuses.
+        let path = temp_options_path("unlock-framerate-corrupt");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for bad in ["\"true\"", "1", "[]", "null", "{}"] {
+            std::fs::write(
+                &path,
+                format!("{{\"gui_scale\": 5, \"unlock_framerate\": {bad}}}"),
+            )
+            .unwrap();
+            let loaded = Options::load_from(&path);
+            assert!(
+                !loaded.unlock_framerate,
+                "unlock_framerate: {bad} should degrade to off"
+            );
+            assert_eq!(loaded.gui_scale, 5, "gui_scale must survive {bad}");
+        }
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
