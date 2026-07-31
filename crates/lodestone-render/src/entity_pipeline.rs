@@ -263,6 +263,36 @@ impl GpuEntityModel {
             parts: mesh.parts.iter().map(|(_, r)| *r).collect(),
         })
     }
+
+    /// Upload a [`WoolMesh`](crate::entity::WoolMesh), or `None` if empty.
+    ///
+    /// Mirrors [`upload_armour`](Self::upload_armour) exactly — the same
+    /// `parts`-carries-ranges-only, names-left-on-the-CPU shape, since a wool
+    /// draw likewise gets its ranges from
+    /// [`WoolMesh::attach`](crate::entity::WoolMesh::attach), which pairs each
+    /// range with the wearer's part index.
+    #[must_use]
+    pub fn upload_wool(device: &wgpu::Device, mesh: &crate::entity::WoolMesh) -> Option<Self> {
+        if mesh.indices.is_empty() {
+            return None;
+        }
+        let vertices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-wool-vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let indices = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-wool-indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some(GpuEntityModel {
+            vertices,
+            indices,
+            index_count: mesh.indices.len() as u32,
+            parts: mesh.parts.iter().map(|(_, r)| *r).collect(),
+        })
+    }
 }
 
 /// Build an instance buffer from a slice of model matrices and the matching

@@ -1070,6 +1070,165 @@ impl ArmourModelSet {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Sheep wool (issue #53)
+// ---------------------------------------------------------------------------
+//
+// The wool layer follows exactly the humanoid-armour discipline above — a
+// second, independently-baked mesh posed off the *wearer's* already-animated
+// `part_transforms`, never a second skeleton — with one structural
+// simplification and one structural trap that armour does not have:
+//
+// * **One mesh, not one per slot.** Armour needs [`ArmourModelSet`] because
+//   the four slots bake different geometry; wool is a single overlay over the
+//   whole sheep body, so [`WoolMesh`] has no per-slot table.
+// * **The gate cannot live inside the mesh geometry the way `ArmourMesh`'s
+//   does.** [`wearer_carries_armour`] reads the wearer's *animation family*,
+//   which is a structural property `sheep`, `pig`, `cow` and `wolf` all share
+//   — a farm animal has no `head`/`body` parts that would make a chestplate
+//   attach fail. Wool cannot reuse that gate: it must be keyed on the
+//   wearer's **resolved model name being exactly `"sheep"`**
+//   (`docs/entity-rendering.md`'s "pig/cow trap, worse"), so [`WoolMesh::attach`]
+//   takes the resolved model name as a second argument rather than reading it
+//   off the [`Skeleton`] the way armour's `wearer.family()` check does.
+
+/// [`sheep_wool_model`](lodestone_assets::entity_models::sheep_wool_model)'s
+/// six named parts, in the order [`WoolMesh::load`] bakes them — the same
+/// pre-order `sheep_model`'s body shares (pinned by
+/// `sheep_wool_model_shares_sheep_body_part_names_and_pivots` in
+/// `lodestone-assets/tests/entity_models.rs`).
+const SHEEP_WOOL_PART_NAMES: [&str; 6] = [
+    "head",
+    "body",
+    "right_hind_leg",
+    "left_hind_leg",
+    "right_front_leg",
+    "left_front_leg",
+];
+
+/// The sheep wool overlay's baked mesh, in the shared part-local
+/// [`ModelVertex`] format, with its parts keyed by the **sheep body's** part
+/// names — the same shape as [`ArmourMesh`], minus the per-slot table, since
+/// wool has only one variant.
+#[derive(Debug, Clone)]
+pub struct WoolMesh {
+    /// Four vertices per quad, part-local (the part's own pose is *not*
+    /// folded in — the wearer's matrix supplies it).
+    pub vertices: Vec<ModelVertex>,
+    /// Six indices per quad, wound so front faces point outward.
+    pub indices: Vec<u32>,
+    /// `(sheep body part name, index range)` for every part that carries
+    /// geometry, in bake order.
+    pub parts: Vec<(&'static str, PartRange)>,
+}
+
+impl WoolMesh {
+    /// Bake the wool overlay mesh.
+    #[must_use]
+    pub fn load() -> Self {
+        let def = lodestone_assets::entity_models::sheep_wool_model();
+        let baked = bake_entity_parts(&def);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut parts = Vec::new();
+        for part in &baked {
+            if part.quads.is_empty() {
+                continue;
+            }
+            // Same discipline as `ArmourMesh::for_slot`: resolve the baked
+            // name back to the `&'static str` this module owns, so a name
+            // this mesh carries but the constant list does not is a bake bug
+            // caught here rather than as a missing draw.
+            let Some(name) = SHEEP_WOOL_PART_NAMES
+                .iter()
+                .find(|n| **n == part.name.as_str())
+                .copied()
+            else {
+                continue;
+            };
+            let index_start = indices.len() as u32;
+            let vertex_start = vertices.len() as u32;
+            push_part_quads(&part.quads, &mut vertices, &mut indices);
+            parts.push((
+                name,
+                PartRange {
+                    index_start,
+                    index_count: indices.len() as u32 - index_start,
+                    vertex_start,
+                    vertex_count: vertices.len() as u32 - vertex_start,
+                },
+            ));
+        }
+        WoolMesh {
+            vertices,
+            indices,
+            parts,
+        }
+    }
+
+    /// Number of quads in the mesh.
+    #[must_use]
+    pub fn quad_count(&self) -> usize {
+        self.indices.len() / 6
+    }
+
+    /// Pair each of this mesh's parts with the index of the wearer's part of
+    /// the same name, dropping every part when `wearer_model` is not
+    /// `"sheep"`.
+    ///
+    /// The caller then reads `instance.part_transforms[wearer_index]` and
+    /// draws `range` instanced over it, exactly [`ArmourMesh::attach`]'s
+    /// contract. `wearer_model` is the resolved
+    /// [`EntityModelSet::resolve`] model name (`instance.model` /
+    /// [`EntityBatch::model`]) — **never** [`Skeleton::family`], because
+    /// `AnimFamily::Quadruped` is shared by `pig`, `cow` and `wolf`: gating on
+    /// family alone would grow wool on a pig exactly as an ungated armour
+    /// attach once drew a breastplate on one. See this section's header.
+    pub fn attach<'a>(
+        &'a self,
+        wearer: &'a Skeleton,
+        wearer_model: &str,
+    ) -> impl Iterator<Item = (PartRange, usize)> + 'a {
+        let is_sheep = wearer_model == "sheep";
+        self.parts
+            .iter()
+            .filter(move |_| is_sheep)
+            .filter_map(|(name, range)| wearer.index_of(name).map(|i| (*range, i)))
+    }
+}
+
+/// The sheep wool overlay's CPU model, loaded once. There is only one
+/// [`WoolMesh`] (wool has no per-material variant the way armour does), so
+/// unlike [`ArmourModelSet`] this holds a single mesh rather than a table —
+/// the wrapper exists for symmetry with the armour loading path and so a
+/// future second wool variant (e.g. a baby rig) has somewhere to live.
+#[derive(Debug, Clone)]
+pub struct SheepWoolModelSet {
+    mesh: WoolMesh,
+}
+
+impl Default for SheepWoolModelSet {
+    fn default() -> Self {
+        Self::load()
+    }
+}
+
+impl SheepWoolModelSet {
+    /// Bake the wool mesh.
+    #[must_use]
+    pub fn load() -> Self {
+        Self {
+            mesh: WoolMesh::load(),
+        }
+    }
+
+    /// The baked wool mesh.
+    #[must_use]
+    pub fn mesh(&self) -> &WoolMesh {
+        &self.mesh
+    }
+}
+
 /// The texture layers to draw for an item sitting in `slot`, in draw order —
 /// empty when this item is not humanoid armour, or is armour for a *different*
 /// slot, or its material declares no layers for this slot's layer type.
@@ -2273,6 +2432,75 @@ mod tests {
         );
         for (_, mesh) in set.iter() {
             assert_eq!(mesh.attach(&pig.skeleton).count(), 0);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Sheep wool (issue #53)
+    // -----------------------------------------------------------------------
+
+    fn cow_mesh() -> EntityMesh {
+        EntityMesh::from_model(&lodestone_assets::entity_models::cow_model())
+    }
+
+    fn sheep_mesh() -> EntityMesh {
+        EntityMesh::from_model(&lodestone_assets::entity_models::sheep_model())
+    }
+
+    /// A sheep attaches every one of the wool mesh's six parts to its own
+    /// body — the positive half of the pig/cow trap check below: if this did
+    /// not attach, the negative checks would be proving nothing.
+    #[test]
+    fn a_sheep_attaches_every_wool_part_to_its_own_body() {
+        let wool = WoolMesh::load();
+        let sheep = sheep_mesh();
+        assert_eq!(wool.parts.len(), 6, "sheep_wool_model must bake all six named parts");
+        let attached: Vec<_> = wool.attach(&sheep.skeleton, "sheep").collect();
+        assert_eq!(
+            attached.len(),
+            6,
+            "every wool part must attach to the real sheep body rig"
+        );
+        for (range, wearer_index) in &attached {
+            assert!(range.index_count > 0, "an attached wool part baked no geometry");
+            assert!(*wearer_index < sheep.skeleton.len());
+        }
+    }
+
+    /// **The pig/cow trap, for wool.** `sheep`, `pig`, `cow` and `wolf` are all
+    /// `AnimFamily::Quadruped` and all four share the exact part *names*
+    /// [`sheep_wool_model`] uses (`head`, `body`, `*_hind_leg`, `*_front_leg`)
+    /// — `quadruped_root` builds every one of them from the same generator.
+    /// So a pig or a cow genuinely **does** have every name [`WoolMesh::attach`]
+    /// looks up, which is exactly why gating on `wearer.family()` (armour's own
+    /// discipline) would be wrong here: it would resolve cleanly and grow a
+    /// fleece on a farm animal. The control matters for the same reason
+    /// `a_pig_attaches_no_armour_despite_having_a_body_part` asserts it does:
+    /// without it, this test could pass by accident (a rig with no matching
+    /// parts at all) rather than by the `wearer_model` gate actually working.
+    #[test]
+    fn a_pig_and_a_cow_attach_no_wool_despite_sharing_every_part_name() {
+        let wool = WoolMesh::load();
+        for (name, mesh) in [("pig", pig_mesh()), ("cow", cow_mesh())] {
+            for part_name in SHEEP_WOOL_PART_NAMES {
+                assert!(
+                    mesh.skeleton.index_of(part_name).is_some(),
+                    "control: {name} must have a {part_name} part, or this test proves \
+                     nothing about the wearer_model gate specifically"
+                );
+            }
+            // The real would-be-wrong call: gating on family alone, exactly the
+            // mistake `docs/entity-rendering.md` names.
+            assert_eq!(
+                mesh.skeleton.family(),
+                crate::entity_anim::AnimFamily::Quadruped,
+                "{name} must share the sheep's animation family for this control to be real"
+            );
+            assert_eq!(
+                wool.attach(&mesh.skeleton, name).count(),
+                0,
+                "{name} must attach no wool part when gated on its own resolved model name"
+            );
         }
     }
 

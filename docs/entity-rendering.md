@@ -296,48 +296,73 @@ render must differ substantially from a white-tinted one at the *same* pose —
 proving `sheep_wool_tint`'s bytes reach the shader's per-instance tint, not
 just that the CPU table has the right numbers.
 
-**Wiring still needed (outside this change's files), fully specified:**
+**Landed.** The `EntitySnapshot`/`EntityDraw` half (originally items 2 and 3
+here) landed first — see the fold above. The remaining mesh/pipeline/draw work
+specified below is now also landed, unchanged from the spec in every
+particular that mattered:
 
-The `EntitySnapshot`/`EntityDraw` half (originally items 2 and 3 here) is
-**landed** — see the fold above. What is left is entirely inside the two files
-`lodestone-shell`'s render layer holds:
+1. **`lodestone-render/src/entity.rs`** — `WoolMesh`/`SheepWoolModelSet`,
+   mirroring `ArmourMesh`/`ArmourModelSet` field for field: `vertices`,
+   `indices`, `parts: Vec<(&'static str, PartRange)>`, built from
+   `sheep_wool_model()` via `bake_entity_parts` exactly as
+   `ArmourMesh::for_slot` builds from `humanoid_armour_model`.
+   `WoolMesh::attach` takes the wearer's **resolved model name** as an
+   explicit second argument (`instance.model`/`EntityBatch::model`, not
+   `Skeleton::family()`), because `Skeleton` itself carries no model name —
+   unlike `wearer_carries_armour`, which can read `wearer.family()` straight
+   off the skeleton it is handed. Two hermetic tests pin the pig/cow trap
+   specifically for wool (`a_sheep_attaches_every_wool_part_to_its_own_body`,
+   `a_pig_and_a_cow_attach_no_wool_despite_sharing_every_part_name` — the
+   second is an **executed** negative control: gating on `wearer.family()`
+   instead, as tried, makes it fail with `left: 6, right: 0` for both a pig
+   and a cow, since every quadruped shares the exact part names wool looks
+   up).
+2. **`lodestone-render/src/entity_pipeline.rs`** — `GpuEntityModel::upload_wool`,
+   mirroring `upload_armour` exactly.
+3. **`lodestone-shell/src/gpu.rs`** — `RenderState::prepare_wool`, mirroring
+   `prepare_armour`: skips sheep whose `EntityDraw::wool.sheared` is true
+   (vanilla's own gate, applied at the point that draws the mesh — the field
+   itself stays unfiltered upstream, as specified), else attaches the one
+   wool mesh, tints via `sheep_wool_tint(color)`, and accumulates per-part
+   instance buffers (`WoolPartAccum`, mirroring `ArmourPartAccum` minus the
+   texture grouping armour needs and wool does not — one mesh, one sheet).
+   Drawn through the **base** entity pipeline (`self.entities.pipeline.pipeline`,
+   `Less`), not `armour_pipeline` (`LessEqual`), for exactly the reason
+   specified: wool has no second layer at the same inflation to correct
+   z-fighting for. `EntityRenderer` gained `wool_models: SheepWoolModelSet`,
+   `wool_gpu: Option<GpuEntityModel>` and `wool_texture: Option<wgpu::BindGroup>`
+   (no per-material table — there is only one mesh), loaded from
+   `entity/sheep/sheep_wool.png` by a `load_sheep_wool_texture` that
+   duplicates pack discovery for the same reason
+   `load_humanoid_armour_textures` does (`resources::vanilla_manager` is
+   `#[cfg(test)]`-only). The draw call sits in the render pass right after the
+   `armour_batches` block, before the dropped-item pass, exactly as specified.
+4. **The mechanical struct-literal widening** (`wool: None` on every
+   `EntityDraw { .. }` literal in `gpu.rs`, `variant: None` on `sim.rs`'s test
+   literal) had already landed by the time this pass started — no longer
+   outstanding.
 
-1. **`lodestone-render/src/entity.rs`** — a `WoolMesh`/`SheepWoolModelSet` type
-   mirroring `ArmourMesh`/`ArmourModelSet` (same file, ~line 917–1071) field
-   for field: `vertices`, `indices`, `parts: Vec<(&'static str, PartRange)>`,
-   built from `sheep_wool_model()` via `bake_entity_parts` exactly as
-   `ArmourMesh::for_slot` builds from `humanoid_armour_model`. Its `attach`
-   must gate on the wearer's **resolved model name being `"sheep"`**, not
-   `wearer.family()` — see the pig/cow trap above; `wearer_carries_armour`'s
-   `AnimFamily::Humanoid` check is not the right template to copy verbatim
-   here for exactly that reason.
-2. **`lodestone-render/src/entity_pipeline.rs`** — a `GpuEntityModel::upload_wool`
-   mirroring `upload_armour` (same file, ~line 245), taking `&WoolMesh`.
-3. **`lodestone-shell/src/gpu.rs`** — a `prepare_wool` mirroring `prepare_armour`:
-   skip sheep whose `EntityDraw::wool.sheared` is true (vanilla's own gate;
-   the field itself is not pre-filtered — see above), else attach the one
-   wool mesh, tint via `sheep_wool_tint(color)`, batch by texture
-   (`entity/sheep/sheep_wool`), and draw. **Use the base entity pipeline
-   (`Less`), not `armour_pipeline` (`LessEqual`).** Armour needs `LessEqual`
-   because leather's two layers are coplanar at the same inflation; wool has no
-   second layer at the same inflation as itself, so there is no z-fighting risk
-   to correct for, and copying `armour_pipeline` here would be picking a
-   pipeline for the wrong reason (see `CLAUDE.md`'s note that the base and
-   armour pipelines already disagree on this compare function and neither
-   should be copied without checking why). `EntityRenderer` (the struct
-   holding `armour_pipeline`/`armour_models`/`armour_textures`) needs the
-   equivalent `wool_model: Option<GpuEntityModel>` (there is only one mesh, no
-   per-material variant) and `wool_texture: Option<wgpu::BindGroup>`, loaded
-   from `entity/sheep/sheep_wool` the same way `load_humanoid_armour_textures`
-   loads armour's sheets, and the draw call wired into the render pass right
-   after the `armour_batches` block, before the dropped-item pass.
-4. **Five existing `EntityDraw { .. }` struct literals in `gpu.rs`** (its
-   `into_draw`, one hermetic armour test, two pig-culling-gate literals, one
-   zombie-hue-gate literal) and **one `EntitySnapshot { .. }` literal in
-   `sim.rs`'s own test module** now need `wool: None`/`variant: None` (plus the
-   pre-existing `count: 1` from the drop-count widening below) added — the
-   mechanical consequence of widening a struct these two held files construct
-   by full literal. None of them need any *behavioural* change beyond that.
+**Pixel evidence through the real shell path**, not just the reimplemented
+plumbing above: `crates/lodestone-shell/tests/sheep_wool_pixels.rs`
+(`#[ignore]`d) drives the actual `RenderState::render` call `app.rs` makes,
+with a woolly sheep against the briefing's own suggested negative control — a
+**sheared** sheep, identical in every other respect. Measured on the real
+`26.2` jar:
+
+```text
+subject (woolly) non-sky px  = 8378
+control (sheared) non-sky px = 7386
+delta                        = 992
+body-only ring estimate      = 2042.0 px (lower bound; head/legs not counted)
+subject wool_layers_drawn    = 1
+control wool_layers_drawn    = 0
+```
+
+The `lodestone-render` gate above (`sheep_wool_pixels.rs`, reimplementing
+`ArmourMesh::attach`'s discipline against public API only) still passes
+unmodified and reports the same `10151`/`0` figures it always did — it is now
+corroborating evidence for the shipped `WoolMesh`/`prepare_wool` path rather
+than the only proof anything works at all.
 
 **Deliberately out of scope for this pass**, same as armour's equivalent list:
 
@@ -496,6 +521,16 @@ nothing consumes them.
   `lodestone-assets/tests/real_jar.rs::sheep_wool_texture_decodes_from_the_real_jar`
   (`#[ignore]`d) is the external-authority check that `sheep_wool.png` is
   64×32 and genuinely greyscale.
+* `crates/lodestone-shell/tests/sheep_wool_pixels.rs` (`#[ignore]`d) — the
+  island check: drives the real `RenderState::render` call, not reimplemented
+  plumbing, with the sheared-vs-woolly pair as its negative control and
+  `RenderStats::wool_layers_drawn` (1 vs. 0) as an exact corroboration. Also
+  `crates/lodestone-render/src/entity.rs`'s
+  `a_pig_and_a_cow_attach_no_wool_despite_sharing_every_part_name`, a hermetic
+  **executed** negative control for the pig/cow trap: gating `WoolMesh::attach`
+  on `wearer.family()` instead of the resolved model name makes it fail with
+  `left: 6, right: 0` for both animals, since every quadruped shares the exact
+  part names wool looks up.
 
 ## Dependencies
 

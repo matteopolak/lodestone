@@ -32,6 +32,7 @@
 
 #![warn(missing_docs)]
 
+pub mod air_bubbles;
 pub mod anim;
 pub mod arena;
 pub mod block;
@@ -59,6 +60,8 @@ pub mod models;
 pub mod scene;
 pub mod section;
 pub mod section_arena;
+pub mod sky;
+pub mod sky_pipeline;
 pub mod strategy;
 pub mod suballoc;
 pub mod target;
@@ -71,6 +74,10 @@ pub mod world;
 #[cfg(feature = "window")]
 pub mod window;
 
+pub use air_bubbles::{
+    BUBBLE_COUNT, BUBBLE_SEPARATION, BUBBLE_SIZE, BubbleSlot, bubble_position, bubble_row,
+    bubble_row_visible,
+};
 pub use anim::{AnimFrame, AnimSample, AnimSlotUniform, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
@@ -100,8 +107,8 @@ pub use driver::{InstanceTable, WorldMesher};
 pub use entity::{
     ENTITY_FULLBRIGHT, ArmourMesh, ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame,
     EntityInstance, EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange,
-    armour_layer_tint, armour_layers, entity_model_matrix, entity_texture_candidates,
-    model_for_type, plan_entities,
+    SheepWoolModelSet, WoolMesh, armour_layer_tint, armour_layers, entity_model_matrix,
+    entity_texture_candidates, model_for_type, plan_entities,
 };
 pub use entity_anim::{AnimFamily, AnimInput, Skeleton};
 pub use entity_pipeline::{
@@ -137,6 +144,18 @@ pub use models::{
 pub use scene::{CullStats, FramePlan, WorldScene, section_of};
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
 pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
+pub use sky::{
+    CLOUD_CELL_BLOCKS, CLOUD_HEIGHT, CLOUD_SCROLL_BLOCKS_PER_TICK, MOON_HEIGHT, MOON_SIZE,
+    SKY_DISC_RADIUS, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED, SUN_HEIGHT, SUN_SIZE,
+    build_star_field, celestial_angle_for_time_of_day, celestial_quad_positions,
+    celestial_quad_uvs, celestial_rotation_matrix, cloud_plane_geometry,
+    moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day,
+    sky_disc_indices, sky_disc_positions, star_brightness_for_time_of_day,
+};
+pub use sky_pipeline::{
+    CelestialPipeline, CelestialVertex, CloudPipeline, CloudVertex, SkyDiscPipeline,
+    SkyDiscVertex, SkyRenderer, StarPipeline, StarVertex,
+};
 pub use strategy::{
     DrawRegion, DrawStrategy, MdiCount, MdiZeroInstance, PerDraw, StrategyError, StrategyKind,
     Submission, build_strategy, select_strategy,
