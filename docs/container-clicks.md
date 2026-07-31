@@ -200,7 +200,7 @@ components — vanilla stores both in the item's *built-in* component map, not
 in the clientbound patch, so no wire decoder could produce them without a
 version-owned census — and it flagged itself as likely to go stale within the
 hour, in the same session, once that census landed. It has: `67ff7c3` added
-`crates/protocol/v770/src/item_prototypes.rs` (an item→`{max_stack_size,
+`crates/lodestone-data/src/item_prototypes.rs` (an item→`{max_stack_size,
 max_damage, equip_slot}` table, the shape `generated/tools.rs` set the
 precedent for) and wired it into wire decoding at
 `read_component_patch` (`crates/protocol/v770/src/adapter.rs:752-830`): the
@@ -304,7 +304,7 @@ whatever `lodestone-shell` feeds it from input events.
   component split (`minecraft:tool`) that `minecraft:equippable` and
   `minecraft:max_stack_size` now also go through, per `67ff7c3`.
 - [`item-prototypes.md`](./item-prototypes.md) — the census itself
-  (`crates/protocol/v770/src/item_prototypes.rs`) and its wire-decode seam.
+  (`crates/lodestone-data/src/item_prototypes.rs`) and its wire-decode seam.
 
 ## Tests
 

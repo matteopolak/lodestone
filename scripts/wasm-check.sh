@@ -96,6 +96,12 @@ CRATES=(
   # all wasm-safe); the live gate's client/tokio/registry deps are gated behind
   # the off-by-default `live-v770` feature, so the wasm build never pulls them.
   "lodestone-sound"
+  # The canonical 26.2 game-data censuses (issue #361), extracted out of
+  # lodestone-v770. Depends on nothing but lodestone-model, so it was already
+  # wasm-safe transitively via lodestone-v770's own row below; listed
+  # separately so a future regression here is unambiguous rather than only
+  # surfacing through v770.
+  "lodestone-data"
   "lodestone-v770"
   "lodestone-v47"
   "lodestone-net|--features ws-web"

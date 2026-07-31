@@ -26,8 +26,8 @@ use lodestone_model::{
     VersionAdapter,
 };
 use lodestone_v770::V770Adapter;
-use lodestone_v770::data_component_types::component_type_name;
-use lodestone_v770::items::item_id;
+use lodestone_data::data_component_types::component_type_name;
+use lodestone_data::items::item_id;
 use lodestone_v770::packet_ids::play;
 use lodestone_world::World;
 

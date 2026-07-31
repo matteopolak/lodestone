@@ -1,10 +1,11 @@
 //! Public data-component-type id→identifier resolution for protocol 776.
 //!
 //! An item stack's `DataComponentPatch` names each added or removed component by
-//! a `minecraft:data_component_type` registry id (a VarInt). The id→name mapping
-//! is version-specific data — ids shift as components are added between
-//! versions — so it lives here in the version crate, generated from Mojang's own
-//! `registries.json`, never in a shared crate.
+//! a `minecraft:data_component_type` registry id (a VarInt). The id→name
+//! mapping is generated from Mojang's own `registries.json` for 26.2, the one
+//! canonical internal version (#343), so it lives here in this data crate
+//! rather than in `lodestone-v770` (issue #361) — it is a game-data census,
+//! not wire-format code.
 
 pub use crate::generated_data_component_types::DATA_COMPONENT_TYPE_COUNT;
 use crate::generated_data_component_types::DATA_COMPONENT_TYPE_NAMES;

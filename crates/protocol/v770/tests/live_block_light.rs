@@ -49,7 +49,7 @@ use lodestone_model::{
 use lodestone_net::Connection;
 use lodestone_testsupport::RconClient;
 use lodestone_v770::V770Adapter;
-use lodestone_v770::block_states;
+use lodestone_data::block_states;
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, LightData, LightProperties, World,
     compute_column_light, diff_column_light,

@@ -84,7 +84,7 @@ use lodestone_model::{
 };
 use lodestone_net::Connection;
 use lodestone_v770::V770Adapter;
-use lodestone_v770::block_states;
+use lodestone_data::block_states;
 use lodestone_world::{
     ChunkColumn, ChunkPos as WorldChunkPos, ColumnLight, LightDiff, LightProperties, Neighbourhood,
     NibbleArray, World, compute_column_light_with_neighbours, light_exercises_propagation,

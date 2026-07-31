@@ -4,8 +4,9 @@
 //! `width`/`height` of its bounding box — to size collision and pathfinding.
 //! Vanilla keys these on the entity *type* via `EntityDimensions`, and the
 //! values shifted across the 1.9/1.14 pose refactors (a standing zombie was
-//! `1.8` tall and is now `1.95`), so this is **version data** and lives here in
-//! the version crate, never in a shared layer.
+//! `1.8` tall and is now `1.95`), so this is **26.2 game data** and lives here
+//! in this data crate (issue #361) rather than in `lodestone-v770` — a
+//! version-free consumer needs no protocol dependency to read it.
 //!
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!

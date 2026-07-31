@@ -1,10 +1,11 @@
 //! Public item id→identifier resolution for protocol 776.
 //!
 //! Item stacks carry the item as a `Holder<Item>`: a VarInt referencing the
-//! `minecraft:item` registry by id. The registry id→name mapping is
-//! version-specific data — ids shift as the registry grows — so it lives here in
-//! the version crate, generated from Mojang's own `registries.json`, never in a
-//! shared crate.
+//! `minecraft:item` registry by id. The registry id→name mapping is generated
+//! from Mojang's own `registries.json` for 26.2, the one canonical internal
+//! version (#343), so it lives here in this data crate rather than in
+//! `lodestone-v770` (issue #361) — it is a game-data census, not wire-format
+//! code.
 
 pub use crate::generated_items::ITEM_COUNT;
 use crate::generated_items::ITEM_NAMES;

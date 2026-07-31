@@ -3,9 +3,10 @@
 //! `sound`/`sound_entity` carry the sound as a `Holder<SoundEvent>`: a positive
 //! VarInt referencing the `minecraft:sound_event` registry (id minus one), or a
 //! zero flag introducing an inline definition. The registry id→name mapping is
-//! version-specific data — ids shift as the registry grows — so it lives here in
-//! the version crate, generated from Mojang's own `registries.json`, never in a
-//! shared crate.
+//! generated from Mojang's own `registries.json` for 26.2, the one canonical
+//! internal version (#343), so it lives here in this data crate rather than
+//! in `lodestone-v770` (issue #361) — it is a game-data census, not
+//! wire-format code.
 //!
 //! Each entry pairs the identifier with the sound's optional fixed audible
 //! range, which is a property of the registry entry rather than the wire and so

@@ -38,12 +38,12 @@ Measured, runnable, in
 
 ### The data
 
-The census lives in `crates/protocol/v770/src/generated/collision_shapes.rs`,
+The census lives in `crates/lodestone-data/src/generated/collision_shapes.rs`,
 generated from a dump of `getCollisionShape(...).toAabbs()` over all 32,366 states
 of the real 26.2 server (`Block.BLOCK_STATE_REGISTRY`). Pure rodata: `STATE_SHAPE:
 [u16; 32366]` maps a state to one of **326 distinct shapes**, and `SHAPES: [&[Aabb];
 326]` points at 716 de-duplicated boxes. See
-`crates/protocol/v770/tests/collision_shapes.rs` for the generator, the drift
+`crates/lodestone-data/tests/collision_shapes.rs` for the generator, the drift
 guard, and `LODESTONE_REGEN=1`.
 
 The census was already complete and already tested when this work started. **It
@@ -60,7 +60,7 @@ fn block_name(&self, state_id: u32) -> Option<&'static str>;
 ```
 
 `BlockAabb` (`lodestone-model/src/adapter.rs`) is the shared block-local box type,
-and `lodestone_v770::collision_shapes::Aabb` is a **type alias** for it — not a
+and `lodestone_data::collision_shapes::Aabb` is a **type alias** for it — not a
 copy. That is what makes the seam zero-copy: it hands back the rodata slice itself
 rather than converting box by box in the innermost loop of the physics tick.
 
@@ -108,7 +108,7 @@ Real (11): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
   now dumped per state — `BlockState.blocksMotion()`
   (`block != COBWEB && block != BAMBOO_SAPLING && legacySolid`) — straight off the
   real server, through `VersionAdapter::block_blocks_motion` →
-  `lodestone_v770::block_solidity` (`crates/protocol/v770/src/generated/block_solidity.rs`,
+  `lodestone_data::block_solidity` (`crates/lodestone-data/src/generated/block_solidity.rs`,
   the same dump-and-commit shape as the collision census). `legacySolid` is a
   *separate* cached boolean 26.2 overrides on 237 blocks with `forceSolidOn()`, 8
   with `forceSolidOff()`, and leaves un-cached on 23 `dynamicShape()` blocks — none
@@ -121,7 +121,7 @@ Real (11): `collision_boxes`, `collision_top`, `friction`, `speed_factor`,
   `WorldCollision`'s 10-block demo palette, whose blocks are all full cubes or air
   and for which the fallback is exact. Used against real 26.2 data instead of the
   census, that fallback is wrong for **2,618 of 32,366 states across 202 blocks**
-  (`crates/protocol/v770/tests/block_physics.rs::the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`):
+  (`crates/lodestone-data/tests/block_physics.rs::the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`):
   signs, pressure plates, chains, banners, lanterns, turtle eggs, conduits and dead
   coral read as *not* blocking; azalea, flowering azalea, big dripleaf, chorus
   plant/flower, end rod, snow and scaffolding read as blocking. **Cobweb, bamboo
@@ -156,7 +156,7 @@ Real with a stated approximation (2):
   version-free (name-keyed, not state-keyed) and reachable from outside
   `lodestone-shell`.
 - **A data bump (new MC version)** — regenerate the census per
-  `crates/protocol/v770/tests/collision_shapes.rs`, then re-read
+  `crates/lodestone-data/tests/collision_shapes.rs`, then re-read
   `data/minecraft/tags/block/suppresses_bounce.json`. Its only member today is
   `honey_block`, which sets no restitution, so `bounce_restitution` ignores the tag;
   a future bouncy suppressor would break that **silently**.
@@ -227,7 +227,7 @@ Real with a stated approximation (2):
 | the census reaches `CollisionView` | `collision.rs::tests::the_real_per_state_collision_census_reaches_the_collision_view` | `#[ignore]` — needs the pack **and** `--features live` |
 | name-keyed constants **and `blocks_motion` routing** reach the view | `collision.rs::tests::name_keyed_constants_reach_the_view_through_the_version_seam` | `#[ignore]` — same |
 | what unit cubes cost, measured | `lodestone-physics/tests/partial_block_shapes.rs` | always |
-| the `blocks_motion` census itself, exhaustively, vs the JVM dump | `crates/protocol/v770/tests/block_physics.rs` (`committed_table_matches_the_committed_dump`, `blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling`, `the_geometry_branch_alone_is_wrong_for_two_thousand_states`, `the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`, `hand_checked_solidity_rows`) | always |
+| the `blocks_motion` census itself, exhaustively, vs the JVM dump | `crates/lodestone-data/tests/block_physics.rs` (`committed_table_matches_the_committed_dump`, `blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling`, `the_geometry_branch_alone_is_wrong_for_two_thousand_states`, `the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong`, `hand_checked_solidity_rows`) | always |
 
 Every one carries a control that must fail the same assertion: bottom slab vs top
 slab, empty-shape vs cube, and — in both the shell gate and the physics gate — the

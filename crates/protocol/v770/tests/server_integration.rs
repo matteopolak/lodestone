@@ -41,7 +41,7 @@ use uuid::Uuid;
 // implementation.
 fn stone_id() -> u32 {
     (0..)
-        .find(|&id| lodestone_v770::block_states::block_name(id) == Some("minecraft:stone"))
+        .find(|&id| lodestone_data::block_states::block_name(id) == Some("minecraft:stone"))
         .expect("generated block-state table has no `minecraft:stone` entry")
 }
 const AIR_ID: u32 = 0;

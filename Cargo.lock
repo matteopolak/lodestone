@@ -2447,6 +2447,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-data"
+version = "0.1.0"
+dependencies = [
+ "lodestone-model",
+ "serde_json",
+]
+
+[[package]]
 name = "lodestone-ecs"
 version = "0.1.0"
 dependencies = [
@@ -2739,6 +2747,7 @@ dependencies = [
  "criterion",
  "lodestone-client",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",

@@ -33,6 +33,9 @@ lodestone-net = { path = "../crates/lodestone-net", default-features = false, fe
 # already pass `wasm-check.sh`.
 lodestone-world = { path = "../crates/lodestone-world" }
 lodestone-v770 = { path = "../crates/protocol/v770" }
+# The block-state census (`block_states::block_name`/`properties`) moved out of
+# lodestone-v770 into this data-only crate (issue #361).
+lodestone-data = { path = "../crates/lodestone-data" }
 lodestone-core = { path = "../crates/lodestone-core" }
 # The shared, wasm-safe player controller (held-key model, vanilla mouse-look
 # curve, forward-gated sprint, and the `move_action` wire lowering). Consuming it

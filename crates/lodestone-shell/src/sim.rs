@@ -1978,7 +1978,7 @@ impl Sim {
     /// # Which entities: a jar-dumped census, default-**deny**
     ///
     /// [`VersionData::entity_facts`] answers it, from
-    /// `lodestone_v770::entity_census` — a table generated from a headless 26.2
+    /// `lodestone_data::entity_census` — a table generated from a headless 26.2
     /// server dump of all 158 entity types (`EntityCensusOracle.java`). A
     /// neighbour pushes the player only if vanilla's crowd pass reaches
     /// `player.push(neighbour)`, which needs three things: the type is a
@@ -4267,7 +4267,7 @@ mod tests {
         // pickaxe mined stone no faster than a fist. `dig_break_inputs` must
         // fold a real `ToolMining` straight through — reference numbers from
         // `docs/tool-mining.md` (also pinned externally by
-        // `crates/protocol/v770/tests/tools.rs`): a diamond pickaxe (`speed:
+        // `crates/lodestone-data/tests/tools.rs`): a diamond pickaxe (`speed:
         // 8.0`, `correct_tool: true`) on stone is 6 ticks, not the bare-hand
         // 151.
         let diamond_pickaxe = lodestone_model::ToolMining {

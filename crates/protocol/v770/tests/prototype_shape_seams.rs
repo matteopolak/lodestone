@@ -12,7 +12,8 @@
 //! the dominant defect shape in this repo. Modelled on `block_hardness_seam.rs`.
 
 use lodestone_model::{EquipmentSlot, VersionAdapter};
-use lodestone_v770::{V770Adapter, block_states, item_prototypes, outline_shapes};
+use lodestone_data::{block_states, item_prototypes, outline_shapes};
+use lodestone_v770::V770Adapter;
 
 /// Binds the concrete adapter behind the trait object, so every assertion below
 /// travels the same dynamic-dispatch path a version-free consumer uses after
@@ -174,7 +175,7 @@ fn item_prototype_seam_returns_real_values_not_the_trait_default() {
 fn item_prototype_seam_agrees_with_the_version_table_for_every_item() {
     let adapter = seam();
     for id in 0..item_prototypes::ITEM_COUNT as i32 {
-        let name = lodestone_v770::items::item_name(id).expect("named");
+        let name = lodestone_data::items::item_name(id).expect("named");
         let direct = item_prototypes::prototype_by_id(id).expect("table resolves");
         let through = adapter.item_prototype(name).expect("seam resolves");
         assert_eq!(
