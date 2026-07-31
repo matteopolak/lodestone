@@ -308,6 +308,38 @@ impl ColourStream<'_> {
         v(x0, y1);
     }
 
+    /// Emit a pixel-space rectangle as two triangles in NDC, with a vertical
+    /// gradient from `top` (the rect's own top edge) to `bottom` (its bottom
+    /// edge). The GPU interpolates per-vertex colour across each triangle, so
+    /// this needs no second pipeline — just two colours instead of one at emit
+    /// time. Used for vanilla's translucent dim behind an open container screen
+    /// (`AbstractContainerScreen::extractTransparentBackground`, a
+    /// `fillGradient`, not a flat fill — see `container.rs`'s own doc comment).
+    pub(crate) fn gradient_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top: [f32; 4],
+        bottom: [f32; 4],
+    ) {
+        debug_assert_eq!(FLOATS_PER_VERTEX, 6);
+        let to_ndc = |px: f32, py: f32| (2.0 * px / self.w - 1.0, 1.0 - 2.0 * py / self.h);
+        let (x0, y0) = to_ndc(x, y);
+        let (x1, y1) = to_ndc(x + w, y + h);
+        let verts = &mut *self.verts;
+        let mut v = |vx: f32, vy: f32, c: [f32; 4]| {
+            verts.extend_from_slice(&[vx, vy, c[0], c[1], c[2], c[3]]);
+        };
+        v(x0, y0, top);
+        v(x1, y0, top);
+        v(x1, y1, bottom);
+        v(x0, y0, top);
+        v(x1, y1, bottom);
+        v(x0, y1, bottom);
+    }
+
     /// Draw a single glyph with its top-left at `(x, y)`. Space and unknown
     /// handling match [`font::glyph_rows`]; blanks emit no quads.
     pub(crate) fn glyph(&mut self, ch: char, x: f32, y: f32, scale: f32, c: [f32; 4]) {

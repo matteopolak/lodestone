@@ -206,12 +206,25 @@ the potion-effect icons (`Hud.java:486-488` — suppressed only when the screen
 `CreativeModeInventoryScreen`, which draw their own) and the subtitle overlay
 (`Hud.java:238-241`). **The crosshair is not one of them** — `Hud.java:439-470`
 gates on camera type and spectator mode only, so vanilla's reticle is still there
-behind an open inventory, dimmed. Hiding ours is a deliberate divergence for as
-long as container screens have no background pass to dim behind (issue #51).
+behind an open inventory, dimmed.
 
-There is no per-element dimming here, and adding one would be the wrong shape:
+**Issue #51 is now closed on the dimming side** — see `docs/container-screen.md`'s
+"The dim behind the panel". `ContainerRenderer` now draws its own full-canvas
+gradient (vanilla's `extractTransparentBackground`) **after** the HUD pass in
+`app.rs`, exactly the shape this section always said the fix had to take —
+"There is no per-element dimming here, and adding one would be the wrong shape:
 the dim belongs to the screen's background pass, not to an alpha on every HUD
-widget. An undimmed hotbar under the pause overlay is the correct interim state.
+widget" turned out to be the right call, not just the interim one. The hotbar
+now genuinely reads darker behind an open chest or the local inventory screen,
+proven pixel-for-pixel by `tests/container_background_pixels.rs`.
+
+Hiding **the crosshair** specifically remains a deliberate, *separate*
+divergence, not fixed by that change: `hud_frame.crosshair` is still driven by
+`is_playing()` alone (`app.rs`), so it still disappears rather than drawing and
+dimming like vanilla's does. A background pass to dim behind it now exists —
+the blocking reason above is gone — but nobody has wired the crosshair itself
+back into `hud_follows_world`'s set yet; that is a small, separate follow-up,
+not a consequence anything here does automatically.
 
 ### Leaving a session: the pause menu → `Sim::end_session`
 

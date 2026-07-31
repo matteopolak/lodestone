@@ -86,6 +86,79 @@ The "Inventory" title for the local inventory screen (`ui.is_container_open()`
 with no server menu) is still a Lodestone-chosen literal, not
 `container.inventory` — there is no server component to resolve in that case.
 
+### The panel is real vanilla art now (issue #51)
+
+`ContainerBackground` (`container.rs`) loads and stitches vanilla's three real
+`textures/gui/container/*.png` sheets — `generic_54`, `crafting_table`,
+`inventory` — and `ContainerRenderer::attach_background` binds them, exactly
+the "is a thing attached" pattern `attach_items`/`attach_item_models` already
+use. Covers every menu `slot_layout` already lays out (`MenuKind::Player`,
+plain `Generic`, and `Generic` with a `craft_layout`); it does **not** add
+furnace/hopper/anvil/etc. backgrounds, because this crate has no slot layout
+for those screens yet (issue #28).
+
+These three PNGs are **not** `GuiAtlas` material: they live at
+`textures/gui/container/**`, not `textures/gui/sprites/**`, carry no sibling
+`.mcmeta`, and vanilla does not scale them through any of `GuiScaling`'s three
+modes at all — it blits hand-placed sub-rectangles of each 256×256 sheet at
+native size. The generic chest case is genuinely two blits
+(`ContainerScreen.java:21-27`): a row-count-dependent top piece
+(`0,0,176,rows*18+17`) and a fixed 96 px bottom piece immediately below it
+sampled from `v=126` regardless of row count. `crafting_table`/`inventory`
+each blit one whole `176x166` panel. `ContainerBackground::quads` computes
+these UV windows by hand against the atlas's own sprite placement — see its
+doc comment before reaching for `GuiScaling` on a similar problem; that type
+has no "arbitrary sub-rect" mode and was never meant to grow one for this.
+
+With a background attached, the flat panel fill and the per-slot well
+rectangles this screen has always drawn are **suppressed** — the real
+sheet's own art already bakes in every well at the exact pixel offsets
+`slot_layout` targets (the layout constants were themselves transcribed from
+vanilla's sheets), so drawing a second flat well on top would be pure noise.
+Title text switches from the fallback's warm-light colour to vanilla's own
+dark grey (`0xFF404040`, `InventoryScreen.java:76`) for the same reason: the
+fallback colour was chosen to read against the flat dark fill, not against a
+light wood panel.
+
+### The dim behind the panel (issue #61's leftover)
+
+`AbstractContainerScreen::isInGameUi()` overrides `true`
+(`AbstractContainerScreen.java:535-538`), which routes `Screen.render`'s
+`extractBackground` to `extractTransparentBackground` (`Screen.java:375-377`)
+— a full-canvas **vertical gradient**, ARGB `(192,16,16,16)` top to
+`(208,16,16,16)` bottom, not the pause menu's tiled
+`inworld_menu_background.png` (that is the `isInGameUi() == false` branch —
+see `pause-menu.md`). `Builder::gradient_rect_px` reproduces it: a two-colour
+rect whose vertices the GPU interpolates, on
+`ContainerGeometry::dim_vertex_count`'s own leading range of `verts`, drawn
+**unconditionally** whenever a menu is open (independent of whether a real
+background is attached).
+
+This is what dims the HUD hotbar for free, per `pause-menu.md`'s "issue #61"
+section: the HUD draws unconditionally behind any world-following screen
+(`hud_follows_world`), and `app.rs`'s per-frame draw now runs the container
+pass **after** the HUD pass (previously it ran before, which is why the dim
+alone was not enough — the HUD painted right back over it every frame). The
+dim is draw order, not a per-element alpha; `pause-menu.md`'s "There is no
+per-element dimming here, and adding one would be the wrong shape" note is
+satisfied the same way the pause overlay already satisfies it.
+
+Pass order inside `ContainerRenderer::render_with_icons_scaled` is now four
+stages, not three: **dim** (no depth) → **background texture** (no depth, if
+attached) → **rest of chrome** (no depth: the flat-fill fallback when there is
+no texture, the title, the wells when there is no texture) → **item models**
+(depth, cleared) → **flat icons + text** (no depth). The dim has to precede
+the texture — vanilla draws its own panel art *after* its dim, not the other
+way around — which is why `ContainerGeometry` carries two split markers now,
+`dim_vertex_count` and `chrome_vertex_count`, not one.
+
+Proven by `tests/container_background_pixels.rs` (`#[ignore]`d, GPU +
+`client.jar`): a point inside the panel differs measurably between a real
+background and the flat fill (claim 1), and a hotbar-cell pixel drawn by a
+real `HudRenderer` reads measurably darker once a container screen draws on
+top of it than with the identical two-pass sequence and the container frame
+closed (claim 2's executed negative control).
+
 ### The result slot is the server's
 
 **Do not add a local recipe matcher to fill the result slot.** Vanilla computes
@@ -191,10 +264,15 @@ container_renderer.render_with_icons_scaled(
 );
 ```
 
-Note the container overlay is drawn **before** the HUD in `WindowApp`, and both
-model passes clear depth, so the order is safe. Use the `_scaled` variant, not
-`render_with_icons`: the plain one lays out against `AUTO_GUI_SCALE` and would
-disagree with `hit_test_with_scale` about where the slots are.
+**Stale as of issue #51/#61's dimming fix**: the container overlay used to draw
+*before* the HUD in `WindowApp`. It now draws **after** the HUD (and after the
+status-effects overlay), on purpose — see "The dim behind the panel" above.
+Both model passes still independently clear depth immediately before their own
+draw, so the two rendering in either relative order remains safe; what changed
+is which one paints over the other's *colour*, which is the whole point. Use
+the `_scaled` variant, not `render_with_icons`: the plain one lays out against
+`AUTO_GUI_SCALE` and would disagree with `hit_test_with_scale` about where the
+slots are.
 
 The third step, the **carried stack**, is also **done**: `app.rs:1270` builds the
 frame with `.with_cursor(Some([self.cursor.0, self.cursor.1]))`. Kept here because
@@ -229,6 +307,7 @@ None. The behavioural switches are all "is a thing attached":
 | `attach_items` not called | colour-swatch + letter fallback in every occupied slot |
 | `attach_item_models` not called | flat sprites draw; block items draw nothing |
 | no `depth` passed to `render_with_icons` | as above |
+| `attach_background` not called | flat programmatic panel fill + wells, instead of vanilla's real `container/*.png` art; the dim still draws either way |
 | `ContainerFrame::menu` is `None` | nothing is drawn at all, and `widget_rect` is `None` |
 | `ContainerFrame::cursor` is `None` (the default) | `menu.carried()`, even if `Some`, draws nowhere |
 
@@ -237,8 +316,12 @@ None. The behavioural switches are all "is a thing attached":
 * **`lodestone-game`** — `Menu`, `MenuKind`, `CraftLayout`, `ItemStack`, and the
   `DAMAGE_COMPONENT` / `MAX_DAMAGE_COMPONENT` component keys.
 * **`crate::hud::item_icon`** — `draw_item_icon`, `ColourStream`, `IconRenderer`,
-  `IconAssets`, `IconSink`.
-* **`lodestone-render`** — `BlockModels`, `ModelVertex` (through the shared pass).
+  `IconAssets`, `IconSink`, and (new) `ColourStream::gradient_rect` for the dim.
+* **`lodestone-render`** — `BlockModels`, `ModelVertex` (through the shared pass),
+  `GuiSpriteQuad`, `GpuAtlas` (the background texture's own small pipeline).
+* **`lodestone-assets`** — `Atlas`, `AtlasBuilder` (`ContainerBackground` stitches
+  the three `container/*.png` sheets directly, not through `GuiAtlas` — see "The
+  panel is real vanilla art now" above for why).
 * **`crate::gpu::RenderState`** — the borrowed block atlas, palette, animation
   slots and depth buffer.
 
@@ -249,4 +332,5 @@ None. The behavioural switches are all "is a thing attached":
 | `crates/lodestone-shell/src/container.rs` | everything above |
 | `crates/lodestone-shell/tests/container_screen.rs` | layout tests (player, generic, crafting) + a coverage gate |
 | `crates/lodestone-shell/tests/container_item_pixels.rs` | the icon pixel gate (GPU + `client.jar`, `#[ignore]`d) |
+| `crates/lodestone-shell/tests/container_background_pixels.rs` | the panel-art and hotbar-dim pixel gate, with its negative controls (GPU + `client.jar`, `#[ignore]`d) |
 | `crates/lodestone-shell/tests/live_container_render.rs` | end-to-end against a live server |
