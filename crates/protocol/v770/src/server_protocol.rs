@@ -48,8 +48,8 @@ use lodestone_server::{
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
 
-use crate::block_states::{block_name, properties};
-use crate::entity_types::entity_type_id;
+use lodestone_data::block_states::{block_name, properties};
+use lodestone_data::entity_types::entity_type_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
 use crate::packets::common::KeepAlive;
@@ -132,7 +132,7 @@ fn resolve_state_id(state: &str) -> u32 {
     };
     wanted.sort_unstable();
 
-    (0..crate::block_states::STATE_COUNT)
+    (0..lodestone_data::block_states::STATE_COUNT)
         .find(|&id| {
             if block_name(id) != Some(name) {
                 return false;
@@ -988,7 +988,7 @@ mod block_edit_tests {
     /// guessing a property string, so this cannot pass by coincidence.
     #[test]
     fn resolve_state_id_matches_properties_not_just_name() {
-        let propertied_id = (0..crate::block_states::STATE_COUNT)
+        let propertied_id = (0..lodestone_data::block_states::STATE_COUNT)
             .find(|&id| !properties(id).unwrap().is_empty())
             .expect("generated table has at least one propertied state");
         let name = block_name(propertied_id).unwrap();

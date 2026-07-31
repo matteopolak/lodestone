@@ -1,5 +1,5 @@
 //! The `VersionAdapter::block_hardness` seam: proves the version-owned
-//! hardness census (`lodestone_v770::hardness`, 32,366 real block states dumped
+//! hardness census (`lodestone_data::hardness`, 32,366 real block states dumped
 //! from a headless 26.2 server) actually reaches a version-free consumer
 //! **through the trait object**.
 //!
@@ -22,7 +22,8 @@
 //! [`lodestone_model::BlockHardness`].
 
 use lodestone_model::VersionAdapter;
-use lodestone_v770::{V770Adapter, block_states, hardness};
+use lodestone_data::{block_states, hardness};
+use lodestone_v770::V770Adapter;
 
 /// Binds the concrete adapter behind the trait object, so every assertion below
 /// travels the same dynamic-dispatch path a version-free consumer uses after

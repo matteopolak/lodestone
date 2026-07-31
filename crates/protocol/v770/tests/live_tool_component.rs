@@ -21,7 +21,7 @@
 //!    nothing removed. A clientbound stack is a *delta* from the item's
 //!    prototype component map, and 26.2 registers a pickaxe's `minecraft:tool`
 //!    in that prototype, so decoding the wire is by itself **not enough** to
-//!    make a pickaxe dig faster. That is why [`lodestone_v770::tool`] also
+//!    make a pickaxe dig faster. That is why [`lodestone_data::tool`] also
 //!    carries a per-item prototype census.
 //! 2. **An explicit `minecraft:tool` decodes rule-for-rule.**
 //!    [`an_explicit_tool_component_round_trips_from_the_server`] gives the

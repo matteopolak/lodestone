@@ -1542,7 +1542,7 @@ The **crack animation** is what is wrong: it runs on the fake 0.05, so it advanc
 everything, and it advances for blocks that will never break. Punching bedrock draws a full
 crack sequence and then nothing happens.
 
-**The fix is a data table, not logic.** `crates/protocol/v770/src/generated/` already holds
+**The fix is a data table, not logic.** `crates/lodestone-data/src/generated/` already holds
 `collision_shapes.rs`, so the extraction pattern is proven: dump from the real server jar
 (`SharedConstants.tryDetectVersion(); Bootstrap.bootStrap();` then walk every one of the 32,366
 block states), **not** from minecraft-data, which lags and is incomplete for 26.x (§12.10 in

@@ -1,10 +1,11 @@
 //! Public particle-type id→identifier resolution for protocol 776.
 //!
 //! `level_particles` carries the particle as a `minecraft:particle_type`
-//! registry id (a VarInt) before any per-particle payload data. That id→name
-//! mapping is version-specific data — ids shift as the registry grows — so it
-//! lives here in the version crate, generated from Mojang's own
-//! `registries.json`, never in a shared crate.
+//! registry id (a VarInt) before any per-particle payload data. The id→name
+//! mapping is generated from Mojang's own `registries.json` for 26.2, the one
+//! canonical internal version (#343), so it lives here in this data crate
+//! rather than in `lodestone-v770` (issue #361) — it is a game-data census,
+//! not wire-format code.
 
 pub use crate::generated_particle_types::PARTICLE_TYPE_COUNT;
 use crate::generated_particle_types::PARTICLE_TYPE_NAMES;

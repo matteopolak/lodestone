@@ -23,7 +23,8 @@
 //! `entity_facts` uses cannot drift off by one against the id-indexed table.
 
 use lodestone_model::{ResourceKey, VersionAdapter};
-use lodestone_v770::{entity_types, V770Adapter};
+use lodestone_data::entity_types;
+use lodestone_v770::V770Adapter;
 
 /// Binds the concrete adapter behind the trait object, so every assertion below
 /// travels the same dynamic-dispatch path a version-free consumer uses after

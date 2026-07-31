@@ -43,7 +43,7 @@ real design and implementation work.
 
 | # | Issue | What it closes |
 |---|---|---|
-| 1 | [#204](https://github.com/matteopolak/lodestone/issues/204) | `ChunkWorld` (the only `PathWorld` a running server uses) classifies every block solid/air only; the 32,366-state JVM-dumped path-type census (`lodestone-v770::path_types`) has never been read by anything that ticks. |
+| 1 | [#204](https://github.com/matteopolak/lodestone/issues/204) | `ChunkWorld` (the only `PathWorld` a running server uses) classifies every block solid/air only; the 32,366-state JVM-dumped path-type census (`lodestone-data::path_types`) has never been read by anything that ticks. |
 | 2 | [#205](https://github.com/matteopolak/lodestone/issues/205) | `MobSim::spawn` hardcodes `entity_type = "minecraft:zombie"` and an empty `GoalSelector` — there is no species→(attributes, shape, goal-set) registry. Hard prerequisite for every roster issue in Phase 2. |
 | 3 | [#207](https://github.com/matteopolak/lodestone/issues/207) | `damage.rs`'s ordered reduction pipeline has zero consumers; `NavigatingMob::attack` just logs the call to a `Vec` for tests. No hit anywhere reduces a health value. |
 | 4 | [#209](https://github.com/matteopolak/lodestone/issues/209) | The `brain` system (Vanilla's *other* AI architecture — villager, piglin, warden, and 17 more) has no `NavigatingMob`-equivalent composition and no consumer, despite being as architecturally complete as the goal system was before that composition existed. |
@@ -92,23 +92,29 @@ which meant a mob produced by natural spawning never moved or looked around —
 so they actually do something; combat goals are still the caller's job (they need a
 target, which the spawn cycle has no way to name yet).
 
-**#204 investigated, left open — architectural, not a wiring gap.** The fix this
-issue wants (a `PathWorld` that reads real per-block-state collision/path-type data
-instead of solid/air) has to live in a version crate: `lodestone-v770::path_types`
-already generates exactly that 32,366-state census, `PathType` in
-`lodestone-model`/`lodestone-entity` already mirrors it variant-for-variant, and the
-bridge is a mechanical id-lookup — genuinely cheap *if* `lodestone-server` could see
-it. It cannot: `lodestone-server/Cargo.toml` documents, in its own dependency
-comment, that `lodestone-entity` (and by construction the whole server crate) adds
-"no version/protocol coupling" — `lodestone-server` has zero dependency on any
-`protocol/*` crate today, only `lodestone-shell` does. Wiring the real census into
-the server's own `MobSim::ChunkWorld` would mean either giving `lodestone-server` a
-version dependency (reversing a documented, deliberate boundary) or having
-`lodestone-shell` supply a richer `PathWorld` — and `lodestone-shell` is out of this
-session's edit scope (held by another agent). Closing this for real needs a
-cross-crate decision, not a local patch; flagging rather than guessing, per this
-project's own standing warning against inventing block classification by hand
-instead of sourcing it from the JVM census.
+**#204 investigated, left open — was architectural, now just a wiring gap.** The
+fix this issue wants (a `PathWorld` that reads real per-block-state
+collision/path-type data instead of solid/air) used to be blocked on a real
+structural problem: the 32,366-state census only existed behind
+`crates/protocol/v770`, and `lodestone-server` correctly refuses a dependency on
+any `protocol/*` crate (`lodestone-server/Cargo.toml` documents "no
+version/protocol coupling" in its own dependency comment) — so wiring the real
+census into `MobSim::ChunkWorld` meant either reversing that boundary or having
+`lodestone-shell` supply a richer `PathWorld`, making the server's fidelity
+depend on the client.
+
+Issue #361 extracted `path_types` (and the other eighteen game-data censuses) out
+of `crates/protocol/v770` into `lodestone-data`, a crate with no protocol
+dependency of its own — see `docs/lodestone-data-crate.md`. `lodestone-data`'s
+`path_types::PathTypes` already implements `lodestone_model::PathTypeRegistry`,
+and `PathType` in `lodestone-model`/`lodestone-entity` already mirrors it
+variant-for-variant, so the boundary problem is gone: `lodestone-server` can add
+a plain data dependency without reversing anything. What is left is genuinely a
+local patch, not a cross-crate decision: add `lodestone-data` to
+`lodestone-server/Cargo.toml`, and have `MobSim::ChunkWorld` (or whatever
+implements `PathWorld` for the server) resolve each cell's block-state id through
+`lodestone_data::path_types::path_type` instead of the solid/air approximation.
+Not done in #361 itself — that issue was scoped to the move only.
 
 ## Phase 1 — Spawning
 

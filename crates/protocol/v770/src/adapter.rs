@@ -26,13 +26,13 @@ use lodestone_model::{
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
-use crate::block_states::block_type_name;
+use lodestone_data::block_states::block_type_name;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
-use crate::data_component_types::component_type_name;
-use crate::entity_types::entity_type_name;
-use crate::items::{item_id, item_name};
-use crate::menus::menu_name;
-use crate::mob_effects::{mob_effect_id, mob_effect_name};
+use lodestone_data::data_component_types::component_type_name;
+use lodestone_data::entity_types::entity_type_name;
+use lodestone_data::items::{item_id, item_name};
+use lodestone_data::menus::menu_name;
+use lodestone_data::mob_effects::{mob_effect_id, mob_effect_name};
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use crate::packets::common::{
@@ -71,8 +71,8 @@ use crate::packets::scoreboard::{
     self as sb, BossEvent, ResetScore, SetDisplayObjective, SetObjective, SetPlayerTeam, SetScore,
 };
 use crate::packets::time::SetTime;
-use crate::particle_types::particle_type_name;
-use crate::sound_events::sound_event;
+use lodestone_data::particle_types::particle_type_name;
+use lodestone_data::sound_events::sound_event;
 
 /// Protocol version implemented by this adapter.
 pub const PROTOCOL: i32 = 776;
@@ -815,7 +815,7 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
 ///
 /// `max_stack_size`, `max_damage` and `equippable` are **not** patch fields —
 /// they are the item's built-in prototype values, folded with whatever the patch
-/// says. They are seeded here from [`crate::item_prototypes`] *before* the patch
+/// says. They are seeded here from [`lodestone_data::item_prototypes`] *before* the patch
 /// is read, because a clientbound patch almost never mentions any of them
 /// (vanilla keeps all three in the prototype component map) and a stack that
 /// reported "unknown" for them would leave armour unequippable and every stack
@@ -828,7 +828,7 @@ fn read_component_patch(
     let added = reader.var_i32().map_err(dec_err)?;
     let removed = reader.var_i32().map_err(dec_err)?;
     let mut components = ItemComponents::default();
-    if let Some(prototype) = crate::item_prototypes::prototype(item) {
+    if let Some(prototype) = lodestone_data::item_prototypes::prototype(item) {
         components.max_stack_size = Some(u32::from(prototype.max_stack_size));
         components.max_damage = prototype.max_damage.map(u32::from);
         components.equippable = prototype.equip_slot;
@@ -938,7 +938,7 @@ fn read_component_patch(
 /// Note this component is *rarely* on the wire: a stack carries only the delta
 /// from its item's prototype component map, and vanilla puts a pickaxe's
 /// `minecraft:tool` in that prototype. It appears for `/give …[minecraft:tool={…}]`
-/// and datapack-authored items. The prototype half lives in [`crate::tool`];
+/// and datapack-authored items. The prototype half lives in [`lodestone_data::tool`];
 /// both feed the same evaluator.
 fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
@@ -4146,11 +4146,12 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn entity_dimensions(&self, entity_type_id: i32) -> Option<EntityBaseDimensions> {
-        // The base hitbox census is version data homed in this crate; the
-        // registry seam reaches it through here so a version-free consumer never
-        // names v770. Base dims only — the caller folds SCALE/STEP_HEIGHT from
-        // the entity's attribute map.
-        crate::entity_dimensions::base_dimensions(entity_type_id)
+        // The base hitbox census is 26.2 game data homed in `lodestone-data`
+        // (issue #361); the registry seam reaches it through here so a
+        // version-free consumer never names v770 or the data crate directly.
+        // Base dims only — the caller folds SCALE/STEP_HEIGHT from the
+        // entity's attribute map.
+        lodestone_data::entity_dimensions::base_dimensions(entity_type_id)
     }
 
     fn entity_facts(&self, entity_type: &ResourceKey) -> Option<EntityFacts> {
@@ -4159,22 +4160,23 @@ impl VersionAdapter for V770Adapter {
         // consumer downstream of ingest still holds. Both lookups are indexed by
         // the same id, so resolving the key once serves both, and a type outside
         // either census misses whole rather than half-answering.
-        let id = crate::entity_types::entity_type_id_parts(
+        let id = lodestone_data::entity_types::entity_type_id_parts(
             entity_type.namespace(),
             entity_type.path(),
         )?;
         Some(EntityFacts {
-            dimensions: crate::entity_dimensions::base_dimensions(id)?,
-            pushes_players: crate::entity_census::pushes_players(id)?,
+            dimensions: lodestone_data::entity_dimensions::base_dimensions(id)?,
+            pushes_players: lodestone_data::entity_census::pushes_players(id)?,
         })
     }
 
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
-        // The per-block-state hardness census is version data homed in this
-        // crate; the registry seam reaches it through here so a version-free
-        // consumer never names v770. `requires_correct_tool` is the *block's*
-        // requirement, not the player's tool match — see `BlockHardness`.
-        crate::hardness::hardness(state_id).map(|entry| BlockHardness {
+        // The per-block-state hardness census is 26.2 game data homed in
+        // `lodestone-data` (issue #361); the registry seam reaches it through
+        // here so a version-free consumer never names v770 or the data crate
+        // directly. `requires_correct_tool` is the *block's* requirement, not
+        // the player's tool match — see `BlockHardness`.
+        lodestone_data::hardness::hardness(state_id).map(|entry| BlockHardness {
             hardness: entry.hardness,
             requires_correct_tool: entry.requires_correct_tool,
         })
@@ -4182,21 +4184,23 @@ impl VersionAdapter for V770Adapter {
 
     fn tool_mining(&self, held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
         // The `minecraft:tool` census — item prototypes, block tag membership,
-        // and the block-state→block-registry map — is version data homed in this
-        // crate; the registry seam reaches it through here so a version-free
-        // consumer never names v770. The returned `correct_tool` is already
+        // and the block-state→block-registry map — is 26.2 game data homed in
+        // `lodestone-data` (issue #361); the registry seam reaches it through
+        // here so a version-free consumer never names v770 or the data crate
+        // directly. The returned `correct_tool` is already
         // `Player.hasCorrectToolForDrops`, block requirement folded in, so the
         // caller has nothing left to invert.
-        crate::tool::mining(held, state_id)
+        lodestone_data::tool::mining(held, state_id)
     }
 
     fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
-        // The per-block-state collision census is version data homed in this
-        // crate (dumped from the real 26.2 server's `Block.BLOCK_STATE_REGISTRY`);
-        // the registry seam reaches it through here so a version-free consumer
-        // never names v770. Zero-copy: `collision_shapes::Aabb` *is*
-        // `BlockAabb`, so this hands back the rodata slice itself.
-        crate::collision_shapes::collision_boxes(state_id)
+        // The per-block-state collision census is 26.2 game data homed in
+        // `lodestone-data` (issue #361; dumped from the real 26.2 server's
+        // `Block.BLOCK_STATE_REGISTRY`); the registry seam reaches it through
+        // here so a version-free consumer never names v770 or the data crate
+        // directly. Zero-copy: `collision_shapes::Aabb` *is* `BlockAabb`, so
+        // this hands back the rodata slice itself.
+        lodestone_data::collision_shapes::collision_boxes(state_id)
     }
 
     fn block_name(&self, state_id: u32) -> Option<&'static str> {
@@ -4204,33 +4208,35 @@ impl VersionAdapter for V770Adapter {
         // asset baker resolves properties through. `&'static str` out of rodata,
         // O(1), no instance and no allocation — the physics seam calls this for
         // the block under the player every tick.
-        crate::block_states::block_name(state_id)
+        lodestone_data::block_states::block_name(state_id)
     }
 
     fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // `BlockStateBase.getShape` — the shape `Entity.pick` clips against, and
-        // a third thing beside collision and fluid presence. Version data homed
-        // in this crate; zero-copy out of rodata. See `crate::outline_shapes` for
-        // why half of all states disagree with `block_collision`.
-        crate::outline_shapes::outline_boxes(state_id)
+        // a third thing beside collision and fluid presence. 26.2 game data
+        // homed in `lodestone-data` (issue #361); zero-copy out of rodata. See
+        // `lodestone_data::outline_shapes` for why half of all states disagree
+        // with `block_collision`.
+        lodestone_data::outline_shapes::outline_boxes(state_id)
     }
 
     fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // `BlockStateBase.getInteractionShape` — empty for all but four block
         // families, and a *face* refinement on top of the outline hit rather than
         // a clip target of its own.
-        crate::outline_shapes::interaction_boxes(state_id)
+        lodestone_data::outline_shapes::interaction_boxes(state_id)
     }
 
     fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
         // The item-prototype census (`minecraft:max_stack_size`,
-        // `minecraft:max_damage`, `minecraft:equippable`) is version data homed
-        // in this crate, because a clientbound stack carries only the *patch*
-        // against it and so none of the three is ever on the wire. Stacks decoded
+        // `minecraft:max_damage`, `minecraft:equippable`) is 26.2 game data
+        // homed in `lodestone-data` (issue #361), because a clientbound stack
+        // carries only the *patch* against it and so none of the three is
+        // ever on the wire. Stacks decoded
         // by this adapter already have these folded into
         // `ItemComponents`' effective fields; this seam is for callers with no
         // stack in hand.
-        crate::item_prototypes::model_prototype(item)
+        lodestone_data::item_prototypes::model_prototype(item)
     }
 
     fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
@@ -4239,7 +4245,7 @@ impl VersionAdapter for V770Adapter {
         // (`forceSolidOn` on 237 blocks, `forceSolidOff` on 8, and a null shape
         // cache on the 23 `dynamicShape()` blocks) are invisible to any shape
         // table, and skipping them is wrong for 2,618 of 32,366 states. One bit
-        // out of rodata. See `crate::block_solidity`.
-        crate::block_solidity::blocks_motion(state_id)
+        // out of rodata. See `lodestone_data::block_solidity`.
+        lodestone_data::block_solidity::blocks_motion(state_id)
     }
 }

@@ -217,7 +217,7 @@ versions, not state-keyed, so putting it behind the version seam would be the ov
 to change it" below warns against — it is a plain function in the version-free crate a plugin already
 depends on, which is exactly where `docs/baritone-port.md` §7.5 wanted it to end up.
 
-**What is still open:** `PathType` per state. `crates/protocol/v770/src/path_types.rs`'s census still
+**What is still open:** `PathType` per state. `crates/lodestone-data/src/path_types.rs`'s census still
 has no `VersionAdapter` method (`lodestone_model::PathTypeRegistry` exists; nothing constructs one
 from v770 data) — confirmed still true, unaffected by either `67ff7c3` or `24af787`. That is the one
 piece of `docs/baritone-port.md` §7.5's "the important one" gap still without a route for a plugin.

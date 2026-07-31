@@ -15,7 +15,7 @@ they are keyed differently:
 | `bounce_restitution` | `Block.getBounceRestitution`, net of `BlockTags.SUPPRESSES_BOUNCE` | block name | same |
 | `stuck_multiplier` | `Block.entityInside` → `Entity.makeStuckInBlock` | block name | same |
 | `climbable` | `BlockTags.CLIMBABLE` | block name | same |
-| `blocks_motion` | `BlockState.blocksMotion()` | block **state id** | `lodestone_v770::block_solidity`, reached via `VersionAdapter::block_blocks_motion` |
+| `blocks_motion` | `BlockState.blocksMotion()` | block **state id** | `lodestone_data::block_solidity`, reached via `VersionAdapter::block_blocks_motion` |
 
 The six name-keyed ones used to be private functions inside
 `crates/lodestone-shell/src/collision.rs`, hand-transcribed from decompiled
@@ -75,10 +75,10 @@ beds (`bounceRestitution` 0.75), ice / packed ice / frosted ice (friction 0.98),
 blue ice (0.989), slime block (friction 0.8, restitution 1.0), soul sand
 (`speedFactor` 0.4) and honey block (`speedFactor` 0.4, `jumpFactor` 0.5).
 
-### `lodestone_v770::block_solidity` — the state-keyed half
+### `lodestone_data::block_solidity` — the state-keyed half
 
-Two bitsets of 4,046 bytes each in `src/generated/block_solidity.rs`, read
-through `src/block_solidity.rs`:
+Two bitsets of 4,046 bytes each in `crates/lodestone-data/src/generated/block_solidity.rs`, read
+through `crates/lodestone-data/src/block_solidity.rs`:
 
 ```rust
 pub fn legacy_solid(id: u32) -> Option<bool>;   // BlockState.isSolid()
@@ -115,7 +115,7 @@ That is the whole shape of the problem in one block.
 
 ### Measured: what the shape derivation cost
 
-Not estimated. `crates/protocol/v770/tests/block_physics.rs` reproduces the old
+Not estimated. `crates/lodestone-data/tests/block_physics.rs` reproduces the old
 `shape_is_solid` body verbatim over the committed collision census and compares
 it to the dumped truth for all 32,366 states:
 
@@ -158,7 +158,7 @@ a right answer rather than a plausible one.
   `name_keyed_constants_match_the_committed_dump_for_every_block`. Do **not** add
   it privately to `collision.rs`; that is the mistake this doc exists to undo.
 - **A data bump (new MC version)** — re-dump and regenerate per the two commands
-  in `crates/protocol/v770/tests/block_physics.rs`'s module docs. The dump is
+  in `crates/lodestone-data/tests/block_physics.rs`'s module docs. The dump is
   byte-reproducible across runs. The oracle reflects into
   `BlockBehaviour.Properties`' private `forceSolid*` fields and needs **no**
   `--add-opens`, because the server jar sits on the classpath and so lands in the
@@ -213,7 +213,7 @@ a right answer rather than a plausible one.
   `VersionAdapter::block_blocks_motion` is unreachable and `blocks_motion`
   degrades to the shape derivation (wrong for the 202 blocks above), the same way
   collision degrades to unit cubes.
-- `LODESTONE_REGEN=1` regenerates `src/generated/block_solidity.rs` from the
+- `LODESTONE_REGEN=1` regenerates `crates/lodestone-data/src/generated/block_solidity.rs` from the
   committed dump.
 - `LODESTONE_ASSETS` — needed by the `#[ignore]`d shell gates that check the seam
   reaches `CollisionView`.

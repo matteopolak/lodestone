@@ -32,7 +32,7 @@ What each one broke while it was missing (all three were, until this landed):
 
 ### The dump
 
-`crates/protocol/v770/oracle-java/ItemPrototypeOracle.java` boots the real 26.2
+`crates/lodestone-data/oracle-java/ItemPrototypeOracle.java` boots the real 26.2
 server, binds the vanilla datapack's tags, runs the data-component initializers,
 and walks `BuiltInRegistries.ITEM` in **registry-id order**. One record per item:
 
@@ -46,14 +46,14 @@ item's prototype component map is baked at datapack reload rather than class-ini
 — `Item.components()` throws *"Components not bound yet"* until
 `DATA_COMPONENT_INITIALIZERS` has been built and applied.
 
-Committed at `crates/protocol/v770/tests/support/item_prototype_jvm.txt`
+Committed at `crates/lodestone-data/tests/support/item_prototype_jvm.txt`
 (1,537 rows, 67 KB) as the external anchor.
 
 ### Regenerating
 
 ```bash
 CACHE="$(cd .cache/mc/26.2 && pwd)"
-HERE="$(cd crates/protocol/v770/oracle-java && pwd)"
+HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
 docker run --rm -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work eclipse-temurin:25-jdk bash -c '
   CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
   cp /oracle/ItemPrototypeOracle.java /work/ && javac -cp "$CP" -d /work /work/ItemPrototypeOracle.java
@@ -65,12 +65,12 @@ LODESTONE_REGEN=1 cargo test -p lodestone-v770 --test item_prototypes \
 
 ### The table and the lookup
 
-`crates/protocol/v770/src/generated/item_prototypes.rs` is a flat
+`crates/lodestone-data/src/generated/item_prototypes.rs` is a flat
 `[ItemPrototypeDef; 1537]` **indexed by network registry id** — no
 de-duplication, because 1,537 entries of five small fields is ~12 KiB of rodata
 and a direct index keeps the hot lookup a single bounds check.
 
-`crates/protocol/v770/src/item_prototypes.rs` exposes:
+`crates/lodestone-data/src/item_prototypes.rs` exposes:
 
 - `prototype_by_id(i32)` — O(1), the hot path (the stack decoder already holds
   the registry id);
@@ -132,7 +132,7 @@ slot, and the census now makes that reachable:
 | `minecraft:leather_horse_armor` … `diamond_horse_armor` | `body` | `#minecraft:can_wear_horse_armor` |
 | `minecraft:saddle` | `saddle` | `#minecraft:can_equip_saddle` |
 
-`animal_armour_is_body_not_chest` in `crates/protocol/v770/tests/item_prototypes.rs`
+`animal_armour_is_body_not_chest` in `crates/lodestone-data/tests/item_prototypes.rs`
 pins all of them.
 
 ### 2. Only the slot is carried, not `allowedEntities`
@@ -208,9 +208,9 @@ Values hand-checked against the decompiled source and cited in the tests:
   version-free carriers.
 - `lodestone_model::VersionAdapter::item_prototype` — the only route a
   version-free consumer has to the census without naming `lodestone-v770`.
-- `crates/protocol/v770/src/items.rs` — the `registries.json`-derived item name
+- `crates/lodestone-data/src/items.rs` — the `registries.json`-derived item name
   table, used both for the by-name lookup and as the cross-check artifact.
-- `crates/protocol/v770/src/data_component_types.rs` — component type ids, for
+- `crates/lodestone-data/src/data_component_types.rs` — component type ids, for
   the patch overrides.
 
 ## Not yet consumed

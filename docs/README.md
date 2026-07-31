@@ -332,3 +332,37 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   following the player between chunk columns — the three things a served
   session needed to survive, keep time, and follow the player, and why every
   piece the client needed already existed and drew nothing until this landed.
+- [The `lodestone-data` crate](./lodestone-data-crate.md) — the nineteen game-data
+  censuses extracted out of `crates/protocol/v770`, where exactly one table
+  (`packet_ids.rs`) was ever wire format: why a server should not need a
+  wire-format implementation to know how tall a zombie is, the two tables that
+  deliberately did **not** move (`entity_variants.rs`, keyed by metadata
+  serializer id rather than a registry, and `ShapeOracle.java`, whose output two
+  independent tests cite as provenance), why `VersionAdapter::block_facts` and
+  friends stay as trait methods with the smell recorded rather than acted on, and
+  what #204 now takes.
+- [Protocol 340 flattening table](./protocol-340-flattening-table.md) — the
+  `id:meta` → block-state table for 1.12.2, derived from the real 1.13.2 jar's own
+  `DataFixerUpper` rather than from `minecraft-data` or the 1.12.2 jar, with the
+  full enumeration of ambiguous cases in both directions — including the 2400
+  slots where vanilla itself silently falls back to air and this table refuses to
+  — and every `minecraft-data` disagreement.
+- [Block editing](./block-edit.md) — dig and place closing the loop on a served
+  world: the decode→mutate→confirm path for `player_action`/`use_item_on`, why
+  nothing retained a generated chunk column before this and why the retention that
+  now does is edit-only rather than read-through, the break sequence's
+  start/abort/stop semantics, why placement always writes plain stone (there is no
+  inventory model to pick from), and the unrelated pre-existing gap it uncovered in
+  the whole-column encoder.
+- [Chunk memory pool footprint](./chunk-memory-pool-footprint.md) — issue #362's
+  measured verdict on a size-classed buffer pool for chunk sections: real
+  32-radius terrain populates exactly **one** of the 14 arithmetic size classes
+  (and only 6 are structurally reachable at all), palettes never exceed 6 entries,
+  the inflation hazard the proposal was designed around does not exist today and
+  would be *introduced* by a naive pool — so the recommendation is not to build
+  it. Also records an accounting gap worth more than the issue itself.
+- [The `gpu/` module layout](./gpu-module-layout.md) — what went where when
+  `gpu.rs` was split (#359), why `RenderState` stays in the module root, and the
+  constraints that travel with the code rather than staying behind: the
+  4-bind-group floor, and why the WGSL shaders were moved by line extraction
+  instead of retyped.

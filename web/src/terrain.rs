@@ -39,7 +39,7 @@ use lodestone_render::{
     BlockClassifier, Cell, ChunkSectionView, Face, Mesh, SectionNeighborhood, SpriteId, Surface,
     UniformLight, mesh_greedy,
 };
-use lodestone_v770::block_states::{block_name, properties};
+use lodestone_data::block_states::{block_name, properties};
 use lodestone_v770::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_world::ChunkColumn;
 

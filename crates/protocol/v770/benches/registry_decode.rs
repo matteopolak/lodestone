@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use lodestone_model::BlockStateRegistry;
-use lodestone_v770::block_states::{BlockStateTable, STATE_COUNT, block_name, properties};
+use lodestone_data::block_states::{BlockStateTable, STATE_COUNT, block_name, properties};
 
 /// Every state id `0..STATE_COUNT`, the same population a full chunk decode's
 /// worth of distinct-block-type resolution would touch over time (a chunk

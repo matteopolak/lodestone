@@ -3,8 +3,11 @@
 //! A chunk section palette yields numeric *block state ids* straight off the
 //! wire; rendering needs to turn each into a block name plus its property values
 //! (`facing=north`, `snowy=false`, …), because the blockstate/model JSON is keyed
-//! by exactly those. That id → (block, properties) mapping is version-specific
-//! generated data, so it lives here rather than in a version-free crate.
+//! by exactly those. That id → (block, properties) mapping is generated data
+//! specific to 26.2, the one canonical internal version (#343). It is a
+//! game-data census, not wire-format code, so it lives here in this data
+//! crate (issue #361) rather than in `lodestone-v770` or in the fully
+//! version-free `lodestone-model`.
 //!
 //! # Memory design
 //!

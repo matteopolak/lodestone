@@ -3,8 +3,12 @@
 //! Land navigation classifies each block state into a [`PathType`] — open,
 //! blocked, water, lava, fence, closed door, rail, damaging, … — via vanilla's
 //! `WalkNodeEvaluator.getPathTypeFromState`. This is the version-free seam
-//! ([`lodestone_model::PathTypeRegistry`]); the numbers are version-specific, so
-//! the table lives here in the version crate.
+//! ([`lodestone_model::PathTypeRegistry`]); the table itself is 26.2 game data
+//! generated from a headless-server dump and lives here in this data crate
+//! (issue #361) rather than in `lodestone-v770` — which is exactly what lets
+//! `lodestone-server` (zero protocol dependency by design) read it directly
+//! for real node classification instead of the solid/air approximation
+//! `ChunkWorld` uses today (issue #204).
 //!
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!

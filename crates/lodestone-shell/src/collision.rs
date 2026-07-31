@@ -278,7 +278,7 @@ fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
 // private item in the client shell. Both are fixed by
 // `lodestone_model::block_physics`, a `pub fn` in the version-free model crate,
 // anchored to a JVM dump of all 1,196 registered blocks by
-// `crates/protocol/v770/tests/block_physics.rs`. See
+// `crates/lodestone-data/tests/block_physics.rs`. See
 // `docs/block-physics-constants.md`.
 //
 // The lookup is done once per query rather than field by field: `block_physics`
@@ -362,7 +362,7 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
 ///
 /// This function used to be the geometry branch plus a hard-coded ladder
 /// exception, and that was **wrong for 2,618 of 32,366 states across 202
-/// blocks** — measured in `crates/protocol/v770/tests/block_physics.rs`, not
+/// blocks** — measured in `crates/lodestone-data/tests/block_physics.rs`, not
 /// estimated. 2,497 of those states are cells vanilla stops you in and we let you
 /// walk through: every sign, hanging sign, banner, wall, pressure plate, chain,
 /// lantern, lightning rod, dead coral, *open* fence gate, cake, bell, conduit,
@@ -1326,7 +1326,7 @@ mod tests {
 
     /// The name-keyed constants now come from `lodestone_model::block_physics`,
     /// which is anchored to a dump of all 1,196 blocks the real 26.2 server
-    /// registers (`crates/protocol/v770/tests/block_physics.rs`). This test is not
+    /// registers (`crates/lodestone-data/tests/block_physics.rs`). This test is not
     /// a second copy of that gate — it is the **shell's** contract on the table:
     /// the rows this module's `*_at` helpers depend on, plus the fallback
     /// behaviour that is this module's own (`DEFAULT_BLOCK_PHYSICS` for an

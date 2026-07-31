@@ -7,7 +7,7 @@ Per-block-state `BlockStateBase.getShape` (the **outline**) and
 from the real 26.2 server and committed as generated tables.
 
 The outline shape is what **block selection** uses. It is a third thing, neither
-the collision shape ([`collision_shapes`](../crates/protocol/v770/src/collision_shapes.rs))
+the collision shape ([`collision_shapes`](../crates/lodestone-data/src/collision_shapes.rs))
 nor fluid presence — 50.9% of the 32,366 block states have an outline that
 differs from their collision shape.
 
@@ -70,7 +70,7 @@ Only four block families override it in 26.2: the cauldron family
 
 ### The dump
 
-`crates/protocol/v770/oracle-java/OutlineShapeOracle.java` boots the real 26.2
+`crates/lodestone-data/oracle-java/OutlineShapeOracle.java` boots the real 26.2
 server and walks `Block.BLOCK_STATE_REGISTRY`, dumping both shapes'
 `toAabbs()`. Unlike `lodestone-physics`'s `ShapeOracle` (whose 5.7 MB
 `shape_java.txt` is gitignored), this dumper **de-duplicates in the JVM**, by
@@ -89,13 +89,13 @@ to a per-state name and reconciles all 32,366 against
 `block_states::block_name`, which is generated from `blocks.json` — a second,
 independently produced artifact.
 
-Committed at `crates/protocol/v770/tests/support/outline_shape_jvm.txt`.
+Committed at `crates/lodestone-data/tests/support/outline_shape_jvm.txt`.
 
 ### Regenerating
 
 ```bash
 CACHE="$(cd .cache/mc/26.2 && pwd)"
-HERE="$(cd crates/protocol/v770/oracle-java && pwd)"
+HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
 docker run --rm -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work eclipse-temurin:25-jdk bash -c '
   CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
   cp /oracle/OutlineShapeOracle.java /work/ && javac -cp "$CP" -d /work /work/OutlineShapeOracle.java
@@ -107,12 +107,12 @@ LODESTONE_REGEN=1 cargo test -p lodestone-v770 --test outline_shapes \
 
 ### The tables and the lookup
 
-`crates/protocol/v770/src/generated/outline_shapes.rs`, same memory design as the
+`crates/lodestone-data/src/generated/outline_shapes.rs`, same memory design as the
 collision table: pure rodata, zero heap, O(1) by id. **860 distinct outline
 shapes** and **8 distinct interaction shapes** over 32,366 states, each family a
 `[u16; 32_366]` index (~63 KiB) into a de-duplicated shape table.
 
-`crates/protocol/v770/src/outline_shapes.rs` exposes `outline_boxes(u32)` and
+`crates/lodestone-data/src/outline_shapes.rs` exposes `outline_boxes(u32)` and
 `interaction_boxes(u32)`, both `Option<&'static [BlockAabb]>`. An **empty slice is
 a meaningful answer** — the state exists and cannot be targeted — and is distinct
 from `None`, which means the id is not a state this version knows.
@@ -216,9 +216,9 @@ air's empty outline.
   collision seam.
 - `lodestone_model::VersionAdapter::{block_outline, block_interaction}` — the only
   route a version-free consumer has without naming `lodestone-v770`.
-- `crates/protocol/v770/src/block_states.rs` — `block_name`, used as the
+- `crates/lodestone-data/src/block_states.rs` — `block_name`, used as the
   cross-check artifact.
-- `crates/protocol/v770/src/collision_shapes.rs` — read only by the divergence
+- `crates/lodestone-data/src/collision_shapes.rs` — read only by the divergence
   control, never as a fallback.
 
 ## Consumption status

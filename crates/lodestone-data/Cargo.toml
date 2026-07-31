@@ -1,0 +1,22 @@
+[package]
+name = "lodestone-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The only external dependency: every census table resolves to a
+# version-free model type (BlockAabb, PathType, ItemPrototype,
+# EntityBaseDimensions, ...) so a consumer never needs a protocol crate to
+# read game data. See docs/lodestone-data-crate.md.
+lodestone-model = { workspace = true }
+
+[dev-dependencies]
+# Only the registry-report generators (attribute_types, entity_types,
+# block_states, tools) parse `registries.json`/`blocks.json` JSON reports for
+# their `#[ignore]`d drift guards.
+serde_json = { workspace = true }

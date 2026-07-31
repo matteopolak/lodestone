@@ -14,7 +14,7 @@ for tool fields, so a pickaxe made nothing faster: obsidian was ~4m10s of
 unbroken holding regardless of what was in hand.
 
 **This doc covers the data/evaluation seam** —
-`crates/protocol/v770/src/tool.rs`, `lodestone_model::VersionAdapter::tool_mining`,
+`crates/lodestone-data/src/tool.rs`, `lodestone_model::VersionAdapter::tool_mining`,
 and the generated tables — plus, as of the session that followed `875f452`, its
 consumer. `crates/lodestone-shell/src/interact.rs`'s `drive_mining` resolves the
 selected hotbar slot through `tool_mining_item`, calls `VersionAdapter::tool_mining(held, state_id)`,
@@ -50,7 +50,7 @@ only covers the wire, and the wire is not where most tools live:
    that prototype (`ToolMaterial.applyToolProperties`), so `/give … diamond_pickaxe`
    arrives as an **empty patch**. The client is expected to already know the
    component — that prototype table is version data
-   (`crate::generated_tools::ITEM_TOOLS` in `crates/protocol/v770/src/generated/tools.rs`).
+   (`crate::generated_tools::ITEM_TOOLS` in `crates/lodestone-data/src/generated/tools.rs`).
 2. **A rule names blocks by tag** (`Tool.Rule.blocks`, typically
    `#minecraft:mineable/pickaxe` or `#minecraft:incorrect_for_<material>_tool`).
    Tag membership is version data (`generated::BLOCK_TAGS`).
@@ -64,7 +64,7 @@ the exact same code path, so the two sources cannot drift apart.
 
 ### The evaluation entry point
 
-`crates/protocol/v770/src/tool.rs`, `pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining>`:
+`crates/lodestone-data/src/tool.rs`, `pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining>`:
 
 1. Looks up `BlockHardness::requires_correct_tool` for `state_id` (reuses the
    existing hardness census — see `block-break-timing.md`). Returns `None` if
@@ -109,8 +109,8 @@ a caller has nothing left to invert (see Gotcha 1).
 
 The tick-accumulation formula itself lives in `lodestone-game`'s `mining`
 module (`BreakInputs`, `Mining::continue_`) and is unchanged by this commit —
-this commit supplies inputs to it, not the loop. `crates/protocol/v770/tests/tools.rs`
-restates the shape (since `lodestone-v770` cannot depend on `lodestone-game`)
+this commit supplies inputs to it, not the loop. `crates/lodestone-data/tests/tools.rs`
+restates the shape (since `lodestone-data` cannot depend on `lodestone-game`)
 as `fn ticks_to_break`:
 
 ```rust
@@ -137,7 +137,7 @@ division, and it is server-confirmed.
 ### Data source
 
 Same headless-server-dump pattern as the pre-existing hardness census, in a
-new file: `crates/protocol/v770/oracle-java/ToolOracle.java`, boots the real
+new file: `crates/lodestone-data/oracle-java/ToolOracle.java`, boots the real
 26.2 server, binds the vanilla datapack's tags, runs the item component
 initializers, and dumps three record kinds to stdout:
 
@@ -150,9 +150,9 @@ initializers, and dumps three record kinds to stdout:
 None of the three is on the wire in the normal case (see "why a version-owned
 census" above), so none of them can be derived from a live packet capture —
 only from booting the jar. The dump is committed at
-`crates/protocol/v770/tests/support/tool_jvm.txt` as the external anchor.
+`crates/lodestone-data/tests/support/tool_jvm.txt` as the external anchor.
 
-`crates/protocol/v770/tests/tools.rs` parses that dump and, in an
+`crates/lodestone-data/tests/tools.rs` parses that dump and, in an
 `#[ignore]`d `committed_tables_match_dump` (actually named
 `committed_tables_cover_the_committed_dump` for the hermetic half — see below),
 regenerates `src/generated/tools.rs` and `src/generated/block_registry.rs`
@@ -161,7 +161,7 @@ and diffs against what is committed. To regenerate after a version bump:
 ```text
 # 1. Re-dump from the server
 CACHE="$(cd .cache/mc/26.2 && pwd)"
-HERE="$(cd crates/protocol/v770/oracle-java && pwd)"
+HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
 docker run --rm -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work eclipse-temurin:25-jdk bash -c '
   CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
   cp /oracle/ToolOracle.java /work/ && javac -cp "$CP" -d /work /work/ToolOracle.java
@@ -182,7 +182,7 @@ tags. Two of those cross-checks are committed as tests, not just claims.
 
 The **hardness** half (`requires_correct_tool` per state) is *not* new here —
 it is the table `block-break-timing.md` already documents, dumped by
-`HardnessOracle.java` and read by `crates/protocol/v770/src/hardness.rs`. This
+`HardnessOracle.java` and read by `crates/lodestone-data/src/hardness.rs`. This
 commit only adds the tool/registry/tag data on top of it.
 
 ### The live wire-decode gate
@@ -209,8 +209,8 @@ fixtures are read at all.
 
 ### 1. `correct_tool` and `requires_correct_tool` are inverses, bare-handed
 
-Confirmed against the code (`crates/protocol/v770/src/tool.rs::bare_handed`,
-`crates/protocol/v770/tests/tools.rs::bare_hand_on_stone_is_151_ticks_not_45`,
+Confirmed against the code (`crates/lodestone-data/src/tool.rs::bare_handed`,
+`crates/lodestone-data/tests/tools.rs::bare_hand_on_stone_is_151_ticks_not_45`,
 and the identical warning already on `BlockHardness` in
 `crates/lodestone-model/src/adapter.rs`): this is real and matches the
 description exactly.
@@ -268,7 +268,7 @@ the tree.
 
 ## `block_type_name` was naming every block wrong
 
-Confirmed from the `875f452` diff. `crates/protocol/v770/src/block_states.rs::block_type_name`
+Confirmed from the `875f452` diff. `crates/lodestone-data/src/block_states.rs::block_type_name`
 resolves a `minecraft:block` **registry id** (registration order — the id
 space `block_event`, and a tool rule's explicit block set, actually carry) to
 a name. Before this commit it indexed `generated_block_states::BLOCK_NAMES`
@@ -291,7 +291,7 @@ self-consistent throughout. This was verified, not assumed, in the commit.
 
 **The fix**: `block_type_name` now indexes a new generated,
 registration-ordered table, `generated_block_registry::BLOCK_REGISTRY_NAMES`
-(`crates/protocol/v770/src/generated/block_registry.rs`, 3,248 new lines),
+(`crates/lodestone-data/src/generated/block_registry.rs`, 3,248 new lines),
 built from the same `ToolOracle.java` dump's `B` records — the same dump this
 whole doc is about, because the tool census needed a correct registry-id→name
 map anyway (rules that name blocks explicitly use registry ids).
@@ -316,19 +316,19 @@ external source (here, the registry-order dump) disagrees.
 ## How to change it
 
 - **Item prototypes and block tags** are version-owned generated data:
-  `crates/protocol/v770/src/generated/tools.rs` (`ITEM_TOOLS`, `BLOCK_TAGS`)
-  and `crates/protocol/v770/src/generated/block_registry.rs`
+  `crates/lodestone-data/src/generated/tools.rs` (`ITEM_TOOLS`, `BLOCK_TAGS`)
+  and `crates/lodestone-data/src/generated/block_registry.rs`
   (`STATE_BLOCK`, `BLOCK_REGISTRY_NAMES`). Regenerate via the `LODESTONE_REGEN=1`
   flow above; never hand-edit (`// @generated` headers say so, same convention
   as `hardness.rs`).
 - **Evaluation logic** (rule walking, patch resolution, the bare-hand
-  inversion) is `crates/protocol/v770/src/tool.rs`, entered through
+  inversion) is `crates/lodestone-data/src/tool.rs`, entered through
   `pub fn mining` and exposed version-free via
   `VersionAdapter::tool_mining` (`crates/lodestone-model/src/adapter.rs`,
   implemented in `crates/protocol/v770/src/adapter.rs`).
 - **Known gap — datapack-retagged blocks**: block tags are synced by the
   `update_tags` packet, which this build does not decode. `block_tag_members`
-  (`crates/protocol/v770/src/tool.rs`) therefore always answers from the
+  (`crates/lodestone-data/src/tool.rs`) therefore always answers from the
   vanilla census; a datapack that moves a block between `mineable/*` tags
   mines at the vanilla rate on this client. When `update_tags` is decoded,
   override at `block_tag_members` — it is the single lookup every rule match
@@ -353,31 +353,37 @@ external source (here, the registry-order dump) disagrees.
 | `--protocol <n>` | `Config::protocol` | which version family's tool/tag/registry census is resolved |
 | `live` feature | `lodestone-shell/Cargo.toml` | compiles a version family into the registry at all |
 | `live-tool` feature | `crates/protocol/v770/Cargo.toml` | enables the live `minecraft:tool` wire-decode gate (`live_tool_component`), joins a real server |
-| `LODESTONE_REGEN=1` | env var, `cargo test -p lodestone-v770 --test tools ... -- --ignored` | regenerates the committed generated tables from `tests/support/tool_jvm.txt` instead of asserting against them |
+| `LODESTONE_REGEN=1` | env var, `cargo test -p lodestone-data --test tools ... -- --ignored` | regenerates the committed generated tables from `tests/support/tool_jvm.txt` instead of asserting against them |
 
 ## Dependencies
 
 - `lodestone_model::{ItemStack, ItemComponents, ToolPatch, ItemTool, ToolRule, ToolBlocks, ToolMining}` —
   the version-free item/tool model (`crates/lodestone-model/src/item.rs`,
   `crates/lodestone-model/src/adapter.rs`).
-- `lodestone_model::VersionAdapter::{block_hardness, tool_mining}` — the only
-  route a version-free consumer has to either census; a direct dependency on
-  `lodestone-v770` from outside the protocol layer would mint a second,
-  divergent data seam.
-- `crates/protocol/v770/src/hardness.rs` — the pre-existing per-state
-  hardness census this module reuses for `requires_correct_tool`.
-- `crates/protocol/v770/src/block_states.rs` — `block_name`/`block_type_name`
+- `lodestone_model::VersionAdapter::{block_hardness, tool_mining}` — the route
+  a consumer that only holds a `&dyn VersionAdapter` (`lodestone-shell`,
+  `lodestone-physics`) has to either census. Since issue #361, a consumer that
+  can add a plain data dependency instead — `lodestone-server` in particular —
+  may depend on `lodestone-data` directly rather than go through the trait; it
+  is the same census either way, so this is no longer a "second, divergent"
+  seam, just a second entry point. A dependency on `lodestone-v770` itself
+  from outside the protocol layer remains the thing to avoid — that would
+  pull in wire-format code for a data question.
+- `crates/lodestone-data/src/hardness.rs` — the pre-existing per-state
+  hardness census this module reuses for `requires_correct_tool` (moved out of
+  `lodestone-v770` by issue #361; see `docs/lodestone-data-crate.md`).
+- `crates/lodestone-data/src/block_states.rs` — `block_name`/`block_type_name`
   and the state↔block-name relationship the registry table cross-checks.
 - `lodestone-game::mining` (`BreakInputs`, `Mining`) — the eventual consumer
   of `ToolMining`'s fields, once `sim.rs` is wired (see "Not yet wired into
-  the shell" above). Not a dependency of `lodestone-v770` itself — the break
-  formula is restated in `tests/tools.rs` rather than imported, since
-  `lodestone-v770` cannot depend on `lodestone-game`.
+  the shell" above). Not a dependency of `lodestone-data` or `lodestone-v770`
+  themselves — the break formula is restated in `tests/tools.rs` rather than
+  imported, since neither can depend on `lodestone-game`.
 
 ## Tests
 
 Hermetic, `cargo check --workspace --all-targets` / `cargo test -p lodestone-v770 --no-fail-fast`:
-`crates/protocol/v770/tests/tools.rs` (rule evaluation, the 151/45 pin, the
+`crates/lodestone-data/tests/tools.rs` (rule evaluation, the 151/45 pin, the
 five reference-value ticks table above, block-registry-order cross-checks)
 and the updated `crates/protocol/v770/tests/world_events.rs`
 (`block_event_emits_pos_params_and_block_name` plus the new negative control

@@ -20,7 +20,7 @@ use std::time::Duration;
 use lodestone_client::{BlockPos, ChunkPos, ClientAction, ClientBuilder, Hand, LoginProfile, ServerAddress};
 use lodestone_model::{BlockActionKind, BlockFace, Rotation, Vec3f};
 use lodestone_server::{IntegratedServer, overworld_chunk_source};
-use lodestone_v770::block_states::block_name;
+use lodestone_data::block_states::block_name;
 use lodestone_v770::{V770ServerProtocol, adapter};
 
 fn profile(name: &str) -> LoginProfile {

@@ -522,11 +522,11 @@ preferred data source, and the right one:
 
 | table | where | shape | reachable via `VersionAdapter`? |
 |---|---|---|---|
-| **collision shapes** | [`crates/protocol/v770/src/collision_shapes.rs`](../crates/protocol/v770/src/collision_shapes.rs) | `STATE_SHAPE: [u16; 32_366]` → `SHAPES: [&[Aabb]; 326]` → 716 dedup'd boxes; ~90 KiB rodata, zero heap, O(1) by **state** id | ❌ no method |
-| **path types** | [`crates/protocol/v770/src/path_types.rs`](../crates/protocol/v770/src/path_types.rs) | `[PathType; 32_366]`, one byte each; dumped with the vanilla **datapack tags loaded** — a bare `Bootstrap` leaves tag sets empty and silently misclassifies fences, walls, trapdoors, water and lava | ❌ `PathTypeRegistry` exists in `lodestone-model`; nothing constructs it |
-| **block properties** | `crates/protocol/v770/src/block_states.rs` | `block_name(id)`, `properties(id) -> &'static [(&str,&str)]`, zero-heap | ❌ no method |
-| **hardness** | `crates/protocol/v770/src/hardness.rs` | `{ hardness, requires_correct_tool }` | ✅ `block_hardness` |
-| **tool mining** | `crates/protocol/v770/src/tool.rs` | `{ speed, correct_tool, damage_per_block }` | ✅ `tool_mining` — but **nothing calls it**; `sim.rs` still feeds `BreakInputs::default()`, documented as an island in [`docs/tool-mining.md`](./tool-mining.md) |
+| **collision shapes** | [`crates/lodestone-data/src/collision_shapes.rs`](../crates/lodestone-data/src/collision_shapes.rs) | `STATE_SHAPE: [u16; 32_366]` → `SHAPES: [&[Aabb]; 326]` → 716 dedup'd boxes; ~90 KiB rodata, zero heap, O(1) by **state** id | ❌ no method |
+| **path types** | [`crates/lodestone-data/src/path_types.rs`](../crates/lodestone-data/src/path_types.rs) | `[PathType; 32_366]`, one byte each; dumped with the vanilla **datapack tags loaded** — a bare `Bootstrap` leaves tag sets empty and silently misclassifies fences, walls, trapdoors, water and lava | ❌ `PathTypeRegistry` exists in `lodestone-model`; nothing constructs it |
+| **block properties** | `crates/lodestone-data/src/block_states.rs` | `block_name(id)`, `properties(id) -> &'static [(&str,&str)]`, zero-heap | ❌ no method |
+| **hardness** | `crates/lodestone-data/src/hardness.rs` | `{ hardness, requires_correct_tool }` | ✅ `block_hardness` |
+| **tool mining** | `crates/lodestone-data/src/tool.rs` | `{ speed, correct_tool, damage_per_block }` | ✅ `tool_mining` — but **nothing calls it**; `sim.rs` still feeds `BreakInputs::default()`, documented as an island in [`docs/tool-mining.md`](./tool-mining.md) |
 
 Three of five have **no consumer outside their own drift tests.** That is a large amount of
 oracle-verified data sitting one trait method away from usefulness, which is why §7.5 treats

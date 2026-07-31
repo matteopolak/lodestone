@@ -124,7 +124,7 @@ Delayed-destroy survives as the safety net in the other direction.
 
 ## How to change it
 
-- **Per-block data** is version-owned: `crates/protocol/v770/src/hardness.rs`,
+- **Per-block data** is version-owned: `crates/lodestone-data/src/hardness.rs`,
   generated from a headless server dump. A new version family implements
   `VersionAdapter::block_hardness` and the shell needs no edit.
 - **The input builder** is `dig_break_inputs` in
@@ -162,7 +162,7 @@ Delayed-destroy survives as the safety net in the other direction.
 - `lodestone-model::{BlockHardness, VersionAdapter}` — the data seam.
 - `lodestone-registry::adapter_for_protocol` — the only route to a version crate.
 - `lodestone-physics::FluidState` — `eye_in_water`.
-- `crates/protocol/v770/src/hardness.rs` — the 32,366-state census.
+- `crates/lodestone-data/src/hardness.rs` — the 32,366-state census.
 
 ## Tests
 

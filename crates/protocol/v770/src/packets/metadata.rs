@@ -78,7 +78,7 @@ use lodestone_model::{
     EntityVariant, Identifier, ItemStack, Reported,
 };
 
-use crate::attribute_types::attribute_name;
+use lodestone_data::attribute_types::attribute_name;
 use crate::entity_variants;
 
 /// Sentinel index terminating a metadata list.

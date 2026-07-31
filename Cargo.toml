@@ -55,6 +55,7 @@ lodestone-registry = { path = "crates/lodestone-registry" }
 lodestone-testsupport = { path = "crates/lodestone-testsupport" }
 lodestone-physics = { path = "crates/lodestone-physics" }
 lodestone-entity = { path = "crates/lodestone-entity" }
+lodestone-data   = { path = "crates/lodestone-data" }
 lodestone-v770   = { path = "crates/protocol/v770" }
 lodestone-v47    = { path = "crates/protocol/v47" }
 lodestone-v340 = { path = "crates/protocol/v340" }
