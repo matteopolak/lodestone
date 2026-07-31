@@ -26,6 +26,14 @@ cargo run --release                       # launch the game
   `compile_error!` when more than one allocator feature is on, because each installs its own
   `#[global_allocator]`, so plain `--all-features` **structurally cannot pass** and chasing it is
   wasted time. With that one crate excluded, the whole workspace is clean under `--all-features`.
+- **No `cargo check` sees a doctest, at any feature setting.** `check --all-targets` does not compile
+  them, so a doc example that no longer builds is invisible to every check in this list. The
+  `lodestone-data` extraction (#361) passed all three checks green and then failed
+  `cargo test --workspace` on a single doctest still importing `lodestone_v770::path_types` — 338
+  test binaries clean, one stale `use` line in a `///` block. Prose that *mentions* the old crate is
+  usually correct ("lives here rather than in `lodestone-v770`"); it is the fenced code that rots.
+  **After any crate rename or module move, grep the moved code for the old crate path and run
+  `cargo test` — not just `check`.**
 - **`cargo test -p <crate>` is not one either — it fail-fasts.** It aborts at the *first* failing
   test binary, so everything alphabetically later is never run and never reported. This has misled
   twice: a stale `block_updates` failure hid the new `hardness` gate entirely, and what looked like
