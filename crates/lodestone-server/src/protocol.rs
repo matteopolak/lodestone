@@ -9,7 +9,7 @@
 //! encoders/decoders (plan §3).
 
 use lodestone_core::State;
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::chunk::ChunkColumn;
@@ -105,6 +105,48 @@ pub enum ServerBound {
         /// New absolute z position, in blocks.
         z: f64,
     },
+    /// A block-breaking phase (`ServerboundPlayerActionPacket`'s
+    /// `START_DESTROY_BLOCK`/`ABORT_DESTROY_BLOCK`/`STOP_DESTROY_BLOCK`
+    /// ordinals). The packet's other four ordinals (drop item, drop stack,
+    /// release use, swap-with-offhand, stab) share the same wire packet but
+    /// carry no terrain edit — item handling is out of this crate's scope
+    /// (see `docs/block-edit.md`) — and decode to [`Ignored`](Self::Ignored)
+    /// instead.
+    BlockAction {
+        /// Which phase of the break this is.
+        action: BlockActionKind,
+        /// Target block position.
+        pos: BlockPos,
+        /// Face being mined. Decoded for parity with the wire packet; the
+        /// current break handling does not use it (no per-face behaviour is
+        /// modelled).
+        face: BlockFace,
+        /// Client block-prediction sequence number. Decoded but not yet
+        /// acted on — this crate does not send
+        /// `ClientboundBlockChangedAckPacket`; see `docs/block-edit.md`'s
+        /// scope note.
+        sequence: i32,
+    },
+    /// Right-click placement against a block face
+    /// (`ServerboundUseItemOnPacket`).
+    ///
+    /// Carries only what full-cube placement needs: the clicked block and
+    /// the face that was clicked determine the placement cell (see
+    /// `crate::server`'s handling). The packet's hand and cursor-position
+    /// fields are decoded off the wire by `ServerProtocol::decode` but not
+    /// threaded through here — this crate has no inventory model to pick an
+    /// item with, and no per-block placement rules (stairs/slabs/doors) that
+    /// would need a precise cursor hit; see `docs/block-edit.md`'s scope note.
+    UseItemOn {
+        /// The block face the client clicked.
+        pos: BlockPos,
+        /// Which face of `pos` was clicked.
+        face: BlockFace,
+        /// Client block-prediction sequence number (see
+        /// [`BlockAction::sequence`](Self::BlockAction) for why it is
+        /// decoded but not yet acted on).
+        sequence: i32,
+    },
     /// A packet the loop does not need to act on (chunk-batch
     /// acknowledgements, teleport confirmations, look-only or status-only
     /// movement). The loop ignores these but stays connected.
@@ -167,9 +209,12 @@ pub enum ServerDirective {
 /// [`begin_chunk_batch`](ServerProtocol::begin_chunk_batch) /
 /// [`encode_chunk`](ServerProtocol::encode_chunk) /
 /// [`end_chunk_batch`](ServerProtocol::end_chunk_batch) (whenever a
-/// [`ServerBound::PlayerMoved`] crosses into a new chunk column). See
-/// `crate::server`'s module docs for the scheduling itself, which is
-/// version-free and lives entirely outside this trait.
+/// [`ServerBound::PlayerMoved`] crosses into a new chunk column); and
+/// [`encode_block_update`](ServerProtocol::encode_block_update) (in reply to
+/// a [`ServerBound::BlockAction`] or [`ServerBound::UseItemOn`], confirming a
+/// dig or placement back to the acting client). See `crate::server`'s module
+/// docs for the scheduling itself, which is version-free and lives entirely
+/// outside this trait.
 pub trait ServerProtocol: Send + Sync {
     /// Lifts one inbound (server-bound) packet into [`ServerBound`].
     ///
@@ -288,6 +333,23 @@ pub trait ServerProtocol: Send + Sync {
     /// nothing.
     fn encode_forget_chunk(&self, cx: i32, cz: i32) -> ServerDirective {
         let _ = (cx, cz);
+        ServerDirective::None
+    }
+
+    /// Encodes a single block-state change (vanilla
+    /// `ClientboundBlockUpdatePacket`, wire id `block_update`), confirming a
+    /// break or placement back to the acting client — mirroring vanilla's
+    /// own `ServerPlayerGameMode`/`ServerGamePacketListenerImpl`, which
+    /// answer every dig/place with this same packet whether or not the edit
+    /// actually took effect (see `crate::server`'s `UseItemOn` handling for
+    /// why it sends two of these per placement).
+    ///
+    /// `state` is the canonical block-state string [`ChunkColumn`] itself
+    /// stores (e.g. `"minecraft:air"`, `"minecraft:stone"`); resolving it to
+    /// a wire registry id is the implementor's job, the same seam
+    /// `encode_chunk` already crosses. The default emits nothing.
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+        let _ = (x, y, z, state);
         ServerDirective::None
     }
 }
