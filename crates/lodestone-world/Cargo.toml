@@ -11,3 +11,26 @@ workspace = true
 [dependencies]
 lodestone-core = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — see the matching note in
+# `lodestone-worldgen/Cargo.toml`. Dev-only.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chunk_load"
+harness = false
+
+[[bench]]
+name = "heightmap_decode"
+harness = false
+
+[[bench]]
+name = "light_propagation"
+harness = false

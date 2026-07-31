@@ -14,3 +14,17 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — `plotters` in particular was flagged in the
+# harness doc as needing a dependency-tree check before adoption, so it stays
+# off. Dev-only: does not affect the wasm build of this crate's lib (`gpu`/wasm
+# concerns live in `lodestone-server`/`lodestone-shell`, not here).
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "generation"
+harness = false
