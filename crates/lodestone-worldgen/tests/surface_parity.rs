@@ -159,6 +159,12 @@ fn run_fixture(label: &str, text: &str) {
     };
     let hm_fn = |x: i32, z: i32| -> i32 { *r.hm.get(&(x, z)).expect("heightmap") };
 
+    // `build_surface` now returns a sparse diff (only positions a surface rule
+    // actually rewrote — see its doc comment); a position absent from it is
+    // unchanged from the pre-surface column, i.e. `pre_fn(x, y, z)`. This test
+    // still compares the reconstructed *full* column against the JVM dump
+    // block-for-block, same as before the diff change — only how the "no
+    // rewrite" case is looked up differs.
     let result = surface.build_surface(&pre_fn, &hm_fn, r.chunk_x * 16, r.chunk_z * 16);
 
     let mut total = 0usize;
@@ -170,8 +176,11 @@ fn run_fixture(label: &str, text: &str) {
             for y in MIN_Y..(MIN_Y + HEIGHT) {
                 total += 1;
                 let want = r.post.get(&key(x, y, z)).expect("post block");
-                let got = result.get(&key(x, y, z)).expect("result block");
-                if want == got {
+                let got = result
+                    .get(&key(x, y, z))
+                    .cloned()
+                    .unwrap_or_else(|| pre_fn(x, y, z));
+                if *want == got {
                     matching += 1;
                 } else if first_divergence.is_none() {
                     first_divergence = Some((x, y, z, want.clone(), got.clone()));
