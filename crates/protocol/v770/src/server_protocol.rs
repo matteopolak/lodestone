@@ -20,7 +20,12 @@
 //! (chunk-cache-center / forget / send) as the player moves between chunk
 //! columns — the scheduling for all three lives in `lodestone-server`'s
 //! `serve_play`; this module only supplies their encoders (and, for
-//! keep-alive and movement, decoders).
+//! keep-alive and movement, decoders) — and, since `docs/block-edit.md`,
+//! decoders for the two serverbound editing packets (`player_action`'s three
+//! destroy phases, `use_item_on`'s placement) plus the `block_update`
+//! encoder that confirms an edit back to the acting client. See that doc for
+//! what block editing does and does not cover; the wire layout here is a
+//! faithful decode/encode of the real packets regardless of scope.
 //!
 //! # Why hand-written encoding is correct, not just convenient
 //!
@@ -36,13 +41,14 @@
 //! best available specification for their wire layout.
 
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_server::{
     ChunkColumn as ServerChunkColumn, EntitySnapshot, ServerBound, ServerDirective, ServerProtocol,
 };
 use lodestone_world::{ChunkColumn as WorldChunkColumn, ChunkSection, ColumnLight, Heightmaps};
 use uuid::Uuid;
 
-use crate::block_states::block_name;
+use crate::block_states::{block_name, properties};
 use crate::entity_types::entity_type_id;
 use crate::packet_ids::{configuration, handshaking, login, play};
 use crate::packets::chunk::ChunkShape;
@@ -50,7 +56,8 @@ use crate::packets::common::KeepAlive;
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, write_lp_vec3};
 use crate::packets::game::{
-    GameLogin, GlobalPos, MovePlayerPos, MovePlayerPosRot, SetDefaultSpawnPosition, SetHealth,
+    GameLogin, GlobalPos, MovePlayerPos, MovePlayerPosRot, PlayerAction, SetDefaultSpawnPosition,
+    SetHealth, UseItemOn,
 };
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
@@ -80,6 +87,93 @@ fn stone_id() -> u32 {
     (0..).find(|&id| block_name(id) == Some("minecraft:stone")).expect(
         "generated block-state table has no `minecraft:stone` entry — regenerate or fix the table",
     )
+}
+
+/// Fallback: the block-state id for `minecraft:air`, resolved the same way as
+/// [`stone_id`] and for the same reason. Used both as
+/// [`resolve_state_id`]'s no-match fallback and, indirectly, wherever this
+/// module needs air's id without hardcoding registry id `0`.
+fn air_id() -> u32 {
+    (0..).find(|&id| block_name(id) == Some("minecraft:air")).expect(
+        "generated block-state table has no `minecraft:air` entry — regenerate or fix the table",
+    )
+}
+
+/// Resolves a canonical block-state string ([`ServerChunkColumn`]'s own
+/// vocabulary, e.g. `"minecraft:water[level=0]"`, `"minecraft:stone"`) to its
+/// protocol-776 registry id, via a linear scan matching both the block name
+/// and its property values against the generated state table —
+/// [`stone_id`]/[`air_id`] special-case the two propertyless states this
+/// module ever *writes*; this is the general form needed for
+/// [`V770ServerProtocol::encode_block_update`], which must also echo back
+/// whatever pre-existing (possibly-propertied) state already occupied a
+/// placement's neighbour cell.
+///
+/// # Falls back to air on no match
+///
+/// A block-update confirmation is best-effort feedback (see
+/// `docs/block-edit.md`), not the server's authoritative state — that stays
+/// in [`ServerChunkColumn`]'s own string form, which this function only
+/// reads. If a state string this version's table cannot parse back ever
+/// reaches here (a property spelling/order drift), sending air is a
+/// visibly-wrong confirmation rather than a panic or a corrupted wire id.
+fn resolve_state_id(state: &str) -> u32 {
+    let (name, raw_props) = match state.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
+        None => (state, ""),
+    };
+    let mut wanted: Vec<(&str, &str)> = if raw_props.is_empty() {
+        Vec::new()
+    } else {
+        raw_props
+            .split(',')
+            .filter_map(|pair| pair.split_once('='))
+            .collect()
+    };
+    wanted.sort_unstable();
+
+    (0..crate::block_states::STATE_COUNT)
+        .find(|&id| {
+            if block_name(id) != Some(name) {
+                return false;
+            }
+            let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+            have.sort_unstable();
+            have == wanted
+        })
+        .unwrap_or_else(air_id)
+}
+
+/// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
+/// [`pack_block_pos`]): `x` in the high 26 bits, `z` in the middle 26 bits,
+/// `y` in the low 12 bits, each sign-extended back out via a
+/// left-then-arithmetic-right shift pair. Mirrors `V770Adapter`'s own private
+/// `unpack_block_pos` exactly (kept as a local duplicate here — this module
+/// already keeps its own hand-written mirrors of the adapter's `pack`/encode
+/// helpers rather than sharing them across the decode/encode boundary, per
+/// this file's own module doc).
+fn unpack_block_pos(packed: i64) -> BlockPos {
+    let x = (packed >> 38) as i32;
+    let y = ((packed << 52) >> 52) as i32;
+    let z = ((packed << 26) >> 38) as i32;
+    BlockPos::new(x, y, z)
+}
+
+/// Maps `Direction.get3DDataValue` (`0` down … `5` east) back to a
+/// [`BlockFace`] — the inverse of `V770Adapter`'s own `face_ordinal`. Any
+/// value outside `0..=5` (a malformed packet) falls back to `East` rather
+/// than panicking; the resulting `ServerBound` still carries a valid
+/// position, so the worst case is a break/place computed against the wrong
+/// face, not a dropped connection.
+fn face_from_ordinal(ordinal: i32) -> BlockFace {
+    match ordinal {
+        0 => BlockFace::Down,
+        1 => BlockFace::Up,
+        2 => BlockFace::North,
+        3 => BlockFace::South,
+        4 => BlockFace::West,
+        _ => BlockFace::East,
+    }
 }
 
 /// Encodes a packet body into a fresh byte buffer.
@@ -166,6 +260,21 @@ fn encode_forget_chunk_body(cx: i32, cz: i32) -> Vec<u8> {
     let packed = (i64::from(cx) & 0xFFFF_FFFF) | ((i64::from(cz) & 0xFFFF_FFFF) << 32);
     let mut w = Writer::default();
     w.i64(packed);
+    w.into_vec()
+}
+
+/// Hand-written encoder for the clientbound `block_update` packet: a packed
+/// `BlockPos` long ([`pack_block_pos`]) followed by a VarInt block-state
+/// registry id — mirrors `ClientboundBlockUpdatePacket.STREAM_CODEC`
+/// (`BlockPos.STREAM_CODEC` composed with `ByteBufCodecs.idMapper(Block
+/// .BLOCK_STATE_REGISTRY)`, `ClientboundBlockUpdatePacket.java:14-20`) and
+/// this crate's own decode of the same packet in `V770Adapter::handle_play`'s
+/// `BLOCK_UPDATE` arm (`adapter.rs`), which reads the identical
+/// packed-i64-then-VarInt shape.
+fn encode_block_update_body(x: i32, y: i32, z: i32, state_id: u32) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.i64(pack_block_pos(x, y, z));
+    w.var_i32(state_id as i32);
     w.into_vec()
 }
 
@@ -489,6 +598,51 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
+            // Ordinals 0-2 are the three destroy phases; 3-7 are the item
+            // actions (drop/release/swap/stab) this crate has no inventory
+            // model to act on, so they decode to `Ignored` rather than a new
+            // `ServerBound` variant — see `ServerBound::BlockAction`'s doc
+            // comment.
+            State::Play if packet_id == play::serverbound::PLAYER_ACTION => {
+                match decode_full::<PlayerAction>(payload) {
+                    Some(action) => {
+                        let pos = unpack_block_pos(action.pos);
+                        let face = face_from_ordinal(i32::from(action.direction));
+                        match action.action {
+                            0 => ServerBound::BlockAction {
+                                action: BlockActionKind::StartDestroy,
+                                pos,
+                                face,
+                                sequence: action.sequence,
+                            },
+                            1 => ServerBound::BlockAction {
+                                action: BlockActionKind::AbortDestroy,
+                                pos,
+                                face,
+                                sequence: action.sequence,
+                            },
+                            2 => ServerBound::BlockAction {
+                                action: BlockActionKind::StopDestroy,
+                                pos,
+                                face,
+                                sequence: action.sequence,
+                            },
+                            _ => ServerBound::Ignored,
+                        }
+                    }
+                    None => ServerBound::Ignored,
+                }
+            }
+            State::Play if packet_id == play::serverbound::USE_ITEM_ON => {
+                match decode_full::<UseItemOn>(payload) {
+                    Some(use_item) => ServerBound::UseItemOn {
+                        pos: unpack_block_pos(use_item.pos),
+                        face: face_from_ordinal(use_item.face),
+                        sequence: use_item.sequence,
+                    },
+                    None => ServerBound::Ignored,
+                }
+            }
             _ => ServerBound::Ignored,
         }
     }
@@ -689,6 +843,193 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::FORGET_LEVEL_CHUNK,
             payload: encode_forget_chunk_body(cx, cz),
+        }
+    }
+
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+        ServerDirective::Send {
+            packet_id: play::clientbound::BLOCK_UPDATE,
+            payload: encode_block_update_body(x, y, z, resolve_state_id(state)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod block_edit_tests {
+    use super::*;
+    use lodestone_core::State;
+
+    fn encode<T: Encode>(packet: &T) -> Vec<u8> {
+        let mut w = Writer::default();
+        packet.encode(&mut w, CTX).expect("well-formed struct encodes");
+        w.into_vec()
+    }
+
+    /// `PLAYER_ACTION` ordinal `0` (`START_DESTROY_BLOCK`) round-trips
+    /// through the real derived `Encode`/decode into
+    /// `ServerBound::BlockAction`, with `pos`/`face` unpacked correctly —
+    /// pinning both [`unpack_block_pos`] against [`pack_block_pos`] and
+    /// [`face_from_ordinal`] against a non-trivial (non-zero) face.
+    #[test]
+    fn decode_player_action_start_destroy() {
+        let proto = V770ServerProtocol;
+        let body = encode(&PlayerAction {
+            action: 0,
+            pos: pack_block_pos(1, 2, 3),
+            direction: 1, // Up
+            sequence: 42,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::BlockAction {
+                action: BlockActionKind::StartDestroy,
+                pos: BlockPos::new(1, 2, 3),
+                face: BlockFace::Up,
+                sequence: 42,
+            }
+        );
+    }
+
+    /// The other two destroy ordinals decode to their matching
+    /// `BlockActionKind`, proving the ordinal mapping is not just
+    /// coincidentally right for `0`.
+    #[test]
+    fn decode_player_action_abort_and_stop() {
+        let proto = V770ServerProtocol;
+        for (ordinal, expected) in [
+            (1, BlockActionKind::AbortDestroy),
+            (2, BlockActionKind::StopDestroy),
+        ] {
+            let body = encode(&PlayerAction {
+                action: ordinal,
+                pos: pack_block_pos(0, 0, 0),
+                direction: 0,
+                sequence: 0,
+            });
+            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body);
+            assert_eq!(
+                decoded,
+                ServerBound::BlockAction {
+                    action: expected,
+                    pos: BlockPos::new(0, 0, 0),
+                    face: BlockFace::Down,
+                    sequence: 0,
+                },
+                "ordinal {ordinal}"
+            );
+        }
+    }
+
+    /// The item-action ordinals (`3`..=`7`: drop/release/swap/stab) share the
+    /// wire packet but carry no terrain edit — this crate has no inventory
+    /// model to act on them, so they must decode to `Ignored`, not silently
+    /// fall into one of the three destroy phases.
+    #[test]
+    fn decode_player_action_item_ordinals_are_ignored() {
+        let proto = V770ServerProtocol;
+        for ordinal in 3..=7 {
+            let body = encode(&PlayerAction {
+                action: ordinal,
+                pos: 0,
+                direction: 0,
+                sequence: 0,
+            });
+            let decoded = proto.decode(State::Play, play::serverbound::PLAYER_ACTION, &body);
+            assert_eq!(decoded, ServerBound::Ignored, "ordinal {ordinal}");
+        }
+    }
+
+    /// `USE_ITEM_ON` round-trips into `ServerBound::UseItemOn`, including a
+    /// negative Y (below `y = 0`) to pin `unpack_block_pos`'s sign extension.
+    #[test]
+    fn decode_use_item_on() {
+        let proto = V770ServerProtocol;
+        let body = encode(&UseItemOn {
+            hand: 0,
+            pos: pack_block_pos(5, -10, -7),
+            face: 3, // South
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            world_border_hit: false,
+            sequence: 7,
+        });
+        let decoded = proto.decode(State::Play, play::serverbound::USE_ITEM_ON, &body);
+        assert_eq!(
+            decoded,
+            ServerBound::UseItemOn {
+                pos: BlockPos::new(5, -10, -7),
+                face: BlockFace::South,
+                sequence: 7,
+            }
+        );
+    }
+
+    /// [`resolve_state_id`] round-trips the two propertyless states this
+    /// crate ever writes back to themselves via [`block_name`].
+    #[test]
+    fn resolve_state_id_round_trips_stone_and_air() {
+        assert_eq!(
+            block_name(resolve_state_id("minecraft:stone")),
+            Some("minecraft:stone")
+        );
+        assert_eq!(
+            block_name(resolve_state_id("minecraft:air")),
+            Some("minecraft:air")
+        );
+    }
+
+    /// [`resolve_state_id`] must match on properties too, not just the block
+    /// name — otherwise every propertied state of a block would resolve to
+    /// whichever one happens to be first in the table. Picks a real
+    /// propertied entry straight from the generated table rather than
+    /// guessing a property string, so this cannot pass by coincidence.
+    #[test]
+    fn resolve_state_id_matches_properties_not_just_name() {
+        let propertied_id = (0..crate::block_states::STATE_COUNT)
+            .find(|&id| !properties(id).unwrap().is_empty())
+            .expect("generated table has at least one propertied state");
+        let name = block_name(propertied_id).unwrap();
+        let props = properties(propertied_id).unwrap();
+        let state_str = format!(
+            "{name}[{}]",
+            props
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(resolve_state_id(&state_str), propertied_id);
+    }
+
+    /// [`resolve_state_id`] falls back to air rather than panicking on a
+    /// string the generated table has no match for.
+    #[test]
+    fn resolve_state_id_falls_back_to_air_on_no_match() {
+        assert_eq!(resolve_state_id("minecraft:not_a_real_block"), air_id());
+    }
+
+    /// Pins `encode_block_update`'s wire layout end to end: packed `BlockPos`
+    /// then a VarInt state id, nothing else — the shape
+    /// `ClientboundBlockUpdatePacket.STREAM_CODEC` specifies
+    /// (`ClientboundBlockUpdatePacket.java:14-20`).
+    #[test]
+    fn encode_block_update_wire_layout() {
+        let proto = V770ServerProtocol;
+        let directive = proto.encode_block_update(1, 2, 3, "minecraft:stone");
+        match directive {
+            ServerDirective::Send { packet_id, payload } => {
+                assert_eq!(packet_id, play::clientbound::BLOCK_UPDATE);
+                let mut r = Reader::new(&payload);
+                let packed = r.i64().expect("packed pos");
+                assert_eq!(packed, pack_block_pos(1, 2, 3));
+                let id = r.var_i32().expect("state id");
+                assert_eq!(id as u32, stone_id());
+                r.ensure_empty().expect("no trailing bytes");
+            }
+            other => panic!("expected Send, got {other:?}"),
         }
     }
 }

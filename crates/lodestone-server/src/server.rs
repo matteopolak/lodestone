@@ -13,9 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use lodestone_core::State;
+use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_net::{Connection, NetError, Transport};
 
-use crate::chunk::ChunkSource;
+use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 
 /// Server-initiated keep-alive interval, and the width of the window in
@@ -417,7 +418,11 @@ where
                 )
                 .await;
             }
-            ServerBound::KeepAlive { .. } | ServerBound::PlayerMoved { .. } | ServerBound::Ignored => {}
+            ServerBound::KeepAlive { .. }
+            | ServerBound::PlayerMoved { .. }
+            | ServerBound::BlockAction { .. }
+            | ServerBound::UseItemOn { .. }
+            | ServerBound::Ignored => {}
         }
     }
 
@@ -430,13 +435,124 @@ where
     }
 }
 
+/// The neighbour cell one step off `pos` in `face`'s direction — vanilla's
+/// `BlockPos.relative(Direction)`, used below to find the placement cell when
+/// the directly clicked block cannot be replaced.
+fn relative(pos: BlockPos, face: BlockFace) -> BlockPos {
+    let (dx, dy, dz) = match face {
+        BlockFace::Down => (0, -1, 0),
+        BlockFace::Up => (0, 1, 0),
+        BlockFace::North => (0, 0, -1),
+        BlockFace::South => (0, 0, 1),
+        BlockFace::West => (-1, 0, 0),
+        BlockFace::East => (1, 0, 0),
+    };
+    BlockPos::new(pos.x + dx, pos.y + dy, pos.z + dz)
+}
+
+/// Applies one block-breaking phase, mirroring
+/// `ServerPlayerGameMode.handleBlockBreakAction`'s three destroy ordinals —
+/// simplified per this crate's documented scope (`docs/block-edit.md`): no
+/// hardness/timing validation (the client's own predictor already gates when
+/// it sends `StopDestroy` — see `lodestone-shell`'s `drive_mining`), and no
+/// interaction-range or spawn-protection checks (this crate does not track
+/// player position beyond the view-tracking column).
+///
+/// `pending_break` is this connection's tracked in-progress dig — the
+/// version-free analogue of vanilla's `destroyPos` field. It is what makes
+/// `StartDestroy` + `StopDestroy` break a block while `StartDestroy` +
+/// `AbortDestroy` does not, and what makes a `StopDestroy` for a position
+/// nobody started a no-op, mirroring vanilla's own
+/// `pos.equals(this.destroyPos)` guard (`ServerPlayerGameMode.java:217`).
+async fn apply_block_action<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    pending_break: &mut Option<BlockPos>,
+    action: BlockActionKind,
+    pos: BlockPos,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
+    match action {
+        BlockActionKind::StartDestroy => {
+            *pending_break = Some(pos);
+        }
+        BlockActionKind::AbortDestroy => {
+            if *pending_break == Some(pos) {
+                *pending_break = None;
+            }
+        }
+        BlockActionKind::StopDestroy => {
+            if *pending_break == Some(pos) {
+                *pending_break = None;
+                source.set_block(pos.x, pos.y, pos.z, AIR);
+                let directive = proto.encode_block_update(pos.x, pos.y, pos.z, AIR);
+                apply(conn, state, directive).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Applies a right-click placement, mirroring
+/// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
+/// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
+/// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
+/// simplified per this crate's documented scope (`docs/block-edit.md`):
+/// always places `minecraft:stone`, since this crate has no inventory model
+/// to resolve a real item from, and no survival/collision validation beyond
+/// "is the target cell currently replaceable" (air or a fluid — see
+/// [`is_air_or_fluid`]).
+///
+/// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
+/// `face`-neighbour unconditionally, matching vanilla's own
+/// `handleUseItemOn` (`ServerGamePacketListenerImpl.java:1397-1398`), which
+/// sends both regardless of whether the placement succeeded — this doubles
+/// as the correction for a client that predicted a placement the server
+/// rejected.
+async fn apply_use_item_on<T, P, S>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    source: &S,
+    state: &mut State,
+    pos: BlockPos,
+    face: BlockFace,
+) -> Result<(), ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+    S: ChunkSource,
+{
+    let neighbour = relative(pos, face);
+    let clicked = source.block_state(pos.x, pos.y, pos.z);
+    let target = if is_air_or_fluid(&clicked) { pos } else { neighbour };
+    let target_state = source.block_state(target.x, target.y, target.z);
+    if is_air_or_fluid(&target_state) {
+        source.set_block(target.x, target.y, target.z, STONE);
+    }
+    for p in [pos, neighbour] {
+        let current = source.block_state(p.x, p.y, p.z);
+        let directive = proto.encode_block_update(p.x, p.y, p.z, &current);
+        apply(conn, state, directive).await?;
+    }
+    Ok(())
+}
+
 /// Decodes and applies one inbound packet once the connection is in
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
-/// for a dead one), or streams the view when the player's chunk column
-/// changed. Every other packet decodes to [`ServerBound::Ignored`] in
-/// `State::Play` under the current protocols (no further state transitions
-/// are modeled — no respawn/dimension change yet) and is a no-op here.
+/// for a dead one), streams the view when the player's chunk column changed,
+/// or applies a block break/placement (see [`apply_block_action`]/
+/// [`apply_use_item_on`]). Every other packet decodes to
+/// [`ServerBound::Ignored`] in `State::Play` under the current protocols (no
+/// further state transitions are modeled — no respawn/dimension change yet)
+/// and is a no-op here.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_play_packet<T, P, S>(
     conn: &mut Connection<T>,
     proto: &P,
@@ -445,6 +561,7 @@ async fn dispatch_play_packet<T, P, S>(
     state: &mut State,
     view: &mut ViewTracker,
     pending_keep_alive: &mut Option<i64>,
+    pending_break: &mut Option<BlockPos>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -468,6 +585,21 @@ where
             for directive in view.recenter(proto, source, cx, cz, view_radius) {
                 apply(conn, state, directive).await?;
             }
+        }
+        ServerBound::BlockAction {
+            action,
+            pos,
+            face: _,
+            sequence: _,
+        } => {
+            apply_block_action(conn, proto, source, state, pending_break, action, pos).await?;
+        }
+        ServerBound::UseItemOn {
+            pos,
+            face,
+            sequence: _,
+        } => {
+            apply_use_item_on(conn, proto, source, state, pos, face).await?;
         }
         ServerBound::Handshake { .. }
         | ServerBound::LoginStart { .. }
@@ -545,6 +677,7 @@ where
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
+    let mut pending_break: Option<BlockPos> = None;
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -577,6 +710,7 @@ where
                     &mut state,
                     &mut view,
                     &mut pending_keep_alive,
+                    &mut pending_break,
                     packet_id,
                     &payload,
                 )
@@ -629,6 +763,7 @@ where
     E: EntitySource,
 {
     let mut pending_keep_alive: Option<i64> = None;
+    let mut pending_break: Option<BlockPos> = None;
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -639,6 +774,7 @@ where
             &mut state,
             &mut view,
             &mut pending_keep_alive,
+            &mut pending_break,
             packet_id,
             &payload,
         )

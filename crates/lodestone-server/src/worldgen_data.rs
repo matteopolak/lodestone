@@ -224,4 +224,51 @@ mod tests {
             "served chunk has no surface material — surface stage lost"
         );
     }
+
+    /// The design question `docs/block-edit.md` answers: before edit support,
+    /// `OverworldChunkSource::column` called straight through to the
+    /// generator on *every* request, so nothing an edit wrote could survive a
+    /// later `column()` call — there was nowhere for it to live. This is the
+    /// hermetic proof that `set_block`'s retention actually closes that gap,
+    /// independent of the slower end-to-end client test
+    /// (`crates/protocol/v770/tests/block_edit.rs`), which proves the same
+    /// thing through the real wire protocol and a real forget/reload cycle.
+    #[test]
+    fn set_block_persists_across_repeated_column_calls() {
+        use crate::ChunkSource;
+
+        let seed = 1234;
+        let source = overworld_chunk_source(seed);
+
+        // World (0, -50, 0) — chunk (0, 0), local (0, 0) — is deep enough
+        // that this carver-less generator (`worldgen_data`'s own "no caves"
+        // scope note) always fills it: real generated content, not
+        // already-air, so an "edit" that landed on existing air could not
+        // pass this test by accident.
+        let pre = source.block_state(0, -50, 0);
+        assert_eq!(
+            pre.split('[').next(),
+            Some("minecraft:deepslate"),
+            "test fixture assumption broke: expected solid deepslate at (0,-50,0), found {pre}"
+        );
+
+        source.set_block(0, -50, 0, "minecraft:air");
+        assert_eq!(source.block_state(0, -50, 0), "minecraft:air");
+
+        // Re-fetch the whole column again — simulating the column being
+        // forgotten and re-sent, `crate::server`'s `ViewTracker` forget/resend
+        // cycle — through a *second, independent* `column()` call. Without
+        // retention this would silently regenerate the original deepslate.
+        let recolumn = source.column(0, 0);
+        assert_eq!(recolumn.block_state(0, -50, 0), "minecraft:air");
+
+        // The edit must be scoped to exactly the touched cell, not a
+        // wholesale wipe of the column: an adjacent, untouched cell in the
+        // same column still reads the generator's original content.
+        assert_eq!(
+            recolumn.block_state(1, -50, 0).split('[').next(),
+            Some("minecraft:deepslate"),
+            "editing (0,-50,0) must not affect its untouched neighbour"
+        );
+    }
 }

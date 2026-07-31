@@ -25,16 +25,36 @@
 //! solid/air API ([`ChunkColumn::set_solid`]/[`ChunkColumn::is_solid`]) is
 //! preserved as a view over that field: a block is "solid" when it is neither air
 //! nor a fluid, and `set_solid(true)` writes canonical stone.
+//!
+//! # Edits need somewhere to live
+//!
+//! [`ChunkSource::set_block`] mutates a block in place and [`ChunkSource::column`]
+//! must go on reflecting that mutation afterward — that only works if *something*
+//! retains the edited column, and before this existed, nothing did:
+//! `OverworldChunkSource::column` called straight through to the generator on
+//! every request. See [`OverworldChunkSource`]'s own doc comment for the
+//! retention this module now adds and why it is scoped to edited columns only,
+//! not every column ever requested.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use lodestone_worldgen::density::{Context, Density};
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 
-const AIR: &str = "minecraft:air";
-const STONE: &str = "minecraft:stone";
+pub(crate) const AIR: &str = "minecraft:air";
+pub(crate) const STONE: &str = "minecraft:stone";
 
 /// Returns `true` for blocks that do not count as collidable terrain: air
 /// variants and fluids. `is_solid` is the negation of this over the block name.
-fn is_air_or_fluid(name: &str) -> bool {
+///
+/// Also doubles as this crate's "can a placement replace this cell" test
+/// (`crate::server`'s `UseItemOn` handling) — vanilla's real `canBeReplaced`
+/// covers a wider set (tall grass, snow layers, …), but the generator this
+/// crate serves produces none of that vegetation yet (`worldgen_data`'s own
+/// "no caves/ores/trees" scope note), so air-or-fluid is the whole set that
+/// can actually appear here.
+pub(crate) fn is_air_or_fluid(name: &str) -> bool {
     let base = name.split('[').next().unwrap_or(name);
     matches!(
         base,
@@ -162,6 +182,37 @@ impl ChunkColumn {
 pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
+
+    /// Reads a single block's canonical state string at world coordinates
+    /// `(x, y, z)`, through the same data [`column`](Self::column) would
+    /// return — including any edit already applied via
+    /// [`set_block`](Self::set_block).
+    ///
+    /// The default recomputes the owning column and reads one cell out of
+    /// it, so an implementor whose `column()` already consults an edit cache
+    /// (see [`OverworldChunkSource`]) gets a correct answer for free without
+    /// overriding this.
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        self.column(cx, cz).block_state(lx, y, lz).to_string()
+    }
+
+    /// Overwrites a single block's state at world coordinates `(x, y, z)`,
+    /// persisting the change so a later [`column`](Self::column) call for
+    /// its chunk reflects it.
+    ///
+    /// The default is a no-op: a source with no persistence (e.g.
+    /// [`WorldgenChunkSource`], kept only for the solidity-only transport
+    /// tests — see this module's own doc comment) silently discards edits
+    /// rather than needing its own override. [`OverworldChunkSource`] is the
+    /// one implementor that actually persists a `set_block` call; see its
+    /// doc comment for why that retention did not already exist.
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let _ = (x, y, z, name);
+    }
 }
 
 /// The real terrain source: the composed, JVM-verified overworld generator.
@@ -170,15 +221,48 @@ pub trait ChunkSource: Send + Sync {
 /// its columns carry real vanilla block states (shape + sea-level aquifer +
 /// surface rules), the same output the shell renders directly. Build one per
 /// world (via [`crate::overworld_chunk_source`]) and share it across the view.
+///
+/// # Retention: the design question a served, editable world raises
+///
+/// Before block-edit support, `column()` called straight through to
+/// `self.generator.column(cx, cz)` on **every** request — nothing was ever
+/// retained. That was fine for read-only terrain (the generator is
+/// deterministic, so "regenerate on every request" and "cache forever" are
+/// observationally identical), but it means there was nowhere for an edit to
+/// live: a `set_block` with no cache behind it would be overwritten by the
+/// next `column()` call the moment the edited chunk left a client's view and
+/// came back (`ViewTracker::recenter`'s forget/resend cycle in
+/// `crate::server`).
+///
+/// `edits` is that missing retention, added deliberately narrow: it is
+/// populated **only** by [`set_block`](Self::set_block), not by every
+/// `column()` read. An unedited column is still regenerated fresh on every
+/// request exactly as before (unchanged cost, unchanged behaviour — see
+/// `worldgen_data`'s `chunk_source_serves_generator_block_for_block` test,
+/// which still passes unmodified because it never edits anything). Only a
+/// column that has actually been touched by a player pays for a permanent
+/// `ChunkColumn` in memory, for the life of this source. Caching *every*
+/// generated column (edited or not) was the other option; it was rejected
+/// because it would make memory cost scale with how much of the world a
+/// session has merely looked at, not with how much it has changed — the
+/// wrong invariant for a server that is otherwise happy to regenerate
+/// deterministic terrain on demand.
 pub struct OverworldChunkSource {
     generator: OverworldGenerator,
+    /// Columns a `set_block` call has touched, keyed by chunk coordinates.
+    /// Absent from this map means "not yet edited"; `column()` falls through
+    /// to the generator in that case. See the struct doc comment above.
+    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
 }
 
 impl OverworldChunkSource {
     /// Wraps a pre-built [`OverworldGenerator`].
     #[must_use]
     pub fn new(generator: OverworldGenerator) -> Self {
-        Self { generator }
+        Self {
+            generator,
+            edits: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -191,7 +275,24 @@ impl std::fmt::Debug for OverworldChunkSource {
 
 impl ChunkSource for OverworldChunkSource {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(edited) = edits.get(&(cx, cz)) {
+            return edited.clone();
+        }
+        drop(edits);
         ChunkColumn::from_generated(self.generator.column(cx, cz))
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        let cx = x.div_euclid(16);
+        let cz = z.div_euclid(16);
+        let lx = x.rem_euclid(16);
+        let lz = z.rem_euclid(16);
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let column = edits
+            .entry((cx, cz))
+            .or_insert_with(|| ChunkColumn::from_generated(self.generator.column(cx, cz)));
+        column.set_block(lx, y, lz, name);
     }
 }
 
