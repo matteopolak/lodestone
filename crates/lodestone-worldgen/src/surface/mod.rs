@@ -197,6 +197,16 @@ impl SurfaceSystem {
     }
 
     /// `SurfaceRules.Context.getMinSurfaceLevel()`.
+    ///
+    /// Used by [`Self::top_material`], which queries one arbitrary position at a
+    /// time (carvers), so it computes its own corner cell fresh. [`Self::build_surface`]
+    /// scans a whole 16×16 chunk at once — every column in that chunk shares the
+    /// same `block_x >> 4` / `block_z >> 4` corner cell (chunk width is exactly
+    /// 16, and `min_block_x`/`min_block_z` are always chunk-aligned per the
+    /// contract this type is built around), so it hoists the four corner
+    /// `preliminary_surface_level` calls out to once per chunk via
+    /// [`Self::interpolate_min_surface_level`] instead of once per column —
+    /// same four corner values, just not recomputed 256 times over.
     fn min_surface_level(&self, block_x: i32, block_z: i32, surface_depth: i32) -> i32 {
         let corner_cell_x = block_x >> 4;
         let corner_cell_z = block_z >> 4;
@@ -204,6 +214,23 @@ impl SurfaceSystem {
         let c1 = self.preliminary_surface_level((corner_cell_x + 1) << 4, corner_cell_z << 4);
         let c2 = self.preliminary_surface_level(corner_cell_x << 4, (corner_cell_z + 1) << 4);
         let c3 = self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
+        Self::interpolate_min_surface_level(block_x, block_z, surface_depth, c0, c1, c2, c3)
+    }
+
+    /// The interpolation half of [`Self::min_surface_level`], factored out so a
+    /// caller that already knows the four corner `preliminary_surface_level`
+    /// values (e.g. one chunk's worth of columns, all sharing the same corner
+    /// cell) can skip recomputing them per column.
+    #[allow(clippy::too_many_arguments)]
+    fn interpolate_min_surface_level(
+        block_x: i32,
+        block_z: i32,
+        surface_depth: i32,
+        c0: i32,
+        c1: i32,
+        c2: i32,
+        c3: i32,
+    ) -> i32 {
         let dx = f64::from((block_x & 15) as f32 / 16.0);
         let dz = f64::from((block_z & 15) as f32 / 16.0);
         let level = floor(lerp2(
@@ -225,8 +252,22 @@ impl SurfaceSystem {
     /// * `heightmap` yields `WORLD_SURFACE_WG` at local `(x, z)`.
     /// * `min_block_x`/`min_block_z` are the chunk's world-space origin.
     ///
-    /// Returns the post-surface column: a map from local `(x, y, z)` to
-    /// canonical block string for every Y in `[min_y, min_y + gen_depth)`.
+    /// Returns a **sparse diff**: local `(x, y, z)` -> canonical block string,
+    /// present only where a surface rule actually rewrote the pre-surface
+    /// block. A position absent from the map is unchanged, i.e. still exactly
+    /// `pre(x, y, z)` — callers that need the full column reconstruct it from
+    /// `pre` overlaid with this map, rather than the map alone.
+    ///
+    /// This used to be an exhaustive map (every one of a chunk's 16×16×`gen_depth`
+    /// positions inserted up front from `pre`, then selectively overwritten by
+    /// matched rules) so callers could treat the return value as the whole
+    /// column. Profiling (`docs/benchmark-harness.md`) showed that exhaustive
+    /// pre-fill — 98304 `String` clones and `HashMap` inserts per chunk for a
+    /// gen_depth of 384, the overwhelming majority of them immediately
+    /// discarded unread — was itself close to a fifth of total column-generation
+    /// time (`SipHasher`/`RawTable::reserve_rehash`/`memmove` self-time). The
+    /// scan below still needs `pre`/`block_at` for its own classification logic
+    /// (unchanged); only the redundant up-front full-column copy is gone.
     #[must_use]
     pub fn build_surface(
         &self,
@@ -239,14 +280,26 @@ impl SurfaceSystem {
         let y_hi = self.min_y + self.gen_depth; // exclusive
         let way_below_min_y = self.min_y << 4;
 
+        // The four `preliminary_surface_level` corner values for this chunk's
+        // corner cell. Every one of the 256 columns below shares the same
+        // `block_x >> 4` / `block_z >> 4` (chunk width is exactly 16 and
+        // `min_block_x`/`min_block_z` are chunk-aligned), so — unlike
+        // `min_surface_level`'s single-position form used by `top_material` —
+        // these are computed once per chunk rather than once per column. Each
+        // `preliminary_surface_level` call walks a `find_top_surface` density
+        // search (up to `(upper_bound - lower_bound) / cell_height` steps), so
+        // this turns 256 searches into 4.
+        let corner_cell_x = min_block_x >> 4;
+        let corner_cell_z = min_block_z >> 4;
+        let corner_c0 = self.preliminary_surface_level(corner_cell_x << 4, corner_cell_z << 4);
+        let corner_c1 =
+            self.preliminary_surface_level((corner_cell_x + 1) << 4, corner_cell_z << 4);
+        let corner_c2 =
+            self.preliminary_surface_level(corner_cell_x << 4, (corner_cell_z + 1) << 4);
+        let corner_c3 =
+            self.preliminary_surface_level((corner_cell_x + 1) << 4, (corner_cell_z + 1) << 4);
+
         let mut out: HashMap<(i32, i32, i32), String> = HashMap::new();
-        for x in 0..16 {
-            for z in 0..16 {
-                for y in y_lo..y_hi {
-                    out.insert((x, y, z), pre(x, y, z));
-                }
-            }
-        }
 
         // Immutable classification source: vanilla only ever reads the original
         // column while scanning (`old` is at the current, not-yet-written Y and
@@ -269,7 +322,15 @@ impl SurfaceSystem {
                     block_z,
                     surface_depth,
                     surface_secondary: self.surface_secondary(block_x, block_z),
-                    min_surface_level: self.min_surface_level(block_x, block_z, surface_depth),
+                    min_surface_level: Self::interpolate_min_surface_level(
+                        block_x,
+                        block_z,
+                        surface_depth,
+                        corner_c0,
+                        corner_c1,
+                        corner_c2,
+                        corner_c3,
+                    ),
                     block_y: 0,
                     water_height: NO_WATER,
                     stone_depth_above: 0,

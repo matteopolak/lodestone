@@ -131,10 +131,51 @@ impl OverworldGenerator {
     pub fn column(&self, cx: i32, cz: i32) -> GeneratedColumn {
         let base_x = cx * 16;
         let base_z = cz * 16;
-        let height = self.height as usize;
 
-        // Stage 1: shape. One fresh sampler per chunk mirrors vanilla's per-chunk
-        // `NoiseChunk` and bounds the interpolation-corner cache.
+        let solid = self.shape_stage(base_x, base_z);
+        let heights = self.fluid_heightmap_stage(&solid);
+        let post = self.surface_stage(&solid, &heights, base_x, base_z);
+        self.intern_stage(&solid, post)
+    }
+
+    /// Identical to [`column`](Self::column), timed per stage. Exists so the
+    /// per-stage cost split can be re-measured without maintaining a second,
+    /// hand-duplicated copy of the pipeline: this calls the exact same private
+    /// stage functions `column` does, just wrapped in `Instant::now()` at each
+    /// boundary. Native-only (wall-clock timing has no meaning under wasm, and
+    /// `Instant::now()` panics on bare `wasm32-unknown-unknown`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn column_timed(&self, cx: i32, cz: i32) -> (GeneratedColumn, StageTimes) {
+        let base_x = cx * 16;
+        let base_z = cz * 16;
+
+        let t0 = std::time::Instant::now();
+        let solid = self.shape_stage(base_x, base_z);
+        let t1 = std::time::Instant::now();
+        let heights = self.fluid_heightmap_stage(&solid);
+        let t2 = std::time::Instant::now();
+        let post = self.surface_stage(&solid, &heights, base_x, base_z);
+        let t3 = std::time::Instant::now();
+        let col = self.intern_stage(&solid, post);
+        let t4 = std::time::Instant::now();
+
+        (
+            col,
+            StageTimes {
+                shape: t1 - t0,
+                fluid_heightmap: t2 - t1,
+                surface: t3 - t2,
+                intern: t4 - t3,
+            },
+        )
+    }
+
+    /// Stage 1: shape. One fresh sampler per chunk mirrors vanilla's per-chunk
+    /// `NoiseChunk` and bounds the interpolation-corner cache. Returns a
+    /// `16×height×16` solid mask indexed by [`Self::idx`].
+    fn shape_stage(&self, base_x: i32, base_z: i32) -> Vec<bool> {
+        let height = self.height as usize;
         let sampler = NoiseChunkSampler::new(
             self.final_density.clone(),
             self.slot_count,
@@ -153,10 +194,13 @@ impl OverworldGenerator {
                 }
             }
         }
+        solid
+    }
 
-        // Stage 2: fluid fill (sea-level aquifer approximation) + WORLD_SURFACE_WG.
-        // `heights[lz*16+lx]` = highest non-air world Y (solid, or water up to sea
-        // level over submerged columns).
+    /// Stage 2: fluid fill (sea-level aquifer approximation) + WORLD_SURFACE_WG.
+    /// `heights[lz*16+lx]` = highest non-air world Y (solid, or water up to sea
+    /// level over submerged columns).
+    fn fluid_heightmap_stage(&self, solid: &[bool]) -> [i32; 256] {
         let mut heights = [i32::MIN; 16 * 16];
         for lz in 0..16i32 {
             for lx in 0..16i32 {
@@ -170,7 +214,23 @@ impl OverworldGenerator {
                 heights[(lz * 16 + lx) as usize] = highest_solid.max(self.sea_level - 1);
             }
         }
+        heights
+    }
 
+    /// Stage 3: surface rules over the pre-surface (shape + fluid) column.
+    /// Returns a **sparse diff** (see [`SurfaceSystem::build_surface`]): only
+    /// the positions a surface rule actually rewrote. [`Self::intern_stage`]
+    /// reconstructs the full column by seeding from `solid` (the same
+    /// shape+fluid default this stage's own `pre` closure computes) and
+    /// overlaying this diff, rather than this stage materialising all
+    /// 16×16×`height` positions itself.
+    fn surface_stage(
+        &self,
+        solid: &[bool],
+        heights: &[i32; 256],
+        base_x: i32,
+        base_z: i32,
+    ) -> std::collections::HashMap<(i32, i32, i32), String> {
         // Pre-surface block string at a local column position (aquifer-filled).
         let pre = |lx: i32, y: i32, lz: i32| -> String {
             let ly = y - self.min_y;
@@ -187,12 +247,48 @@ impl OverworldGenerator {
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
 
-        // Stage 3: surface rules over the pre-surface column.
-        let post = self.surface.build_surface(&pre, &heightmap, base_x, base_z);
+        self.surface.build_surface(&pre, &heightmap, base_x, base_z)
+    }
 
-        // Intern into a dense palette-indexed grid.
+    /// Stage 4: intern the surface-rewritten column into a dense
+    /// palette-indexed grid.
+    ///
+    /// `post` is [`Self::surface_stage`]'s sparse diff, not a full column, so
+    /// this seeds `blocks` from `solid` first — exactly the same
+    /// solid/fluid/air default `surface_stage`'s own `pre` closure computes,
+    /// just written straight into the dense grid instead of round-tripped
+    /// through a `String`-keyed `HashMap` — and then overlays the (much
+    /// smaller) set of positions the surface rules actually changed.
+    fn intern_stage(
+        &self,
+        solid: &[bool],
+        post: std::collections::HashMap<(i32, i32, i32), String>,
+    ) -> GeneratedColumn {
+        let height = self.height as usize;
         let mut palette: Vec<String> = vec!["minecraft:air".to_string()];
         let mut blocks = vec![0u16; 16 * 16 * height];
+
+        // Seed from shape + fluid fill (stage 1/2 output), matching
+        // `surface_stage`'s `pre` closure: solid -> default_block, else
+        // below sea level -> default_fluid, else air (already 0).
+        let stone_id = palette.len() as u16;
+        palette.push(self.default_block.clone());
+        let fluid_id = palette.len() as u16;
+        palette.push(self.default_fluid.clone());
+        for lz in 0..16i32 {
+            for lx in 0..16i32 {
+                for ly in 0..self.height {
+                    let idx = Self::idx(lx, ly, lz, self.height);
+                    if solid[idx] {
+                        blocks[idx] = stone_id;
+                    } else if self.min_y + ly < self.sea_level {
+                        blocks[idx] = fluid_id;
+                    }
+                }
+            }
+        }
+
+        // Overlay the surface-rule diff.
         for ((lx, y, lz), state) in post {
             let ly = y - self.min_y;
             if !(0..self.height).contains(&ly) {
@@ -221,6 +317,31 @@ impl OverworldGenerator {
         debug_assert!((0..16).contains(&lx) && (0..16).contains(&lz));
         debug_assert!((0..height).contains(&ly));
         ((ly * 16 + lz) * 16 + lx) as usize
+    }
+}
+
+/// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call.
+/// Stage boundaries match the doc comment on [`OverworldGenerator`]: shape,
+/// fluid fill + heightmap, surface rules, and palette interning. `shape` and
+/// `surface` are the two stages named in `HANDOFF.md` §4's original (deleted)
+/// split; `fluid_heightmap` and `intern` were folded into "surface"/"intern"
+/// there but are broken out here since they are now separate functions.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+pub struct StageTimes {
+    pub shape: std::time::Duration,
+    pub fluid_heightmap: std::time::Duration,
+    pub surface: std::time::Duration,
+    pub intern: std::time::Duration,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StageTimes {
+    /// Total of the four stages (wall-clock, so approximately equal to but not
+    /// exactly the same instant range as timing the whole `column()` call).
+    #[must_use]
+    pub fn total(&self) -> std::time::Duration {
+        self.shape + self.fluid_heightmap + self.surface + self.intern
     }
 }
 
