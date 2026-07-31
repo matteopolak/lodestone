@@ -55,7 +55,11 @@ tokio = { version = "1", default-features = false, features = [
 wasm-bindgen-futures = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+# `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
+# used by `tests/serve_play.rs` to observe the keep-alive timeout and the
+# periodic time-of-day broadcast without a real 15-second wait — the same
+# precedent `lodestone-net`'s own dev-dependency (`Cargo.toml`) already sets.
+tokio = { workspace = true, features = ["test-util"] }
 serde_json = { workspace = true }
 lodestone-client = { path = "../lodestone-client" }
 lodestone-model = { path = "../lodestone-model" }
