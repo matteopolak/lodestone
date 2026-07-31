@@ -236,6 +236,32 @@ pub enum ParticleAtlasError {
     Atlas(#[from] AtlasError),
 }
 
+/// Errors produced while loading sky assets: the celestial (sun + moon phase)
+/// atlas and the cloud texture.
+#[derive(Debug, thiserror::Error)]
+pub enum SkyAssetError {
+    /// A required sky texture (sun, a moon phase, or the cloud map) was not
+    /// present in any pack.
+    #[error("sky texture not found: {location}")]
+    Missing {
+        /// The missing texture's location.
+        location: String,
+    },
+    /// A sky texture failed to decode.
+    #[error("sky texture {location}: {source}")]
+    Texture {
+        /// The texture being processed.
+        location: String,
+        /// The underlying decode error.
+        #[source]
+        source: TextureError,
+    },
+    /// The underlying celestial-atlas stitch failed for a reason other than a
+    /// missing texture.
+    #[error("celestial atlas: {0}")]
+    Atlas(#[from] AtlasError),
+}
+
 /// Errors produced while baking a resolved model into renderer-ready geometry.
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {
