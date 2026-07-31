@@ -18,11 +18,20 @@
 #
 # Runs `--rm` so the container self-cleans on stop. The world directory is
 # gitignored and intentionally kept by cleanup.sh, so re-running this is cheap.
+#
+# Once the server is up, the interactive account named by $LODESTONE_OP_NAME
+# (default below) is opped over RCON via rcon-op.py — see that file for why
+# RCON `op <name>` and not a hand-written ops.json. This assumes RCON is
+# already enabled in this world's server.properties (rcon.port=25571,
+# rcon.password=lodestone), which this script does not manage — see terrain.sh
+# for the same assumption and why it isn't rewritten here.
 set -euo pipefail
 
 NAME=lodestone-creative
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORLD="$ROOT/.cache/mc/creative"
+RCON_PORT=25571
+RCON_PASSWORD=lodestone
 
 if [ ! -f "$WORLD/server.jar" ]; then
   echo "no server.jar at $WORLD — fetch the 26.2 dedicated server jar there first" >&2
@@ -38,9 +47,26 @@ docker run -d --rm --name "$NAME" \
   eclipse-temurin:25-jdk \
   java -Xmx2G -jar server.jar nogui
 
+# Best-effort: op the interactive account so client-side testing affordances
+# (e.g. `/givedebug`) work. Never fails the script — a live gate that depends
+# on this oracle starting must not break because RCON hiccupped.
+op_interactive_player() {
+  local op_name="${LODESTONE_OP_NAME:-LodestonePlayer}"
+  local attempt
+  for attempt in $(seq 1 10); do
+    if python3 "$ROOT/scripts/live-oracles/rcon-op.py" 127.0.0.1 "$RCON_PORT" "$RCON_PASSWORD" "op $op_name" >/dev/null; then
+      echo "opped '$op_name' on :$RCON_PORT (override with LODESTONE_OP_NAME)"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "warning: could not op '$op_name' via RCON on :$RCON_PORT — /givedebug and other op-gated commands will be refused (override the name with LODESTONE_OP_NAME)" >&2
+}
+
 echo "waiting for '$NAME' to accept connections..."
 for _ in $(seq 1 60); do
   if docker logs "$NAME" 2>&1 | grep -q 'Done ('; then
+    op_interactive_player
     echo "ready: game on :25570, RCON on :25571"
     exit 0
   fi
