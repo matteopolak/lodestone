@@ -93,6 +93,7 @@ mod model;
 pub mod particle;
 pub mod particle_atlas;
 mod profile;
+pub mod sky;
 pub mod sound;
 mod source;
 mod texture;
@@ -114,7 +115,7 @@ pub use error::AtlasSourceError;
 pub use error::{
     AssetError, AtlasError, BakeError, BlockStateError, FontError, GuiError, IconError,
     ItemAtlasError, ItemModelError, ModelError, ParticleAtlasError, ParticleError,
-    ResourceLocationError, SoundError, TextureError, TintError,
+    ResourceLocationError, SkyAssetError, SoundError, TextureError, TintError,
 };
 pub use icon::{DefaultItemContext, GuiItemContext, IconPart, ItemIcon, ItemIconBuilder, SpriteLayer};
 pub use item_atlas::{ItemAtlas, ItemAtlasReport};
@@ -133,6 +134,7 @@ pub use model::{
 };
 pub use particle_atlas::{ParticleAtlas, ParticleAtlasReport};
 pub use profile::AssetProfile;
+pub use sky::{CelestialAtlas, MOON_PHASE_NAMES, SUN_SPRITE_PATH, load_cloud_texture};
 #[cfg(not(target_arch = "wasm32"))]
 pub use source::DirectorySource;
 pub use source::{MemorySource, ResourceSource, ZipSource};

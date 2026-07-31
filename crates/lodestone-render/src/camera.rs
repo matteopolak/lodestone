@@ -135,6 +135,28 @@ impl Camera {
         self.projection_matrix() * self.view_matrix()
     }
 
+    /// The view-projection matrix for a sky dome: rotation only, with the
+    /// camera's translation stripped from the view matrix before combining
+    /// with the projection.
+    ///
+    /// A sky dome (disc, sun/moon/star billboards, cloud plane) is built at a
+    /// fixed radius around the origin and must appear infinitely distant —
+    /// panning the camera must never visibly slide it, only turning may. Using
+    /// [`view_projection`](Self::view_projection) unmodified would translate
+    /// sky geometry by the camera's world position every frame, sliding the
+    /// horizon out of alignment as soon as the player moves. Vanilla achieves
+    /// the same thing by never touching its model-view translation when
+    /// drawing the sky (`SkyRenderer`/`LevelRenderer` push only rotation onto
+    /// the pose stack); this is the equivalent for a `view * projection`
+    /// pipeline: zero the view matrix's translation column, keep its
+    /// rotation/scale block, then project as usual.
+    #[must_use]
+    pub fn sky_view_projection(&self) -> Mat4 {
+        let mut view = self.view_matrix();
+        view.w_axis = Vec4::new(0.0, 0.0, 0.0, 1.0);
+        self.projection_matrix() * view
+    }
+
     /// The frustum for this camera, for culling.
     #[must_use]
     pub fn frustum(&self) -> Frustum {
@@ -387,6 +409,48 @@ mod tests {
         assert!((c.position.y - (64.0 + PLAYER_EYE_HEIGHT)).abs() < 1e-6);
         assert_eq!(c.position.x, 8.0);
         assert_eq!(c.position.z, 8.0);
+    }
+
+    /// A point fixed relative to the *sky* (i.e. a fixed offset from the
+    /// camera's own position, the way sky geometry is actually built each
+    /// frame) must land at the same clip-space position regardless of where
+    /// the camera has moved to in the world — that is the entire point of
+    /// stripping translation. `view_projection` on the same relative point
+    /// does *not* have this property, which is the defect this guards
+    /// against.
+    #[test]
+    fn sky_view_projection_is_translation_invariant() {
+        let base = Camera {
+            position: Vec3::new(10.0, 70.0, -30.0),
+            yaw: 35.0,
+            pitch: -12.0,
+            ..cam_looking_south()
+        };
+        let moved = Camera {
+            position: Vec3::new(-400.0, 5.0, 900.0),
+            ..base
+        };
+        // A "sky point" 100 blocks in front of the eye, exactly like a
+        // billboard placed relative to the camera every frame.
+        let offset = base.forward() * 100.0;
+        let clip_base = base.sky_view_projection() * offset.extend(1.0);
+        let clip_moved = moved.sky_view_projection() * offset.extend(1.0);
+        assert!(
+            (clip_base - clip_moved).length() < 1e-3,
+            "sky_view_projection must not move sky geometry when the camera translates: \
+             {clip_base:?} vs {clip_moved:?}"
+        );
+
+        // Negative control: the detector actually distinguishes something —
+        // plain `view_projection` on the same relative point *does* move when
+        // the camera translates, proving the assertion above is not vacuous.
+        let world_point = base.position + offset;
+        let ordinary_base = base.view_projection() * world_point.extend(1.0);
+        let ordinary_moved = moved.view_projection() * world_point.extend(1.0);
+        assert!(
+            (ordinary_base - ordinary_moved).length() > 1.0,
+            "control failed: view_projection should be translation-*sensitive*"
+        );
     }
 
     #[test]
