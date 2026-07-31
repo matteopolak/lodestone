@@ -276,9 +276,14 @@ fn non_empty_container_produces_pixel_coverage_inside_widget_rect() {
         h: rect.h * scale,
     };
 
-    assert_eq!(covered_pixels(&empty, physical_rect, w, h), 0);
+    // `empty` has no menu, so its `dim_vertex_count` is 0 and the skip is a
+    // no-op there — passed anyway so both sides ask the same question.
+    assert_eq!(
+        covered_pixels(&empty, physical_rect, w, h, empty.dim_vertex_count),
+        0
+    );
     assert!(
-        covered_pixels(&full, physical_rect, w, h) > 1_000,
+        covered_pixels(&full, physical_rect, w, h, full.dim_vertex_count) > 1_000,
         "container geometry must visibly cover pixels inside its own widget rect"
     );
 }
@@ -362,13 +367,16 @@ fn with_cursor_draws_the_carried_stack_centred_on_the_cursor() {
         w: 16.0,
         h: 16.0,
     };
+    // Both measurements skip the screen-wide dim, which covers every pixel and
+    // would otherwise saturate both counts to the rect's full area — see
+    // `covered_pixels`. The question is whether anything *else* paints here.
     assert_eq!(
-        covered_pixels(&control, cursor_rect, w, h),
+        covered_pixels(&control, cursor_rect, w, h, control.dim_vertex_count),
         0,
-        "sanity: nothing else draws at the test cursor position"
+        "sanity: nothing but the screen-wide dim draws at the test cursor position"
     );
     assert!(
-        covered_pixels(&geo, cursor_rect, w, h) > 0,
+        covered_pixels(&geo, cursor_rect, w, h, geo.dim_vertex_count) > 0,
         "the carried stack must draw centred on the cursor, not just somewhere on screen"
     );
 }
@@ -453,7 +461,33 @@ fn container_renderer_reaches_pixels_inside_widget_rect() {
     );
 }
 
-fn covered_pixels(geo: &ContainerGeometry, rect: Rect, width: u32, height: u32) -> usize {
+/// Pixels inside `rect` covered by any of `geo`'s triangles, **skipping the
+/// leading `skip_verts` vertices**.
+///
+/// The skip exists because of a real trap this test walked into. The dim
+/// gradient (`extractTransparentBackground`, issue #51) is
+/// `gradient_rect_px(0.0, 0.0, w, h)` — genuinely full-screen, and correct: it
+/// is what dims the HUD hotbar. But it is emitted *first*, so once it existed,
+/// "how many pixels are covered here" saturated at the rect's full area
+/// everywhere on screen, and any assertion of the form "nothing else draws at
+/// this position" became unsatisfiable.
+///
+/// That is `CLAUDE.md`'s "a control's premise can be false before the feature
+/// under test existed" in its purest form: the assertion was true when written,
+/// a legitimate behaviour change falsified it, and the *test* was wrong rather
+/// than the code. Skipping the dim's own vertices restores the question the
+/// control was actually asking — does anything **other than the screen-wide
+/// dim** paint here — instead of relaxing the assertion until it passes.
+fn covered_pixels(
+    geo: &ContainerGeometry,
+    rect: Rect,
+    width: u32,
+    height: u32,
+    skip_verts: usize,
+) -> usize {
+    // 6 floats per vertex (18 per triangle, three vertices each).
+    let skip_floats = (skip_verts * 6).min(geo.verts.len());
+    let verts = &geo.verts[skip_floats..];
     let mut covered = 0;
     let min_x = rect.x.max(0.0).floor() as u32;
     let max_x = (rect.x + rect.w).min(width as f32).ceil() as u32;
@@ -463,7 +497,7 @@ fn covered_pixels(geo: &ContainerGeometry, rect: Rect, width: u32, height: u32) 
         for x in min_x..max_x {
             let px = x as f32 + 0.5;
             let py = y as f32 + 0.5;
-            if geo.verts.chunks_exact(18).any(|tri| {
+            if verts.chunks_exact(18).any(|tri| {
                 let a = ndc_to_px(tri[0], tri[1], width, height);
                 let b = ndc_to_px(tri[6], tri[7], width, height);
                 let c = ndc_to_px(tri[12], tri[13], width, height);
