@@ -15,6 +15,14 @@ uuid = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 lodestone-testsupport = { workspace = true }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
+# for its statistically-robust sampling and free local `--baseline` diffing.
+# `default-features = false` + only `cargo_bench_support`: the default feature
+# set pulls in `plotters` (HTML report charts) and `rayon`, neither of which
+# this crate's benches need — see the matching note in
+# `lodestone-worldgen/Cargo.toml`. Dev-only.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 # E4 acceptance gate only (`tests/live_entity_seam.rs`): drives the *public*
 # lodestone-client API against the live oracle to establish whether real entity
@@ -26,3 +34,11 @@ lodestone-testsupport = { workspace = true }
 lodestone-client = { workspace = true }
 lodestone-registry = { workspace = true, features = ["v770"] }
 tokio = { workspace = true }
+
+[[bench]]
+name = "pathfinding_search"
+harness = false
+
+[[bench]]
+name = "mob_tick"
+harness = false

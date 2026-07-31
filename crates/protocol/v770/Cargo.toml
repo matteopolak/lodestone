@@ -26,7 +26,12 @@ lodestone-server = { path = "../../lodestone-server" }
 serde_json = { workspace = true }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
-tokio = { workspace = true }
+# `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
+# used by `tests/server_liveness.rs` to observe the keep-alive interval and
+# time-of-day broadcast against the real client without a real wall-clock
+# wait — same precedent as `lodestone-net`'s and `lodestone-server`'s own
+# dev-dependency.
+tokio = { workspace = true, features = ["test-util"] }
 # Test-only: the real client talking to our real `V770ServerProtocol` over the
 # in-memory transport, proving the join sequence end-to-end without a socket.
 lodestone-client = { workspace = true }
@@ -40,6 +45,24 @@ lodestone-worldgen = { path = "../../lodestone-worldgen" }
 # `lodestone-physics` engine to walk a player and asserts the real server never
 # corrects us. Test-only; production code never depends on physics.
 lodestone-physics = { path = "../../lodestone-physics" }
+# Direct dependency (not a workspace alias), per the harness decision in
+# `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU/no-socket benches use
+# criterion. `default-features = false` + only `cargo_bench_support`: the
+# default feature set pulls in `plotters` and `rayon`, neither needed here —
+# see the matching note in `lodestone-worldgen/Cargo.toml`. Dev-only.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "chunk_light_decode"
+harness = false
+
+[[bench]]
+name = "nbt_decode"
+harness = false
+
+[[bench]]
+name = "registry_decode"
+harness = false
 
 [features]
 # Enables the white-box live acceptance tests (`live_chunk`, `live_respawn`)

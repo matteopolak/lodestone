@@ -26,6 +26,10 @@
 **/mc/*/client-src/
 *.jar
 
+# Benchmark measurement data (docs/benchmark-harness.md) — local dev
+# artifacts, not comparable across machines, never committed.
+/bench-results/
+
 # OS
 .DS_Store
 
