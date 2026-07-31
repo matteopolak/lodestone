@@ -107,6 +107,13 @@ that must fail the same assertion, can see an island.
 Ask of every piece of work: **what actually consumes this?** Treat "nothing" as a defect report, not
 a status update. Assign work end-to-end, from data through to draw, rather than by crate.
 
+**One specific island factory: `ingest::handles_event`'s routing switch.** A system can be correct,
+registered in the right set, in the right order, and unit-tested green — and still never run in
+production, because `SharedState::apply` only forwards events the switch lists. A hermetic test that
+calls the system directly passes either way, so nothing catches it. This has now hidden working code
+**twice in one session** (`EntityDamaged`/`EntityHurtAnimation`, then air supply). When adding an
+ingest system, the switch is the first thing to check, not the last.
+
 ### 2. Re-verify before routing around "X doesn't exist yet"
 
 Staleness is the most common defect in the written record — **seven instances in one session**.
@@ -141,6 +148,25 @@ evidence.
 **Assertions of an absence need a control proving the detector works.** "No corrective teleport",
 "no trailing bytes", "zero unresolved" are only as good as the evidence the mechanism *would* have
 fired. Run the control and observe it fail; do not describe what it would do.
+
+**A control's premise can be false before the feature under test ever existed.** This is subtler
+than a wrong assertion and it fails in the *safe*-looking direction: the control fires, so the gate
+looks rigorous, and what it actually measures is unrelated. Two instances while wiring the sky:
+
+- A control asserted that a sky-less frame "clears uniformly to `SKY_COLOR`". It failed at 3.5%. The
+  offenders were at `x221..255 y180..255` in dark browns — the **first-person bare arm**, which the
+  hand pass draws whenever `third_person_body_drawn` is false, i.e. always, in first person, with
+  nothing installed. The premise had been false since long before the sky existed.
+- A HUD gate's rect hardcoded the *with-hotbar* `cluster_top`. `sprite_vitals` stacks upward from a
+  **moving** anchor (pulled up only `if frame.hotbar`, again only `if frame.xp`), so the gate
+  measured ~20 logical pixels above a row that was drawing perfectly and reported 0 px — a dead
+  wiring chain that was not dead.
+
+So: before believing a control, ask **what else already paints here**, and derive layout from the
+same expression the draw uses rather than restating a constant. And per *measure by location, never
+by frame average* below — both were diagnosed in one step by printing a **bounding box** instead of
+a percentage. A gate that reports only a fraction cannot tell a uniform-but-wrong frame from a
+localised blob; make failure output say *where*.
 
 **A shell pipeline will destroy the evidence you are about to reason from.** Two instances in one
 session, both of which produced a confident wrong conclusion:
