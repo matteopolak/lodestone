@@ -137,7 +137,17 @@ impl NoiseChunkSampler {
                 let qz = (z >> 2) << 2;
                 self.slot_get(*slot, (qx, 0, qz), inner)
             }
-            Density::Marker(inner) => self.eval(inner, x, y, z, interpolate),
+            // `cache_2d` stays transparent in the block field, same as the
+            // other three "value-transparent" markers below — this mirrors
+            // the pre-split `Density::Marker` handling verbatim (`cache_2d`
+            // was one of the four lumped JSON types here), so it carries the
+            // same JVM-cross-checked correctness this module's doc comment
+            // already claims for it. Only `super::Density::compute` (the
+            // point evaluator, used outside `NoiseChunk`'s per-block field)
+            // gained real caching for `cache_2d` — see its module doc.
+            Density::Cache2D { inner, .. } | Density::Marker(inner) => {
+                self.eval(inner, x, y, z, interpolate)
+            }
 
             Density::Add(a, b) => {
                 self.eval(a, x, y, z, interpolate) + self.eval(b, x, y, z, interpolate)

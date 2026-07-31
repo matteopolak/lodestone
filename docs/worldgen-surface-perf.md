@@ -87,21 +87,54 @@ JVM-oracle parity tests re-verify — see below). Only the bookkeeping around
   just makes it load-bearing for performance, not only for correctness of the
   interpolation math itself. `top_material`'s single-position path is
   unaffected — it doesn't take this shortcut.
-- **If `find_top_surface`'s own internal scan turns out to also be a
-  bottleneck**, note that `Density::compute` (the generic evaluator used for
-  `preliminary_surface_level`, as opposed to `NoiseChunkSampler`'s
-  memoised `eval`/`slot_get` used for the shape stage) treats `FlatCache` /
-  `Interpolated` / `Marker` density nodes as **pure pass-throughs with no
-  caching** — correct values, but every nested noise sample inside one of
-  those wrappers is recomputed from scratch on every `compute()` call, even
-  when (as `cache_2d`-wrapped `overworld/offset`/`overworld/factor` are) the
-  value only depends on `(x, z)` and is being asked for repeatedly at
-  different `y` within one `find_top_surface` scan. This was not touched
-  here — the corner-cell hoist above already eliminates the 256x outer
-  redundancy that made this worth investigating — but a real per-node cache
-  in `Density::compute` (matching what `NoiseChunkSampler` already does for
-  the shape stage) is the next lever if `preliminary_surface_level` shows up
-  hot again.
+- **Follow-up landed**: `Density::compute` now caches `cache_2d` (real
+  `Cache2DSlot`, keyed on exact `(x, z)`, ignoring `y`) — the node kind that
+  sits directly over `find_top_surface`'s per-`y` scan in
+  `preliminarySurfaceLevel`'s own tree (`NoiseRouterData.java:489-490`'s
+  `cache2d(offset)`/`cache2d(factor)`). `flat_cache` was tried the same way
+  first and **reverted**: it regressed `column()`'s median by +11–13% across
+  every bench function, because in this crate's actual call graph
+  `flat_cache` nodes (`continents`/`erosion`/`ridges`) are reached almost
+  entirely as `spline` `coordinate` inputs, which `NoiseChunkSampler`
+  (`chunk.rs`) treats as a corner-deduplicated *leaf* — so each raw `compute`
+  call already lands on a distinct `(x, z)`, and a last-value cache there pays
+  a `Mutex` lock for (almost) no hits. `interpolated` and the other three
+  markers (`cache_once`, `cache_all_in_cell`, `blend_density`) stay
+  transparent, matching vanilla's own behaviour off the cell-filling loop —
+  see `crates/lodestone-worldgen/src/density/mod.rs`'s `## Caching` section
+  for the full per-node-kind reasoning and jar citations. Net effect, measured
+  with a same-session criterion `--save-baseline`/`--baseline` pair on a quiet
+  machine: **−4.4% (95% CI −6.0%..−2.7%, p < 0.05)** on `column()`'s median —
+  real but modest, because `preliminary_surface_level` was already a minority
+  of the surface stage's own cost even before this change (the corner-cell
+  hoist above ate the larger, 256×-per-chunk redundancy; this catches the
+  smaller, per-`y`-step one it couldn't touch). All parity tests
+  (`surface_parity.rs`, `chunk_parity.rs`, `aquifer_parity.rs`,
+  `density_parity.rs`, `region_parity.rs`) stayed 100% bit-exact throughout.
+- **The shape stage's own memoisation (`NoiseChunkSampler`'s `FxHash`-keyed
+  corner cache, `chunk.rs`) was assessed as the next lever and not attempted.**
+  A `samply` profile (`threadCPUDelta`-weighted, symbolicated via a local
+  `samply load` + Firefox Profiler session against the DWARF `debug = 2`
+  build) found `HashMap::get` alone at ~10% of total profiled self-time
+  inside `NoiseChunkSampler::slot_get` — a materially larger target than
+  `preliminary_surface_level` was. Replacing it with vanilla's real
+  incremental, array-indexed `NoiseChunk` update (`initializeForFirstCellX` /
+  `advanceCellX` / `selectCellYZ` / `updateForY` / `updateForX` / `updateForZ`,
+  `NoiseChunk.java:250-336`) is **not a like-for-like swap**: vanilla's
+  algorithm is a stateful, strictly-ordered walk (X-cell outer, then
+  Y/Z-cell, precomputing 8 corner values once per cell into double-buffered
+  `slice0`/`slice1` arrays and reusing partial Y-then-X-then-Z lerps across
+  every block in that cell) with no analogue in this crate's current
+  per-block `final_density(x, y, z)` point-query API. Adopting it would mean
+  restructuring `NoiseChunkSampler`'s public API *and* every caller's
+  iteration order (`OverworldGenerator::shape_stage`'s `for lz { for lx { for
+  ly } } }` loop, currently Z/X/Y, would have to become vanilla's cell-major
+  order) — a rewrite of exactly the code `chunk_parity.rs`'s
+  `interpolated_final_density_matches_jvm_over_whole_chunk` test exists to
+  hold bit-exact, where an axis-order or lerp-sequencing slip would be far
+  easier to introduce than in the two memoisation-only changes made here.
+  Given the modest, already-measured return on the lower-risk lever, this was
+  costed and left as a follow-up rather than attempted in the same pass.
 
 ## Configuration
 
