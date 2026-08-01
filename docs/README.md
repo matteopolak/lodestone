@@ -93,7 +93,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   no terrain metric could see. Covers the placement matrix (block space, **not**
   the entity path's Y-flip and 1.501 lift), the three separate lid transforms,
   why sheets are keyed by stem rather than model, and the note that the GUI
-  item-icon path (#369) is a **second consumer** of the same geometry.
+  item-icon path (#369) is a **second consumer** of the same geometry. Now also
+  the **four** creation routes, not the two the chain diagram used to imply
+  (issue #374): in vanilla *writing a block state is what creates the block
+  entity*, no packet involved, so a freshly placed chest was invisible while
+  still opening — and why the removal half of `World::sync_block_entity` matters
+  as much as the creation half.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob. Also the sheep wool render layer (issue #53,
