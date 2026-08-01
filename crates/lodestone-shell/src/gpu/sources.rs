@@ -204,6 +204,13 @@ impl ThirdPersonBodyState {
     /// corpus-name fallback with no new plumbing on the render side.
     pub(super) fn into_draw(self) -> EntityDraw {
         EntityDraw {
+            // The local player's own body never reddens today, for the same
+            // reason its `on_fire` overlay cannot: the local player has no
+            // ingest entity carrying `HurtTime` (`apply_local_player_login`
+            // gives it no `EntityKind`/`Position`), so there is nothing to read
+            // — and with no third-person camera there is nothing to see either.
+            // A `false` by construction, not by omission; see `docs/combat.md`.
+            hurt: false,
             id: LOCAL_PLAYER_DRAW_ID,
             type_path: player_model_name(self.slim).to_string(),
             item: None,

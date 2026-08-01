@@ -368,19 +368,82 @@ pub fn upload_instances(
     )
 }
 
-/// [`upload_instances`] with a per-instance gamma-space tint.
+/// One instance's full colour state: the gamma-space dye tint **and** whether
+/// the hurt/death red overlay applies to it.
+///
+/// # Why one type instead of two parallel slices
+///
+/// [`upload_instances_tinted`] used to take a bare `&[[u8; 3]]`, and the
+/// obvious way to add the overlay was a second `&[bool]` beside it. That is the
+/// shape this repo keeps getting bitten by: a lockstep invariant across two
+/// arguments that nothing enforces, so a later edit that filters or reorders one
+/// of them silently paints the wrong mob red. Bundling the two means a tint
+/// physically cannot travel without its overlay flag — the same move that made
+/// `sprite_rect` return its atlas alongside its rect rather than leaving the
+/// pairing to the caller.
+///
+/// [`NONE`](Self::NONE) is what every undyed, unhurt instance passes, and it
+/// packs to exactly [`NO_TINT`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceTint {
+    /// The gamma-space `[r, g, b]` multiplied into the texel — `[255, 255, 255]`
+    /// for "leave the texel alone".
+    pub rgb: [u8; 3],
+    /// Whether this instance draws with the hurt/death red overlay
+    /// ([`HURT_OVERLAY_ALPHA_BYTE`]). Boolean, not a fade, per
+    /// [`EntityInstanceRaw::with_hurt_overlay`].
+    pub hurt: bool,
+}
+
+impl InstanceTint {
+    /// Untinted and unhurt: packs to [`NO_TINT`].
+    pub const NONE: Self = Self {
+        rgb: [255, 255, 255],
+        hurt: false,
+    };
+
+    /// A dye tint with no overlay.
+    #[must_use]
+    pub const fn rgb(rgb: [u8; 3]) -> Self {
+        Self { rgb, hurt: false }
+    }
+
+    /// The same tint with the hurt/death overlay set or cleared.
+    #[must_use]
+    pub const fn with_hurt(mut self, hurt: bool) -> Self {
+        self.hurt = hurt;
+        self
+    }
+
+    /// Fold both halves into one instance's packed `tint` word.
+    #[must_use]
+    fn apply(self, inst: EntityInstanceRaw) -> EntityInstanceRaw {
+        inst.with_tint(self.rgb).with_hurt_overlay(self.hurt)
+    }
+}
+
+impl Default for InstanceTint {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+/// [`upload_instances`] with a per-instance gamma-space tint and hurt overlay.
 ///
 /// `tints` is indexed in lockstep with `transforms`; a short or missing entry
-/// falls back to [`NO_TINT`], for the same reason `lights` falls back to
-/// full-bright — a plumbing mistake should render the *untinted* thing, not a
+/// falls back to [`InstanceTint::NONE`], for the same reason `lights` falls back
+/// to full-bright — a plumbing mistake should render the *untinted* thing, not a
 /// black one, because "grey leather" is a legible bug and "black leather" looks
-/// like a lighting failure somewhere else entirely.
+/// like a lighting failure somewhere else entirely. A missing entry likewise
+/// draws *unhurt*: a mob that should have flashed and did not is a missed frame,
+/// where a mob reddened by an indexing slip looks like a damage event that never
+/// happened.
 #[must_use]
 pub fn upload_instances_tinted(
     device: &wgpu::Device,
     transforms: &[glam::Mat4],
     lights: &[u32],
-    tints: &[[u8; 3]],
+    tints: &[InstanceTint],
 ) -> Option<wgpu::Buffer> {
     if transforms.is_empty() {
         return None;
@@ -392,14 +455,14 @@ pub fn upload_instances_tinted(
         .map(|(i, m)| {
             let inst = EntityInstanceRaw::new(*m, lights.get(i).copied().unwrap_or(fallback));
             match tints.get(i) {
-                Some(rgb) => inst.with_tint(*rgb),
+                Some(tint) => tint.apply(inst),
                 None => inst,
             }
         })
         .collect();
     Some(
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("lodestone-entity-armour-instances"),
+            label: Some("lodestone-entity-tinted-instances"),
             contents: bytemuck::cast_slice(&raw),
             usage: wgpu::BufferUsages::VERTEX,
         }),
@@ -1038,6 +1101,36 @@ mod tests {
             [1.0, 2.0, 3.0],
         );
         let base = EntityCameraUniform {
+    /// [`InstanceTint`] is the thing that stops the overlay flag from being a
+    /// second, parallel slice nothing keeps in step with the tints. Both halves
+    /// must survive the fold into one packed word, in both orders, and
+    /// [`InstanceTint::NONE`] must be indistinguishable from the pre-overlay
+    /// `NO_TINT` — otherwise every undyed mob in the world changes colour the
+    /// day this type lands.
+    #[test]
+    fn instance_tint_carries_both_halves_into_one_packed_word() {
+        let m = glam::Mat4::IDENTITY;
+        let raw = |t: InstanceTint| t.apply(EntityInstanceRaw::new(m, 0)).tint;
+
+        assert_eq!(raw(InstanceTint::NONE), NO_TINT);
+        assert_eq!(InstanceTint::default(), InstanceTint::NONE);
+
+        let leather = lodestone_assets::equipment::UNDYED_LEATHER_RGB;
+        assert_eq!(raw(InstanceTint::rgb(leather)) & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!(raw(InstanceTint::rgb(leather)) >> 24, 0);
+
+        // The case a parallel `&[bool]` gets wrong: a dyed *and* hurt instance.
+        let both = InstanceTint::rgb(leather).with_hurt(true);
+        assert_eq!(raw(both) & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!(raw(both) >> 24, HURT_OVERLAY_ALPHA_BYTE);
+
+        // Hurt with no dye still leaves the texel's own colour alone.
+        let hurt_only = InstanceTint::NONE.with_hurt(true);
+        assert_eq!(raw(hurt_only) & 0x00FF_FFFF, NO_TINT);
+        assert_eq!(raw(hurt_only) >> 24, HURT_OVERLAY_ALPHA_BYTE);
+        assert_eq!(raw(hurt_only.with_hurt(false)), NO_TINT);
+    }
+
             camera: CameraUniform {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 section_origin: [0.0; 4],

@@ -26,8 +26,8 @@ use lodestone_assets::entity_models::sheep_wool_tint;
 use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_render::{
     BlockAtlas, BlockPipeline, Camera, CameraUniform, DepthBuffer, ENTITY_FULLBRIGHT,
-    EntityCameraUniform, GpuAtlas, GpuMesh, GpuModelMesh, ItemGeometry, Mesh, ModelMesh,
-    ModelPipeline, SpriteAnimation,
+    EntityCameraUniform, GpuAtlas, GpuMesh, GpuModelMesh, InstanceTint, ItemGeometry, Mesh,
+    ModelMesh, ModelPipeline, SpriteAnimation,
     block::{camera_buffer, sprite_uv_buffer},
     crack_pipeline::{CrackPipeline, GpuCrackMesh},
     crack_resolver::CrackResolver,
@@ -1913,35 +1913,51 @@ impl RenderState {
             ),
         );
 
-        let instances: Vec<_> = entities
-            .iter()
-            .filter_map(|e| {
-                self.entities
-                    .models
-                    .resolve(&e.type_path, e.feet, e.yaw, e.scale, &e.anim)
-                    .map(|i| i.with_light(self.entity_light.sample(e.feet)))
-            })
-            .collect();
+        // Split by `hurt` here, at the one point that still knows which
+        // `EntityDraw` each instance came from.
+        let mut plain: Vec<_> = Vec::new();
+        let mut hurt: Vec<_> = Vec::new();
+        for e in entities {
+            let Some(instance) = self
+                .entities
+                .models
+                .resolve(&e.type_path, e.feet, e.yaw, e.scale, &e.anim)
+                .map(|i| i.with_light(self.entity_light.sample(e.feet)))
+            else {
+                continue;
+            };
+            if e.hurt { &mut hurt } else { &mut plain }.push(instance);
+        }
 
-        let frame = plan_entities(&instances, &camera.frustum());
-        stats.entities_drawn = frame.stats.drawn;
-        stats.entities_culled = frame.stats.culled_frustum;
+        let frustum = camera.frustum();
+        // The flag and the plan it describes travel as one value from here on.
+        let plans = [
+            (false, plan_entities(&plain, &frustum)),
+            (true, plan_entities(&hurt, &frustum)),
+        ];
+        stats.entities_drawn = plans.iter().map(|(_, f)| f.stats.drawn).sum();
+        stats.entities_culled = plans.iter().map(|(_, f)| f.stats.culled_frustum).sum();
 
         // One instance buffer per *part*, not per entity: the mesh's vertices are
         // part-local, so a limb only moves if its own matrices are uploaded
         // separately. A mob is ~10–35 parts but hundreds of quads, so this moves
         // roughly 1% of the data a per-entity vertex re-bake would.
-        frame
-            .batches
+        plans
             .iter()
-            .map(|batch| {
+            .flat_map(|(hurt, frame)| frame.batches.iter().map(move |batch| (*hurt, batch)))
+            .map(|(hurt, batch)| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
-                // Every part uploads the *same* light slice: a mob's lightmap
-                // sample is per entity, so its head and its leg share one value.
+                // Every instance in this batch shares one overlay state, by
+                // construction of the split above — so one repeated value rather
+                // than a per-instance vector, and no way for the two to disagree.
+                let tints = vec![InstanceTint::NONE.with_hurt(hurt); batch.transforms.len()];
+                // Every part uploads the *same* light and tint slices: a mob's
+                // lightmap sample and its overlay state are per entity, so its
+                // head and its leg share both values.
                 let parts = batch
                     .parts
                     .iter()
-                    .map(|p| upload_instances(device, p, &batch.lights))
+                    .map(|p| upload_instances_tinted(device, p, &batch.lights, &tints))
                     .collect();
                 EntityDrawBatch {
                     model: batch.model,
@@ -1961,6 +1977,21 @@ impl RenderState {
     /// animated by the wearer's render state, so a zombie's chestplate reaches
     /// out in front with `animateZombieArms`. The equivalent here is to run no
     /// second pose at all: `ArmourMesh::attach` pairs each armour part with the
+    ///
+    /// # Why this plans twice (issue #98's hurt overlay)
+    ///
+    /// `plan_entities` groups by model and drops the input order, so a
+    /// per-entity flag cannot be zipped back onto a batch afterwards — and
+    /// `EntityInstance` (in `lodestone-render`'s `entity.rs`) carries only the
+    /// light byte, not the overlay. The instances are therefore split by
+    /// [`EntityDraw::hurt`] *before* planning, and each half's flag stays
+    /// attached to the plan it produced as a `(bool, EntityFrame)` pair. That
+    /// pairing is the point: a `Vec<bool>` parallel to the batches would be an
+    /// invariant nothing enforces, which is precisely how this class of bug
+    /// comes back. Grouping by `(model, hurt)` instead of `model` is also what
+    /// a hurt mob costs in vanilla — one extra batch while its 10 ticks run,
+    /// and nothing at all the rest of the time (the hurt half is empty, and
+    /// `plan_entities` on an empty slice returns no batches).
     /// wearer's index for the same name, and this reads
     /// `instance.part_transforms[i]` — the matrix the mob is *already* being
     /// drawn with.
@@ -2070,7 +2101,11 @@ impl RenderState {
                     if !self.entities.armour_textures.contains_key(&texture) {
                         continue;
                     }
-                    let tint = armour_layer_tint(layer);
+                    // Vanilla's overlay is sampled by every layer of a
+                    // `LivingEntityRenderer`'s model, armour included — a hurt
+                    // mob whose breastplate stayed its own colour would read as
+                    // a rendering fault, not as damage.
+                    let tint = InstanceTint::rgb(armour_layer_tint(layer)).with_hurt(draw.hurt);
                     let group = match accum
                         .iter_mut()
                         .position(|a| a.slot == slot && a.texture == texture)
@@ -2205,7 +2240,9 @@ impl RenderState {
                 continue;
             }
             let light = u32::from(self.entity_light.sample(draw.feet));
-            let tint = sheep_wool_tint(wool.color);
+            // Same reason armour carries it: the wool is one of the sheep's
+            // model layers, so it reddens with the body.
+            let tint = InstanceTint::rgb(sheep_wool_tint(wool.color)).with_hurt(draw.hurt);
             for (range, wearer_index) in &attached {
                 let Some(transform) = instance.part_transforms.get(*wearer_index) else {
                     continue;
@@ -2247,7 +2284,7 @@ struct WoolPartAccum {
     range: lodestone_render::PartRange,
     transforms: Vec<glam::Mat4>,
     lights: Vec<u32>,
-    tints: Vec<[u8; 3]>,
+    tints: Vec<InstanceTint>,
 }
 
 /// One model type's uploaded per-part instance buffers for a frame. `parts[p]`
@@ -2288,7 +2325,7 @@ struct ArmourPartAccum {
     range: lodestone_render::PartRange,
     transforms: Vec<glam::Mat4>,
     lights: Vec<u32>,
-    tints: Vec<[u8; 3]>,
+    tints: Vec<InstanceTint>,
 }
 
 /// The [`ArmourSlot`] an [`EquipmentSlot`] maps onto, or `None`.
@@ -2631,6 +2668,7 @@ mod tests {
                 );
             }
             for (i, part) in instance.part_transforms.iter().enumerate() {
+            hurt: false,
                 assert!(
                     part.determinant() > 0.0,
                     "{expected_model} part {i}: determinant must be positive, was {}",
@@ -3430,6 +3468,7 @@ mod tests {
              run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
              here would assert nothing",
         );
+                hurt: false,
         let device = ctx.device();
         let queue = ctx.queue();
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -3447,6 +3486,7 @@ mod tests {
             fov_y_degrees: 60.0,
             aspect: w as f32 / h as f32,
             near: 0.05,
+                hurt: false,
             far: Camera::far_for_render_distance(8, 0),
         };
         let draws = vec![EntityDraw {
@@ -3562,3 +3602,4 @@ mod tests {
         );
     }
 }
+            hurt: false,

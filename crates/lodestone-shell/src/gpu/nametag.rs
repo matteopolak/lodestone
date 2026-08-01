@@ -704,6 +704,7 @@ mod tests {
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
         let draw = EntityDraw {
+            hurt: false,
             id: 1,
             type_path: "pig".to_owned(),
             item: None,
@@ -758,6 +759,7 @@ mod tests {
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
         let draw = EntityDraw {
+            hurt: false,
             id: 1,
             type_path: "pig".to_owned(),
             item: None,
@@ -833,6 +835,7 @@ mod tests {
         let mut normal = Vec::new();
         let mut see_through = Vec::new();
         let draw = EntityDraw {
+            hurt: false,
             id: 1,
             type_path: "pig".to_owned(),
             item: None,

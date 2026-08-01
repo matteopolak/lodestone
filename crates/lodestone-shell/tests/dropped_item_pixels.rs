@@ -102,6 +102,10 @@ fn camera() -> Camera {
 
 fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
     EntityDraw {
+        // A dropped item is not a living entity, so it never reddens — vanilla's
+        // overlay is `LivingEntityRenderer`'s, and an item entity is drawn
+        // through the model pipeline instead (issue #98).
+        hurt: false,
         id: DROP_ID,
         type_path: ITEM_ENTITY_TYPE_PATH.to_owned(),
         item,
@@ -437,6 +441,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
     };
 
     let projectile = |type_path: &str| EntityDraw {
+        hurt: false,
         id: DROP_ID + 1,
         type_path: type_path.to_owned(),
         // Exactly what `extract_entity_draws` produces for a non-`item` entity.

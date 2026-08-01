@@ -1643,16 +1643,35 @@ impl WindowApp {
             )
         } else if self.ui.is_container_open() {
             player_menu = self.sim.player_menu();
-            (Some(&player_menu), "Inventory".to_string())
+            // **"Crafting"**, not "Inventory" (issue #370). `InventoryScreen`
+            // passes `translatable("container.crafting")` as its title
+            // (`InventoryScreen.java:28`) — it names the 2x2 grid — and the
+            // literal `"Inventory"` that used to sit here was wrong twice: wrong
+            // word, and, going in as the *title*, drawn at the title anchor,
+            // which on this one screen is `x = 97`. The word "Inventory" does
+            // exist in vanilla, as the *second* label, which this screen is the
+            // only one to omit; see `container::label_layout`.
+            (
+                Some(&player_menu),
+                crate::container::player_inventory_title(self.sim.translator().as_ref()),
+            )
         } else {
             (None, String::new())
         };
         if container_menu.is_some() {
+            // `playerInventoryTitle` through the same language table. A local
+            // constant here is not the #52 defect class repeating: vanilla reads
+            // it from `Inventory.getDisplayName()`, itself the client-side
+            // constant `translatable("container.inventory")`
+            // (`Inventory.java:55`), so there is no server component to resolve.
+            let inventory_label =
+                crate::container::player_inventory_label(self.sim.translator().as_ref());
             // The carried stack follows the pointer, so the frame needs the cursor
             // in physical pixels — the same space `hit_test` and the menu layout
             // use (see the `cursor` field). Without this the stack is built but
             // never positioned, and nothing draws.
             let container_frame = ContainerFrame::new(container_menu, &container_title)
+                .with_inventory_label(&inventory_label)
                 .with_cursor(Some([self.cursor.0, self.cursor.1]))
                 .with_recipe_book(self.recipe_book.as_ref());
             // `render_with_icons_scaled`, **not** `render_scaled`: the latter

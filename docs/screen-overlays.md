@@ -90,6 +90,23 @@ this file's `ScreenEffects` struct is still the right place to add it *if*
 that decision is made (one more `bool`, one more mix in `OVERLAY_WGSL`,
 exactly `on_fire`'s shape) — it just was not built speculatively here.
 
+**Update: the per-entity overlay is now wired end to end, and it stayed out of
+this pass.** `HurtTime` reaches pixels through the *entity* pipeline
+(`ClientEvent::EntityHurtAnimation` → `HurtTime` → `EntityDraw::hurt` →
+`prepare_entities`' hurt/not-hurt split → `InstanceTint::with_hurt` → the
+entity shader's gamma-space blend), gated by
+`crates/lodestone-shell/tests/hurt_overlay_pixels.rs`. That gate asserts
+**zero** changed pixels outside the mob's own silhouette, which is the
+mechanical proof it has not quietly become the screen-space tint this section
+says it must not be — if someone later folds a hurt flash into
+`ScreenEffects`, that assertion is the one that will notice.
+
+Note also what this pass's `on_fire` still lacks and the hurt overlay now has:
+a *per-entity* value cannot ride a single session-scoped `bool` on
+`ScreenEffects`. That is why the two were wired differently rather than
+symmetrically, and why the hurt half did not wait on `on_fire`'s
+`entity_view()` reachability fix.
+
 ### Fire: a real animated texture, a simplified placement
 
 `submitFire` (`ScreenEffectRenderer.java:168-180`) draws two quads sampling
