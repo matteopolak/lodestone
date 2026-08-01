@@ -1,0 +1,294 @@
+# Block entity renderers
+
+**Issue:** [#23](https://github.com/matteopolak/lodestone/issues/23) — still open; chest is
+landed, the other eleven types are not.
+
+## What it is
+
+The cuboid rigs vanilla's `BlockEntityRenderer`s draw for blocks whose **block model does not
+describe them**. Today: chests (single, double left, double right; every material; the lid
+animation).
+
+This is not a nice-to-have layer over an existing box. A 26.2 chest has **no block model at all** —
+`assets/minecraft/blockstates/chest.json` points at `block/chest`, and that file is verbatim:
+
+```json
+{ "textures": { "particle": "minecraft:block/oak_planks" } }
+```
+
+Zero elements. Every visible triangle of a chest comes from `ChestRenderer`, so before this landed a
+chest was a **hole in the world**, and no terrain metric could see it: `sections_drawn`,
+`total_quads` and every pre-existing pixel gate are byte-identical with and without chests drawing.
+That is why chest was first rather than sign.
+
+**The converse is the trap, and it is easy to get backwards from memory: a 26.2 sign *is* a real
+block model.** `blockstates/oak_sign.json` maps all 16 `rotation` values to `block/oak_sign_rot_N`
+models with genuine geometry, and `StandingSignRenderer`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/StandingSignRenderer.java`)
+declares **no model whatsoever** — only text transformations. So there is deliberately no sign
+*geometry* here; porting one would draw a second board inside the one the terrain mesher already
+produces. Sign block entities are a **text pass**, and that pass is not built (see
+[What is not built](#what-is-not-built)).
+
+## How it works
+
+Four layers, version-free until the last:
+
+| layer | file | what it owns |
+|---|---|---|
+| geometry | `crates/lodestone-assets/src/block_entity_models.rs` | the ported `EntityModelDef`s |
+| renderer | `crates/lodestone-render/src/block_entity.rs` | placement, lid pose, material→sheet, batching |
+| GPU | `crates/lodestone-shell/src/gpu/block_entities.rs` | pipeline, meshes, texture bind groups |
+| source | `crates/lodestone-shell/src/block_entities.rs` | world → `ChestSpawn`, and the lid clock |
+
+### The consumer chain, end to end
+
+Two links already existed and reached **nothing**. Both are marked; if you are extending this, they
+are the shape of failure to expect.
+
+```
+level_chunk_with_light ─► BlockEntity::decode_list ─► LoadedChunk.block_entities
+block_entity_data      ─► World::set_block_entity  ─┘        ▲
+                                                    was DEAD: zero shell call sites
+                                                             │
+                       shell/block_entities.rs::chest_spawns ┘
+                                    │
+BLOCK_EVENT ─► v770 adapter ─► ClientEvent::BlockEvent
+                                    ▲ was DEAD: fell through net.rs `forward`'s
+                                    │ terminal `_ =>` arm — decoded-but-stranded
+                       net.rs NetUpdate::BlockEvent
+                                    │
+                       sim.rs poll_net ─► Sim::chest_lids  (ticked in Sim::step)
+                                    │
+                       Sim::block_entity_source()  ── installed every frame ──┐
+                                                                              ▼
+                              app.rs ─► RenderState::set_block_entity_source
+                                                                              │
+                    gpu.rs::prepare_block_entities ─► plan_block_entities ────┘
+                                    │
+                    gpu.rs render_inner, inside the block pass ─► draw_indexed
+```
+
+**`ingest::handles_event` needed no new arm.** Checked rather than assumed, because that switch is
+this repo's island factory: `SharedState::apply` forwards only ECS-handled events, and block events
+travel the shell's own `ClientEvent` stream, so the ECS routing switch is not on this path at all.
+
+### Geometry, and the one difference from entity models
+
+The bake is shared with entities verbatim — `CubeDef` / `PartDef` / `bake_entity_parts`, and
+`entity::push_part_quads`' winding rule (made `pub(crate)` rather than copied: a chest whose winding
+disagreed with the mobs beside it has exactly the armour-layer failure mode that function's doc
+describes). **Placement is the difference, and it is total:**
+
+| | entity | block entity |
+|---|---|---|
+| model space | Y-**down** | Y-**up** |
+| placement | `entity_model_matrix`: `translate(feet) · rotY(180°−yaw) · scale(−s,−s,s) · translate(0,−1.501,0)` | `block_entity_placement_matrix`: `translate(pos) · rotateAround(−yaw, ½,0,½)` |
+| anchor | the entity's feet | the block's corner |
+
+`ChestRenderer.submit`'s *entire* prologue is one
+`Matrix4f().rotationAround(Axis.YP.rotationDegrees(-facing.toYRot()), 0.5F, 0.0F, 0.5F)` — no flip
+and no lift, because the chest's texels are already block-space: `bottom` spans y `0..10` texels and
+the `lid` pivot at y `9` puts the closed lid's top at `14/16`, the real chest height. Feeding a chest
+through the entity matrix buries it 1.5 blocks down, upside down.
+
+`det(placement) == +1` for every facing (translation ∘ rotation, no handedness flip), which is *why*
+the winding rule transfers unchanged. It is **measured**, not asserted from "rotations are positive"
+— see `placement_preserves_orientation`.
+
+### The lid
+
+Vanilla applies **three** transforms, in three different classes. Collapsing any pair of them is
+right at the endpoints and wrong everywhere between.
+
+1. `ChestLidController.tickLid()` — ramps `openness` by **±0.1 per tick**, clamped `0..=1`, so a lid
+   takes exactly 10 ticks. Ported in `shell/block_entities.rs::ChestLids::tick`.
+2. `ChestLidController.getOpenness(a)` — `lerp(a, oOpenness, openness)`, the partial-tick
+   interpolation. `ChestLids::openness`.
+3. `ChestRenderer.submit` eases the progress (`open = 1-open; open = 1-open³`, a cubic ease-out),
+   then `ChestModel.setupAnim` turns it into an angle (`lid.xRot = -(open·π/2)`, and
+   `lock.xRot = lid.xRot`). `chest_lid_openness` and `chest_lid_x_rot` — deliberately two functions.
+
+`lid` and `lock` are **siblings** sharing pivot `offset(0, 9, 1)`, not parent and child; nesting the
+lock composes the pivot twice and puts it 9 texels too high.
+
+### Sheets
+
+Keyed by **texture stem**, not model name. A trapped chest shares the single-chest *mesh* and differs
+only in bind group, so the batch key is `(model, texture)`; keying textures by model — as
+`EntityRenderer::textures` correctly does, because a mob's sheet *is* determined by its model — draws
+every trapped chest in plain oak.
+
+22 stems: 7 materials × 3 halves, plus one half-independent ender sheet. `chest_texture_stems()`
+derives that list from the *same match* the renderer resolves through, so a material cannot be added
+without its sheets.
+
+**Ender is half-independent on purpose.** `Sheets.chooseSprite` returns the single
+`ENDER_CHEST_LOCATION` for every `ChestType`, and the jar ships only `entity/chest/ender.png` — no
+`ender_left`/`ender_right` exist. A uniform suffix rule names a missing file and the chest falls back
+to nothing, which reads as a broken renderer rather than a missing texture.
+
+26.2 stitches these into `textures/atlas/chest.png` and submits a `SpriteId`. We bind the individual
+PNGs instead: each sprite **is** the whole 64×64 sheet, so the model's own UVs (normalised against
+64×64 by the bake) address a direct upload identically, and the atlas would only add a UV remap.
+
+## How to change it
+
+### Adding a block-entity type
+
+1. A `*_model()` builder plus a `BlockEntityModelEntry` in `BLOCK_ENTITY_MODELS`.
+2. A texture-stem resolver in `render/block_entity.rs` and its entry in the preload list.
+3. A `*Spawn` input struct and a `resolve_*` on `BlockEntityModelSet`.
+4. A gather arm in `shell/block_entities.rs` and a prepare arm in `gpu.rs`.
+
+You do **not** need a new pipeline. Everything draws through `EntityPipeline`, and the draw loop is
+already generic over `(model, texture)`.
+
+### Gotchas, each of which has a test holding it
+
+- **`visible_faces` is indexed by `entity::FACE_ORDER` `[Down, Up, West, North, East, South]`**, not
+  by `Direction`'s discriminant. Off-by-index deletes the chest's *front* face instead of its seam,
+  which still passes any "does a chest draw" gate. Held by
+  `double_halves_omit_exactly_the_seam_face`, which asserts *by direction*, not by quad count.
+- **Part names are the animation's only handle.** `BlockEntityMesh::index_of` resolves `"lid"` and
+  `"lock"` by name; renaming either silently freezes the lid shut — the mesh still draws, so a
+  coverage-only gate stays green. Held by
+  `lid_and_lock_share_the_pivot_the_animation_rotates_about`.
+- **South is yaw `0`** (`Direction.toYRot()`), not `Direction`'s declaration order
+  (down/up/north/south/west/east), which is a quarter-turn error on every chest in the world.
+  Held by `facing_rotates_the_front_of_the_chest_to_the_named_side`, which locates the *latch* after
+  rotation — a `+yaw`/`−yaw` swap passes every bounds and determinant assertion.
+- **`Affine` → `Mat4` is a transpose.** `Affine::m[i][j]` is row `i`, column `j`;
+  `Mat4::from_cols_array_2d` takes **columns**. Feeding rows in as columns gives the inverse
+  rotation, which for a lid looks like it opening *into* the chest and is easy to misread as a sign
+  error in `chest_lid_x_rot`.
+- **The entity lift is `+1.501` in world space, not `−1.501`.** The flip is applied *after* the
+  translate, so the negative comes out positive. `placement_does_not_flip_or_lift` failed on its
+  first run for exactly this; it compares against the real `entity_model_matrix` rather than
+  restating its expression.
+- **Do not use `entity_anim::Skeleton`.** It animates by *slot* (head, limb table) and classifies a
+  chest as `AnimFamily::Static` — i.e. a permanently shut lid. Block entities take direct per-part
+  pose overrides, composed through `lodestone_assets::entity::Affine::of_pose` so the `rotationZYX`
+  order cannot drift from the bake's.
+- **Do not nest the world read lock.** `chest_spawns` calls `loaded_chunks()` *before* taking the
+  guard and drops the guard before sampling light. `std::sync::RwLock` gives no re-entrancy
+  guarantee — a nested read may deadlock once a writer is queued, which on this world happens every
+  time a chunk packet lands. That failure mode appears under load and never in a test.
+- **No fifth bind group.** `wgpu`'s default `max_bind_groups` is 4 and the model shader spends all
+  four. This pass reuses `EntityPipeline` (two groups) and adds a second bind group over the
+  *existing* group-0 layout, the same trick the first-person hand pass uses. A fifth group compiles
+  on an 8-group M5 and crashes at startup for everyone at the floor.
+- **The source must be re-installed every frame.** It captures this frame's partial tick and a
+  snapshot of the lid map. A one-shot install at connect draws every lid frozen at the fraction of a
+  tick the session happened to join on.
+
+### There are two consumers of this geometry, not one
+
+The world pass documented here is the first. The **GUI item-icon path is the second**: a chest
+*item* in the inventory or hotbar has no baked icon either (`IconPart::Special` is where vanilla's
+`ChestSpecialRenderer` would go), which is issue
+[#369](https://github.com/matteopolak/lodestone/issues/369). Vanilla shares one `ChestModel` between
+`ChestRenderer` and `ChestSpecialRenderer`, so the geometry here is the right source for both — but
+they are separate call sites with separate pipelines, and a change to the models must be checked
+against **both**. Do not assume a chest that looks right in the world looks right in the hand.
+
+## Configuration
+
+Nothing user-facing. The values that matter are all ported constants:
+
+| constant | value | source |
+|---|---|---|
+| `block_entities::VIEW_DISTANCE` | `64.0` blocks | `BlockEntityRenderer.getViewDistance()`, compared against `Vec3.atCenterOf(pos)` — the block **centre**, not its corner |
+| `LID_SPEED` | `0.1` / tick | `ChestLidController.tickLid()` |
+| chest sheet size | 64×64 | all three `ChestModel` layers' `LayerDefinition.create(mesh, 64, 64)` |
+| `EXPECTED_SHEETS` (gate) | `22` | derived from `chest_texture_stems()` |
+
+Sheets load from `client.jar` via `resources::load_block_entity_textures`, fail-open: no pack means
+chests **draw nothing** rather than a synthetic placeholder. That asymmetry with mob sheets (which do
+get a placeholder) is deliberate — a flat-magenta mob reads as "this sheet is missing", but a
+flat-magenta chest-shaped box reads as a renderer bug. `RenderStats::block_entity_sheets_loaded` is
+what distinguishes the two from outside.
+
+## Proof
+
+`crates/lodestone-shell/tests/chest_block_entity_pixels.rs` — three `#[ignore]`d GPU gates:
+
+```bash
+cargo test -p lodestone-shell --test chest_block_entity_pixels -- --ignored --nocapture
+```
+
+The expected rect is projected from the **real baked vertices** of the real corpus mesh, through the
+*same* `Camera::view_projection` the render call uses and the *same* `part_transforms` the draw uses
+— never a remembered literal. Failure output prints a **bounding box**, not a percentage.
+
+Measured green:
+
+| gate | measurement |
+|---|---|
+| chest draws | rect `x137..183 y98..144`; fill **89.6%**; changed bbox `x138..181 y98..142`, entirely inside |
+| lid animates | band above the closed silhouette: closed **0 px**, open **1504 of 1504** |
+| arm is elsewhere | arm bbox `x247..319 y169..239`, disjoint from the chest rect |
+
+**The negative control was watched failing.** The island was simulated exactly — planning left
+intact so `block_entities_drawn` stayed at `1`, and the mesh upload dropped, which is the precise
+shape of this repo's eleven confirmed instances:
+
+```
+the chest fills only 0.0% of its own projected rect (0 of 2209 px).
+Subject's non-sky bbox: Rect { x0: 247, y0: 169, x1: 319, y1: 239 }
+an open lid painted only 0 px in the 1504 px band ... Changed bbox: None
+```
+
+Note what the first failure printed: the only thing painting was the **first-person bare arm**. That
+is the false control `CLAUDE.md` records, and it is caught by construction —
+`the_first_person_arm_is_somewhere_else` *locates* the arm and asserts it is disjoint from the chest
+rect, so the sibling gates' clean-control premise is a measurement rather than a hope.
+
+Both other gates assert their own premise before the thing they measure: the lid gate fails loudly
+if the open lid does not project above the closed chest (which would make its pixel assertion vacuous
+rather than failing), and the draw gate fails if the chest projects to under 900 px.
+
+Unit tests: 6 in `lodestone-assets`, 17 in `lodestone-render`, 10 in `lodestone-shell`. Note that all
+33 are a **closed loop** with respect to the shell pass — none of them calls
+`prepare_block_entities`, so every one would stay green with the draw deleted. Only the pixel gates
+can see that.
+
+## What is not built
+
+Eleven of the twelve types on #23, in the order the issue puts them:
+
+- **Signs** — text only (the board is a block model). Needs: `SignText` NBT decode (`messages`,
+  `color`, `has_glowing_text` per `SignText.DIRECT_CODEC`), the transforms from
+  `StandingSignRenderer` (`RENDER_SCALE 0.6666667`, `TEXT_OFFSET (0, 0.33333334, 0.046666667)`,
+  scale `±0.010416667`, the wall offset `(0, -0.3125, -0.4375)`, 16 `RotationSegment` steps, front
+  and back), `MAX_TEXT_LINE_WIDTH 90` / `TEXT_LINE_HEIGHT 10`, and the dye rule
+  (`ARGB.scaleRGB(color, 0.4)` normally; full `DyeColor.textColor` plus full-bright plus an outline
+  when glowing, with `BLACK_TEXT_OUTLINE_COLOR = -988212` substituted for black). The substrate
+  exists: `gpu/nametag.rs` already draws world-space text as coloured quads from a `RasterFont`,
+  including its own two depth passes. Colour must multiply in **gamma** space.
+- Beds, banners (layered patterns from the `banner_patterns` atlas), item frames, shulker boxes
+  (`shulker_boxes` atlas, 16 dyes), the enchanting-table book, bells, conduits, end crystals,
+  decorated pots (`decorated_pot` atlas).
+
+Also unbuilt for chests specifically: the `BrightnessCombiner` that makes a double chest's two halves
+share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behind
+`chest_material_with_season` (the function is ported and tested; nothing calls it with `true`).
+
+## Dependencies
+
+- `lodestone-assets` — `entity::{CubeDef, PartDef, EntityModelDef, PartPose, Affine, bake_entity_parts}`,
+  `Image::decode_png`, `ResourceManager`/`ZipSource` for the jar.
+- `lodestone-render` — `entity::{push_part_quads, PartRange}`, `entity_pipeline::{EntityPipeline,
+  GpuEntityModel, EntityCameraUniform, upload_instances}`, `camera::Frustum`, `models::ModelVertex`.
+- `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`.
+- `lodestone-data` — `block_states::{block_name, properties}` for the material and the
+  `facing`/`type` properties.
+- `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`.
+
+## Related
+
+- [`entity-rendering.md`](./entity-rendering.md) — the cuboid-rig machinery this reuses.
+- [`gpu-module-layout.md`](./gpu-module-layout.md) — the bind-group budget and pass ordering.
+- Vanilla reference: `.cache/mc/26.2/client-src/net/minecraft/client/{model/object/chest/ChestModel,
+  renderer/blockentity/{ChestRenderer,BlockEntityRenderDispatcher,AbstractSignRenderer,
+  StandingSignRenderer},renderer/Sheets}.java`.

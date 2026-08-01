@@ -77,6 +77,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   for those pinned the factor to a **session constant** (permanent noon: the
   reported "fullbright world" and "daytime mobs", one root cause), why breaking a
   block appeared to fix it, and why two green shader gates could not see any of it.
+- [Block entity renderers](./block-entity-renderers.md) — the cuboid rigs whose
+  block model does not describe them (issue #23; chest landed, eleven types not).
+  A 26.2 chest has **no block model at all** — `block/chest.json` declares only a
+  particle texture, zero elements — so before this it was a hole in the world that
+  no terrain metric could see. Covers the placement matrix (block space, **not**
+  the entity path's Y-flip and 1.501 lift), the three separate lid transforms,
+  why sheets are keyed by stem rather than model, and the note that the GUI
+  item-icon path (#369) is a **second consumer** of the same geometry.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob. Also the sheep wool render layer (issue #53,
