@@ -985,6 +985,66 @@ def is_in_lava(world, s):
     return False
 
 
+def fluid_jump_threshold(eye_h):
+    # Entity.getFluidJumpThreshold(): getEyeHeight() < 0.4 ? 0.0 : 0.4.
+    return 0.0 if eye_h < 0.4 else 0.4
+
+
+def fluid_kind_at(world, x, y, z):
+    # Fine `fluid_at` first, falling back to the coarse is_water/is_lava
+    # presence booleans -- mirrors Rust `fluid_state::fluid_kind_at`.
+    cell = world.fluid_at(x, y, z)
+    if cell is not None:
+        return cell[0]
+    if world.is_water(x, y, z):
+        return "water"
+    if world.is_lava(x, y, z):
+        return "lava"
+    return None
+
+
+def fluid_cell_height(world, x, y, z, kind):
+    # FluidState.getHeight(): hasSameAbove ? 1.0F : own_height(amount/9.0F).
+    # A coarse presence-only cell (no fine `fluid_at` entry) is treated as a
+    # full cell, matching Rust `fluid_state::cell_height`'s `None => 1.0F`.
+    cell = world.fluid_at(x, y, z)
+    if cell is None:
+        return f32(1.0)
+    if fluid_kind_at(world, x, y + 1, z) == kind:
+        return f32(1.0)
+    return own_height(cell[1])
+
+
+def fluid_reach_height(world, s, kind):
+    # Entity.getFluidHeight(tag): max(fluidTop - feetY) over the deflated
+    # box's cells holding `kind`. Mirrors Rust `fluid_state::compute_fluid_state`'s
+    # per-fluid reach (the eye-in-fluid half is unused by travelInLava, so it is
+    # not ported here).
+    bb = bounding_box(s)
+    d = 0.001
+    x0 = mth_floor(bb[0] + d)
+    y0 = mth_floor(bb[1] + d)
+    z0 = mth_floor(bb[2] + d)
+    x1 = mth_ceil(bb[3] - d) - 1
+    y1 = mth_ceil(bb[4] - d) - 1
+    z1 = mth_ceil(bb[5] - d) - 1
+    deflated_min_y = bb[1] + d
+    entity_y = bb[1]
+    reach = 0.0
+    for x in range(x0, x1 + 1):
+        for y in range(y0, y1 + 1):
+            for z in range(z0, z1 + 1):
+                k = fluid_kind_at(world, x, y, z)
+                if k != kind:
+                    continue
+                h = fluid_cell_height(world, x, y, z, kind)
+                fluid_top = float(y) + float(h)
+                if fluid_top < deflated_min_y:
+                    continue
+                reach = max(reach, fluid_top - entity_y)
+    return reach
+
+
 def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
     # baseTick's `if (isInLava()) fallDistance *= 0.5;` (Entity.java:555-557).
     # This function is only reached when the per-tick fluid summary already said
@@ -1007,7 +1067,14 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
         s.vel[1] += float(f32(0.04))
     else:
         s.no_jump_delay = 0
-    base_gravity = float(P.gravity)
+    # `isFalling`/`baseGravity` are read here, at the top of `travelInFluid`
+    # (LivingEntity.java:2495-2497) -- after the (simplified) jump block above
+    # has already altered velocity, before moveRelative adds this tick's input
+    # acceleration. `effective_gravity` folds in the Slow Falling clamp exactly
+    # as `tick_water` above computes it; lava shares the same `travelInFluid`
+    # call site, so it must apply the same clamp.
+    is_falling = s.vel[1] <= 0.0
+    base_gravity = effective_gravity(float(P.gravity), is_falling, s.slow_falling)
     ax, ay, az = input_vector(xxa, zza, P.fluid_input_speed, s.yaw)
     s.vel[0] += ax
     s.vel[1] += ay
@@ -1016,8 +1083,17 @@ def tick_lava(world, s, forward, strafe, jump, sneak, sprint):
     do_move(world, s, s.vel, sneak, staying_on_ground_surface=sneak)
     # Entity.move()'s checkFallDamage call. Not water on this path.
     accumulate_fall_distance(s, s.pos[1] - old_y, False)
-    # deep-lava branch: scale(0.5) then -baseGravity/4
-    s.vel = [s.vel[0] * 0.5, s.vel[1] * 0.5, s.vel[2] * 0.5]
+    # isInShallowFluid(LAVA) (LivingEntity.java:2542-2548): shallow gets the
+    # same buoyant falling-adjustment water always gets, on top of a
+    # Y-asymmetric multiply(0.5, 0.8, 0.5); deep gets a flat scale(0.5) with
+    # no adjustment at all.
+    threshold = fluid_jump_threshold(eye_height(s))
+    lava_height = fluid_reach_height(world, s, "lava")
+    if lava_height <= threshold:
+        mv = (s.vel[0] * 0.5, s.vel[1] * float(f32(0.8)), s.vel[2] * 0.5)
+        s.vel = list(fluid_falling_adjusted_movement(base_gravity, is_falling, s.sprinting, mv))
+    else:
+        s.vel = [s.vel[0] * 0.5, s.vel[1] * 0.5, s.vel[2] * 0.5]
     if base_gravity != 0.0:
         s.vel[1] += -base_gravity / 4.0
 
@@ -1501,6 +1577,34 @@ def scenario_lava_sink():
     s = State(0.5, 95.0, 0.5, 0.0)
     trace = []
     for _ in range(120):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_lava_shallow():
+    # Shallow lava puddle: fine-level cell (amount 3 -> own_height 3/9 = 0.333,
+    # below the 0.4 jump threshold) resting on solid ground, one block deep only.
+    # Exercises travelInLava's SHALLOW branch: multiply(0.5, 0.8, 0.5) then
+    # getFluidFallingAdjustedMovement -- a Y-asymmetric scale plus the buoyant
+    # falling-adjustment that deep lava (scenario_lava_sink) never applies. The
+    # player's box bottom sits exactly on the puddle's floor for the whole
+    # trace, so lava_height stays 0.333 <= 0.4 on every tick -- this scenario
+    # never crosses into the deep arm, the same way lava_sink's full column
+    # never crosses into the shallow one.
+    #
+    # Coarse-presence lava (add_lava, one block deep) would NOT distinguish the
+    # branches: a present cell with no fine `fluid_at` entry reads as a FULL
+    # cell (height 1.0), which is > 0.4 and lands on the deep arm regardless of
+    # how many blocks it is "deep" in the everyday sense. `add_lava_cell`'s
+    # explicit low `amount` is what actually produces a sub-threshold height.
+    w = World()
+    w.add_solid(0, 49, 0)
+    w.add_lava_cell(0, 50, 0, 3)
+    s = State(0.5, 50.0, 0.5, 0.0)
+    s.on_ground = True
+    trace = []
+    for _ in range(60):
         tick(w, s, 0.0, 0.0, False, False, False)
         trace.append((list(s.pos), list(s.vel)))
     return w, trace
@@ -2126,6 +2230,7 @@ SCENARIOS = [
     ("ladder_sneak_hold", scenario_ladder_sneak_hold),
     ("blue_ice_slide", scenario_blue_ice_slide),
     ("lava_sink", scenario_lava_sink),
+    ("lava_shallow", scenario_lava_shallow),
     ("levitation", scenario_levitation),
     ("slow_falling_water", scenario_slow_falling_water),
     ("swim_sprint", scenario_swim_sprint),

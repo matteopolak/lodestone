@@ -25,10 +25,10 @@ use golden_traces::{
     GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GAP_GLIDE,
     GOLDEN_ELYTRA_GLIDE_LEVEL, GOLDEN_ENTITY_PUSH_FLUSH_CONTROL, GOLDEN_ENTITY_PUSH_SHOVE,
     GOLDEN_ENTITY_PUSH_WIDE_PLATEAU, GOLDEN_FREE_FALL, GOLDEN_HONEY_JUMP, GOLDEN_ICE_SLIDE,
-    GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB, GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SINK,
-    GOLDEN_LEVITATION, GOLDEN_SLAB_STEP, GOLDEN_SLIME_BOUNCE, GOLDEN_SLIME_BOUNCE_SNEAK,
-    GOLDEN_SLOW_FALLING_WATER, GOLDEN_SNEAK_EDGE_DIAGONAL, GOLDEN_SNEAK_EDGE_STOP,
-    GOLDEN_SNEAK_EDGE_WALK_OFF, GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP,
+    GOLDEN_JUMP_BOOST, GOLDEN_LADDER_CLIMB, GOLDEN_LADDER_SNEAK_HOLD, GOLDEN_LAVA_SHALLOW,
+    GOLDEN_LAVA_SINK, GOLDEN_LEVITATION, GOLDEN_SLAB_STEP, GOLDEN_SLIME_BOUNCE,
+    GOLDEN_SLIME_BOUNCE_SNEAK, GOLDEN_SLOW_FALLING_WATER, GOLDEN_SNEAK_EDGE_DIAGONAL,
+    GOLDEN_SNEAK_EDGE_STOP, GOLDEN_SNEAK_EDGE_WALK_OFF, GOLDEN_SOUL_SAND_WALK, GOLDEN_SPRINT_JUMP,
     GOLDEN_STAND_LOW_CORRIDOR_CONTROL, GOLDEN_SWIM_GAP_BLOCKED_CONTROL, GOLDEN_SWIM_GAP_TUNNEL,
     GOLDEN_SWIM_LOOK_DOWN_DIVES, GOLDEN_SWIM_SPRINT, GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL,
     GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN, GOLDEN_WALK_FLAT, GOLDEN_WALK_INTO_WALL,
@@ -86,6 +86,17 @@ impl World {
     }
     fn add_lava(&mut self, x: i32, y: i32, z: i32) {
         self.lava.insert((x, y, z));
+    }
+    fn add_lava_cell(&mut self, x: i32, y: i32, z: i32, amount: u8) {
+        self.lava.insert((x, y, z));
+        self.fluids.insert(
+            (x, y, z),
+            FluidCell {
+                kind: FluidKind::Lava,
+                amount,
+                falling: false,
+            },
+        );
     }
     fn add_slime(&mut self, x: i32, y: i32, z: i32) {
         self.slime.insert((x, y, z));
@@ -436,6 +447,29 @@ fn lava_sink_matches_golden() {
 }
 
 #[test]
+fn lava_shallow_matches_golden() {
+    // A shallow lava puddle (fine-level cell, amount 3 -> height 0.333, below
+    // the 0.4 jump threshold) one block deep on solid ground: exercises
+    // `tick_lava`'s SHALLOW branch (multiply(0.5, 0.8, 0.5) + the buoyant
+    // falling-adjustment), the counterpart to `lava_sink`'s deep branch. Coarse
+    // presence-only lava (`add_lava`) would read as a full-height cell and
+    // never take this arm regardless of how many blocks "deep" it looks — the
+    // fine `add_lava_cell` amount is what actually produces a sub-threshold
+    // height, matching `gen_golden.py`'s `scenario_lava_shallow`.
+    let mut world = World::default();
+    world.solid(0, 49, 0);
+    world.add_lava_cell(0, 50, 0, 3);
+    let state = grounded(0.5, 50.0, 0.5);
+    assert_tick_trace(
+        "lava_shallow",
+        &world,
+        state,
+        &GOLDEN_LAVA_SHALLOW,
+        MovementInput::NONE,
+    );
+}
+
+#[test]
 fn levitation_matches_golden() {
     // Levitation replaces gravity in the air path with a pull toward 0.05*(amp+1),
     // so the player rises instead of falling.
@@ -663,12 +697,7 @@ fn swim_surface_look_down_control_matches_golden() {
             sprint: true,
         },
     );
-    let final_y = f64::from_bits(
-        GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL
-            .last()
-            .unwrap()
-            .pos[1],
-    );
+    let final_y = f64::from_bits(GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL.last().unwrap().pos[1]);
     assert!(
         final_y < 89.5 - 5.0,
         "looking down at the surface must pull the swimmer down noticeably: y = {final_y}"
