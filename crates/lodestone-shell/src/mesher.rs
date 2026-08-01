@@ -602,6 +602,24 @@ impl ModelSectionView for SnapshotModelView<'_> {
         self.models.quads(id)
     }
 
+    /// Vanilla's `ambientocclusion` model-JSON flag, per state (issue #22).
+    ///
+    /// The trait default is `true`, which is what preserved behaviour while this
+    /// was unwired — so **the flag mechanism was inert in the running game until
+    /// this override existed**, exactly the island shape `CLAUDE.md` rule 1
+    /// names. Mirrors `quads_at`'s lookup deliberately: same state id, same
+    /// `BlockModels`, so a model whose flag says "flat" cannot disagree with the
+    /// geometry it was baked alongside.
+    ///
+    /// Note this is only the model-flag third of
+    /// `ModelBlockRenderer.java:65`'s predicate; the `getLightEmission() == 0`
+    /// clause has no data source in this codebase yet — see
+    /// `docs/model-smooth-lighting.md`.
+    fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
+        let id = self.snapshot.at(0, 0, 0).get_block(x, y, z);
+        self.models.ambient_occlusion(id)
+    }
+
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
         let (dx, lx) = split16(x);
         let (dy, ly) = split16(y);
