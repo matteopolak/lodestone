@@ -20,7 +20,9 @@ use lodestone_physics::{PhysicsProfile, Vec3d};
 #[path = "support/golden_traces.rs"]
 mod golden_traces;
 use golden_traces::{
-    GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_CROUCH_LOW_CORRIDOR,
+    GOLDEN_ANALOG_STRAFE, GOLDEN_BLUE_ICE_SLIDE, GOLDEN_BUBBLE_COLUMN_DOWN,
+    GOLDEN_BUBBLE_COLUMN_SURFACE_LAUNCH, GOLDEN_BUBBLE_COLUMN_UP,
+    GOLDEN_BUBBLE_COLUMN_WATER_CONTROL, GOLDEN_CROUCH_LOW_CORRIDOR,
     GOLDEN_CROUCH_RELEASE_STAYS_CROUCHED, GOLDEN_DIAGONAL_WALK, GOLDEN_ELYTRA_CLIMB,
     GOLDEN_ELYTRA_DIAGONAL_YAW, GOLDEN_ELYTRA_DIVE, GOLDEN_ELYTRA_GAP_GLIDE,
     GOLDEN_ELYTRA_GLIDE_LEVEL, GOLDEN_ENTITY_PUSH_FLUSH_CONTROL, GOLDEN_ENTITY_PUSH_SHOVE,
@@ -47,6 +49,8 @@ struct World {
     jump_factor: HashMap<(i32, i32, i32), f32>,
     speed_factor: HashMap<(i32, i32, i32), f32>,
     fluids: HashMap<(i32, i32, i32), FluidCell>,
+    /// `BubbleColumnBlock` cells → the `DRAG_DOWN` property.
+    bubble: HashMap<(i32, i32, i32), bool>,
 }
 
 impl World {
@@ -100,6 +104,20 @@ impl World {
     }
     fn add_slime(&mut self, x: i32, y: i32, z: i32) {
         self.slime.insert((x, y, z));
+    }
+    /// A `BubbleColumnBlock` cell. `drag_down` is the `DRAG_DOWN` property: `true`
+    /// for a magma-block drain, `false` for a soul-sand lift.
+    ///
+    /// **Also registers the cell as water**, mirroring `gen_golden.py`'s
+    /// `add_bubble_column`. Not a convenience: `BubbleColumnBlock.getFluidState`
+    /// returns `Fluids.WATER.getSource(false)` (`BubbleColumnBlock.java:73-75`), so
+    /// in vanilla a bubble column *is* a full water source cell. That is what makes
+    /// the in-water branch dispatch, and what makes the cell above a column read as
+    /// "not open air" so the inside impulse pair is selected. A dry bubble column is
+    /// not a world vanilla can represent, so this helper will not build one.
+    fn add_bubble_column(&mut self, x: i32, y: i32, z: i32, drag_down: bool) {
+        self.bubble.insert((x, y, z), drag_down);
+        self.water.insert((x, y, z));
     }
     fn set_jump_factor(&mut self, x: i32, y: i32, z: i32, f: f32) {
         self.jump_factor.insert((x, y, z), f);
@@ -163,6 +181,9 @@ impl CollisionView for World {
     }
     fn blocks_motion(&self, x: i32, y: i32, z: i32) -> bool {
         self.solid.contains(&(x, y, z))
+    }
+    fn bubble_column(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        self.bubble.get(&(x, y, z)).copied()
     }
 }
 
@@ -1627,4 +1648,241 @@ fn elytra_gap_glide_matches_golden() {
     }
     assert_eq!(s.pose, Pose::FallFlying);
     assert!(!s.swimming);
+}
+
+// ---------------------------------------------------------------------------
+// Bubble columns (issue #199) — `BubbleColumnBlock.entityInside`
+// ---------------------------------------------------------------------------
+
+/// The shaft `gen_golden.py`'s `bubble_column_world` builds: a solid base at
+/// `floor_y`, bubble column up to `column_top`, plain water above to `water_top_y`.
+///
+/// The base block is solid and nothing more. Vanilla resolves soul sand versus
+/// magma once, at block-update time, into the `DRAG_DOWN` boolean
+/// (`BubbleColumnBlock.getColumnState`), and the entity-side impulse never looks
+/// below the column — so `drag_down` is the *whole* of the base's contribution and
+/// there is deliberately no soul-sand/magma block here to get wrong.
+fn bubble_column_world(drag_down: bool, column_top: i32, water_top_y: i32, floor_y: i32) -> World {
+    let mut w = World::default();
+    w.solid(0, floor_y, 0);
+    for y in (floor_y + 1)..=column_top {
+        w.add_bubble_column(0, y, 0, drag_down);
+    }
+    for y in (column_top + 1)..=water_top_y {
+        w.add_water(0, y, 0);
+    }
+    w
+}
+
+/// Soul-sand lift, `onInsideBubbleColumn`'s `min(0.7, vy + 0.06)`.
+///
+/// Anti-vacuity: the player must actually *rise*, and the terminal velocity must
+/// reach the clamp exactly. A trace that merely sank slowly would still pass a
+/// bit-comparison against an oracle that shared the bug, so the sign and the clamp
+/// are asserted against literals hand-derived from `Entity.java:2893`.
+#[test]
+fn bubble_column_up_matches_golden() {
+    let world = bubble_column_world(false, 160, 165, 79);
+    let state = PlayerState::at(Vec3d::new(0.5, 85.0, 0.5), 0.0);
+    assert_tick_trace(
+        "bubble_column_up",
+        &world,
+        state,
+        &GOLDEN_BUBBLE_COLUMN_UP,
+        MovementInput::NONE,
+    );
+
+    let first_y = f64::from_bits(GOLDEN_BUBBLE_COLUMN_UP[0].pos[1]);
+    let last = GOLDEN_BUBBLE_COLUMN_UP.last().unwrap();
+    let last_y = f64::from_bits(last.pos[1]);
+    assert!(
+        last_y > first_y + 25.0,
+        "the lift did not lift: y went {first_y} -> {last_y}"
+    );
+    // `Math.min(0.7, …)` — the inside-branch push-up clamp, reached and not exceeded.
+    let last_vy = f64::from_bits(last.vel[1]);
+    assert_eq!(
+        last_vy, 0.7,
+        "terminal vertical velocity should saturate the inside push-up clamp"
+    );
+    for (t, g) in GOLDEN_BUBBLE_COLUMN_UP.iter().enumerate() {
+        let vy = f64::from_bits(g.vel[1]);
+        assert!(
+            vy <= 0.7,
+            "tick {t}: vy {vy} exceeds the inside clamp — the `above` branch must \
+             not be reachable in a column capped by more column"
+        );
+    }
+}
+
+/// **The control for [`bubble_column_up_matches_golden`].** Same shaft, plain water
+/// instead of a bubble column.
+///
+/// This is what proves the detector works rather than describing what it would do:
+/// the player *sinks* here and *rises* there, from identical geometry and identical
+/// (absent) input. An `apply_bubble_column` that never ran — not called from
+/// `travel_and_check_inside_blocks`, or gated on a `CollisionView::bubble_column`
+/// that always answered `None` — would make these two traces identical, and the
+/// assertion below is the one that fails.
+#[test]
+fn bubble_column_water_control_matches_golden() {
+    let mut world = World::default();
+    world.solid(0, 79, 0);
+    for y in 80..=165 {
+        world.add_water(0, y, 0);
+    }
+    let state = PlayerState::at(Vec3d::new(0.5, 85.0, 0.5), 0.0);
+    assert_tick_trace(
+        "bubble_column_water_control",
+        &world,
+        state,
+        &GOLDEN_BUBBLE_COLUMN_WATER_CONTROL,
+        MovementInput::NONE,
+    );
+
+    // The control must genuinely sink, and must differ from the lift everywhere
+    // after the very first impulse.
+    let ys: Vec<f64> = GOLDEN_BUBBLE_COLUMN_WATER_CONTROL
+        .iter()
+        .map(|g| f64::from_bits(g.pos[1]))
+        .collect();
+    assert!(
+        *ys.last().unwrap() < ys[0],
+        "the plain-water control should sink, not rise"
+    );
+    for g in &GOLDEN_BUBBLE_COLUMN_WATER_CONTROL {
+        let vy = f64::from_bits(g.vel[1]);
+        assert!(vy < 0.0, "plain water must never push a still player upward");
+    }
+    assert_eq!(
+        GOLDEN_BUBBLE_COLUMN_UP.len(),
+        GOLDEN_BUBBLE_COLUMN_WATER_CONTROL.len(),
+        "the control must be the same length to be comparable"
+    );
+    // **Tick 0's position is identical in both, and that is the correct answer.**
+    // `applyEffectsFromBlocks` runs *after* `travel()` (`LivingEntity.java:3130`
+    // then `:3134`), so the first tick's move happens before any impulse exists and
+    // the divergence appears in tick 0's **velocity** and tick 1's position. This
+    // assertion was first written as "all 50 positions differ" and measured 49 —
+    // the one exception is this ordering, not a missing impulse.
+    assert_eq!(
+        GOLDEN_BUBBLE_COLUMN_UP[0].pos[1], GOLDEN_BUBBLE_COLUMN_WATER_CONTROL[0].pos[1],
+        "the impulse is applied after the move, so tick 0's position cannot differ"
+    );
+    let differing = GOLDEN_BUBBLE_COLUMN_UP
+        .iter()
+        .zip(GOLDEN_BUBBLE_COLUMN_WATER_CONTROL.iter())
+        .skip(1)
+        .filter(|(a, b)| a.pos[1] != b.pos[1])
+        .count();
+    assert_eq!(
+        differing,
+        GOLDEN_BUBBLE_COLUMN_UP.len() - 1,
+        "every tick after the first should differ from the plain-water control"
+    );
+
+    // The two-impulses-per-tick signature, isolated. A standing player spans two
+    // column cells, so tick 0's velocity is the control's plus exactly `2 × 0.06`
+    // — the clamp is not yet in play at that magnitude, so the arithmetic is
+    // visible in the clear. A port applying one impulse per tick instead of one per
+    // cell would land on `+0.06` here and still converge on the same `0.7`
+    // terminal velocity later, which is why this is asserted on tick 0 rather than
+    // on the tail.
+    let lift_vy0 = f64::from_bits(GOLDEN_BUBBLE_COLUMN_UP[0].vel[1]);
+    let control_vy0 = f64::from_bits(GOLDEN_BUBBLE_COLUMN_WATER_CONTROL[0].vel[1]);
+    assert_eq!(
+        lift_vy0,
+        control_vy0 + 0.06 + 0.06,
+        "tick 0 vy: lift {lift_vy0} vs control {control_vy0} — expected exactly two \
+         `+0.06` cell impulses (a 1.8-high box spans two column cells)"
+    );
+}
+
+/// Magma drain, `onInsideBubbleColumn`'s `max(-0.3, vy - 0.03)`.
+///
+/// The clamp is the discriminator: unassisted sinking in water tops out far slower
+/// than `0.3`/tick (the control above reaches `-0.025` in fifty ticks), so a trace
+/// saturating at exactly `-0.3` cannot be produced by water drag alone.
+#[test]
+fn bubble_column_down_matches_golden() {
+    let world = bubble_column_world(true, 119, 125, 81);
+    let state = PlayerState::at(Vec3d::new(0.5, 110.0, 0.5), 0.0);
+    assert_tick_trace(
+        "bubble_column_down",
+        &world,
+        state,
+        &GOLDEN_BUBBLE_COLUMN_DOWN,
+        MovementInput::NONE,
+    );
+
+    let last = GOLDEN_BUBBLE_COLUMN_DOWN.last().unwrap();
+    assert_eq!(
+        f64::from_bits(last.vel[1]),
+        -0.3,
+        "terminal vertical velocity should saturate the inside drag-down clamp"
+    );
+    let last_y = f64::from_bits(last.pos[1]);
+    assert!(
+        last_y > 82.0,
+        "the drain reached the floor ({last_y}); the trace would then be measuring \
+         the floor rather than the column"
+    );
+    for (t, g) in GOLDEN_BUBBLE_COLUMN_DOWN.iter().enumerate() {
+        let vy = f64::from_bits(g.vel[1]);
+        assert!(
+            vy >= -0.3,
+            "tick {t}: vy {vy} below the inside clamp — the `above` branch's -0.9 \
+             must not be reachable in a capped column"
+        );
+    }
+}
+
+/// The **other** branch: `onAboveBubbleColumn`'s `min(1.8, vy + 0.1)`, selected when
+/// `BubbleColumnBlock.entityInside` finds open air over the cell.
+///
+/// The proof that the strong branch actually fired is that the trace exceeds `0.7`
+/// — the inside clamp, which no amount of the inside impulse can pass. It reaches
+/// `0.775`. This scenario also carries the mixed straddle (upper cell `above`, lower
+/// cell `inside`, same tick) and the exit into air, where `is_in_water` goes false
+/// and no impulse applies at all.
+#[test]
+fn bubble_column_surface_launch_matches_golden() {
+    let mut world = World::default();
+    world.solid(0, 79, 0);
+    for y in 80..=90 {
+        world.add_bubble_column(0, y, 0, false);
+    }
+    let state = PlayerState::at(Vec3d::new(0.5, 81.0, 0.5), 0.0);
+    assert_tick_trace(
+        "bubble_column_surface_launch",
+        &world,
+        state,
+        &GOLDEN_BUBBLE_COLUMN_SURFACE_LAUNCH,
+        MovementInput::NONE,
+    );
+
+    let max_vy = GOLDEN_BUBBLE_COLUMN_SURFACE_LAUNCH
+        .iter()
+        .map(|g| f64::from_bits(g.vel[1]))
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        max_vy > 0.7,
+        "vy peaked at {max_vy}, at or below the inside clamp — the `above` branch \
+         never fired, so this scenario is not testing what it exists to test"
+    );
+    assert!(
+        max_vy <= 1.8,
+        "vy {max_vy} exceeds the above-branch clamp of 1.8"
+    );
+    // And it must come back down: leaving the water drops the player into
+    // `tick_air`, where no bubble impulse applies.
+    let min_vy = GOLDEN_BUBBLE_COLUMN_SURFACE_LAUNCH
+        .iter()
+        .map(|g| f64::from_bits(g.vel[1]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        min_vy < -0.3,
+        "vy bottomed at {min_vy}; the player never left the column into free air, \
+         so the exit half of this scenario is vacuous"
+    );
 }

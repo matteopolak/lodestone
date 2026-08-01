@@ -200,13 +200,13 @@ list rather than leaving them to be rediscovered:
      reader) is not deleted — it is still the right accessor for a caller
      *outside* the ECS `GameTick` schedule (a plugin, a debug overlay), it is
      just not on the path `player_physics` itself needed.
-- **Bubble columns are not implemented.** `docs/fluid-classification.md`
-  already documents that `bubble_column` is one of the five classes
-  hardcoded to read as water for classification purposes
-  (`UNCONDITIONAL_WATER_BLOCKS`) — so a bubble column correctly makes you
-  swim, and correctly fogs/sounds like water. But `BubbleColumnBlock`'s
-  up/down impulse is nowhere in `lodestone-physics`: standing in one moves
-  you like plain water, not like a lift or a drain.
+- ~~**Bubble columns are not implemented.**~~ **Closed** (issue #199) — see
+  [`bubble-columns.md`](./bubble-columns.md). The impulse turned out not to
+  belong in `tick_water` at all: `BubbleColumnBlock.entityInside` is reached
+  from `applyEffectsFromBlocks`, which `LivingEntity.aiStep` calls *after*
+  `travel()`, so it lives one level up beside `update_stuck_multiplier`. The
+  `drag` property that blocked it was already on the wire and in the generated
+  state table the whole time.
 - ~~**The swim look-descent is not modelled.**~~ **Closed** (issue #59) — see
   below.
 

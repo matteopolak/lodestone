@@ -206,6 +206,25 @@ class World:
         self.jumpf = {}      # (x,y,z) -> jump factor (honey 0.5)
         self.speedf = {}     # (x,y,z) -> speed factor (soul sand / honey 0.4)
         self.fluids = {}     # (x,y,z) -> ("water"|"lava", amount 1..8, falling)
+        self.bubble = {}     # (x,y,z) -> drag_down bool (BubbleColumnBlock DRAG_DOWN)
+
+    def add_bubble_column(self, x, y, z, drag_down):
+        # BubbleColumnBlock. `drag_down=True` is the magma-block drain, `False` the
+        # soul-sand lift; the two states are 15294/15295 in the 26.2 palette.
+        #
+        # Registers the cell as WATER as well, and that is not a convenience: the
+        # block's own getFluidState returns `Fluids.WATER.getSource(false)`
+        # (BubbleColumnBlock.java:73-75), so a bubble column IS a full water source
+        # cell in vanilla -- it is what makes you swim in one, and what makes the
+        # cell above a column read as "not open air" so the inside branch is taken.
+        # Coupling them here means no scenario can build a dry bubble column, which
+        # vanilla cannot represent.
+        self.bubble[(x, y, z)] = bool(drag_down)
+        self.water.add((x, y, z))
+        return self
+
+    def bubble_column(self, x, y, z):
+        return self.bubble.get((x, y, z))
 
     def add_slime(self, x, y, z):
         self.slime.add((x, y, z))
@@ -472,7 +491,7 @@ class State:
         # clamp -- see accumulate_fall_distance() and
         # check_fall_distance_accumulation() below. NOT modelled (matching the
         # Rust port, which has no equivalent state): creative flight (no flying
-        # here), riding/vehicles (no riding here), bubble columns, the
+        # here), riding/vehicles (no riding here), the
         # movementLength>=1.0 clip-through reset (needs a world raycast this
         # oracle's World has no equivalent of), and teleport resets (this oracle
         # has no teleport primitive; scenarios that want one must zero this field
@@ -1286,6 +1305,71 @@ def update_player_pose(world, s, sneak):
     s.pose = actual
 
 
+def cell_is_open_air(world, x, y, z):
+    """BubbleColumnBlock.entityInside's `nothingAbove`
+    (BubbleColumnBlock.java:58): the state above has an empty collision shape AND
+    an empty fluid state. Only true for real air."""
+    out = []
+    world.collision_boxes(x, y, z, out)
+    return (not out) and not world.is_water(x, y, z) and not world.is_lava(x, y, z)
+
+
+def apply_bubble_column(world, s):
+    """BubbleColumnBlock.entityInside -> Entity.onInsideBubbleColumn /
+    onAboveBubbleColumn (Entity.java:2851-2898).
+
+    Reached from applyEffectsFromBlocks, which LivingEntity.aiStep calls AFTER
+    travel() (LivingEntity.java:3130 then :3134) -- so the impulse this applies is
+    integrated on the NEXT tick, not this one.
+
+                    | drag=False (soul sand)  | drag=True (magma)
+        inside      | min(0.7, vy + 0.06)     | max(-0.3, vy - 0.03)
+        above (air) | min(1.8, vy + 0.1)      | max(-0.9, vy - 0.03)
+
+    All four are double arithmetic against double literals -- no f32 anywhere.
+
+    ONE IMPULSE PER CELL. checkInsideBlocks visits each intersected block position
+    once (deduped by position) and BubbleColumnBlock applies its impulse
+    immediately in the callback rather than deferring it to the
+    InsideBlockEffectApplier, so a 1.8-high standing player spans two cells and
+    takes two impulses per tick. The clamp is what makes that converge instead of
+    running away.
+
+    resetFallDistance() rides along on the INSIDE branch only (Entity.java:2897);
+    the above branch sends particles instead and leaves fall distance alone
+    (:2865).
+
+    Player.onInsideBubbleColumn/onAboveBubbleColumn additionally skip the whole
+    thing when abilities.flying (Player.java:310-321); vacuously true here, as
+    this oracle has no flight.
+    """
+    bb = bounding_box(s)
+    minx = mth_floor(bb[0] + 1.0e-5)
+    maxx = mth_floor(bb[3] - 1.0e-5)
+    miny = mth_floor(bb[1] + 1.0e-5)
+    maxy = mth_floor(bb[4] - 1.0e-5)
+    minz = mth_floor(bb[2] + 1.0e-5)
+    maxz = mth_floor(bb[5] - 1.0e-5)
+    for x in range(minx, maxx + 1):
+        for y in range(miny, maxy + 1):
+            for z in range(minz, maxz + 1):
+                drag_down = world.bubble_column(x, y, z)
+                if drag_down is None:
+                    continue
+                vy = s.vel[1]
+                if cell_is_open_air(world, x, y + 1, z):
+                    if drag_down:
+                        s.vel[1] = max(-0.9, vy - 0.03)
+                    else:
+                        s.vel[1] = min(1.8, vy + 0.1)
+                else:
+                    if drag_down:
+                        s.vel[1] = max(-0.3, vy - 0.03)
+                    else:
+                        s.vel[1] = min(0.7, vy + 0.06)
+                    s.fall_distance = 0.0
+
+
 def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
     """Everything super.tick() does to the motion: baseTick's swim summary, then
     LivingEntity.travel's fluid/elytra/air dispatch. Excludes the pose, which is
@@ -1311,6 +1395,12 @@ def travel_dispatch(world, s, forward, strafe, jump, sneak, sprint):
         tick_elytra(world, s, sneak)
     else:
         tick_air(world, s, forward, strafe, jump, sneak, sprint)
+    # LivingEntity.aiStep's applyEffectsFromBlocks() (LivingEntity.java:3134),
+    # right after the travel() dispatch above (:3130) and before pushEntities()
+    # (:3163). The Rust port calls update_stuck_multiplier here too; this oracle
+    # models no stuck-in-block (see State.fall_distance's note), so only the bubble
+    # column is here.
+    apply_bubble_column(world, s)
 
 
 def tick(world, s, forward, strafe, jump, sneak, sprint):
@@ -2265,6 +2355,100 @@ def scenario_elytra_gap_glide():
     return w, trace
 
 
+def bubble_column_world(drag_down, column_top, water_top_y, floor_y=79):
+    """A deep water shaft at (0, 0) with a bubble column filling it up to
+    `column_top` and plain water above that up to `water_top_y`.
+
+    `floor_y` is the base block -- soul sand for a push-up column, magma for a
+    drain. It is SOLID and nothing more: the base's identity is resolved by vanilla
+    once at block-update time into the DRAG_DOWN boolean
+    (BubbleColumnBlock.getColumnState), and the entity-side impulse code never looks
+    below the column. So there is deliberately no soul-sand/magma distinction in
+    this world beyond `drag_down` itself.
+    """
+    w = World()
+    w.add_solid(0, floor_y, 0)
+    for y in range(floor_y + 1, column_top + 1):
+        w.add_bubble_column(0, y, 0, drag_down)
+    for y in range(column_top + 1, water_top_y + 1):
+        w.add_water(0, y, 0)
+    return w
+
+
+def scenario_bubble_column_up():
+    # Soul-sand lift, "inside" branch only: the column is far taller than the
+    # player can climb in 50 ticks, so the cell above every occupied cell is more
+    # column (which reads as water) and the strong surface pair is never selected.
+    #
+    # A standing player is 1.8 high and therefore spans TWO column cells, so this
+    # trace carries two `min(0.7, vy + 0.06)` impulses per tick -- the per-cell
+    # behaviour, not a per-tick one. A one-impulse-per-tick port would converge on
+    # the same 0.7 terminal velocity but reach it at half the rate, so the early
+    # ticks of this trace are what distinguish them.
+    w = bubble_column_world(drag_down=False, column_top=160, water_top_y=165)
+    s = State(0.5, 85.0, 0.5, 0.0)
+    trace = []
+    for _ in range(50):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_bubble_column_water_control():
+    # THE CONTROL for scenario_bubble_column_up: byte-identical world construction
+    # except the shaft holds plain water instead of a bubble column. The player must
+    # SINK here and RISE there. If apply_bubble_column were inert -- not called, or
+    # gated on a property that never arrives -- the two traces would be identical,
+    # which is precisely what tests/bubble_column.rs asserts they are not.
+    w = World()
+    w.add_solid(0, 79, 0)
+    for y in range(80, 166):
+        w.add_water(0, y, 0)
+    s = State(0.5, 85.0, 0.5, 0.0)
+    trace = []
+    for _ in range(50):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_bubble_column_down():
+    # Magma drain, "inside" branch: max(-0.3, vy - 0.03). Starts high in a tall
+    # column so the descent never reaches the floor within the trace -- a player
+    # that landed would spend the remaining ticks measuring the floor instead of the
+    # drain.
+    w = bubble_column_world(drag_down=True, column_top=119, water_top_y=125)
+    s = State(0.5, 110.0, 0.5, 0.0)
+    trace = []
+    for _ in range(50):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_bubble_column_surface_launch():
+    # The OTHER branch: a push-up column whose top cell has real air above it, so
+    # BubbleColumnBlock.entityInside's `nothingAbove` is true and the entity takes
+    # onAboveBubbleColumn's min(1.8, vy + 0.1) instead of the inside pair.
+    #
+    # The column tops out at y=90 with air from y=91, so as the player rises the
+    # occupied cells straddle the boundary: the upper cell takes the ABOVE pair and
+    # the lower cell the INSIDE pair, in the same tick. Then the player leaves the
+    # water entirely, is_in_water goes false, tick_air takes over with no impulse at
+    # all, and gravity drops them back in -- so one trace covers the strong branch,
+    # the mixed straddle, and the exit.
+    w = World()
+    w.add_solid(0, 79, 0)
+    for y in range(80, 91):
+        w.add_bubble_column(0, y, 0, False)
+    s = State(0.5, 81.0, 0.5, 0.0)
+    trace = []
+    for _ in range(60):
+        tick(w, s, 0.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
 SCENARIOS = [
     ("free_fall", scenario_free_fall),
     ("walk_flat", scenario_walk_flat),
@@ -2309,6 +2493,10 @@ SCENARIOS = [
     ("stand_low_corridor_control", scenario_stand_low_corridor_control),
     ("crouch_release_stays_crouched", scenario_crouch_release_stays_crouched),
     ("elytra_gap_glide", scenario_elytra_gap_glide),
+    ("bubble_column_up", scenario_bubble_column_up),
+    ("bubble_column_water_control", scenario_bubble_column_water_control),
+    ("bubble_column_down", scenario_bubble_column_down),
+    ("bubble_column_surface_launch", scenario_bubble_column_surface_launch),
 ]
 
 

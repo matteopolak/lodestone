@@ -159,6 +159,14 @@ trait BlockView {
     /// [`shape_of`](Self::shape_of) *inside* an adapter, or the fallback stops
     /// being distinguishable from a real answer.
     fn blocks_motion_of(&self, state: u32) -> Option<bool>;
+
+    /// `BubbleColumnBlock`'s `DRAG_DOWN` property for a state, or `None` when the
+    /// state is not a bubble column — which is every state but two.
+    ///
+    /// Keyed by state rather than by name because both bubble-column states share
+    /// one name and differ only in this property; see
+    /// [`VersionAdapter::block_bubble_column_drag`]. Issue #199.
+    fn bubble_column_of(&self, state: u32) -> Option<bool>;
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +339,16 @@ fn stuck_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<Vec3d> {
 
 fn climbable_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     physics_at(v, x, y, z).climbable
+}
+
+/// [`CollisionView::bubble_column`] — the `DRAG_DOWN` property of the bubble column
+/// at this cell, if it is one.
+///
+/// Not routed through [`physics_at`] like its neighbours above: that table is keyed
+/// by block *name*, and the two bubble-column states share a name. This is the one
+/// physics answer in this module that a name cannot give.
+fn bubble_column_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<bool> {
+    v.bubble_column_of(v.state_at(x, y, z))
 }
 
 fn is_water_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
@@ -551,6 +569,13 @@ impl BlockView for WorldCollision<'_> {
     fn blocks_motion_of(&self, _state: u32) -> Option<bool> {
         None
     }
+
+    /// **Always `None`.** The demo palette has no bubble column at all — it is ten
+    /// full cubes, air and water (`crate::blocks`) — so there is no state here that
+    /// could answer anything else. The offline world simply has no elevators.
+    fn bubble_column_of(&self, _state: u32) -> Option<bool> {
+        None
+    }
 }
 
 impl CollisionView for WorldCollision<'_> {
@@ -604,6 +629,10 @@ impl CollisionView for WorldCollision<'_> {
 
     fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
         bounce_at(self, x, y, z)
+    }
+
+    fn bubble_column(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        bubble_column_at(self, x, y, z)
     }
 }
 
@@ -1141,6 +1170,13 @@ impl BlockView for LiveCollision {
     fn blocks_motion_of(&self, state: u32) -> Option<bool> {
         self.version.as_ref()?.block_blocks_motion(state)
     }
+
+    /// The bubble column's `drag` property, read off the version crate's state
+    /// table. `None` with no version data — which degrades a bubble column to the
+    /// plain water it already classifies as, rather than to a wrong impulse.
+    fn bubble_column_of(&self, state: u32) -> Option<bool> {
+        self.version.as_ref()?.block_bubble_column_drag(state)
+    }
 }
 
 impl CollisionView for LiveCollision {
@@ -1194,6 +1230,10 @@ impl CollisionView for LiveCollision {
 
     fn bounce_restitution(&self, x: i32, y: i32, z: i32) -> f32 {
         bounce_at(self, x, y, z)
+    }
+
+    fn bubble_column(&self, x: i32, y: i32, z: i32) -> Option<bool> {
+        bubble_column_at(self, x, y, z)
     }
 }
 
