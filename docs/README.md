@@ -38,7 +38,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Swimming](./swimming.md) — the water-movement port: the missing `PlayerCommand`
   packet that meant the server never believed a sprint-swim, double-tap-to-sprint's
   fixed-tick timing, Depth Strider's attribute now reaching physics for real, and
-  the deliberate gaps that remain (`movement_speed`, bubble columns).
+  the deliberate gaps that remain (`movement_speed`, bubble columns). Also lava's
+  shallow-vs-deep `travelInLava` branch (issue #214) — a structurally different
+  arm rather than water with different numbers, and one that no coarse
+  presence-cell scenario could have distinguished, since coarse presence reads as
+  a full `1.0` height and is always on the deep side of the `0.4` threshold.
 - [Pose-dependent dimensions](./pose-dimensions.md) — why the player box is
   `0.6 × 0.6` swimming and `0.6 × 1.5` crouching, and why that is a **fit-gated
   state machine** rather than a pose lookup: vanilla has no recovery for a player
