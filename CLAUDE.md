@@ -123,6 +123,14 @@ Oracles (not part of repo state — recreate them):
   in-flight work — and correctly abandoned the change rather than shipping it. **Before naming a path,
   check `git diff -- <path>` is only your own work.** If it is not, either wait for the owner or take
   the temp-index route below.
+- **Never `git pull --rebase`, and never `--autostash`.** The `git stash` ban above is easy to keep
+  when you type it; `--autostash` runs one *for* you, on the whole shared tree, silently. An agent ran
+  `git pull --rebase --autostash`, the rebase aborted, and it was left with a spurious **staged
+  deletion of another agent's brand-new test file** — content intact but the index claiming a removal,
+  which the next commit would have shipped. It repaired the index entry by hand. There is also a live
+  `stash@{0}: autostash` entry holding a full-tree snapshot, left in place deliberately as someone
+  else's safety net: **do not `stash drop` or `stash pop` it.** If you need to move to a newer commit,
+  do it in a throwaway `git worktree add --detach`, which touches nothing here.
 - **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and it has its own trap: a stale tree.**
   When you need partial-file granularity that a pathspec commit cannot express, build the commit in a
   **private** index so the shared one is never touched. But the ref compare-and-swap in
