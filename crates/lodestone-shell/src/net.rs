@@ -99,8 +99,8 @@ use std::time::Duration;
 
 use lodestone_client::{
     BlockPos, ChunkPos, ChunkSection, ClientAction, ClientBuilder, ClientEvent, ClientHandle,
-    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Reported, Rotation, SectionLight,
-    ServerAddress, Vec3, WorldDimensions,
+    EntityView, LoginProfile, OpenMenuSnapshot, PlayerListEntry, Reported, RespawnPolicy,
+    Rotation, SectionLight, ServerAddress, Vec3, WorldDimensions,
 };
 use lodestone_game::menu::Menu;
 use lodestone_game::scoreboard::Scoreboard;
@@ -229,8 +229,21 @@ pub enum NetUpdate {
     // (see `lodestone_ecs::session::ServerAlive`'s docs on why the two liveness
     // rules must not merge).
     /// The player died. A transient state, not the end of the session: the
-    /// client library auto-respawns, and [`NetUpdate::Respawned`] follows.
-    Death,
+    /// shell shows the death screen (issue #103) and [`NetUpdate::Respawned`]
+    /// follows once the player clicks Respawn and the server confirms it — the
+    /// client library no longer auto-respawns (`RespawnPolicy::Manual`, set on
+    /// the `ClientBuilder` in [`run`]), which is the actual behaviour change
+    /// this issue asked for; a screen with no gate behind it would have
+    /// nothing to show.
+    Death {
+        /// The server's own death message (`ClientEvent::Death`'s `message`
+        /// field), flattened to plain text the same way [`Self::Disconnected`]
+        /// flattens a disconnect reason — see that variant's construction site
+        /// in [`forward`]. Untranslated components (most death causes) render
+        /// as their raw key; see `docs/pause-menu.md`'s note on this screen for
+        /// why that is an accepted, named simplification rather than a bug.
+        message: String,
+    },
     /// The server confirmed a respawn (post-death, dimension change, or
     /// `/respawn`). The fresh position arrives in the placement
     /// [`NetUpdate::Teleport`] that follows.
@@ -808,8 +821,18 @@ fn run(
         // builder installs no plugins and spawns no entity — the shell's `App`
         // already carries `IngestPlugin`/`SessionPlugin` and the entity is
         // `Sim.local` — because `add_systems` does not deduplicate.
-        let mut builder =
-            ClientBuilder::new(server, profile, adapter).connect_timeout(Some(Duration::from_secs(10)));
+        //
+        // `RespawnPolicy::Manual` (issue #103): the library's default,
+        // `Automatic`, answers every `Death` event with an unconditional
+        // `ClientAction::Respawn`, which is what let the shell ride through
+        // death with no screen at all — the death packet arrived and left
+        // again inside one library call, before the shell ever got a chance to
+        // react. Manual makes death a real gate: `Sim` marks the player dead
+        // and waits, the shell shows the death screen, and only a click on its
+        // Respawn button (`Sim::respawn`) sends the action.
+        let mut builder = ClientBuilder::new(server, profile, adapter)
+            .connect_timeout(Some(Duration::from_secs(10)))
+            .respawn_policy(RespawnPolicy::Manual);
         if let Some(session) = auth {
             builder = builder.online_session(session);
         }
@@ -935,7 +958,9 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
         // `Vitals`/`Xp` components on the net thread, and forwarding them here as
         // well would put a second writer on the shell side. See `NetUpdate`'s note
         // where the two variants used to be.
-        ClientEvent::Death { .. } => NetUpdate::Death,
+        ClientEvent::Death { message } => NetUpdate::Death {
+            message: message.to_plain_string(),
+        },
         ClientEvent::Respawned { .. } => NetUpdate::Respawned,
         // Sound events: strip the namespace to the `sounds.json` key path and
         // pass the server's seed through unchanged (client-side variant
@@ -1278,7 +1303,9 @@ mod tests {
             "the vitals fold lives in `lodestone_ecs::session`; nothing may cross this channel"
         );
         // …and the control that `forward` is genuinely running: an event that
-        // *does* have a shell-side reaction still arrives.
+        // *does* have a shell-side reaction still arrives, and carries its
+        // message flattened to plain text (issue #103's death screen reads
+        // this straight off `NetUpdate::Death`, through `Sim::death_message`).
         forward(
             &tx,
             ClientEvent::Death {
@@ -1286,10 +1313,10 @@ mod tests {
             },
         )
         .expect("forward does not stop the loop");
-        assert!(matches!(
-            rx.try_recv().expect("Death still crosses"),
-            NetUpdate::Death
-        ));
+        match rx.try_recv().expect("Death still crosses") {
+            NetUpdate::Death { message } => assert_eq!(message, "you died"),
+            other => panic!("expected NetUpdate::Death, got {other:?}"),
+        }
     }
 
     #[test]

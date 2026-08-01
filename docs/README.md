@@ -379,6 +379,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   wgpu-forced `Always`/`write:false` substitute for vanilla's "no depth attachment
   at all" (found only by a validation error), and why the occlusion gate asserts
   **pixel-identity** with the occluder baseline rather than mere absence.
+- [Death screen](./death-screen.md) — issue #103: why no death screen could ever
+  have appeared before this (the client was built with `RespawnPolicy::Automatic`,
+  which answered every death packet with an unconditional respawn before the shell
+  could react), vanilla's `DeathScreen` layout including the "You Died!" title's
+  easy-to-miss `width/4` centering, Escape deliberately doing nothing
+  (`shouldCloseOnEsc() == false`), and the live-oracle evidence that chunk
+  streaming actually resumes after a manual respawn — the failure mode `CLAUDE.md`
+  records as a silent total chunk blackout.
 - [Clientbound packet coverage](./clientbound-packet-coverage.md) — the measured
   triage behind #26: `xtask connectedness` at 109/141 decoded, and why the other 32
   gap packets are deliberately **not** decoded — a full A/B/C tier table with the

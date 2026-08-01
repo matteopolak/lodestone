@@ -99,6 +99,26 @@ pub enum Screen {
     /// deliberately **not** an [`render::owns_frame`] screen, because that set
     /// clears the frame and would stop the world rendering behind it.
     Paused,
+    /// The local player died (issue #103): vanilla's `DeathScreen` — the "You
+    /// Died!" title, the server's death message, a score line, and two
+    /// buttons (Respawn / Title Screen). Reachable from every live gameplay
+    /// screen (`Playing`, `Chat`, `Container`, `Paused` — vanilla replaces
+    /// whatever screen was open the instant the death packet lands, see
+    /// [`die`](Self::die)) on [`crate::sim::Sim::is_dead`] going true, and
+    /// left only by [`respawn_confirmed`](Self::respawn_confirmed) once the
+    /// server confirms the respawn the Respawn button asked for
+    /// (`Sim::respawn`) — **not** by [`on_escape`](Self::on_escape), which is
+    /// a deliberate no-op here: vanilla's `DeathScreen.shouldCloseOnEsc()`
+    /// returns `false`, so Escape does not dismiss it.
+    ///
+    /// Drawn the same way [`Screen::Paused`] is — an overlay over the
+    /// still-rendering, still-ticking world (`render::death_frame` +
+    /// `MenuRenderer::render_overlay`), **not** an [`render::owns_frame`]
+    /// screen — for the same reason: a live server holds a dead player with
+    /// no chunk stream until it respawns (see `CLAUDE.md`'s dead-player note),
+    /// and this screen must not itself go blank or stop the session ticking
+    /// while that holds. See `docs/pause-menu.md`'s note on this screen.
+    Death,
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
     Error,
@@ -116,6 +136,10 @@ pub struct UiState {
     /// whichever opened it. See [`UiState::open_settings`],
     /// [`UiState::open_settings_from_pause`] and [`UiState::close_settings`].
     settings_return: Screen,
+    /// The current death's message, populated only on [`Screen::Death`] — see
+    /// [`Self::die`]. Mirrors how [`Self::error`] carries `Screen::Error`'s
+    /// reason.
+    death_message: Option<String>,
 }
 
 impl Default for UiState {
@@ -126,6 +150,7 @@ impl Default for UiState {
             error: None,
             quit_requested: false,
             settings_return: Screen::MainMenu,
+            death_message: None,
         }
     }
 }
@@ -167,6 +192,18 @@ impl UiState {
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.screen == Screen::Paused
+    }
+
+    /// Whether the death screen is up.
+    #[must_use]
+    pub fn is_death(&self) -> bool {
+        self.screen == Screen::Death
+    }
+
+    /// The current death's message, populated only on [`Screen::Death`].
+    #[must_use]
+    pub fn death_message(&self) -> Option<&str> {
+        self.death_message.as_deref()
     }
 
     /// Whether the chat box is open over the world.
@@ -298,6 +335,15 @@ impl UiState {
             self.screen == Screen::Settings && self.settings_return == Screen::Paused;
         // Ignore failures once we've already left for the menu, so a trailing
         // error from a shutting-down session doesn't resurrect the error screen.
+        //
+        // `Screen::Death` is included (issue #103): a live server holds a dead
+        // player with no chunk stream until it respawns, so a disconnect while
+        // the death screen is up is a real failure the player needs to see,
+        // not something that silently strands them on a screen whose Respawn
+        // button will now never get an answer — exactly the "held on the
+        // death screen, silent total chunk blackout" symptom `CLAUDE.md`
+        // warns about, here from a different cause (a genuine disconnect
+        // rather than the offline-mode UUID collision that note names).
         if mid_session_settings
             || matches!(
                 self.screen,
@@ -306,9 +352,11 @@ impl UiState {
                     | Screen::Chat
                     | Screen::Container
                     | Screen::Paused
+                    | Screen::Death
                     | Screen::Error
             )
         {
+            self.death_message = None;
             self.error = Some(reason.into());
             self.screen = Screen::Error;
         }
@@ -468,6 +516,14 @@ impl UiState {
             Screen::Settings => self.close_settings(),
             Screen::MainMenu => self.request_quit(),
             Screen::Connecting => {}
+            // Deliberately a no-op, not "unwind one level" like every screen
+            // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns
+            // `false` (`DeathScreen.java:64-66`), so Escape does not dismiss
+            // it. `MenuNav::key_death` mirrors this — it does not call
+            // `on_escape` for `MenuKey::Escape` the way every other screen's
+            // key handler does — so this arm exists only so the match stays
+            // exhaustive against a caller that reaches here some other way.
+            Screen::Death => {}
         }
     }
 
@@ -492,9 +548,10 @@ impl UiState {
     }
 
     /// Leave a live session for the title screen — the pause menu's "Quit to
-    /// Title" button. Only from [`Screen::Paused`], matching every other
-    /// "leave a screen" guard here: a stray call must never cut a live
-    /// session out from under the player who didn't ask for it.
+    /// Title" button, and (issue #103) the death screen's "Title Screen"
+    /// button. Only from [`Screen::Paused`] or [`Screen::Death`], matching
+    /// every other "leave a screen" guard here: a stray call must never cut a
+    /// live session out from under the player who didn't ask for it.
     ///
     /// Deliberately **not** routed through [`session_failed`](Self::session_failed):
     /// this is not an error, so no `error` is set and the title screen shows
@@ -503,10 +560,45 @@ impl UiState {
     /// reaction to the [`nav::MenuAction`] this produces — this method only
     /// moves the screen.
     pub fn quit_to_title(&mut self) {
-        if self.screen == Screen::Paused {
+        if matches!(self.screen, Screen::Paused | Screen::Death) {
             self.kind = None;
             self.error = None;
+            self.death_message = None;
             self.screen = Screen::MainMenu;
+        }
+    }
+
+    /// The local player died (issue #103): show the death screen. Valid from
+    /// every live gameplay screen — `Playing`, `Chat`, `Container`, `Paused`
+    /// — matching vanilla, which replaces whatever screen is open the instant
+    /// the death packet lands (`ClientPacketListener` sets the death screen
+    /// unconditionally, not only from `Playing`). `message` is the server's
+    /// death message, already flattened to plain text — see
+    /// `net::NetUpdate::Death` and `Sim::death_message`.
+    ///
+    /// Called once per death from `app.rs`'s per-frame reconciliation, guarded
+    /// there on `!ui.is_death()` so a death that is still being processed
+    /// (`Sim::is_dead()` staying `true` across many frames while the screen
+    /// waits for a click) does not re-latch every frame — harmless here either
+    /// way since the guard below is idempotent, but the caller's guard is what
+    /// keeps `message` from being overwritten by a later, unrelated call.
+    pub fn die(&mut self, message: Option<String>) {
+        if matches!(
+            self.screen,
+            Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+        ) {
+            self.death_message = message;
+            self.screen = Screen::Death;
+        }
+    }
+
+    /// The server confirmed the respawn the death screen's Respawn button
+    /// asked for (`Sim::respawn`): leave the death screen for the world. Only
+    /// from [`Screen::Death`] — never resurrects a menu/error/loading screen.
+    pub fn respawn_confirmed(&mut self) {
+        if self.screen == Screen::Death {
+            self.death_message = None;
+            self.screen = Screen::Playing;
         }
     }
 
@@ -1026,5 +1118,106 @@ mod tests {
             "no session was ever started from the title's Options button"
         );
         assert!(ui.error().is_none());
+    }
+
+    // -- the death screen (issue #103) -------------------------------------
+
+    #[test]
+    fn die_reaches_the_death_screen_from_every_live_gameplay_screen_and_carries_the_message() {
+        for setup in [
+            (|ui: &mut UiState| ui.enter_dev_world()) as fn(&mut UiState),
+            |ui| {
+                ui.enter_dev_world();
+                ui.open_chat();
+            },
+            |ui| {
+                ui.enter_dev_world();
+                ui.open_container();
+            },
+            |ui| {
+                ui.enter_dev_world();
+                ui.pause();
+            },
+        ] {
+            let mut ui = UiState::new();
+            setup(&mut ui);
+            ui.die(Some("hit the ground too hard".to_string()));
+            assert_eq!(ui.screen(), Screen::Death);
+            assert_eq!(ui.death_message(), Some("hit the ground too hard"));
+        }
+
+        // A stray call from anywhere it cannot happen from (no live session)
+        // must be a no-op — same guard as every other "leave a screen" method.
+        let mut ui = UiState::new();
+        ui.die(Some("should not apply".to_string()));
+        assert_eq!(ui.screen(), Screen::MainMenu, "no world, so no-op");
+        assert!(ui.death_message().is_none());
+    }
+
+    #[test]
+    fn respawn_confirmed_only_leaves_from_death_and_clears_the_message() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.die(Some("burned to death".to_string()));
+
+        ui.respawn_confirmed();
+        assert_eq!(ui.screen(), Screen::Playing);
+        assert!(
+            ui.death_message().is_none(),
+            "the old death's message must not survive into the new session"
+        );
+
+        // A stray call from anywhere else is a no-op.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.respawn_confirmed();
+        assert_eq!(ui.screen(), Screen::Playing, "not dead, so no-op");
+    }
+
+    #[test]
+    fn escape_does_not_leave_the_death_screen() {
+        // Vanilla's `DeathScreen.shouldCloseOnEsc()` is `false` — this is the
+        // one screen in this file where `on_escape` must be a pure no-op.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.die(None);
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::Death);
+        assert!(!ui.quit_requested());
+    }
+
+    #[test]
+    fn quit_to_title_from_the_death_screen_leaves_for_the_main_menu() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.die(Some("slain by Zombie".to_string()));
+
+        ui.quit_to_title();
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(ui.death_message().is_none());
+        assert!(ui.error().is_none(), "this is not a failure, so no reason");
+    }
+
+    #[test]
+    fn a_disconnect_while_dead_reaches_the_error_screen() {
+        // The hazard `CLAUDE.md` names: a live server holds a dead player with
+        // no chunk stream until it respawns. If a genuine disconnect while the
+        // death screen is up were swallowed here, the player would be stuck
+        // looking at a Respawn button that can never get an answer — the same
+        // *symptom* as the dead-player chunk-blackout bug, from a different
+        // cause. `session_failed` must reach through to `Screen::Error`.
+        let mut ui = UiState::new();
+        ui.begin(SessionKind::Multiplayer);
+        ui.session_ready();
+        ui.die(Some("fell out of the world".to_string()));
+        assert_eq!(ui.screen(), Screen::Death);
+
+        ui.session_failed("disconnected: Server closed");
+        assert_eq!(ui.screen(), Screen::Error);
+        assert_eq!(ui.error(), Some("disconnected: Server closed"));
+        assert!(
+            ui.death_message().is_none(),
+            "the stale death message must not leak onto the error screen"
+        );
     }
 }
