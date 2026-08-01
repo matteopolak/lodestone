@@ -228,6 +228,103 @@ fn entering_water_resets_fall_distance_to_exactly_zero() {
     );
 }
 
+/// Pins the **one named divergence** in this subsystem: the water reset that
+/// vanilla reaches from *inside* `move()`, which this crate does not model.
+///
+/// Hand-derived from the jar, not from this crate. `updateFluidInteraction` has
+/// **two** call sites, not one:
+///
+/// * `Entity.baseTick` (`Entity.java:537`), before `travel()` — the pre-move
+///   evaluation this crate reproduces as `tick`'s dispatch summary; and
+/// * `LivingEntity.checkFallDamage` (`LivingEntity.java:365`),
+///   `if (!this.isInWater()) { this.updateFluidInteraction(); }`, which runs
+///   *inside* `move()` against the **post-move** position.
+///
+/// `Entity.isInWater()` is `return this.wasTouchingWater` (`Entity.java:1605-1607`)
+/// — a *cached* flag that `updateFluidInteraction` itself rewrites
+/// (`Entity.java:1657-1666`). So on the tick a fall first enters water, vanilla
+/// re-evaluates mid-`move`, hits `if (inWater) resetFallDistance()`
+/// (`Entity.java:1658-1659`), and the `super.checkFallDamage` accumulation that
+/// follows is then skipped because `!isInWater()` is now false
+/// (`Entity.java:1565`). Vanilla therefore ends the entry tick at **exactly 0.0**.
+///
+/// This crate freezes the fluid summary for the whole tick, so the entry tick is
+/// still dispatched to `tick_air`, which accumulates that tick's descent.
+///
+/// **Why this is recorded rather than fixed**: modelling it costs a second
+/// `compute_fluid_state` on every air tick (a box-cell walk, on the path a
+/// pathfinder calls thousands of times) and **cannot change committed position**.
+/// The accumulation runs at the *end* of the move, after the edge-back-off gate
+/// has already read the old value, and the next tick's dispatch re-derives the
+/// fluid summary from the same post-move position vanilla used — so `tick_water`
+/// resets it before that tick's gate reads anything. The divergence is a
+/// single-tick transient in the field, visible only to an external reader
+/// between ticks (a future fall-damage predictor), never to the gate. The second
+/// half of this test is what establishes that bound.
+#[test]
+fn water_entry_tick_is_the_one_known_divergence_and_it_lasts_exactly_one_tick() {
+    // Same fixture as the test above: a deep water column with no floor.
+    let mut world = World::default();
+    for x in -2..=2 {
+        for z in -2..=2 {
+            for y in -10..=0 {
+                world.water.insert((x, y, z));
+            }
+        }
+    }
+    let profile = PhysicsProfile::mc_1_21();
+    let mut state = PlayerState::at(Vec3d::new(0.5, 5.0, 0.5), 0.0);
+    state.on_ground = false;
+
+    let in_water_now = |s: &PlayerState| {
+        lodestone_physics::compute_fluid_state(
+            s.bounding_box(&profile),
+            s.position,
+            s.pose.eye_height(),
+            &world,
+        )
+        .in_water()
+    };
+
+    // Find the entry tick: pre-move box out of water, post-move box in it.
+    let mut entry = None;
+    for _ in 0..30 {
+        let pre_in_water = in_water_now(&state);
+        tick(&mut state, MovementInput::NONE, &world, &profile);
+        if !pre_in_water && in_water_now(&state) {
+            entry = Some(state.fall_distance);
+            break;
+        }
+    }
+    let entry_fall_distance =
+        entry.expect("fixture never produced a tick that *entered* water — nothing to test");
+
+    // The divergence itself. Vanilla: exactly 0.0, per the citations above.
+    // This crate: strictly positive, because `tick_air` accumulated the descent.
+    assert!(
+        entry_fall_distance > 0.0,
+        "expected this crate's known divergence (a positive fall_distance on the \
+         water-entry tick, where vanilla resets to 0.0 inside move()); got \
+         {entry_fall_distance}. If this now reads 0.0 the gap has been CLOSED — \
+         that is an improvement, but update `PlayerState::fall_distance`'s \
+         \"Not modelled\" list and docs/edge-back-off.md, which both still \
+         document it as open."
+    );
+
+    // The bound that makes it harmless: the very next tick is dispatched to
+    // `tick_water`, whose first act is the reset. One tick, then converged.
+    assert!(
+        in_water_now(&state),
+        "precondition for the bound: entry tick must have left the box in water"
+    );
+    tick(&mut state, MovementInput::NONE, &world, &profile);
+    assert_eq!(
+        state.fall_distance, 0.0,
+        "the divergence must not survive past the entry tick — the next tick's \
+         `tick_water` reset is what keeps it invisible to the edge-back-off gate"
+    );
+}
+
 #[test]
 fn lava_halves_fall_distance() {
     // Isolated: velocity zero and no floor under the lava column, so this

@@ -79,7 +79,7 @@ prediction (`docs/container-clicks.md`, already complete).
 |---|---|---|---|
 | [#191](https://github.com/matteopolak/lodestone/issues/191) | 1 | #1 | Creative/spectator flight as a real physics mode, not a debug free-cam |
 | [#193](https://github.com/matteopolak/lodestone/issues/193) | 1 | #1 | `movement_speed` not attribute-driven — Speed/Slowness inert |
-| [#194](https://github.com/matteopolak/lodestone/issues/194) | 1 | #1 | `fall_distance` never accumulated |
+| ~~[#194](https://github.com/matteopolak/lodestone/issues/194)~~ | 1 | #1 | ~~`fall_distance` never accumulated~~ — **done**, see [`edge-back-off.md`](../edge-back-off.md) |
 | [#196](https://github.com/matteopolak/lodestone/issues/196) | 1 | #1 | Wire the built-but-unused `EyeHeightSmoother` into `Sim` |
 | [#199](https://github.com/matteopolak/lodestone/issues/199) | 1 | #1 | Bubble columns apply no impulse |
 | [#220](https://github.com/matteopolak/lodestone/issues/220) | 1 | #1 | Live gate: the rubber-band threshold and the vertical-disagreement clamp |
@@ -114,6 +114,17 @@ dependency either, but doing it **early** is valuable because its result — whe
 vertical-disagreement clamp really is dead code in 26.2 — directly informs how much
 the #194 (`fall_distance`) implementer needs to worry about server rejection of a
 vertical-only change. Do #220 before or alongside #194, not after.
+
+> **Stale as written: #194 landed first, and #220 is still open.** The advice above
+> was sound but was not followed, so record what that cost — nothing, as it turned
+> out. `fall_distance` only reaches position through
+> `Player.maybeBackOffFromEdge`, which rewrites the **horizontal** components
+> only, and the server's own rubber-band comparison zeroes `yDist` before
+> measuring (`ServerGamePacketListenerImpl.java:1137-1139`) — so the
+> vertical-disagreement question #220 exists to answer could not have gated #194
+> either way. #220 remains worth doing, and it is still the vehicle for
+> `edge-back-off.md`'s owed live sneak-at-a-ledge gate, which #194 did **not**
+> run.
 
 **Phase B — Tier 1½ input, independent of Phase A.** #200 (food-gated sprint), #201
 (auto-jump), #202 (toggle sneak/sprint), #203 (mouse feel) are all self-contained

@@ -289,6 +289,13 @@ pub struct PlayerState {
     /// `isAboveGround` consults `fallDistance`, and the back-off moves you, so fall
     /// distance is now a position input.
     ///
+    /// **`isAboveGround` (`Player.java:932`) is the only reader in *this* crate,
+    /// not the only reader in vanilla.** The others are all outside this crate's
+    /// scope today, and are listed because a maintained value is what unblocks
+    /// them: `Player.canCriticalAttack` (`Player.java:1033`, `fallDistance > 0.0`
+    /// — the crit condition), `LivingEntity.checkFallDamage`'s damage calculation
+    /// (`LivingEntity.java:368-370`), and `Block.fallOn` (`Entity.java:1571`).
+    ///
     /// **This crate maintains it.** [`tick`]/[`tick_air`]/[`tick_water`]/
     /// [`tick_lava`]/[`tick_elytra`] reproduce every site vanilla touches it:
     ///
@@ -310,9 +317,14 @@ pub struct PlayerState {
     ///   [`crate::entity::move_entity`]'s own scope note.
     /// * **Water reset** — `Entity.updateFluidInteraction`: `if (inWater)
     ///   resetFallDistance();` (`Entity.java:1658-1659`), called from `baseTick`
-    ///   before `travel`. This crate's dispatch already computes the same
-    ///   per-tick fluid summary before choosing [`tick_water`], so the reset lands
-    ///   at the top of that function.
+    ///   (`Entity.java:537`) before `travel`. This crate's dispatch already
+    ///   computes the same per-tick fluid summary before choosing [`tick_water`],
+    ///   so the reset lands at the top of that function. **The `baseTick` call is
+    ///   not the only one**: `LivingEntity.checkFallDamage` calls
+    ///   `updateFluidInteraction` again from *inside* `move()`
+    ///   (`LivingEntity.java:365`), which is why the water-**entry** tick diverges
+    ///   by one tick here — see [`accumulate_fall_distance`], which documents the
+    ///   bound and why it cannot move the player.
     /// * **Lava halving** — `Entity.baseTick`: `if (isInLava()) fallDistance *=
     ///   0.5;` (`Entity.java:555-557`), applied at the top of [`tick_lava`] for the
     ///   same reason.
@@ -339,7 +351,11 @@ pub struct PlayerState {
     ///   `update_stuck_multiplier` already reproduces the block scan that feeds
     ///   `stuckSpeedMultiplier`; the reset rides along whenever it finds one.
     ///
-    /// **Not modelled, matching pre-existing gaps elsewhere in this crate.**
+    /// **Not modelled, matching pre-existing gaps elsewhere in this crate.** The
+    /// mid-`move` water re-evaluation (`LivingEntity.java:365`) is the one gap
+    /// that is a *divergence* rather than an absent feature — bounded to the
+    /// water-entry tick and unable to affect position, fully documented on
+    /// [`accumulate_fall_distance`] and pinned by a test.
     /// Creative flight (`Player.aiStep`: `if (abilities.flying &&
     /// !isPassenger()) resetFallDistance();`, `Player.java:449-451`) does not
     /// apply — see [`tick_air`]'s own doc on `!abilities.flying`, "this crate has
@@ -1309,11 +1325,34 @@ fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
 /// the actual Y position delta this move achieved, *not* the pre-move velocity.
 /// Callers pass `state.position.y - old_y`, captured immediately before the move.
 ///
-/// `in_water` is vanilla's `isInWater()` (`wasTouchingWater`), frozen for the
-/// whole tick by `updateFluidInteraction` before `travel()` runs — callers pass a
+/// `in_water` is vanilla's `isInWater()` (`wasTouchingWater`) — callers pass a
 /// constant matching which travel path they are in (only [`tick_water`] can have
 /// it `true`; the dispatch in [`travel_and_check_inside_blocks`] guarantees the
 /// other three paths are only reached when it is `false`).
+///
+/// **That constant is an approximation, and this is the subsystem's one known
+/// divergence.** `isInWater()` is *not* frozen for the tick: it reads the cached
+/// `wasTouchingWater` (`Entity.java:1605-1607`), and `updateFluidInteraction`
+/// rewrites that cache from **two** call sites — `Entity.baseTick`
+/// (`Entity.java:537`, pre-`travel`, the one this crate's dispatch reproduces)
+/// and `LivingEntity.checkFallDamage` (`LivingEntity.java:365`), which runs
+/// *inside* `move()` against the **post-move** position under
+/// `if (!this.isInWater())`. So on the tick a fall first enters water vanilla
+/// resets mid-`move` (`Entity.java:1658-1659`) and then skips the accumulation
+/// below, ending that tick at exactly `0.0`, whereas this crate is still on the
+/// `tick_air` path and accumulates the descent.
+///
+/// The divergence is bounded to that single tick and **cannot move the player**:
+/// this call happens at the *end* of the move, after
+/// `Player.maybeBackOffFromEdge` has already read the old value, and the next
+/// tick's dispatch re-derives the summary from the same post-move position
+/// vanilla used, so [`tick_water`]'s reset lands before any gate reads it. It is
+/// therefore observable only to an external reader between ticks (a future
+/// fall-damage predictor). Closing it would cost a second
+/// [`crate::fluid_state::compute_fluid_state`] on every air tick.
+/// `tests/fall_distance.rs`'s
+/// `water_entry_tick_is_the_one_known_divergence_and_it_lasts_exactly_one_tick`
+/// pins both halves of that claim.
 ///
 /// The `(float)` cast is vanilla's, not an approximation: `fallDistance` is a
 /// `double` field but the tick's `ya` is truncated to `float` precision *before*
