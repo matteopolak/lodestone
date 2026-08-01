@@ -68,7 +68,9 @@ use bevy_ecs::prelude::{Entity, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
 use bevy_ecs::schedule::IntoScheduleConfigs;
 use bevy_ecs::world::World;
-use lodestone_entity::attribute::{attribute_value, water_movement_efficiency_key};
+use lodestone_entity::attribute::{
+    attribute_value, movement_speed_key, sprinting_modifier_id, water_movement_efficiency_key,
+};
 use lodestone_model::{ClientAction, PlayerInput};
 use lodestone_physics::{
     CollisionView, FluidState, MovementInput, NearbyEntity, PhysicsProfile, PlayerState, PushSelf,
@@ -581,8 +583,45 @@ pub fn player_physics(
             continue;
         }
 
-        let base = f64::from(profile.base_movement_speed);
-        let attr = if intent.sprint {
+        // Issue #193. The walk speed is the server-reported
+        // `minecraft:movement_speed`, which is what makes Speed, Slowness, Soul
+        // Speed and boot enchantments reach physics at all: vanilla folds every
+        // one of them into this attribute **server-side**
+        // (`LivingEntity.onEffectAdded` is `!isClientSide()`-gated) and syncs the
+        // result, so this single read covers the lot without a client-side
+        // effect-to-modifier translation.
+        //
+        // **Deliberately not `attribute_value` alone.** Its no-snapshot fallback
+        // is `default_def`'s `movement_speed` = `0.7`, which is vanilla's
+        // *generic mob* default from `createMobAttributes` — the player's base is
+        // `0.1`. Using it would make an offline world, and every frame before the
+        // first attributes packet, walk **seven times too fast**. So a missing
+        // snapshot is tested for explicitly and answered from the profile.
+        let key = movement_speed_key();
+        let snapshot = attributes.and_then(|attrs| {
+            attrs.0.iter().find(|snapshot| snapshot.attribute == key)
+        });
+        let base = match snapshot {
+            Some(snapshot) => attribute_value(std::slice::from_ref(snapshot), &key),
+            None => f64::from(profile.base_movement_speed),
+        };
+        // Vanilla has no sprint arithmetic in `travel`: `Player.aiStep` reads the
+        // folded attribute (`Player.java:456`) and `LivingEntity.setSprinting`
+        // puts a transient `minecraft:sprinting` (+0.3 `ADD_MULTIPLIED_TOTAL`)
+        // modifier on it. Our sprint is client-predicted from the local
+        // double-tap, and the server's modifier only arrives a `PlayerCommand`
+        // round trip later — so the local multiply covers exactly that window and
+        // stops the moment the real modifier shows up in the snapshot. Applying
+        // both would compound to ~1.69x instead of 1.3x, which is the trap this
+        // branch exists to avoid.
+        let sprint_already_folded = snapshot.is_some_and(|snapshot| {
+            let sprinting = sprinting_modifier_id();
+            snapshot
+                .modifiers
+                .iter()
+                .any(|modifier| modifier.id == sprinting)
+        });
+        let attr = if intent.sprint && !sprint_already_folded {
             base * (1.0 + f64::from(profile.sprint_speed_modifier))
         } else {
             base
@@ -1135,6 +1174,87 @@ mod tests {
     /// `lodestone_entity::attribute`'s own tests; the exact number is
     /// arbitrary, chosen only to be recognisably non-default and non-1.0 so a
     /// build that clamped or rounded would be caught.
+    /// **Issue #193, and the two traps that make it more than a one-line read.**
+    ///
+    /// Pins three things a naive `attribute_value(&attrs.0, &movement_speed_key())`
+    /// would each get wrong:
+    ///
+    /// 1. **No snapshot must fall back to the *player* base (`0.1`), not
+    ///    `default_def`'s `0.7`.** That default is vanilla's generic-mob value
+    ///    from `createMobAttributes`; using it would make an offline world walk
+    ///    seven times too fast. This is the case an online-only test cannot see.
+    /// 2. **A real snapshot must reach physics**, so Speed/Slowness — which
+    ///    vanilla folds into this attribute server-side — actually change the
+    ///    walk speed.
+    /// 3. **The local sprint multiply must stop once the server's own
+    ///    `minecraft:sprinting` modifier is in the snapshot**, or the two
+    ///    compound to ~1.69x instead of 1.3x.
+    #[test]
+    fn movement_speed_prefers_the_snapshot_but_never_the_generic_mob_default() {
+        use lodestone_model::{EntityAttributeModifier, EntityAttributeSnapshot};
+
+        // (1) No `Attributes` component at all: the profile base, not 0.7.
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        run_tick(&mut app);
+        let bare = app.world().get::<PhysicsState>(entity).unwrap().0;
+        let speed = bare.movement_speed.expect("player_physics always sets it");
+        // `f64::from(0.1_f32)` rather than the literal `0.1`: the profile field is
+        // an `f32`, so widening it is `0.10000000149011612`. Written as the
+        // conversion instead of a loosened tolerance so the f32 origin stays
+        // visible — a reader who "tidies" this to `0.1` will see it fail.
+        assert!(
+            (speed - f64::from(0.1_f32)).abs() < 1e-12,
+            "with no snapshot the player base (0.1) must be used, not default_def's \
+             generic-mob 0.7 — got {speed}"
+        );
+
+        // (2) A snapshot reaches physics. `0.26` is recognisably neither the
+        // player base nor the mob default, so a build that ignored the snapshot
+        // or fell back would be caught either way.
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        app.world_mut().entity_mut(entity).insert(Attributes(vec![EntityAttributeSnapshot {
+            attribute: movement_speed_key(),
+            base: 0.26,
+            modifiers: Vec::new(),
+        }]));
+        run_tick(&mut app);
+        let got = app.world().get::<PhysicsState>(entity).unwrap().0.movement_speed.unwrap();
+        assert!(
+            (got - 0.26).abs() < 1e-9,
+            "a movement_speed snapshot must reach PlayerState, got {got}"
+        );
+
+        // (3) The sprint multiply is suppressed once the server's own modifier is
+        // present. Same base, sprinting intent, with and without the modifier.
+        let with_sprint_modifier = vec![EntityAttributeSnapshot {
+            attribute: movement_speed_key(),
+            base: 0.1,
+            modifiers: vec![EntityAttributeModifier {
+                id: sprinting_modifier_id(),
+                amount: 0.3,
+                operation: 2, // ADD_MULTIPLIED_TOTAL
+            }],
+        }];
+        let folded = attribute_value(&with_sprint_modifier, &movement_speed_key());
+
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        app.world_mut().entity_mut(entity).insert(Attributes(with_sprint_modifier));
+        app.world_mut().entity_mut(entity).insert(MovementIntent(MovementInput {
+            forward: 0.0,
+            strafe: 0.0,
+            jump: false,
+            sneak: false,
+            sprint: true,
+        }));
+        run_tick(&mut app);
+        let sprinting = app.world().get::<PhysicsState>(entity).unwrap().0.movement_speed.unwrap();
+        assert!(
+            (sprinting - folded).abs() < 1e-9,
+            "with the server's sprinting modifier already folded in ({folded}), the local \
+             multiply must not compound on top — got {sprinting}"
+        );
+    }
+
     #[test]
     fn depth_strider_attribute_reaches_the_physics_state_each_tick() {
         use lodestone_model::{EntityAttributeModifier, EntityAttributeSnapshot, Identifier};
