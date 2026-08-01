@@ -171,12 +171,29 @@ any shader math.
 - **`inverseArmHeight` is hardcoded `0.0`**, so the item never dips and rises on a
   hotbar change. It is `swapAnimationScale(item) · (1 - lerp(oHeight, height))` and
   the shell tracks neither height — the same gap the bare arm has.
-- **The special-cased poses are all absent**: bow and crossbow while drawing,
+- **The special-cased poses are all absent here**: bow and crossbow while drawing,
   shield, spyglass, map (one- and two-handed), trident, and the eating/drinking and
-  brush animations. Each is its own branch in `submitArmWithItem` and each needs
-  use-item state the shell does not track. An item in one of those categories draws
-  through the generic chain, which is the resting pose — wrong while in use,
-  correct while merely held.
+  brush animations. Each is its own branch in `submitArmWithItem`. An item in one of
+  those categories draws through the generic chain, which is the resting pose —
+  wrong while in use, correct while merely held.
+
+  **"needs use-item state the shell does not track" is no longer true** — that was
+  the state before issue #57. The using-item bit is decoded and folded all the way to
+  a `lodestone_ecs::entity::ItemUse` component, and third-person mobs and remote
+  players draw the bow/crossbow arm pose from it
+  ([`item-use-arm-poses.md`](./item-use-arm-poses.md)). What is still missing *for
+  this pass* is two specific things, and neither is the state:
+
+  1. **The local player cannot reach `ItemUse` through the generic path.** It has no
+     `EntityKind`/`Position`/`Rotation`/`HeadYaw` (deliberately — that absence keeps
+     a self-model off `ClientHandle::entities()`), so `entity_view()`'s early `?`
+     returns before the flags are read. It needs a session-scoped fold of the same
+     shape as `ingest::apply_local_player_on_fire` (`7822a60`) plus a
+     `PlayerSnapshot` field.
+  2. **`ItemInHandRenderer`'s own transforms**, which are *not* the humanoid arm
+     poses and are separate work: `case BOW` is a translate/rotate/scale on the item
+     pose stack driven by `power = (t² + 2t)/3` clamped at 1, with a shake term
+     above `power > 0.1`, and the crossbow case has its own distinct constants.
 - **The off hand is not drawn at all.** `Arm::Left` is fully supported by every
   function here (`invert`, the left-hand `display` mirror), but
   `prepare_first_person_hand` only ever asks for `Arm::Right`. Adding the off hand
