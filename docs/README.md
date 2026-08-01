@@ -35,6 +35,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `tick_water` — `applyEffectsFromBlocks` runs *after* `travel()`, so it lands on the
   next tick. Also the "doubled for magma" term that the issue described and vanilla
   does not have.
+- [Creative flight](./creative-flight.md) — issue #191: the server-granted flight the
+  client had **no** consumer for (`AbilitiesChanged` was decoded, tested and wired to
+  nothing, so the client would free-cam on a server that never granted flight), why
+  flight is a *wrapper* around the existing travel dispatch rather than a fourth
+  `tick_*` arm, the `0.6` that is Y-only and *overwrites* rather than damps, the
+  thirteen `!flying` conjuncts (one of which nothing had listed), and the
+  `getFlyingSpeed` sprint arm whose absence made **every sprint-jump** 30% short —
+  in the Rust *and* in the Python oracle, which is why they agreed. Spectator is
+  explicitly deferred rather than half-modelled.
 - [Fluid rendering](./fluid-rendering.md) — given that a cell carries water, what
   gets drawn: vanilla `FluidRenderer`'s three different face predicates, which
   sprite each face takes, and the shoreline bug that proved occlusion is a
@@ -122,6 +131,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `ITEM_STACK` serializer so a dropped item knows what it is, why the item codec
   is shared rather than duplicated, and the one place the decoder deliberately
   abandons alignment instead of misreading it.
+- [Item-use arm poses](./item-use-arm-poses.md) — the bow draw and crossbow wind
+  (issue #57): why metadata index 8 is ambiguous between `LivingEntity`'s
+  using-item bitfield and an arrow's **crit** flag (both plain bytes, so a naive
+  decoder reports every critical arrow as drawing a bow), why the draw fraction has
+  to be counted client-side because `useItemRemaining` is never synced, why a
+  repeated metadata byte must not restart the draw, and why a bow-holding zombie
+  correctly keeps its arms forward.
 - [Block-break timing](./block-break-timing.md) — how long a block takes to mine
   and how fast its crack fills: the per-state hardness seam, the two ways to wire
   it that break blocks *too fast*, and the server branch the real numbers change.
@@ -367,8 +383,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `sunrise_sunset_color` is ARGB and not RGBA, why the sunrise fan's ring is
   centred on the **eye** rather than on its own apex, void fog's quadratic
   world-bottom falloff, a stale module doc that had rotted from "a duplicate of a
-  validated formula" into "a divergent second opinion", and exactly which
-  protocol hop blocks per-biome sky tint.
+  validated formula" into "a divergent second opinion", and — re-verified against
+  #288 rather than taken on faith — why per-biome sky tint is *not* blocked on a
+  protocol hop after all: both ends are built, `entry_names` has no caller outside
+  its own crate, and the 66 biome files hold only 16 distinct sky colours, with
+  `plains` and `swamp` byte-identical so the obvious gate discriminator is vacuous.
 - [Served session liveness](./served-session-liveness.md) — keep-alive (vanilla's
   own 15s interval and disconnect-on-timeout, not two different numbers), the
   day/night clock actually advancing over a live connection instead of a
