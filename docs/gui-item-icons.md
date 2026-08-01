@@ -48,7 +48,11 @@ Sim::player_menu -> HudFrame::hotbar_items      Menus::active -> ContainerFrame
                                                   gui_item_pose(rect, transform)
                                                   mesh_item_quads(..., gui_light)
                                                   -> IconSink::model (posed verts)
-                             IconPart::Special -> nothing
+                             IconPart::Special -> special_icon_geometry(kind, item)
+                                                  gui_item_pose(rect, display.gui)
+                                                  BlockEntityMesh::part_transforms
+                                                  -> IconSink::special (mesh + sheet
+                                                     + placement, NOT verts)
                            count + durability   -> IconSink::colour
                              (count draws through the caller's `Option<&VanillaFont>`,
                               same fallback rule as every other HUD string)
@@ -215,9 +219,23 @@ None — no env vars, flags or feature gates. The behavioural switches are all
 | condition | behaviour |
 | --- | --- |
 | no `ItemAtlas` (`attach_items` not called) | no icons at all; wells stay empty |
-| no `attach_item_models` (demo path, no baked models) | flat sprites only; block items draw an empty well |
+| no `attach_item_models` (demo path, no baked models) | flat sprites only; block items **and** special (chest) items draw an empty well |
 | no `depth` passed to `render_with_item_models` | as above |
 | `HudFrame::hotbar_items` is `None` | nothing is drawn in any cell |
+| jar has no `entity/chest/*.png` | `SpecialIcons::new` returns `None`; chests draw nothing rather than a placeholder |
+
+`attach_item_models` gates **both** 3-D passes, deliberately: the special pass needs
+the same depth attachment, so one `models_attached()` signal covers both and no
+caller learns a second flag. It is also what makes one `attach`-less frame serve as
+the negative control for both pixel gates.
+
+The special pass is built **lazily**, on the first frame that actually contains a
+chest, because it needs a `queue` to upload its 22 sheets and `attach_item_models`
+has only a `device` — widening that signature would reach up through both screens
+into the contended `app.rs`. A `special_tried` flag stops a jar-less run re-trying
+every frame. `HudRenderer::special_icon_sheets()` reports how many sheets it loaded,
+which is what separates "no chest in any slot" from "no pack, so a chest could never
+draw".
 
 Cell geometry, mirrored by the gate: with the vanilla GUI atlas the icon is
 `16 * 2` px at a `20 * 2` px pitch starting `3 * 2` px into the frame; without it
@@ -229,8 +247,20 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
   `ResourceLocation`.
 * **`lodestone-render`** — `BlockModels::item`, `gui_item_pose`, `gui_ortho`,
   `mesh_item_quads`, `ModelVertex`, `ModelPipeline`, `ModelCameraUniform`,
-  `CameraUniform`, `fog::FogUniform`, `RenderLayer`.
+  `CameraUniform`, `fog::FogUniform`, `RenderLayer`; and for the special pass
+  `BlockEntityModelSet` / `BlockEntityMesh::part_transforms`, `CHEST_SINGLE`,
+  `ChestMaterial::from_block_path`, `ChestHalf`, `chest_texture_stem(s)`,
+  `EntityPipeline`, `GpuEntityModel::upload_parts`, `EntityCameraUniform`,
+  `entity_camera_buffer`, `upload_instances`.
+* **`crate::resources::load_block_entity_textures`** — the 22 chest sheets, read
+  straight from `client.jar`. Shared *code* with the world's block-entity pass but
+  not shared *resources*: that pass keeps its bind groups against its own
+  `EntityPipeline` instance's layouts, and 22 64x64 textures are cheap enough that
+  reaching across the `gpu` module boundary is not worth it.
 * **`crate::gpu::RenderState`** — the four borrowed GPU resources above.
+* **`docs/block-entity-renderers.md`** — the geometry side, and the authoritative
+  account of what is and is not reusable between the world chest and this one.
+  A change to the chest models must be checked against **both** call sites.
 
 ## Known gaps
 
@@ -251,6 +281,44 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
   sprite stream is fine and only the model stream is starved, whereas a missing
   `attach_items` would have shown swatches. Reach for that distinction before
   grepping — it localises the break to one of the two streams in a single frame.
+* ~~**`IconPart::Special` draws nothing — chest, shulker, banner, shield are
+  invisible**~~ — issue
+  [#369](https://github.com/matteopolak/lodestone/issues/369), **chest closed, nine
+  kinds remain**. The arm was literally `IconPart::Special { .. } => {}`; it now
+  routes through `special_icon_geometry` and a third `EntityPipeline` pass recorded
+  inside `IconRenderer::draw_models`. Gated by
+  `tests/hotbar_special_item_pixels.rs`.
+
+  **The fix is keyed on `kind`, and that is load-bearing.** The family is ten kinds
+  over 91 item definitions:
+
+  | `kind` | defs | geometry | draws today |
+  |---|---|---|---|
+  | `minecraft:chest` | 13 | #23, all 7 materials | **yes** |
+  | `minecraft:shulker_box` | 17 | not ported | no |
+  | `minecraft:banner` | 16 | not ported | no |
+  | `minecraft:copper_golem_statue` | 32 | not ported | no |
+  | `minecraft:head` / `player_head` | 7 | not ported | no |
+  | `minecraft:shield` | 2 | not ported | no |
+  | `minecraft:trident` | 2 | not ported | no |
+  | `minecraft:conduit` | 1 | not ported | no |
+  | `minecraft:decorated_pot` | 1 | not ported | no |
+
+  Each remaining row is **one match arm** in `special_icon_geometry` the day its
+  model lands in `BLOCK_ENTITY_MODELS`; none of the wiring changes. Note the item id
+  is consulted only *within* a kind, to choose the sheet — that is what makes one
+  chest arm cover trapped, ender and the four copper weathering stages.
+
+  **Do not "simplify" this to the `base` sprite fallback.** The issue proposed it as
+  the cheap route and it is not a route at all: **every one of the ten `base` models
+  has no `elements` and no `layer0`**, only a `particle` texture naming a *block*
+  texture that is not in the item atlas. `classify_model` yields no
+  `IconPart::Sprite`, so the fallback draws the same zero pixels under a different
+  arm. Measured, not assumed —
+  `the_base_sprite_fallback_is_vacuous_for_every_special_kind` asserts 1 special /
+  0 sprite parts for all ten through the production resolver. The `base` model's
+  value is its `display` map, which is where the chest's `gui` pose
+  (`[30, 45, 0]` at `0.625`, **45** not 225) comes from.
 * **Tint on flat sprites is still deferred** — leather armour, potions and spawn
   eggs draw untinted white. 3-D items *are* tinted, through the shared palette.
 * **The enchantment glint is not drawn** (`ItemIcon::enchanted` is carried but
