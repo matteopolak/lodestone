@@ -172,12 +172,18 @@ Real with a stated approximation (2):
   collision-less cell *and* an empty outline; kelp has an outline (so it is
   breakable) and no collision; soul sand collides to 0.875 and outlines to 1.0.
   Nothing in this module may decide what the crosshair selects — that is
-  `LiveCollision::is_pickable`, and its real fix was an outline/interaction census
+  `LiveCollision::pick_boxes`, and its real fix was an outline/interaction census
   beside the collision one, `VersionAdapter::block_outline` / `block_interaction`.
-  **That has since landed (`196d385`):** `is_pickable` now reads `block_outline`
-  directly rather than the has-baked-quads proxy this note used to describe — see
+  **That has since landed (`196d385`), and the ray now clips those boxes rather
+  than the cell (issue #375):** `pick_boxes` emits `block_outline`'s geometry and
+  `crate::raycast::raycast` intersects it, so a `1/16`-tall leaf litter is only
+  targetable where it actually is — see
   [`docs/block-outline-shapes.md`](./block-outline-shapes.md). `collision_boxes`
   was never offered as a substitute for either; kelp stays breakable.
+- **Nor may it decide the *distance* to what the crosshair selects.** The entity
+  pick shortens its search radius to the block hit's entry distance, and that
+  distance has to come from the outline box the ray struck (`RayHit::distance`),
+  not from this module's boxes and not from a cube around the cell.
 - **`max_y` is not capped at 1.0.** A fence is 1.5, and the 0.6 auto-step *cannot*
   mount it. Clamping makes fences look step-able and routes navigation straight
   through them.

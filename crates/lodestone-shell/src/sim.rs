@@ -350,22 +350,19 @@ pub(crate) fn particle_face(face: BlockFace) -> particle_emit::Face {
     }
 }
 
-/// The block-local hit position at the centre of the struck face, in the `0..1`
-/// coordinates `use_item_on` expects. The shell's raycast reports only the block
-/// and its face normal, not the exact sub-block hit point; the face centre is
-/// exact for full-cube placement and the server re-derives fine detail anyway.
-fn face_center_cursor(normal: [i32; 3]) -> Vec3f {
-    // On the struck face's normal axis the hit sits on the block boundary (1.0
-    // for a positive normal, 0.0 for a negative one); the two in-plane axes sit
-    // at the face centre.
-    let coord = |c: i32| -> f32 {
-        match c.signum() {
-            1 => 1.0,
-            -1 => 0.0,
-            _ => 0.5,
-        }
-    };
-    Vec3f::new(coord(normal[0]), coord(normal[1]), coord(normal[2]))
+/// The block-local hit position `use_item_on` expects — vanilla's
+/// `BlockHitResult` cursor, which is `location - blockPos`
+/// (`writeBlockHitResult`).
+///
+/// This used to be the centre of the struck *cube* face, because the raycast
+/// reported only a block and a normal. It now reports the exact entry point of
+/// the outline box it hit ([`RayHit::cursor`], issue #375), which is what the
+/// server uses to pick a slab's half, a stair's orientation and which side of a
+/// block a torch attaches to — so the approximation is gone rather than
+/// documented.
+fn hit_cursor(hit: RayHit) -> Vec3f {
+    let [x, y, z] = hit.cursor();
+    Vec3f::new(x, y, z)
 }
 
 /// The [`ChunkWorld`] store, adapted to the ECS's [`CollisionSource`].
@@ -2682,11 +2679,20 @@ impl Sim {
     /// shape.
     ///
     /// The whole question therefore lives in one place,
-    /// [`LiveCollision::is_pickable`] / [`WorldCollision::is_pickable`] — read its
+    /// [`LiveCollision::pick_boxes`] / [`WorldCollision::pick_boxes`] — read its
     /// docs, which record why an earlier inlined `!is_water(...)` here made **kelp
     /// and every waterlogged block unbreakable**. Deliberately a single call and not
-    /// an `||` chain: the predicate the collision tests exercise has to be the exact
-    /// predicate the ray uses, or the gate proves nothing about the pick.
+    /// an `||` chain: the geometry the collision tests exercise has to be the exact
+    /// geometry the ray uses, or the gate proves nothing about the pick.
+    ///
+    /// # Issue #375: boxes, not a boolean
+    ///
+    /// This used to pass `is_pickable` — a per-*cell* occupancy predicate — so
+    /// every pickable block was a unit cube to the hit test while the selection
+    /// box was already drawn from the real outline census. Leaf litter therefore
+    /// stayed targetable with the crosshair well above it. The closure now emits
+    /// the cell's real outline boxes and [`raycast`] clips against them, which is
+    /// vanilla's `ClipContext.Block.OUTLINE`.
     pub fn update_target(&mut self, aspect: f32) {
         let cam = self.camera(aspect);
         let origin = [
@@ -2702,13 +2708,18 @@ impl Sim {
         // face at the edge of reach is always covered. A `None` snapshot means
         // the player's own column has not streamed in; nothing is targetable.
         let hit = if self.is_live() {
-            self.live_collision()
-                .and_then(|view| raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z)))
+            self.live_collision().and_then(|view| {
+                raycast(origin, dir, REACH, |x, y, z, out| {
+                    view.pick_boxes(x, y, z, out);
+                })
+            })
         } else {
             let store = self.chunk_world();
             let world = store.read();
             let view = WorldCollision::new(&world);
-            raycast(origin, dir, REACH, |x, y, z| view.is_pickable(x, y, z))
+            raycast(origin, dir, REACH, |x, y, z, out| {
+                view.pick_boxes(x, y, z, out);
+            })
         };
         self.set_target(hit);
         // Shared with the demo world too (harmlessly a no-op there — the demo
@@ -2726,12 +2737,15 @@ impl Sim {
     /// `DEFAULT_ENTITY_INTERACTION_RANGE`, `Player.java:134`), shortened to
     /// `block_hit`'s own entry distance when a block sits closer than that —
     /// matching vanilla's `blockDistance` clamp, so a wall between the eye and
-    /// an entity is never picked through. The clamp treats the hit block as a
-    /// unit cube rather than its real outline shape (this module does not
-    /// carry outline geometry — see [`Self::outline_shape_source`]'s docs on
-    /// the same gap); that only ever shortens the entity search, so the worst
-    /// case is a slightly conservative cutoff, never a pick through solid
-    /// terrain.
+    /// an entity is never picked through.
+    ///
+    /// That distance is [`RayHit::distance`], the entry point of the **outline
+    /// box** the ray actually struck. It used to be re-derived here by clipping
+    /// a unit cube around `block_hit.block`, which was wrong in both directions
+    /// on a partial block — too *short* whenever the real box sits deeper in the
+    /// cell than its near face, which hid an entity standing in front of a
+    /// fence. The ray now reports its own entry distance, so there is nothing
+    /// left to approximate (issue #375).
     ///
     /// Candidates come from the same `(Position, EntityKind)` query
     /// [`Self::tick_nearby_entities`] uses for pushers, resolved to a hitbox
@@ -2743,16 +2757,7 @@ impl Sim {
     /// return it — the same property vanilla's `clip()` gets from excluding
     /// `this` explicitly.
     fn update_entity_target(&mut self, origin: [f64; 3], dir: [f64; 3], block_hit: Option<RayHit>) {
-        let block_limit = block_hit.and_then(|hit| {
-            let min = [
-                f64::from(hit.block[0]),
-                f64::from(hit.block[1]),
-                f64::from(hit.block[2]),
-            ];
-            let max = [min[0] + 1.0, min[1] + 1.0, min[2] + 1.0];
-            ray_aabb(origin, dir, REACH, min, max)
-        });
-        let search_limit = block_limit.map_or(ENTITY_REACH, |d| d.min(ENTITY_REACH));
+        let search_limit = block_hit.map_or(ENTITY_REACH, |hit| hit.distance.min(ENTITY_REACH));
 
         let target = self.write(|w| {
             let mut state = w.query::<(&Position, &EntityKind, &MinecraftEntityId)>();
@@ -3108,7 +3113,7 @@ impl Sim {
         let Some(hit) = self.target() else { return };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
         let face = face_from_normal(hit.normal);
-        let cursor = face_center_cursor(hit.normal);
+        let cursor = hit_cursor(hit);
         // The intent this tick's physics ran on — the same one
         // `lodestone_controller::ecs::send_player_input` derived the wire's shift
         // bit from, so the local decision and the server's cannot disagree. This
@@ -6669,14 +6674,14 @@ mod tests {
         sim.drain_all_meshes();
         // Aim straight down at the block under the player's feet.
         let feet = sim.player().position;
-        sim.set_target(Some(crate::raycast::RayHit {
-            block: [
+        sim.set_target(Some(crate::raycast::RayHit::face_center(
+            [
                 feet.x.floor() as i32,
                 feet.y.floor() as i32 - 1,
                 feet.z.floor() as i32,
             ],
-            normal: [0, 1, 0],
-        }));
+            [0, 1, 0],
+        )));
         assert!(sim.break_block(), "should break the solid block");
         assert!(sim.target().is_none(), "target cleared after break");
         assert!(sim.pending_meshes() > 0, "a remesh was scheduled");
@@ -6699,14 +6704,14 @@ mod tests {
     /// `breaking_the_target_clears_it_and_schedules_a_remesh`.
     fn aim_at_the_floor(sim: &mut Sim) {
         let feet = sim.player().position;
-        sim.set_target(Some(crate::raycast::RayHit {
-            block: [
+        sim.set_target(Some(crate::raycast::RayHit::face_center(
+            [
                 feet.x.floor() as i32,
                 feet.y.floor() as i32 - 1,
                 feet.z.floor() as i32,
             ],
-            normal: [0, 1, 0],
-        }));
+            [0, 1, 0],
+        )));
     }
 
     /// Run whole ticks and report the largest swing progress seen.
@@ -7271,10 +7276,10 @@ mod tests {
         let bx = feet.x.floor() as i32 + 3;
         let bz = feet.z.floor() as i32;
         let s = crate::worldgen::surface_height(bx, bz);
-        sim.set_target(Some(crate::raycast::RayHit {
-            block: [bx, s, bz],
-            normal: [0, 1, 0],
-        }));
+        sim.set_target(Some(crate::raycast::RayHit::face_center(
+            [bx, s, bz],
+            [0, 1, 0],
+        )));
         {
             let store = sim.chunk_world();
             let world = store.read();
@@ -7297,14 +7302,14 @@ mod tests {
         let feet = sim.player().position;
         // Target the block under the feet, whose top face is where the player
         // stands — placing there would clip the player, so it must be refused.
-        sim.set_target(Some(crate::raycast::RayHit {
-            block: [
+        sim.set_target(Some(crate::raycast::RayHit::face_center(
+            [
                 feet.x.floor() as i32,
                 feet.y.floor() as i32 - 1,
                 feet.z.floor() as i32,
             ],
-            normal: [0, 1, 0],
-        }));
+            [0, 1, 0],
+        )));
         assert!(!sim.place_block(), "placing inside the player is refused");
     }
 

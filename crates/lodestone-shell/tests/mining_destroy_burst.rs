@@ -217,10 +217,7 @@ fn build_resources(world: &mut EcsWorld) {
         live: true,
     });
     world.insert_resource(Attacking(true));
-    world.insert_resource(RayTarget(Some(RayHit {
-        block: TARGET,
-        normal: [0, 1, 0],
-    })));
+    world.insert_resource(RayTarget(Some(RayHit::face_center(TARGET, [0, 1, 0]))));
     world.insert_resource(MiningPredictor::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
