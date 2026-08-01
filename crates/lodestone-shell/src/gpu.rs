@@ -37,8 +37,8 @@ use lodestone_render::{
         thrown_item_mesh,
     },
     fog::{FogSettings, FogUniform},
-    model_anim_buffer, model_camera_buffer, model_shared_camera_buffer, plan_entities,
-    update_model_anim_buffer, update_model_shared_camera_buffer, upload_instances,
+    model_anim_buffer, model_camera_buffer, model_shared_camera_buffer, plan_block_entities,
+    plan_entities, update_model_anim_buffer, update_model_shared_camera_buffer, upload_instances,
     upload_instances_tinted,
     vertex::vram_bytes,
 };
@@ -51,6 +51,7 @@ use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 use crate::mesher::{SectionGeometry, SectionKey};
 use crate::particles::{ParticleInstance, ParticleRenderer};
 
+mod block_entities;
 mod debug_lines;
 mod entities;
 mod first_person;
@@ -65,11 +66,12 @@ pub use debug_lines::{DebugLineVertex, debug_line_vertices};
 pub use outline::CrackTarget;
 pub use screen_effects::ScreenEffects;
 pub use sources::{
-    EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource, SkyDarkenSource,
-    ThirdPersonBodySource, ThirdPersonBodyState,
+    BlockEntitySource, EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource,
+    SkyDarkenSource, ThirdPersonBodySource, ThirdPersonBodyState,
 };
 pub use stats::RenderStats;
 
+use block_entities::{BlockEntityDrawBatch, BlockEntityRenderer};
 use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
 use first_person::FirstPersonHand;
@@ -213,6 +215,19 @@ pub struct RenderState {
     /// [`crate::hud::vanilla_font::VanillaFont::shared`]), so nothing
     /// downstream needs to know whether it succeeded.
     nametag: NameTagRenderer,
+    /// Block-entity rigs — chests today (issue #23). Always constructed, like
+    /// [`Self::nametag`] and unlike [`Self::sky`]: it loads its own sheets from
+    /// the jar and fail-opens to drawing nothing, so there is no install step for
+    /// a caller to forget.
+    ///
+    /// A chest has no block model whatsoever in 26.2, so without this the block
+    /// pass leaves a **hole** where every chest is; that is why it is
+    /// unconditional rather than opt-in.
+    block_entities: BlockEntityRenderer,
+    /// Where this frame's chests come from. Empty until the shell wires the
+    /// world in via [`RenderState::set_block_entity_source`] — the same
+    /// "unset means draw nothing" convention every other source here uses.
+    block_entity_source: BlockEntitySource,
 }
 
 impl RenderState {
@@ -412,6 +427,10 @@ impl RenderState {
             // `install_screen_effects`.
             screen_effects: None,
             nametag,
+            block_entities: BlockEntityRenderer::new(device, queue, color_format),
+            // No chests until the shell installs a world source; see
+            // `set_block_entity_source`.
+            block_entity_source: BlockEntitySource::default(),
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -731,6 +750,29 @@ impl RenderState {
         f: impl Fn() -> Option<lodestone_assets::ResourceLocation> + Send + Sync + 'static,
     ) {
         self.main_hand = MainHandSource(Some(Box::new(f)));
+    }
+
+    /// Install the source for this frame's block entities (chests, issue #23).
+    ///
+    /// **Without this every chest in the world is an invisible hole.** A 26.2
+    /// chest has no block model at all (`block/chest.json` declares only a
+    /// particle texture, zero elements), so the terrain mesher draws nothing
+    /// there and only this pass can. That makes it the one source here whose
+    /// absence is a missing *block*, not a missing effect.
+    ///
+    /// The closure receives the camera position, because vanilla's own gate is
+    /// per-block-entity distance from the camera and applying it where the world
+    /// is walked is much cheaper than filtering afterwards.
+    ///
+    /// **Re-install every frame**, like [`Self::set_main_hand_source`] and unlike
+    /// [`Self::set_entity_light_source`]: the lid angle is partial-tick
+    /// interpolated, so a closure installed once at connect draws every chest
+    /// frozen at the fraction of a tick it happened to be installed on.
+    pub fn set_block_entity_source(
+        &mut self,
+        f: impl Fn(Vec3) -> Vec<lodestone_render::ChestSpawn> + Send + Sync + 'static,
+    ) {
+        self.block_entity_source = BlockEntitySource(Some(Box::new(f)));
     }
 
     /// Install the source for the targeted block's outline shape.
@@ -1201,6 +1243,12 @@ impl RenderState {
         // off a pose the body pass did not also draw.
         let wool_batches = self.prepare_wool(device, camera, entities, &mut stats);
 
+        // Block entities (chests, issue #23). Not derived from `entities` — a
+        // chest is a *block*, gathered from the world's block-entity records by
+        // the installed source — but uploaded here for the same reason as
+        // everything above: buffers cannot be created mid-pass.
+        let block_entity_batches = self.prepare_block_entities(device, queue, camera, &mut stats);
+
         // Dropped items *and* items in mobs' hands, meshed and uploaded before
         // the pass for the same reason as everything else here (no buffer
         // creation mid-pass). Both are item models through the model pipeline,
@@ -1456,6 +1504,45 @@ impl RenderState {
                         pass.set_vertex_buffer(1, buffer.slice(..));
                         let end = range.index_start + range.index_count;
                         pass.draw_indexed(range.index_start..end, 0, 0..*count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
+            // Block entities (chests, issue #23) — after the mob layers and
+            // **before translucent water**, exactly where the mobs sit and for
+            // the same reason: this pass is opaque-cutout with depth write on, so
+            // drawing it after water would paint a submerged chest over the water
+            // surface however deep it was. Vanilla's own order is the same
+            // (`SOLID`/`CUTOUT`, block entities and entities, then `TRANSLUCENT`).
+            //
+            // Its own group-0 bind group, not `self.entities.cam_bind_group`:
+            // both hold the same matrix this frame, but they are separate buffers
+            // so the two passes can never silently share a stale write. This is a
+            // second bind group over the *existing* two-group layout, not a fifth
+            // group — see `gpu/block_entities.rs` on the 4-group floor.
+            if !block_entity_batches.is_empty() {
+                pass.set_pipeline(&self.block_entities.pipeline.pipeline);
+                pass.set_bind_group(0, &self.block_entities.cam_bind_group, &[]);
+                for batch in &block_entity_batches {
+                    let Some(model) = self.block_entities.gpu_models.get(batch.model) else {
+                        continue;
+                    };
+                    // Keyed by *sheet*, not model: a trapped chest shares the
+                    // single-chest mesh and differs only here.
+                    let Some(texture) = self.block_entities.textures.get(batch.texture) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, buffer) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
                         stats.draw_calls += 1;
                     }
                 }
@@ -2272,6 +2359,86 @@ impl RenderState {
                 let count = u32::try_from(p.transforms.len()).unwrap_or(u32::MAX);
                 upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)
                     .map(|buffer| (p.range, buffer, count))
+            })
+            .collect()
+    }
+
+    /// Resolve this frame's block entities (chests, issue #23) into per-part
+    /// instance buffers, frustum-culled and batched by `(model, sheet)`.
+    ///
+    /// # The one thing that is *not* like `prepare_entities`
+    ///
+    /// A chest's input does not come from the `entities` slice — it is a block,
+    /// gathered from the world's decoded block-entity records by the source the
+    /// shell installs. Everything downstream (per-part instance buffers, the
+    /// group-0 camera+fog write, the `Frustum` cull) is deliberately identical,
+    /// because a chest that fogged or lit differently from the mobs standing next
+    /// to it would be the more visible bug.
+    ///
+    /// Light arrives already sampled on each [`lodestone_render::ChestSpawn`]
+    /// rather than being read through [`Self::entity_light`] here: the gather
+    /// already holds the world open to find the chest at all, and sampling there
+    /// costs one lock instead of one per chest.
+    fn prepare_block_entities(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        stats: &mut RenderStats,
+    ) -> Vec<BlockEntityDrawBatch> {
+        // Always reported, even on an empty frame: this is what separates "no
+        // chests in view" from "no pack, so nothing can ever draw" — a chest with
+        // no sheet draws nothing rather than a placeholder.
+        stats.block_entity_sheets_loaded = self.block_entities.sheet_count();
+
+        let eye = camera.position;
+        let chests = self.block_entity_source.chests(eye);
+        if chests.is_empty() {
+            return Vec::new();
+        }
+
+        // Same group-0 contents as the entity pass, written to this pass's own
+        // buffer: view-projection (world position is per-instance, so the section
+        // origin stays zero), this frame's fog, and this frame's sky darkening.
+        queue.write_buffer(
+            &self.block_entities.cam_buffer,
+            0,
+            bytemuck::bytes_of(
+                &EntityCameraUniform {
+                    camera: CameraUniform {
+                        view_proj: camera.view_projection().to_cols_array_2d(),
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    },
+                    fog: self.fog_with_clock(eye),
+                }
+                .with_sky_darken(self.sky_darken.value()),
+            ),
+        );
+
+        let instances: Vec<_> = chests
+            .iter()
+            .filter_map(|spawn| self.block_entities.models.resolve_chest(spawn))
+            .collect();
+
+        let frame = plan_block_entities(&instances, &camera.frustum());
+        stats.block_entities_drawn = frame.stats.drawn;
+        stats.block_entities_culled = frame.stats.culled_frustum;
+
+        frame
+            .batches
+            .iter()
+            .map(|batch| BlockEntityDrawBatch {
+                model: batch.model,
+                texture: batch.texture,
+                count: batch.count(),
+                // One buffer per part, for the reason `prepare_entities` gives:
+                // vertices are part-local, so the lid only moves if its own
+                // matrices are uploaded separately from the bottom's.
+                parts: batch
+                    .parts
+                    .iter()
+                    .map(|p| upload_instances(device, p, &batch.lights))
+                    .collect(),
             })
             .collect()
     }

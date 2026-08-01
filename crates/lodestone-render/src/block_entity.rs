@@ -95,7 +95,7 @@ pub const CHEST_RIGHT: &str = "chest_right";
 /// Not a pose of one layer: the halves are 15 texels wide against the single
 /// chest's 14 and each omits the seam face, so this selects a different mesh.
 /// Mirrors `ChestType` (`SINGLE`/`LEFT`/`RIGHT`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChestHalf {
     /// A lone chest.
     Single,

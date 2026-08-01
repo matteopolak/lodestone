@@ -1431,6 +1431,19 @@ impl WindowApp {
             .map(|record| record.item.clone());
         render.set_main_hand_source(move || held.clone());
 
+        // Block entities — chests (issue #23). **This install is what makes a
+        // chest visible at all**: a 26.2 chest has no block model (its
+        // `block/chest.json` declares only a particle texture, zero elements), so
+        // without this the terrain mesher leaves a hole where every chest is.
+        //
+        // Installed every frame, like the swing and the held item above and for
+        // the same reason: the closure captures this frame's partial tick and a
+        // snapshot of the lid map, so a one-shot install at connect would draw
+        // every lid frozen at the fraction of a tick we happened to join on.
+        if let Some(f) = self.sim.block_entity_source() {
+            render.set_block_entity_source(f);
+        }
+
         // Reconcile fog with the player's bit-exact fluid state each frame,
         // re-uploading only when it changes (crossing a water/lava surface) so a
         // submerged eye dissolves terrain into short water/lava fog and the

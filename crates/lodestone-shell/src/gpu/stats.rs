@@ -115,4 +115,26 @@ pub struct RenderStats {
     /// [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed on
     /// `ScreenEffects::on_fire` instead.
     pub fire_overlay_drawn: bool,
+    /// Block-entity rigs drawn this frame (issue #23) — chests today.
+    ///
+    /// Its own counter, not folded into `entities_drawn`, for the reason
+    /// [`item_drops_drawn`](Self::item_drops_drawn) and
+    /// [`projectiles_drawn`](Self::projectiles_drawn) have theirs: a chest is not
+    /// an entity, so it never reaches `entities_drawn`, and before this counter a
+    /// room full of chests and an empty room produced byte-identical stats.
+    ///
+    /// A chest has **no block model at all** in 26.2 (`block/chest.json` is
+    /// `{"textures":{"particle":…}}`, zero elements), so this is also the only
+    /// number that separates "chests render" from "chests are invisible holes" —
+    /// `sections_drawn` is unaffected either way.
+    pub block_entities_drawn: usize,
+    /// Block-entity rigs frustum-culled this frame.
+    pub block_entities_culled: usize,
+    /// How many block-entity **sheets** loaded from the vanilla pack.
+    ///
+    /// The discriminator between "nothing in view" and "nothing can ever draw":
+    /// a chest with no sheet draws nothing rather than a placeholder box (see
+    /// `gpu/block_entities.rs`), so `block_entities_drawn == 0` is ambiguous on
+    /// its own. Zero here means no jar; 22 means every stem resolved.
+    pub block_entity_sheets_loaded: usize,
 }

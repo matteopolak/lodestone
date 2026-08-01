@@ -274,6 +274,44 @@ impl GpuEntityModel {
         })
     }
 
+    /// Upload a [`BlockEntityMesh`](crate::block_entity::BlockEntityMesh), or
+    /// `None` if empty.
+    ///
+    /// Takes the three pieces rather than the mesh type because a block-entity
+    /// mesh differs from an [`EntityMesh`] only in what lives *beside* the
+    /// buffers on the CPU (a part hierarchy with pose overrides instead of a
+    /// slot-based [`Skeleton`](crate::entity_anim::Skeleton)). The GPU-resident
+    /// shape is identical, so the alternative would be either a second copy of
+    /// this buffer-creation code or a `BlockEntityMesh → EntityMesh` conversion
+    /// that fabricates a skeleton nothing reads.
+    #[must_use]
+    pub fn upload_parts(
+        device: &wgpu::Device,
+        vertices: &[crate::models::ModelVertex],
+        indices: &[u32],
+        parts: Vec<crate::entity::PartRange>,
+    ) -> Option<Self> {
+        if indices.is_empty() {
+            return None;
+        }
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-block-entity-vertices"),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("lodestone-block-entity-indices"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        Some(GpuEntityModel {
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            index_count: indices.len() as u32,
+            parts,
+        })
+    }
+
     /// Upload an [`ArmourMesh`](crate::entity::ArmourMesh), or `None` if empty.
     ///
     /// `parts` carries the ranges in the mesh's own order, with the part *names*

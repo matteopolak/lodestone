@@ -173,6 +173,29 @@ pub enum NetUpdate {
         /// Section-relative `(x, y, z)`, each `0..16`, of every changed cell.
         blocks: Vec<[u8; 3]>,
     },
+    /// A `block_event` (vanilla's `ClientboundBlockEventPacket`): two opaque
+    /// parameter bytes for the block at `pos`.
+    ///
+    /// Deliberately **uninterpreted here**. The two bytes mean completely
+    /// different things per block type — `b0 == 1` on a chest is "viewer count in
+    /// `b1`" (`ChestBlockEntity.triggerEvent`), on a note block it is a pitch, on
+    /// a piston a direction — and the adapter already declines to interpret them
+    /// for exactly that reason. `Sim::poll_net` forwards them to the one consumer
+    /// that knows the rule.
+    ///
+    /// Added for issue #23: this variant is why a chest lid opens at all. The
+    /// event was decoded by `v770`'s adapter and reached
+    /// `ClientEvent::BlockEvent` with **no consumer anywhere** — it fell through
+    /// [`forward`]'s terminal `_ =>` arm and was dropped silently, so a chest
+    /// could only ever be drawn shut.
+    BlockEvent {
+        /// Absolute block position.
+        pos: [i32; 3],
+        /// First parameter byte — the event *kind*, per block type.
+        b0: u8,
+        /// Second parameter byte — the event's payload.
+        b1: u8,
+    },
     /// The server reported a block being destroyed at `pos`, carrying the state
     /// id it had **before** breaking.
     ///
@@ -1067,6 +1090,15 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             y: section.y,
             z: section.z,
             blocks,
+        },
+        // Block events, forwarded raw (issue #23). Until this arm existed the
+        // event reached the terminal `_ =>` below and was dropped, which is why
+        // chest lids never moved. The two bytes are per-block-type and are
+        // interpreted by `Sim::poll_net`'s one consumer, not here.
+        ClientEvent::BlockEvent { pos, b0, b1, .. } => NetUpdate::BlockEvent {
+            pos: [pos.x, pos.y, pos.z],
+            b0,
+            b1,
         },
         // The server placing/relocating the player. The shell camera must adopt
         // this authoritative pose — the read-model's own `position()` is an
