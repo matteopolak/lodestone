@@ -81,6 +81,14 @@ Oracles (not part of repo state — recreate them):
   `docs/README.md` are the usual victims because everyone needs a line in them. Prefer a targeted
   edit over a rewrite, and **re-read a shared file immediately before writing to it** — not at the
   start of your task, which may be an hour of other agents' commits ago.
+- **Never run `cargo fmt` (or `rustfmt`) in this checkout.** It rewrites files you do not own, and
+  the damage is not the reformatting — it is that your diff becomes inseparable from everyone
+  else's, so the *cleanup* is what destroys work. An agent ran `cargo fmt` on `sim.rs`, then tried
+  to strip the reformatting by reversing hunks against `HEAD`; the reversal deleted another agent's
+  concurrent `particle_atlas`/`particle_sheet_atlas` additions, because new content added since
+  `HEAD` is indistinguishable from "collateral formatting" when you diff against `HEAD`. It was
+  caught only by a build error naming a method that had stopped existing, and re-applying the patch
+  forward recovered it. Format the lines you wrote, by hand.
 - **When a shared file already holds someone else's work, stage your hunks, not the file.**
   `git add -p`, or `git diff -- <file> | …` filtered and applied with `git apply --cached`, then
   read `git diff --cached` to confirm the commit contains no foreign lines. This is the working
