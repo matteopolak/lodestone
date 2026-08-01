@@ -355,12 +355,23 @@ impl Menu {
                     if source.count() > cap {
                         let placed = source.split(cap);
                         self.set_slot_item(index, Some(placed));
+                        // Vanilla's `source` here is the *live* object backing
+                        // `inventory.getItem(buttonNum)` — `ItemStack.split`
+                        // (`ItemStack.java:327-332`) calls `this.shrink(...)`,
+                        // mutating it in place, so by the time
+                        // `inventory.add(targetItemStack)` runs
+                        // (`AbstractContainerMenu.java:498`) the native slot
+                        // already shows the reduced remainder and can absorb the
+                        // overflow via a same-slot merge. Our `ItemStack` isn't
+                        // aliased, so the native slot must be written back
+                        // *before* `give_to_player` scans it, or the overflow
+                        // lands in the first empty slot instead of merging back
+                        // into the slot it just came from.
+                        self.set_player_native(native, crate::item::normalize(source));
                         // Overflow target back into inventory or drop it.
                         if !self.give_to_player(target.clone()) {
                             outcome.dropped.push(target);
                         }
-                        // Remaining source stays in the hotbar slot.
-                        self.set_player_native(native, crate::item::normalize(source));
                         self.on_take(index);
                     } else {
                         self.set_player_native(native, Some(target));

@@ -135,6 +135,28 @@ fn throw_ctrl_q_drops_whole_slot() {
     assert_eq!(outcome.dropped[0].count(), 5);
 }
 
+/// `AbstractContainerMenu.java:516-518`: `THROW` bails out entirely when
+/// `!player.canDropItems()`, before taking anything from the slot. Vanilla
+/// gates it *inside* the `THROW` arm, unlike the outside-cursor drop (`PICKUP`
+/// with `slotIndex == -999`, `:404-412`), which drops unconditionally — so this
+/// is a control specific to `Throw`, not a general "can't drop" gate.
+#[test]
+fn throw_is_a_noop_when_the_player_cannot_drop_items() {
+    let mut menu = Menu::generic(27);
+    menu.set_slot_item(0, Some(stack("minecraft:stone", 5)));
+    let ctx = PlayerCtx {
+        infinite_materials: false,
+        can_drop: false,
+    };
+    let outcome = Click::drop_one(0).apply(&mut menu, ctx);
+    assert!(outcome.dropped.is_empty(), "nothing may be thrown");
+    assert_eq!(
+        menu.slot_item(0).map(ItemStack::count),
+        Some(5),
+        "the slot must be untouched"
+    );
+}
+
 // --- Number-key swap ---
 
 #[test]
@@ -159,6 +181,38 @@ fn hotbar_swap_exchanges_two_stacks() {
     );
     assert_eq!(
         menu.player_native(0).map(|s| s.item().path().to_string()),
+        Some("diamond".into())
+    );
+}
+
+// --- Off-hand key swap ---
+
+/// Same `Swap` mode, `buttonNum == 40` (`AbstractContainerMenu.java:471`,
+/// `ContainerInput.SWAP`'s guard: `buttonNum >= 0 && buttonNum < 9 ||
+/// buttonNum == 40`) — a distinct wire value from the hotbar keys, addressing
+/// [`lodestone_game::menu::OFFHAND_NATIVE`] instead of a hotbar index.
+#[test]
+fn offhand_swap_moves_between_slot_and_offhand() {
+    let mut menu = Menu::player();
+    menu.set_slot_item(9, Some(stack("minecraft:diamond", 3)));
+    Click::offhand_swap(9).apply(&mut menu, survival());
+    assert!(menu.slot_item(9).is_none());
+    assert_eq!(menu.slot_item(45).map(ItemStack::count), Some(3));
+    assert_eq!(menu.player_native(40).map(ItemStack::count), Some(3));
+}
+
+#[test]
+fn offhand_swap_exchanges_two_stacks() {
+    let mut menu = Menu::player();
+    menu.set_slot_item(9, Some(stack("minecraft:diamond", 3)));
+    menu.set_player_native(40, Some(stack("minecraft:gold_ingot", 7)));
+    Click::offhand_swap(9).apply(&mut menu, survival());
+    assert_eq!(
+        menu.slot_item(9).map(|s| s.item().path().to_string()),
+        Some("gold_ingot".into())
+    );
+    assert_eq!(
+        menu.player_native(40).map(|s| s.item().path().to_string()),
         Some("diamond".into())
     );
 }
@@ -297,6 +351,23 @@ fn middle_click_clone_noop_in_survival() {
     menu.set_slot_item(0, Some(stack("minecraft:stone", 5)));
     Click::clone_slot(0).apply(&mut menu, survival());
     assert!(menu.carried().is_none());
+}
+
+/// `AbstractContainerMenu.java:508`: `CLONE` additionally requires
+/// `this.getCarried().isEmpty()`. A creative middle-click while already
+/// holding something must not overwrite the cursor.
+#[test]
+fn middle_click_clone_refuses_when_cursor_is_occupied() {
+    let mut menu = Menu::generic(27);
+    menu.set_slot_item(0, Some(stack("minecraft:stone", 5)));
+    menu.set_carried(Some(stack("minecraft:dirt", 1)));
+    Click::clone_slot(0).apply(&mut menu, PlayerCtx::creative());
+    assert_eq!(
+        menu.carried().map(|s| s.item().path().to_string()),
+        Some("dirt".into()),
+        "the held item must survive untouched"
+    );
+    assert_eq!(menu.slot_item(0).map(ItemStack::count), Some(5));
 }
 
 #[test]
