@@ -237,11 +237,14 @@ pub enum NetUpdate {
     /// nothing to show.
     Death {
         /// The server's own death message (`ClientEvent::Death`'s `message`
-        /// field), flattened to plain text the same way [`Self::Disconnected`]
-        /// flattens a disconnect reason — see that variant's construction site
-        /// in [`forward`]. Untranslated components (most death causes) render
-        /// as their raw key; see `docs/pause-menu.md`'s note on this screen for
-        /// why that is an accepted, named simplification rather than a bug.
+        /// field), flattened to plain text with `to_plain_string()` in
+        /// [`forward`] — **not** resolved through the language table.
+        /// Untranslated components (most death causes) render as their raw
+        /// key. [`Self::Disconnected`] used to flatten the same way and no
+        /// longer does (issue #68); this variant is the one that still does,
+        /// named as a deliberate, separate follow-up in
+        /// `docs/death-screen.md`'s "What was deliberately left out" section
+        /// rather than fixed here.
         message: String,
     },
     /// The server confirmed a respawn (post-death, dimension change, or
@@ -316,8 +319,20 @@ pub enum NetUpdate {
     /// An action-bar (GameInfo) message for the shell-owned
     /// [`lodestone_game::player_state::ActionBar`] fold.
     ActionBar(lodestone_model::Text),
-    /// The session ended (clean or with a reason).
-    Disconnected(String),
+    /// The session ended (clean or with a reason), as an unresolved
+    /// [`lodestone_model::Text`] component — same convention as
+    /// [`Self::Chat`]/[`Self::ActionBar`]: translation keys survive here and
+    /// are resolved through `Sim::translator()` at the read boundary
+    /// ([`Sim::poll_net`]'s `Disconnected` arm), so a kick reason like
+    /// `multiplayer.disconnect.kicked` reaches `Screen::Error` as English
+    /// rather than the raw key (issue #68). The two synthetic senders in
+    /// this module (`"stream closed"`, and `sim.rs`'s test-only
+    /// `"Server closed"`) use [`lodestone_model::Text::literal`]: they are
+    /// not vanilla translation keys, so wrapping them in a `Text` that
+    /// merely carries their literal English through the same pipe is
+    /// correct — the translator is a no-op on a `Literal` node, it only
+    /// rewrites `Translate` nodes.
+    Disconnected(Box<lodestone_model::Text>),
     /// A transport or setup error.
     Error(String),
     /// The server placed or relocated the player (`TeleportPlayer`): the
@@ -890,7 +905,9 @@ fn run(
                     }
                 }
                 Ok(None) => {
-                    let _ = tx.send(NetUpdate::Disconnected("stream closed".into()));
+                    let _ = tx.send(NetUpdate::Disconnected(Box::new(
+                        lodestone_model::Text::literal("stream closed"),
+                    )));
                     break;
                 }
                 Err(_timeout) => {
@@ -951,7 +968,13 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
             count,
         },
         ClientEvent::Disconnect { reason } => {
-            let _ = tx.send(NetUpdate::Disconnected(reason.to_plain_string()));
+            // Unlike `Death`'s `message` (flattened to plain text below, a
+            // known, separately-tracked gap — see `docs/death-screen.md`),
+            // `reason` is passed through unresolved: `Sim::poll_net` is the
+            // read boundary that owns translation for this class of event
+            // (issue #68), so flattening here would throw the translation
+            // key away before it ever reaches `Sim::translator()`.
+            let _ = tx.send(NetUpdate::Disconnected(Box::new(reason)));
             return Err(());
         }
         // No `HealthChanged`/`ExperienceChanged` arms: those fold into the

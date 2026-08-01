@@ -148,10 +148,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   elapsed-based: the obvious gate delivers 26 fps at a 30 fps target.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
-  dependency edge that gave `lodestone-net`'s ping its first consumer, and the
+  dependency edge that gave `lodestone-net`'s ping its first consumer, the
   account list screen (issue #66) — a scrollable list mixed with real nine-slice
   action buttons, why that mixing needed a `row_rect` fix, and the non-vanilla
-  `Accounts` title-screen row.
+  `Accounts` title-screen row — and issue #68: why `Screen::Error` rendered a raw
+  `multiplayer.disconnect.*` key, the `NetUpdate::Disconnected` fix (now an
+  unresolved `Text` resolved at `Sim::poll_net`, same shape as #52's container
+  title), and the `NetUpdate` sweep that found `Death`'s message has the same
+  bug and left it as the already-named separate follow-up.
 - [Pause menu](./pause-menu.md) — the in-game Escape stack, why `Screen::Paused`
   is deliberately kept out of `owns_frame` (that set drives a world-replacing
   `Clear` pass; pause overlays with `LoadOp::Load` instead), and `Sim::end_session`

@@ -44,7 +44,9 @@ fn live_sections_cross_the_shell_seam_as_real_terrain() {
                 NetUpdate::LoggedIn { .. } => logged_in = true,
                 NetUpdate::Chunk { .. } => chunk_signals += 1,
                 NetUpdate::Error(e) => last_err = Some(e),
-                NetUpdate::Disconnected(r) => last_err = Some(format!("disconnected: {r}")),
+                NetUpdate::Disconnected(r) => {
+                    last_err = Some(format!("disconnected: {}", r.to_plain_string()))
+                }
                 _ => {}
             }
         }

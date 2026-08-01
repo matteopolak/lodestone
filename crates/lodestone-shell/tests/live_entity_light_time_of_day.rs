@@ -62,7 +62,9 @@ fn join(net: &NetClient) -> Vec3 {
             match u {
                 NetUpdate::LoggedIn { .. } => logged_in = true,
                 NetUpdate::Error(e) => last_err = Some(e),
-                NetUpdate::Disconnected(r) => last_err = Some(format!("disconnected: {r}")),
+                NetUpdate::Disconnected(r) => {
+                    last_err = Some(format!("disconnected: {}", r.to_plain_string()))
+                }
                 _ => {}
             }
         }

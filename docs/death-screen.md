@@ -197,7 +197,11 @@ Respawn returns the new `MenuAction::Respawn`; `Enter` on Title Screen calls
   than resolved English. A generic-but-present message was judged good enough
   for this change; threading the death message through `Sim::translator()`
   (already used for chat/title/action-bar) the way those are is a small,
-  separate follow-up.
+  separate follow-up. **Still true after issue #68**, which fixed the identical
+  bug for `NetUpdate::Disconnected`/`Screen::Error` (see `main-menu.md`'s
+  "The disconnect reason goes through the language table" section) but
+  deliberately left this one alone — #68's sweep for other pre-stringified
+  `Text` found this exact gap and confirmed it is still open, not a new find.
 - **No gradient backdrop.** Vanilla's `DeathScreen.extractBackground` is a
   reddish `fillGradient` (`DeathScreen.java:134-136`); this screen draws with
   `render::OVERLAY_BG`, the same flat 25%-black dim `Screen::Paused` uses,

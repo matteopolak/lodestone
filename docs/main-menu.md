@@ -208,6 +208,50 @@ deliberately **not** `Screen::Connecting` — that keeps rendering the world so
 chunks mesh and upload as they stream in, rather than piling up behind a loading
 screen and landing as one spike at login.
 
+### The disconnect reason goes through the language table (issue #68)
+
+`Screen::Error`'s message used to be built from `NetUpdate::Disconnected(String)`,
+where the `String` came from `reason.to_plain_string()` at the construction site
+in `net::forward` — the same "flatten against the model's fourteen-key stub
+table, not the real one" mistake issue #52 found in the container title (see
+`container-screen.md`'s "The title goes through the language table" section for
+the general shape of the bug). A kick landed on screen as the literal
+`multiplayer.disconnect.kicked` instead of "Kicked by an operator".
+
+The fix follows #52's pattern exactly: `NetUpdate::Disconnected` now carries
+`Box<lodestone_model::Text>` — unresolved, the same convention `Chat` and
+`ActionBar` already used — and `Sim::poll_net`'s `Disconnected` arm is the read
+boundary, calling `self.resolve_text(&reason)` (the same helper
+`title_overlay`/`action_bar_overlay` call) before formatting it into `status`
+and `SessionPhase::Ended`. `net::forward`'s `ClientEvent::Disconnect` arm
+therefore just moves `reason` into the `Box` unchanged; it no longer calls
+`to_plain_string()` at all.
+
+Two sender sites in `net.rs` construct a `Disconnected` from a **synthetic**,
+Lodestone-authored message rather than a server-sent key: the stream-closed-
+without-a-packet case in `run`'s event loop (`"stream closed"`) and a test
+fixture in `sim.rs` (`"Server closed"`). Both use `Text::literal(..)` rather
+than inventing a fake vanilla translation key — there is no real
+`multiplayer.disconnect.*` key that means "the event stream ended with no
+packet", and a made-up one would be more confusing than a literal, not less.
+`Text::literal` round-trips through `resolve_text` as a no-op (only `Translate`
+nodes consult the table), so the synthetic English still reaches the screen
+unchanged.
+
+**Swept, not fixed**: `NetUpdate::Death { message: String }` has the exact same
+flattening bug (`net::forward` calls `message.to_plain_string()`), so a death
+cause like `death.attack.generic` also renders as its raw key. This was
+already named as a deliberate, separate follow-up in `death-screen.md`'s "What
+was deliberately left out" section before #68, and is left that way here too —
+fixing it means threading `Sim::translator()` through `Sim::death_message`,
+which is `sim.rs` surface outside `poll_net`'s `Disconnected` arm and outside
+this issue's stated scope. Every other `NetUpdate` variant that carries a
+`Text` (`Chat`, `ActionBar`, `TitleEvent`) was already resolving correctly
+before #68 — `Chat` at ingest (`sim.rs`'s `NetUpdate::Chat` arm), `ActionBar`/
+`TitleEvent` at the same read boundary `title_overlay`/`action_bar_overlay`
+use — so `Disconnected` was the one variant issue #52's audit had not reached
+yet.
+
 `geometry()` is pure (`MenuFrame` + viewport → `Vec<f32>`), which is what lets the
 layout be gated by **coverage inside a row's own rect**, with negative controls,
 rather than by counting vertices.

@@ -110,7 +110,9 @@ fn wait_logged_in(net: &NetClient, label: &str) {
             match u {
                 NetUpdate::LoggedIn { .. } => logged_in = true,
                 NetUpdate::Error(e) => last_err = Some(e),
-                NetUpdate::Disconnected(r) => last_err = Some(format!("disconnected: {r}")),
+                NetUpdate::Disconnected(r) => {
+                    last_err = Some(format!("disconnected: {}", r.to_plain_string()))
+                }
                 _ => {}
             }
         }
@@ -310,7 +312,11 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
         .map(|s| mesh_snapshot(&s.full_bright_control(), &classifier))
         .collect();
     let control_max = control_meshes.iter().map(max_vertex_sky).max().unwrap_or(0);
-    let control_min = control_meshes.iter().map(min_vertex_sky).min().unwrap_or(255);
+    let control_min = control_meshes
+        .iter()
+        .map(min_vertex_sky)
+        .min()
+        .unwrap_or(255);
     assert_eq!(
         control_min, control_max,
         "the full-bright control produced a gradient (min {control_min} != max {control_max}); it \
