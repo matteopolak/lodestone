@@ -27,6 +27,7 @@ use lodestone_model::{
 
 use crate::{
     click::{Click, ClickOutcome, ContainerInput, PlayerCtx},
+    container::Container,
     item::ItemStack,
     menu::Menu,
 };
@@ -154,6 +155,25 @@ pub struct Reconciliation {
     pub corrected: bool,
 }
 
+/// The one player inventory, in transit between two [`ClientMenu`]s.
+///
+/// A [`ClientMenu`] deliberately holds **two** [`Menu`]s — the prediction the UI
+/// draws and the last thing the server confirmed — so "the one inventory" is a
+/// pair here rather than a single [`Container`]. That is not the duplication
+/// issue #373 was about: those two are the same *window*'s two points in time,
+/// and `reconcile` exists precisely to collapse them. What #373 was about is two
+/// **windows** each owning a copy of the player's 41 native slots, which nothing
+/// collapses.
+///
+/// Opaque on purpose: the only things you can do with one are take it out of a
+/// menu and put it into another, which is what makes "exactly one owner" a
+/// property of the type rather than of a convention.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInventory {
+    predicted: Container,
+    confirmed: Container,
+}
+
 /// An optimistic client menu that predicts clicks and reconciles against server
 /// updates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,6 +203,22 @@ impl ClientMenu {
     #[must_use]
     pub fn confirmed(&self) -> &Menu {
         &self.confirmed
+    }
+
+    /// Moves the player inventory out of both menus. See
+    /// [`Menu::take_player_inventory`].
+    pub fn take_player_inventory(&mut self) -> PlayerInventory {
+        PlayerInventory {
+            predicted: self.predicted.take_player_inventory(),
+            confirmed: self.confirmed.take_player_inventory(),
+        }
+    }
+
+    /// Installs the player inventory into both menus. See
+    /// [`Menu::take_player_inventory`].
+    pub fn install_player_inventory(&mut self, inventory: PlayerInventory) {
+        self.predicted.install_player_inventory(inventory.predicted);
+        self.confirmed.install_player_inventory(inventory.confirmed);
     }
 
     /// Predicts a click locally and returns the intent to send to the server.

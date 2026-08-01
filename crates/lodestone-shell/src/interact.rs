@@ -427,8 +427,13 @@ pub fn drive_mining(
     // failing `single()` and aborting every dig — and *no* `Menu::player()`
     // fallback is needed, because a fresh player menu is empty, so it would answer
     // `None` for every slot anyway. That is the pre-fix behaviour exactly.
+    // `Menus::player_native` rather than `player().player_native(..)`: the one
+    // inventory is owned by the *open container's* menu while a screen is up
+    // (issue #373), so reading window 0's menu here returned a stale stack and
+    // mined at the wrong speed with a tool picked up inside a chest. It also
+    // drops the whole-menu clone this comment complains about.
     let held = menus
-        .and_then(|menus| menus.0.player().player_native(slot.0))
+        .and_then(|menus| menus.0.player_native(slot.0))
         .map(crate::sim::tool_mining_item);
     let tool = version
         .tool_mining(held.as_ref(), id_value)
