@@ -230,6 +230,14 @@ session, both of which produced a confident wrong conclusion:
 The general rule: the transform that makes output readable is also the transform that can invent a
 green. When a conclusion depends on what was *not* in the output, re-run without the filter.
 
+**And `rtk` rewrites pipelines, so this reaches controls that have nothing to do with cargo.** A
+zero-deletion control on a regenerated data table ran `diff | grep -c '^<'` and reported **0**. The
+true figure was about **15,000**; it surfaced only as 20,251 deletions in `git diff --cached`, and
+the control had to be redone as a semantic parse (43 statics carrying over with all 30,360 literals
+byte-identical). The generator emits one line per tick where the committed file is reflowed to four,
+so a line-oriented control was the wrong instrument even before the pipeline ate the count. **Do not
+build a control out of a shell pipeline here.** Count with a program that reads the file.
+
 **Four species of vacuous test.** Two cannot be found by reading the test — the source is exemplary
 and the flaw is a property of what it was pointed at:
 
