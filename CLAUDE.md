@@ -94,6 +94,20 @@ Oracles (not part of repo state — recreate them):
   read `git diff --cached` to confirm the commit contains no foreign lines. This is the working
   practice that let one agent commit into `gpu.rs`, `gpu/stats.rs`, `resources.rs` and
   `docs/README.md` while three other agents held in-flight edits in all four.
+- **The index is shared too: never leave work staged.** Hunk-staging (above) stops *you* shipping
+  someone else's lines; it does nothing to stop *them* shipping yours. `git add` writes to the one
+  index every agent shares, so any other agent's `git commit` in the gap — however narrow — harvests
+  whatever you have staged into **their** commit, under their message. This happened to a whole
+  26-file change: the `registry_data` ingest for #288 was staged, verified, and then committed by
+  another agent as `a19e5e4 feat(shell): chests reach pixels`. Nothing was lost and nothing foreign
+  was shipped, but the change set has no commit that describes it, and a reviewer reading `a19e5e4`
+  is misled about what it contains. The same gap cost that work three re-stagings, because a
+  concurrent broad `git add` also reset the index for `docs/` twice mid-flight, and a
+  `git diff --cached` read one command later was already describing a different index.
+  **Stage, verify and commit in a single shell invocation** — one script that resets the index for
+  your paths, stages them, asserts `git diff --cached --name-only` equals your intended list, and
+  commits. Two invocations is a race you will sometimes lose, and `git add` "to see the diff" is the
+  most expensive way to look.
 - **`git clean` is the worst of the git-level mistakes, because it destroys what nothing can
   recover.** The others discard *modifications* to tracked files, which at least existed in a commit
   once.
