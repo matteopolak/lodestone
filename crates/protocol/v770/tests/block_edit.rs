@@ -20,7 +20,7 @@ use std::time::Duration;
 use lodestone_client::{BlockPos, ChunkPos, ClientAction, ClientBuilder, Hand, LoginProfile, ServerAddress};
 use lodestone_model::{BlockActionKind, BlockFace, Rotation, Vec3f};
 use lodestone_server::{IntegratedServer, overworld_chunk_source};
-use lodestone_data::block_states::block_name;
+use lodestone_data::block_states::{block_name, properties};
 use lodestone_v770::{V770ServerProtocol, adapter};
 
 fn profile(name: &str) -> LoginProfile {
@@ -46,6 +46,57 @@ fn state_id(name: &str) -> u32 {
     (0..)
         .find(|&id| block_name(id) == Some(name))
         .unwrap_or_else(|| panic!("generated block-state table has no `{name}` entry"))
+}
+
+/// Resolves a **full** block-state string, properties included (e.g.
+/// `"minecraft:deepslate[axis=y]"`), to its protocol-776 registry id —
+/// unlike [`state_id`] above, which only ever finds the first state with a
+/// given name and is therefore only correct for the two propertyless states
+/// it is used for. Same three-tier algorithm as `server_protocol.rs`'s own
+/// (private) `resolve_state_id` (exact match, then the lowest-id state
+/// sharing the block name — its default — then air), duplicated here rather
+/// than exposed: this is a test helper working against the public
+/// `lodestone_data` table, not a reason to widen `lodestone-v770`'s public
+/// API surface.
+///
+/// The middle tier matters for this fixture specifically:
+/// `lodestone-worldgen`'s `OverworldGenerator` writes its default fluid as
+/// the **bare** literal `"minecraft:water"` (`overworld.rs`'s
+/// `default_fluid`), with no `level` property — and real water has no
+/// propertyless state (every id in `86..=101` carries `level=0..15`). A
+/// two-tier (exact-or-air) version of this helper would resolve the water
+/// fixture straight to air, the same bug `server_protocol.rs`'s hermetic gate
+/// caught the first time it ran.
+fn resolve_state(state: &str) -> u32 {
+    let (name, raw_props) = match state.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
+        None => (state, ""),
+    };
+    let mut wanted: Vec<(&str, &str)> = if raw_props.is_empty() {
+        Vec::new()
+    } else {
+        raw_props
+            .split(',')
+            .filter_map(|pair| pair.split_once('='))
+            .collect()
+    };
+    wanted.sort_unstable();
+
+    let mut same_name_default: Option<u32> = None;
+    for id in 0..lodestone_data::block_states::STATE_COUNT {
+        if block_name(id) != Some(name) {
+            continue;
+        }
+        if same_name_default.is_none() {
+            same_name_default = Some(id);
+        }
+        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        have.sort_unstable();
+        if have == wanted {
+            return id;
+        }
+    }
+    same_name_default.unwrap_or_else(|| state_id("minecraft:air"))
 }
 
 /// The base block name (properties stripped) `lodestone-client`'s `block_at`
@@ -86,38 +137,33 @@ fn base_name_at(handle: &lodestone_client::ClientHandle, pos: BlockPos) -> Strin
 ///   notes about chunk `(0, 0)` at nearby seeds) — the placement target once
 ///   the gravel's `Up` face is clicked, since water is replaceable.
 ///
-/// # A discovered wire-fidelity gap this test works around, not fixes
+/// # A formerly-collapsed wire-fidelity gap, fixed by issue #363
 ///
-/// `V770ServerProtocol::encode_chunk`'s `build_world_column` (pre-existing,
-/// not touched by this change) collapses every *solid* block in a whole
-/// -column send to a single `minecraft:stone`, and everything non-solid
-/// (air **and every fluid**) to air — it only ever writes `ChunkSection
-/// ::set_block(…, stone)` under an `is_solid` check, never any other state.
-/// So a real client's chunk store, via `handle.block_at`, cannot see
+/// Until issue #363, `V770ServerProtocol::encode_chunk`'s
+/// `build_world_column` collapsed every *solid* block in a whole-column send
+/// to a single `minecraft:stone`, and everything non-solid (air **and every
+/// fluid**) to air — it only ever wrote `ChunkSection::set_block(…, stone)`
+/// under an `is_solid` check, never any other state. That meant a real
+/// client's chunk store, via `handle.block_at`, could not see
 /// `deepslate`/`gravel`/`water` at all — only "solid" (stone) or "not"
-/// (air), for *any* full-column send, edited or not. This is unrelated to
-/// block editing (`ServerProtocol::encode_block_update` resolves the real
-/// state string correctly, via `resolve_state_id` — that path has full
-/// fidelity), and is not fixed here: it is a pre-existing limitation of the
-/// bulk terrain encoder, orthogonal to this task's scope and risky to change
-/// inside this change (it touches the whole-column path every client join
-/// and every view-tracker resend uses). See this crate's task report.
+/// (air), for *any* full-column send, edited or not.
 ///
-/// So the *client*-observable pre-edit state at all three cells is only
-/// ever `stone` (solid) or `air` (not) — asserted below — while the
-/// *real* per-block content above is asserted independently, straight off
-/// the generator, so "what terrain was actually there" is still on record
-/// even though the wire cannot show it. Both a stone→air (break) and an
-/// air→stone (place) transition are still real, observable, non-vacuous
-/// edits: neither cell already showed the post-edit value before it was
-/// touched.
+/// `build_world_column` now resolves each cell's real state via
+/// `ServerChunkColumn::block_state`/`resolve_state_id` (the same
+/// [`ServerProtocol::encode_block_update`] already used for a single cell),
+/// so the pre-edit assertions below check the **real** per-block content
+/// directly, at full wire fidelity — no separate "what terrain was actually
+/// there" shadow-check is needed anymore; the client now sees it.
+///
+/// [`ServerProtocol::encode_block_update`]: lodestone_server::ServerProtocol::encode_block_update
 #[tokio::test]
 async fn dig_and_place_persist_through_forget_and_reload() {
     let seed: i64 = 1234;
     let view_radius = 0; // one column only — keeps the real generator's cost down.
 
-    // The real per-block content, independent of the client-visible wire
-    // encoding discussed above — this is "what terrain was actually there".
+    // The real per-block content, from an independent generator instance —
+    // now also exactly what the wire and `handle.block_at` are expected to
+    // show, per this test's doc comment above.
     let generator = lodestone_server::overworld_generator(seed);
     let real_column = generator.column(0, 0);
     assert_eq!(
@@ -129,6 +175,9 @@ async fn dig_and_place_persist_through_forget_and_reload() {
         real_column.block_state(0, 38, 0).split('[').next(),
         Some("minecraft:water")
     );
+    let deepslate_id = resolve_state(real_column.block_state(0, -50, 0));
+    let gravel_id = resolve_state(real_column.block_state(0, 37, 0));
+    let water_id = resolve_state(real_column.block_state(0, 38, 0));
 
     let source = overworld_chunk_source(seed);
     let (server, client_io) = IntegratedServer::open_in_memory(V770ServerProtocol, source, view_radius);
@@ -151,26 +200,32 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     let stone_id = state_id("minecraft:stone");
     let air_id = state_id("minecraft:air");
 
-    // --- World-species control, at the fidelity the wire actually offers
-    // (see the doc comment above): the two solid cells (deepslate, gravel)
-    // read as `stone`; the fluid cell (water) reads as `air`. None of the
-    // three already matches its post-edit value.
+    // --- World-species control: the whole-column send now carries real
+    // per-block fidelity (issue #363), so each cell reads as its own
+    // distinct real state — deepslate, gravel, and (the fluid, the case
+    // most likely to be missed by a fix that only thinks about solids)
+    // water — not a collapsed stone/air pair. None of the three already
+    // matches its post-edit value (stone for the placement, air for the
+    // break), so a fix that accidentally left the collapse in place, or
+    // one that fixed solids but still mapped fluids to air, would fail this
+    // loudly rather than by coincidence.
     let break_pre = handle.block_at(break_pos).expect("break column loaded");
     assert_eq!(
-        break_pre, stone_id,
-        "expected the (real: deepslate) break cell to read as solid/stone pre-edit, got {}",
+        break_pre, deepslate_id,
+        "expected the break cell to read as real deepslate pre-edit, got {}",
         base_name_at(&handle, break_pos)
     );
     let clicked_pre = handle.block_at(clicked_pos).expect("clicked column loaded");
     assert_eq!(
-        clicked_pre, stone_id,
-        "expected the (real: gravel) clicked cell to read as solid/stone pre-edit, got {}",
+        clicked_pre, gravel_id,
+        "expected the clicked cell to read as real gravel pre-edit, got {}",
         base_name_at(&handle, clicked_pos)
     );
     let target_pre = handle.block_at(target_pos).expect("target column loaded");
     assert_eq!(
-        target_pre, air_id,
-        "expected the (real: water) target cell to read as non-solid/air pre-edit, got {}",
+        target_pre, water_id,
+        "expected the target cell to read as real water pre-edit (not air — water is a \
+         fluid, the case the old collapse mapped to air rather than stone), got {}",
         base_name_at(&handle, target_pos)
     );
 
@@ -227,16 +282,13 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     );
     // The clicked cell's *block* is untouched — only its neighbour changed,
     // proving the replace-vs-relative placement-cell choice actually ran
-    // rather than always writing to the clicked position. Note this is not
+    // rather than always writing to the clicked position. This is exactly
     // `Some(clicked_pre)`: vanilla's own `handleUseItemOn` unconditionally
     // sends a `block_update` for the clicked cell too (this module's own
-    // `apply_use_item_on` mirrors that), and unlike the whole-column send,
-    // `encode_block_update` carries the block's *real* resolved id — so the
-    // clicked cell's client-visible state upgrades here from the wire
-    // -collapsed `stone` to the real `gravel` id, even though the server
-    // never wrote a new value there. That is the correct, intended effect of
-    // sending the confirmation, not a bug.
-    let gravel_id = state_id("minecraft:gravel");
+    // `apply_use_item_on` mirrors that), but now that the whole-column send
+    // already carries full fidelity (issue #363), that confirmation
+    // reconfirms the same real `gravel` id the column already showed rather
+    // than upgrading it from a wire-collapsed `stone`.
     assert_eq!(
         handle.block_at(clicked_pos),
         Some(gravel_id),
@@ -316,23 +368,23 @@ async fn dig_and_place_persist_through_forget_and_reload() {
         base_name_at(&handle, target_pos)
     );
     // And an untouched cell in the very same edited column still reflects
-    // the original generator output (real: deepslate, so still `stone` at
-    // the wire's solid/air fidelity — see this test's own doc comment) —
-    // the edit is scoped to what was actually touched, not a side effect
-    // that corrupted the whole column on regeneration. The *exact* string
-    // -level claim ("still literally deepslate, not just still solid") is
-    // what `lodestone-server`'s hermetic
+    // the original generator output at *full* fidelity — real
+    // `deepslate[axis=y]`, not merely "still solid" — the edit is scoped to
+    // what was actually touched, not a side effect that corrupted the whole
+    // column on regeneration. `lodestone-server`'s hermetic
     // `set_block_persists_across_repeated_column_calls` test (same fixture,
-    // no client/wire involved) checks instead.
+    // no client/wire involved) checks the same claim without the network
+    // machinery.
     let untouched_pos = BlockPos::new(2, -50, 0);
     assert_eq!(
         real_column.block_state(2, -50, 0).split('[').next(),
         Some("minecraft:deepslate"),
         "fixture assumption broke: expected deepslate at {untouched_pos:?}"
     );
+    let untouched_deepslate_id = resolve_state(real_column.block_state(2, -50, 0));
     assert_eq!(
         handle.block_at(untouched_pos),
-        Some(stone_id),
+        Some(untouched_deepslate_id),
         "an untouched cell in the edited column changed too after the reload — got {}",
         base_name_at(&handle, untouched_pos)
     );
