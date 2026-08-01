@@ -61,6 +61,8 @@ const PLAYER_MOVED_C2S: i32 = 42;
 const SET_TIME_S2C: i32 = 43;
 const SET_CHUNK_CACHE_CENTER_S2C: i32 = 44;
 const FORGET_LEVEL_CHUNK_S2C: i32 = 45;
+const AIR_SUPPLY_S2C: i32 = 46;
+const SET_HEALTH_S2C: i32 = 47;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
 /// tests are about packet scheduling, not terrain, so real worldgen would
@@ -70,6 +72,28 @@ struct AirSource;
 impl ChunkSource for AirSource {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         ChunkColumn::new(0, 16)
+    }
+}
+
+/// A [`ChunkSource`] whose every block is `minecraft:water` — the drowning
+/// tests' subject world. Filling the *entire* column (not just a shallow
+/// pool) means any in-range player position is submerged regardless of
+/// exactly where `y` lands, which is what lets the drowning tests below
+/// place the player with a plain [`send_player_moved`] and not also have to
+/// reason about a precise pool depth.
+struct WaterSource;
+
+impl ChunkSource for WaterSource {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        let mut col = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in 0..16 {
+                    col.set_block(x, y, z, "minecraft:water");
+                }
+            }
+        }
+        col
     }
 }
 
@@ -201,6 +225,24 @@ impl ServerProtocol for FakeProtocol {
             payload: w.as_slice().to_vec(),
         }
     }
+
+    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(air);
+        ServerDirective::Send {
+            packet_id: AIR_SUPPLY_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
+
+    fn encode_set_health(&self, health: f32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.f32(health);
+        ServerDirective::Send {
+            packet_id: SET_HEALTH_S2C,
+            payload: w.as_slice().to_vec(),
+        }
+    }
 }
 
 /// Drives the client side of handshake → login → configuration → the
@@ -264,9 +306,18 @@ async fn drive_login_and_join(
 /// `start_paused = true` — the same pattern
 /// `read_packet_timeout_fires_when_peer_is_silent` in
 /// `crates/lodestone-net/src/connection.rs` already proves, and the 50ms
-/// budget is two orders of magnitude below the 1s time-sync interval, so
-/// draining never accidentally waits long enough to pick up a periodic
-/// broadcast that was not actually due.
+/// budget is well below the 1s time-sync interval, so draining never
+/// accidentally waits long enough to pick up a periodic broadcast that was
+/// not actually due. `VITALS_TICK_INTERVAL` is *also* 50ms (matching
+/// vanilla's own per-tick cadence — see `crate::vitals`'s module docs, not
+/// duplicated here since this crate is `lodestone-server`'s *caller*), so
+/// under paused-clock auto-advance this races the timeout against the
+/// server's own next vitals tick at the same virtual instant; that race
+/// still resolves correctly for a control (dry, or at full air) because that
+/// tick produces no directive at all to read, so the timeout still fires.
+/// The drowning tests below therefore read directly rather than through this
+/// helper, since they need to actually wait across many consecutive vitals
+/// ticks, not stop at the first one.
 async fn drain_available(client: &mut Connection<DuplexStream>) -> Vec<(i32, Vec<u8>)> {
     let mut out = Vec::new();
     loop {
@@ -536,6 +587,144 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
         added2,
         HashSet::from([(12, -1), (12, 0), (12, 1)]),
         "expected exactly the new column to be sent"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// Reads packets until a [`SET_HEALTH_S2C`] arrives, collecting every
+/// [`AIR_SUPPLY_S2C`] value seen along the way (in order) and discarding
+/// anything else (keep-alive, time-sync noise interleaved by the same
+/// `tokio::select!` loop). Returns `(air_values, health_after)`.
+async fn read_until_health_update(client: &mut Connection<DuplexStream>) -> (Vec<i32>, f32) {
+    let mut air_values = Vec::new();
+    loop {
+        let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+        let mut r = Reader::new(&payload);
+        if id == AIR_SUPPLY_S2C {
+            air_values.push(r.var_i32().expect("air value"));
+        } else if id == SET_HEALTH_S2C {
+            return (air_values, r.f32().expect("health value"));
+        }
+        // else: keep-alive / time-sync noise, ignored.
+    }
+}
+
+/// **Subject**: a player whose eye is submerged the whole time must lose air
+/// on the exact vanilla cadence (`crate::vitals`'s module doc comment,
+/// mirrored from `LivingEntity.baseTick`/`decreaseAirSupply`/
+/// `shouldTakeDrowningDamage`) and take the first drowning hit at exactly
+/// tick 320 (300 ticks = 15s to empty from full, then 20 more ticks = 1s to
+/// cross the `<= -20` threshold) — not some rounder or approximated number.
+/// [`WaterSource`] fills the *entire* column, so the player is genuinely
+/// submerged throughout (the "world" species of vacuous test this guards
+/// against: a player who never actually gets wet would prove nothing).
+///
+/// This test spans 320 vitals ticks (16s of virtual time) to the first hit,
+/// then a further 20 ticks (1s) to the second — 340 real tick-cadence steps
+/// in total, all resolved by `tokio`'s paused-clock auto-advance in a
+/// fraction of a second of wall time, the same mechanism the keep-alive
+/// tests above already rely on for their 15s+ spans. This is deliberately
+/// **not** a short window: the "duration" species of vacuous test
+/// (`CLAUDE.md`) would pass a test that only ran a handful of ticks even if
+/// the real cadence were wrong, since nothing would yet distinguish "1 tick"
+/// from "20 ticks" from "300 ticks". Spanning past two full hits is what
+/// proves the cadence repeats rather than being a one-off.
+#[tokio::test(start_paused = true)]
+async fn submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence() {
+    let (client_end, server_end) = memory_pair();
+    let source = WaterSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0).await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Diver", 1).await;
+
+    // Any position inside chunk (0, 0) with y in [0, 16) is submerged: the
+    // entire `WaterSource` column is water, feet at y = 8 puts the eye
+    // (8 + 1.62 = 9.62, floored to block y = 9) in water too.
+    send_player_moved(&mut client, 8.0, 8.0, 8.0).await;
+
+    let (air_values, health_after_first_hit) = read_until_health_update(&mut client).await;
+
+    // Expected sequence, derived the same way `PlayerVitals::tick` computes
+    // it rather than restated as a magic literal: 319 decrements from 300
+    // (299, 298, ..., 0, -1, ..., -19), then the 320th tick resets to 0 on
+    // crossing the damage threshold.
+    let mut expected = Vec::new();
+    let mut air = 300;
+    for _ in 0..319 {
+        air -= 1;
+        expected.push(air);
+    }
+    expected.push(0);
+
+    assert_eq!(
+        air_values, expected,
+        "air must count down by exactly 1/tick, resetting to 0 only on the hit"
+    );
+    assert_eq!(
+        health_after_first_hit, 18.0,
+        "first drowning hit must deal exactly 2.0 damage (20.0 -> 18.0)"
+    );
+
+    // The countdown re-arms identically: the second hit must land exactly
+    // 20 ticks later, not immediately and not some other interval.
+    let (air_values2, health_after_second_hit) = read_until_health_update(&mut client).await;
+    let mut expected2 = Vec::new();
+    let mut air2 = 0;
+    for _ in 0..19 {
+        air2 -= 1;
+        expected2.push(air2);
+    }
+    expected2.push(0);
+
+    assert_eq!(air_values2, expected2, "the re-armed countdown must also take exactly 20 ticks");
+    assert_eq!(
+        health_after_second_hit, 16.0,
+        "second drowning hit must also deal exactly 2.0 damage (18.0 -> 16.0)"
+    );
+
+    drop(client);
+    let _ = server.await.unwrap();
+}
+
+/// **Control**: a player who is never submerged (an all-air world, matching
+/// `AirSource`) must receive **zero** air-supply or health updates, even
+/// across a window (20s) comfortably longer than the 16s the subject test
+/// above takes to reach its first drowning hit. Per `CLAUDE.md`'s evidence
+/// standard this is the control that proves the submersion test actually
+/// gates the tick — not merely that the subject test happened to show
+/// numbers going down, which alone would not rule out air draining
+/// regardless of water.
+#[tokio::test(start_paused = true)]
+async fn dry_player_keeps_full_air_and_takes_no_damage() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(&mut conn, &FakeProtocol, &source, &NoEntities, 0).await
+    });
+
+    let mut client = Connection::new(client_end);
+    drive_login_and_join(&mut client, "Dry", 1).await;
+    send_player_moved(&mut client, 8.0, 64.0, 8.0).await;
+
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let packets = drain_available(&mut client).await;
+    let stray: Vec<_> = packets
+        .iter()
+        .filter(|(id, _)| *id == AIR_SUPPLY_S2C || *id == SET_HEALTH_S2C)
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "a dry player must never receive an air-supply or health update: {stray:?}"
     );
 
     drop(client);

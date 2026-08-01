@@ -352,4 +352,35 @@ pub trait ServerProtocol: Send + Sync {
         let _ = (x, y, z, state);
         ServerDirective::None
     }
+
+    /// Encodes an air-supply update for the local player (vanilla's entity
+    /// metadata `DATA_AIR_SUPPLY_ID`, sent over `SET_ENTITY_DATA` — see
+    /// `crates/protocol/v770/src/packets/metadata.rs`'s `IDX_AIR_SUPPLY`,
+    /// the decode side this mirrors). `air` is the new value, `-20..=300`
+    /// (never sent negative on the wire in practice — `crate::vitals`
+    /// resets to `0` the same tick air crosses the drowning threshold, and
+    /// [`PlayerVitals::tick`](crate::PlayerVitals::tick) reports that via
+    /// [`VitalsTick::air_changed`](crate::VitalsTick::air_changed) alongside
+    /// the reset, not the transient negative value). The default emits
+    /// nothing, so a protocol without air-supply support need not override
+    /// it and drowning simply never reaches that client's HUD.
+    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+        let _ = air;
+        ServerDirective::None
+    }
+
+    /// Encodes a health update for the local player (vanilla's
+    /// `ClientboundSetHealthPacket`, the same packet
+    /// [`begin_play`](Self::begin_play) sends once at join with the
+    /// fresh-spawn default). Sent whenever
+    /// [`PlayerVitals::tick`](crate::PlayerVitals::tick) reports damage —
+    /// currently only drowning. This crate tracks no food/hunger, so an implementor that
+    /// reuses vanilla's combined health/food/saturation packet must supply
+    /// its own constant food/saturation (see
+    /// `V770ServerProtocol::encode_set_health` for the value it picks and
+    /// why). The default emits nothing.
+    fn encode_set_health(&self, health: f32) -> ServerDirective {
+        let _ = health;
+        ServerDirective::None
+    }
 }

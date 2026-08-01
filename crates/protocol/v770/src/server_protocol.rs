@@ -64,6 +64,31 @@ use crate::packets::game::{
 use crate::packets::handshake::Intention;
 use crate::packets::login::{LoginFinished, LoginHello};
 
+/// The local player's fixed network entity id, matching
+/// [`begin_play`](V770ServerProtocol::begin_play)'s `GameLogin { entity_id:
+/// LOCAL_PLAYER_ENTITY_ID, .. }` below — the id a real client latches onto as
+/// "self" from the join packet, and therefore also the id
+/// `encode_air_supply_update` must tag its metadata update with for a client
+/// to apply it to its own local-player state rather than treating it as some
+/// other entity's cosmetic bubble state.
+const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
+
+/// `Entity`'s `DATA_AIR_SUPPLY_ID` metadata index (`Entity.java:268`,
+/// verified index `1` — see `crates/protocol/v770/src/packets/metadata.rs`'s
+/// `IDX_AIR_SUPPLY` doc comment) and the `INT` serializer it is registered
+/// under
+/// (`EntityDataSerializers` registration order; that module's `SER_INT`).
+/// Both constants are private to that module, so this hand-encoder restates
+/// their values rather than importing them — the same "no existing struct to
+/// reuse `Encode` from" situation `encode_chunk_cache_center_body` and
+/// friends above are already in, and for the same reason: nothing on the
+/// server side has ever needed to *write* a metadata list before this.
+const METADATA_IDX_AIR_SUPPLY: u8 = 1;
+const METADATA_SER_INT: i32 = 1;
+/// Sentinel terminating a metadata list (mirrors `metadata.rs`'s private
+/// `EOF_MARKER`).
+const METADATA_EOF: u8 = 0xFF;
+
 /// The overworld world-clock's registry holder id
 /// (`WorldClocks::bootstrap` registers `minecraft:overworld` first,
 /// `minecraft:the_end` second — see `packets::time::ClockUpdate::holder_id`'s
@@ -748,7 +773,7 @@ impl ServerProtocol for V770ServerProtocol {
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
         let login = GameLogin {
-            entity_id: 1,
+            entity_id: LOCAL_PLAYER_ENTITY_ID,
             hardcore: false,
             levels: vec!["minecraft:overworld".to_string()],
             max_players: 20,
@@ -927,6 +952,50 @@ impl ServerProtocol for V770ServerProtocol {
             packet_id: play::clientbound::BLOCK_UPDATE,
             payload: encode_block_update_body(x, y, z, resolve_state_id(state)),
         }
+    }
+
+    /// Encodes air-supply as a one-field `SET_ENTITY_DATA` metadata update for
+    /// [`LOCAL_PLAYER_ENTITY_ID`] — the same wire packet a mob's cosmetic
+    /// metadata would use, restricted to the single `DATA_AIR_SUPPLY_ID`
+    /// field vanilla's own `Entity.setAirSupply` sync would send. Hand-written
+    /// (no existing struct to derive `Encode` from — see this module's own
+    /// doc comment on why that is the right call here) but byte-accurate
+    /// against `crates/protocol/v770/src/packets/metadata.rs`'s
+    /// `read_entity_metadata`, the decode side this must round-trip through:
+    /// VarInt entity id, then `(index: u8, serializer: VarInt, value)`
+    /// repeated, terminated by the `0xFF` sentinel that decoder's `EOF_MARKER`
+    /// checks for.
+    fn encode_air_supply_update(&self, air: i32) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(LOCAL_PLAYER_ENTITY_ID);
+        w.u8(METADATA_IDX_AIR_SUPPLY);
+        w.var_i32(METADATA_SER_INT);
+        w.var_i32(air);
+        w.u8(METADATA_EOF);
+        ServerDirective::Send {
+            packet_id: play::clientbound::SET_ENTITY_DATA,
+            payload: w.into_vec(),
+        }
+    }
+
+    /// Re-sends `SET_HEALTH` with the new health — the same packet and
+    /// struct [`begin_play`](Self::begin_play) already sends once at join.
+    /// `food`/`saturation` are resent at the same fresh-spawn constants
+    /// `begin_play` uses (`20`, `5.0`): `lodestone-server` has no hunger
+    /// model to track a real value for either (the same "no inventory model"
+    /// scope this crate's `UseItemOn` handling already documents applies
+    /// equally here — there is simply nothing that changes them), so
+    /// restating the constant is honest about there being no hunger
+    /// simulation, not a claim that hunger is unaffected by anything.
+    fn encode_set_health(&self, health: f32) -> ServerDirective {
+        send(
+            play::clientbound::SET_HEALTH,
+            &SetHealth {
+                health: health.clamp(0.0, 20.0),
+                food: 20,
+                saturation: 5.0,
+            },
+        )
     }
 }
 
