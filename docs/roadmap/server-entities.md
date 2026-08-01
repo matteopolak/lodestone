@@ -43,7 +43,7 @@ real design and implementation work.
 
 | # | Issue | What it closes |
 |---|---|---|
-| 1 | [#204](https://github.com/matteopolak/lodestone/issues/204) | `ChunkWorld` (the only `PathWorld` a running server uses) classifies every block solid/air only; the 32,366-state JVM-dumped path-type census (`lodestone-data::path_types`) has never been read by anything that ticks. |
+| 1 | [#204](https://github.com/matteopolak/lodestone/issues/204) | **Closed.** `ChunkWorld` used to classify every block solid/air only; it now reads the 32,366-state JVM-dumped path-type census (`lodestone-data::path_types`) for real. See "Phase 0 progress" below. |
 | 2 | [#205](https://github.com/matteopolak/lodestone/issues/205) | `MobSim::spawn` hardcodes `entity_type = "minecraft:zombie"` and an empty `GoalSelector` — there is no species→(attributes, shape, goal-set) registry. Hard prerequisite for every roster issue in Phase 2. |
 | 3 | [#207](https://github.com/matteopolak/lodestone/issues/207) | `damage.rs`'s ordered reduction pipeline has zero consumers; `NavigatingMob::attack` just logs the call to a `Vec` for tests. No hit anywhere reduces a health value. |
 | 4 | [#209](https://github.com/matteopolak/lodestone/issues/209) | The `brain` system (Vanilla's *other* AI architecture — villager, piglin, warden, and 17 more) has no `NavigatingMob`-equivalent composition and no consumer, despite being as architecturally complete as the goal system was before that composition existed. |
@@ -52,7 +52,7 @@ real design and implementation work.
 | 7 | [#215](https://github.com/matteopolak/lodestone/issues/215) | `item_entity.rs`'s despawn/pickup-delay/merge lifecycle is unconsumed; only the fall-dynamics half reaches the client renderer. |
 | 8 | [#217](https://github.com/matteopolak/lodestone/issues/217) | `MobSim` never streams positions to a connected client (the module's own doc says so). The last mile that makes every other issue in this roadmap invisible to a player. |
 
-### Phase 0 progress (session closing #207/#213, partial #205)
+### Phase 0 progress (sessions closing #204/#207/#213, partial #205)
 
 **#207 closed.** `SimMob` now carries real health, `Defenses` and a `HurtCooldown`,
 seeded from `lodestone_entity::attribute::default_attributes` (real per-type data —
@@ -92,29 +92,50 @@ which meant a mob produced by natural spawning never moved or looked around —
 so they actually do something; combat goals are still the caller's job (they need a
 target, which the spawn cycle has no way to name yet).
 
-**#204 investigated, left open — was architectural, now just a wiring gap.** The
-fix this issue wants (a `PathWorld` that reads real per-block-state
-collision/path-type data instead of solid/air) used to be blocked on a real
-structural problem: the 32,366-state census only existed behind
-`crates/protocol/v770`, and `lodestone-server` correctly refuses a dependency on
-any `protocol/*` crate (`lodestone-server/Cargo.toml` documents "no
-version/protocol coupling" in its own dependency comment) — so wiring the real
-census into `MobSim::ChunkWorld` meant either reversing that boundary or having
-`lodestone-shell` supply a richer `PathWorld`, making the server's fidelity
-depend on the client.
+**#204 closed.** The fix this issue wants (a `PathWorld` that reads real
+per-block-state collision/path-type data instead of solid/air) used to be
+blocked on a real structural problem: the 32,366-state census only existed
+behind `crates/protocol/v770`, and `lodestone-server` correctly refuses a
+dependency on any `protocol/*` crate (`lodestone-server/Cargo.toml` documents
+"no version/protocol coupling" in its own dependency comment) — so wiring the
+real census into `MobSim::ChunkWorld` meant either reversing that boundary or
+having `lodestone-shell` supply a richer `PathWorld`, making the server's
+fidelity depend on the client.
 
 Issue #361 extracted `path_types` (and the other eighteen game-data censuses) out
 of `crates/protocol/v770` into `lodestone-data`, a crate with no protocol
 dependency of its own — see `docs/lodestone-data-crate.md`. `lodestone-data`'s
 `path_types::PathTypes` already implements `lodestone_model::PathTypeRegistry`,
 and `PathType` in `lodestone-model`/`lodestone-entity` already mirrors it
-variant-for-variant, so the boundary problem is gone: `lodestone-server` can add
-a plain data dependency without reversing anything. What is left is genuinely a
-local patch, not a cross-crate decision: add `lodestone-data` to
-`lodestone-server/Cargo.toml`, and have `MobSim::ChunkWorld` (or whatever
-implements `PathWorld` for the server) resolve each cell's block-state id through
-`lodestone_data::path_types::path_type` instead of the solid/air approximation.
-Not done in #361 itself — that issue was scoped to the move only.
+variant-for-variant, so the boundary problem was gone: `lodestone-server` could
+add a plain data dependency without reversing anything.
+
+That local patch is what this session did. `crates/lodestone-server/Cargo.toml`
+now depends on `lodestone-data`. `ChunkWorld::base_path_type` (`mobs.rs`)
+resolves each cell's canonical block-state string — `ChunkColumn` (`chunk.rs`)
+already stored those in full, not just a solid/air bit, so no `ChunkColumn`
+data-model change was needed — to a global block-state id (a new reverse
+`String -> u32` index built once over `lodestone_data::block_states`, since
+nothing needed a name-to-id lookup before this) and looks it up in
+`lodestone_data::path_types::path_type`, translated into
+`lodestone_entity::pathfinding::PathType` by a small 1:1 match
+(`census_to_pathfinding_type`). `ChunkWorld::collision_top` reads
+`lodestone_data::collision_shapes` the same way, taking the max Y of the
+state's real collision boxes — matching exactly what vanilla asks at
+`WalkNodeEvaluator.getFloorLevel`
+(`.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/WalkNodeEvaluator.java:219-222`:
+`shape.isEmpty() ? 0.0 : shape.max(Direction.Axis.Y)`) — instead of the old
+hardcoded `1.0`. `PathWorld::collides` (the coarse jump-clearance/diagonal-reach
+sweep) is unchanged and still reads `ChunkColumn::is_solid`; widening it to real
+per-shape sweeps was judged a separate, larger change outside this issue's
+scope. See `crates/lodestone-server/tests/chunk_world_path_census.rs`:
+`real_census_forces_a_lava_detour_the_old_solid_air_model_would_walk_straight_through`
+(a lava band the old solid/air mapping reads as `Open` and walks straight
+through; the real census reads it as `PathType::Lava`, malus `-1`, and the
+search detours around the band's end — with the old mapping re-run over the
+*same* terrain as the required control, proving it really does walk straight
+through) and `collision_top_reads_the_real_per_state_shape_not_a_hardcoded_full_cell`
+(pins the slab/fence/water/air collision tops directly).
 
 ## Phase 1 — Spawning
 

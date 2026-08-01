@@ -19,6 +19,12 @@ lodestone-worldgen = { path = "../lodestone-worldgen" }
 # dependency cycle (entity never depends on server).
 lodestone-entity = { path = "../lodestone-entity" }
 lodestone-model = { path = "../lodestone-model" }
+# The 26.2 per-block-state game-data censuses (`path_types`, `block_states`,
+# `collision_shapes`, ...). This depends on nothing but `lodestone-model` (see
+# `docs/lodestone-data-crate.md`), so it is a plain data dependency, not a
+# protocol one: `ChunkWorld` (mobs.rs) reads it to classify real block states
+# into `PathType`/collision geometry instead of a solid/air guess (issue #204).
+lodestone-data = { path = "../lodestone-data" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 # Client-supplied login UUID is echoed back in the login-success reply; this is
