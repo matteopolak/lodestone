@@ -9,9 +9,11 @@ workspace = true
 
 [dependencies]
 lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
 lodestone-world = { workspace = true }
+tracing = { workspace = true }
 uuid = { workspace = true }
 
 [features]

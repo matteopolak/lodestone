@@ -29,6 +29,14 @@ way.
 attempt was made to make a 1.12.2 client join and render — see "What wiring `v340` would
 need" below for what that follow-up requires.
 
+**Update: the adapter wiring described below has since landed.** See
+[`protocol-340-canonical-bridge.md`](./protocol-340-canonical-bridge.md) for what
+`crates/protocol/v340/src/canonical.rs` does with each of the four outcomes below, the
+additional renames/property fixups that direction needed beyond this table's own scope, and the
+live-server evidence gathered for it. This document is left as originally written (the table's
+own construction and verification); only this note and the "What wiring `v340` would need"
+section below were touched.
+
 ## Where the mapping actually lives (and where it does not)
 
 **It is not in the 1.12.2 jar, and it is not in `minecraft-data`.** The 1.12.2 jar only
@@ -332,15 +340,23 @@ already match `lodestone-v770`'s (26.2) naming.** It needs to pass through whate
 layer accounts for the table above before being used as a lookup key into the canonical
 censuses — see the next section.
 
-## What wiring `v340` would need (not done here)
+## What wiring `v340` would need (status as of this table's original writing)
 
 1. **A rename pass** for the small set of known-stale names/properties above (and any
    others not surfaced by this task's spot-checks — the full rename chain inside
    `DataFixerUpper` was not walked). Small in count, not yet enumerated exhaustively.
+   **Done** — `canonical.rs`'s `bridge_name`, see `protocol-340-canonical-bridge.md`. It
+   found a few more stale names this table's own spot-checks did not surface
+   (`sign`/`wall_sign`/`grass`/`grass_path`), verified by registry existence + shape rather
+   than by tracing the later jar (that remains real, unstarted follow-up work).
 2. **A decision for `NoTableEntry`** at each of `v340`'s two consumption points
    (`packets/chunk.rs`'s palette decode, and any block-update/interaction packet carrying
    a raw legacy id): whether to reject the packet, substitute a real "unknown block"
    sentinel state, or something else. This table deliberately does not make that choice.
+   **Done for `packets/chunk.rs`** — substituted with air, counted and logged per column,
+   never silent. Block-update/interaction packets (`v340` currently ignores everything in
+   play besides the packets `adapter.rs` explicitly lists) remain unaddressed; nothing in
+   this crate today produces a raw legacy id outside chunk decode.
 3. **A decision for `RequiresAdditionalContext`** at the same points: flower pots and
    skulls need their TileEntity to be decoded and consulted *alongside* the block
    metadata, not instead of it — this table's job ends at flagging that the block-only
@@ -348,15 +364,23 @@ censuses — see the next section.
    `packets/chunk.rs`'s per-section decode does not currently expose during palette
    resolution (it would need to defer resolution to a second pass with the full section in
    hand, or resolve lower-before-upper within a column).
+   **Partially done**: substituted with air, counted and logged, same as `NoTableEntry` —
+   this crate still does not decode block entities at all (see `packets/chunk.rs`'s own
+   module docs on why they are consumed and discarded), so there is no TileEntity data to
+   resolve these from even now. Decoding block entities is real, unstarted follow-up work.
 4. **A decision for `OutOfBounds`** — realistically the same handling as `NoTableEntry`,
    since no real client ever sends `old_block_id=255, meta=15` and the distinction mostly
-   matters for debugging, not runtime behaviour.
+   matters for debugging, not runtime behaviour. **Done** — same air substitution.
 5. **The item-side table** (`aah`, 302 entries) is a separate, smaller piece of work for
    inventory/creative-menu item resolution — not needed for `packets/chunk.rs`, but needed
-   before a 1.12.2 client's window/inventory packets can be translated.
+   before a 1.12.2 client's window/inventory packets can be translated. **Still not done** —
+   out of scope for chunk decode; unchanged by this follow-up.
 
-None of this was implemented — the task was the table, verified, with its ambiguities on
-the record.
+See `protocol-340-canonical-bridge.md` for the full account of what was actually built,
+including the additional property fixups (`waterlogged`, leaves' `persistent`/`distance`,
+`*_wood`'s `axis`, trapdoor `powered`, note block's full property set, and the cauldron/wall
+identity splits) that turned out to be necessary beyond the rename pass alone, and the live
+1.12.2 server evidence gathered for it.
 
 ## How to change it
 

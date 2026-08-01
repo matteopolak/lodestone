@@ -62,6 +62,8 @@ use lodestone_world::{
     Result,
 };
 
+use crate::canonical::{self, FallbackTally};
+
 /// Number of block sections in a 1.12.2 column (fixed world height 0..256).
 const SECTION_COUNT: usize = 16;
 /// Entries in one block-state section (16³).
@@ -85,7 +87,12 @@ pub struct ChunkShape {
     pub block_kind: PaletteKind,
     /// Palette configuration for the (fabricated) biome containers.
     pub biome_kind: PaletteKind,
-    /// Block-state id treated as air (block id 0, meta 0 → state 0).
+    /// Block-state id treated as air — the **canonical 26.2**
+    /// [`canonical::air_state_id`], not the legacy `(0, 0)` composite id.
+    /// Every block this crate stores has already been translated by
+    /// [`canonical::resolve_or_air`] by the time it reaches a
+    /// [`PalettedContainer`] (see [`decode_section_blocks`]), so this must
+    /// match that id space, not the wire's.
     pub air_id: u32,
     /// Default biome id for sections/columns without biome data.
     pub biome_id: u32,
@@ -99,7 +106,7 @@ impl ChunkShape {
             has_skylight: true,
             block_kind: PaletteKind::block_states(),
             biome_kind: PaletteKind::biomes(),
-            air_id: 0,
+            air_id: canonical::air_state_id(),
             biome_id: 0,
         }
     }
@@ -132,6 +139,13 @@ pub struct ChunkData {
     pub column: ChunkColumn,
     /// Sky and block light.
     pub light: ColumnLight,
+    /// How many blocks in this column needed a fallback substitution while
+    /// bridging legacy `id:meta` to a canonical 26.2 state — see
+    /// [`canonical::resolve_or_air`]. Zero for the overwhelming majority of
+    /// real-world columns; surfaced here (and logged, see
+    /// [`MapChunk::decode`]) rather than silently absorbed so a wrong
+    /// mapping stays traceable per CLAUDE.md's evidence standards.
+    pub fallback: FallbackTally,
 }
 
 /// The `minecraft:map_chunk` packet (clientbound play, id 32).
@@ -186,6 +200,28 @@ impl MapChunk {
         // any slack is a misparse (or a wrong dimension/skylight assumption).
         blob.ensure_empty()?;
 
+        // The adapter's chosen fallback for every non-Resolved canonical
+        // outcome (see `crate::canonical`'s module docs) is a visible,
+        // counted air substitution rather than a silent one: log it once per
+        // column, with the breakdown, instead of once per block or not at
+        // all. Silent for the overwhelming majority of columns, which need
+        // no fallback at all.
+        if !data.fallback.is_empty() {
+            tracing::warn!(
+                target: "v340::chunk",
+                x, z,
+                no_table_entry = data.fallback.no_table_entry,
+                requires_additional_context = data.fallback.requires_additional_context,
+                out_of_bounds = data.fallback.out_of_bounds,
+                unmapped = data.fallback.unmapped,
+                "substituted air for {} block(s) that could not be resolved to a canonical 26.2 state",
+                data.fallback.no_table_entry
+                    + data.fallback.requires_additional_context
+                    + data.fallback.out_of_bounds
+                    + data.fallback.unmapped,
+            );
+        }
+
         // Block entities trail the buffer as full named-NBT compounds. Their
         // string type id has no numeric registry here, so they are consumed to
         // keep the zero-trailing-bytes gate honest but are not retained.
@@ -225,12 +261,13 @@ fn decode_column(
         shape.biome_id,
     );
     let mut light = ColumnLight::new(SECTION_COUNT);
+    let mut fallback = FallbackTally::default();
 
     // Sections are interleaved: each is a full [blocks, blockLight, skyLight]
     // record before the next (unlike 1.8's grouped-by-type layout).
     let mut section_blocks: Vec<(usize, PalettedContainer)> = Vec::with_capacity(present.len());
     for &index in &present {
-        let values = decode_section_blocks(blob)?;
+        let values = decode_section_blocks(blob, &mut fallback)?;
         section_blocks.push((
             index,
             PalettedContainer::from_values(shape.block_kind, &values),
@@ -272,12 +309,22 @@ fn decode_column(
         ground_up,
         column,
         light,
+        fallback,
     })
 }
 
-/// Reads one section's paletted block data and returns the 4096 resolved
-/// block-state ids (`(blockId << 4) | meta`, the version-free id space).
-fn decode_section_blocks(blob: &mut Reader<'_>) -> Result<Vec<u32>> {
+/// Reads one section's paletted block data and returns the 4096 **canonical
+/// 26.2** block-state ids, translated from the wire's legacy
+/// `(blockId << 4) | meta` composite ids via [`canonical::resolve_or_air`].
+///
+/// The translation happens on the palette (typically a few dozen distinct
+/// entries) rather than per-cell where the section carries one — the 4096
+/// output values are then just an index through the already-translated
+/// palette, same as before. Sections large/varied enough to use the direct
+/// (paletteless) encoding translate each of the 4096 raw values directly;
+/// [`canonical::resolve_or_air`] is a lazily-built array lookup after the
+/// first call in the process, so this stays cheap either way.
+fn decode_section_blocks(blob: &mut Reader<'_>, fallback: &mut FallbackTally) -> Result<Vec<u32>> {
     let bits = u32::from(blob.u8()?);
     if bits == 0 || bits > 32 {
         return Err(lodestone_core::Error::Custom(format!("invalid bits-per-block {bits}")).into());
@@ -296,6 +343,18 @@ fn decode_section_blocks(blob: &mut Reader<'_>) -> Result<Vec<u32>> {
     let mut palette = Vec::with_capacity(palette_len);
     for _ in 0..palette_len {
         palette.push(u32::try_from(blob.var_i32()?).unwrap_or(0));
+    }
+    // Translate the (typically small) palette once, rather than each of the
+    // 4096 output cells individually — see the function docs. Each entry is
+    // still the wire's legacy `(blockId << 4) | meta` composite id at this
+    // point; `canonical::resolve_or_air` is what turns it into a canonical
+    // 26.2 state id (substituting air, and recording into `fallback`, for
+    // any of the four outcomes `crate::canonical`'s docs enumerate that
+    // aren't a clean `Resolved`).
+    let mut translated_palette = Vec::with_capacity(palette.len());
+    for &raw in &palette {
+        let (old_block_id, meta) = legacy_id_meta(raw)?;
+        translated_palette.push(canonical::resolve_or_air(old_block_id, meta, fallback));
     }
 
     // Data array: a VarInt long count then that many big-endian longs. The count
@@ -317,18 +376,38 @@ fn decode_section_blocks(blob: &mut Reader<'_>) -> Result<Vec<u32>> {
     let indices = unpack_straddling(&longs, bits, BLOCK_ENTRIES);
     let mut values = vec![0u32; BLOCK_ENTRIES];
     for (out, &raw) in values.iter_mut().zip(indices.iter()) {
-        *out = if palette.is_empty() {
-            raw
+        *out = if translated_palette.is_empty() {
+            // Direct/global palette: `raw` *is* the legacy composite id
+            // itself, one per cell — no shared palette to translate once.
+            let (old_block_id, meta) = legacy_id_meta(raw)?;
+            canonical::resolve_or_air(old_block_id, meta, fallback)
         } else {
-            *palette.get(raw as usize).ok_or_else(|| {
+            *translated_palette.get(raw as usize).ok_or_else(|| {
                 lodestone_world::WorldError::from(lodestone_core::Error::Custom(format!(
                     "palette index {raw} escapes palette of {}",
-                    palette.len()
+                    translated_palette.len()
                 )))
             })?
         };
     }
     Ok(values)
+}
+
+/// Splits a wire-format legacy composite block value into `(old_block_id,
+/// meta)`, rejecting anything past `old_block_id in 0..=255, meta in 0..16`
+/// (i.e. `raw > 0x0FFF`) as malformed rather than silently truncating —
+/// every real 1.12.2 block/palette entry fits in 12 bits by construction (see
+/// the module docs), so a larger value means desync or a hostile sender, not
+/// a block this crate should render as *something*.
+fn legacy_id_meta(raw: u32) -> Result<(u8, u8)> {
+    if raw > 0x0FFF {
+        return Err(lodestone_core::Error::Custom(format!(
+            "legacy block value {raw} exceeds the (old_block_id << 4) | meta range"
+        ))
+        .into());
+    }
+    // `raw <= 0x0FFF` is checked above, so both halves fit in `u8`.
+    Ok(((raw >> 4) as u8, (raw & 0x0F) as u8))
 }
 
 /// Number of 64-bit longs the **old (straddling)** packing uses for `count`

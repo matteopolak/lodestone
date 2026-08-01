@@ -21,10 +21,14 @@
 //!   `ensure_empty`, surfaced here as a decode error) — the single best
 //!   detector of a subtly wrong layout, and in particular of the pre-1.16
 //!   **straddling** long unpacking being wrong;
-//! * the world-independent **bedrock floor** (block id 7 → state 112) fills the
-//!   whole `y=0` plane of every column, in both flat and default worlds
-//!   (catches a byte-correct but YZX-transposed or mis-shifted decode, and a
-//!   scrambled straddling unpack);
+//! * the world-independent **bedrock floor** (legacy block id 7, meta 0 →
+//!   canonical `minecraft:bedrock`, per [`lodestone_v340::canonical::resolve`])
+//!   fills the whole `y=0` plane of every column, in both flat and default
+//!   worlds (catches a byte-correct but YZX-transposed or mis-shifted decode,
+//!   and a scrambled straddling unpack) — note this is the **canonical 26.2**
+//!   state id now, not the legacy `112` composite, since `packets/chunk.rs`
+//!   translates every block through `crate::canonical` before it reaches
+//!   [`lodestone_world`] storage;
 //! * it reports the column count read out of `World`.
 //!
 //! Because the chunk bytes cross the same `WorldSink` seam the client uses, a
@@ -210,20 +214,28 @@ async fn decodes_real_chunks_from_live_1_12_server() {
     //      store (not from a local decode) is what proves the seam. ----
     //
     // The y=0 plane is a solid bedrock floor in *every* vanilla 1.12.2 column,
-    // flat or default (only y=1..4 are patchy), so "y=0 all == state 112" is a
-    // world-independent known-block-at-known-Y detector that also proves the
-    // straddling unpack is correct — a scrambled unpack would not land bedrock
-    // uniformly on the bottom plane.
+    // flat or default (only y=1..4 are patchy), so "y=0 all == canonical
+    // bedrock" is a world-independent known-block-at-known-Y detector that
+    // also proves the straddling unpack *and* the legacy->canonical
+    // translation are both correct — a scrambled unpack would not land
+    // bedrock uniformly on the bottom plane, and a broken translation would
+    // land air (or some other wrong id) instead of bedrock's canonical id.
+    let bedrock_state = match lodestone_v340::canonical::resolve(7, 0) {
+        lodestone_v340::canonical::CanonicalBlockState::Resolved(id) => id,
+        other => panic!("legacy bedrock (7,0) did not resolve to a canonical state: {other:?}"),
+    };
     let mut checked = 0usize;
     let mut bedrock_planes = 0usize;
     for loaded in world.values() {
         let col = &loaded.column;
         checked += 1;
-        let uniform_bedrock = (0..16).all(|x| (0..16).all(|z| col.get_block(x, 0, z) == 112));
+        let uniform_bedrock =
+            (0..16).all(|x| (0..16).all(|z| col.get_block(x, 0, z) == bedrock_state));
         assert!(
             uniform_bedrock,
-            "y=0 plane is not uniform bedrock (state 112) — decode is likely \
-             YZX-transposed, endian-swapped, or the straddling unpack is wrong"
+            "y=0 plane is not uniform canonical bedrock (state {bedrock_state}) — decode is \
+             likely YZX-transposed, endian-swapped, the straddling unpack is wrong, or the \
+             legacy->canonical translation is wrong"
         );
         bedrock_planes += 1;
     }
