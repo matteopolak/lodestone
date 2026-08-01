@@ -321,4 +321,13 @@ impl EntityIndex {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// Forgets every mapping, without touching the entities they pointed to.
+    ///
+    /// The caller is responsible for despawning first —
+    /// [`crate::ingest::reset_ingest_entities`] is the one place that does
+    /// both, in that order.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }

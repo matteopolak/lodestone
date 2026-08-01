@@ -114,6 +114,61 @@ non-commutative pair is "despawn then respawn a reused id", and
 `apply_entity_spawn` already handles that on its own by replacing whatever holds
 the id.
 
+### Session teardown must clear the index too — it didn't, and rejoining duplicated every entity
+
+`EntityIndex` is populated by `apply_local_player_login` and `apply_entity_spawn`
+and was, for a long time, cleared by **nothing**. `Sim::end_session`
+(`lodestone-shell/src/sim.rs`) has always been meticulous about resetting session
+state — entity tracks, the frame clock's accumulator, four resources, terrain, the
+chunk store, the local player's whole component set, both halves of the
+HUD/session set, the target and the input state — but the ingest-side entity set
+this module owns was simply never in that list.
+
+That is a **second, parallel** entity set from the one `reset_entity_tracks`
+(`lodestone-shell/src/entities.rs`) clears. `reset_entity_tracks` only tears down
+the *render*-side fold (`TrackIndex`, `ItemStacks`, `ExtractedDraws`) — the
+entities `fold_snapshots` spawns from `EntitySnapshot`. It has no reach into
+`EntityIndex` or the components this module documents, because those live one
+layer upstream, in `SharedState`'s own `World`.
+
+The bug this produced: quit, rejoin, and the new server hands out an entirely
+different set of network ids (vanilla never guarantees reuse, and normally
+never reuses at all). No `EntityRemoved` for the previous session's entities
+ever arrives — nothing sends one; a disconnect just drops the socket — so they
+were never despawned. They stayed indexed under ids nothing would ever
+reference again, and `SharedState::entities()` (`lodestone-client/src/state.rs`)
+enumerates `EntityIndex` **directly**, so it kept deriving `EntityView`s for
+them every frame. The shell's render fold then treated each as a "new" entity
+(its `TrackIndex` had just been cleared) and spawned a fresh render-side track
+for it — frozen in its last-known pose, since nothing could ever address its
+dead id again — sitting right beside the live duplicate the new session spawned
+under its own fresh id for the same mob. One mob, drawn twice, one copy inert.
+
+A single-session test cannot see this class of bug by construction: within one
+session a reused id is already handled (`apply_entity_spawn`'s "replace the
+previous holder" branch), and that branch was presumably why this went
+unnoticed for so long. It only shows up **across** two sessions using
+**different** ids for the same logical entity — which is exactly what a real
+rejoin does and a same-id test does not.
+
+The fix is `reset_ingest_entities` (`lodestone-ecs/src/ingest.rs`), called from
+`end_session` right next to `reset_entity_tracks` (both run inside the same
+`self.write` closure, over the one shared `World` — see `sim.rs`'s own comment
+on `IngestPlugin`/`EntityInterpPlugin` sharing a `World` since §4.1(c)). It
+despawns every entity `EntityIndex` points at **except** one carrying
+`LocalPlayer` — the same guard `apply_entity_spawn`/`apply_entity_removal` use,
+for the same reason: the local player's `Entity` id is held by the driver
+across the reset and must survive it. It then clears `EntityIndex` in full,
+local-player mapping included — that mapping is stale the instant the session
+ends anyway, and `apply_local_player_login` re-adds it on the next login by
+querying `With<LocalPlayer>` directly, never by reading the index, so clearing
+it costs nothing. `EntityIndex::clear()` is the one new method this needed.
+
+No other index required a matching fix: `ServerEntityId` (the local player's
+own last-known network id, used to attribute mob effects) is a *component* on
+the local player, not a separate map, and was already reset every session by
+`insert_session_components`.
+
 ### `EntityView` is now derived, not stored
 
 `Inner.entities: HashMap<i32, EntityView>` and `Inner::apply`'s eight entity arms
@@ -153,6 +208,13 @@ a tracked entity and the next extract puts it on screen.
 
 ## How to change it, and the gotchas
 
+- **A resource that indexes entities by network id needs an explicit line in
+  `Sim::end_session`, or it survives a rejoin.** `EntityIndex` did not, for a
+  long time, and every entity duplicated itself on reconnect — see "Session
+  teardown must clear the index too" above. If you add another such index,
+  clear it there too, and prove it with a test that spans **two** sessions
+  using **different** ids for the same logical entity; a same-session or
+  same-id test cannot see this class of bug.
 - **Never spawn a component to make a query simpler.** For `DisplayItem` /
   `CustomName` that is the invisible-drop regression; for `Velocity` it erases
   "never reported" vs "reported zero", which is the difference between a drop
