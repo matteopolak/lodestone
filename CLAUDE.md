@@ -104,10 +104,17 @@ Oracles (not part of repo state — recreate them):
   is misled about what it contains. The same gap cost that work three re-stagings, because a
   concurrent broad `git add` also reset the index for `docs/` twice mid-flight, and a
   `git diff --cached` read one command later was already describing a different index.
-  **Stage, verify and commit in a single shell invocation** — one script that resets the index for
-  your paths, stages them, asserts `git diff --cached --name-only` equals your intended list, and
-  commits. Two invocations is a race you will sometimes lose, and `git add` "to see the diff" is the
-  most expensive way to look.
+  **Use the pathspec form: `git commit -- <your paths>`.** It commits exactly those paths and
+  **ignores the index entirely**, which is the only property that makes it safe here.
+  "Stage, verify and commit in one shell invocation" was tried and is **not sufficient** — a single
+  invocation is not an atomic transaction. An agent staged six files, asserted
+  `git diff --cached --name-only` matched exactly, and then its plain `git commit` swept in **14
+  files** belonging to another agent who had run `git add` in the window between the assert and the
+  commit. One of those files was captured **mid-keystroke**, so `main` was briefly red from a commit
+  whose author never touched the broken file. Review-then-commit cannot be made race-free while the
+  index is shared; the fix is not to look harder but to stop consulting the index at all.
+  `git add` "to see the diff" is the most expensive way to look — `git diff -- <paths>` shows the
+  same thing and touches nothing.
 - **`git clean` is the worst of the git-level mistakes, because it destroys what nothing can
   recover.** The others discard *modifications* to tracked files, which at least existed in a commit
   once.
