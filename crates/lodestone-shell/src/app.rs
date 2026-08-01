@@ -898,6 +898,17 @@ impl WindowApp {
             {
                 render.install_sky(sky);
             }
+            // The underwater/fire overlay pass (issues #108, #112): same
+            // shape and same reason as the sky install just above (needs GPU
+            // handles immediately, so it is loaded here rather than folded
+            // into a `set_*_source` closure). `has_screen_effects` guards a
+            // re-connect the same way `has_sky` does.
+            if let Some(render) = self.render.as_mut()
+                && !render.has_screen_effects()
+                && let Some(fx) = crate::resources::load_screen_effects(device, queue, format)
+            {
+                render.install_screen_effects(fx);
+            }
         }
         self.install_outline_source();
         self.install_debug_lines_source();
@@ -1357,13 +1368,36 @@ impl WindowApp {
         // needs the world; doing it here would hand out two borrows of `Sim`.
         let particle_frame = self.sim.extract_particles(&camera);
         render.prepare_particles(device, queue, &self.sim.particle_instances(), &camera);
-        render.update_animation(queue, self.sim.tick_count());
+        let tick = self.sim.tick_count();
+        render.update_animation(queue, tick);
+        // The underwater/fire overlay pass's per-frame input (issues #108,
+        // #112). `eye_in_water` is the *same* `PhysicsState` predicate the
+        // submerged fog and the air-bubble row already read
+        // (`docs/sky-and-air-bubbles.md`) — not a second derivation. `on_fire`
+        // is always `false`: the shared-flags byte decodes in
+        // `protocol/v770/src/packets/metadata.rs` and reaches a generic
+        // `EntityFlags` ECS component, but the local player is deliberately
+        // excluded from the generic entity-view path, and no session-scoped
+        // fold like `apply_local_player_air_supply` exists for it yet — see
+        // `docs/screen-overlays.md`.
+        let spectator = self
+            .sim
+            .net()
+            .and_then(|n| n.shared_handle().get().cloned())
+            .and_then(|h| h.game_mode())
+            == Some(lodestone_client::GameMode::Spectator);
+        let screen_effects = crate::gpu::ScreenEffects {
+            eye_in_water: self.sim.player().eye_in_water,
+            on_fire: false,
+            spectator,
+            tick,
+        };
         // Route the progressive-mining crack overlay when a dig is in flight,
         // otherwise take the plain path (avoids building the crack buffer while
         // idle). `crack_target()` reads the live mining state, so it is `None`
         // off a server and on the demo path.
         let stats = match self.sim.crack_target() {
-            Some(crack) => render.render_with_crack(
+            Some(crack) => render.render_with_crack_and_effects(
                 device,
                 queue,
                 frame.view(),
@@ -1371,14 +1405,16 @@ impl WindowApp {
                 outline,
                 &entity_draws,
                 crack,
+                screen_effects,
             ),
-            None => render.render(
+            None => render.render_with_effects(
                 device,
                 queue,
                 frame.view(),
                 &render_camera,
                 outline,
                 &entity_draws,
+                screen_effects,
             ),
         };
 
@@ -1462,6 +1498,14 @@ impl WindowApp {
             .recipe_book
             .as_ref()
             .map(|book| (book.len(), book.tags().len()));
+        // Always `Some`: `Sim::attack_strength_scale` is defined on both the
+        // demo and live worlds (the ticker and the `attack_speed` attribute
+        // default both exist before any server connection), unlike
+        // `health`/`food`/`xp` which stay `None` until a server reports them.
+        // `hud.rs`'s draw site is what actually gates this on
+        // `frame.crosshair` — see that field's doc for why the crosshair
+        // hides behind an open screen but the hotbar does not (issue #61).
+        hud_frame.attack_cooldown = Some(self.sim.attack_strength_scale());
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
@@ -1743,6 +1787,14 @@ impl ApplicationHandler for WindowApp {
                 && let Some(sky) = crate::resources::load_sky(gpu.device(), gpu.queue(), format)
             {
                 render.install_sky(sky);
+            }
+            // See `connect_to`: the overlay pass, from the same local GPU
+            // handles.
+            if !render.has_screen_effects()
+                && let Some(fx) =
+                    crate::resources::load_screen_effects(gpu.device(), gpu.queue(), format)
+            {
+                render.install_screen_effects(fx);
             }
         }
         // No target requested: stay on `Screen::MainMenu`, which `UiState::new`

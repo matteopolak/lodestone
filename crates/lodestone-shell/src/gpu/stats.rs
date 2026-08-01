@@ -91,4 +91,12 @@ pub struct RenderStats {
     /// also what the block pass's clear-vs-load choice keys off, so a wrong
     /// value here is not just a missing counter, it is a missing frame clear.
     pub sky_drawn: bool,
+    /// Whether the underwater overlay (issue #108) drew this frame — a pass
+    /// is installed, first-person, not spectator, and
+    /// `ScreenEffects::eye_in_water` was true.
+    pub underwater_overlay_drawn: bool,
+    /// Whether the fire overlay (issue #112) drew this frame — same gating as
+    /// [`underwater_overlay_drawn`](Self::underwater_overlay_drawn), keyed on
+    /// `ScreenEffects::on_fire` instead.
+    pub fire_overlay_drawn: bool,
 }

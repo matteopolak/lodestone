@@ -39,6 +39,10 @@ lodestone-sound = { workspace = true }
 lodestone-world = { workspace = true }
 lodestone-registry = { workspace = true }
 lodestone-entity.workspace = true
+# Per-entity-type base hitbox height (issue #100's nametag pass): the same
+# jar-derived census `lodestone-physics`/`lodestone-worldgen` consumers use,
+# not a guessed offset — see `crates/lodestone-shell/src/gpu/nametag.rs`.
+lodestone-data = { workspace = true }
 lodestone-render = { path = "../lodestone-render", features = ["window"] }
 lodestone-physics = { path = "../lodestone-physics" }
 # Vanilla particle simulation (block-break debris, hit fragments). The shell
