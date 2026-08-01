@@ -210,6 +210,57 @@ list rather than leaving them to be rediscovered:
 - ~~**The swim look-descent is not modelled.**~~ **Closed** (issue #59) — see
   below.
 
+### Lava movement (issue #214)
+
+`tick_lava` (`crates/lodestone-physics/src/player.rs`) is `travelInLava`
+(`LivingEntity.java:2539-2555`), and it is a *different* branch from water,
+not a retuned copy of it: flat `0.02F` input speed regardless of depth, and an
+extra `-baseGravity/4` term on top of whatever the depth branch below does.
+
+**The predicate.** `isInShallowFluid(LAVA)` = `getFluidHeight(LAVA) <=
+getFluidJumpThreshold()`. The threshold is `eyeHeight() < 0.4 ? 0.0 : 0.4`
+(`fluid_jump_threshold`, `Entity.java:3692-3694`) — `0.4` for every real
+player pose, since even the swimming pose's eye height is exactly `0.4` and
+`0.4 < 0.4` is false. This is the *same* predicate and the *same*
+`FluidState::lava_height` input `apply_fluid_jump` already used for the jump
+decision (`LivingEntity.aiStep`'s jump block); the movement branch below was
+the one piece of that pair still unported, closing issue #214.
+
+**Both arms**, `<= 0.4` (shallow) vs. `> 0.4` (deep):
+
+- shallow: `multiply(0.5, 0.8, 0.5)`, then
+  `getFluidFallingAdjustedMovement` — the same buoyant slow-descent water
+  always gets (normally `y - baseGravity/16`, clamped to `-0.003` near
+  terminal fall speed).
+- deep: a flat `scale(0.5)` on all three axes. **No** falling-adjustment at
+  all — this is not water with different numbers, it is a structurally
+  simpler arm.
+
+`fall_distance` participates in **neither** the predicate nor either arm.
+This was worth checking explicitly rather than assuming: reading
+`travelInFluid`/`travelInLava`/`getFluidFallingAdjustedMovement` directly
+shows `isFalling` there is `getDeltaMovement().y <= 0.0`, not a
+`fallDistance` comparison. So, unlike the accumulation work in
+[`edge-back-off.md`](./edge-back-off.md) (where `fall_distance` being
+permanently `0.0` *did* silently gate two other systems), this branch's
+absence was not fall-distance-shaped — it was simply never ported, on both
+sides of the predicate. The pre-existing `lava_sink` golden scenario only
+ever exercised the deep arm (a coarse `is_lava` presence cell reads as a full
+`1.0` height through `fluid_state::cell_height`'s fallback, which is always
+`> 0.4`); it stays golden byte-for-bit unchanged as the regression control
+that this port is additive. `lava_shallow` (new) uses a fine `fluid_at` cell
+with a low `amount` (`3` ⇒ height `0.333`) — coarse one-block-deep presence
+cannot reach the shallow arm at all, regardless of how many blocks "deep" it
+looks, because presence-only reads as a full cell. Both are replayed
+bit-for-bit against `gen_golden.py`, an independent Python oracle, in
+`tests/golden.rs`. `tests/lava_depth.rs` adds the primitive-level evidence a
+smooth trace can't show on its own: a pure control that runs identical
+input through `tick_lava` twice, varying only `lava_height`, and a check that
+the predicate's `<=` (not `<`) is inclusive at the exact threshold.
+
+Out of scope for this port, named rather than silently drifted into: fire
+damage, lava's rendering, and the fluid-flow simulation (issue #309).
+
 ### Look-descent and the camera jerk (issue #59)
 
 Two reported bugs, one real cause each — they turned out to be unrelated to

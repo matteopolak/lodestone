@@ -204,9 +204,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   shorter vanilla reach, the serverbound `Attack` packet that had a fully
   built encoder and zero callers, why server-sent knockback used to be
   silently absorbed into a component nothing reads, the `HurtTime` countdown
-  that closes two more decoded-but-unconsumed events, and why the
-  attack-strength ticker/crit/sweep feedback is deliberately left unbuilt
-  until something can consume it.
+  that closes two more decoded-but-unconsumed events, the attack-strength ticker
+  and the crosshair cooldown indicator (issue #121, built as one unit because
+  either half alone is an island), and why crit and sweep feedback specifically
+  stays unbuilt until particles and sounds can consume it.
 - [Autonomous navigation](./baritone-port.md) — the design for a Baritone-class
   pathfinding plugin: why movement costs are derived by simulating our own physics
   rather than by formula, how a 150 ms search reconciles with a one-threaded

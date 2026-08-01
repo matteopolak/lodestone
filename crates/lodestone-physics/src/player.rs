@@ -1609,20 +1609,33 @@ pub fn tick_water(
     jump_out_of_fluid(state, old_y, view, profile);
 }
 
-/// One tick of movement while submerged in **deep lava** (`travelInLava`).
+/// One tick of movement while submerged in lava (`travelInLava`,
+/// `LivingEntity.java:2539-2555`).
 ///
 /// Lava is a *different branch* from water, not a retuned one: input speed is a
-/// flat `0.02F`, the post-move velocity is scaled by `0.5` (deep) rather than by
-/// the water slow-down, and gravity is applied as an extra `-baseGravity/4`
-/// term.
+/// flat `0.02F`, and gravity is applied as an extra `-baseGravity/4` term
+/// regardless of depth. What differs by depth is the post-move velocity scale:
 ///
-/// The shallow-lava branch (`isInShallowFluid(LAVA)` ⇒ `multiply(0.5, 0.8, 0.5)` +
-/// `getFluidFallingAdjustedMovement`, `LivingEntity.java:2538-2547`) is still
-/// **not** modelled: only the deep `scale(0.5)` arm is. Note that the old reason
-/// given here — "the coarse `CollisionView` hook does not expose the fluid height"
-/// — no longer holds: [`FluidState::lava_height`] is now passed in and
-/// [`apply_fluid_jump`] already uses it for the jump decision. What remains is
-/// simply unported work, not a missing input.
+/// * **deep** (`!isInShallowFluid(LAVA)`) ⇒ a flat `scale(0.5)` on all three
+///   axes, with no buoyant falling-adjustment at all;
+/// * **shallow** (`isInShallowFluid(LAVA)`, i.e. `lava_height <=
+///   `[`fluid_jump_threshold`]) ⇒ `multiply(0.5, 0.8, 0.5)` (a *different* Y
+///   factor from deep's implicit `0.5`) followed by
+///   [`fluid_falling_adjusted_movement`] — the same buoyant slow-descent water
+///   always gets, which deep lava never does.
+///
+/// The predicate and both arms were ported from the jar directly (not from a
+/// summary): `isInShallowFluid` is `getFluidHeight(tag) <=
+/// getFluidJumpThreshold()`, already used by [`apply_fluid_jump`] for the jump
+/// decision, so this reuses the same [`FluidState::lava_height`] /
+/// [`fluid_jump_threshold`] inputs rather than adding a parallel predicate.
+///
+/// `fallDistance` does **not** participate in this predicate or either arm —
+/// `isFalling` here is `getDeltaMovement().y <= 0.0`, not a fall-distance
+/// comparison, despite the "fall-distance or depth comparison" pattern this
+/// file's sibling gravity code might suggest. Confirmed by reading
+/// `travelInFluid`/`travelInLava`/`getFluidFallingAdjustedMovement` directly:
+/// none of the three references `fallDistance`.
 pub fn tick_lava(
     state: &mut PlayerState,
     input: MovementInput,
@@ -1658,10 +1671,21 @@ pub fn tick_lava(
     // normally; only deep lava gets `jumpInLiquid`'s +0.04 (see `apply_fluid_jump`).
     apply_fluid_jump(state, input, fluid, view, profile);
 
-    let base_gravity = f64::from(profile.gravity);
+    // `isFalling`/`baseGravity` are read here, at the top of `travelInFluid`
+    // (`LivingEntity.java:2495-2497`), i.e. after the jump block above has
+    // already altered velocity but before moveRelative adds this tick's input
+    // acceleration. `getEffectiveGravity()` folds in the Slow Falling clamp
+    // exactly as `tick_water` computes it a few lines above; lava shares the
+    // same `travelInFluid` call site, so it must apply the same clamp.
+    let is_falling = state.velocity.y <= 0.0;
+    let base_gravity = effective_gravity(
+        f64::from(profile.gravity),
+        is_falling,
+        state.effects.slow_falling,
+    );
     let old_y = state.position.y;
 
-    // moveRelative(0.02) → move → scale(0.5) [deep] → -baseGravity/4.
+    // moveRelative(0.02) → move → shallow/deep branch → -baseGravity/4.
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak, input.sneak);
@@ -1669,7 +1693,20 @@ pub fn tick_lava(
     // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
     accumulate_fall_distance(state, state.position.y - old_y, false);
 
-    state.velocity = state.velocity.scale(0.5);
+    // `isInShallowFluid(LAVA)` (`LivingEntity.java:2542-2548`): shallow gets the
+    // same buoyant falling-adjustment water always gets, on top of a
+    // Y-asymmetric `multiply(0.5, 0.8, 0.5)`; deep gets a flat `scale(0.5)`
+    // with no adjustment at all. Reuses the same threshold/height inputs
+    // `apply_fluid_jump` already reads for the jump decision.
+    let threshold = fluid_jump_threshold(state.pose.eye_height());
+    let shallow_lava = fluid.lava_height <= threshold;
+    if shallow_lava {
+        let movement = state.velocity.multiply_each(0.5, f64::from(0.8f32), 0.5);
+        state.velocity =
+            fluid_falling_adjusted_movement(base_gravity, is_falling, state.sprinting, movement);
+    } else {
+        state.velocity = state.velocity.scale(0.5);
+    }
     if base_gravity != 0.0 {
         state.velocity = state
             .velocity
