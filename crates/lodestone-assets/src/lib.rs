@@ -72,6 +72,7 @@
 mod atlas;
 pub mod atlas_source;
 mod bake;
+pub mod block_entity_models;
 mod blockstate;
 pub mod entity;
 pub mod entity_models;
