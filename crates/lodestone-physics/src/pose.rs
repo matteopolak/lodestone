@@ -231,7 +231,13 @@ pub fn desired_pose(state: &PlayerState, input: MovementInput) -> Pose {
         Pose::Swimming
     } else if state.fall_flying {
         Pose::FallFlying
-    } else if input.sneak {
+    } else if input.sneak && !state.flying {
+        // `Player.getDesiredPose()` (`Player.java:369`):
+        // `isShiftKeyDown() && !this.abilities.flying ? CROUCHING : STANDING`.
+        // Holding shift while flying is the *descend* control, not a crouch, so the
+        // box must stay `1.8` tall — a `1.27` box would let a descending flier slip
+        // into gaps vanilla keeps them out of, and `update_player_pose`'s fit gate
+        // would then refuse to let them stand back up under a low ceiling.
         Pose::Crouching
     } else {
         Pose::Standing

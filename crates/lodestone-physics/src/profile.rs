@@ -103,8 +103,34 @@ pub struct PhysicsProfile {
     pub friction_modifier: f32,
     /// Ground-acceleration constant (`0.21600002F`).
     pub ground_accel: f32,
-    /// Flying (in-air, not sprinting attribute) input speed (`0.02F`).
+    /// The airborne input speed for a **non**-flying entity that is *not*
+    /// sprinting (`0.02F`) — `LivingEntity.getFlyingSpeed()`'s unridden value and
+    /// the `else` arm of `Player.getFlyingSpeed()`
+    /// (`Player.java:1974-1980`).
+    ///
+    /// **This is not the creative-flight speed**, despite the name, which is
+    /// vanilla's (`getFlyingSpeed` is the airborne substitute for `getSpeed()`
+    /// in `getFrictionInfluencedSpeed`, and predates creative flight sharing the
+    /// word). Creative flight's speed is `Abilities.flyingSpeed`, default
+    /// `0.05F`, and arrives per-player on [`crate::PlayerState::flying_speed`]
+    /// because the server can change it at runtime. Reusing this field for
+    /// flight would fly at 40% of vanilla's speed and look merely "a bit slow".
     pub flying_speed: f32,
+    /// The airborne input speed for a non-flying entity that **is** sprinting
+    /// (`0.025999999F`, `Player.java:1978`).
+    ///
+    /// Written out as the exact literal vanilla uses rather than `0.026`: the
+    /// two differ (`0.026F` is `0.026000000536441803`, this is
+    /// `0.025999999046325684`) and `input_vector` is linear in it, so the choice
+    /// is observable in the reported position on the first sprint-jump tick.
+    ///
+    /// This arm was **missing entirely** until creative flight was ported: the
+    /// airborne branch of [`crate::player::friction_influenced_speed_value`]
+    /// returned a flat [`Self::flying_speed`], so every sprint-jump accelerated
+    /// at `0.02` instead of `0.026` — 30% short. `tests/movement_speed.rs`'s
+    /// `sprinting_airborne_speed_is_the_0_026_literal_not_0_02` pins it, and
+    /// `golden.rs`'s `sprint_jump` trace moved when it was fixed.
+    pub airborne_sprint_speed: f32,
     /// Jump power (`JUMP_STRENGTH = 0.42F`, with unit block/boost factors).
     pub jump_power: f32,
     /// Sprint-jump horizontal boost magnitude (`0.2`).
@@ -149,6 +175,7 @@ impl PhysicsProfile {
             friction_modifier: 1.0,
             ground_accel: 0.216_000_02,
             flying_speed: 0.02,
+            airborne_sprint_speed: 0.025_999_999,
             jump_power: 0.42,
             sprint_jump_boost: 0.2,
             water_slow_down: 0.8,

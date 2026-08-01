@@ -205,9 +205,51 @@ pub struct Submersion(pub FluidState);
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct PrevPosition(pub Vec3d);
 
-/// Whether free-fly (noclip) is active instead of physics-walk.
+/// Whether the **developer free-fly (noclip) camera** is active instead of
+/// physics-walk.
+///
+/// # This is not creative flight, and the two are deliberately separate
+///
+/// | | `Flying` (this) | [`Abilities::flying`](crate::session::Abilities::flying) |
+/// |---|---|---|
+/// | authority | local, a debug key | the **server** (`player_abilities`) |
+/// | collision | **off** (noclip) | **on** — vanilla creative flight collides |
+/// | arithmetic | `position += dir * speed`, no velocity, no drag | vanilla `travelInAir` + the `0.6` Y overwrite |
+/// | runs physics | no — [`fly_step`] replaces the whole tick | yes, `lodestone_physics::tick` |
+/// | reaches the server | no | yes, echoed as `ClientAction::SetFlying` |
+///
+/// Creative flight is *not* implemented by flipping this bit, and doing so would
+/// be wrong in both directions: it would noclip where vanilla collides, and it
+/// would run non-vanilla arithmetic that the server's movement check would
+/// eventually correct. Conflating them is specifically what issue #191 was told
+/// not to do; keeping this as a distinct developer affordance is the deliberate
+/// choice, and `docs/creative-flight.md` records it.
+///
+/// The name is kept (rather than renamed to `NoClip`) only because
+/// `lodestone-shell`'s `sim.rs` and `interact.rs` both read it and that file is
+/// heavily contended; every doc comment on it now says which of the two it is.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Flying(pub bool);
+
+/// `LocalPlayer.jumpTriggerTime` (`LocalPlayer.java:833-842`) — the double-tap
+/// window for toggling creative flight.
+///
+/// The first jump *press* while `mayfly` sets this to `7`; a second press while it
+/// is still non-zero flips flight. It counts down one per tick
+/// (`LocalPlayer.tick`), so the window is seven ticks — a third of a second.
+///
+/// Vanilla's field is an `int` and the countdown is `if (this.jumpTriggerTime > 0)
+/// this.jumpTriggerTime--;`, so it saturates at `0` rather than going negative.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct JumpTriggerTime(pub i32);
+
+/// `LocalPlayer.wasJumping` — the jump key's state *last* tick, so the flight
+/// toggle can fire on the **rising edge** rather than every tick the key is held.
+///
+/// Without it, holding space would flip flight twenty times a second. Vanilla's
+/// gate is `!wasJumping && this.input.keyPresses.jump()`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WasJumping(pub bool);
 
 /// Selected hotbar slot in `0..9`.
 ///
@@ -243,6 +285,34 @@ pub struct LastPlayerInput(pub Option<PlayerInput>);
 /// a redundant `STOP_SPRINTING` on the first tick.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LastSprintingSent(pub Option<bool>);
+
+/// The last creative-flight state put on the wire as a
+/// [`ClientAction::SetFlying`](lodestone_model::ClientAction::SetFlying), mirroring
+/// vanilla's `Player.onUpdateAbilities()` →
+/// `ServerboundPlayerAbilitiesPacket`.
+///
+/// # Why the echo is not optional
+///
+/// The client toggles `abilities.flying` **locally** and tells the server
+/// afterwards. Vanilla sends this on every toggle edge
+/// (`LocalPlayer.aiStep` calls `onUpdateAbilities()` at both the engage and the
+/// landing-cancel sites). Without it the server still believes we are walking,
+/// its own `travel` replay disagrees with the position we claim, and
+/// `ServerGamePacketListenerImpl.handleMovePlayer` corrects us — or, once we have
+/// been unsupported in open air for `getMaximumFlyingTicks`, disconnects us with
+/// `multiplayer.disconnect.flying`. The kick message is not a coincidence: it is
+/// literally the anti-cheat for this.
+///
+/// `ClientAction::SetFlying` was itself an island before #191 — encoded by four
+/// protocol adapters (`v47`, `v340`, `v735`, `v770`) with **zero** producers
+/// anywhere outside their own tests. This component and
+/// `lodestone_shell::interact::send_abilities` are its first consumer.
+///
+/// Starts `Some(false)` for the same reason [`LastSprintingSent`] does: a player
+/// who joins and never flies sends nothing at all, rather than a redundant
+/// "not flying" on the first tick.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LastFlyingSent(pub Option<bool>);
 
 /// Present while the local player is dead and awaiting the server-confirmed
 /// respawn.
@@ -561,17 +631,34 @@ pub fn player_physics(
             &Flying,
             &SprintKeyHeld,
             Option<&Attributes>,
+            Option<&crate::session::Abilities>,
         ),
         With<LocalPlayer>,
     >,
 ) {
     let profile = &profile.0;
-    for (mut state, mut fluid, mut prev, intent, flying, sprint_key, attributes) in &mut players {
+    for (mut state, mut fluid, mut prev, intent, flying, sprint_key, attributes, abilities) in
+        &mut players
+    {
         prev.0 = state.0.position;
         let player = &mut state.0;
         let intent = intent.0;
 
+        // **The server-authoritative half of #191.** `Abilities` is folded from
+        // `ClientEvent::AbilitiesChanged` by `crate::session::apply_local_player_state`;
+        // this is the line that carries it into physics, and without it the whole
+        // chain — decode, switch arm, component, fold — reaches zero pixels.
+        //
+        // `Option` because `spawn_local_player` alone does not insert the session
+        // set (`lodestone-controller`'s tests and the offline fixture world call it
+        // bare). Absent folds to `Abilities::default()`, i.e. **not flying** — the
+        // safe direction, and the same reasoning `Attributes` below uses for its
+        // own `None`.
+        let abilities = abilities.copied().unwrap_or_default();
+        *player = player.with_flight(abilities.flying, abilities.flying_speed);
+
         if flying.0 {
+            // The *debug* free-fly camera, not creative flight — see [`Flying`].
             fly_step(player, intent, sprint_key.0, &mut fluid.0);
             continue;
         }
@@ -672,6 +759,144 @@ pub fn player_physics(
     }
 }
 
+/// `TickSet::Physics`, **before** [`player_physics`]: the client half of creative
+/// flight — `LocalPlayer.aiStep`'s double-tap toggle and vertical impulse
+/// (`LocalPlayer.java:824-878`).
+///
+/// # Order is load-bearing and matches vanilla exactly
+///
+/// Everything here happens *before* `super.aiStep()` in vanilla, and
+/// `super.aiStep()` is what contains the travel dispatch. So the toggle and the
+/// vertical impulse both land on the velocity that [`player_physics`] then
+/// integrates this same tick. The landing cancel is the mirror image — it is
+/// *after* `super.aiStep()` — and therefore lives in a separate system,
+/// [`cancel_flight_on_landing`].
+///
+/// # The toggle
+///
+/// ```text
+/// if (abilities.mayfly && !wasJumping && jump() && !wasAutoJump) {
+///    if (jumpTriggerTime == 0) jumpTriggerTime = 7;
+///    else if (!isSwimming()) { abilities.flying = !abilities.flying; jumpTriggerTime = 0; }
+/// }
+/// ```
+///
+/// **`may_fly` is the whole point.** It is the server's grant, and it is why this
+/// cannot be a local toggle: on a survival server `may_fly` is `false`, this
+/// system does nothing, and pressing space twice jumps twice.
+///
+/// # The vertical impulse uses the **raw** ability speed
+///
+/// `inputYa * abilities.getFlyingSpeed() * 3.0F` — *not* the sprint-doubled value
+/// `Player.getFlyingSpeed()` returns. Sprinting doubles horizontal flight and
+/// leaves the climb rate alone. Reusing
+/// [`lodestone_physics::player_flying_speed`] here would sprint-double it and
+/// climb twice as fast as vanilla.
+///
+/// # Divergences, deliberate
+///
+/// * **`isControlledCamera()`** is vacuously true — this engine has no camera
+///   possession.
+/// * **The one-shot hop on engaging flight while standing** (`if (abilities.flying
+///   && this.onGround()) this.jumpFromGround();`) is **not** modelled:
+///   `jump_from_ground` is private to `lodestone-physics` and needs a
+///   `CollisionView` for `getBlockJumpFactor`, which this system does not hold.
+///   The cost is a slightly less snappy takeoff from the ground (vanilla gets a
+///   one-tick `+0.42` Y); flight itself is unaffected because the impulse below
+///   fires on the same tick. Pinned by
+///   `takeoff_from_the_ground_does_not_model_vanillas_one_shot_hop`.
+/// * **Auto-jump** (`wasAutoJump`) does not exist here, so its `!` is vacuous.
+/// * **`!isSwimming()`** *is* modelled, because a sprint-swimmer double-tapping
+///   space would otherwise take off mid-stroke.
+pub fn apply_creative_flight_input(
+    mut players: Query<
+        (
+            &mut PhysicsState,
+            &mut crate::session::Abilities,
+            &mut JumpTriggerTime,
+            &mut WasJumping,
+            &MovementIntent,
+            Option<&Dead>,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for (mut state, mut abilities, mut trigger, mut was_jumping, intent, dead) in &mut players {
+        let jump = intent.0.jump;
+        // `LocalPlayer.tick`'s countdown, saturating at zero.
+        trigger.0 = trigger.0.saturating_sub(1).max(0);
+
+        // A dead player is on the death screen and drives no input; `wasJumping`
+        // still latches so the first press after respawn is a genuine rising edge
+        // rather than a level that was already held.
+        if dead.is_none() && abilities.may_fly && !was_jumping.0 && jump {
+            if trigger.0 == 0 {
+                trigger.0 = 7;
+            } else if !state.0.swimming {
+                abilities.flying = !abilities.flying;
+                trigger.0 = 0;
+            }
+        }
+        was_jumping.0 = jump;
+
+        if abilities.flying && dead.is_none() {
+            let mut input_ya = 0i32;
+            if intent.0.sneak {
+                input_ya -= 1;
+            }
+            if jump {
+                input_ya += 1;
+            }
+            if input_ya != 0 {
+                // The `f32` product widened to `f64` by `Vec3.add`, exactly as
+                // vanilla: `inputYa * abilities.getFlyingSpeed() * 3.0F` is a
+                // `float` expression before it reaches the `double` vector.
+                let impulse = input_ya as f32 * abilities.flying_speed * 3.0;
+                state.0.velocity.y += f64::from(impulse);
+            }
+        }
+    }
+}
+
+/// `TickSet::Physics`, **after** [`player_physics`]: landing cancels creative
+/// flight (`LocalPlayer.aiStep`'s tail, `LocalPlayer.java:911-914`).
+///
+/// ```text
+/// super.aiStep();
+/// if (this.onGround() && abilities.flying && !this.minecraft.gameMode.isSpectator()) {
+///    abilities.flying = false;
+///    this.onUpdateAbilities();
+/// }
+/// ```
+///
+/// A **separate system from [`apply_creative_flight_input`]** precisely because
+/// vanilla puts it on the other side of `super.aiStep()`: `onGround` is written by
+/// the move this tick, so reading it before the move would test *last* tick's
+/// landing and cancel flight one tick early — visible as flight cutting out just
+/// before you touch down.
+///
+/// The `!isSpectator()` conjunct is honoured through
+/// [`ServerGameMode`](crate::session::ServerGameMode): a spectator stays flying.
+/// That is the *only* part of spectator mode this crate models — see
+/// `docs/creative-flight.md`'s "Spectator is deferred".
+pub fn cancel_flight_on_landing(
+    mut players: Query<
+        (
+            &PhysicsState,
+            &mut crate::session::Abilities,
+            &crate::session::ServerGameMode,
+        ),
+        With<LocalPlayer>,
+    >,
+) {
+    for (state, mut abilities, game_mode) in &mut players {
+        let spectator = game_mode.0 == Some(lodestone_model::common::GameMode::Spectator);
+        if state.0.on_ground && abilities.flying && !spectator {
+            abilities.flying = false;
+        }
+    }
+}
+
 /// `TickSet::Animate`: advance every [`LocalPlayer`]'s [`AttackStrengthTicker`]
 /// one tick, mirroring `Player.tick()`'s unconditional `this
 /// .attackStrengthTicker++` (`Player.java:268`). Same rate and same
@@ -716,7 +941,15 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
             SelectedSlot(0),
             LastPlayerInput(None),
             LastSprintingSent(Some(false)),
+            LastFlyingSent(Some(false)),
             AttackStrengthTicker(0),
+            // Creative-flight client state. Both start cleared: `jumpTriggerTime`
+            // at `0` means the *next* jump press opens a fresh double-tap window
+            // rather than immediately completing one, and `wasJumping` at `false`
+            // makes a jump key already held at spawn read as a rising edge — which
+            // is vanilla's own initial state for both fields.
+            JumpTriggerTime(0),
+            WasJumping(false),
         ))
         .id()
 }
@@ -742,7 +975,14 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
         SelectedSlot(0),
         LastPlayerInput(None),
         LastSprintingSent(Some(false)),
+        LastFlyingSent(Some(false)),
         AttackStrengthTicker(0),
+        // A quit-to-title must not leave a half-open double-tap window behind.
+        // `Abilities` itself is reset by `insert_session_components`, which the
+        // driver calls alongside this — so a new session starts with no flight
+        // grant until the server sends one.
+        JumpTriggerTime(0),
+        WasJumping(false),
     ));
     entity.remove::<Dead>();
 }
@@ -798,7 +1038,22 @@ impl Plugin for LocalPlayerPlugin {
         );
         app.add_systems(Extract, clear_debug_lines.before(ExtractSet::Debug));
 
-        app.add_systems(GameTick, player_physics.in_set(TickSet::Physics));
+        // `.chain()` reproduces `LocalPlayer.aiStep`'s three-part ordering around
+        // `super.aiStep()`, and the order is observable rather than cosmetic:
+        // the toggle and the vertical impulse must land on the velocity this
+        // tick's travel integrates, while the landing cancel must read the
+        // `on_ground` that same travel just wrote. Registered as one chain so a
+        // plugin cannot reorder them independently.
+        app.add_systems(
+            GameTick,
+            (
+                apply_creative_flight_input,
+                player_physics,
+                cancel_flight_on_landing,
+            )
+                .chain()
+                .in_set(TickSet::Physics),
+        );
         // `TickSet::Animate` is already chained after `Physics`/`Predict` by
         // `CorePlugin` (see `plugin.rs`'s `GameTick` `configure_sets`), so no
         // extra ordering edge is needed here — same reasoning `crate::ingest`
@@ -848,6 +1103,222 @@ mod tests {
 
     fn run_tick(app: &mut App) {
         app.world_mut().run_schedule(GameTick);
+    }
+
+    /// An app with the session component set too, so `Abilities` exists — the
+    /// shell's real shape (`Sim::build` calls `spawn_local_player` then
+    /// `insert_session_components` on **one** entity).
+    fn app_with_flightworthy_player(collision: PlayerCollision) -> (App, Entity) {
+        let (mut app, entity) = app_with_player(collision);
+        crate::session::insert_session_components(app.world_mut(), entity);
+        (app, entity)
+    }
+
+    fn set_input(app: &mut App, entity: Entity, input: MovementInput) {
+        app.world_mut().get_mut::<MovementIntent>(entity).unwrap().0 = input;
+    }
+
+    fn grant_flight(app: &mut App, entity: Entity, may_fly: bool) {
+        let mut abilities = app
+            .world_mut()
+            .get_mut::<crate::session::Abilities>(entity)
+            .unwrap();
+        abilities.may_fly = may_fly;
+    }
+
+    fn flying(app: &App, entity: Entity) -> bool {
+        app.world()
+            .get::<crate::session::Abilities>(entity)
+            .unwrap()
+            .flying
+    }
+
+    fn feet_y(app: &App, entity: Entity) -> f64 {
+        app.world().get::<PhysicsState>(entity).unwrap().0.position.y
+    }
+
+    /// A rising edge on jump: the toggle is `!wasJumping && jump()`, so a held key
+    /// must be released and pressed again to count.
+    fn tap_jump(app: &mut App, entity: Entity) {
+        set_input(app, entity, MovementInput::NONE);
+        run_tick(app);
+        set_input(
+            app,
+            entity,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+        );
+        run_tick(app);
+    }
+
+    /// **#191's end-to-end gate.** Not "the system works" — *the whole chain from
+    /// the server's grant to the player leaving the ground*, driven through the real
+    /// `GameTick` schedule. A hermetic call to either flight system passes whether
+    /// or not it is registered, which is the island this repo has hit fourteen times.
+    #[test]
+    fn a_granted_double_tap_lifts_the_player_off_the_ground() {
+        let (mut app, entity) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        // Settle onto the floor first, so `on_ground` is genuinely true and the
+        // landing-cancel system has something to cancel.
+        set_input(&mut app, entity, MovementInput::NONE);
+        for _ in 0..40 {
+            run_tick(&mut app);
+        }
+        let resting = feet_y(&app, entity);
+        assert!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.on_ground,
+            "precondition: the player must be standing before takeoff is meaningful"
+        );
+
+        grant_flight(&mut app, entity, true);
+        tap_jump(&mut app, entity); // opens the 7-tick window
+        assert!(!flying(&app, entity), "one tap must not fly");
+        tap_jump(&mut app, entity); // completes it
+        assert!(
+            flying(&app, entity),
+            "a granted double-tap must engage flight"
+        );
+
+        // Hold jump: the +flyingSpeed*3 impulse must actually lift them.
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+        );
+        for _ in 0..10 {
+            run_tick(&mut app);
+        }
+        assert!(
+            feet_y(&app, entity) > resting + 0.5,
+            "flight must lift the player off the floor (resting {resting}, now {})",
+            feet_y(&app, entity)
+        );
+        assert!(flying(&app, entity), "still airborne, so still flying");
+    }
+
+    /// **The negative control, and it is the bug that actually shipped.** With no
+    /// server grant the identical input sequence must leave the player walking.
+    ///
+    /// The input here is genuinely negative — `may_fly` is `false` — because a
+    /// gate test whose fixture always grants flight is the *world* species of
+    /// vacuous test: green, and measuring nothing about the gate.
+    #[test]
+    fn an_ungranted_double_tap_does_not_fly_on_a_survival_server() {
+        let (mut app, entity) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        set_input(&mut app, entity, MovementInput::NONE);
+        for _ in 0..40 {
+            run_tick(&mut app);
+        }
+        let resting = feet_y(&app, entity);
+
+        // PRECONDITION asserted, not assumed: a fresh session has no grant.
+        assert!(
+            !app.world()
+                .get::<crate::session::Abilities>(entity)
+                .unwrap()
+                .may_fly,
+            "a fresh session must not believe it may fly"
+        );
+
+        tap_jump(&mut app, entity);
+        tap_jump(&mut app, entity);
+        assert!(
+            !flying(&app, entity),
+            "flight without a server grant is exactly the bug #191 closed"
+        );
+
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                jump: true,
+                ..MovementInput::NONE
+            },
+        );
+        for _ in 0..10 {
+            run_tick(&mut app);
+        }
+        // Jumping is allowed to move them, but they must come back down rather
+        // than climb away: bounded by well under the flier's gain above.
+        assert!(
+            feet_y(&app, entity) < resting + 0.5,
+            "an ungranted player must not climb (resting {resting}, now {})",
+            feet_y(&app, entity)
+        );
+    }
+
+    /// Landing releases flight, and it must read the `on_ground` written by *this*
+    /// tick's move — hence a system ordered after `player_physics`.
+    #[test]
+    fn landing_cancels_flight() {
+        let (mut app, entity) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        grant_flight(&mut app, entity, true);
+        {
+            let mut abilities = app
+                .world_mut()
+                .get_mut::<crate::session::Abilities>(entity)
+                .unwrap();
+            abilities.flying = true;
+        }
+        // Descend onto the floor while holding shift.
+        set_input(
+            &mut app,
+            entity,
+            MovementInput {
+                sneak: true,
+                ..MovementInput::NONE
+            },
+        );
+        for _ in 0..60 {
+            run_tick(&mut app);
+            if !flying(&app, entity) {
+                break;
+            }
+        }
+        assert!(
+            !flying(&app, entity),
+            "touching the ground must release flight"
+        );
+        assert!(
+            app.world().get::<PhysicsState>(entity).unwrap().0.on_ground,
+            "…and the reason must be that they landed"
+        );
+    }
+
+    /// The server's grant must reach physics, not just the component. This is the
+    /// line that makes the whole fold worth having.
+    #[test]
+    fn abilities_flying_reaches_physics_state() {
+        let (mut app, entity) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        run_tick(&mut app);
+        // NEGATIVE CONTROL: not flying by default.
+        assert!(!app.world().get::<PhysicsState>(entity).unwrap().0.flying);
+
+        {
+            let mut abilities = app
+                .world_mut()
+                .get_mut::<crate::session::Abilities>(entity)
+                .unwrap();
+            abilities.may_fly = true;
+            abilities.flying = true;
+            abilities.flying_speed = 0.0625;
+        }
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(state.flying, "PlayerState::flying must track the abilities bit");
+        assert_eq!(
+            state.flying_speed, 0.0625,
+            "a server-set flying speed must reach physics, not the 0.05 default"
+        );
     }
 
     /// The physics system must actually be reachable *through the schedule* —

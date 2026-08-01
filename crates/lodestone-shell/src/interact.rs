@@ -90,10 +90,10 @@ use lodestone_ecs::ecs::resource::Resource;
 use lodestone_ecs::ecs::schedule::IntoScheduleConfigs;
 use lodestone_client::{BlockPos, ClientAction, ClientHandle};
 use lodestone_ecs::player::{
-    ActionQueue, Dead, Egress, Flying, LastSprintingSent, LocalPlayer, PhysicsState, SelectedSlot,
-    Submersion,
+    ActionQueue, Dead, Egress, Flying, LastFlyingSent, LastSprintingSent, LocalPlayer, PhysicsState,
+    SelectedSlot, Submersion,
 };
-use lodestone_ecs::session::{ServerEntityId, SessionMenus};
+use lodestone_ecs::session::{Abilities, ServerEntityId, SessionMenus};
 use lodestone_ecs::{GameTick, TickSet, VersionData};
 use lodestone_game::mining::Mining;
 use lodestone_game::placement::Placement;
@@ -277,6 +277,50 @@ pub fn send_sprint_command(
             } else {
                 PlayerCommand::StopSprinting
             },
+        });
+    }
+}
+
+/// `TickSet::Send`: echo creative flight to the server as
+/// [`ClientAction::SetFlying`], mirroring `Player.onUpdateAbilities()` →
+/// `ServerboundPlayerAbilitiesPacket`.
+///
+/// # Why this exists, and what it closes
+///
+/// The flight toggle is **client-authoritative in vanilla**: the client flips
+/// `abilities.flying` locally (`LocalPlayer.aiStep`) and tells the server after
+/// the fact. Without this echo the server keeps simulating a walking player,
+/// its `handleMovePlayer` replay diverges from the position we report, and it
+/// either teleports us back or eventually disconnects us with
+/// `multiplayer.disconnect.flying`.
+///
+/// `ClientAction::SetFlying` was an **island** before this: four protocol
+/// adapters encode it, nothing produced it. This is its first producer.
+///
+/// # Edge-triggered, and the latch is gated on `Egress`
+///
+/// Exactly the shape [`send_sprint_command`] uses, for exactly its reasons — a
+/// system that ran while disconnected would latch the current value as
+/// "already sent" and swallow the first real change after connecting.
+///
+/// Unlike the sprint command this packet carries **no entity id**, so it does not
+/// need [`ServerEntityId`] to be populated; `Egress::in_world` is the whole
+/// precondition.
+pub fn send_abilities(
+    egress: Res<Egress>,
+    mut queue: ResMut<ActionQueue>,
+    mut players: Query<(&Abilities, &mut LastFlyingSent), With<LocalPlayer>>,
+) {
+    if !(egress.in_world && egress.live) {
+        return;
+    }
+    for (abilities, mut last) in &mut players {
+        if last.0 == Some(abilities.flying) {
+            continue;
+        }
+        last.0 = Some(abilities.flying);
+        queue.0.push(ClientAction::SetFlying {
+            flying: abilities.flying,
         });
     }
 }
@@ -509,7 +553,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<VersionData>();
         app.add_systems(
             GameTick,
-            (send_sprint_command, drive_mining)
+            (send_abilities, send_sprint_command, drive_mining)
                 .chain()
                 .after(lodestone_controller::ecs::send_player_input)
                 .in_set(TickSet::Send),
