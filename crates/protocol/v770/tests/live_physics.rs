@@ -102,15 +102,6 @@ impl lodestone_world::WorldSink for NullSink {
         _nbt: lodestone_core::Nbt,
     ) {
     }
-    fn sync_block_entity(
-        &mut self,
-        _x: i32,
-        _y: i32,
-        _z: i32,
-        _block_entity_type: Option<u32>,
-    ) -> lodestone_world::BlockEntitySync {
-        lodestone_world::BlockEntitySync::ChunkAbsent
-    }
     fn merge_light(
         &mut self,
         _pos: lodestone_world::ChunkPos,

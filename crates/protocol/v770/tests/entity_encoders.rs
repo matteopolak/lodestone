@@ -43,15 +43,6 @@ impl WorldSink for NullSink {
     fn merge_light(&mut self, _pos: ChunkPos, _patch: LightPatch) {}
     fn unload(&mut self, _pos: ChunkPos) {}
     fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _type_id: u32, _nbt: Nbt) {}
-    fn sync_block_entity(
-        &mut self,
-        _x: i32,
-        _y: i32,
-        _z: i32,
-        _block_entity_type: Option<u32>,
-    ) -> lodestone_world::BlockEntitySync {
-        lodestone_world::BlockEntitySync::ChunkAbsent
-    }
 }
 
 /// Decodes one clientbound packet through the real adapter, returning its

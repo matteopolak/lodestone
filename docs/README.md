@@ -18,8 +18,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   does, and the shell interface it is waiting on.
 - [Block outline and interaction shapes](./block-outline-shapes.md) — the third
   shape census (selection/pick, distinct from collision): why cobweb outlines to a
-  full cube while colliding with nothing, `is_pickable` reading it for real now,
-  and the selection-box render hook that exists but nothing installs yet.
+  full cube while colliding with nothing, and its three consumers — pickability,
+  the drawn selection box, and the pick ray, which kept treating every block as a
+  unit cube for a whole release *after* the drawn box was fixed (#375).
 - [Item prototype components](./item-prototypes.md) — `max_stack_size`,
   `max_damage` and `equippable`, the three item facts a clientbound stack never
   carries because vanilla keeps them in the item's prototype rather than the wire
@@ -93,12 +94,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   no terrain metric could see. Covers the placement matrix (block space, **not**
   the entity path's Y-flip and 1.501 lift), the three separate lid transforms,
   why sheets are keyed by stem rather than model, and the note that the GUI
-  item-icon path (#369) is a **second consumer** of the same geometry. Now also
-  the **four** creation routes, not the two the chain diagram used to imply
-  (issue #374): in vanilla *writing a block state is what creates the block
-  entity*, no packet involved, so a freshly placed chest was invisible while
-  still opening — and why the removal half of `World::sync_block_entity` matters
-  as much as the creation half.
+  item-icon path (#369) is a **second consumer** of the same geometry.
 - [Entity rendering](./entity-rendering.md) — how an entity type resolves to a
   mesh, a texture and a `setupAnim`, and the two places that resolution has
   silently picked the wrong mob. Also the sheep wool render layer (issue #53,
