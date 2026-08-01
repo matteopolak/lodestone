@@ -201,3 +201,42 @@ replacing that per-call hash-map-lookup memoisation with vanilla's real
 incremental (array-indexed, no hashing) `NoiseChunk` update pattern, which
 is a materially larger rewrite of code that `chunk_parity.rs` already proves
 bit-exact — left as a follow-up, not attempted here.
+
+## 3. `NoiseChunkSampler`'s hash map, replaced by a dense grid (`ada197f`)
+
+The follow-up above **was** taken, but not by the route it describes. Vanilla's
+stateful cell-ordered walk would have forced `NoiseChunkSampler`'s public API
+*and* `shape_stage`'s iteration order (Z/X/Y → cell-major) to change together —
+an order-dependent rewrite where `chunk_parity.rs` is the only thing that would
+catch a slip.
+
+`DenseSlot`/`DenseShape` get the array-indexing win **without** that: the
+point-query API is unchanged and there is no iteration-order change at all. The
+insight is that both key families are regular, so one grid addresses both
+exactly — `interpolated` corners land on multiples of `cell_width`/`cell_height`,
+`flat_cache` keys on multiples of 4 (hardcoded in vanilla, *not*
+`cell_width`-parameterised), so stepping X/Z by `gcd(cell_width, 4)` divides both.
+Every real key lands on an exact grid point rather than being rounded onto one.
+
+### The measurement, and why the obvious number is the wrong one
+
+**−13.2%: 12 639.6 µs → 10 972.7 µs** (`column_median_us`, seed 42, 5×5 patch,
+release, this machine).
+
+That compares two **quiet** readings: `d0cd8d6` before the change against
+`4d34681` after. It is *not* a paired same-run A/B, which would require reverting
+the change — stated plainly rather than implied, because the distinction matters
+for how much weight the figure carries.
+
+**Do not quote criterion's own `change:` line for this commit.** It reported up to
+**−32%**, and that is an artifact: its saved baseline came from a run taken while
+six agents were building concurrently. The same commit's recorded history shows
+that load directly — `fe7238d` produced 13 471, 13 537, 13 753, 14 751 and
+14 827 µs on five consecutive runs, a spread of over 10% on *identical* code.
+Comparing a quiet run against a loaded baseline manufactures a win.
+
+This run itself was at load 2.2–2.95, not zero. Better than the 53 the first pass
+saw, but the honest reading is "−13.2% with a couple of points of noise", not a
+precise figure.
+
+Cumulative across all three passes on this pipeline: **~24–25 ms → ~11.0 ms.**
