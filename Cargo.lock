@@ -2646,6 +2646,7 @@ dependencies = [
  "lodestone-auth",
  "lodestone-client",
  "lodestone-controller",
+ "lodestone-data",
  "lodestone-ecs",
  "lodestone-entity",
  "lodestone-game",
