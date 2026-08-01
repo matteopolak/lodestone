@@ -98,7 +98,9 @@ pub use lighting::{
 };
 pub use packed::PackedArray;
 pub use section::ChunkSection;
-pub use world::{ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink};
+pub use world::{
+    BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
+};
 
 /// Errors produced when decoding world structures from untrusted wire data.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
