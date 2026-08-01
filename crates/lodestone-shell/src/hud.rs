@@ -36,7 +36,7 @@ use lodestone_render::{
 
 use lodestone_assets::ItemAtlas;
 
-use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink};
+use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 
 use crate::overlay::{BossBarView, Sidebar};
 
@@ -375,6 +375,16 @@ pub struct HudGeometry {
     /// paying a per-slot uniform + draw call. Empty unless a [`BlockModels`] was
     /// supplied and at least one slot holds an item with 3-D geometry.
     pub model_verts: Vec<ModelVertex>,
+    /// The **special-renderer** icons (chests and the rest of the ex-
+    /// `builtin/entity` family): not vertices, but which baked block-entity mesh
+    /// and sheet to draw and the GUI-space placement to draw it under. The meshes
+    /// are resident from attach time, so a slot costs a handful of matrices.
+    ///
+    /// `pub(crate)` rather than `pub` because [`SpecialIconDraw`] is: this is an
+    /// internal hand-off to [`IconRenderer::upload`], not part of the geometry a
+    /// caller inspects, and nothing outside the crate constructs a
+    /// [`HudGeometry`].
+    pub(crate) special: Vec<SpecialIconDraw>,
 }
 
 impl HudGeometry {
@@ -857,6 +867,7 @@ impl HudGeometry {
             sprite_verts: b.sprite_verts,
             item_verts: b.item_verts,
             model_verts: b.model_verts,
+            special: b.special,
         }
     }
 }
@@ -1109,6 +1120,8 @@ struct Builder<'a> {
     sprite_verts: Vec<f32>,
     item_verts: Vec<f32>,
     model_verts: Vec<ModelVertex>,
+    /// Special-renderer (block-entity) icons; see [`HudGeometry::special`].
+    special: Vec<SpecialIconDraw>,
     gui: Option<&'a GuiAtlas>,
     items: Option<&'a ItemAtlas>,
     /// The baked model set, for items whose inventory icon is a 3-D mini-block
@@ -1138,6 +1151,7 @@ impl<'a> Builder<'a> {
             sprite_verts: Vec::new(),
             item_verts: Vec::new(),
             model_verts: Vec::new(),
+            special: Vec::new(),
             gui,
             items,
             models,
@@ -1182,6 +1196,7 @@ impl<'a> Builder<'a> {
             },
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
+            special: &mut self.special,
         };
         item_icon::draw_item_icon(&mut sink, &assets, (w, h), slot, x, y, size, self.font);
     }
@@ -1631,6 +1646,20 @@ impl HudRenderer {
         );
     }
 
+    /// How many block-entity sheets the **special-renderer** icon pass has
+    /// loaded — `0` until the first frame containing a chest (the pass is built
+    /// lazily) and `0` forever on a jar-less run.
+    ///
+    /// Exists for the pixel gate, and it is not ornamental: a coverage-only
+    /// assertion cannot tell "no chest in any slot" from "no pack, so a chest
+    /// could never draw", and those two fail in opposite directions. The same
+    /// distinction `RenderStats::block_entity_sheets_loaded` draws for the world
+    /// pass.
+    #[must_use]
+    pub fn special_icon_sheets(&self) -> usize {
+        self.icons.special_sheet_count()
+    }
+
     /// Draw the HUD over the current frame contents (a `Load` pass, no depth).
     ///
     /// Convenience wrapper over [`render_with_item_models`](Self::render_with_item_models)
@@ -1720,10 +1749,15 @@ impl HudRenderer {
             models.filter(|_| want_models),
             font.as_deref(),
         );
+        // `geo.special` counts too. A hotbar holding nothing but a chest, with the
+        // procedural frame suppressed, produces zero vertices in all four other
+        // streams — bailing here would make the whole chest-icon chain
+        // unreachable in exactly the configuration the pixel gate renders.
         if geo.verts.is_empty()
             && geo.sprite_verts.is_empty()
             && geo.item_verts.is_empty()
             && geo.model_verts.is_empty()
+            && geo.special.is_empty()
         {
             return;
         }
@@ -1776,6 +1810,7 @@ impl HudRenderer {
             queue,
             &geo.item_verts,
             &geo.model_verts,
+            &geo.special,
             logical_w.max(1.0) as u32,
             logical_h.max(1.0) as u32,
             "hud-item-verts",
