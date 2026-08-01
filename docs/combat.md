@@ -1,9 +1,11 @@
-# Combat: swinging, attacking entities, and knockback
+# Combat: swinging, attacking entities, knockback, and the attack-cooldown indicator
 
 ## What it is
 
-Issues #72 (left-click only swung when a dig started) and #12 (attacking
-entities, taking knockback). Covers three things:
+Issues #72 (left-click only swung when a dig started), #12 (attacking
+entities, taking knockback), and #121 (the crosshair cooldown reticle).
+Covers three things from the original change, plus the ticker/indicator pair
+added afterward:
 
 1. **The arm now swings on every left-click**, not only the ones that start a
    dig — including a miss (empty air) and attacking an entity.
@@ -143,24 +145,119 @@ vanilla's per-tick decrement. `EntityHurtAnimation`'s `yaw` field is not
 carried into the component — vanilla's own override accepts the parameter and
 never stores it either.
 
+### The attack-strength ticker and the crosshair indicator (issue #121)
+
+Built as one unit deliberately: the ticker (state) and the crosshair reticle
+(the thing that displays it) were left unbuilt together in the original
+combat change specifically so they would not become two separate unconsumed
+islands — see the git history around `24943a3` and the previous revision of
+this doc's "deliberately not built" section.
+
+**The ticker** is `AttackStrengthTicker(pub u32)`
+(`crates/lodestone-ecs/src/player.rs`), a component on the `LocalPlayer`
+entity mirroring vanilla's `attackStrengthTicker` field
+(`Player.java:210`/`268`). `tick_attack_strength`, registered in
+`LocalPlayerPlugin::build` under `TickSet::Animate` (already chained after
+`Physics`/`Predict` by `CorePlugin`, so no new ordering edge was needed),
+increments it by exactly `1` every `GameTick` — vanilla's unconditional
+`this.attackStrengthTicker++` in `Player.tick()`. `spawn_local_player`/
+`reset_local_player` start it at `0`, matching Java's bare-`int` default.
+`Sim::attack_entity` (`crates/lodestone-shell/src/sim.rs`) resets it to `0`
+synchronously on every entity attack — vanilla's
+`MultiPlayerGameMode.attack` calling `player.resetAttackStrengthTicker()`
+right after the client-side `player.attack(entity)`
+(`MultiPlayerGameMode.java:425-430`). Unconditional, because this shell has
+no client-side `cannotAttack` gate (damage is fully server-authoritative, see
+above): every left-click on an entity restarts the cooldown, matching what
+the real client does before any server response is known.
+
+**The delay is not a constant.** `Sim::attack_strength_delay` implements
+vanilla's `getCurrentItemAttackStrengthDelay`, `(1.0 /
+getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0` (`Player.java:1816-1818`).
+It reads `minecraft:attack_speed` off the local player's own `Attributes`
+component (`crates/lodestone-ecs/src/entity.rs`) through
+`lodestone_entity::attribute::attribute_value` — the same server-fed,
+three-stage-`calculateValue` fold `player_physics` already uses for
+`WATER_MOVEMENT_EFFICIENCY` (Depth Strider). This was checked rather than
+assumed, per two things worth re-verifying named in this task's brief:
+
+- `lodestone-entity`'s attribute census (`crates/lodestone-entity/src/
+  attribute.rs::default_def`) already carries `"attack_speed" => d(4.0, 0.0,
+  1024.0)` — the correct vanilla default and clamp range — so no new default
+  table was needed.
+- `lodestone-data`'s `item_prototypes` census (`crates/lodestone-data/src/
+  item_prototypes.rs`) does **not** carry attack speed at all — it covers
+  only `max_stack_size`/`max_damage`/`equip_slot`. That is not a gap here,
+  though: a weapon's `-2.4` (sword)/`-3.0` (axe) attack-speed modifier
+  arrives the same way any other equipment-driven attribute change does — a
+  server `update_attributes` packet the instant the held item changes
+  (`AttributeMap`'s dirty-tracking on `LivingEntity.setItemSlot`), already
+  folded into `Attributes` by `apply_entity_attributes`
+  (`crates/lodestone-ecs/src/ingest.rs`). Nothing per-item needed adding.
+
+Before the first `update_attributes` for the local player (a fresh demo-world
+player, or a live session before login's fold lands), `attribute_value` falls
+back to the registry default `4.0` (unarmed), giving the correct 5-tick delay
+rather than a guess. `Sim::attack_strength_scale` combines ticker and delay
+into vanilla's `getAttackStrengthScale(0.0F)` — the exact call
+`Hud.extractCrosshair` makes for the crosshair-style indicator
+(`Hud.java:448`) — clamped to `0.0..=1.0`.
+
+**The indicator** is `HudFrame::attack_cooldown: Option<f32>`
+(`crates/lodestone-shell/src/hud.rs`), populated unconditionally in `app.rs`
+(`Some(self.sim.attack_strength_scale())` — unlike `health`/`food`/`xp`, both
+the ticker and the attribute default exist before any server connection, so
+this is never `None` on a real run) and drawn inside `HudGeometry::
+build_inner`'s existing crosshair block, nested under `if frame.crosshair`
+right alongside the white-plus reticle. That nesting is deliberate: it reuses
+the same visibility gate the crosshair itself already has (issue #51's
+container-screen suppression), rather than inventing a second one.
+
+The two sprites (`hud/crosshair_attack_indicator_background`,
+`hud/crosshair_attack_indicator_progress`, both 16x4 native) were already
+present in the GUI atlas — `GuiAtlas` globs `gui/sprites/**`, and the
+air-bubble/hotbar work had already established that pattern holds — so no
+asset plumbing was needed, only the draw call. `Builder::sprite`/
+`gui_geometry` are no-op-safe with no atlas attached (see `sprite_vitals`'s
+own doc), so a jar-less/headless run draws nothing here instead of needing a
+second procedural implementation — the same choice already made for the
+underwater bubble row. The progress bar is cropped by shrinking both the
+destination width and the sampled UV span to the cooldown fraction, the exact
+idiom `sprite_vitals` already uses for the XP-bar progress fill.
+
+**Scope cuts, both deliberate:**
+
+- **Only `AttackIndicatorStatus::CROSSHAIR`.** Vanilla's real enum
+  (`AttackIndicatorStatus.java`) has three variants — `OFF`, `CROSSHAIR`,
+  `HOTBAR` — and issue #121 explicitly scoped this shell to ship the default
+  (crosshair) only, noting the options-menu toggle as future work (#32/#55
+  own that menu). There is no `Options::attack_indicator` read anywhere; the
+  indicator always draws whenever the crosshair does.
+- **No full-charge "ready" icon.** Vanilla replaces the fill bar with a
+  distinct `CROSSHAIR_ATTACK_INDICATOR_FULL_SPRITE` circle when the scale
+  reaches `1.0` *and* the crosshair is over a living, in-range target *and*
+  the held weapon's delay exceeds 5 ticks (`Hud.java:450-465`) — a slow-weapon
+  "you're ready" nicety. That needs the crosshair's entity target plus its
+  liveness/range, none of which `HudFrame` carries today. At full charge this
+  shell simply draws nothing (matching vanilla's non-"ready" default case),
+  which is also the correct control for the pixel gate below: the indicator
+  must produce **zero** pixels at `attack_cooldown = Some(1.0)`, not the full
+  circle.
+
 ## What is deliberately not built here
 
-**Vanilla's `attackStrengthTicker`/`getAttackStrengthScale` cooldown, the crit
-condition, and the sweep-attack condition.** These are real per-hit vanilla
-mechanics (see `Player.java:951-1053` for `attack()`/the crit and sweep
-conditions, and `:1816-1837` for the ticker/cooldown itself, in
-`.cache/mc/26.2/src`), but every one of them exists only to scale **local** sound/
-particle feedback and the crosshair cooldown indicator — the damage number
-itself is server-authoritative, and the wire packet carries none of it. None of
-their consumers exist in this shell yet: the crosshair indicator is `hud.rs`'s
-(held by a different agent at the time of this change), and sweep/crit
-sound-and-particle feedback is `entities.rs`/asset work, also out of
-`lodestone-shell/src/{sim.rs,interact.rs,net.rs}`'s scope. Building a ticker
-with nothing to read it would be exactly the unconsumed-island class this
-repo's `CLAUDE.md` warns about, so it stays unbuilt rather than built and
-orphaned. Whoever adds the crosshair pip or the sweep sound is the natural
-owner — it plugs in as a new read of `Sim::attack_entity`'s call site, or a new
-field alongside it.
+**Vanilla's crit condition and the sweep-attack condition.** These are real
+per-hit vanilla mechanics (`Player.java:951-1053`'s `attack()`), but both
+exist only to trigger **local** sound/particle feedback — the damage number
+itself is server-authoritative, and the wire `Attack` packet carries none of
+it. Their consumer is `entities.rs`/asset work (particles, sounds), out of
+`lodestone-shell/src/{sim.rs,interact.rs,hud.rs}`'s scope for this pass, and
+they need real particle-emitter and sound-cue plumbing this shell does not
+have wired to combat yet. Building either now — with the ticker/indicator
+already landed as the natural place a crit read would plug into
+(`Sim::attack_entity`'s call site) — would still orphan the sound/particle
+half, so they stay unbuilt rather than half-started. Whoever adds the sweep
+sound or the crit particle burst is the natural owner.
 
 **`HurtTime` has no render-side consumer yet.** `entities.rs` does not read it
 — nobody asked it to. The patch spec for that hookup: read `HurtTime` (and
@@ -178,6 +275,15 @@ camera state that does not exist yet.
   modifier tracked.
 - `crates/lodestone-ecs/src/ingest.rs::HURT_DURATION_TICKS` — `10`, vanilla's
   `hurtDuration` constant.
+- The attack-strength delay has no standalone constant: it is
+  `20.0 / attack_speed_attribute`, computed fresh in
+  `Sim::attack_strength_delay` every call. The only literal is the registry
+  default `4.0` (unarmed attack speed), which lives in
+  `lodestone-entity/src/attribute.rs::default_def` — not duplicated in
+  `lodestone-shell`.
+- `crates/lodestone-shell/src/hud.rs`'s crosshair block hardcodes the
+  indicator's native size (`16x4`) and offset (`cx - 8, cy + 9`) — vanilla's
+  own constants (`Hud.java:457-458`), not configurable.
 
 ## Dependencies
 
@@ -188,17 +294,43 @@ camera state that does not exist yet.
 - `VersionData::entity_facts` (`lodestone-model`/`lodestone-v770`'s entity
   census) — entity hitbox dimensions for the attack ray, the same seam
   `tick_nearby_entities` already depends on for the push crowd pass.
-- `lodestone_ecs::entity::{MinecraftEntityId, Position, EntityKind, HurtTime}`
-  and `lodestone_ecs::player::PhysicsState` — the ECS components this change
-  reads and writes.
+- `lodestone_ecs::entity::{MinecraftEntityId, Position, EntityKind, HurtTime,
+  Attributes}`, `lodestone_ecs::player::{PhysicsState, AttackStrengthTicker}`
+  — the ECS components this change reads and writes.
+- `lodestone_entity::attribute::attribute_value` and
+  `crates/lodestone-entity/src/attribute.rs::default_def`'s `"attack_speed"`
+  entry — the attribute fold and its registry default, both pre-existing and
+  reused rather than duplicated.
+- The GUI atlas's `hud/crosshair_attack_indicator_background`/
+  `hud/crosshair_attack_indicator_progress` sprites (already stitched from
+  `client.jar` — no new asset plumbing).
 
 ## How to change it
 
-- Adding the crosshair attack-strength indicator or crit/sweep feedback:
-  start from `Sim::attack_entity` (`sim.rs`) — that is where the outbound send
-  already happens, and where a ticker/cooldown component would need to be
-  read to decide `criticalAttack`/`fullStrengthAttack`. See "What is
-  deliberately not built here" above before adding one with no consumer.
+- Adding crit/sweep sound-and-particle feedback: start from
+  `Sim::attack_entity` (`sim.rs`) — that is where the outbound send already
+  happens and where `AttackStrengthTicker`/`attack_strength_scale` are
+  already read, so a `criticalAttack`/`fullStrengthAttack`/`sweepAttack`
+  decision has everything it needs except the particle-emitter/sound-cue
+  plumbing. See "What is deliberately not built here" above.
+- Adding the hotbar-style attack indicator or the `AttackIndicatorStatus`
+  options toggle: `HudFrame::attack_cooldown` already carries the fraction;
+  the missing half is an `Options`-driven read gating which of
+  `hud.rs`'s crosshair-block draw (already built) vs. a new hotbar-adjacent
+  draw (not built) runs, mirroring vanilla's `extractItemHotbar`
+  (`Hud.java:606-621`).
+- Adding the full-charge "ready" icon: needs the crosshair's live entity
+  target's liveness/range plus the held weapon's delay compared against `5`
+  ticks (`Hud.java:450-455`) threaded into `HudFrame`, then a third sprite
+  branch (`hud/crosshair_attack_indicator_full`, already in the atlas)
+  alongside the existing background/progress branch in `hud.rs`.
+- Changing the delay's item-attribute-modifier source: it is **not** a
+  per-item census read (`lodestone-data`'s `item_prototypes` deliberately has
+  none) — it is whatever the server's `update_attributes` packets put in the
+  local player's `Attributes` component. A demo-world (offline) weapon swap
+  will *not* change the delay, because nothing generates that packet without
+  a server; that is a real, current gap for offline testing, not a bug in the
+  live path.
 - Adding the render-side hurt tint: `HurtTime` already exists and already
   counts down correctly; the missing half is entirely in `entities.rs`.
 - Changing entity reach/attribute modifiers: `ENTITY_REACH` is a `const`

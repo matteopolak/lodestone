@@ -311,6 +311,16 @@ pub struct HudFrame<'a> {
     /// `0 0`, the same convention [`Self::hotbar_items`] uses for "not yet
     /// known" versus "known empty".
     pub recipe_stats: Option<(usize, usize)>,
+    /// The attack-cooldown fraction (`0.0..=1.0`, full strength at `1.0`) the
+    /// crosshair indicator fills to — `Sim::attack_strength_scale`'s value,
+    /// vanilla's `getAttackStrengthScale(0.0F)`. Drawn only while
+    /// [`Self::crosshair`] is also set (see that field), and only once the
+    /// atlas resolves the two indicator sprites — see the crosshair draw site
+    /// in [`HudGeometry::build_inner`] for exactly which vanilla condition is
+    /// and is not modelled (no hotbar-style variant, no full-charge "ready"
+    /// icon; `docs/combat.md` names the cut). `None` draws nothing, the
+    /// pre-#121 behaviour.
+    pub attack_cooldown: Option<f32>,
 }
 
 impl<'a> HudFrame<'a> {
@@ -336,6 +346,7 @@ impl<'a> HudFrame<'a> {
             title: None,
             action_bar: None,
             recipe_stats: None,
+            attack_cooldown: None,
         }
     }
 }
@@ -554,6 +565,64 @@ impl HudGeometry {
             let col = [1.0, 1.0, 1.0, 0.85];
             b.rect_px(cx - arm, cy - thick * 0.5, arm * 2.0, thick, col);
             b.rect_px(cx - thick * 0.5, cy - arm, thick, arm * 2.0, col);
+
+            // Attack-strength (cooldown) indicator: a small fill bar just below
+            // the crosshair — vanilla's `Hud.extractCrosshair`'s
+            // `CROSSHAIR_ATTACK_INDICATOR_{BACKGROUND,PROGRESS}_SPRITE` branch
+            // (`Hud.java:447-465`, `.cache/mc/26.2/client-src`), gated there on
+            // `AttackIndicatorStatus::CROSSHAIR` (issue #121 scopes this shell
+            // to that variant only — no options-menu toggle exists yet, and no
+            // hotbar-style variant). Native 16x4, anchored at vanilla's own
+            // `(guiWidth/2 - 8, guiHeight/2 - 7 + 16)` — here `(cx - 8, cy + 9)`
+            // against this canvas's own centre, which this block already
+            // computed for the plus above.
+            //
+            // `b.sprite`/`b.gui_geometry` are no-op-safe with no atlas attached
+            // (see `sprite_vitals`'s doc on the same pattern), so a
+            // jar-less/headless run draws nothing here rather than needing a
+            // second procedural implementation — the same choice already made
+            // for the underwater bubble row (`bubble_row`, below).
+            //
+            // Vanilla hides this entirely once `attackStrengthScale >= 1.0`
+            // *unless* a slow weapon (delay > 5 ticks) is aimed at a living,
+            // in-range target, in which case a distinct "ready" icon
+            // (`CROSSHAIR_ATTACK_INDICATOR_FULL_SPRITE`) replaces it
+            // (`Hud.java:450-465`). That icon needs the crosshair's target
+            // entity plus its liveness/range/weapon-delay, none of which
+            // `HudFrame` carries — deliberately out of scope per
+            // `docs/combat.md`'s crits/sweep cut for the same issue. At full
+            // charge this draws nothing, matching vanilla's non-"ready" case.
+            if let Some(raw_scale) = frame.attack_cooldown {
+                let scale = raw_scale.clamp(0.0, 1.0);
+                if scale < 1.0 {
+                    let iw = 16.0;
+                    let ih = 4.0;
+                    let ix = cx - iw * 0.5;
+                    let iy = cy + 9.0;
+                    let white = [1.0, 1.0, 1.0, 1.0];
+                    b.sprite(
+                        "hud/crosshair_attack_indicator_background",
+                        ix,
+                        iy,
+                        iw,
+                        ih,
+                        white,
+                    );
+                    if scale > 0.0 {
+                        // Crop by shrinking both the destination width and the
+                        // sampled UV span, exactly `sprite_vitals`' XP-bar-progress
+                        // idiom — reveals the fill pattern instead of squashing it.
+                        for mut q in
+                            b.gui_geometry("hud/crosshair_attack_indicator_progress", ix, iy, iw, ih)
+                        {
+                            let span = q.uv_max[0] - q.uv_min[0];
+                            q.dst[2] *= scale;
+                            q.uv_max[0] = q.uv_min[0] + span * scale;
+                            b.push_sprite_quad(q, white);
+                        }
+                    }
+                }
+            }
         }
 
         // The hotbar (bottom-centre) and the survival pip rows above it. The

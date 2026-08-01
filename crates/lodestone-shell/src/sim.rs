@@ -12,11 +12,11 @@ use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
-use lodestone_ecs::entity::{EntityKind, MinecraftEntityId, Position};
+use lodestone_ecs::entity::{Attributes, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
-    ActionQueue, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin, MovementIntent,
-    NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot,
-    Submersion, reset_local_player, spawn_local_player,
+    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin,
+    MovementIntent, NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile,
+    SelectedSlot, Submersion, reset_local_player, spawn_local_player,
 };
 use lodestone_ecs::session::{
     ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerEntityId, SessionChat,
@@ -26,6 +26,7 @@ use lodestone_ecs::{
     ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
 };
 pub use lodestone_ecs::SessionPhase;
+use lodestone_entity::attribute::attribute_value;
 use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
@@ -1642,6 +1643,58 @@ impl Sim {
             .map(|(progress, level, _total)| (level, progress))
     }
 
+    /// The ticks a fresh attack must wait before it is back at full strength —
+    /// vanilla's `getCurrentItemAttackStrengthDelay`, `(1.0 /
+    /// getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`
+    /// (`Player.java:1816-1818`, `.cache/mc/26.2/src`).
+    ///
+    /// Reads `minecraft:attack_speed` off the local player's own
+    /// [`Attributes`] snapshot — the same server-fed, per-item-aware value
+    /// `lodestone_ecs::player::player_physics`'s `WATER_MOVEMENT_EFFICIENCY`
+    /// injection already reads through `attribute_value`. This is *not* a hardcoded
+    /// constant and does not need `lodestone-data`'s `item_prototypes` census
+    /// (which was checked and does not carry attack speed at all — no
+    /// `minecraft:attribute_modifiers` census exists in this repo yet): a
+    /// weapon's `-2.4` (sword) / `-3.0` (axe) modifier arrives the same way
+    /// any other equipment-driven attribute change does, as a server
+    /// `update_attributes` packet the instant the held item changes
+    /// (`AttributeMap`'s dirty-tracking on `LivingEntity.setItemSlot`), and
+    /// [`Attributes`] already folds it. Before the first such packet (a fresh
+    /// demo-world player, or a live session before login's fold lands)
+    /// `attribute_value` reads the registry default (`4.0`, unarmed), giving a
+    /// 5-tick delay — the correct unarmed value, not a guess.
+    #[must_use]
+    fn attack_strength_delay(&self) -> f32 {
+        let key = lodestone_model::Identifier::new("minecraft", "attack_speed")
+            .expect("valid built-in identifier");
+        let speed = self.read(|w| {
+            w.get::<Attributes>(self.local)
+                .map_or(4.0, |attrs| attribute_value(&attrs.0, &key))
+        });
+        // `getAttributeValue` cannot legitimately reach 0 (the registry clamps
+        // `attack_speed` to `>= 0.0`, and no vanilla modifier stack takes an
+        // unarmed 4.0 base all the way there), but a hostile/future value of
+        // exactly 0 must not become a divide-by-zero `inf` delay.
+        20.0 / (speed.max(f64::from(f32::EPSILON)) as f32)
+    }
+
+    /// The attack-cooldown fraction the crosshair indicator fills to,
+    /// `0.0..=1.0` — vanilla's `getAttackStrengthScale(0.0F)`
+    /// (`Player.java:1826-1828`), the exact call `Hud.extractCrosshair` makes
+    /// for the crosshair-style indicator (`Hud.java:448`). The `a` (partial
+    /// tick) argument is fixed at `0.0` here, same as that call site; nothing
+    /// in this shell threads a render-time partial tick into `Sim`'s other
+    /// accessors either (see [`Self::health`]/[`Self::xp`]).
+    #[must_use]
+    pub fn attack_strength_scale(&self) -> f32 {
+        let delay = self.attack_strength_delay();
+        let ticker = self.read(|w| {
+            w.get::<AttackStrengthTicker>(self.local)
+                .map_or(0, |t| t.0)
+        });
+        (ticker as f32 / delay).clamp(0.0, 1.0)
+    }
+
     /// The title/subtitle overlay as `(title, subtitle, alpha)`, `Some` while a
     /// server-sent title is visible. `Text` is flattened to a legacy `§` string
     /// at read time, matching the chat path, so colour survives once decoded.
@@ -2848,11 +2901,27 @@ impl Sim {
     /// queued through [`ActionQueue`]: that queue only drains inside the tick
     /// loop (see `crate::interact`'s "how to change it"), and an attack is a
     /// discrete click event, not a per-tick one.
+    ///
+    /// Also resets [`AttackStrengthTicker`] to `0` — vanilla's
+    /// `MultiPlayerGameMode.attack` calling `player.resetAttackStrengthTicker()`
+    /// right after the client-side `player.attack(entity)`
+    /// (`MultiPlayerGameMode.java:425-430`, `.cache/mc/26.2/client-src`).
+    /// Unconditional on every entity target, exactly like vanilla's call site:
+    /// there is no client-side `cannotAttack` gate here (damage is fully
+    /// server-authoritative per `docs/combat.md`), so every left-click on an
+    /// entity restarts the cooldown regardless of whether the server ends up
+    /// applying any damage.
     fn attack_entity(&mut self, entity_id: i32) {
         // The same tick-driven intent `use_item_live` reads for its own
         // sneaking bit, so a sneak-attack cannot disagree with what the wire
         // already told the server this tick's crouch state is.
         let sneaking = self.movement_intent().sneak;
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut ticker) = w.get_mut::<AttackStrengthTicker>(local) {
+                ticker.0 = 0;
+            }
+        });
         if let Some(net) = &self.net {
             net.send_action(ClientAction::InteractEntity {
                 entity_id,
@@ -6600,6 +6669,92 @@ mod tests {
         assert_eq!(peak, 0.0, "a dead player must not swing on attack");
     }
 
+    /// Vanilla's `getCurrentItemAttackStrengthDelay`/`getAttackStrengthScale`
+    /// (`Player.java:1816-1828`): with no [`Attributes`] component at all (the
+    /// pre-login default `attribute_value` falls back to — see
+    /// `no_attributes_component_folds_to_the_registry_default` in
+    /// `lodestone_ecs::player`'s own tests for the identical fallback one
+    /// layer down), the unarmed `attack_speed` default of `4.0` gives a
+    /// 5-tick delay, so the scale ramps linearly from `0.0` to `1.0` over
+    /// exactly 5 real `GameTick`s (via [`Self::step`], not a hand-called
+    /// tick function — the same "reachable through the schedule" bar
+    /// `lodestone_ecs::player`'s island-class tests hold `PhysicsState`/
+    /// `AttackStrengthTicker` to) and clamps there rather than overshooting.
+    #[test]
+    fn attack_strength_scale_ramps_to_full_over_five_ticks_unarmed() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        assert_eq!(
+            sim.attack_strength_scale(),
+            0.0,
+            "a fresh player must start at zero strength, matching Player's bare int field"
+        );
+        for expected_ticks in 1..=5u32 {
+            sim.step(1.0 / 20.0);
+            let want = (expected_ticks as f32 / 5.0).min(1.0);
+            let got = sim.attack_strength_scale();
+            assert!(
+                (got - want).abs() < 1e-6,
+                "after {expected_ticks} ticks expected scale {want}, got {got}"
+            );
+        }
+        // One tick past the delay: still clamped at 1.0, not overshooting.
+        sim.step(1.0 / 20.0);
+        assert_eq!(sim.attack_strength_scale(), 1.0);
+    }
+
+    /// A weapon's `minecraft:attack_speed` modifier (a sword's net `1.6`, per
+    /// vanilla's item data) must change the delay, not just the unarmed
+    /// default — this is the whole reason the delay reads a live
+    /// server-fed [`Attributes`] snapshot instead of a hardcoded constant.
+    /// `20.0 / 1.6 = 12.5` ticks, so one tick in gives `1.0 / 12.5 = 0.08`.
+    #[test]
+    fn attack_strength_delay_follows_a_reported_attack_speed_attribute() {
+        use std::str::FromStr;
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        let local = sim.local_player();
+        let key = lodestone_model::Identifier::from_str("minecraft:attack_speed").unwrap();
+        sim.write(|w| {
+            w.entity_mut(local).insert(Attributes(vec![lodestone_model::EntityAttributeSnapshot {
+                attribute: key,
+                base: 1.6,
+                modifiers: Vec::new(),
+            }]));
+        });
+        sim.step(1.0 / 20.0);
+        let got = sim.attack_strength_scale();
+        assert!(
+            (got - 0.08).abs() < 1e-5,
+            "a 1.6 attack-speed weapon should give scale 0.08 after one tick, got {got}"
+        );
+    }
+
+    /// [`Sim::attack_entity`] must reset the ticker **immediately**, in the
+    /// same call, not on the next tick — vanilla's
+    /// `MultiPlayerGameMode.attack` calls `resetAttackStrengthTicker()`
+    /// synchronously right after `player.attack(entity)`
+    /// (`MultiPlayerGameMode.java:425-430`).
+    #[test]
+    fn attacking_an_entity_resets_the_strength_ticker_immediately() {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        // Reach full strength first, so the reset is unambiguous.
+        for _ in 0..5 {
+            sim.step(1.0 / 20.0);
+        }
+        assert_eq!(sim.attack_strength_scale(), 1.0);
+
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+        sim.begin_attack_live();
+
+        assert_eq!(
+            sim.attack_strength_scale(),
+            0.0,
+            "attacking an entity must reset the ticker before the next tick, not after it"
+        );
+    }
+
     /// The geometric half of entity targeting: [`Sim::update_entity_target`]
     /// must find a spawned entity the ray points straight at, and report it
     /// by its server (`MinecraftEntityId`), never a `bevy_ecs::Entity`.
@@ -7196,6 +7351,9 @@ mod tests {
             equipment: Vec::new(),
             variant: None,
             count: 1,
+            // `EntitySnapshot::name_tag` (issue #100) — irrelevant to this
+            // gate, which only checks that `end_session` prunes tracks.
+            name_tag: None,
         };
         sim.write(|w| crate::entities::fold_entity_snapshots(w, &[snap]));
         assert_eq!(

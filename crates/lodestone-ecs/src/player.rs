@@ -254,6 +254,29 @@ pub struct LastSprintingSent(pub Option<bool>);
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Dead;
 
+/// Ticks since the local player's last attack — vanilla's `attackStrengthTicker`
+/// (`Player.java:210` field, incremented at `Player.java:268`,
+/// `.cache/mc/26.2/src/net/minecraft/world/entity/player/Player.java`).
+///
+/// Counts up from `0`, uncapped: vanilla lets the raw field overshoot the
+/// weapon's delay indefinitely once the cooldown is long since full, and
+/// [`crate::TickSet::Animate`]'s [`tick_attack_strength`] does the same —
+/// callers derive the clamped `0.0..=1.0` fraction (see
+/// `lodestone_shell::sim::Sim::attack_strength_scale`, the reader this exists
+/// for) rather than the ticker clamping itself.
+///
+/// **Local-only**, like [`SelectedSlot`]: nothing server-authoritative resets
+/// or reports it — the wire `Attack` packet carries only the target entity id
+/// (`docs/combat.md`), never a strength scalar — so there is no fold to guard
+/// against a second writer the way [`crate::session::Vitals`] has to.
+/// [`spawn_local_player`]/[`reset_local_player`] start it at `0`, matching
+/// `Player`'s bare (zero-initialised) `int` field; the reset on an actual
+/// attack is the caller's job (`Sim::attack_entity`), mirroring vanilla's
+/// `MultiPlayerGameMode.attack` calling `player.resetAttackStrengthTicker()`
+/// itself rather than `Player.attack` doing it unconditionally.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttackStrengthTicker(pub u32);
+
 // ---------------------------------------------------------------------------
 // The collision seam
 // ---------------------------------------------------------------------------
@@ -610,6 +633,25 @@ pub fn player_physics(
     }
 }
 
+/// `TickSet::Animate`: advance every [`LocalPlayer`]'s [`AttackStrengthTicker`]
+/// one tick, mirroring `Player.tick()`'s unconditional `this
+/// .attackStrengthTicker++` (`Player.java:268`). Same rate and same
+/// "runs regardless of anything else this tick" contract as
+/// [`crate::ingest::tick_hurt_time`]/[`crate::ingest::tick_entity_swing`],
+/// which this is the local-player counterpart of — those age a *remote*
+/// entity's hurt/swing state; this ages our own attack cooldown.
+///
+/// Registered here rather than in `crate::ingest` because the ticker is a
+/// [`LocalPlayer`]-only concept with no server event feeding it at all — see
+/// [`AttackStrengthTicker`]'s docs — so it belongs with this crate's other
+/// local-player-only tick systems ([`player_physics`]) rather than beside the
+/// net-ingest-driven ones.
+pub fn tick_attack_strength(mut players: Query<&mut AttackStrengthTicker, With<LocalPlayer>>) {
+    for mut ticker in &mut players {
+        ticker.0 = ticker.0.saturating_add(1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Spawning
 // ---------------------------------------------------------------------------
@@ -635,6 +677,7 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
             SelectedSlot(0),
             LastPlayerInput(None),
             LastSprintingSent(Some(false)),
+            AttackStrengthTicker(0),
         ))
         .id()
 }
@@ -660,6 +703,7 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
         SelectedSlot(0),
         LastPlayerInput(None),
         LastSprintingSent(Some(false)),
+        AttackStrengthTicker(0),
     ));
     entity.remove::<Dead>();
 }
@@ -716,6 +760,11 @@ impl Plugin for LocalPlayerPlugin {
         app.add_systems(Extract, clear_debug_lines.before(ExtractSet::Debug));
 
         app.add_systems(GameTick, player_physics.in_set(TickSet::Physics));
+        // `TickSet::Animate` is already chained after `Physics`/`Predict` by
+        // `CorePlugin` (see `plugin.rs`'s `GameTick` `configure_sets`), so no
+        // extra ordering edge is needed here — same reasoning `crate::ingest`
+        // relies on for `tick_hurt_time`/`tick_entity_swing`.
+        app.add_systems(GameTick, tick_attack_strength.in_set(TickSet::Animate));
     }
 }
 
@@ -1129,6 +1178,50 @@ mod tests {
             state.water_movement_efficiency, 0.0,
             "control: no attribute snapshot at all must fold to the default, not a stale \
              or hard-coded value"
+        );
+    }
+
+    /// [`AttackStrengthTicker`] must actually advance through a real
+    /// `GameTick` run, not merely be advanceable by a hand-called
+    /// [`tick_attack_strength`] — the same island class `CLAUDE.md` rule 1
+    /// warns about, and the same shape `depth_strider_attribute_reaches_the_
+    /// physics_state_each_tick` above already guards for `PhysicsState`.
+    #[test]
+    fn attack_strength_ticker_advances_one_per_game_tick_through_the_schedule() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        assert_eq!(
+            app.world().get::<AttackStrengthTicker>(entity).unwrap().0,
+            0,
+            "spawn_local_player must start the ticker at 0, matching Player's bare int field"
+        );
+
+        for expected in 1..=5u32 {
+            run_tick(&mut app);
+            assert_eq!(
+                app.world().get::<AttackStrengthTicker>(entity).unwrap().0,
+                expected,
+                "the ticker must advance by exactly one per GameTick run"
+            );
+        }
+    }
+
+    /// [`reset_local_player`] must put the ticker back to `0`, matching every
+    /// other locally-owned field it resets — a session that quits to title
+    /// mid-swing must not carry the old cooldown into the next one.
+    #[test]
+    fn reset_local_player_zeroes_the_attack_strength_ticker() {
+        let (mut app, entity) = app_with_player(PlayerCollision::View(Arc::new(Floor)));
+        for _ in 0..3 {
+            run_tick(&mut app);
+        }
+        assert!(app.world().get::<AttackStrengthTicker>(entity).unwrap().0 > 0);
+
+        let state = PlayerState::at(Vec3d::new(0.5, 4.0, 0.5), 0.0);
+        reset_local_player(app.world_mut(), entity, state);
+        assert_eq!(
+            app.world().get::<AttackStrengthTicker>(entity).unwrap().0,
+            0,
+            "reset_local_player must zero the ticker like every other local-only field"
         );
     }
 }
