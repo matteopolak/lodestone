@@ -115,6 +115,23 @@ Oracles (not part of repo state — recreate them):
   index is shared; the fix is not to look harder but to stop consulting the index at all.
   `git add` "to see the diff" is the most expensive way to look — `git diff -- <paths>` shows the
   same thing and touches nothing.
+
+  **But the pathspec form commits *working-tree* content, so it is only safe for files you
+  exclusively own.** It defeats the index race, not the shared checkout: if another agent has
+  uncommitted edits in a path you name, those edits go into your commit. One agent caught this before
+  committing — its one-line fix touched `sim.rs`, which was holding ~500 lines of another agent's
+  in-flight work — and correctly abandoned the change rather than shipping it. **Before naming a path,
+  check `git diff -- <path>` is only your own work.** If it is not, either wait for the owner or take
+  the temp-index route below.
+- **`GIT_INDEX_FILE` + `commit-tree` is the escape hatch, and it has its own trap: a stale tree.**
+  When you need partial-file granularity that a pathspec commit cannot express, build the commit in a
+  **private** index so the shared one is never touched. But the ref compare-and-swap in
+  `git update-ref <new> <old>` protects the *parent*, **not the tree you built**. An agent read a tree,
+  two commits landed while it worked, and committing that stale tree onto the fresh parent **reverted
+  2,173 lines** of another agent's chest and metadata fixes. It was caught immediately in
+  `git show --stat` and repaired, but the lesson is: **read the tree and commit it in one step**, and
+  always `git show --stat` your own commit afterwards to confirm it contains only additions you
+  intended and no deletions you did not.
 - **`git clean` is the worst of the git-level mistakes, because it destroys what nothing can
   recover.** The others discard *modifications* to tracked files, which at least existed in a commit
   once.
@@ -191,16 +208,32 @@ calls the system directly passes either way, so nothing catches it. This has now
 **twice in one session** (`EntityDamaged`/`EntityHurtAnimation`, then air supply). When adding an
 ingest system, the switch is the first thing to check, not the last.
 
-**Generalise it: every terminal `_ =>` arm in an event router is an island factory, and there are at
-least two.** The second is **`net.rs`'s `forward`**, where `BLOCK_EVENT` was decoded, tested, and
-fell straight through the catch-all — so chest lids could never animate no matter how correct the
-renderer was. The shape is identical to `handles_event` and the tell is the same: a `_ => {}` that
-silently discards is indistinguishable, at the call site, from one that has nothing left to handle.
-Note the two routers are **not** interchangeable, and assuming they are wastes a search: ECS-handled
-events go through `SharedState::apply`'s switch, while block events travel the shell's own
-`ClientEvent` stream, so the chest work needed **no** `handles_event` arm at all. When a decoded
-packet reaches no pixels, grep for its variant in *every* router before concluding the decode is
-wrong.
+**Generalise it: every terminal `_ =>` arm in an event router is an island factory, and there are
+three.** A `_ => {}` that silently discards is indistinguishable, at the call site, from one that has
+nothing left to handle.
+
+| router | carries | missed instance |
+|---|---|---|
+| `ingest::handles_event` | per-entity ECS state | `EntityDamaged`/`EntityHurtAnimation`, air supply |
+| `session::handles_event` | local-player session scalars | — (but see below) |
+| `net.rs`'s `forward` | the shell's own `ClientEvent` stream | `BLOCK_EVENT`, so chest lids could never animate |
+
+**`ingest` vs `session` is a real fork and guessing it wrong has cost work twice.** `SharedState::apply`
+consults *both*, so an arm added to the wrong one compiles, tests green as a unit, and never runs.
+`DimensionTypeChanged` is claimed by `session`, and so is `AbilitiesChanged` — for which both the issue
+and the dispatch briefing said `ingest`, where an arm would have produced a fold that never fires.
+The rule of thumb that has held: **per-entity state is `ingest`, local-player scalars are `session`**,
+and block/world events are neither, travelling the shell stream instead — the chest work needed no
+`handles_event` arm at all.
+
+So when a decoded packet reaches no pixels, grep its variant in *every* router before concluding the
+decode is wrong, and check the sibling router before adding an arm to the one you thought of first.
+
+**Islands come in both directions.** All of the above are *inbound*. `ClientAction::SetFlying` was the
+mirror image: encoded by four protocol adapters with **zero producers** anywhere outside
+`crates/protocol/`, so flight was applied locally and the server kicked us with
+`multiplayer.disconnect.flying`. Ask what *sends* a serverbound action, not only what consumes a
+clientbound one.
 
 ### 2. Re-verify before routing around "X doesn't exist yet"
 
@@ -281,15 +314,28 @@ byte-identical). The generator emits one line per tick where the committed file 
 so a line-oriented control was the wrong instrument even before the pipeline ate the count. **Do not
 build a control out of a shell pipeline here.** Count with a program that reads the file.
 
-**Four species of vacuous test.** Two cannot be found by reading the test — the source is exemplary
+**Five species of vacuous test.** Two cannot be found by reading the test — the source is exemplary
 and the flaw is a property of what it was pointed at:
 
 | species | flaw lives in | readable? |
 |---|---|---|
 | assertion | the assert | yes |
 | precondition | the setup (skip instead of fail) | yes |
+| **magnitude** | the assert's *predicate*, not its subject | yes, if you ask "how much?" |
 | duration | test lifetime vs system counters | **no** |
 | **world** | **the input data** | **no** |
+
+The *magnitude* species is new and it is subtle because everything else about the gate is right. The
+hurt-overlay gate asserted that silhouette pixels **"moved toward vanilla's overlay red"** and
+reported 3440/3440, with a working negative control. It measured **direction, not magnitude** — and
+the shader was rendering ~70% red where vanilla renders ~30%, a predicate satisfied identically by
+both. Wiring genuinely proven, strength never under test, and a player saw it immediately.
+
+The repair generalises: **predict the value, do not merely assert the sign of the change.** Compute
+*both* the correct and the suspected-wrong hypothesis from constants that originate outside the code,
+and require the measurement to land on the right one. Here vanilla's overlay green is 0, so the blend
+is a pure scaling in gamma space and green retention is `0.698` if right and `0.302` if inverted —
+measured `0.6969`, control `0.3057`. A ratio needs no knowledge of the subject's own colours.
 
 The *world* species is the live one here. A colour fix was verified against `--headless` and
 measured byte-identical, concluding it was inert. There are two meshers: `--headless` renders
