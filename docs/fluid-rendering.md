@@ -63,9 +63,14 @@ Two consequences worth having in your head:
   (`direction != UP` short-circuits), regardless of the fluid's height. A pool
   walled in solid blocks emits **only** its top surface.
 - The **up** face is *not* culled by a solid block above, because the fluid's
-  corner heights are `8/9`, not `1.0`, so `height == 1.0F` is false. Water under
-  stone still draws its surface into the `1/9`-block gap. Our `mesh_fluids` culls
-  it — a known, deliberate divergence, listed under "Known gaps" below.
+  corner heights are `8/9`, not `1.0`, so `height == 1.0F` is false almost
+  always. Water under stone still draws its surface into the `1/9`-block gap.
+  `mesh_fluids` matches this: a fully-occluding neighbour above only culls the
+  top face when **every** corner height is already `1.0` (a same-fluid column
+  one cell short of the ceiling) — see `up_occluded` in `mesh_fluids`. This is
+  exact for the `Shapes.block()` fast path vanilla itself takes for a plain
+  opaque cube; the partial-occluder `else` branch above it is not modelled (see
+  "Known gaps", partial occluders).
 
 ### Which texture
 
@@ -73,13 +78,17 @@ Two consequences worth having in your head:
 - **top**, flowing → `*_flow`, with the UV quad rotated by
   `atan2(flow.z, flow.x) - π/2` and sampled at ±0.25 about the sprite centre.
 - **bottom** → `*_still`.
-- **sides** → `*_flow`, *always*. It is sampled over `u ∈ [0, 0.5]` and
+- **sides** → `*_flow` by default. It is sampled over `u ∈ [0, 0.5]` and
   `v ∈ [(1 - h)/2, 0.5]` — one quarter of the sprite, magnified 2×, with the
   streaks running vertically. This is why a fluid side face reads as a waterfall:
   that is genuinely what vanilla draws there.
-- **sides against a `HalfTransparentBlock` or `LeavesBlock`** → the fluid model's
-  **overlay** material (`block/water_overlay`) instead, and the quad gets **no**
-  back face (`addBackFace = !isOverlay`). We do not implement this yet; see
+- **sides against a `HalfTransparentBlock` or `LeavesBlock`** → the fluid
+  model's **overlay** material (`block/water_overlay`) instead, and the quad
+  gets **no** back face (`addBackFace = !isOverlay`). `bake_fluid` implements
+  this (`FluidGeometry::side_overlay`, the `overlay: Option<SpriteUv>`
+  parameter) and `mesh_fluids` wires it through `FluidSectionView::overlay_at`
+  — but the live shell mesher doesn't override that method yet, so on a real
+  server every neighbour still reads as "not overlay" until it does. See
   "Known gaps".
 
 ## The shoreline bug (2026-07), and what it teaches
@@ -189,25 +198,104 @@ jar's** `grass_block`, not on a hand-written view.
 
 ## Known gaps
 
-Each is a real divergence from `FluidRenderer`, none of them the reported bug:
+Issue #18 tracked five divergences from `FluidRenderer`, none of them the
+reported shoreline bug. Re-verified 2026-07-31 against the same 26.2
+`client-src` cited throughout this doc: three were still live and are now
+closed; one (the overlay material) is closed in `lodestone-render` but not yet
+reachable from a live server; one (partial occluders) is still open.
 
-- **Partial occluders are not modelled.** `isFaceOccludedByState`'s third branch
-  (`Shapes.blockOccludes(box(0,0,0,1,h,1), occluder, dir)`) needs real voxel
-  shapes. A `dirt_path` or `farmland` bank occludes a `8/9`-high water face in
-  vanilla (its occluder reaches `15/16`) and does not here, so those banks still
-  draw a side face. Fixing it means giving `FluidSectionView` a directional,
-  height-aware query and feeding it occlusion shapes — the per-face
-  `StateModel::face_occludes` array is the first half of that seam.
-- **The up face is culled by a solid block above.** Vanilla draws it (see above).
-- **No overlay material.** Side faces against glass, ice, honey, slime or leaves
-  should use `block/water_overlay` and omit the back face; we use `*_flow` with a
-  back face.
-- **No back faces.** `FluidRenderer.addFace` emits a reversed copy for side faces
-  and, conditionally, for the top (`shouldRenderBackwardUpFace`). `bake_fluid`
-  emits single quads, so a fluid surface seen from behind is invisible.
-- **No `0.001` insets.** Vanilla nudges side faces inward and the top down by
-  `0.001` to avoid z-fighting; `bake_fluid` leaves that to the mesher and the
-  mesher does not do it.
+- **Closed — the up face is no longer culled by a solid block above.**
+  `mesh_fluids`'s `up_occluded` now matches `isFaceOccludedByState`'s
+  `Shapes.block()` fast path exactly: `direction != Direction.UP || height ==
+  1.0F` (`FluidRenderer.java:38`) only culls the top face when every corner
+  height is already `1.0`, which needs a same-fluid column stacked one cell
+  short of the neighbour — never true for an ordinary source surrounded by air,
+  whose corners sit at `8/9`. Water under stone now draws its surface into the
+  `1/9` gap, matching vanilla. What's *not* ported is the `else` branch below
+  the fast path (a partial-shape neighbour occluding the top face) — folded
+  into the partial-occluders gap below, since it needs the same voxel-shape
+  machinery.
+- **Closed — back faces.** `bake_fluid` now emits `FluidRenderer.addFace`'s
+  reversed-winding copy: unconditionally for every side face unless it's using
+  the overlay material (`addBackFace = !isOverlay`,
+  `FluidRenderer.java:310-318`), and for the top face when
+  `FluidState.shouldRenderBackwardUpFace` says so
+  (`FluidState.java:65-77`) — reproduced in `mesh_fluids` as
+  `should_render_backward_up_face`, a 3×3 ring check at the cell directly above
+  the fluid. One approximation: vanilla's ring test is `!isSame(fluidType) &&
+  !isSolidRender()`; this reads `!isSolidRender()` off the existing
+  `occludes_at` boolean rather than a separate solid-render query, which agrees
+  for a plain opaque cube (the dominant case) and is the same approximation
+  `flow_neighbor_at` already makes for `blocks_motion`/`isSolid`. Net visible
+  effect: an ordinary open lake now draws its top surface **double-sided**
+  (matches vanilla — the surface is visible from underwater looking up), and
+  every open side face gets a reversed copy.
+- **Closed — `0.001` z-fight insets.** `bake_fluid` now applies
+  `FluidRenderer.java`'s `offs`/`bottomOffs`/side-inset constants itself: top
+  corners pull down `0.001` whenever the top face draws (and that adjustment is
+  visible to the side faces reading the same corner heights, exactly as in
+  Java, where the mutation happens once before either reads it); side faces
+  inset `0.001` off their block boundary; a side face's bottom edge — and the
+  bottom face itself — sit at `y = 0.001` only when the bottom face is *also*
+  drawn (`bottomOffs = renderDown ? 0.001F : 0.0F`), else flush at `y = 0`.
+- **Closed in `lodestone-render`, not yet live — overlay material.** Side
+  faces against a vanilla `HalfTransparentBlock` or `LeavesBlock` (glass, every
+  stained-glass colour, tinted glass, ice, blue ice, frosted ice, honey,
+  slime, all eleven leaves types — scanned from `Blocks.java`, see
+  `is_fluid_overlay_neighbor` in `block_models.rs`) now bake against
+  `block/water_overlay` with no back face, via `bake_fluid`'s `overlay:
+  Option<SpriteUv>` parameter and `FluidGeometry::side_overlay`.
+  `FluidSectionView` gained `overlay_at(x, y, z) -> bool` (default `false`, so
+  every existing implementation keeps compiling and keeps its old behaviour).
+  **The live shell doesn't override it yet** — `SnapshotFluidView` in
+  `crates/lodestone-shell/src/mesher.rs` needs:
+  ```rust
+  fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
+      let (dx, lx) = split16(x);
+      let (dy, ly) = split16(y);
+      let (dz, lz) = split16(z);
+      if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+          return false;
+      }
+      let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
+      self.models.fluid_overlay(id)
+  }
+  ```
+  — the same pattern `occludes_at` already uses one method up, forwarding to
+  the new `BlockModels::fluid_overlay(state_id)` accessor. Until that patch
+  lands, a real server's water still draws `*_flow` with a back face against
+  glass/leaves, same as before.
+- **Still open — partial occluders are not modelled.** `isFaceOccludedByState`'s
+  third branch (`Shapes.blockOccludes(box(0,0,0,1,h,1), occluder, dir)`,
+  `FluidRenderer.java:44`) needs real voxel shapes: a `dirt_path` or `farmland`
+  bank occludes an `8/9`-high water face in vanilla (its collision shape
+  reaches `15/16`, and `occluder`'s footprint is full-width so `blockOccludes`
+  degenerates to "does the occluder's height cover the fluid's test height over
+  the full boundary square") and does not here, so those banks still draw a
+  side face.
+
+  This was re-investigated, not just re-flagged: `lodestone-data`'s
+  `collision_shapes` module (`crates/lodestone-data/src/collision_shapes.rs`)
+  already has exactly the missing geometry — real per-state AABB unions dumped
+  from the 26.2 jar (`collision_boxes(state_id) -> &[Aabb]`), 326 distinct
+  shapes across all 32,366 states — so this is *not* blocked on new jar data
+  the way it looked when this doc was first written. What's still missing is
+  the algorithm: `Shapes.blockOccludes` (`Shapes.java:244`) is a real
+  voxel-shape slice-and-compare (via `VoxelShape.getFaceShape`,
+  `VoxelShape.java:197`, and `Shapes.joinIsNotEmpty`'s boolean-grid merge), and
+  porting it faithfully for the general multi-box case (stairs, fences, walls
+  — shapes with actual holes) is a bigger undertaking than the two named
+  examples suggest. The two named examples (and slabs, snow layers, and most
+  other "flat-topped, height-only-reduced" blocks) are the *simple* case,
+  where `blockOccludes` collapses to the height/footprint comparison described
+  above and would not need the general algorithm — a scoped implementation
+  covering only single-box, full-horizontal-footprint shapes (falling back to
+  today's boolean `occludes_at` for anything else) is a bounded, honestly-scoped
+  next step, left undone this pass rather than shipped half-verified against
+  the harder shapes. Wiring it needs a new `FluidSectionView` query (something
+  like `side_occlusion_height_at(x, y, z) -> Option<f32>`, `None` falling back
+  to the existing boolean) and, on the shell side, a lookup from block state id
+  to `collision_boxes`.
 
 ## Configuration
 
@@ -220,24 +308,43 @@ skipping.
 ## Dependencies
 
 - `lodestone-assets` — `fluid::{bake_fluid, corner_height, flow_horizontal, …}`,
-  `BlockBaker`, the stitched `Atlas` (fluid sprites are seeded explicitly, since no
-  blockstate references them).
-- `lodestone-render` — `BlockModels` (classification, per-face occlusion, sprite
-  rects), `mesh_fluids`, `ModelPipeline::for_fluid`.
+  `BlockBaker`, the stitched `Atlas` (fluid sprites, **and now
+  `block/water_overlay`**, are seeded explicitly, since no blockstate
+  references them).
+- `lodestone-render` — `BlockModels` (classification, per-face occlusion,
+  sprite rects, and now `fluid_overlay(state_id)` — the
+  `HalfTransparentBlock`/`LeavesBlock` name-list classification), `mesh_fluids`,
+  `ModelPipeline::for_fluid`.
 - `lodestone-shell` — `SnapshotFluidView` / `mesh_snapshot_fluids`, the live
-  neighbourhood.
+  neighbourhood. Does not yet implement `FluidSectionView::overlay_at`; see
+  "Known gaps".
+- `lodestone-data` — `collision_shapes::collision_boxes`, the real per-state
+  jar-dumped collision geometry the still-open partial-occluders gap needs and
+  didn't previously have a known source for.
 
 ## Tests
 
 Hermetic (`cargo test -p lodestone-render --lib`):
 
 - `models::tests::a_walled_pool_emits_only_its_level_top_surface` — 0 side faces
-  and a level 8×8 surface, with the pre-fix occlusion answer executed as the
+  and a level 8×8 surface (now 128 quads: every top quad is double-sided, see
+  "Known gaps"), with the pre-fix occlusion answer executed as the
   negative control and asserted to produce side faces and sloped rim quads.
 - `models::tests::shared_face_between_two_water_cells_is_not_emitted`,
   `lone_water_source_emits_a_surface_below_the_full_block`.
+- `models::tests::water_under_a_solid_ceiling_still_draws_its_top_surface` —
+  the up-face-culling fix, with the pre-fix whole-occludes rule checked
+  (not just described) as the executed negative control.
+- `models::tests::side_face_against_an_overlay_neighbor_uses_the_overlay_sprite_and_has_no_back_face`,
+  `overlay_flag_without_an_overlay_material_falls_back_to_flow_with_a_back_face`
+  — the overlay-material wiring through `mesh_fluids`/`bake_fluid`, and that a
+  `None` overlay sprite (lava) restores the back face even if `overlay_at`
+  reports true.
 - `crates/lodestone-assets/tests/fluid.rs` — the `bake_fluid` UV/winding layout
-  against hand-derived `FluidRenderer` values.
+  against hand-derived `FluidRenderer` values, plus the `0.001` inset
+  (including the "no top face drawn → side reads the *un*-inset height"
+  interaction), back-face winding (top and side), and overlay-sprite selection
+  cases added for this pass.
 
 Jar-backed, `#[ignore]`d:
 

@@ -41,8 +41,15 @@
 //! `FluidRenderer`/`FluidModel` sources, so this module is jar-verified end to
 //! end. Fluid tint comes from the fluid model's tint source (water =
 //! `getAverageWaterColor`, lava untinted), resolved via the [`crate::tint`]
-//! seam; per-face colour and the `~0.001` z-fight insets vanilla applies are
-//! left to the mesher/renderer.
+//! seam; per-face colour is left to the mesher/renderer.
+//!
+//! `bake_fluid` itself now owns vanilla's `~0.001` anti-z-fight insets, the
+//! optional back faces (`FluidRenderer.addFace`'s reversed copy) and the
+//! `water_overlay` material substitution against glass/ice/leaves neighbours —
+//! the mesher only has to supply the neighbourhood facts
+//! ([`FluidGeometry::back_up_face`], [`FluidGeometry::side_overlay`]) that
+//! `FluidState.shouldRenderBackwardUpFace` and the `HalfTransparentBlock` /
+//! `LeavesBlock` check need.
 
 use crate::bake::BakedQuad;
 use crate::model::Direction;
@@ -327,6 +334,24 @@ impl Default for FaceSet {
     }
 }
 
+/// Whether each side face should sample the `water_overlay` material instead
+/// of `*_flow`, matching vanilla's `relativeBlock instanceof HalfTransparentBlock
+/// || relativeBlock instanceof LeavesBlock` check in `FluidRenderer.tesselate`.
+/// An overlay side face also omits its back copy (`addBackFace = !isOverlay`).
+/// Ignored (treated as all-`false`) when [`bake_fluid`] isn't given an overlay
+/// sprite — lava has no overlay material in vanilla either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SideOverlay {
+    /// The `-Z` side.
+    pub north: bool,
+    /// The `+Z` side.
+    pub south: bool,
+    /// The `+X` side.
+    pub east: bool,
+    /// The `-X` side.
+    pub west: bool,
+}
+
 /// The resolved neighbourhood of a fluid cell — the mesher fills this, then
 /// [`bake_fluid`] turns it into quads. This struct *is* the mesher seam.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -345,7 +370,25 @@ pub struct FluidGeometry {
     /// ([`crate::tint::TintKind::Water`]) and multiplies it in, matching the
     /// fluid model's tint source.
     pub tint_index: Option<i32>,
+    /// Whether the top surface's back-facing copy should also be emitted —
+    /// vanilla `FluidState.shouldRenderBackwardUpFace`: true when any of the
+    /// 3×3 neighbourhood at the cell directly above carries a *different*
+    /// fluid (or none) over a non-solid-render block, i.e. the surface is
+    /// visible from above through a gap at the rim. Ignored when
+    /// [`FaceSet::up`] is cleared.
+    pub back_up_face: bool,
+    /// Per-side overlay-material selection; see [`SideOverlay`].
+    pub side_overlay: SideOverlay,
 }
+
+/// Vanilla's z-fight avoidance nudge (`FluidRenderer.tesselate`'s `offs` /
+/// `bottomOffs` / the `0.001F` side inset). Top corners are pulled down by this
+/// much when the top face is drawn, side faces are inset this far from their
+/// block boundary, and the bottom edge of a side face — and the bottom face
+/// itself — sit this far above `y = 0`, but **only** when the bottom face is
+/// also drawn (`bottomOffs = renderDown ? 0.001F : 0.0F`); a culled bottom face
+/// leaves side faces flush with `y = 0`.
+const Z_FIGHT_INSET: f32 = 0.001;
 
 /// Bakes a fluid cell into renderer-ready quads, matching the vertex winding and
 /// UV mapping of the client `FluidRenderer.tesselate`.
@@ -353,16 +396,36 @@ pub struct FluidGeometry {
 /// Emits the top surface (four corner heights), the requested side faces and the
 /// bottom face. The top uses the still texture when [`FluidGeometry::flow`] is
 /// zero, otherwise the flowing texture rotated by [`flow_angle`]; sides use the
-/// left half of the flowing texture, scaled vertically by their corner heights;
-/// the bottom uses the still texture. Positions are in block-local space
-/// (`0..=1`). `cullface` is `None` on every quad — fluids are culled by the
-/// mesher through [`FaceSet`], not the block-model cull system — and vanilla's
-/// `~0.001` anti-z-fight insets and optional back-faces are left to the mesher.
+/// left half of the flowing texture (or, per [`FluidGeometry::side_overlay`],
+/// the left half of `overlay`) scaled vertically by their corner heights; the
+/// bottom uses the still texture. Positions are in block-local space (`0..=1`,
+/// inset by [`Z_FIGHT_INSET`] exactly where vanilla insets them). `cullface` is
+/// `None` on every quad — fluids are culled by the mesher through [`FaceSet`],
+/// not the block-model cull system.
+///
+/// `overlay` is `None` for fluids with no overlay material (lava, in vanilla);
+/// [`FluidGeometry::side_overlay`] is then ignored and every side uses `flow`.
 #[must_use]
-pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<BakedQuad> {
+pub fn bake_fluid(
+    geom: &FluidGeometry,
+    still: SpriteUv,
+    flow: SpriteUv,
+    overlay: Option<SpriteUv>,
+) -> Vec<BakedQuad> {
     let mut quads = Vec::new();
-    let [nw, ne, se, sw] = geom.corners;
+    // Vanilla mutates `heightNorthWest` etc. in place once, before either the
+    // top face or the side-face switch reads them — so the inset (applied only
+    // when the top face actually draws) is visible to sides too. Mirrored here
+    // by adjusting the corners the side loop below reads from.
+    let [nw, ne, se, sw] = if geom.faces.up {
+        geom.corners.map(|h| h - Z_FIGHT_INSET)
+    } else {
+        geom.corners
+    };
     let flowing = select_texture(geom.flow) == FluidTexture::Flowing;
+    // Side faces' bottom edge only lifts off y=0 when the bottom face is also
+    // drawn (avoids z-fighting *between* them); otherwise it stays at y=0.
+    let bottom_offs = if geom.faces.down { Z_FIGHT_INSET } else { 0.0 };
 
     if geom.faces.up {
         // Vanilla winding NW -> SW -> SE -> NE (counter-clockwise from above).
@@ -382,22 +445,29 @@ pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<
                 still.at(1.0, 0.0),
             ]
         };
-        quads.push(fluid_quad(
+        let quad = fluid_quad(
             positions,
             uvs,
             Direction::Up,
             geom.tint_index,
             if flowing { flow.anim } else { still.anim },
-        ));
+        );
+        if geom.back_up_face {
+            let back = back_face(&quad);
+            quads.push(quad);
+            quads.push(back);
+        } else {
+            quads.push(quad);
+        }
     }
 
     if geom.faces.down {
         quads.push(fluid_quad(
             [
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [1.0, 0.0, 1.0],
-                [0.0, 0.0, 1.0],
+                [0.0, bottom_offs, 0.0],
+                [1.0, bottom_offs, 0.0],
+                [1.0, bottom_offs, 1.0],
+                [0.0, bottom_offs, 1.0],
             ],
             [
                 still.at(0.0, 0.0),
@@ -412,63 +482,86 @@ pub fn bake_fluid(geom: &FluidGeometry, still: SpriteUv, flow: SpriteUv) -> Vec<
     }
 
     // Side faces, per vanilla's per-direction corner selection. Each spans two
-    // top corners (heights h0, h1) down to y=0, using the left half of the flow
-    // texture (u in [0, 0.5]) with v scaled by height.
+    // top corners (heights h0, h1) down to the (possibly lifted) base, using the
+    // left half of the flow (or overlay) texture (u in [0, 0.5]) with v scaled
+    // by height, inset `Z_FIGHT_INSET` off the block boundary.
+    let eps = Z_FIGHT_INSET;
     let sides = [
         (
             geom.faces.north,
+            geom.side_overlay.north,
             Direction::North,
             [0.0f32, 1.0],
-            [0.0f32, 0.0],
+            [eps, eps],
             nw,
             ne,
         ),
         (
             geom.faces.south,
+            geom.side_overlay.south,
             Direction::South,
             [1.0, 0.0],
-            [1.0, 1.0],
+            [1.0 - eps, 1.0 - eps],
             se,
             sw,
         ),
         (
             geom.faces.west,
+            geom.side_overlay.west,
             Direction::West,
-            [0.0, 0.0],
+            [eps, eps],
             [1.0, 0.0],
             sw,
             nw,
         ),
         (
             geom.faces.east,
+            geom.side_overlay.east,
             Direction::East,
-            [1.0, 1.0],
+            [1.0 - eps, 1.0 - eps],
             [0.0, 1.0],
             ne,
             se,
         ),
     ];
-    for (emit, dir, xs, zs, h0, h1) in sides {
+    for (emit, use_overlay, dir, xs, zs, h0, h1) in sides {
         if !emit {
             continue;
         }
-        quads.push(fluid_quad(
+        let is_overlay = use_overlay && overlay.is_some();
+        let sprite = if is_overlay {
+            overlay.expect("checked by is_overlay")
+        } else {
+            flow
+        };
+        let quad = fluid_quad(
             [
                 [xs[0], h0, zs[0]],
                 [xs[1], h1, zs[1]],
-                [xs[1], 0.0, zs[1]],
-                [xs[0], 0.0, zs[0]],
+                [xs[1], bottom_offs, zs[1]],
+                [xs[0], bottom_offs, zs[0]],
             ],
             [
-                flow.at(0.0, (1.0 - h0) * 0.5),
-                flow.at(0.5, (1.0 - h1) * 0.5),
-                flow.at(0.5, 0.5),
-                flow.at(0.0, 0.5),
+                sprite.at(0.0, (1.0 - h0) * 0.5),
+                sprite.at(0.5, (1.0 - h1) * 0.5),
+                sprite.at(0.5, 0.5),
+                sprite.at(0.0, 0.5),
             ],
             dir,
             geom.tint_index,
-            flow.anim,
-        ));
+            sprite.anim,
+        );
+        // `addBackFace = !isOverlay`: an overlay side face (glass/ice/leaves) is
+        // single-sided; a plain flow side face gets a reversed back copy so it
+        // reads correctly when seen from the far side (e.g. looking up through
+        // the underside of a waterfall).
+        if is_overlay {
+            quads.push(quad);
+        } else {
+            let back = back_face(&quad);
+            quads.push(quad);
+            quads.push(back);
+        }
     }
 
     quads
@@ -490,6 +583,35 @@ fn fluid_quad(
         shade: false,
         layer: 0,
         anim,
+    }
+}
+
+/// The reversed-winding copy `FluidRenderer.addFace` emits for a double-sided
+/// quad: vertex order `[0, 3, 2, 1]` instead of `[0, 1, 2, 3]`, so the face is
+/// visible from the opposite side too. `direction` is carried through unused —
+/// fluid quads are always `shade: false`, so [`crate::bake`]'s per-direction
+/// shade constant never reads it — and `cullface` stays `None` like the front
+/// copy.
+fn back_face(front: &BakedQuad) -> BakedQuad {
+    BakedQuad {
+        positions: [
+            front.positions[0],
+            front.positions[3],
+            front.positions[2],
+            front.positions[1],
+        ],
+        uvs: [
+            front.uvs[0],
+            front.uvs[3],
+            front.uvs[2],
+            front.uvs[1],
+        ],
+        direction: front.direction,
+        cullface: None,
+        tint_index: front.tint_index,
+        shade: false,
+        layer: 0,
+        anim: front.anim,
     }
 }
 

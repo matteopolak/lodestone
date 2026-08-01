@@ -104,8 +104,8 @@
 
 use glam::{Mat4, Vec3};
 use lodestone_assets::fluid::{
-    FaceSet, FlowNeighbor, FluidGeometry, bake_fluid, corner_height, flow_horizontal,
-    neighbor_height,
+    FaceSet, FlowNeighbor, FluidGeometry, SideOverlay, bake_fluid, corner_height,
+    flow_horizontal, neighbor_height,
 };
 use lodestone_assets::{BakedQuad, Direction, GuiLight};
 
@@ -703,6 +703,21 @@ pub trait FluidSectionView {
     }
     /// The still/flow sprite rects for a fluid kind, into the model atlas.
     fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites;
+    /// Whether the block at `(x, y, z)` is a `HalfTransparentBlock` or
+    /// `LeavesBlock` in vanilla terms (glass, ice, honey, slime, tinted glass,
+    /// leaves) — the neighbour class `FluidRenderer.tesselate` checks to swap a
+    /// touching fluid side face onto the `water_overlay` material and suppress
+    /// its back copy.
+    ///
+    /// Defaults to `false` everywhere, which reproduces the pre-overlay
+    /// behaviour exactly (every side face uses `*_flow` with a back face) —
+    /// existing [`FluidSectionView`] implementations need no change to keep
+    /// compiling. See `docs/fluid-rendering.md`'s "Known gaps" for the concrete
+    /// live-shell patch that overrides this from real block classification.
+    fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
+        let _ = (x, y, z);
+        false
+    }
 }
 
 /// Water and lava geometry meshed from a section, on their two separate passes:
@@ -755,6 +770,37 @@ fn flow_neighbor_at(
     }
 }
 
+/// Vanilla `FluidState.shouldRenderBackwardUpFace`: whether the fluid's top
+/// surface needs a reversed back copy so it stays visible when seen from
+/// above, e.g. through the rim gap where the surface dips below a solid
+/// ceiling. True when any cell in the 3×3 neighbourhood **directly above** the
+/// fluid (`y + 1`, matching vanilla's `above.offset(ox, 0, oz)`) carries a
+/// *different* fluid (or none) over a cell that doesn't fully occlude.
+///
+/// `occludes_at` stands in for vanilla's `isSolidRender` — they agree for a
+/// plain opaque cube (the dominant case) and this mirrors the same
+/// approximation `mesh_fluids` already makes for `blocks_motion`/`isSolid` in
+/// [`flow_neighbor_at`]; see `docs/fluid-rendering.md`.
+fn should_render_backward_up_face(
+    view: &dyn FluidSectionView,
+    kind: FluidKind,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> bool {
+    let above_y = y + 1;
+    for oz in -1..=1 {
+        for ox in -1..=1 {
+            let (nx, nz) = (x + ox, z + oz);
+            let same = matches!(view.fluid_at(nx, above_y, nz), Some(f) if f.kind == kind);
+            if !same && !view.occludes_at(nx, above_y, nz) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Mesh the fluid cells of a section into water/lava geometry.
 ///
 /// For each fluid cell the mesher reconstructs the vanilla `FluidRenderer`
@@ -764,6 +810,15 @@ fn flow_neighbor_at(
 /// applies the water colour); lava is untinted and emitted **full-bright**
 /// (light `0xFF`) since it is an emitter. Positions are section-local, matching
 /// [`mesh_models`].
+///
+/// The **up** face is *not* culled just because the block above occludes: per
+/// `isFaceOccludedByState`'s `direction != UP || height == 1.0` short-circuit,
+/// a full solid neighbour only culls the top surface when every corner height
+/// is already `1.0` (a same-fluid column stacked one cell short of the ceiling)
+/// — which is why water under a solid block still draws its surface into the
+/// `1/9`-block gap. See `docs/fluid-rendering.md`'s "Known gaps" for why this
+/// stays a boolean-`occludes_at` approximation rather than the full
+/// partial-occluder shape test vanilla's `else` branch performs.
 #[must_use]
 pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
     let mut out = FluidMeshes::default();
@@ -796,8 +851,13 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                 let emit = |dx: i32, dy: i32, dz: i32| {
                     !same(dx, dy, dz) && !view.occludes_at(xi + dx, yi + dy, zi + dz)
                 };
+                // Vanilla's `isFaceOccludedByNeighbor(UP, min(corners), aboveState)`
+                // only culls the top face when the *fully occluding* fast path
+                // (`Shapes.block()`) also has `height == 1.0`, which needs every
+                // corner at a full column — not merely a solid block above.
+                let up_occluded = view.occludes_at(xi, yi + 1, zi) && corners.iter().all(|&h| h >= 1.0);
                 let faces = FaceSet {
-                    up: emit(0, 1, 0),
+                    up: !same(0, 1, 0) && !up_occluded,
                     down: emit(0, -1, 0),
                     north: emit(0, 0, -1),
                     south: emit(0, 0, 1),
@@ -810,13 +870,22 @@ pub fn mesh_fluids(view: &dyn FluidSectionView) -> FluidMeshes {
                     FluidKind::Lava => None,
                 };
                 let sprites = view.fluid_sprites(kind);
+                let side_overlay = SideOverlay {
+                    north: faces.north && view.overlay_at(xi, yi, zi - 1),
+                    south: faces.south && view.overlay_at(xi, yi, zi + 1),
+                    east: faces.east && view.overlay_at(xi + 1, yi, zi),
+                    west: faces.west && view.overlay_at(xi - 1, yi, zi),
+                };
+                let back_up_face = faces.up && should_render_backward_up_face(view, kind, xi, yi, zi);
                 let geom = FluidGeometry {
                     corners,
                     flow,
                     faces,
                     tint_index,
+                    back_up_face,
+                    side_overlay,
                 };
-                let quads = bake_fluid(&geom, sprites.still, sprites.flow);
+                let quads = bake_fluid(&geom, sprites.still, sprites.flow, sprites.overlay);
 
                 let (mesh, light) = match kind {
                     FluidKind::Water => (&mut out.water, view.light_at(x, y, z)),
@@ -1378,8 +1447,22 @@ mod tests {
     struct FakeFluidView {
         fluids: HashMap<(i32, i32, i32), FluidCell>,
         solids: HashSet<(i32, i32, i32)>,
+        /// Cells that answer `overlay_at` true (a stand-in for a glass/ice/leaves
+        /// neighbour). Empty by default, matching the trait's `false` default.
+        overlays: HashSet<(i32, i32, i32)>,
+        /// Whether `fluid_sprites` should hand back a distinguishable overlay
+        /// rect at all — `None` reproduces a fluid with no overlay material
+        /// (lava), even if `overlays` is non-empty.
+        overlay_sprite: Option<()>,
     }
     impl FakeFluidView {
+        fn with_overlay_material(mut self) -> Self {
+            self.overlay_sprite = Some(());
+            self
+        }
+        fn overlay(&mut self, x: i32, y: i32, z: i32) {
+            self.overlays.insert((x, y, z));
+        }
         fn water(&mut self, x: i32, y: i32, z: i32, state: FluidState) {
             self.fluids.insert(
                 (x, y, z),
@@ -1409,7 +1492,15 @@ mod tests {
             FluidSprites {
                 still: unit,
                 flow: unit,
+                overlay: self.overlay_sprite.map(|_| SpriteUv {
+                    min: [0.25, 0.25],
+                    max: [0.75, 0.75],
+                    anim: 0,
+                }),
             }
+        }
+        fn overlay_at(&self, x: i32, y: i32, z: i32) -> bool {
+            self.overlays.contains(&(x, y, z))
         }
     }
 
@@ -1422,10 +1513,15 @@ mod tests {
         v.solid(8, 7, 8); // floor below
         let m = mesh_fluids(&v);
 
+        // Open air on every side (including above) means the surface gets a
+        // back-facing top copy (`shouldRenderBackwardUpFace`) and every one of
+        // the 4 open sides gets a reversed back copy too (`addBackFace`,
+        // suppressed only for an overlay side face — none here): top 1+1,
+        // sides 4*(1+1), bottom culled by the floor.
         assert_eq!(
             m.water.quad_count(),
-            5,
-            "top + 4 sides, bottom culled by floor"
+            10,
+            "top (front+back) + 4 sides (front+back each), bottom culled by floor"
         );
         assert!(m.lava.vertices.is_empty(), "no lava");
 
@@ -1457,11 +1553,13 @@ mod tests {
         pair.water(9, 8, 8, FluidState::source()); // east neighbour, same fluid
         let pair_quads = mesh_fluids(&pair).water.quad_count();
 
-        // Each cell loses its shared (east/west) face: 2 fewer than 2x lone.
+        // Each cell loses its shared (east/west) face — and that face would
+        // have been a front+back pair (open air, no overlay), so each cell
+        // loses 2 quads: 4 fewer than 2x lone.
         assert_eq!(
             pair_quads,
-            lone_sides * 2 - 2,
-            "the shared water-water face on both cells must be culled"
+            lone_sides * 2 - 4,
+            "the shared water-water face (front+back) on both cells must be culled"
         );
     }
 
@@ -1570,9 +1668,13 @@ mod tests {
              one of them would draw the animated water_flow sprite over the bank"
         );
         assert_eq!(sloped, 0, "no corner may slope toward an occluding bank");
+        // The whole sky above the pool is open air, so every top-surface cell's
+        // `shouldRenderBackwardUpFace` ring is all-air too: each of the 8x8
+        // level quads gets a back copy (128), matching vanilla's own open-lake
+        // behaviour rather than a single-sided sheet.
         assert_eq!(
-            level, 64,
-            "exactly the 8x8 top surface of the pool's topmost layer"
+            level, 128,
+            "the 8x8 top surface of the pool's topmost layer, front+back"
         );
 
         // Negative control, executed: the pre-fix occlusion answer for a
@@ -1584,6 +1686,112 @@ mod tests {
             "control must reproduce the bug: a non-occluding bank has to yield side \
              faces ({bad_vertical}) and sloped rim quads ({bad_sloped}); if it does not, \
              this gate cannot see the defect it exists to catch"
+        );
+    }
+
+    // --- Known-gap closures: up-face culling, overlay, back faces ----------
+
+    /// Gap: "the up face is not culled by a solid block above" (vanilla draws
+    /// it). `isFaceOccludedByState`'s `direction != UP || height == 1.0F` only
+    /// culls the top face for a *full* solid neighbour when every corner is
+    /// already `1.0` — never true for a plain source surrounded by open air on
+    /// its sides, whose corners sit at `8/9`. So water directly under a solid
+    /// ceiling must still draw its top surface into the `1/9` gap.
+    #[test]
+    fn water_under_a_solid_ceiling_still_draws_its_top_surface() {
+        let mut v = FakeFluidView::default();
+        v.water(8, 8, 8, FluidState::source());
+        v.solid(8, 9, 8); // ceiling directly above
+        let m = mesh_fluids(&v);
+
+        let has_up = m.water.vertices.chunks(4).any(|q| {
+            let ys: Vec<f32> = q.iter().map(|vx| vx.position[1]).collect();
+            ys.iter().all(|y| (y - ys[0]).abs() < 1e-6) && ys[0] > 8.5
+        });
+        assert!(
+            has_up,
+            "a solid block directly above must not cull the fluid's top surface \
+             — vanilla only culls it when every corner height is already 1.0"
+        );
+
+        // Executed negative control: the pre-fix rule (cull whenever the
+        // neighbour occludes, regardless of corner height) must fail this same
+        // assertion — it is exactly the divergence this test exists to catch.
+        let same = |dx: i32, dy: i32, dz: i32| {
+            matches!(v.fluid_at(8 + dx, 8 + dy, 8 + dz), Some(f) if f.kind == FluidKind::Water)
+        };
+        let pre_fix_up_emitted = !same(0, 1, 0) && !v.occludes_at(8, 9, 8);
+        assert!(
+            !pre_fix_up_emitted,
+            "control premise: the pre-fix whole-occludes rule must in fact cull \
+             this face, or this test cannot distinguish the fix from a no-op"
+        );
+    }
+
+    /// Gap: "no `water_overlay` material for glass/ice/leaves neighbours" —
+    /// `mesh_fluids` must route a side face against an `overlay_at` neighbour
+    /// onto the overlay sprite, and per vanilla's `addBackFace = !isOverlay`,
+    /// must not emit that face's back copy.
+    #[test]
+    fn side_face_against_an_overlay_neighbor_uses_the_overlay_sprite_and_has_no_back_face() {
+        let mut v = FakeFluidView::default().with_overlay_material();
+        v.water(8, 8, 8, FluidState::source());
+        v.overlay(8, 8, 7); // north neighbour is glass/ice/leaves-like
+        let m = mesh_fluids(&v);
+
+        // North is a vertical quad (side face); with an overlay neighbour it
+        // must appear exactly once (no reversed back copy).
+        let north_quads: Vec<_> = m
+            .water
+            .vertices
+            .chunks(4)
+            .filter(|q| {
+                let ys: Vec<f32> = q.iter().map(|vx| vx.position[1]).collect();
+                let (lo, hi) = ys
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
+                hi - lo > 0.5 && q.iter().all(|vx| (vx.position[2] - 8.0).abs() < 0.01)
+            })
+            .collect();
+        assert_eq!(
+            north_quads.len(),
+            1,
+            "an overlay side face must have no back copy (addBackFace = !isOverlay)"
+        );
+        // The overlay sprite (from FakeFluidView) is the [0.25,0.25]..[0.75,0.75]
+        // rect; a plain flow face would sample the [0,0]..[1,1] unit rect
+        // instead, so every UV must land strictly inside the overlay rect.
+        assert!(
+            north_quads[0]
+                .iter()
+                .all(|vx| vx.uv[0] >= 0.25 && vx.uv[0] <= 0.75),
+            "overlay side face must sample the overlay sprite, not flow"
+        );
+    }
+
+    /// Same neighbourhood, but the view reports no overlay material at all
+    /// (`with_overlay_material` not called) — matching lava, which has none in
+    /// vanilla. The `overlay_at` flag must be ignored and the back face
+    /// restored, proving `bake_fluid`'s `overlay: Option<SpriteUv>` gate (not
+    /// just `SideOverlay`) is what the mesher actually threads through.
+    #[test]
+    fn overlay_flag_without_an_overlay_material_falls_back_to_flow_with_a_back_face() {
+        let mut v = FakeFluidView::default(); // no with_overlay_material()
+        v.water(8, 8, 8, FluidState::source());
+        v.overlay(8, 8, 7);
+        let m = mesh_fluids(&v);
+
+        let north_quads = m.water.vertices.chunks(4).filter(|q| {
+            let ys: Vec<f32> = q.iter().map(|vx| vx.position[1]).collect();
+            let (lo, hi) = ys
+                .iter()
+                .fold((f32::MAX, f32::MIN), |(l, h), &y| (l.min(y), h.max(y)));
+            hi - lo > 0.5 && q.iter().all(|vx| (vx.position[2] - 8.0).abs() < 0.01)
+        });
+        assert_eq!(
+            north_quads.count(),
+            2,
+            "no overlay sprite resolved (lava-like): back face must be restored"
         );
     }
 }

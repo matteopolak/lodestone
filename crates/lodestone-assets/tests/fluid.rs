@@ -148,7 +148,7 @@ fn none() -> FlowNeighbor {
 }
 
 use lodestone_assets::Direction;
-use lodestone_assets::fluid::{FaceSet, FluidGeometry, SpriteUv, bake_fluid};
+use lodestone_assets::fluid::{FaceSet, FluidGeometry, SideOverlay, SpriteUv, bake_fluid};
 
 fn uv(a: f32, b: f32, c: f32, d: f32) -> SpriteUv {
     SpriteUv {
@@ -172,19 +172,51 @@ fn baked_top_face_carries_corner_heights_and_tint() {
             west: false,
         },
         tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
     };
-    let quads = bake_fluid(&geom, uv(0.0, 0.0, 0.5, 0.5), uv(0.5, 0.0, 1.0, 0.5));
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 0.5, 0.5), uv(0.5, 0.0, 1.0, 0.5), None);
     assert_eq!(quads.len(), 1);
     let top = &quads[0];
     assert_eq!(top.direction, Direction::Up);
     assert_eq!(top.tint_index, Some(0));
-    // Vanilla winding NW, SW, SE, NE. corners = [nw, ne, se, sw].
-    assert_eq!(top.positions[0], [0.0, SOURCE, 0.0]); // NW
-    assert_eq!(top.positions[1], [0.0, 0.5, 1.0]); // SW
-    assert_eq!(top.positions[2], [1.0, 0.5, 1.0]); // SE
-    assert_eq!(top.positions[3], [1.0, SOURCE, 0.0]); // NE
+    // Vanilla winding NW, SW, SE, NE. corners = [nw, ne, se, sw]. The top face
+    // draws, so vanilla's `~0.001` z-fight inset pulls every corner down.
+    const EPS: f32 = 0.001;
+    assert_eq!(top.positions[0], [0.0, SOURCE - EPS, 0.0]); // NW
+    assert_eq!(top.positions[1], [0.0, 0.5 - EPS, 1.0]); // SW
+    assert_eq!(top.positions[2], [1.0, 0.5 - EPS, 1.0]); // SE
+    assert_eq!(top.positions[3], [1.0, SOURCE - EPS, 0.0]); // NE
     // Still surface → UVs from the still sprite rect (SE corner is 0.5,0.5).
     assert_eq!(top.uvs[2], [0.5, 0.5]);
+}
+
+#[test]
+fn top_face_gets_no_inset_when_not_drawn_and_sides_read_the_uninset_height() {
+    // The `~0.001` corner inset only happens inside vanilla's `if (renderUp &&
+    // !occluded)` block — so a side face drawn *without* the top face (e.g. the
+    // top is occluded by a solid block) must use the raw, un-inset corner
+    // height, not the top face's adjusted one.
+    let geom = FluidGeometry {
+        corners: [SOURCE; 4],
+        flow: [0.0, 0.0],
+        faces: FaceSet {
+            up: false,
+            down: false,
+            north: true,
+            south: false,
+            east: false,
+            west: false,
+        },
+        tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
+    };
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    // North without the top face still emits front + back (flow, not overlay).
+    assert_eq!(quads.len(), 2);
+    let front = &quads[0];
+    assert_eq!(front.positions[0][1], SOURCE, "uninset height on the side face");
 }
 
 #[test]
@@ -203,8 +235,10 @@ fn flowing_top_face_uses_flow_sprite() {
             west: false,
         },
         tint_index: None,
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
     };
-    let quads = bake_fluid(&geom, still, flow);
+    let quads = bake_fluid(&geom, still, flow, None);
     // Every top UV should land inside the flow sprite's U range [0.5, 1.0].
     for [u, _] in quads[0].uvs {
         assert!((0.5..=1.0).contains(&u), "flow UV u={u} out of flow sprite");
@@ -213,26 +247,36 @@ fn flowing_top_face_uses_flow_sprite() {
 
 #[test]
 fn full_cell_emits_six_faces_no_cullface() {
+    // No back-up-face and no overlay: the top and bottom stay single-sided, but
+    // each of the four sides gets a reversed back copy (`addBackFace` is
+    // unconditional for a non-overlay side face) — 1 + 1 + 4*2 = 10.
     let geom = FluidGeometry {
         corners: [1.0; 4],
         flow: [0.0, 0.0],
         faces: FaceSet::default(),
         tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
     };
-    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0));
-    assert_eq!(quads.len(), 6);
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    assert_eq!(quads.len(), 10);
     // Fluids are culled by the mesher via FaceSet, so no quad carries a cullface.
     assert!(quads.iter().all(|q| q.cullface.is_none()));
-    // All six geometric directions are present exactly once.
-    for dir in [
-        Direction::Up,
-        Direction::Down,
-        Direction::North,
-        Direction::South,
-        Direction::East,
-        Direction::West,
+    // Up and down are single-sided; each horizontal direction appears twice
+    // (front + back).
+    for (dir, want) in [
+        (Direction::Up, 1),
+        (Direction::Down, 1),
+        (Direction::North, 2),
+        (Direction::South, 2),
+        (Direction::East, 2),
+        (Direction::West, 2),
     ] {
-        assert_eq!(quads.iter().filter(|q| q.direction == dir).count(), 1);
+        assert_eq!(
+            quads.iter().filter(|q| q.direction == dir).count(),
+            want,
+            "direction {dir:?}"
+        );
     }
 }
 
@@ -251,10 +295,13 @@ fn side_face_uses_left_half_of_flow_texture() {
             west: false,
         },
         tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
     };
     // Flow sprite occupies full [0,1] rect so at(u,v) == (u,v).
-    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0));
-    assert_eq!(quads.len(), 1);
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    // Front + reversed back copy (no overlay material supplied).
+    assert_eq!(quads.len(), 2);
     let side = &quads[0];
     // u only reaches 0.5 (left half); v spans (1-h)*0.5 .. 0.5.
     for [u, _] in side.uvs {
@@ -264,4 +311,138 @@ fn side_face_uses_left_half_of_flow_texture() {
     let top_v = (1.0 - SOURCE) * 0.5;
     assert!((side.uvs[0][1] - top_v).abs() < 1e-6);
     assert!((side.uvs[2][1] - 0.5).abs() < 1e-6);
+
+    // The back copy is the reversed winding [0,3,2,1] with matching UVs, and
+    // both quads' bottom edge sits flush at y=0 (the bottom face is culled, so
+    // `bottom_offs` stays 0 per vanilla's `renderDown ? 0.001 : 0.0`).
+    let back = &quads[1];
+    assert_eq!(back.positions[0], side.positions[0]);
+    assert_eq!(back.positions[1], side.positions[3]);
+    assert_eq!(back.positions[2], side.positions[2]);
+    assert_eq!(back.positions[3], side.positions[1]);
+    assert_eq!(side.positions[2][1], 0.0, "bottom face culled: flush at y=0");
+}
+
+#[test]
+fn overlay_side_face_is_single_sided_and_samples_the_overlay_sprite() {
+    // A side face against glass/ice/leaves uses `water_overlay` and omits its
+    // back copy (`addBackFace = !isOverlay`), matching `FluidRenderer.tesselate`.
+    let flow = uv(0.0, 0.0, 0.5, 0.5); // distinguishable ranges so a test bug
+    let overlay = uv(0.5, 0.5, 1.0, 1.0); // would show up as a wrong-sprite UV
+    let geom = FluidGeometry {
+        corners: [SOURCE; 4],
+        flow: [0.0, 0.0],
+        faces: FaceSet {
+            up: false,
+            down: false,
+            north: true,
+            south: false,
+            east: false,
+            west: false,
+        },
+        tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay {
+            north: true,
+            ..SideOverlay::default()
+        },
+    };
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), flow, Some(overlay));
+    assert_eq!(quads.len(), 1, "overlay side face has no back copy");
+    for [u, v] in quads[0].uvs {
+        assert!(
+            (0.5..=1.0).contains(&u) && (0.5..=1.0).contains(&v),
+            "overlay UV ({u}, {v}) should land in the overlay sprite's rect, not flow's"
+        );
+    }
+}
+
+#[test]
+fn overlay_is_ignored_without_an_overlay_sprite() {
+    // Lava has no overlay material in vanilla: even if the mesher flagged a
+    // side as an overlay neighbour, `bake_fluid` must fall back to `flow` and
+    // keep the back face, because `overlay` is `None`.
+    let geom = FluidGeometry {
+        corners: [SOURCE; 4],
+        flow: [0.0, 0.0],
+        faces: FaceSet {
+            up: false,
+            down: false,
+            north: true,
+            south: false,
+            east: false,
+            west: false,
+        },
+        tint_index: None,
+        back_up_face: false,
+        side_overlay: SideOverlay {
+            north: true,
+            ..SideOverlay::default()
+        },
+    };
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    assert_eq!(quads.len(), 2, "no overlay sprite supplied: back face restored");
+}
+
+#[test]
+fn bottom_face_and_side_base_lift_together_when_both_drawn() {
+    // `bottomOffs = renderDown ? 0.001F : 0.0F` is shared: when the bottom face
+    // draws, both it *and* every side face's bottom edge sit at y=0.001, so the
+    // two don't z-fight against each other.
+    let geom = FluidGeometry {
+        corners: [SOURCE; 4],
+        flow: [0.0, 0.0],
+        faces: FaceSet {
+            up: false,
+            down: true,
+            north: true,
+            south: false,
+            east: false,
+            west: false,
+        },
+        tint_index: Some(0),
+        back_up_face: false,
+        side_overlay: SideOverlay::default(),
+    };
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    // down (1) + north front/back (2).
+    assert_eq!(quads.len(), 3);
+    let down = quads.iter().find(|q| q.direction == Direction::Down).unwrap();
+    assert!(
+        down.positions.iter().all(|p| (p[1] - 0.001).abs() < 1e-7),
+        "bottom face lifted by the z-fight inset"
+    );
+    let side = quads.iter().find(|q| q.direction == Direction::North).unwrap();
+    assert!(
+        (side.positions[2][1] - 0.001).abs() < 1e-7,
+        "side face's bottom edge lifted to match the bottom face"
+    );
+}
+
+#[test]
+fn top_face_back_copy_is_reversed_winding() {
+    let geom = FluidGeometry {
+        corners: [SOURCE; 4],
+        flow: [0.0, 0.0],
+        faces: FaceSet {
+            up: true,
+            down: false,
+            north: false,
+            south: false,
+            east: false,
+            west: false,
+        },
+        tint_index: Some(0),
+        back_up_face: true,
+        side_overlay: SideOverlay::default(),
+    };
+    let quads = bake_fluid(&geom, uv(0.0, 0.0, 1.0, 1.0), uv(0.0, 0.0, 1.0, 1.0), None);
+    assert_eq!(quads.len(), 2, "shouldRenderBackwardUpFace true: front + back");
+    let (front, back) = (&quads[0], &quads[1]);
+    assert_eq!(back.positions, [
+        front.positions[0],
+        front.positions[3],
+        front.positions[2],
+        front.positions[1],
+    ]);
 }

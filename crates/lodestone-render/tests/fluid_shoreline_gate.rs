@@ -186,8 +186,12 @@ fn a_grass_banked_pond_draws_no_flowing_side_faces() {
          would draw the flowing-water sprite at the shoreline (the reported bug). The \
          pre-fix control on this same scene emits {bad_vertical}"
     );
+    // The whole sky above the pond is open air, so every top-surface cell's
+    // `shouldRenderBackwardUpFace` (issue #18 gap 4, closed) ring is all-air:
+    // each of the 64 level quads gets a back copy, matching vanilla's own
+    // open-water behaviour rather than a single-sided sheet.
     assert_eq!(
-        level, 64,
-        "the pond must still render its 8x8 top surface, flat: {level} level quads"
+        level, 128,
+        "the pond must still render its 8x8 top surface, flat, front+back: {level} level quads"
     );
 }
