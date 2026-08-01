@@ -92,7 +92,8 @@ this is deliberately unwired rather than approximated. Purely cosmetic.
 **Deliberate sky omissions, so nobody reads them as bugs:** clouds are vanilla's
 flat "fast" mode, not the 3-D voxel-extruded fancy mode; there is no
 below-horizon dark disc; there is no per-biome sky tint (#96 — see below for the
-exact blocker); and the star field uses splitmix64 rather than Java's RNG — same
+exact missing link, which is *not* the protocol gap an earlier revision recorded);
+and the star field uses splitmix64 rather than Java's RNG — same
 distribution shape, different exact positions, a visual choice and not a
 decode-parity claim.
 
@@ -268,7 +269,7 @@ the re-derivation, not a footnote to it.** What #96 actually still owed was:
 | 1 | horizon-to-zenith gradient, without banding | **done** |
 | 2 | sunrise/sunset horizon tint band | **done** |
 | 3 | void fog below the negative build limit | **done** |
-| 4 | per-biome sky tint | **open, blocked** — see below |
+| 4 | per-biome sky tint | **open** — no longer blocked on protocol; the gap is a 4-file plumbing chain, see below |
 
 ### Where vanilla's gradient actually comes from
 
@@ -384,31 +385,87 @@ gamma space, hence `fog::scale_gamma`.
 
 ### What is still open on #96, and exactly why
 
-**Per-biome sky tint is blocked on protocol work, not on rendering work.** In
-26.2 a biome carries `"attributes": {"minecraft:visual/sky_color": "#78a7ff"}`
-(and the overworld values are tightly clustered around that, with `pale_garden`'s
-`#b9b9b9` the dramatic outlier). Reaching it at runtime needs three hops this
-client does not have:
+**Per-biome sky tint is still open — but the reason recorded above was stale
+within the hour, and the real blocker is one seam further on.** In 26.2 a biome
+carries `"attributes": {"minecraft:visual/sky_color": "#78a7ff"}`.
 
-1. Biomes are a **datapack registry**, so they have no static protocol ids —
-   `generated/reports/registries.json` has `worldgen/biome_source` but no
-   `worldgen/biome`. The numeric ids are assigned by the server and sent in the
-   configuration-phase `registry_data` packet, which this client decodes only as
-   a packet id (`crates/protocol/v770/src/generated/packet_ids.rs`); there is no
-   runtime registry parse.
-2. The standing biome then has to come from the chunk section's biome palette.
-   The data is already there (`lodestone_world::Section::biome_at_block`), but
-   **nothing in the shell calls it** — `lodestone-assets`' `BiomeTint` seam has
-   no consumer either.
-3. Only then can `SkyFrame::day_sky_color` be fed a real biome colour instead of
-   the flat sky constant.
+The paragraph this replaces said biome ids arrive in `registry_data`, "which this
+client decodes only as a packet id … there is no runtime registry parse". That
+was true and evidenced when written. **#288 landed the `registry_data` ingest
+about an hour later** (harvested into `a19e5e4`, whose message describes chests),
+so it is false now. This is `CLAUDE.md` rule 2 in its purest form: nothing about
+the claim looked wrong on inspection, and a re-read of the file it cited would
+have confirmed it, because the thing that changed lives in a different file.
 
-The *composition* half is done and pinned: `SkyFrame` documents the field,
-and `sunrise_sunset_timeline.rs`'s fourth column checks
-`ARGB.multiply(plains #78a7ff, sky_color_track)` against the JVM at every tick,
-so the gamma-space arithmetic the biome path will need is already proven. What is
-missing is a biome id to look up. Deliberately **not** landed as a table with no
-caller — that is the island shape `CLAUDE.md` rule 1 is about.
+Re-verified end to end, by grepping the *producer* across the whole tree rather
+than a named consumer file:
+
+| link | state | evidence |
+|---|---|---|
+| wire → decode | **wired** | `packets/registry.rs` decodes `RegistryData`; biome arrives as `minecraft:worldgen/biome`, **not** `minecraft:biome` |
+| decode → ordered names | **wired** | `ClientRegistries::apply` keeps entry names in registry order (index `i` = holder id `i`) in its `other` map |
+| names → readable | **wired** | `ClientRegistries::entry_names(registry)` |
+| names → version-free seam | **MISSING** | `entry_names` has **no caller outside `registry.rs`'s own unit tests** (whole-tree grep, unfiltered: 5 hits, 4 in that file, 1 an unrelated `fog.rs` doc comment). Neither `ClientEvent::Login` (`entity_id`, `game_mode`, `dimension`) nor `ClientEvent::DimensionTypeChanged` carries them, so the `Vec<String>` stays inside the adapter's `Mutex<ClientRegistries>`. `grep -c biome` on `lodestone-model/src/event.rs` is 5, all prose |
+| biome id at the camera | **wired** | chunk decode fills the biome container (`PaletteKind::biomes()`), `ChunkSection::biome_at_block` floors a block coord into its 4×4×4 cell, `World::section` is public and the shell already calls it to mesh |
+| id → colour table | absent | no data yet; deliberately not built, see below |
+| colour → draw | **wired** | `SkyFrame::day_sky_color`, fed at `gpu.rs`'s sky block from `self.clear` |
+
+So **both ends are built and the join is missing**, and the ids cannot be
+hardcoded around it: a data pack reorders the registry, which is exactly why
+#288's own doc says never to assume a holder id.
+
+#### The smallest patch
+
+Four edits, mirroring how `dimension_type` was plumbed in #288:
+
+1. `lodestone-model/src/event.rs` — carry the ordered names on `ClientEvent::Login`
+   beside `dimension_type` (`Login` is the right carrier: re-entering
+   configuration resends the registries and is followed by a fresh `Login`).
+2. `protocol/v770/src/adapter.rs` — at the `ClientEvent::Login` construction,
+   read `entry_names("minecraft:worldgen/biome")` and pass it.
+3. `lodestone-ecs/src/session.rs` + `lodestone-client/src/state.rs` — land it in a
+   resource beside `ServerDimensionType` and surface it on the snapshot.
+4. `lodestone-shell/src/gpu.rs` — resolve camera → biome id → name → colour and
+   feed `day_sky_color` instead of `self.clear`.
+
+Note that hop 4 lands in `gpu.rs` and hops 1 and 3 in shared files, which is why
+this was not landed by the sky work: no part of it is in the sky renderer.
+
+The *composition* half is done and pinned: `sunrise_sunset_timeline.rs`'s fourth
+column checks `ARGB.multiply(plains #78a7ff, sky_color_track)` against the JVM at
+every tick, so the gamma-space arithmetic the biome path needs is already proven.
+The colour table is deliberately **not** landed ahead of its caller — that is the
+island shape `CLAUDE.md` rule 1 is about, and it would be the fourteenth.
+
+#### A measured warning for whoever gates it
+
+Surveyed all 66 files in
+`.cache/mc/26.2/client-src/data/minecraft/worldgen/biome` by parsing each one
+(not by grepping): 56 declare `minecraft:visual/sky_color` and they hold only
+**16 distinct values**. The 10 without it are exactly the Nether and End biomes,
+which is consistent — the Nether's `"skybox": "none"` means fog alone is correct
+there. No file uses the pre-26.2 `effects.sky_color` integer form; the key moved
+into `attributes` and is a hex string.
+
+The overworld spread is genuinely slight, and blue is a constant `0xff`:
+
+| value | count | examples |
+|---|---|---|
+| `#6eb1ff` | 7 | desert, savanna, badlands |
+| `#7ba4ff` | 13 | ocean, river, meadow, lush_caves |
+| `#78a7ff` | 8 | **plains, swamp**, beach, deep_dark |
+| `#859dff` | 2 | frozen_peaks, jagged_peaks |
+| `#b9b9b9` | 1 | **pale_garden** — the one dramatic outlier, a desaturated grey |
+
+**`plains` and `swamp` are byte-identical.** A "plains versus swamp"
+discriminator — the obvious pick, and the one this task was briefed with — is
+vacuous by construction: it would pass unchanged against the hardcoded constant
+the feature is meant to replace. It is the *world* species of vacuous test from
+`CLAUDE.md`'s table, where the flaw is in the input data and cannot be found by
+reading the test. Gate `pale_garden` (`#b9b9b9`) against `desert` (`#6eb1ff`) for
+a difference no constant can fake, and add `desert` against `frozen_peaks`
+(`#859dff`, ΔR 23 / ΔG 20) to prove the gate resolves a *slight* difference too —
+otherwise it only ever proves grey is not blue.
 
 Also still open: the below-horizon dark disc, and void fog's `min_y`/`onset_range`
 come from `VoidFog::OVERWORLD` (`-64`/`32.0`) rather than the real dimension

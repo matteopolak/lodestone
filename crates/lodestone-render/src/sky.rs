@@ -18,16 +18,21 @@
 //! (`docs/time-of-day-lighting.md`) — there is deliberately no second clock,
 //! no tick counter, and no wall-clock read anywhere in this module.
 //!
-//! # Two formulas are intentionally duplicated from `entity.rs`, not imported
+//! # One formula is duplicated from `entity.rs`, not imported — and it is now one, not two
 //!
-//! [`celestial_angle_for_time_of_day`] and the private `sky_darken_shape` this
-//! module also needs are the *same* vanilla `celestialAngle`/`getSkyDarken`
-//! math [`crate::entity::sky_darken_for_time_of_day`] already computes as a
-//! private intermediate — but `entity.rs` is a held file outside this change's
-//! scope, so this is a second, independently-written copy rather than an
-//! import. If either formula changes, the other copy must change with it, or
-//! the sun's screen position and the lightmap's darken factor will visibly
-//! disagree about what time it is.
+//! [`celestial_angle_for_time_of_day`] is the *same* vanilla `celestialAngle`
+//! math [`crate::entity::sky_darken_for_time_of_day`] computes as a private
+//! intermediate — but `entity.rs` was a held file outside this change's scope,
+//! so this is a second, independently-written copy rather than an import. If
+//! either copy changes, the other must change with it, or the sun's screen
+//! position and the lightmap's darken factor will visibly disagree about what
+//! time it is.
+//!
+//! This heading used to say **two** formulas, naming a private `sky_darken_shape`
+//! alongside it. That function was deleted (see the section below) and the count
+//! was not updated with it, leaving a rustdoc link to a nonexistent item three
+//! hundred lines away — invisible to every `cargo check`, since none of them
+//! compile documentation.
 //!
 //! # Which formulas here are timeline-exact and which are still 1.21's (#49)
 //!
@@ -359,9 +364,11 @@ pub fn fog_color_for_time_of_day(time_of_day: i64, day_fog: [f32; 3]) -> [f32; 3
 }
 
 /// Vanilla's legacy `getStarBrightness`: `0.0` for most of the day, ramping up
-/// around dusk to a `0.5` plateau at night. Ported literally (not re-derived
-/// from [`sky_darken_shape`]'s different constants) since it is vanilla's own
-/// distinct formula.
+/// around dusk to a `0.5` plateau at night. Ported literally rather than
+/// re-derived from the sky-darken curve's different constants, since it is
+/// vanilla's own distinct formula — and note that curve is now the timeline port
+/// in [`crate::entity::sky_darken_for_time_of_day`], not the cosine this
+/// sentence used to link to.
 #[must_use]
 pub fn star_brightness_for_time_of_day(time_of_day: i64) -> f32 {
     let angle = celestial_angle_for_time_of_day(time_of_day);
