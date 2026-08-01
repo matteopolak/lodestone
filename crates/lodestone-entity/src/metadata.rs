@@ -261,6 +261,88 @@ impl SharedEntityFlags {
     }
 }
 
+/// Which hand an entity is using an item with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UsedHand {
+    /// The entity's main hand (right for a right-handed humanoid).
+    #[default]
+    Main,
+    /// The entity's off hand.
+    Off,
+}
+
+/// The bit meanings inside the **living-entity** flags byte — a different byte
+/// from [`SharedEntityFlags`], carried at a different metadata index, and the one
+/// that says an entity is *using* an item (drawing a bow, charging a crossbow,
+/// eating, blocking).
+///
+/// # Why this is not folded into [`SharedEntityFlags`]
+///
+/// They are two distinct synced fields. Vanilla's base `Entity` defines the
+/// shared-flags byte; `LivingEntity` defines a second byte of its own, and only
+/// living entities have it. Merging them would mean inventing an index that does
+/// not exist and would make `on_fire()` and `using_item()` readable off the same
+/// value, which they are not.
+///
+/// # The absent field: how far the item is drawn
+///
+/// Bit 0 says an item is *in use*; it does **not** say for how long, and vanilla
+/// **does not sync `useItemRemaining` at all**. The client starts its own
+/// countdown when the bit flips on — `LivingEntity.onSyncedDataUpdated` sets
+/// `useItemRemaining = useItem.getUseDuration(this)` on the client side only —
+/// and decrements it locally each tick. So a consumer that wants a *draw
+/// fraction* must keep its own per-entity tick counter seeded from this bit's
+/// rising edge; there is no wire field to read it from, and waiting for one is
+/// waiting for a packet that is never sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LivingEntityFlags {
+    /// The raw byte value.
+    pub bits: u8,
+}
+
+impl LivingEntityFlags {
+    const USING_ITEM: u8 = 0x01;
+    const OFFHAND: u8 = 0x02;
+    const SPIN_ATTACK: u8 = 0x04;
+
+    /// Wraps a raw byte.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
+
+    /// Whether the entity is currently using (holding down) an item.
+    ///
+    /// `LivingEntity.isUsingItem` is `(flags & 1) > 0`.
+    #[must_use]
+    pub const fn using_item(self) -> bool {
+        self.bits & Self::USING_ITEM != 0
+    }
+
+    /// Which hand the item is being used with. Meaningful only while
+    /// [`using_item`](Self::using_item); vanilla's `getUsedItemHand` reads the bit
+    /// unconditionally, but the hand of an entity that is not using anything is
+    /// not a fact about anything.
+    #[must_use]
+    pub const fn used_hand(self) -> UsedHand {
+        if self.bits & Self::OFFHAND != 0 {
+            UsedHand::Off
+        } else {
+            UsedHand::Main
+        }
+    }
+
+    /// Whether the entity is in a riptide spin attack.
+    ///
+    /// This is `LivingEntity.isAutoSpinAttack` — `(flags & 4) != 0` — and is in
+    /// this byte rather than the pose enum, which also has a `SPIN_ATTACK` value.
+    /// The two are set together by vanilla but are separate wire fields.
+    #[must_use]
+    pub const fn spin_attack(self) -> bool {
+        self.bits & Self::SPIN_ATTACK != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +401,31 @@ mod tests {
         assert_eq!(MetadataValue::Float(1.5).as_float(), Some(1.5));
         assert_eq!(MetadataValue::Boolean(true).as_bool(), Some(true));
         assert_eq!(MetadataValue::String("x".into()).as_int(), None);
+    }
+
+    #[test]
+    fn living_flags_decode_each_bit_independently() {
+        assert!(LivingEntityFlags::from_bits(0x01).using_item());
+        assert!(!LivingEntityFlags::from_bits(0x00).using_item());
+        // The offhand bit alone does not imply "using": vanilla sets both, and a
+        // consumer must gate on `using_item`, not on the hand.
+        assert!(!LivingEntityFlags::from_bits(0x02).using_item());
+        assert_eq!(LivingEntityFlags::from_bits(0x01).used_hand(), UsedHand::Main);
+        assert_eq!(LivingEntityFlags::from_bits(0x03).used_hand(), UsedHand::Off);
+        assert!(LivingEntityFlags::from_bits(0x04).spin_attack());
+        assert!(!LivingEntityFlags::from_bits(0x03).spin_attack());
+    }
+
+    /// The two flag bytes are different fields and must not share an accessor:
+    /// bit 0 is `on fire` in one and `using item` in the other, so a byte read
+    /// through the wrong type is silently, plausibly wrong.
+    #[test]
+    fn the_two_flag_bytes_disagree_on_bit_zero() {
+        assert!(SharedEntityFlags::from_bits(0x01).on_fire());
+        assert!(LivingEntityFlags::from_bits(0x01).using_item());
+        // 0x02 is `crouching` in the shared byte and `offhand` in the living one.
+        assert!(SharedEntityFlags::from_bits(0x02).crouching());
+        assert_eq!(LivingEntityFlags::from_bits(0x02).used_hand(), UsedHand::Off);
     }
 
     #[test]

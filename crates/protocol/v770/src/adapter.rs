@@ -65,7 +65,7 @@ use crate::packets::login::{
     LoginFinished,
 };
 use crate::packets::metadata::{
-    MetadataClass, metadata_class, read_entity_metadata, read_update_attributes,
+    MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
 use crate::packets::registry::{ClientRegistries, DimensionType, RegistryData};
@@ -105,7 +105,7 @@ pub struct V770Adapter {
     /// @ 18). Only these ambiguous classes are stored, bounding the map to the
     /// mobs actually present; self-identifying registry-holder variants need no
     /// entry. Populated on `add_entity`, cleared on `remove_entities`.
-    variants: Arc<Mutex<HashMap<i32, MetadataClass>>>,
+    variants: Arc<Mutex<HashMap<i32, TrackedEntity>>>,
     /// The overworld day clock, held across packets because `set_time` mostly
     /// does **not** carry it. See [`DayClock`].
     clock: Arc<Mutex<DayClock>>,
@@ -1771,7 +1771,7 @@ fn handle_player_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
 /// crate's scope.
 fn handle_add_entity(
     payload: &[u8],
-    variants: &Mutex<HashMap<i32, MetadataClass>>,
+    variants: &Mutex<HashMap<i32, TrackedEntity>>,
 ) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let entity_id = reader.var_i32().map_err(dec_err)?;
@@ -1796,13 +1796,24 @@ fn handle_add_entity(
         ))
     })?;
 
-    // Remember the concrete type only for mobs whose variant index is ambiguous,
-    // so a later `set_entity_data` can disambiguate it. Everything else is left
-    // untracked; its variant (if any) resolves by serializer alone.
-    if let Some(class) = metadata_class(name)
+    // Remember the facts a later `set_entity_data` cannot recover from the wire:
+    // the concrete class for mobs whose variant index is ambiguous, and whether
+    // the type is a `LivingEntity` (which decides whether index 8's byte is a
+    // using-item bitfield or an arrow's crit flag — see `IDX_LIVING_FLAGS`).
+    // Types with neither fact stay out of the map, so it is still bounded to the
+    // mobs actually present rather than every entity in render distance.
+    //
+    // `is_living` returning `None` for an id outside the census means "we cannot
+    // establish it is living", which fails closed to `living: false`: a missing
+    // pose is a visible gap, a wrongly-decoded flags byte is a silent lie.
+    let tracked = TrackedEntity {
+        class: metadata_class(name),
+        living: lodestone_data::entity_census::is_living(type_id).unwrap_or(false),
+    };
+    if tracked.is_tracked()
         && let Ok(mut map) = variants.lock()
     {
-        map.insert(entity_id, class);
+        map.insert(entity_id, tracked);
     }
 
     Ok(vec![
@@ -1825,7 +1836,7 @@ fn handle_add_entity(
 /// event.
 fn handle_remove_entities(
     payload: &[u8],
-    variants: &Mutex<HashMap<i32, MetadataClass>>,
+    variants: &Mutex<HashMap<i32, TrackedEntity>>,
 ) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let count = reader.var_i32().map_err(dec_err)?;
@@ -2014,17 +2025,21 @@ fn handle_move_minecart_along_track(payload: &[u8]) -> Result<Vec<Directive>, Ad
 /// is applied incrementally, so a partial update is ordinary, not lossy.
 fn handle_set_entity_data(
     payload: &[u8],
-    variants: &Mutex<HashMap<i32, MetadataClass>>,
+    variants: &Mutex<HashMap<i32, TrackedEntity>>,
 ) -> Vec<Directive> {
     let mut reader = Reader::new(payload);
     let Ok(entity_id) = reader.var_i32() else {
         return Vec::new();
     };
-    let class = variants
+    // An id with no entry is an entity we chose not to track, which means it is
+    // neither an ambiguous-variant mob nor a `LivingEntity` — so the default's
+    // `living: false` is the right answer for it, not a lost fact.
+    let tracked = variants
         .lock()
         .ok()
-        .and_then(|map| map.get(&entity_id).copied());
-    match read_entity_metadata(&mut reader, class) {
+        .and_then(|map| map.get(&entity_id).copied())
+        .unwrap_or_default();
+    match read_entity_metadata(&mut reader, tracked.class, tracked.living) {
         // `complete == false` short-circuits the trailing-bytes check: the
         // reader is deliberately parked mid-payload there.
         Ok(decoded)

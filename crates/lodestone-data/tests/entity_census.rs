@@ -340,6 +340,33 @@ fn generate(rows: &[Row]) -> String {
     }
     out.push_str("];\n");
 
+    // The raw `living` column, shipped unreduced. It is a *different* fact from
+    // `ENTITY_PUSHES_PLAYERS` above and cannot be recovered from it: `bat`,
+    // `armor_stand` and `parrot` are all `LivingEntity` subclasses that do not
+    // push (`tests` `the_three_living_types_that_cannot_reach_a_player_do_not_push`),
+    // so reading the push table as an is-living test gets those three wrong.
+    //
+    // Its consumer is metadata decode, not physics: `DATA_LIVING_ENTITY_FLAGS`
+    // sits at metadata index 8, and so does `AbstractArrow.ID_FLAGS` — both
+    // plain bytes, indistinguishable by serializer. A version adapter needs this
+    // to know whether an index-8 byte is a using-item bitfield or an arrow's
+    // crit flag (issue #57).
+    let _ = writeln!(
+        out,
+        "\n/// Whether this type's implementation class is a `LivingEntity`, by network\n\
+         /// registry id."
+    );
+    let _ = writeln!(out, "pub static ENTITY_IS_LIVING: [bool; {count}] = [");
+    for row in rows {
+        let literal = format!("{},", row.living);
+        let _ = writeln!(
+            out,
+            "    {literal:<7}// {} {} — {}",
+            row.id, row.name, row.impl_class
+        );
+    }
+    out.push_str("];\n");
+
     out
 }
 

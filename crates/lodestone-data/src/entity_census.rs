@@ -77,8 +77,36 @@
 //! network entity-type registry id — the same id space as [`crate::entity_types`]
 //! and [`crate::entity_dimensions`].
 
-use crate::generated_entity_census::ENTITY_PUSHES_PLAYERS;
+use crate::generated_entity_census::{ENTITY_IS_LIVING, ENTITY_PUSHES_PLAYERS};
 pub use crate::generated_entity_census::TYPE_COUNT;
+
+/// Whether an entity of this network type id is a vanilla `LivingEntity`.
+///
+/// Returns `None` for ids outside `0..TYPE_COUNT`.
+///
+/// # This is not [`pushes_players`] and must not be derived from it
+///
+/// The push census is a *reduction* of this column plus two override sites, and
+/// three living types reduce to `false`: `bat`, `parrot` and `armor_stand`.
+/// Reading the push table as an is-living test therefore misclassifies exactly
+/// the entities whose arm poses matter (an armour stand holds items).
+///
+/// # Why a consumer wants it: metadata index 8 is ambiguous
+///
+/// `LivingEntity.DATA_LIVING_ENTITY_FLAGS` (the using-item bitfield behind a bow
+/// draw, issue #57) is assigned metadata index 8 by `SynchedEntityData.defineId`'s
+/// declaration-order counter — and `AbstractArrow`'s own flags byte lands at the
+/// same index on a non-living entity. Both are `EntityDataSerializers.BYTE`, so
+/// the wire cannot tell them apart and a decoder that surfaced every index-8 byte
+/// as "living flags" would read an arrow's crit bit as "this arrow is drawing a
+/// bow". The disambiguation needs the entity's concrete *type*, which is what
+/// this table supplies.
+#[must_use]
+pub fn is_living(id: i32) -> Option<bool> {
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| ENTITY_IS_LIVING.get(index).copied())
+}
 
 /// Whether an entity of this network type id can shove the local player through
 /// vanilla `LivingEntity.pushEntities()`.

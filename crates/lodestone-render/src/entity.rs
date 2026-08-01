@@ -2578,6 +2578,7 @@ mod tests {
                 attack_anim: 0.4,
                 age_ticks: 42.0,
                 aggressive: false,
+                ..AnimInput::REST
             })
             .expect("zombie resolves");
         let mesh = models.get("zombie").expect("zombie mesh");
@@ -3934,6 +3935,7 @@ mod tests {
                 attack_anim: 0.0,
                 age_ticks: 40.0,
                 aggressive: false,
+                ..AnimInput::REST
             };
             let instance =
                 EntityInstance::new(name, &mesh, Vec3::new(1.0, 0.0, 2.0), 37.0, 1.0, &anim);

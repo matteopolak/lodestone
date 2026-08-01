@@ -238,6 +238,80 @@ impl AttackSwing {
     }
 }
 
+/// How long an entity has been *using* an item, and with which hand — the state
+/// behind a bow draw or a crossbow wind (issue #57).
+///
+/// # The server does not send the counter, so we keep our own
+///
+/// `LivingEntity`'s synced flags byte carries only a **boolean**: bit 0 is "an
+/// item is in use", bit 1 is which hand. `useItemRemaining` is *never* synced.
+/// Vanilla's own client does exactly what this type does — `onSyncedDataUpdated`
+/// (`LivingEntity.java:3521-3529`) seeds its countdown the moment the bit flips
+/// on, and ticks it locally.
+///
+/// # Counting up, not down
+///
+/// Vanilla counts `useItemRemaining` **down** from `getUseDuration`, then derives
+/// `getTicksUsingItem() = duration - remaining` (`LivingEntity.java:3594`) — and
+/// `getTicksUsingItem` is what every pose and every draw-power formula actually
+/// reads. So [`ticks`](Self::ticks) counts **up** from zero, which is that same
+/// quantity without needing `getUseDuration`. That matters: the duration is a
+/// per-item value (`72000` for a bow, so "remaining" would be a number no pose
+/// uses) and for a crossbow it depends on the Quick Charge enchantment level.
+/// Counting up removes an item-data lookup from the hot path *and* removes a
+/// whole class of "which duration did we assume" bug.
+///
+/// **Absent** until the first metadata packet mentioning the byte, like
+/// [`AttackSwing`] and [`HurtTime`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct ItemUse {
+    /// Whether an item is in use right now (`LivingEntity.isUsingItem`).
+    pub using: bool,
+    /// Whether the item is in the off hand (`getUsedItemHand() == OFF_HAND`).
+    /// Meaningless while `!using`.
+    pub off_hand: bool,
+    /// Ticks elapsed since the use began — vanilla's `getTicksUsingItem()`.
+    /// Held at `0` while `!using`.
+    pub ticks: u32,
+}
+
+impl ItemUse {
+    /// Folds a freshly-received living-entity flags byte in, preserving or
+    /// resetting [`ticks`](Self::ticks) as the *edge* dictates.
+    ///
+    /// # The whole point of this method is that a repeat is not an edge
+    ///
+    /// A server re-sends the same metadata byte freely — on entity re-track, on
+    /// any other field in the same packet changing, and every time the player
+    /// enters range. Resetting the counter on each packet would pin the draw at
+    /// zero and produce a bow that is permanently un-drawn while looking, from the
+    /// byte alone, perfectly correct. So the counter only resets on a **rising
+    /// edge** (`!was_using && now using`) or on the hand changing, which vanilla
+    /// treats the same way — `startUsingItem` is guarded by `!this.isUsingItem()`
+    /// (`LivingEntity.java:3500`).
+    pub fn apply_flags(&mut self, using: bool, off_hand: bool) {
+        let restart = (using && !self.using) || (using && off_hand != self.off_hand);
+        if restart {
+            self.ticks = 0;
+        }
+        if !using {
+            self.ticks = 0;
+        }
+        self.using = using;
+        self.off_hand = off_hand;
+    }
+
+    /// One tick's advance. Only counts while in use, and **saturates** rather
+    /// than wrapping: a bow's `getUseDuration` is `72000` ticks (an hour), so an
+    /// entity left holding one is a real, reachable input, and a `u32` wrap would
+    /// snap a fully-drawn bow back to slack.
+    pub fn tick(&mut self) {
+        if self.using {
+            self.ticks = self.ticks.saturating_add(1);
+        }
+    }
+}
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

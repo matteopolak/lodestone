@@ -119,7 +119,7 @@ pub use entity::{
     SheepWoolModelSet, WoolMesh, armour_layer_tint, armour_layers, entity_model_matrix,
     entity_texture_candidates, model_for_type, plan_entities,
 };
-pub use entity_anim::{AnimFamily, AnimInput, Skeleton};
+pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{
     EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel,
     HURT_OVERLAY_ALPHA_BYTE, InstanceTint, NO_TINT, entity_camera_buffer, upload_instances,

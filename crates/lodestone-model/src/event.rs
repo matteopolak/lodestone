@@ -315,6 +315,23 @@ pub struct EntityMetadataUpdate {
     /// / invisible / glowing / fall-flying), when present. Bit meanings are
     /// stable across modern versions.
     pub flags: Option<u8>,
+    /// The **living-entity** flags byte (using-item / which hand / spin attack),
+    /// when present and when the entity is known to be a living entity. Decode
+    /// through `lodestone_entity::metadata::LivingEntityFlags` (a downstream
+    /// crate, hence no intra-doc link) rather than by masking inline.
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// The byte's index collides with a *non*-living entity's own flags byte of
+    /// the same serializer (in 26.2, `AbstractArrow`'s crit/pierce bitfield sits
+    /// at the same index as `LivingEntity`'s), so the wire alone cannot say which
+    /// one arrived. A version adapter that cannot establish the entity is living
+    /// leaves this `None` rather than surfacing a byte that may mean something
+    /// else entirely — a critical arrow's crit bit is bit-identical to the
+    /// using-item bit. `None` therefore means "not known to be living flags",
+    /// which a consumer must treat as "not using an item", never as a cleared
+    /// bitfield.
+    pub living_flags: Option<u8>,
     /// The custom name. [`Reported::Unreported`] when this packet did not
     /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
     /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
@@ -366,6 +383,7 @@ impl EntityMetadataUpdate {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.flags.is_none()
+            && self.living_flags.is_none()
             && !self.custom_name.is_reported()
             && self.custom_name_visible.is_none()
             && self.pose.is_none()

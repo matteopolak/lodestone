@@ -352,6 +352,21 @@ pub struct AnimInput {
     /// non-aggressive branch is the pose a player sees on an idle or
     /// merely-walking zombie, and it is the one that was missing.
     pub aggressive: bool,
+    /// How the arms are held for the item in use, if any (issue #57).
+    ///
+    /// Vanilla's `HumanoidModel.ArmPose`, reduced to the poses this build
+    /// actually draws — see [`ArmPose`].
+    pub arm_pose: ArmPose,
+    /// Which hand holds the item [`arm_pose`](Self::arm_pose) describes.
+    ///
+    /// `false` is the main hand, which for every rig we draw is the right arm.
+    /// Vanilla threads this as `AnimationUtils`' `holdingInRightArm` and as
+    /// `HumanoidModel.setupAnim`'s `mainHandUsed == rightHanded` fork; it decides
+    /// which arm *holds* and which arm *pulls*, so getting it wrong mirrors the
+    /// pose rather than breaking it — a bow drawn with the wrong arm still looks
+    /// like a bow draw, which is why it is a named field rather than an
+    /// assumption.
+    pub arm_pose_left_hand: bool,
 }
 
 impl AnimInput {
@@ -364,7 +379,83 @@ impl AnimInput {
         attack_anim: 0.0,
         age_ticks: 0.0,
         aggressive: false,
+        arm_pose: ArmPose::Empty,
+        arm_pose_left_hand: false,
     };
+}
+
+/// How a humanoid rig holds its arms for the item it is using — vanilla's
+/// `HumanoidModel.ArmPose`, reduced to the cases this build draws.
+///
+/// # What is modelled, and what a variant means
+///
+/// Only the two-handed *ranged* poses, which are the ones issue #57 reported as
+/// missing. `Empty` is "leave the arms wherever the walk cycle and the attack
+/// swing put them" and is what every other item still gets — including a held
+/// sword, which vanilla poses with `ITEM` (`xRot * 0.5 - PI/10`). That is a real
+/// divergence and it is *deliberate*: `ITEM` needs to know only "is something in
+/// the hand", which the equipment set already says, so it is a separate, cheap
+/// follow-up rather than something to smuggle in behind a using-item bit that has
+/// nothing to do with it.
+///
+/// Also absent, each for the same reason — they need per-item state this build
+/// does not decode, and all of them are `Empty` today: `BLOCK` (shield, needs
+/// `minecraft:blocks_attacks`), `SPYGLASS`, `TOOT_HORN`, `BRUSH`,
+/// `THROW_TRIDENT` and `SPEAR`.
+///
+/// # Why the crossbow carries a fraction and the bow does not
+///
+/// The bow's arm pose is a *static* hold — vanilla's `BOW_AND_ARROW` arm is a
+/// function of head rotation alone, and the draw progress goes into the **item's**
+/// first-person transform, not the arms. The crossbow's `CROSSBOW_CHARGE` genuinely
+/// interpolates the pulling arm over the charge, so it needs the fraction.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ArmPose {
+    /// No item pose: the arms keep the walk/attack/idle result.
+    #[default]
+    Empty,
+    /// Drawing a bow (`ArmPose::BOW_AND_ARROW`). Both arms come up in front,
+    /// tracking the head.
+    BowAndArrow,
+    /// Winding a crossbow (`ArmPose::CROSSBOW_CHARGE`). The pulling arm rotates
+    /// further as the charge advances.
+    CrossbowCharge {
+        /// Charge fraction in `0..=1`, vanilla's
+        /// `clamp(ticksUsingItem, 0, maxCrossbowChargeDuration) /
+        /// maxCrossbowChargeDuration`.
+        ///
+        /// The **fraction** rather than `(ticks, duration)` on purpose: the
+        /// duration is `CrossbowItem.getChargeDuration`, which is
+        /// `25 - 5 * QuickCharge level`, and resolving an enchantment level needs
+        /// the enchantment registry. A caller with no enchantment data supplies
+        /// `ticks / 25.0`, which is exact for an unenchanted crossbow and merely
+        /// slow for an enchanted one; keeping that decision at the caller means
+        /// this function cannot silently assume level 0.
+        progress: f32,
+    },
+    /// Holding an already-charged crossbow (`ArmPose::CROSSBOW_HOLD`), which is
+    /// **not** an in-use pose: vanilla shows it whenever a charged crossbow is
+    /// held and the entity is not swinging, driven by the item's
+    /// `minecraft:charged_projectiles` component rather than by the using-item
+    /// bit.
+    CrossbowHold,
+}
+
+impl ArmPose {
+    /// Whether this pose occupies **both** arms, so the off hand's own pose is
+    /// suppressed (vanilla `ArmPose.isTwoHanded`).
+    ///
+    /// Every pose modelled here is two-handed, which is not a coincidence — the
+    /// ranged poses are exactly the ones that need a second arm — but it is
+    /// asserted rather than assumed because the one-handed poses listed in the
+    /// type docs will land here later.
+    #[must_use]
+    pub const fn is_two_handed(self) -> bool {
+        match self {
+            ArmPose::Empty => false,
+            ArmPose::BowAndArrow | ArmPose::CrossbowCharge { .. } | ArmPose::CrossbowHold => true,
+        }
+    }
 }
 
 /// One node of an animatable model: its name, its parent, and its authored pose.
@@ -760,6 +851,13 @@ impl Skeleton {
                 set_z_rot(poses, s.right_leg, 0.005);
                 set_z_rot(poses, s.left_leg, -0.005);
 
+                // Vanilla's ordering exactly: `setupAnim` poses the arms for the
+                // item *after* the walk swing and *before* `setupAttackAnimation`
+                // (`HumanoidModel.java:248-273`). It matters in both directions —
+                // the item pose must overwrite the walk swing (it assigns), and
+                // the attack swing must then be layered on top of it (it adds).
+                self.pose_arms_for_item(poses, input);
+
                 self.attack_anim(poses, input);
 
                 match self.arms {
@@ -843,6 +941,107 @@ impl Skeleton {
         bob(poses, s.left_arm, input.age_ticks, -1.0);
     }
 
+    /// `HumanoidModel.poseRightArm`/`poseLeftArm` for the ranged [`ArmPose`]s:
+    /// both arms come up to hold the weapon, tracking the head (issue #57).
+    ///
+    /// # These assign, they do not accumulate
+    ///
+    /// Vanilla writes `this.rightArm.xRot = …`, replacing whatever the walk cycle
+    /// put there — an item pose is a *position*, not an offset. So this uses
+    /// direct field assignment and **not** the `set_*_rot` helpers in this module,
+    /// which despite their names do `+=` (see their doc comment). Using them here
+    /// would leave the walk swing summed into the draw pose, making the bow hold
+    /// wobble with the legs.
+    ///
+    /// # It reads the head, so the head must already be posed
+    ///
+    /// Every branch is a function of `head.y_rot`/`head.x_rot`, which
+    /// [`Self::setup_anim`] writes before the family match. Reading it here rather
+    /// than re-deriving from `head_yaw_deg`/`head_pitch_deg` is deliberate: the
+    /// head pose is *added* to the model's authored rotation, so for a rig that
+    /// authors a non-zero head (hoglin, ender dragon) the two differ, and vanilla
+    /// reads the posed part.
+    ///
+    /// # A zombie rig deliberately loses this pose
+    ///
+    /// `HumanoidArms::Zombie` runs [`Self::animate_zombie_arms`] afterwards, which
+    /// *assigns* over both arms and so erases whatever happened here. That is
+    /// vanilla's behaviour, not a bug in the ordering: `AbstractZombieModel.setupAnim`
+    /// calls `super.setupAnim` and then `AnimationUtils.animateZombieArms`
+    /// unconditionally, so a bow-holding zombie keeps the arms-forward zombie pose
+    /// in vanilla too. Skeletons — the rig the issue was reported against — are
+    /// `HumanoidArms::Swinging` and do keep it.
+    fn pose_arms_for_item(&self, poses: &mut [PartPose], input: &AnimInput) {
+        let s = &self.slots;
+        let (Some(right), Some(left)) = (s.right_arm, s.left_arm) else {
+            return;
+        };
+        // `poseRightArm`/`poseLeftArm` differ only in which arm is treated as the
+        // holder; vanilla picks by `mainHandUsed == rightHanded`. Both branches of
+        // every modelled pose write both arms, so this resolves to one pair.
+        let holding_in_right = !input.arm_pose_left_hand;
+        let head_y_rot = s.head.map_or(0.0, |i| poses[i].y_rot);
+        let head_x_rot = s.head.map_or(0.0, |i| poses[i].x_rot);
+
+        match input.arm_pose {
+            ArmPose::Empty => {}
+
+            // `case BOW_AND_ARROW` (`HumanoidModel.java:353-357` for the right
+            // arm, `:398-402` for the left). Both arms take the *same* xRot; the
+            // two branches differ only in that the arm which is **not** holding
+            // splays a further 0.4 rad away. Written out rather than folded into
+            // one signed expression: the first attempt at that put the splay on
+            // the wrong arm for the left-handed case and still produced a
+            // plausible-looking bow draw, which is precisely the class of error a
+            // screenshot cannot catch.
+            ArmPose::BowAndArrow => {
+                let x_rot = -std::f32::consts::FRAC_PI_2 + head_x_rot;
+                if holding_in_right {
+                    poses[right].y_rot = -0.1 + head_y_rot;
+                    poses[left].y_rot = 0.1 + head_y_rot + 0.4;
+                } else {
+                    poses[right].y_rot = -0.1 + head_y_rot - 0.4;
+                    poses[left].y_rot = 0.1 + head_y_rot;
+                }
+                poses[right].x_rot = x_rot;
+                poses[left].x_rot = x_rot;
+            }
+
+            // `AnimationUtils.animateCrossbowCharge` (`AnimationUtils.java:20-32`).
+            // The holding arm is fixed; the pulling arm's yaw lerps 0.4 -> 0.85 and
+            // its pitch lerps toward -PI/2 as the charge advances. Note the holding
+            // arm does **not** track the head here — unlike the hold pose below —
+            // which is vanilla's asymmetry, not an omission.
+            ArmPose::CrossbowCharge { progress } => {
+                let (holding, pulling) = if holding_in_right {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                let sign = if holding_in_right { 1.0 } else { -1.0 };
+                let alpha = progress.clamp(0.0, 1.0);
+                poses[holding].y_rot = -0.8 * sign;
+                poses[holding].x_rot = -0.970_796_35;
+                poses[pulling].y_rot = lerp(alpha, 0.4, 0.85) * sign;
+                poses[pulling].x_rot = lerp(alpha, -0.970_796_35, -std::f32::consts::FRAC_PI_2);
+            }
+
+            // `AnimationUtils.animateCrossbowHold` (`AnimationUtils.java:11-18`).
+            ArmPose::CrossbowHold => {
+                let (holding, shooting) = if holding_in_right {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                let sign = if holding_in_right { 1.0 } else { -1.0 };
+                poses[holding].y_rot = -0.3 * sign + head_y_rot;
+                poses[shooting].y_rot = 0.6 * sign + head_y_rot;
+                poses[holding].x_rot = -std::f32::consts::FRAC_PI_2 + head_x_rot + 0.1;
+                poses[shooting].x_rot = -1.5 + head_x_rot;
+            }
+        }
+    }
+
     /// `HumanoidModel.setupAttackAnimation`'s `WHACK` branch: the body twists,
     /// both arms are carried around with it, and the swinging arm arcs down.
     ///
@@ -880,6 +1079,15 @@ impl Skeleton {
             poses[i].z_rot += (t * std::f32::consts::PI).sin() * -0.4;
         }
     }
+}
+
+/// `Mth.lerp(alpha, from, to)` — note vanilla's argument order puts the *alpha*
+/// first, which is the opposite of most Rust `lerp` conventions and is the reason
+/// this exists rather than a call to something in `glam`: transcribing
+/// `Mth.lerp(lerpAlpha, 0.4F, 0.85F)` as `0.4.lerp(0.85, alpha)` is easy, and
+/// getting it backwards silently swaps a crossbow's start and end pose.
+fn lerp(alpha: f32, from: f32, to: f32) -> f32 {
+    from + alpha * (to - from)
 }
 
 /// `Ease.outQuart`: `1 - (1 - t)^4`.
@@ -1539,6 +1747,7 @@ mod tests {
                 attack_anim: 0.75,
                 age_ticks: 900.0,
                 aggressive: true,
+                ..AnimInput::REST
             });
             for (i, m) in mats.iter().enumerate() {
                 assert!(
@@ -1551,6 +1760,233 @@ mod tests {
         assert!(
             animated >= 60,
             "only {animated} of the corpus animates — classification is too narrow"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Arm poses for a used item (issue #57)
+    // -----------------------------------------------------------------------
+
+    /// The uncomposed arm rotations a skeleton rig ends up with, so the
+    /// expectations below can be the vanilla constants themselves rather than a
+    /// matrix nobody can check by eye.
+    fn arm_rots(name: &str, input: &AnimInput) -> ((f32, f32, f32), (f32, f32, f32)) {
+        let skel = skeleton_for(name);
+        let poses = skel.posed(input);
+        let r = skel.index_of("right_arm").expect("right arm");
+        let l = skel.index_of("left_arm").expect("left arm");
+        (
+            (poses[r].x_rot, poses[r].y_rot, poses[r].z_rot),
+            (poses[l].x_rot, poses[l].y_rot, poses[l].z_rot),
+        )
+    }
+
+    /// **The expected values come from the 26.2 decompile, not from this code.**
+    /// `HumanoidModel.poseRightArm`'s `case BOW_AND_ARROW` is four assignments
+    /// with literal constants (`-0.1`, `0.1 + 0.4`, `-PI/2` twice); they are
+    /// restated here so a change to the port shows up as a disagreement with
+    /// vanilla rather than with our own previous output.
+    #[test]
+    fn the_bow_pose_matches_vanilla_pose_right_arm_constants() {
+        // Head straight ahead isolates the constants from the head terms.
+        let input = AnimInput {
+            arm_pose: ArmPose::BowAndArrow,
+            ..AnimInput::REST
+        };
+        let ((rx, ry, _), (lx, ly, _)) = arm_rots("skeleton", &input);
+        let quarter = -std::f32::consts::FRAC_PI_2;
+        assert!((ry - -0.1).abs() < 1e-6, "right yaw {ry} != -0.1");
+        assert!((ly - 0.5).abs() < 1e-6, "left yaw {ly} != 0.1 + 0.4");
+        assert!((rx - quarter).abs() < 1e-6, "right pitch {rx} != -PI/2");
+        assert!((lx - quarter).abs() < 1e-6, "left pitch {lx} != -PI/2");
+    }
+
+    /// The pose **tracks the head**, and it reads the *posed* head rather than
+    /// re-deriving from the degrees input. A 30-degree look adds 30 degrees in
+    /// radians to both arms' yaw and pitch.
+    #[test]
+    fn the_bow_pose_tracks_the_head() {
+        let input = AnimInput {
+            arm_pose: ArmPose::BowAndArrow,
+            head_yaw_deg: 30.0,
+            head_pitch_deg: -20.0,
+            ..AnimInput::REST
+        };
+        let ((rx, ry, _), (_, ly, _)) = arm_rots("skeleton", &input);
+        let yaw = 30.0 * DEG;
+        let pitch = -20.0 * DEG;
+        assert!((ry - (-0.1 + yaw)).abs() < 1e-5, "right yaw {ry}");
+        assert!((ly - (0.5 + yaw)).abs() < 1e-5, "left yaw {ly}");
+        assert!(
+            (rx - (-std::f32::consts::FRAC_PI_2 + pitch)).abs() < 1e-5,
+            "right pitch {rx}"
+        );
+    }
+
+    /// The left-handed branch moves the splay to the **other** arm. This is the
+    /// case a folded signed expression got wrong while still producing a
+    /// bow-shaped pose, so it is asserted independently of the right-handed one.
+    #[test]
+    fn the_bow_pose_mirrors_for_the_off_hand() {
+        let right = AnimInput {
+            arm_pose: ArmPose::BowAndArrow,
+            ..AnimInput::REST
+        };
+        let left = AnimInput {
+            arm_pose_left_hand: true,
+            ..right
+        };
+        let ((_, r_ry, _), (_, r_ly, _)) = arm_rots("skeleton", &right);
+        let ((_, l_ry, _), (_, l_ly, _)) = arm_rots("skeleton", &left);
+        // Holding right: the *left* arm splays (+0.4). Holding left: the *right*
+        // arm splays (-0.4). Vanilla `HumanoidModel.java:353-357` vs `:398-402`.
+        assert!((r_ry - -0.1).abs() < 1e-6, "holding right, right yaw {r_ry}");
+        assert!((r_ly - 0.5).abs() < 1e-6, "holding right, left yaw {r_ly}");
+        assert!((l_ry - -0.5).abs() < 1e-6, "holding left, right yaw {l_ry}");
+        assert!((l_ly - 0.1).abs() < 1e-6, "holding left, left yaw {l_ly}");
+        assert_ne!(
+            (r_ry, r_ly),
+            (l_ry, l_ly),
+            "the two hands must not produce the same pose"
+        );
+    }
+
+    /// `AnimationUtils.animateCrossbowCharge`: the holding arm is fixed and the
+    /// pulling arm interpolates. Checks both endpoints against the vanilla
+    /// literals *and* that the middle is strictly between them — a lerp with its
+    /// arguments swapped passes an endpoint check on one end and fails this.
+    #[test]
+    fn the_crossbow_charge_pulls_one_arm_across_the_charge() {
+        let at = |p: f32| {
+            arm_rots(
+                "skeleton",
+                &AnimInput {
+                    arm_pose: ArmPose::CrossbowCharge { progress: p },
+                    ..AnimInput::REST
+                },
+            )
+        };
+        let ((rx0, ry0, _), (lx0, ly0, _)) = at(0.0);
+        let (_, (lx1, ly1, _)) = at(1.0);
+        let (_, (_, ly_mid, _)) = at(0.5);
+
+        // Holding arm (right) is constant: `holdingArm.yRot = -0.8`,
+        // `holdingArm.xRot = -0.97079635`.
+        assert!((ry0 - -0.8).abs() < 1e-6, "holding yaw {ry0}");
+        assert!((rx0 - -0.970_796_35).abs() < 1e-6, "holding pitch {rx0}");
+        // Pulling arm (left) at alpha 0: yaw 0.4, pitch equal to the holding arm's.
+        assert!((ly0 - 0.4).abs() < 1e-6, "pulling yaw at 0 = {ly0}");
+        assert!((lx0 - -0.970_796_35).abs() < 1e-6, "pulling pitch at 0 = {lx0}");
+        // ...and at alpha 1: yaw 0.85, pitch -PI/2.
+        assert!((ly1 - 0.85).abs() < 1e-6, "pulling yaw at 1 = {ly1}");
+        assert!(
+            (lx1 - -std::f32::consts::FRAC_PI_2).abs() < 1e-6,
+            "pulling pitch at 1 = {lx1}"
+        );
+        assert!(
+            ly0 < ly_mid && ly_mid < ly1,
+            "the pulling arm must sweep monotonically: {ly0} -> {ly_mid} -> {ly1}"
+        );
+        // Out-of-range progress clamps rather than extrapolating past the pose.
+        let (_, (_, ly_over, _)) = at(4.0);
+        assert!((ly_over - ly1).abs() < 1e-6, "progress > 1 must clamp");
+    }
+
+    /// `animateCrossbowHold` is a *different* pose from the charge — the holding
+    /// arm tracks the head here and does not in the charge. Asserting they differ
+    /// is what stops one being wired where the other belongs, which a still
+    /// screenshot of a crossbow cannot distinguish.
+    #[test]
+    fn the_crossbow_hold_and_charge_are_different_poses() {
+        let hold = arm_rots(
+            "skeleton",
+            &AnimInput {
+                arm_pose: ArmPose::CrossbowHold,
+                head_yaw_deg: 40.0,
+                ..AnimInput::REST
+            },
+        );
+        let charge = arm_rots(
+            "skeleton",
+            &AnimInput {
+                arm_pose: ArmPose::CrossbowCharge { progress: 1.0 },
+                head_yaw_deg: 40.0,
+                ..AnimInput::REST
+            },
+        );
+        assert_ne!(hold, charge, "hold and charge must not coincide");
+        // The hold's holding arm carries the head yaw; the charge's does not.
+        let yaw = 40.0 * DEG;
+        assert!(
+            ((hold.0).1 - (-0.3 + yaw)).abs() < 1e-5,
+            "hold holding-arm yaw {} != -0.3 + head",
+            (hold.0).1
+        );
+        assert!(
+            ((charge.0).1 - -0.8).abs() < 1e-6,
+            "charge holding-arm yaw {} must ignore the head",
+            (charge.0).1
+        );
+    }
+
+    /// The **control for every assertion above**: with `ArmPose::Empty` the arms
+    /// are wherever the walk cycle put them, and every pose above must differ from
+    /// that. Without this, a `pose_arms_for_item` that never ran would still let
+    /// the constants above pass if they happened to match a rest pose.
+    #[test]
+    fn every_arm_pose_moves_the_arms_off_the_unposed_result() {
+        let base = AnimInput {
+            limb_swing: 4.0,
+            limb_swing_amount: 1.0,
+            ..AnimInput::REST
+        };
+        let empty = arm_rots("skeleton", &base);
+        for pose in [
+            ArmPose::BowAndArrow,
+            ArmPose::CrossbowCharge { progress: 0.0 },
+            ArmPose::CrossbowCharge { progress: 1.0 },
+            ArmPose::CrossbowHold,
+        ] {
+            let posed = arm_rots(
+                "skeleton",
+                &AnimInput {
+                    arm_pose: pose,
+                    ..base
+                },
+            );
+            assert_ne!(posed, empty, "{pose:?} left the arms unchanged");
+        }
+        assert!(
+            base.arm_pose == ArmPose::Empty && !ArmPose::Empty.is_two_handed(),
+            "Empty is the no-op pose and is not two-handed"
+        );
+    }
+
+    /// A zombie rig **loses** the pose, because `animate_zombie_arms` assigns over
+    /// both arms afterwards — vanilla's own behaviour
+    /// (`AbstractZombieModel.setupAnim` calls `super.setupAnim` then
+    /// `animateZombieArms` unconditionally). Asserted rather than left implicit
+    /// because it looks exactly like the pose failing to wire up, and the next
+    /// person to see a bow-holding zombie with forward arms needs this test to
+    /// tell them it is correct.
+    #[test]
+    fn a_zombie_rig_overwrites_the_item_pose_as_vanilla_does() {
+        let base = AnimInput::REST;
+        let bow = AnimInput {
+            arm_pose: ArmPose::BowAndArrow,
+            ..base
+        };
+        assert_eq!(
+            arm_rots("zombie", &bow),
+            arm_rots("zombie", &base),
+            "a zombie rig must be unaffected by the item pose"
+        );
+        // The same pose on a `Swinging` rig *does* land — otherwise this test
+        // would pass on a completely dead `pose_arms_for_item`.
+        assert_ne!(
+            arm_rots("skeleton", &bow),
+            arm_rots("skeleton", &base),
+            "control: the skeleton rig must still take the pose"
         );
     }
 
