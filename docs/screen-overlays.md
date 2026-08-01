@@ -140,9 +140,12 @@ does), never a false positive that hides a working feature — see
 `spectator_suppresses_both_overlays` and the `any_active` unit tests in
 `crates/lodestone-shell/src/gpu/screen_effects.rs`.
 
-## What does not reach the shell yet: the on-fire flag
+## The on-fire flag's route to the shell (closed, issue #112)
 
-**This is the one gap issue #112 flagged as the real risk, and it is real.**
+**Closed.** `apply_local_player_on_fire` now folds the bit into
+`Vitals::on_fire`, `PlayerSnapshot::on_fire` carries it, and `app.rs` reads it —
+the overlay is live. The analysis below is kept because it explains *why* a
+dedicated fold was the only route, which is not obvious from the code.
 The shared-entity-flags byte (`Entity.FLAG_ONFIRE = 0`,
 `Entity.java:261`) **does** decode: `protocol/v770/src/packets/metadata.rs`
 already parses `IDX_SHARED_FLAGS` into `EntityMetadata::flags: Option<u8>`
@@ -180,7 +183,7 @@ pointing back here. This is not a placeholder pretending to work — the
 render mechanism is real and gated correctly, but there is genuinely no data
 to feed it yet.
 
-### The patch this needs (spec only — not applied; touches forbidden crates)
+### The patch, as applied
 
 1. **`lodestone-ecs/src/session.rs`**: add a field to `Vitals` (or a sibling
    component), e.g. `on_fire: Option<bool>`, following `air`'s own doc comment

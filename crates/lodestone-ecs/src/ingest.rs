@@ -614,6 +614,53 @@ pub fn apply_entity_metadata(
 /// fork: look the event's id up in [`EntityIndex`], then check the resolved
 /// entity carries [`LocalPlayer`]. A `Query` miss (a real mob's metadata, or
 /// an id metadata arrived for before its `Vitals`-bearing session entity
+/// `IngestSet::Apply`: `ClientEvent::EntityMetadataUpdated` → the local player's
+/// own [`crate::session::Vitals::on_fire`] (issue #112), when the event names our
+/// id.
+///
+/// The sibling of [`apply_local_player_air_supply`] below, and it exists for the
+/// identical reason: the shared-flags byte arrives as **per-entity** metadata for
+/// any entity, and `apply_entity_metadata` does fold it into a generic
+/// `EntityFlags` — including on our own entity. But
+/// `lodestone_client::state::entity_view` requires
+/// `EntityKind`/`Position`/`Rotation`/`HeadYaw`, and
+/// [`apply_local_player_login`] deliberately gives the local player none of
+/// them, precisely so a self-model never reaches `ClientHandle::entities()` and
+/// renders at the camera's own eye. `entity_view()`'s early `?` therefore returns
+/// before `flags` is read, and no amount of correct generic folding can surface
+/// it. A session-scoped fold is the only route.
+///
+/// Bit 0 is `Entity.FLAG_ONFIRE` (`Entity.java:261`), read through
+/// [`lodestone_entity::metadata::SharedEntityFlags`] rather than by testing
+/// `& 0x01` inline — the flags byte carries seven other meanings and an inline
+/// mask is the kind of thing that gets copied to the wrong bit later.
+pub fn apply_local_player_on_fire(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut locals: Query<&mut crate::session::Vitals, With<LocalPlayer>>,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        } = event
+        else {
+            continue;
+        };
+        let Some(flags) = metadata.flags else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        if let Ok(mut vitals) = locals.get_mut(entity) {
+            vitals.on_fire = Some(
+                lodestone_entity::metadata::SharedEntityFlags::from_bits(flags as i8).on_fire(),
+            );
+        }
+    }
+}
+
 /// exists) is silently skipped, matching every other id-addressed system here.
 pub fn apply_local_player_air_supply(
     batch: Res<IngestBatch>,
@@ -830,6 +877,7 @@ impl Plugin for IngestPlugin {
                 // `apply_entity_metadata` does not matter (disjoint components), but it
                 // is placed right after it so the two stay visibly paired.
                 apply_local_player_air_supply,
+                apply_local_player_on_fire,
                 apply_entity_attributes,
                 apply_entity_equipment,
                 apply_entity_damaged,
@@ -1215,6 +1263,62 @@ mod tests {
         assert_eq!(
             world.get::<crate::session::Vitals>(local).unwrap().air,
             Some(247),
+        );
+    }
+
+    /// Metadata naming our own id folds the on-fire bit into
+    /// [`crate::session::Vitals::on_fire`] (issue #112) — the wiring
+    /// [`apply_local_player_on_fire`] exists for, and the reason it has to exist
+    /// at all: the generic `EntityFlags` fold *does* run on our own entity, but
+    /// `entity_view()` can never surface it because the local player has no
+    /// `EntityKind`.
+    ///
+    /// `0x01` is `Entity.FLAG_ONFIRE`; `0x08` (sprinting) is fed first as a
+    /// **discriminator** — a fold that tested "any flags present" rather than the
+    /// specific bit would report burning for a sprinting player, which is a much
+    /// worse bug than not showing the overlay at all.
+    #[test]
+    fn entity_metadata_naming_the_local_player_folds_the_on_fire_bit_into_vitals() {
+        let (mut world, local) = ingest_world_with_local_player();
+        world.entity_mut(local).insert(crate::session::Vitals::default());
+        feed(&mut world, login_event(3));
+
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().on_fire,
+            None,
+            "unreported until the first metadata update naming us"
+        );
+
+        // Sprinting only: the flags byte is non-zero but bit 0 is clear.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    flags: Some(0x08),
+                    ..EntityMetadataUpdate::default()
+                },
+                3,
+            ),
+        );
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().on_fire,
+            Some(false),
+            "a non-zero flags byte without bit 0 must not read as burning"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    flags: Some(0x01),
+                    ..EntityMetadataUpdate::default()
+                },
+                3,
+            ),
+        );
+        assert_eq!(
+            world.get::<crate::session::Vitals>(local).unwrap().on_fire,
+            Some(true),
         );
     }
 

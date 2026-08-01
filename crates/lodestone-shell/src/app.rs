@@ -1463,12 +1463,17 @@ impl WindowApp {
         // #112). `eye_in_water` is the *same* `PhysicsState` predicate the
         // submerged fog and the air-bubble row already read
         // (`docs/sky-and-air-bubbles.md`) — not a second derivation. `on_fire`
-        // is always `false`: the shared-flags byte decodes in
-        // `protocol/v770/src/packets/metadata.rs` and reaches a generic
-        // `EntityFlags` ECS component, but the local player is deliberately
-        // excluded from the generic entity-view path, and no session-scoped
-        // fold like `apply_local_player_air_supply` exists for it yet — see
-        // `docs/screen-overlays.md`.
+        // now comes from `PlayerSnapshot::on_fire`, folded by
+        // `apply_local_player_on_fire`: the shared-flags byte reaches a generic
+        // `EntityFlags` component for any entity, but the local player is
+        // deliberately excluded from the generic entity-view path, so it needs a
+        // session-scoped fold to arrive at all. `false` without a live
+        // connection, which is also the pre-first-packet answer.
+        let on_fire = self
+            .sim
+            .net()
+            .and_then(|n| n.shared_handle().get().cloned())
+            .is_some_and(|h| h.player().on_fire);
         let spectator = self
             .sim
             .net()
@@ -1477,7 +1482,7 @@ impl WindowApp {
             == Some(lodestone_client::GameMode::Spectator);
         let screen_effects = crate::gpu::ScreenEffects {
             eye_in_water: self.sim.player().eye_in_water,
-            on_fire: false,
+            on_fire,
             spectator,
             tick,
         };
