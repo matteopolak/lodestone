@@ -43,6 +43,7 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
+use bevy_ecs::world::World;
 use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
@@ -710,6 +711,54 @@ pub fn apply_entity_equipment(
             }
         }
     }
+}
+
+/// Despawn every ingest-side entity and forget it, for a session teardown.
+///
+/// # The hole this closes
+///
+/// [`EntityIndex`] is populated by [`apply_local_player_login`] and
+/// [`apply_entity_spawn`], and until now nothing ever cleared it on a session
+/// end. A rejoin's server assigns an entirely fresh set of ids, so no
+/// `EntityRemoved` for the previous session's entities ever arrives — they
+/// were never despawned, stayed indexed under ids nothing would ever
+/// reference again, and kept being enumerated: `SharedState::entities`
+/// (`lodestone-client/src/state.rs`) walks [`EntityIndex`] directly to derive
+/// its `EntityView`s, so every stale entity kept reaching the render fold and
+/// drawing — frozen, since nothing addressed by its dead id could ever move
+/// it again — right alongside the live duplicate the new session spawned
+/// under its own id for the same mob. This is the render-side twin of
+/// [`crate::player::reset_local_player`]: same reset-on-teardown shape, same
+/// module the state it clears is defined in.
+///
+/// # The local player is exempt
+///
+/// Same reason [`apply_entity_spawn`] and [`apply_entity_removal`] exempt it:
+/// the local player's `Entity` id is held by the driver (`Sim.local`) across
+/// the whole reset, not just this call, and despawning it would take
+/// `PhysicsState`, the HUD components and every session component with it —
+/// exactly the panic `Sim::end_session`'s own local-player reset exists to
+/// avoid. [`EntityIndex`] is still cleared **entirely**, including whatever
+/// entry currently maps the local player's own id: that mapping is stale the
+/// instant the session ends, and [`apply_local_player_login`] re-adds it from
+/// scratch — by querying `With<LocalPlayer>`, not by reading the index — the
+/// next time we log in. Nothing needs to resolve our own id in the gap
+/// between sessions.
+pub fn reset_ingest_entities(world: &mut World) {
+    let tracked: Vec<Entity> = world
+        .resource::<EntityIndex>()
+        .iter()
+        .map(|(_, entity)| entity)
+        .collect();
+    for entity in tracked {
+        if world.get::<LocalPlayer>(entity).is_some() {
+            continue;
+        }
+        if let Ok(entity_mut) = world.get_entity_mut(entity) {
+            entity_mut.despawn();
+        }
+    }
+    world.resource_mut::<EntityIndex>().clear();
 }
 
 /// Registers the [`IngestQueue`] → [`IngestBatch`] hand-off: the two resources
@@ -1739,6 +1788,127 @@ mod tests {
             },
         );
         assert!(world.resource::<EntityIndex>().get(11).is_none());
+    }
+
+    // ---- session teardown (rejoin duplicates entities) --------------------
+    //
+    // The live bug: quitting and rejoining left every previous session's
+    // ingest-side entity indexed under an id nothing would ever reference
+    // again — nothing cleared `EntityIndex` on a session end. `SharedState::
+    // entities` (`lodestone-client/src/state.rs`) enumerates `EntityIndex`
+    // directly to derive its `EntityView`s, so the stale entity kept reaching
+    // the render fold: it drew, frozen (no event could ever move it again,
+    // since the new server hands out different ids), right beside the live
+    // duplicate the new session spawned for the same mob under its new id.
+    //
+    // Both ids below are deliberately different session-to-session — a real
+    // rejoin never reuses an id, and `apply_entity_spawn`'s existing
+    // "replace a reused id" branch would silently mask this bug if the test
+    // reused one.
+
+    #[test]
+    fn without_a_reset_a_rejoin_leaves_the_previous_sessions_mob_indexed_and_frozen() {
+        // The control: the pre-fix behaviour verbatim — two sessions, no call
+        // to `reset_ingest_entities` in between. If this did not fail, the
+        // fix test below would prove nothing.
+        let (mut world, _local) = ingest_world_with_local_player();
+
+        // Session 1: log in under id 7, a mob spawns under id 11.
+        feed(&mut world, login_event(7));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+        let session_one_pig = world.resource::<EntityIndex>().get(11).expect("indexed");
+
+        // Session ends — no `EntityRemoved` for id 11 ever arrives, because a
+        // real disconnect just drops the socket; nothing sends one.
+
+        // Session 2: a fresh login under a different id, and the same logical
+        // mob reappears under a different id too, exactly as vanilla assigns
+        // ids per-connection.
+        feed(&mut world, login_event(20));
+        feed(&mut world, spawn_event(31, "minecraft:pig"));
+
+        assert!(
+            world.get_entity(session_one_pig).is_ok(),
+            "the previous session's mob was never despawned — this is the duplicate"
+        );
+        assert!(
+            world.resource::<EntityIndex>().get(11).is_some(),
+            "…and it is still indexed, still enumerable by SharedState::entities"
+        );
+        assert_eq!(
+            world.resource::<EntityIndex>().len(),
+            3,
+            "the old pig, the new pig, and the local player — one mob drawn twice"
+        );
+    }
+
+    #[test]
+    fn reset_ingest_entities_clears_the_previous_sessions_mob_across_a_rejoin() {
+        let (mut world, local) = ingest_world_with_local_player();
+
+        feed(&mut world, login_event(7));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+        let session_one_pig = world.resource::<EntityIndex>().get(11).expect("indexed");
+
+        // The fix under test, at the point `Sim::end_session` now calls it.
+        reset_ingest_entities(&mut world);
+
+        feed(&mut world, login_event(20));
+        feed(&mut world, spawn_event(31, "minecraft:pig"));
+
+        assert!(
+            world.get_entity(session_one_pig).is_err(),
+            "the previous session's mob must be despawned, not merely deindexed"
+        );
+        assert!(
+            world.resource::<EntityIndex>().get(11).is_none(),
+            "its id must not still resolve"
+        );
+        assert_eq!(
+            world.resource::<EntityIndex>().len(),
+            2,
+            "exactly the second session's local player and its one mob — no duplicate"
+        );
+        assert_eq!(
+            world.resource::<EntityIndex>().get(20),
+            Some(local),
+            "the local player entity itself survives the reset and re-indexes under its new id"
+        );
+    }
+
+    #[test]
+    fn reset_ingest_entities_never_despawns_the_local_player() {
+        // A blanket "despawn everything EntityIndex points at" would take the
+        // local player with it — `PhysicsState`, the HUD components and
+        // `Sim.local`'s identity all vanish, and per `sim.rs`'s own comment a
+        // missing component there means "someone despawned the local player,
+        // which is a bug". This is the guard proving that never happens.
+        let (mut world, local) = ingest_world_with_local_player();
+        feed(&mut world, login_event(7));
+        feed(&mut world, spawn_event(11, "minecraft:pig"));
+
+        reset_ingest_entities(&mut world);
+
+        assert!(
+            world.get_entity(local).is_ok(),
+            "the local player entity must survive a session reset"
+        );
+        assert!(
+            world.get::<LocalPlayer>(local).is_some(),
+            "…still carrying its marker"
+        );
+        assert!(
+            world.resource::<EntityIndex>().is_empty(),
+            "the index is cleared entirely, including the now-stale local-player entry — \
+             apply_local_player_login re-adds it by querying With<LocalPlayer>, not by \
+             reading the index, so clearing it costs nothing"
+        );
+
+        // The driver-visible proof: a relogin re-indexes cleanly under a new
+        // id, exactly as if this were the very first login.
+        feed(&mut world, login_event(99));
+        assert_eq!(world.resource::<EntityIndex>().get(99), Some(local));
+        assert_eq!(world.resource::<EntityIndex>().len(), 1);
     }
 
     // ---- the routing switch ----------------------------------------------
