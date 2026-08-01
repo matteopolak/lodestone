@@ -449,6 +449,16 @@ pub struct StateModel {
     /// not the live biome colour, so a state's debris matches the terrain quads
     /// beside it rather than the biome it fell in.
     pub particle_tint: Option<[f32; 3]>,
+    /// Whether the mesher should compute per-corner smooth ambient occlusion
+    /// for this state's quads, or fall back to flat per-face light — vanilla's
+    /// `ModelBlockRenderer.tesselateBlock` choosing `tesselateAmbientOcclusion`
+    /// vs `tesselateFlat`. Sourced from
+    /// [`BakedModel::ambient_occlusion`](lodestone_assets::bake::BakedModel::ambient_occlusion),
+    /// which carries only the model-JSON half of vanilla's gate
+    /// (`this.parts.getFirst().useAmbientOcclusion()`); the
+    /// `blockState.getLightEmission() == 0` half has no data source in this
+    /// crate yet and is not applied — see that field's doc for what is missing.
+    pub ambient_occlusion: bool,
 }
 
 impl StateModel {
@@ -462,6 +472,7 @@ impl StateModel {
             layer: RenderLayer::Solid,
             particle_uv: None,
             particle_tint: None,
+            ambient_occlusion: true,
         }
     }
 }
@@ -1066,6 +1077,7 @@ impl BlockModels {
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
                 Ok(model) if !model.quads.is_empty() => {
                     let particle_uv = model.particle_uv;
+                    let ambient_occlusion = model.ambient_occlusion;
                     let mut quads = model.quads;
                     // Rewrite each tinted quad's raw model tint index into a
                     // palette index for its resolved source colour. `None` (an
@@ -1099,6 +1111,7 @@ impl BlockModels {
                         layer,
                         particle_uv,
                         particle_tint,
+                        ambient_occlusion,
                     }
                 }
                 _ => StateModel::empty(),
@@ -1391,6 +1404,15 @@ impl BlockModels {
     #[must_use]
     pub fn occludes(&self, state_id: u32) -> bool {
         self.state(state_id).occludes
+    }
+
+    /// Whether a state's quads should get per-corner smooth ambient occlusion
+    /// (via [`crate::mesh_models`]'s corner sampling) or flat per-face light
+    /// instead — see [`StateModel::ambient_occlusion`] for exactly which half
+    /// of vanilla's gate this reflects.
+    #[must_use]
+    pub fn ambient_occlusion(&self, state_id: u32) -> bool {
+        self.state(state_id).ambient_occlusion
     }
 
     /// Normalised atlas UVs `[u0, v0, u1, v1]` of a state's `#particle` sprite —
