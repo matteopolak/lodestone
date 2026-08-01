@@ -354,6 +354,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   start/abort/stop semantics, why placement always writes plain stone (there is no
   inventory model to pick from), and the unrelated pre-existing gap it uncovered in
   the whole-column encoder.
+- [Chunk column encoding](./chunk-column-encoding.md) — issue #363: why every
+  served chunk was stone-and-air only, `build_world_column`'s real-per-cell fix
+  with its memoized `resolve_state_id` lookup, and the **second, independent** bug
+  the gate uncovered — the generator writing a bare `minecraft:water` with no
+  `level` property, which resolved to *air* because water has no propertyless
+  state, until `resolve_state_id` grew a same-name-default fallback tier. Includes
+  the honest caveat that lowest-id is **not** a general default rule (661 of 797
+  multi-state blocks disagree), so the tier is scoped to fluids on purpose.
 - [Chunk memory pool footprint](./chunk-memory-pool-footprint.md) — issue #362's
   measured verdict on a size-classed buffer pool for chunk sections: real
   32-radius terrain populates exactly **one** of the 14 arithmetic size classes

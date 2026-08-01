@@ -40,6 +40,8 @@
 //! [`V770Adapter`]'s own decode logic for those same packets, which is the
 //! best available specification for their wire layout.
 
+use std::collections::HashMap;
+
 use lodestone_core::{Ctx, Decode, Encode, Nbt, Reader, Writer, write_network_nbt};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_server::{
@@ -74,10 +76,15 @@ const OVERWORLD_CLOCK_HOLDER_ID: i32 = 0;
 /// packet ids on the server side).
 const CTX: Ctx = Ctx { version: 776 };
 
-/// Fallback: the block-state id for `minecraft:stone`, resolved by name at
-/// construction so a change to the generated table cannot silently desync
-/// this from the real registry id (see `tests/server_protocol.rs`'s pinning
-/// test for the non-vacuity check).
+/// The block-state id for `minecraft:stone`, resolved by name so a change to
+/// the generated table cannot silently desync this from the real registry
+/// id. Test-only since issue #363: `build_world_column` used to write this
+/// as its solid-block fallback (before it carried real per-block state) and
+/// `encode_chunk`'s own call site is where that literal lived; now the only
+/// remaining reference is `encode_block_update_wire_layout`'s pinning
+/// assertion below, which still writes literal `"minecraft:stone"` through
+/// [`resolve_state_id`] and checks the id lands here.
+#[cfg(test)]
 fn stone_id() -> u32 {
     // Registry id `1` is asserted to be `minecraft:stone` by
     // `tests/block_states.rs`; re-deriving it by name here (rather than the
@@ -104,19 +111,58 @@ fn air_id() -> u32 {
 /// protocol-776 registry id, via a linear scan matching both the block name
 /// and its property values against the generated state table —
 /// [`stone_id`]/[`air_id`] special-case the two propertyless states this
-/// module ever *writes*; this is the general form needed for
-/// [`V770ServerProtocol::encode_block_update`], which must also echo back
-/// whatever pre-existing (possibly-propertied) state already occupied a
-/// placement's neighbour cell.
+/// module writes unconditionally; this is the general form needed for
+/// [`V770ServerProtocol::encode_block_update`] (which must echo back
+/// whatever pre-existing, possibly-propertied state already occupied a
+/// placement's neighbour cell) and for [`build_world_column`] (which must
+/// carry the real per-block state a whole-column send resolves for every
+/// cell). `O(`[`lodestone_data::block_states::STATE_COUNT`]`)` per call —
+/// [`build_world_column`] memoizes it per distinct string it sees in a
+/// column rather than calling it per block; do not reach for this function
+/// itself in a true per-block hot path without the same memoization.
 ///
-/// # Falls back to air on no match
+/// # Three-tier fallback: exact match, then same-name default, then air
+///
+/// 1. **Exact match** — name and every property value agree. The common case
+///    for anything decoded off a real edit or a fully-qualified generator
+///    state (`"minecraft:deepslate[axis=y]"`).
+/// 2. **Same block name, any properties** — falls back to the **lowest-id**
+///    state sharing `name`. This exists for issue #363's own fluid case:
+///    `lodestone-worldgen`'s `OverworldGenerator` writes its default fluid as
+///    the bare literal `"minecraft:water"`
+///    (`crates/lodestone-worldgen/src/overworld.rs`'s `default_fluid`), with
+///    **no `level` property** — and real water has no propertyless state at
+///    all (every one of ids `86..=101` carries `level=0..15`).
+///
+///    "Lowest id" happens to equal water's real default (`86`, `level=0`,
+///    `blocks.json`'s own `"default": true` entry for `minecraft:water`,
+///    `.cache/mc/26.2/generated/reports/blocks.json`) — **but this is not a
+///    general vanilla-registration guarantee**, and was checked, not
+///    assumed: a one-off scan of that same `blocks.json` found the
+///    lowest-id state disagrees with the marked default for 661 of 797
+///    multi-state blocks (e.g. `minecraft:acacia_button`'s default is id
+///    `10780`, not its lowest id `10771`). It happens to hold for both
+///    fluids this codebase's fallback can currently reach (water: `86`
+///    lowest = `86` default; lava: `102` lowest = `102` default) — confirmed
+///    directly, not inferred from a pattern. **Do not extend this fallback's
+///    coverage to a new bare, property-requiring block name without
+///    checking `blocks.json`'s own `"default"` marker for that specific
+///    block first** — "lowest id" is a coincidence here, not a rule.
+///
+///    Before this tier existed, any bare block name for a block that
+///    *requires* properties (water chief among them) fell straight to air —
+///    the exact trap `CLAUDE.md` and issue #363 flag: "a fix that only
+///    thinks about solids will leave \[fluids\] broken and still look like
+///    progress."
+/// 3. **No name match at all** — falls back to air.
 ///
 /// A block-update confirmation is best-effort feedback (see
 /// `docs/block-edit.md`), not the server's authoritative state — that stays
 /// in [`ServerChunkColumn`]'s own string form, which this function only
-/// reads. If a state string this version's table cannot parse back ever
-/// reaches here (a property spelling/order drift), sending air is a
-/// visibly-wrong confirmation rather than a panic or a corrupted wire id.
+/// reads. Tier 3 exists so a state string this version's table cannot parse
+/// back at all (an unknown name, or a property spelling/order drift on a
+/// nonexistent variant) degrades to a visibly-wrong confirmation rather than
+/// a panic or a corrupted wire id.
 fn resolve_state_id(state: &str) -> u32 {
     let (name, raw_props) = match state.split_once('[') {
         Some((name, rest)) => (name, rest.strip_suffix(']').unwrap_or(rest)),
@@ -132,16 +178,21 @@ fn resolve_state_id(state: &str) -> u32 {
     };
     wanted.sort_unstable();
 
-    (0..lodestone_data::block_states::STATE_COUNT)
-        .find(|&id| {
-            if block_name(id) != Some(name) {
-                return false;
-            }
-            let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
-            have.sort_unstable();
-            have == wanted
-        })
-        .unwrap_or_else(air_id)
+    let mut same_name_default: Option<u32> = None;
+    for id in 0..lodestone_data::block_states::STATE_COUNT {
+        if block_name(id) != Some(name) {
+            continue;
+        }
+        if same_name_default.is_none() {
+            same_name_default = Some(id);
+        }
+        let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();
+        have.sort_unstable();
+        if have == wanted {
+            return id;
+        }
+    }
+    same_name_default.unwrap_or_else(air_id)
 }
 
 /// Unpacks vanilla's `BlockPos.asLong` form (the inverse of
@@ -421,19 +472,33 @@ fn encode_game_login_rest() -> Vec<u8> {
     w.into_vec()
 }
 
-/// Converts one `lodestone-server` bool-grid column into the version-free
-/// [`WorldChunkColumn`] the wire codec speaks, mapping the server's
-/// `is_solid` grid onto stone/air block-state ids under `shape`.
+/// Converts one `lodestone-server` [`ServerChunkColumn`] into the
+/// version-free [`WorldChunkColumn`] the wire codec speaks, carrying the
+/// **real** per-block state the source already computed (grass, dirt,
+/// deepslate, gravel, water, …) rather than a solid/air classification —
+/// see issue #363. Every cell is resolved via
+/// [`ServerChunkColumn::block_state`] (the same string source
+/// [`V770ServerProtocol::encode_block_update`] already reads for a single
+/// cell) through [`resolve_state_id`].
 ///
-/// Iterates section-major (matching wire order) and skips sections the
-/// source reports as entirely air, since [`WorldChunkColumn::set_section`]
-/// already elides those — a column that is all air outside `shape`'s window
-/// (nothing above/below the source's own vertical extent) is therefore free.
-fn build_world_column(
-    shape: &ChunkShape,
-    source: &ServerChunkColumn,
-    stone: u32,
-) -> WorldChunkColumn {
+/// # Why this does not cost a linear scan per block
+///
+/// [`resolve_state_id`] is `O(STATE_COUNT)` (~32k) per call, and a column is
+/// 98,304 cells — calling it unmemoized here would be billions of
+/// comparisons per column, every join and every view-tracker resend. `seen`
+/// memoizes by the block-state string itself: a real column's *distinct*
+/// state strings number in the dozens (`docs/chunk-memory-pool-footprint.md`
+/// records live sections as 4-bit indirect palettes with at most 6 entries
+/// each), so the expensive scan runs once per distinct string, not once per
+/// block. The map borrows its keys from `source` and is not carried across
+/// calls — the columns a server sends are different data every time (edits,
+/// different chunk coordinates), so there is nothing durable to cache
+/// across them without the source outliving one `encode_chunk` call.
+///
+/// Iterates section-major (matching wire order) and skips sections that end
+/// up entirely default (air-only, default biome), since
+/// [`WorldChunkColumn::set_section`] already elides those.
+fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldChunkColumn {
     let mut column = WorldChunkColumn::new(
         shape.min_y,
         shape.section_count,
@@ -442,6 +507,8 @@ fn build_world_column(
         shape.air_id,
         shape.biome_id,
     );
+
+    let mut seen: HashMap<&str, u32> = HashMap::new();
 
     for section_index in 0..shape.section_count {
         let base_y = shape.min_y + (section_index * ChunkSection::EDGE) as i32;
@@ -455,8 +522,17 @@ fn build_world_column(
             let wy = base_y + ly as i32;
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
-                    if source.is_solid(lx as i32, wy, lz as i32) {
-                        section.set_block(lx, ly, lz, stone);
+                    let state = source.block_state(lx as i32, wy, lz as i32);
+                    let id = *seen
+                        .entry(state)
+                        .or_insert_with(|| resolve_state_id(state));
+                    // `air_id` is already the container's own default (see
+                    // `ChunkSection::new`), so a cell resolving to it needs
+                    // no explicit write — same short-circuit the old
+                    // `is_solid` check gave air cells, just derived from the
+                    // real state now.
+                    if id != shape.air_id {
+                        section.set_block(lx, ly, lz, id);
                     }
                 }
             }
@@ -749,7 +825,7 @@ impl ServerProtocol for V770ServerProtocol {
 
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
         let shape = ChunkShape::overworld_1_21();
-        let world_column = build_world_column(&shape, column, stone_id());
+        let world_column = build_world_column(&shape, column);
         let payload = encode_column_body(cx, cz, &shape, &world_column);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
@@ -1009,6 +1085,125 @@ mod block_edit_tests {
     #[test]
     fn resolve_state_id_falls_back_to_air_on_no_match() {
         assert_eq!(resolve_state_id("minecraft:not_a_real_block"), air_id());
+    }
+
+    /// The regression this fix exists for: `lodestone-worldgen`'s
+    /// `OverworldGenerator` writes its default fluid as the **bare** literal
+    /// `"minecraft:water"`, with no `level` property
+    /// (`crates/lodestone-worldgen/src/overworld.rs`'s `default_fluid`) — and
+    /// real water has no propertyless state (every id in `86..=101` carries
+    /// `level=0..15`). Before `resolve_state_id`'s same-name-default
+    /// fallback tier existed, this fell all the way through to **air** —
+    /// found by this crate's own hermetic
+    /// `encode_chunk_carries_real_block_states_including_a_fluid` gate below,
+    /// which failed its `assert_ne!(water_id, air_id())` sanity check the
+    /// first time it ran, exactly the trap issue #363 warned a
+    /// solids-only fix would fall into. Pins the exact expected id
+    /// (`blocks.json`'s own `"default": true` entry for `minecraft:water` is
+    /// `level=0`, id `86` — `.cache/mc/26.2/generated/reports/blocks.json`),
+    /// not just "not air", so a future table regeneration that changes which
+    /// state is default cannot silently regress this to a *different* wrong
+    /// answer.
+    #[test]
+    fn resolve_state_id_resolves_bare_water_to_its_default_level_state() {
+        let bare_water_id = resolve_state_id("minecraft:water");
+        assert_ne!(
+            bare_water_id,
+            air_id(),
+            "bare `minecraft:water` (no `level` property) must not resolve to air"
+        );
+        assert_eq!(
+            properties(bare_water_id),
+            Some([("level", "0")].as_slice()),
+            "expected the default (level=0) water state"
+        );
+        assert_eq!(
+            bare_water_id,
+            resolve_state_id("minecraft:water[level=0]"),
+            "the bare-name fallback must agree with the fully-qualified default state"
+        );
+    }
+
+    /// The hermetic half of issue #363's gate: a whole-column `encode_chunk`
+    /// send, decoded back through the real wire codec
+    /// ([`crate::packets::chunk::LevelChunkWithLight::decode`], the same
+    /// decoder `tests/join_flow.rs`'s golden vectors and `tests/live_chunk
+    /// .rs`'s live capture pin), must carry the real per-block state rather
+    /// than a collapsed solid/air pair — including a **fluid**, the case a
+    /// fix that only thinks about solids is most likely to miss (the old
+    /// collapse mapped every fluid to air, not stone, so a half-fix would
+    /// still pass a solids-only check here).
+    ///
+    /// This round-trips through this crate's own encode/decode, which
+    /// `CLAUDE.md` flags as weaker evidence than an independent oracle
+    /// (`decode(encode(x)) == x` is satisfiable by two symmetric
+    /// misunderstandings) — the real-client gate in
+    /// `tests/block_edit.rs`'s `dig_and_place_persist_through_forget_and
+    /// _reload` is the honest one, checking a real `lodestone-client`'s
+    /// `block_at` against an independent generator instance. This test is
+    /// the fast, hermetic complement: no client/server machinery, so it
+    /// pins the exact ids a regression would have to break.
+    #[test]
+    fn encode_chunk_carries_real_block_states_including_a_fluid() {
+        use crate::packets::chunk::LevelChunkWithLight;
+        use lodestone_server::{ChunkSource, overworld_chunk_source};
+
+        // Same fixture `tests/block_edit.rs` uses (seed 1234, chunk (0, 0)):
+        // real per-block content sampled from an *independent* generator
+        // instance, per `CLAUDE.md`'s "an expected value must originate
+        // outside the code under test" — this crate's own `resolve_state_id`
+        // resolves the id, but the state *strings* being asserted come from
+        // nothing this test constructs by hand.
+        let seed: i64 = 1234;
+        let independent_generator = lodestone_server::overworld_generator(seed);
+        let real_column = independent_generator.column(0, 0);
+        let deepslate_state = real_column.block_state(0, -50, 0);
+        let gravel_state = real_column.block_state(0, 37, 0);
+        let water_state = real_column.block_state(0, 38, 0);
+        assert_eq!(deepslate_state.split('[').next(), Some("minecraft:deepslate"));
+        assert_eq!(gravel_state, "minecraft:gravel");
+        assert_eq!(water_state.split('[').next(), Some("minecraft:water"));
+
+        let deepslate_id = resolve_state_id(deepslate_state);
+        let gravel_id = resolve_state_id(gravel_state);
+        let water_id = resolve_state_id(water_state);
+        assert_ne!(
+            water_id,
+            air_id(),
+            "fixture sanity: the real water state must not itself resolve to air"
+        );
+
+        // The column actually served, from a second, separately-constructed
+        // source — proving `encode_chunk` (not this test) is what produces
+        // the fidelity, the same source `V770ServerProtocol` would be given
+        // in the live server.
+        let source = overworld_chunk_source(seed);
+        let served_column = source.column(0, 0);
+
+        let proto = V770ServerProtocol;
+        let directive = proto.encode_chunk(0, 0, &served_column);
+        let payload = match directive {
+            ServerDirective::Send { payload, .. } => payload,
+            other => panic!("expected Send, got {other:?}"),
+        };
+
+        let shape = ChunkShape::overworld_1_21();
+        let mut r = Reader::new(&payload);
+        let decoded = LevelChunkWithLight::decode(&mut r, &shape).expect("decode column");
+        r.ensure_empty().expect("no trailing bytes");
+
+        assert_eq!(decoded.column.get_block(0, -50, 0), deepslate_id);
+        assert_eq!(decoded.column.get_block(0, 37, 0), gravel_id);
+        assert_eq!(
+            decoded.column.get_block(0, 38, 0),
+            water_id,
+            "fluid cell must carry the real water id on the wire, not collapse to air"
+        );
+
+        // An untouched, definitely-air cell (well above this column's
+        // terrain) still reads as air — the fix does not smear a stray
+        // non-air write across cells the source itself reports as air.
+        assert_eq!(decoded.column.get_block(5, 300, 5), air_id());
     }
 
     /// Pins `encode_block_update`'s wire layout end to end: packed `BlockPos`

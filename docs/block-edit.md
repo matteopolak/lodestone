@@ -122,29 +122,34 @@ of that vegetation yet (`worldgen_data.rs`'s own "no caves/ores/trees" scope not
 air-or-fluid is the whole replaceable set that can actually appear in served terrain
 today.
 
-## A discovered, pre-existing wire-fidelity gap (not fixed here)
+## A discovered, pre-existing wire-fidelity gap — now fixed (issue #363)
 
 While building the end-to-end test it became clear that
 `V770ServerProtocol::encode_chunk`'s `build_world_column` — used for **every**
 whole-column send, at join and at every `ViewTracker` resend, unrelated to this
-change — collapses every solid block to a single `minecraft:stone` and everything
-non-solid (air *and every fluid*) to air. It only ever calls
-`ChunkSection::set_block(…, stone)` under an `is_solid` check and touches the section no
-other way. So a real client's chunk store cannot see `deepslate`/`gravel`/`water`/etc.
+change — collapsed every solid block to a single `minecraft:stone` and everything
+non-solid (air *and every fluid*) to air. It only ever called
+`ChunkSection::set_block(…, stone)` under an `is_solid` check and touched the section no
+other way. So a real client's chunk store could not see `deepslate`/`gravel`/`water`/etc.
 at all through a whole-column send — only "solid" or "not". The server's own
-`ChunkColumn` data is real (block-for-block verified by `worldgen_data.rs`'s existing
-`chunk_source_serves_generator_block_for_block` test); it is only the *bulk terrain
-encoder* that throws the variety away on the way to the wire.
+`ChunkColumn` data was, and is, real (block-for-block verified by `worldgen_data.rs`'s
+existing `chunk_source_serves_generator_block_for_block` test); it was only the *bulk
+terrain encoder* that threw the variety away on the way to the wire.
 
-This is orthogonal to block editing specifically: `encode_block_update` (this change)
-resolves the real block-state string via `resolve_state_id`, so a break/place
-confirmation always carries full fidelity — and, as a side effect, **upgrades** the
-confirmed cells' client-visible state from the wire-collapsed stone/air to their real
-value, even for a cell the edit didn't actually touch (see `block_edit.rs`'s
-`dig_and_place_persist_through_forget_and_reload` test, which documents and exploits
-this for its "clicked cell unchanged" assertion). Fixing `build_world_column` itself —
-so a whole-column send shows real block variety — is a separate, larger change to a
-path many other things depend on, and is not attempted here.
+This was orthogonal to block editing specifically: `encode_block_update` already
+resolved the real block-state string via `resolve_state_id`, so a break/place
+confirmation always carried full fidelity even before the encoder fix — which is why,
+pre-fix, it had the odd side effect of **upgrading** the confirmed cells' client-visible
+state from the wire-collapsed stone/air to their real value, even for a cell the edit
+didn't actually touch. **Issue #363 closed this gap**: `build_world_column` now resolves
+each cell's real state the same way `encode_block_update` always did (memoized per
+distinct string in the column, to keep the ~32k-entry linear scan from running once per
+block — see [`docs/chunk-column-encoding.md`](./chunk-column-encoding.md) for the full
+account, the wire-format citations, and the "nothing else depended on the collapse"
+check). `block_edit.rs`'s `dig_and_place_persist_through_forget_and_reload` test was
+updated accordingly: its pre-edit assertions now check the **real** per-block content
+(deepslate/gravel/water) directly, rather than the collapsed stone/air pair the old
+encoder produced.
 
 ## How to change it, and the gotchas
 
@@ -159,9 +164,11 @@ path many other things depend on, and is not attempted here.
   and cheap enough there).
 * **`resolve_state_id` (`server_protocol.rs`) is a linear scan over the ~32k-entry
   generated state table**, matching name *and* properties. Fine for an occasional
-  confirmation packet; do not reach for it in a hot path (`encode_chunk`'s
-  `build_world_column` does not use it, for exactly this reason plus the collapse
-  described above).
+  confirmation packet on its own; `build_world_column` (issue #363) now also calls it,
+  but only once per *distinct* block-state string in a column (memoized in a local
+  `HashMap`), not once per block — see
+  [`docs/chunk-column-encoding.md`](./chunk-column-encoding.md). Do not call it
+  unmemoized in a true per-block loop.
 * **`pending_break` is per-connection, not per-block.** Two different connections
   digging the same block concurrently is not modelled — the second `StartDestroy`
   simply overwrites the first connection's own tracked position, same as vanilla's
