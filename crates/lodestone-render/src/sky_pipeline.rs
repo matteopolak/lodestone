@@ -1018,7 +1018,30 @@ impl SkyRenderer {
             atlas.height,
             &atlas.rgba,
             wgpu::AddressMode::ClampToEdge,
-            wgpu::FilterMode::Linear,
+            // Nearest, not Linear — vanilla does not filter these (issue #372).
+            //
+            // There is no `.mcmeta` anywhere under
+            // `assets/minecraft/textures/environment/`, so nothing there sets
+            // `blur: true` and every one of those textures takes the
+            // nearest-neighbour default. `sun.png` is a small texture stretched
+            // across a large quad, so `Linear` spread its edge over many screen
+            // pixels in proportion to that magnification — which is why the sun
+            // and moon read as soft while the clouds below, already `Nearest`,
+            // read as crisp.
+            //
+            // Two reasons, not one. The second is independent of fidelity: these
+            // sprites are *stitched*, so `Linear` samples across sprite
+            // boundaries and can bleed one moon phase into the next.
+            // `ClampToEdge` does not help — it governs sampling past `[0, 1]`,
+            // not between sprites inside an atlas. If any bleed survives this,
+            // the sprite rects need half-texel insetting.
+            //
+            // This was the only `Linear` *magnification* filter in the renderer.
+            // Every other sampler here is `Nearest` for mag, including the block
+            // atlas (`texture.rs`: `mag: Nearest, min: Linear, mipmap: Linear`,
+            // which is correct — minification wants the mip chain). Only
+            // `screen_effects.rs` legitimately wants `Linear`, being a blur.
+            wgpu::FilterMode::Nearest,
         );
         let celestial_bind_group = texture_bind_group(
             device,
