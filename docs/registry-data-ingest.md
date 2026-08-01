@@ -12,6 +12,15 @@ Issue [#288]. It is the root cause the issue names for [#34] (sky light matched 
 name) and for the overworld/End clock coincidence in
 `crates/protocol/v770/src/packets/time.rs`.
 
+> **Provenance, because `git log` will mislead you here.** The whole change set
+> landed inside **`a19e5e4 feat(shell): chests reach pixels`**, an unrelated
+> commit by a concurrent agent that harvested this work out of the shared index
+> before it could be committed under its own message. `git log` for
+> `packets/registry.rs` therefore names a chest renderer. Nothing was lost and
+> nothing foreign was shipped, but the commit message is not a description of
+> this work — this doc is. See `CLAUDE.md`'s repo hazards for the mechanism and
+> the practice that avoids it.
+
 ## How it works
 
 ### 1. The wire (`crates/protocol/v770/src/packets/registry.rs`)
