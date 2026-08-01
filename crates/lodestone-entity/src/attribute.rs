@@ -426,6 +426,37 @@ pub fn water_movement_efficiency_key() -> Identifier {
     Identifier::from_str("minecraft:water_movement_efficiency").expect("valid built-in identifier")
 }
 
+/// The canonical id of vanilla's `movement_speed` attribute (issue #193).
+///
+/// Reaches physics via [`PlayerState::with_movement_speed`](
+/// https://docs.rs/lodestone-physics) the same way
+/// [`water_movement_efficiency_key`] reaches
+/// [`PlayerState::with_water_movement_efficiency`](
+/// https://docs.rs/lodestone-physics) for Depth Strider — same shape of fold,
+/// same seam, one attribute later. Folding the server-reported snapshot
+/// through [`attribute_value`] already covers Speed/Slowness and soul speed
+/// for free: vanilla applies those as `MOVEMENT_SPEED` `AttributeModifier`s
+/// **server-side** (`LivingEntity.onEffectAdded`/`onEffectUpdated`, gated on
+/// `!level().isClientSide()` — `LivingEntity.java:1075-1103`,
+/// `.cache/mc/26.2/src`) and syncs the resulting base+modifiers back over the
+/// wire via `ClientboundUpdateAttributesPacket`
+/// (`ServerEntity.sendChanges`/`removeVehicle`, `ServerEntity.java:289,352`);
+/// the client never re-derives the modifier itself. The sprint bonus is the
+/// same shape too — `LivingEntity.setSprinting` adds/removes a transient
+/// `+0.3F ADD_MULTIPLIED_TOTAL` modifier keyed `minecraft:sprinting`
+/// (`LivingEntity.java:154-157`, matching
+/// [`sprint_modifier_matches_physics_convention`]'s worked example) — but a
+/// caller reading this attribute client-side sees that modifier only once the
+/// server has processed the corresponding `PlayerCommand` and resynced, which
+/// lags the client's own locally-latched sprint key by a tick or more; that
+/// latency is why `lodestone_ecs::player::player_physics` keeps its own
+/// local sprint multiply on top of this attribute's folded value rather than
+/// relying on the modifier alone (`docs/swimming.md`).
+#[must_use]
+pub fn movement_speed_key() -> Identifier {
+    Identifier::from_str("minecraft:movement_speed").expect("valid built-in identifier")
+}
+
 /// Builds a foldable [`AttributeInstance`] from a wire-shaped
 /// [`EntityAttributeSnapshot`] — the shape `ClientboundUpdateAttributesPacket`
 /// decodes to (see `read_update_attributes`,
@@ -930,6 +961,44 @@ mod tests {
             id("minecraft:water_movement_efficiency")
         );
         assert!(default_def(&water_movement_efficiency_key()).is_some());
+    }
+
+    #[test]
+    fn movement_speed_key_matches_the_registry_id() {
+        assert_eq!(movement_speed_key(), id("minecraft:movement_speed"));
+        // The *generic* `RangedAttribute` default (0.7, `Attributes.java:108-109`
+        // equivalent) — a player's own base is 0.1 (`Player.createAttributes()`),
+        // supplied by the wire snapshot once the server sends one, not by this
+        // table. This table's job is the fallback + clamp range only.
+        assert_eq!(default_def(&movement_speed_key()).unwrap().default, 0.7);
+    }
+
+    /// The `movement_speed` counterpart of `water_movement_efficiency_folds_
+    /// through_the_wire_snapshot`: a Speed-II-shaped `ADD_MULTIPLIED_TOTAL`
+    /// modifier on a player's own `0.1` base folds to `0.1 * 1.4 = 0.14`,
+    /// through the same wire-shaped conversion Depth Strider uses. This is the
+    /// value `lodestone_ecs::player::player_physics` would hand to
+    /// `PlayerState::with_movement_speed` (combined with the local sprint
+    /// multiply on top, per this module's own `movement_speed_key` docs) —
+    /// proving the fold this crate owns produces the right number before any
+    /// caller outside this crate touches it.
+    #[test]
+    fn movement_speed_folds_a_speed_ii_modifier_onto_the_player_base() {
+        use lodestone_model::EntityAttributeModifier;
+
+        let snapshot = EntityAttributeSnapshot {
+            attribute: id("minecraft:movement_speed"),
+            base: 0.1, // Player.createAttributes().add(MOVEMENT_SPEED, 0.1F)
+            modifiers: vec![EntityAttributeModifier {
+                id: id("minecraft:effect.speed"),
+                // MobEffects.SPEED: +0.2F per level, amplifier 1 = Speed II.
+                amount: f64::from(0.2f32) * 2.0,
+                operation: Operation::AddMultipliedTotal.id(),
+            }],
+        };
+
+        let v = attribute_value(&[snapshot], &id("minecraft:movement_speed"));
+        assert!((v - 0.14).abs() < 1e-9, "got {v}");
     }
 
     #[test]
