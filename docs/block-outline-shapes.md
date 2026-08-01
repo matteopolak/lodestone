@@ -20,8 +20,10 @@ Two things depended on not having it:
    (`crates/lodestone-shell/src/collision.rs`). Structurally sound — fluids are
    the one thing vanilla does not draw through the model pipeline — but a proxy,
    and the doc comment there says so.
-2. **Selection boxes are a full unit cube for everything**, including slabs,
+2. **Selection boxes were a full unit cube for everything**, including slabs,
    stairs and kelp. Only **3,328 of 32,366** states are actually a full cube.
+3. **So was the pick ray**, for longer — and invisibly, because it kept working
+   *after* the drawn box was fixed (issue #375; see Consumption status §3).
 
 ## How it works
 
@@ -313,35 +315,52 @@ not a different scene.
 
 ## Consumption status
 
-**1. `is_pickable` is done (`196d385`).** `LiveCollision::is_pickable`
-(`crates/lodestone-shell/src/collision.rs`) now reads
-`self.version.block_outline(state)` through the private `outline_of` helper,
-replacing the has-baked-quads proxy this section used to describe. The one
-behaviour change flagged below landed with it: `minecraft:light` is now
-**un**pickable when not holding a light item, matching vanilla — the proxy's
+All three consumers are wired. This section used to list two of them as gaps; the
+history is kept because each one failed in a different way.
+
+**1. Pickability (`196d385`).** `LiveCollision::outline_of`
+(`crates/lodestone-shell/src/collision.rs`) reads
+`self.version.block_outline(state)`, replacing the has-baked-quads proxy that
+predated the census. One behaviour change landed with it: `minecraft:light` is
+now **un**pickable when not holding a light item, matching vanilla — the proxy's
 "no fluid ⇒ pickable" clause used to keep it targetable as a side effect of
 having no baked model geometry.
 
-**2. The selection box is still a unit cube, but not for lack of a shape or a
-render hook — both exist now, and only the wiring between them is missing.**
+**2. The selection box (`app.rs::install_outline_source`, `app.rs:853-857`).**
+`Sim::outline_shape_source` (`sim.rs`) hands `RenderState::set_outline_shape_source`
+a `'static` closure over `VersionAdapter::block_outline`, and
+`OutlineRenderer::prepare` draws the boxes it returns. An empty result still
+falls back to a unit cube, which is correct for the demo palette — it has no
+outline census and is all full cubes.
 
-- `LiveCollision::outline_boxes_at(x, y, z) -> Vec<Aabb>` (`collision.rs`) returns
-  the real per-block outline boxes in world space — a half-height box on a slab,
-  kelp's thin column, and so on.
-- `RenderState::set_outline_shape_source` and the `OutlineShapeSource` it installs
-  (`crates/lodestone-shell/src/gpu.rs`) exist for exactly this: `RenderState`
-  samples `self.outline_shape.sample(block)` and hands the boxes to
-  `OutlineRenderer::prepare`, which already accepts a real shape (an empty slice
-  falls back to a unit cube — correct for the demo palette, which has no outline
-  census).
-- **Nothing calls `set_outline_shape_source`.** `grep -rn set_outline_shape_source
-  crates` finds only its own definition. Until some startup path (the shell's
-  `app.rs`, where the live `RenderState` and the live `CollisionSource` both
-  already exist) installs a closure over `LiveCollision::outline_boxes_at`, the
-  renderer keeps drawing `OutlineShapeSource::default()`'s unit cube, and every
-  slab/stair/kelp selection box over-selects at its edges exactly as before.
+**3. The pick ray (issue #375).** This was the subtle one, and it is worth
+recording *why* it survived §2 landing: the drawn box was right while the hit
+test was wrong, which is the most convincing possible way for a bug to hide.
+`raycast` took a per-**cell** `is_solid(x, y, z) -> bool`, so every pickable
+block was a unit cube to the hit test regardless of what the census said. Leaf
+litter — `1/16` of a block tall — stayed highlighted and stayed punchable with
+the crosshair plainly above it, which is how it was reported, from play.
 
-The census itself, and the shape/render seam it needed, are no longer the gap —
-the missing piece is a single call at startup. Until that call exists, the
-selection-box half of this census still reaches zero pixels — see CLAUDE.md on
-islands.
+`crate::raycast::raycast` now takes `pick_boxes(x, y, z, &mut Vec<PickBox>)` and
+clips the ray against each box with the same slab test `ray_aabb` uses
+(vanilla's `AABB.clip`), nearest entry wins:
+
+- `LiveCollision::pick_boxes` emits the census boxes, block-local; the demo
+  adapter's emits one cube per pickable cell, which is exact for that palette;
+- **the hit face comes from the box, not from the cell boundary** the DDA
+  crossed. This is not cosmetic: placement is face-driven, so before the fix a
+  ray angled down onto leaf litter reported the cell's south face and placed the
+  block one cell *south* of the litter instead of on top of it;
+- `RayHit` gained the exact entry point and distance. The cursor
+  `use_item_on` carries is now `hit − blockPos` (vanilla's
+  `writeBlockHitResult`) instead of the struck cube face's centre, and the
+  entity-pick reach clamp uses the real entry distance instead of re-clipping a
+  unit cube around the hit block;
+- an empty box list still means unpickable, and there is deliberately no cube
+  fallback for it — that is the right answer for air, water, lava and
+  `minecraft:light`. A box the eye is already *inside* is skipped, matching
+  `AABB.clip`, which is written in terms of face crossings.
+
+The degraded tier is unchanged in kind: with no version census `outline_of` hands
+back a full cube for anything with baked model geometry, so a version-free build
+still targets blocks, just as coarsely as the whole client did before #375.

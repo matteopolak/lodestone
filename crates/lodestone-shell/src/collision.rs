@@ -104,6 +104,7 @@ use lodestone_render::{BlockAtlas, BlockClassifier, FluidKind};
 use lodestone_world::{ChunkPos, ChunkSection, World};
 
 use crate::blocks::{demo_fluid, id, vanilla_fluid};
+use crate::raycast::PickBox;
 
 // ---------------------------------------------------------------------------
 // The shared seam: what the two adapters answer differently
@@ -502,6 +503,39 @@ impl<'a> WorldCollision<'a> {
     pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
         let b = self.block_at(x, y, z);
         b != id::AIR && demo_fluid(b).is_none()
+    }
+
+    /// The boxes [`crate::raycast::raycast`] clips against in this cell — the demo
+    /// counterpart of [`LiveCollision::pick_boxes`].
+    ///
+    /// A full cube for every pickable cell, and that is **exact** rather than a
+    /// fallback: every block in the demo palette is a full cube, air or water
+    /// (`crate::blocks`). Derived from [`is_pickable`](Self::is_pickable) rather
+    /// than restating it, so the two cannot disagree about what is targetable.
+    pub fn pick_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<PickBox>) {
+        if self.is_pickable(x, y, z) {
+            out.push(PickBox::CUBE);
+        }
+    }
+}
+
+/// One census box widened into the pick ray's block-local `f64` box.
+///
+/// The census is `f32` and the ray is `f64`; the widening is exact, and it is the
+/// only conversion between the two spaces (see [`PickBox`]'s docs on why
+/// `raycast` does not name the census type).
+fn pick_box(b: &BlockAabb) -> PickBox {
+    PickBox {
+        min: [
+            f64::from(b.min[0]),
+            f64::from(b.min[1]),
+            f64::from(b.min[2]),
+        ],
+        max: [
+            f64::from(b.max[0]),
+            f64::from(b.max[1]),
+            f64::from(b.max[2]),
+        ],
     }
 }
 
@@ -1029,11 +1063,14 @@ impl LiveCollision {
     /// Public read of [`outline_of`](Self::outline_of) at world coordinates —
     /// block-local boxes translated to world space, for drawing the real
     /// selection box shape (a half-height box on a slab, kelp's 9/16 column,
-    /// …) instead of a unit cube. Not yet consumed: the selection-box
-    /// wireframe is `gpu.rs`'s `OutlineRenderer::prepare`, which is out of
-    /// this module's file scope and still builds a hard-coded unit cube
-    /// around [`Sim::target`](crate::sim::Sim)'s block — see
-    /// `docs/block-outline-shapes.md` for the spec to wire this in.
+    /// …) instead of a unit cube.
+    ///
+    /// The *renderer* does not go through here: `gpu.rs`'s
+    /// `OutlineRenderer::prepare` takes its shapes from
+    /// [`Sim::outline_shape_source`](crate::sim::Sim::outline_shape_source),
+    /// a `'static` closure over the same `VersionAdapter::block_outline`
+    /// census, because it needs no borrowed world snapshot. This accessor is
+    /// the view-shaped read of the same answer, used by the shape gates below.
     #[must_use]
     pub fn outline_boxes_at(&self, x: i32, y: i32, z: i32) -> Vec<Aabb> {
         let state = self.block_at(x, y, z);
@@ -1092,20 +1129,58 @@ impl LiveCollision {
     /// is collision-adjacent geometry, outline is a third, independent shape (see
     /// the module docs) — so the two are tested independently now.
     ///
-    /// Still coarse in one respect: [`raycast`](crate::raycast::raycast) itself
-    /// still steps cell-by-cell and reports whichever cell the DDA enters first,
-    /// so a ray that grazes the *empty* corner of a genuinely partial outline (a
-    /// slab's top half, kelp's 9/16 column) can still register a hit at that
-    /// cell. The selection box now drawn from
-    /// [`outline_boxes_at`](Self::outline_boxes_at) is the real shape; the ray's
-    /// own geometry-aware clipping is unchanged by this fix.
+    /// This is the **cell-coarse** half of the question: whether this cell holds
+    /// anything targetable at all. Whether the *ray* passes through the shape is
+    /// [`pick_boxes`](Self::pick_boxes), which the ray uses; both read the same
+    /// [`outline_of`](Self::outline_of), so they cannot disagree.
     #[must_use]
     pub fn is_pickable(&self, x: i32, y: i32, z: i32) -> bool {
+        self.pick_outline(x, y, z).is_some_and(|s| !s.is_empty())
+    }
+
+    /// The boxes [`crate::raycast::raycast`] clips the view ray against in this
+    /// cell — vanilla's `state.getShape(…).toAabbs()`, block-local, appended.
+    ///
+    /// # Issue #375: this is what the ray takes instead of a boolean
+    ///
+    /// The pick used to hand `raycast` an occupancy *predicate*
+    /// ([`is_pickable`](Self::is_pickable)), so every pickable block was a unit
+    /// cube to the hit test even after the selection box on screen was being
+    /// drawn from the real census. Reported from play: leaf litter stayed
+    /// highlighted with the crosshair well above it. Vanilla clips the outline
+    /// boxes themselves (`ClipContext.Block.OUTLINE`, `Entity.java:2012-2016`),
+    /// which is what emitting them here lets the ray do.
+    ///
+    /// Empty output means "nothing to target here", the correct answer for air,
+    /// water, lava and `minecraft:light` — see
+    /// [`outline_of`](Self::outline_of) for why that is a real answer rather
+    /// than a data gap, and why there is deliberately no cube fallback for it.
+    ///
+    /// The **degraded** tier still works and still targets: with no version
+    /// census `outline_of` hands back a full cube for anything with baked model
+    /// geometry, so a build with no version family compiled in picks blocks
+    /// exactly as coarsely as it did before this change — never "no target at
+    /// all".
+    pub fn pick_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<PickBox>) {
+        if let Some(shape) = self.pick_outline(x, y, z) {
+            out.extend(shape.iter().map(pick_box));
+        }
+    }
+
+    /// The outline of this cell for *picking* purposes: `None` for the three air
+    /// blocks, otherwise [`outline_of`](Self::outline_of).
+    ///
+    /// The air check is not redundant with an empty outline. In the **degraded**
+    /// tier (no version census) `outline_of`'s last clause hands a full cube to
+    /// anything that carries no fluid, which includes air — so without this,
+    /// a version-free build would target the empty cell in front of the
+    /// player's face. See [`AIR_BLOCKS`] for why `state != 0` is not the test.
+    fn pick_outline(&self, x: i32, y: i32, z: i32) -> Option<&'static [BlockAabb]> {
         let state = self.block_at(x, y, z);
         if self.air_states.contains(&state) {
-            return false;
+            return None;
         }
-        !self.outline_of(state).is_empty()
+        Some(self.outline_of(state))
     }
 }
 
@@ -1535,6 +1610,32 @@ mod tests {
             .unwrap_or_else(|| panic!("no such block state: {name}"))
     }
 
+    /// A one-section live view (chunk `0,0`, `min_y = 0`) holding exactly the
+    /// listed `(x, y, z, state)` cells, everything else air — for the pick-ray
+    /// gates, which need a *single* cell with a partial outline and empty space
+    /// around it rather than [`live_column`]'s uniform fill.
+    ///
+    /// `version` is explicit so the same fixture can exercise the degraded
+    /// (no-census) tier by passing `None`.
+    fn live_cells(
+        atlas: Arc<BlockAtlas>,
+        version: Option<Arc<dyn VersionAdapter>>,
+        cells: &[(usize, usize, usize, u32)],
+    ) -> LiveCollision {
+        let mut section = ChunkSection::new(
+            PaletteKind::block_states_with_direct_bits(20),
+            PaletteKind::biomes(),
+            0,
+            0,
+        );
+        for &(x, y, z, state) in cells {
+            section.set_block(x, y, z, state);
+        }
+        let mut sections = HashMap::new();
+        sections.insert((0, 0, 0), Arc::new(section));
+        LiveCollision::new(sections, 0, 1, atlas, version)
+    }
+
     /// A one-section live view (chunk `0,0`, `min_y = 0`) whose cells at
     /// `y_range` hold `state` and whose remaining cells are air.
     ///
@@ -1708,13 +1809,31 @@ mod tests {
         );
 
         // Control 3: the pre-fix behaviour, on the same states, must be wrong.
+        //
+        // It asserted the *specific* wrong answer `1.0` — "a bottom slab reads as a
+        // full cube" — and that premise is false and was never true here. The
+        // fallback is `classify(state).occludes ? FULL_CUBE : NO_COLLISION`, and
+        // `occludes` is derived from the **baked model geometry**
+        // (`BlockModels::face_occludes`, `block_models.rs:410-426`): a bottom
+        // slab's up face has no quad at the cell boundary, so it does not occlude
+        // and the fallback gives it *no collision at all*, i.e. `0.0`. Which is
+        // the worse of the two bugs — you fall through the slab rather than
+        // standing 0.5 too high. So the control fires; it just fires the other
+        // way, and the assertion is stated as the property (not the real shape)
+        // rather than as one of the two wrong numbers.
         let slab = state_id(&atlas, "minecraft:oak_slab[type=bottom,waterlogged=false]");
         let degraded = live_column(Arc::clone(&atlas), slab, 4..=4).with_version_data(None);
+        let degraded_top = degraded.collision_top(0, 4, 0);
         assert!(
-            (degraded.collision_top(0, 4, 0) - 1.0).abs() < 1e-6,
-            "control did not fire: without the census a bottom slab must read as a \
-             full cube (that IS the bug), got {}",
-            degraded.collision_top(0, 4, 0)
+            (degraded_top - 0.5).abs() > 1e-6,
+            "control did not fire: without the census a bottom slab must NOT reach \
+             its real 0.5 top (that IS the bug), got {degraded_top}"
+        );
+        let real_top = live_column(Arc::clone(&atlas), slab, 4..=4).collision_top(0, 4, 0);
+        assert!(
+            (real_top - 4.5).abs() < 1e-6,
+            "…and with the census it must: got {real_top}, expected 4.5 in this \
+             fixture's world space"
         );
         let cobweb = state_id(&atlas, "minecraft:cobweb");
         let real = live_column(Arc::clone(&atlas), cobweb, 4..=4);
@@ -2125,14 +2244,237 @@ mod tests {
         sections.insert((0, 0, 0), Arc::new(section));
         let view = LiveCollision::new(sections, 0, 1, Arc::clone(&atlas), inferred_version_data());
 
-        let hit = crate::raycast::raycast([0.5, 6.5, 0.5], [0.0, -1.0, 0.0], 4.0, |x, y, z| {
-            view.is_pickable(x, y, z)
-        })
+        let hit = crate::raycast::raycast(
+            [0.5, 6.5, 0.5],
+            [0.0, -1.0, 0.0],
+            4.0,
+            |x, y, z, out| view.pick_boxes(x, y, z, out),
+        )
         .expect("the ray must hit something within 4 blocks");
         assert_eq!(
             hit.block,
             [0, 4, 0],
             "the ray must stop at the kelp, not tunnel through to the stone"
+        );
+
+        // The 9/16 column belongs to the **head**, not the body. `Block.column(16,
+        // 0, 9)` is `KelpBlock`'s `SHAPE` (`KelpBlock.java:24`), passed to
+        // `GrowingPlantHeadBlock`; `kelp_plant` is the `GrowingPlantBodyBlock`
+        // half, which overrides no shape and so outlines to a full cube. The
+        // committed JVM dump agrees: `kelp_plant` is `0..1`, `kelp[age=0]` is
+        // `0..0.5625`. Casting at both pins that the ray reads a *per-state*
+        // shape rather than one shape per block — and the head is the one whose
+        // entry point a cube-shaped hit test got wrong.
+        assert!(
+            (hit.hit[1] - 5.0).abs() < 1e-6,
+            "kelp_plant's outline is a full cube, so the entry is the cell top: {}",
+            hit.hit[1]
+        );
+        let head = state_id(&atlas, "minecraft:kelp[age=0]");
+        let head_view =
+            live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, head)]);
+        let head_hit = cast(&head_view, [0.5, 6.5, 0.5], [0.0, -1.0, 0.0])
+            .expect("the kelp head must be targetable too");
+        assert!(
+            (head_hit.hit[1] - (4.0 + 9.0 / 16.0)).abs() < 1e-6,
+            "entered the kelp head's real 9/16 top, got y = {}",
+            head_hit.hit[1]
+        );
+    }
+
+    /// Fire the real [`crate::raycast::raycast`] through a live view, so the
+    /// caller looks exactly like `Sim::update_target`'s.
+    fn cast(view: &LiveCollision, origin: [f64; 3], dir: [f64; 3]) -> Option<crate::raycast::RayHit> {
+        crate::raycast::raycast(origin, dir, crate::raycast::REACH, |x, y, z, out| {
+            view.pick_boxes(x, y, z, out);
+        })
+    }
+
+    /// **Issue #375, against the real per-state census.** Reported from play:
+    /// flat blocks like leaf litter stayed highlighted and stayed targetable
+    /// with the crosshair plainly above them, because the ray took a per-cell
+    /// *boolean* and treated every pickable block as a unit cube.
+    ///
+    /// The geometry expected below is vanilla's own, transcribed from 26.2
+    /// source and cross-checked against the committed JVM outline dump
+    /// (`lodestone-data/tests/support/outline_shape_jvm.txt`), not produced by
+    /// the ray under test:
+    ///
+    /// * `CarpetBlock.java:17` — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e. the
+    ///   full cell in x/z and **`1/16` of a block tall**;
+    /// * `LeafLitterBlock` via `SegmentableBlock.java:20,39-41` —
+    ///   `Block.box(0, 0, 0, 8, getShapeHeight() = 1, 8)` per segment, so a
+    ///   four-segment litter is the same `1/16`-tall plate over the whole cell.
+    ///
+    /// The first assertion is the **world-species guard**: if the census handed
+    /// this cell a unit cube, every ray assertion below would be testing a cube
+    /// against a cube and would pass either way.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn the_view_ray_clips_a_flat_blocks_real_outline_box() {
+        let atlas = vanilla_atlas();
+        // One-sixteenth of a block: vanilla's own number for both of these.
+        const TOP: f64 = 1.0 / 16.0;
+
+        for name in [
+            "minecraft:leaf_litter[facing=north,segment_amount=4]",
+            "minecraft:white_carpet",
+        ] {
+            let state = state_id(&atlas, name);
+            let view = live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, state)]);
+
+            // The world-species guard: this cell really does carry a 1/16-tall
+            // plate in the census the ray reads, not a cube.
+            let boxes = view.outline_boxes_at(0, 4, 0);
+            assert_eq!(boxes.len(), 1, "{name} has one outline box, got {boxes:?}");
+            assert!(
+                (boxes[0].min_y - 4.0).abs() < 1e-6
+                    && (boxes[0].max_y - (4.0 + TOP)).abs() < 1e-6
+                    && (boxes[0].max_x - boxes[0].min_x - 1.0).abs() < 1e-6,
+                "{name}'s census outline must be a full-cell 1/16-tall plate — \
+                 otherwise these ray assertions test a cube against a cube: {boxes:?}"
+            );
+
+            // Straight down: a hit, and the entry point is the *box* top, not the
+            // cell top. `5.0` here is the pre-fix answer.
+            let down = cast(&view, [0.5, 6.0, 0.5], [0.0, -1.0, 0.0])
+                .unwrap_or_else(|| panic!("{name} must still be targetable from above"));
+            assert_eq!(down.block, [0, 4, 0]);
+            assert_eq!(down.normal, [0, 1, 0]);
+            assert!(
+                (down.hit[1] - (4.0 + TOP)).abs() < 1e-6,
+                "{name}: entered at y = {}, expected the box top 4 + 1/16 (a cube \
+                 would say 5.0)",
+                down.hit[1]
+            );
+            assert!(
+                (f64::from(down.cursor()[1]) - TOP).abs() < 1e-6,
+                "{name}: so use_item_on's cursor y is 1/16, not 1.0"
+            );
+
+            // **The reported bug.** A ray crossing the cell at eye height passes
+            // 7/16 of a block above the plate: vanilla does not target it, and
+            // before #375 this hit.
+            assert!(
+                cast(&view, [0.5, 4.5, 3.0], [0.0, 0.0, -1.0]).is_none(),
+                "{name}: a ray half a block above a 1/16-tall plate must miss"
+            );
+            // Bracketing the same boundary from the other side is the magnitude
+            // control — a ray that rejects *everything* also passes a miss test.
+            assert!(
+                cast(&view, [0.5, 4.0 + TOP + 0.01, 3.0], [0.0, 0.0, -1.0]).is_none(),
+                "{name}: 0.01 above the plate must still miss, so the boundary is \
+                 1/16 and not some coarser cutoff"
+            );
+            let grazing = cast(&view, [0.5, 4.0 + TOP - 0.01, 3.0], [0.0, 0.0, -1.0])
+                .unwrap_or_else(|| panic!("{name}: 0.01 below the plate top must hit"));
+            assert_eq!(grazing.block, [0, 4, 0]);
+            assert_eq!(
+                grazing.normal,
+                [0, 0, 1],
+                "{name}: entered the plate's +Z side"
+            );
+        }
+    }
+
+    /// A block whose outline is several **disjoint** boxes must have all of them
+    /// tested, and the gaps between them must be gaps.
+    ///
+    /// `minecraft:oak_fence` with all four sides connected is three boxes in the
+    /// census — the west–east bar through the middle plus the two z arms
+    /// (`CrossCollisionBlock.java:55-56`: `column(4, 0, 16)` for the post and
+    /// `boxZ(4, 0, 16, 0, 8)` rotated for each arm, unioned and decomposed):
+    ///
+    /// ```text
+    /// [0.0,   0, 0.375] .. [1.0,   1, 0.625]
+    /// [0.375, 0, 0.0  ] .. [0.625, 1, 0.375]
+    /// [0.375, 0, 0.625] .. [0.625, 1, 1.0  ]
+    /// ```
+    ///
+    /// So the four corners of the cell — `x < 0.375` with `z < 0.375`, and the
+    /// three rotations of that — are **empty**, and a ray down a corner must miss
+    /// while a ray down any arm must hit. That is the shape of the assertion no
+    /// cell-shaped hit test can satisfy, in either direction.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn every_box_of_a_fences_outline_is_tested_and_the_corner_gap_is_a_gap() {
+        let atlas = vanilla_atlas();
+        let fence = state_id(
+            &atlas,
+            "minecraft:oak_fence[east=true,north=true,south=true,waterlogged=false,west=true]",
+        );
+        let view = live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, fence)]);
+
+        // The world-species guard again: three boxes, or this proves nothing
+        // about multi-box clipping.
+        let boxes = view.outline_boxes_at(0, 4, 0);
+        assert_eq!(
+            boxes.len(),
+            3,
+            "a four-way fence's census outline is the bar plus two arms, got {boxes:?}"
+        );
+
+        // One ray per box, straight down onto its top at y = 5.
+        for (x, z, what) in [
+            (0.5, 0.5, "the post/bar centre"),
+            (0.1, 0.5, "the west end of the x bar"),
+            (0.5, 0.1, "the north arm"),
+            (0.5, 0.9, "the south arm"),
+        ] {
+            let hit = cast(&view, [x, 6.0, z], [0.0, -1.0, 0.0])
+                .unwrap_or_else(|| panic!("{what} must be targetable"));
+            assert_eq!(hit.block, [0, 4, 0], "{what}");
+            assert_eq!(hit.normal, [0, 1, 0], "{what}");
+            assert!(
+                (hit.hit[1] - 5.0).abs() < 1e-6,
+                "{what}: the fence outline is a full block tall, got {}",
+                hit.hit[1]
+            );
+        }
+
+        // …and the four empty corners are empty. Pre-fix all four hit.
+        for (x, z) in [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)] {
+            assert!(
+                cast(&view, [x, 6.0, z], [0.0, -1.0, 0.0]).is_none(),
+                "the fence's ({x}, {z}) corner is empty in the census, so the ray \
+                 must pass through it"
+            );
+        }
+    }
+
+    /// **The degraded tier still targets.** With no version census the outline
+    /// falls back to "has baked model quads ⇒ a unit cube"
+    /// ([`LiveCollision::outline_of`]), which is *coarse* — the whole point of
+    /// #375 is that a cube is the wrong shape — but it must never become "no
+    /// target at all", and air must still not be targetable through it.
+    ///
+    /// Both halves matter: without the second, a fallback that returned a cube
+    /// for *every* cell (air included) would pass the first.
+    #[test]
+    #[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
+    fn with_no_version_census_the_ray_still_targets_coarsely() {
+        let atlas = vanilla_atlas();
+        let litter = state_id(&atlas, "minecraft:leaf_litter[facing=north,segment_amount=4]");
+        let view = live_cells(Arc::clone(&atlas), None, &[(0, 4, 0, litter)]);
+        assert!(
+            !view.has_real_shapes(),
+            "this fixture must be the degraded tier, or it proves nothing"
+        );
+
+        let hit = cast(&view, [0.5, 6.0, 0.5], [0.0, -1.0, 0.0])
+            .expect("a version-free build must still target blocks, coarsely");
+        assert_eq!(hit.block, [0, 4, 0]);
+        assert!(
+            (hit.hit[1] - 5.0).abs() < 1e-6,
+            "and coarsely means the whole cell: got y = {}",
+            hit.hit[1]
+        );
+
+        // The air cells the ray crossed on the way must not have answered — the
+        // fallback's last clause hands a cube to anything carrying no fluid.
+        assert!(
+            cast(&view, [0.5, 6.0, 0.5], [0.0, 1.0, 0.0]).is_none(),
+            "looking up into air must find nothing even with no census"
         );
     }
 
