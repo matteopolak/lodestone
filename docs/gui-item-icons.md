@@ -101,12 +101,61 @@ the renderer draws as two ranges of one buffer:
 | pass | attachment | contents |
 | --- | --- | --- |
 | `container-pass` | colour (`Load`) | panel, title, slot wells (`0..chrome`) |
-| `container-item-model-pass` | colour (`Load`) + **depth (`Clear(1.0)`)** | the 3-D mini-blocks |
-| `container-item-pass` | colour (`Load`) | flat sprites, then `chrome..n` (counts, bars) |
+| `container-item-model-pass` | colour (`Load`) + **depth (`Clear(1.0)`)** | the slots' 3-D mini-blocks (`0..slot_model`) |
+| `container-item-pass` | colour (`Load`) | the slots' flat sprites (`0..slot_item`), then `chrome..slot_colour` (counts, bars) |
+| `container-carried-model-pass` | colour (`Load`) + **depth (`Clear(1.0)`)** | the carried stack's 3-D mini-block (`slot_model..n`) |
+| `container-carried-pass` | colour (`Load`) | the carried stack's flat sprite (`slot_item..n`), then `slot_colour..n` |
 
 If you add anything to the container's colour stream, put it in the loop that
 matches its layer, not wherever is convenient — a stack count emitted in the
 wells loop ends up *underneath* the sprite it counts.
+
+### The last two passes are a *stratum*, not a reorder (issue #377)
+
+Reported from play: the stack on the cursor drew **under** the slot items. It was
+already appended last on all three streams, and two of the four combinations were
+already right — which is why this needed measuring rather than a reorder. The
+cause is that within one stratum the item passes run **model first, then flat
+sprites** (only the model pass needs depth, and a pass's attachments are fixed
+for its lifetime), so:
+
+| cursor holds | slot holds | before |
+| --- | --- | --- |
+| flat sprite | flat sprite | correct — later in the same stream |
+| flat sprite | 3-D block | correct — the sprite pass runs after the model pass |
+| **3-D block** | flat sprite | **wrong** — the model pass runs *before* the sprite pass |
+| **3-D block** | 3-D block | **wrong** — same GUI depth, resolved against the depth buffer, not append order |
+
+plus a third, independent mechanism in *every* combination: the slot layer's
+**stack-count glyphs** are on the colour stream's second run, which also drew
+after the carried icon. The measured control confirmed all three — the flat/flat
+case failed at 37 px whose bounding box (`x164..173 y168..175`) is exactly where a
+count sits.
+
+So `build_inner` records three more split markers — `slot_vertex_count`,
+`slot_item_vertex_count`, `slot_model_vertex_count`, plus `slot_special_count` —
+and the renderer replays all three streams as a second stratum. **The second
+model pass clears depth again**, and that clear is the load-bearing part: it is
+what vanilla's `graphics.nextStratum()`
+(`AbstractContainerScreen.java:126`, called immediately before it draws the
+carried item and nowhere else on that screen) buys, and without it a slot block's
+near faces still win. `IconStratum` in `hud/item_icon.rs` names the two layers.
+
+Two things to know before touching this:
+
+* the sprite and model streams need **no** split argument in `IconRenderer::upload`
+  — they are contiguous vertex slices, so only the *draw* splits — but `special`
+  does, because a special batch is *grouped* by `(model, sheet)` during upload and
+  a group spanning the split would draw a carried chest in the slot stratum.
+  `upload` therefore takes `special_carried_from`; the hotbar passes
+  `special.len()` because it has no carried stack.
+* gate: `tests/container_cursor_pixels.rs`. Its discriminator is **"nothing paints
+  inside the cursor's own ink"** — the pixel set where a cursor-only render
+  differs from a chrome baseline — reported as a bounding box, never a fraction.
+  Its live-detector control is the complement (the slot item *must* be visible
+  outside that ink, or the assertion is vacuous), and it runs the flat-sprite and
+  the block cursor separately, because a flat sprite structurally cannot exercise
+  the depth half.
 
 ### Stack count text and font
 
@@ -334,10 +383,11 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 
 | path | role |
 | --- | --- |
-| `crates/lodestone-shell/src/hud/item_icon.rs` | `ItemIcon`, `draw_item_icon`, `ColourStream`, `IconRenderer` (both pipelines, upload, draws) |
+| `crates/lodestone-shell/src/hud/item_icon.rs` | `ItemIcon`, `draw_item_icon`, `ColourStream`, `IconStratum`, `IconRenderer` (both pipelines, upload, draws) |
 | `crates/lodestone-shell/src/hud.rs` | the hotbar consumer: cell layout, `Builder::item_icon`, the three passes |
-| `crates/lodestone-shell/src/container.rs` | the container consumer: slot layout, chrome/overlay split, `render_with_icons` |
+| `crates/lodestone-shell/src/container.rs` | the container consumer: slot layout, chrome/overlay/carried splits, `render_with_icons` |
 | `crates/lodestone-shell/src/gpu.rs` | the four borrowed-resource accessors on `RenderState` |
-| `crates/lodestone-shell/src/app.rs` | attaches both screens at startup; passes models + depth per frame for the **hotbar only** (`app.rs:1359`) — the container's `app.rs:1273` call still omits them, which is #50 |
+| `crates/lodestone-shell/src/app.rs` | attaches both screens at startup; passes models + depth per frame to **both** — the hotbar's `render_with_item_models` and the container's `render_with_icons_scaled`. (This row used to say the container call "still omits them, which is #50"; #50 closed, and the Known-gaps entry above already recorded that. Two statements about the same fact is how that entry went stale twice.) |
 | `crates/lodestone-shell/tests/hotbar_block_item_pixels.rs` | hotbar pixel gate (GPU + `client.jar`, `#[ignore]`d) — 176 / 0 / 0 |
 | `crates/lodestone-shell/tests/container_item_pixels.rs` | container pixel gate (same) — 176 block / 120 sprite / 0 empty / 0 control |
+| `crates/lodestone-shell/tests/container_cursor_pixels.rs` | the carried-stack stratum gate (#377, same requirements) — 0 px bleed inside the cursor's ink across three cases; the pre-fix control fails at 128 / 46 / 37 px |

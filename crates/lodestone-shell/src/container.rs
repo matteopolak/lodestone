@@ -510,6 +510,27 @@ pub struct ContainerGeometry {
     /// the icons, so the renderer draws this stream in two ranges with the icon
     /// passes in between.
     pub chrome_vertex_count: usize,
+    /// How many leading vertices of [`verts`](Self::verts) belong to the **slot**
+    /// stratum, i.e. everything except the carried stack's own count and
+    /// durability bar. The remainder is drawn last, above the carried stack's
+    /// icon (issue #377).
+    ///
+    /// Equal to [`vertex_count`](Self::vertex_count) when nothing is carried, so
+    /// the fourth range is simply empty.
+    pub slot_vertex_count: usize,
+    /// How many leading vertices of [`item_verts`](Self::item_verts) are slot
+    /// icons; the remainder is the carried stack's flat sprite. See
+    /// [`slot_vertex_count`](Self::slot_vertex_count).
+    pub slot_item_vertex_count: usize,
+    /// How many leading vertices of [`model_verts`](Self::model_verts) are slot
+    /// icons; the remainder is the carried stack's 3-D block. **This one is not
+    /// an ordering nicety** — the model pass is depth-tested, so a carried block
+    /// has to be drawn in a pass that clears depth again or a slot block's near
+    /// faces win over it. See [`crate::hud::item_icon::IconStratum`].
+    pub slot_model_vertex_count: usize,
+    /// How many leading entries of `special` are slot icons; the remainder is a
+    /// carried block-entity item (a chest on the cursor).
+    pub(crate) slot_special_count: usize,
     /// Rect covered by the widget, if anything was drawn — in the **logical**
     /// GUI canvas (physical `width`/`height` divided by the effective GUI
     /// scale, matching [`panel_origin`]), not raw physical pixels. A caller
@@ -590,6 +611,10 @@ impl ContainerGeometry {
                 bg_verts: Vec::new(),
                 dim_vertex_count: 0,
                 chrome_vertex_count: 0,
+                slot_vertex_count: 0,
+                slot_item_vertex_count: 0,
+                slot_model_vertex_count: 0,
+                slot_special_count: 0,
                 widget_rect: None,
             };
         };
@@ -754,14 +779,40 @@ impl ContainerGeometry {
             b.rect_px(sx, sy, CELL, CELL, [0.05, 0.05, 0.05, 0.55]);
         }
 
+        // Everything above is the **slot stratum**; everything below is the
+        // carried stack, drawn in its own later stratum. This is vanilla's
+        // `graphics.nextStratum()`, called immediately before it draws the
+        // carried item and nowhere else on the screen
+        // (`AbstractContainerScreen.java:126`).
+        //
+        // It has to be a stratum and not merely "appended last" (issue #377).
+        // Append order only settles two of the four cases, because the GUI item
+        // passes run **model first, then flat sprites** — the model pass is the
+        // only one that needs a depth attachment and a pass's attachments are
+        // fixed for its lifetime:
+        //
+        // | cursor holds | slot holds | before |
+        // |---|---|---|
+        // | flat sprite | flat sprite | correct — later in the same stream |
+        // | flat sprite | 3-D block | correct — sprite pass runs after the model pass |
+        // | **3-D block** | flat sprite | **wrong** — model pass runs *before* the sprite pass |
+        // | **3-D block** | 3-D block | **wrong** — same depth, resolved by the depth buffer, not by append order |
+        //
+        // and the slot layer's stack counts, which are on the colour stream's
+        // second run, painted over a flat carried sprite too. So the three
+        // markers recorded below let the renderer replay all three streams as a
+        // second stratum whose model pass clears depth again.
+        let slot_floats = b.verts.len();
+        let slot_item_floats = b.item_verts.len();
+        let slot_model_verts = b.model_verts.len();
+        let slot_special = b.special.len();
+
         // The carried stack — what the player has picked up and is dragging —
-        // draws last: above every slot (it is appended after them on all three
-        // streams, and the icon streams draw in this same append order), below
-        // the tooltip (which this client does not draw yet). Vanilla centres it
-        // on the cursor; `cursor` is `None` unless the caller opted in via
-        // `ContainerFrame::with_cursor`, so every existing caller (the headless
-        // gates, `tests/container_screen.rs`, a menu with nothing carried) draws
-        // exactly as before.
+        // draws above every slot and below the tooltip (which this client does
+        // not draw yet). Vanilla centres it on the cursor; `cursor` is `None`
+        // unless the caller opted in via `ContainerFrame::with_cursor`, so every
+        // existing caller (the headless gates, `tests/container_screen.rs`, a
+        // menu with nothing carried) draws exactly as before.
         //
         // `frame.cursor` is documented as the same **physical** viewport space
         // `hit_test` takes, but this builder draws in the logical canvas (`w`,
@@ -778,6 +829,10 @@ impl ContainerGeometry {
         Self {
             dim_vertex_count: dim_floats / FLOATS_PER_VERTEX,
             chrome_vertex_count: chrome_floats / FLOATS_PER_VERTEX,
+            slot_vertex_count: slot_floats / FLOATS_PER_VERTEX,
+            slot_item_vertex_count: slot_item_floats / crate::hud::SPRITE_FLOATS_PER_VERTEX,
+            slot_model_vertex_count: slot_model_verts,
+            slot_special_count: slot_special,
             verts: b.verts,
             item_verts: b.item_verts,
             model_verts: b.model_verts,
@@ -2041,6 +2096,7 @@ impl ContainerRenderer {
             &geo.item_verts,
             &geo.model_verts,
             &geo.special,
+            geo.slot_special_count,
             logical_w.max(1.0) as u32,
             logical_h.max(1.0) as u32,
             "container-item-verts",
@@ -2049,6 +2105,12 @@ impl ContainerRenderer {
         let vertex_count = geo.vertex_count() as u32;
         let chrome_count = (geo.chrome_vertex_count as u32).min(vertex_count);
         let dim_count = (geo.dim_vertex_count as u32).min(chrome_count);
+        // The three carried-stack splits (issue #377). Clamped against what
+        // `upload` actually reported so a stream whose half is not attached (no
+        // atlas, no depth) still yields an empty range rather than a bogus one.
+        let slot_colour_count = (geo.slot_vertex_count as u32).clamp(chrome_count, vertex_count);
+        let slot_item_count = (geo.slot_item_vertex_count as u32).min(item_count);
+        let slot_model_count = (geo.slot_model_vertex_count as u32).min(model_count);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("container"),
         });
@@ -2103,15 +2165,16 @@ impl ContainerRenderer {
             pass.draw(dim_count..chrome_count, 0..1);
         }
 
-        self.icons.draw_models(
+        self.icons.draw_models_range(
             &mut encoder,
             view,
             depth,
-            model_count,
+            0..slot_model_count,
+            item_icon::IconStratum::Slots,
             "container-item-model-pass",
         );
 
-        if item_count > 0 || vertex_count > chrome_count {
+        if slot_item_count > 0 || slot_colour_count > chrome_count {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("container-item-pass"),
                 color_attachments: &[Some(item_icon::load_colour_attachment(view))],
@@ -2120,13 +2183,45 @@ impl ContainerRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.icons.draw_sprites(&mut pass, item_count);
+            self.icons.draw_sprites_range(&mut pass, 0..slot_item_count);
             // Stack counts, durability bars and the atlas-less swatch fallback,
             // over whichever kind of icon drew beneath them.
-            if vertex_count > chrome_count {
+            if slot_colour_count > chrome_count {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.buffer.slice(..));
-                pass.draw(chrome_count..vertex_count, 0..1);
+                pass.draw(chrome_count..slot_colour_count, 0..1);
+            }
+        }
+
+        // Vanilla's `nextStratum()` (issue #377): the carried stack replays all
+        // three streams *after* every slot, and its model pass **clears depth
+        // again** — that clear is what stops a slot block item's near faces
+        // winning over a block on the cursor. See the layering table in
+        // `build_inner` for the four cases and which two append order alone
+        // could not fix.
+        self.icons.draw_models_range(
+            &mut encoder,
+            view,
+            depth,
+            slot_model_count..model_count,
+            item_icon::IconStratum::Carried,
+            "container-carried-model-pass",
+        );
+        if item_count > slot_item_count || vertex_count > slot_colour_count {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("container-carried-pass"),
+                color_attachments: &[Some(item_icon::load_colour_attachment(view))],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.icons
+                .draw_sprites_range(&mut pass, slot_item_count..item_count);
+            if vertex_count > slot_colour_count {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_vertex_buffer(0, self.buffer.slice(..));
+                pass.draw(slot_colour_count..vertex_count, 0..1);
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
