@@ -36,6 +36,7 @@ pub mod air_bubbles;
 pub mod anim;
 pub mod arena;
 pub mod block;
+pub mod block_entity;
 pub mod block_models;
 pub mod block_resolver;
 pub mod blocks_json;
@@ -82,6 +83,13 @@ pub use air_bubbles::{
 pub use anim::{AnimFrame, AnimSample, AnimSlotUniform, AnimUniform, SpriteAnimation};
 pub use arena::{ArenaAllocation, ArenaBuffer, ArenaError};
 pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
+pub use block_entity::{
+    BlockEntityBatch, BlockEntityCullStats, BlockEntityFrame, BlockEntityInstance, BlockEntityMesh,
+    BlockEntityModelSet, CHEST_LEFT, CHEST_MATERIALS, CHEST_RIGHT, CHEST_SINGLE, ChestHalf,
+    ChestMaterial, ChestSpawn, block_entity_placement_matrix, chest_lid_openness, chest_lid_x_rot,
+    chest_material_with_season, chest_texture_stem, chest_texture_stems, horizontal_facing_yaw,
+    plan_block_entities,
+};
 pub use block_models::{
     BlockModels, BlockModelsError, CRACK_STAGE_COUNT, FluidCell, FluidKind, FluidSprites,
     ItemGeometry, StateModel,

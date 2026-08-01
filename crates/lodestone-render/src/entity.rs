@@ -473,13 +473,16 @@ impl EntityMesh {
 /// **part-local** geometry, winding each triangle pair from the quad's own baked
 /// outward normal.
 ///
-/// The one implementation of that winding rule, shared by [`EntityMesh`] and
-/// [`ArmourMesh`]. It has to be shared rather than copied: an armour layer whose
-/// winding disagreed with the mob it sits on would be invisible from exactly the
-/// half of the angles the mob is visible from, and only once back-face culling is
-/// eventually turned on — a defect that cannot be seen today and would land
-/// later, on somebody else's change.
-fn push_part_quads(
+/// The one implementation of that winding rule, shared by [`EntityMesh`],
+/// [`ArmourMesh`] and [`crate::block_entity::BlockEntityMesh`]. It has to be
+/// shared rather than copied: an armour layer whose winding disagreed with the
+/// mob it sits on would be invisible from exactly the half of the angles the mob
+/// is visible from, and only once back-face culling is eventually turned on — a
+/// defect that cannot be seen today and would land later, on somebody else's
+/// change. A chest whose winding disagreed with the mobs beside it would have
+/// the same property, which is why `block_entity` reaches in here rather than
+/// keeping a "simple" local copy.
+pub(crate) fn push_part_quads(
     quads: &[lodestone_assets::entity::EntityQuad],
     vertices: &mut Vec<ModelVertex>,
     indices: &mut Vec<u32>,
