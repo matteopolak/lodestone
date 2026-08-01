@@ -262,6 +262,27 @@ pub enum SkyAssetError {
     Atlas(#[from] AtlasError),
 }
 
+/// Errors produced while loading the screen-overlay textures (`textures/misc/underwater.png`,
+/// `textures/block/fire_1.png`).
+#[derive(Debug, thiserror::Error)]
+pub enum ScreenEffectAssetError {
+    /// A required overlay texture was not present in any pack.
+    #[error("screen-effect texture not found: {location}")]
+    Missing {
+        /// The missing texture's location.
+        location: String,
+    },
+    /// An overlay texture failed to decode.
+    #[error("screen-effect texture {location}: {source}")]
+    Texture {
+        /// The texture being processed.
+        location: String,
+        /// The underlying decode error.
+        #[source]
+        source: TextureError,
+    },
+}
+
 /// Errors produced while baking a resolved model into renderer-ready geometry.
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {

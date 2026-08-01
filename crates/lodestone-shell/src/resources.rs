@@ -16,8 +16,8 @@ use lodestone_assets::{
     ItemAtlas, Language, ParticleAtlas, ResourceManager, ResourceSource, ZipSource,
 };
 use lodestone_render::{
-    BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, SkyRenderer, blocks_json_registry,
-    entity_texture_candidates,
+    BlockAtlas, BlockModels, EntityModelSet, GuiAtlas, ScreenEffectRenderer, SkyRenderer,
+    blocks_json_registry, entity_texture_candidates,
 };
 
 use crate::blocks::{DemoClassifier, ShellClassifier};
@@ -266,6 +266,31 @@ pub fn load_sky(
         }
         Err(e) => {
             tracing::warn!(target: "assets", "build sky renderer from {}: {e}", root.display());
+            None
+        }
+    }
+}
+
+/// Load and build the underwater/fire screen-overlay pass (`textures/misc/underwater.png`,
+/// `textures/block/fire_1.png`, from `client.jar`) via [`ScreenEffectRenderer::new`].
+/// Same shape as [`load_sky`]: fail-open, `None` on a jar-less run or a pack
+/// missing either texture, leaving [`crate::gpu::RenderState`] with no overlay
+/// pass installed rather than failing startup.
+#[must_use]
+pub fn load_screen_effects(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color_format: wgpu::TextureFormat,
+) -> Option<ScreenEffectRenderer> {
+    let root = asset_root()?;
+    let manager = open_client_jar(&root)?;
+    match ScreenEffectRenderer::new(device, queue, color_format, &manager) {
+        Ok(fx) => {
+            tracing::info!(target: "assets", "loaded underwater/fire screen overlays");
+            Some(fx)
+        }
+        Err(e) => {
+            tracing::warn!(target: "assets", "build screen-effect renderer from {}: {e}", root.display());
             None
         }
     }
