@@ -379,6 +379,14 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   wgpu-forced `Always`/`write:false` substitute for vanilla's "no depth attachment
   at all" (found only by a validation error), and why the occlusion gate asserts
   **pixel-identity** with the occluder baseline rather than mere absence.
+- [Clientbound packet coverage](./clientbound-packet-coverage.md) — the measured
+  triage behind #26: `xtask connectedness` at 109/141 decoded, and why the other 32
+  gap packets are deliberately **not** decoded — a full A/B/C tier table with the
+  decompiled record cited per packet, splitting "blocked on a consumer in another
+  crate" from "dormant `ClientAction` but no UI" from "genuinely irrelevant".
+  Landing them now would manufacture exactly the island pattern the issue warns
+  against. Also explains why `CHUNK_BATCH_START` reads as stranded to the tool and
+  is not.
 - [Chunk column encoding](./chunk-column-encoding.md) — issue #363: why every
   served chunk was stone-and-air only, `build_world_column`'s real-per-cell fix
   with its memoized `resolve_state_id` lookup, and the **second, independent** bug
