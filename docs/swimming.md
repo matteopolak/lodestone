@@ -444,26 +444,125 @@ does on land.
   alongside any fix so the list doesn't go stale the way `docs/in-flight.md`
   did.
 - **`movement_speed` is not attribute-driven either, and it looks like it is.**
-  Measured while closing the `EntityIndex` hole above.
-  `lodestone_ecs::player::player_physics` does call the physics seam —
-  `*player = player.with_movement_speed(attr)` — but `attr` is
-  `profile.base_movement_speed` (a hardcoded `0.1`, `lodestone-physics`'s
-  `profile.rs:142`) times `(1 + profile.sprint_speed_modifier)` when
-  sprinting. **No server-reported attribute reaches it.** So:
+  Issue #193 / Tier 1 epic #1. `lodestone_ecs::player::player_physics` does
+  call the physics seam — `*player = player.with_movement_speed(attr)` — but
+  `attr` is `profile.base_movement_speed` (a hardcoded `0.1`,
+  `lodestone-physics`'s `profile.rs:142`) times
+  `(1 + profile.sprint_speed_modifier)` when sprinting. **No server-reported
+  attribute reaches it.** So a `/attribute @s minecraft:movement_speed base
+  set 0.5` changes nothing client-side, and Speed/Slowness/Soul Speed/boot
+  enchantments do not change the local player's walk speed.
 
-  - a `/attribute @s minecraft:movement_speed base set 0.5` changes nothing
-    client-side;
-  - **Speed and Slowness do not change the local player's walk speed.**
-    `lodestone_physics::movement_speed_modifier` exists, is unit-tested, and
-    has no production caller — `player_physics` never folds
-    `PhysicsState.effects` into the value. `effective_speed`'s own doc comment
-    says "sprint + Speed/Slowness already folded in by the entity layer",
-    which is true of the *seam's contract* and false of every caller.
+  **Re-verified against the jar (2026-07-31) rather than trusting the
+  original write-up's plan verbatim** — `CLAUDE.md`'s rule 2. Two things
+  changed the picture:
 
-  This is the same hole as the attribute one, one layer further on: the value
-  had nowhere to come from, so the caller invented one. The read side is now
-  wired (`ClientHandle::local_player_attributes`), so both fixes are the same
-  shape of change in the same place.
+  1. **Speed/Slowness never need a client-side attribute-modifier fold of
+     their own.** `LivingEntity.onEffectAdded`/`onEffectUpdated`
+     (`.cache/mc/26.2/src/.../LivingEntity.java:1075-1103`) call
+     `addAttributeModifiers`/`removeAttributeModifiers` on the entity's
+     `AttributeMap` only `if (!this.level().isClientSide())` — i.e.
+     **server-side only**. The client's own `handleUpdateMobEffect`
+     (`ClientPacketListener.java:1794-1813`) calls `forceAddEffect`, which
+     does *not* touch attributes on that path. The server instead marks the
+     attribute dirty and syncs the resulting base+modifiers over the wire via
+     `ClientboundUpdateAttributesPacket` (`ServerEntity.sendChanges`,
+     `ServerEntity.java:289,352`), which is the packet
+     `lodestone_ecs::ingest::apply_entity_attributes` already folds into
+     `Attributes`. So folding `movement_speed` through the same
+     `Attributes`-component seam Depth Strider uses already covers Speed,
+     Slowness, Soul Speed and any equipment modifier — no second,
+     client-side effect→attribute translation needs to exist.
+     `lodestone_physics::effect::movement_speed_modifier`/`classify`'s
+     Speed/Slowness branches remain unit-tested and production-caller-free
+     after this finding, same as before it — they were never the missing
+     piece.
+  2. **The sprint bonus is itself the same shape of modifier, server-side.**
+     `LivingEntity.setSprinting` adds/removes a transient
+     `AttributeModifier(SPRINTING_MODIFIER_ID, 0.3F, ADD_MULTIPLIED_TOTAL)`
+     (`LivingEntity.java:154-157,2311-2317`) on the same `MOVEMENT_SPEED`
+     instance — not a separate multiply in `travel`. `Player.aiStep` then
+     does `this.setSpeed((float)this.getAttributeValue(MOVEMENT_SPEED))`
+     (`Player.java:456`) with **no further sprint arithmetic** — vanilla's
+     `getSpeed()` *is* the folded attribute value. The client-local sprint
+     multiply `player_physics` already does on top of `profile.
+     base_movement_speed` exists only because our sprint intent is
+     client-predicted (double-tap-W, the local key) and reaches the server's
+     own `SPRINTING_MODIFIER_ID` modifier one or more ticks later over the
+     `PlayerCommand` round trip (see "Sprint edge detection" above) — so it
+     stays, layered on top of the attribute-derived base rather than
+     replacing vanilla's single-attribute-read model, exactly as the original
+     scoping said.
+
+  **Closed on the `lodestone-physics`/`lodestone-entity` side (2026-07-31),
+  open on the `lodestone-ecs` side — the wiring call site itself is out of
+  this pass's file ownership.**
+  `lodestone_entity::attribute::movement_speed_key()` now exists
+  (`crates/lodestone-entity/src/attribute.rs`), mirroring
+  `water_movement_efficiency_key()` exactly, with its own worked fold test
+  (`movement_speed_folds_a_speed_ii_modifier_onto_the_player_base` — a
+  Speed-II-shaped `ADD_MULTIPLIED_TOTAL` modifier on the player's real `0.1`
+  base folds to `0.14`, matching `AttributeInstance::value`'s existing
+  three-stage fold, which was already correct for all three operations
+  before this issue — proven by `water_movement_efficiency_folds_through_the_
+  wire_snapshot`'s deliberately-order-sensitive worked example). On the
+  physics side, `PlayerState::movement_speed`/`with_movement_speed`/
+  `effective_speed` were **already fully wired and tested** —
+  `injected_attribute_speed_replaces_not_stacks_with_sprint` already pinned
+  that a `Some(v)` override is used verbatim, `(float)`-cast, never
+  re-multiplied by physics itself. What did **not** exist: any golden
+  scenario or ECS system that ever set `movement_speed` away from its `None`
+  default, so the seam was reachable but never actually reached end to end.
+  `tests/golden.rs`'s `walk_speed_ii_matches_golden` (backed by a new
+  `gen_golden.py` scenario) and `tests/movement_speed.rs`'s pure control
+  close that gap on the physics side — see their own doc comments for what
+  each proves and why the golden regeneration was a zero-diff across all 42
+  pre-existing scenarios before the new one was added.
+
+  **The remaining patch, spelled out exactly** (blocked on this pass's file
+  ownership, not on any unresolved question — `crates/lodestone-ecs/**` is
+  out of scope here): in `crates/lodestone-ecs/src/player.rs`'s
+  `player_physics`, change
+
+  ```rust
+  let base = f64::from(profile.base_movement_speed);
+  let attr = if intent.sprint {
+      base * (1.0 + f64::from(profile.sprint_speed_modifier))
+  } else {
+      base
+  };
+  *player = player.with_movement_speed(attr);
+  ```
+
+  to
+
+  ```rust
+  let base = attributes.map_or(f64::from(profile.base_movement_speed), |attrs| {
+      attribute_value(&attrs.0, &movement_speed_key())
+  });
+  let attr = if intent.sprint {
+      base * (1.0 + f64::from(profile.sprint_speed_modifier))
+  } else {
+      base
+  };
+  *player = player.with_movement_speed(attr);
+  ```
+
+  (adding `movement_speed_key` to the existing
+  `use lodestone_entity::attribute::{attribute_value, water_movement_efficiency_key};`
+  import) — the same `Attributes`-component read `player_physics` already
+  holds for Depth Strider, `profile.base_movement_speed` kept as the fallback
+  for the offline demo world exactly as before. The proof shape to pin it,
+  mirroring `depth_strider_attribute_reaches_the_physics_state_each_tick` /
+  `no_attributes_component_folds_to_the_registry_default`: a
+  `movement_speed` snapshot (base `0.1` + a Speed-II-shaped
+  `ADD_MULTIPLIED_TOTAL` modifier) on the local player's `Attributes`
+  component reaching `PlayerState::movement_speed` through a real `GameTick`
+  run, plus the no-`Attributes` control folding to `profile.
+  base_movement_speed` rather than a stale value. A live-server gate
+  (`/effect give @s speed 30 1`, watch reported delta-position magnitude
+  change) remains the `needs-live-verify` half neither the hermetic ECS test
+  nor this pass's physics-only work can stand in for.
 
 - ~~**Wiring `WATER_MOVEMENT_EFFICIENCY` (and `movement_speed`) for real**~~ —
   **`WATER_MOVEMENT_EFFICIENCY` half closed 2026-07-30; `movement_speed` is
@@ -494,21 +593,17 @@ does on land.
   `depth_strider_attribute_reaches_the_physics_state_each_tick` and
   `no_attributes_component_folds_to_the_registry_default`.
 
-  **`movement_speed` did not get this fix and is the same shape of gap,
-  narrower now that the route is known.** `player_physics` already has the
-  `Option<&Attributes>` read in hand (added for Depth Strider); feeding
-  `movement_speed` from it needs only a `movement_speed_key()` helper next to
-  `water_movement_efficiency_key()` in `lodestone_entity::attribute` (does not
-  exist yet) and a second `attribute_value` call, combined with the existing
-  sprint-modifier arithmetic rather than replacing it, with
-  `profile.base_movement_speed` kept as the fallback for the offline fixture
-  world (no `Attributes` component there, same as before this fix). Do **not**
-  route this through `ClientHandle`/`net.rs` — that was the part of the old
-  plan this correction found unnecessary.
-
-  Don't hardcode a Depth Strider constant as a shortcut — that reintroduces
-  exactly the "guessed number instead of real data" pattern `CLAUDE.md` warns
-  against elsewhere in this repo.
+  **`movement_speed` is the same shape of gap, and the route is now fully
+  known rather than merely scoped** — see the bullet above ("`movement_speed`
+  is not attribute-driven either…") for the exact patch, the jar citations
+  that replaced the original plan's assumptions, and what closed on the
+  `lodestone-physics`/`lodestone-entity` side on 2026-07-31.
+  `movement_speed_key()` now exists next to `water_movement_efficiency_key()`
+  in `lodestone_entity::attribute`, so that part of this bullet's original
+  "does not exist yet" is done. Do **not** route this through
+  `ClientHandle`/`net.rs`, and don't hardcode a Speed/Depth-Strider constant
+  as a shortcut — both reintroduce exactly the "guessed number instead of
+  real data" pattern `CLAUDE.md` warns against elsewhere in this repo.
 - **Bubble columns**: would need a `BubbleColumnBlock`-equivalent impulse in
   `tick_water`, gated on the block's `drag_direction`/`drag` blockstate
   property (not yet decoded anywhere in this tree, as far as this doc's
@@ -532,11 +627,12 @@ matching vanilla's default, not a runtime option.
 - `lodestone-entity::attribute` — `AttributeInstance::value` (the vanilla
   three-stage fold), `instance_from_snapshot`/`attribute_value` (the
   wire-shaped `EntityAttributeSnapshot` → fold conversion),
-  `water_movement_efficiency_key`. `crates/lodestone-ecs/src/player.rs`'s
-  `player_physics` is now a direct dependent of this module (added
+  `water_movement_efficiency_key`, `movement_speed_key` (issue #193,
+  2026-07-31). `crates/lodestone-ecs/src/player.rs`'s `player_physics` is a
+  direct dependent of this module for `water_movement_efficiency_key` (added
   2026-07-30, closing Depth Strider) — see the "still open" note above for
-  `movement_speed`, the one attribute this crate folds that `player_physics`
-  does not yet read.
+  the exact patch that makes it a dependent of `movement_speed_key` too,
+  which as of this doc's last update it is not yet.
 - `lodestone-controller::input` — `InputState`, double-tap detection.
 - `crates/lodestone-shell/src/sim.rs` — `Sim::drive_interaction`,
   `send_is_sprinting_if_needed`, `send_player_input`, `update_pose`,
@@ -566,3 +662,25 @@ Issue #59: `tests/golden.rs`'s `swim_look_down_dives_matches_golden`,
 oracle in `gen_golden.py`, zero tolerance). `camera_rig.rs`'s own test module
 covers `EyeHeightSmoother` in isolation (seed/tick/lerp, convergence, reversal
 mid-ramp) — hermetic, since it is not wired into `Sim` yet.
+
+Issue #193 (`movement_speed`), physics/entity side, 2026-07-31:
+`lodestone-entity::attribute`'s `movement_speed_key_matches_the_registry_id`
+and `movement_speed_folds_a_speed_ii_modifier_onto_the_player_base` (the
+wire-shaped fold, mirroring the Depth Strider worked example).
+`lodestone-physics::tests::golden::walk_speed_ii_matches_golden` (a new
+`gen_golden.py` scenario — regenerating the golden file with only the
+oracle's `player_speed`-override refactor first produced a byte-for-byte
+**zero diff** across all 42 pre-existing scenarios, confirming none of them
+ever exercised `movement_speed` away from its `None` default; this is the one
+that does, bit-exact against the Python oracle). `tests/movement_speed.rs`'s
+`speed_ii_and_sprint_are_the_only_difference` is the pure control, in the
+style of `tests/lava_depth.rs`'s `shallow_vs_deep_is_the_only_difference`:
+the same one-tick walk through three different injected `movement_speed`
+values (base, Speed II, sprinting), each expected position hand-derived from
+`Entity.getInputVector`/`modifyInputSpeedForSquareMovement`'s jar formula
+rather than by calling the crate's own helpers. The `lodestone-ecs` wiring
+gate this table's Depth Strider row already has
+(`depth_strider_attribute_reaches_the_physics_state_each_tick` /
+`no_attributes_component_folds_to_the_registry_default`) does **not** yet
+have a `movement_speed` counterpart — that is the remaining patch spelled out
+above, out of this pass's file ownership.

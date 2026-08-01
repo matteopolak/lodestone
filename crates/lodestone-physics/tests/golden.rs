@@ -32,7 +32,7 @@ use golden_traces::{
     GOLDEN_STAND_LOW_CORRIDOR_CONTROL, GOLDEN_SWIM_GAP_BLOCKED_CONTROL, GOLDEN_SWIM_GAP_TUNNEL,
     GOLDEN_SWIM_LOOK_DOWN_DIVES, GOLDEN_SWIM_SPRINT, GOLDEN_SWIM_SURFACE_LOOK_DOWN_CONTROL,
     GOLDEN_SWIM_SURFACE_LOOK_UP_NO_PULLDOWN, GOLDEN_WALK_FLAT, GOLDEN_WALK_INTO_WALL,
-    GOLDEN_WATER_CURRENT_PUSH, GOLDEN_WATER_SINK, GoldenTick,
+    GOLDEN_WALK_SPEED_II, GOLDEN_WATER_CURRENT_PUSH, GOLDEN_WATER_SINK, GoldenTick,
 };
 
 #[derive(Default)]
@@ -222,6 +222,37 @@ fn walk_flat_matches_golden() {
             ..MovementInput::NONE
         }
     });
+}
+
+/// `MOVEMENT_SPEED` attribute-driven walk speed (issue #193). Every other
+/// scenario in this file runs `PlayerState::movement_speed` at its `None`
+/// default, so regenerating `golden_traces.rs` with only the `gen_golden.py`
+/// refactor (`player_speed` reading an override) produced a byte-for-byte
+/// zero diff across all 42 pre-existing consts — nothing exercised the
+/// injected-attribute path at all. This is the scenario that does: a
+/// Speed-II-shaped fold of the player's own `0.1F` `MOVEMENT_SPEED` base
+/// (`Player.java:209`) through `AttributeInstance.calculateValue`'s
+/// multiplicative stage (`base * (1 + amount)`, `amount = 0.2F * 2` for
+/// amplifier 1 — `LivingEntity.java:154-157`), injected via
+/// [`PlayerState::with_movement_speed`] exactly as the entity layer would
+/// after folding a real `update_attributes` snapshot.
+#[test]
+fn walk_speed_ii_matches_golden() {
+    let world = World::flat_floor(4);
+    let speed_ii_amount = f64::from(0.2f32) * 2.0;
+    let speed_ii = f64::from(0.1f32) * (1.0 + speed_ii_amount);
+    let mut state = grounded(0.5, 1.0, 0.5);
+    state = state.with_movement_speed(speed_ii);
+    assert_trace(
+        "walk_speed_ii",
+        &world,
+        state,
+        &GOLDEN_WALK_SPEED_II,
+        |_| MovementInput {
+            forward: 1.0,
+            ..MovementInput::NONE
+        },
+    );
 }
 
 #[test]

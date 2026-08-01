@@ -451,6 +451,14 @@ class State:
         self.hcol = False
         self.no_jump_delay = 0
         self.sprinting = False
+        # MOVEMENT_SPEED attribute value injected by the entity layer (issue
+        # #193), mirroring Rust `PlayerState::movement_speed: Option<f64>`.
+        # `None` (the default) means "no override" -- `player_speed` falls
+        # back to the standalone base+sprint computation, exactly as Rust's
+        # `effective_speed` does. When set, the value is used *verbatim*
+        # (sprint, Speed/Slowness and any equipment modifier already folded
+        # in by the caller) -- never re-multiplied here.
+        self.movement_speed = None
         # Physics-affecting status effects (mirrors StatusEffects).
         self.levitation = None   # None or amplifier (0-based)
         self.slow_falling = False
@@ -513,9 +521,17 @@ def eye_height(s):
     return POSES[s.pose][2]
 
 
-def player_speed(sprinting):
+def player_speed(s):
+    # `LivingEntity.getSpeed()` -- Rust's `effective_speed`. An injected
+    # `movement_speed` (the entity layer's folded MOVEMENT_SPEED attribute,
+    # issue #193) wins verbatim, `(float)`-cast, exactly like the `Some(v)`
+    # arm of Rust `effective_speed`; only with no override does this fall
+    # back to the standalone base+sprint arithmetic `Player.createAttributes`
+    # would otherwise need a real AttributeMap for.
+    if s.movement_speed is not None:
+        return f32(s.movement_speed)
     base = float(P.base_movement_speed)
-    if sprinting:
+    if s.sprinting:
         return f32(base * (1.0 + float(P.sprint_speed_modifier)))
     return f32(base)
 
@@ -827,9 +843,9 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
     if s.on_ground:
         if block_friction > 0.6:
             cubed = f32(f32(block_friction * block_friction) * block_friction)
-            speed = f32(player_speed(s.sprinting) * f32(P.ground_accel / cubed))
+            speed = f32(player_speed(s) * f32(P.ground_accel / cubed))
         else:
-            speed = player_speed(s.sprinting)
+            speed = player_speed(s)
     else:
         speed = P.flying_speed
     ax, ay, az = input_vector(xxa, zza, speed, s.yaw)
@@ -1408,6 +1424,39 @@ def scenario_walk_flat():
     s.on_ground = True
     trace = []
     for _ in range(200):
+        tick_air(w, s, 1.0, 0.0, False, False, False)
+        trace.append((list(s.pos), list(s.vel)))
+    return w, trace
+
+
+def scenario_walk_speed_ii():
+    # MOVEMENT_SPEED attribute-driven walk speed (issue #193): no existing
+    # scenario ever set `movement_speed` to anything but the None default, so
+    # regenerating the golden file with the *unmodified* generator produced a
+    # zero-diff -- this scenario is what actually exercises the injected-
+    # attribute path (Rust `effective_speed`'s `Some(v)` arm) end to end
+    # through a multi-tick trace, the way `swim_look_down_dives` did for the
+    # look-descent port (see this file's own history).
+    #
+    # The value is a Speed-II-shaped fold of the *player's own* MOVEMENT_SPEED
+    # base (`Player.createAttributes().add(MOVEMENT_SPEED, 0.1F)`,
+    # `Player.java:209` -- not the generic `RangedAttribute` default of 0.7,
+    # `Attributes.java`) with `MobEffects.SPEED`'s `ADD_MULTIPLIED_TOTAL`
+    # modifier (`+0.2F` per level, amplifier 1 = Speed II ->
+    # `0.2F * (1 + 1) = 0.4`, `LivingEntity.java:154-157` /
+    # `AttributeModifier.create`), folded through
+    # `AttributeInstance.calculateValue`'s multiplicative stage:
+    # `result = base * (1 + amount)`. Deliberately not sprinting, so this
+    # scenario isolates the attribute path from the separate sprint modifier
+    # `player_speed` still applies on top when no override is present --
+    # `tests/movement_speed.rs`'s pure control is what exercises both at once.
+    w = flat_floor()
+    s = State(0.5, 1.0, 0.5, 0.0)
+    s.on_ground = True
+    speed_ii_amount = float(f32(0.2)) * 2.0
+    s.movement_speed = float(f32(0.1)) * (1.0 + speed_ii_amount)
+    trace = []
+    for _ in range(60):
         tick_air(w, s, 1.0, 0.0, False, False, False)
         trace.append((list(s.pos), list(s.vel)))
     return w, trace
@@ -2219,6 +2268,7 @@ def scenario_elytra_gap_glide():
 SCENARIOS = [
     ("free_fall", scenario_free_fall),
     ("walk_flat", scenario_walk_flat),
+    ("walk_speed_ii", scenario_walk_speed_ii),
     ("sprint_jump", scenario_sprint_jump),
     ("ice_slide", scenario_ice_slide),
     ("walk_into_wall", scenario_walk_into_wall),
