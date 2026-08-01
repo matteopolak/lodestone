@@ -116,9 +116,13 @@ recurring defect classes, not because they are generically useful — see
    (text layout, dye, glow), beds, banners (layered patterns), item frames, shulkers,
    enchanting-table book, bells, conduits, end crystals, decorated pots. Start with
    chest and sign — the two a player notices first.
-3. **Sun, moon, stars, clouds.** Sky is a flat colour. Moon has 8 phases from a 4×2
-   atlas; stars are a seeded 1500-point field; clouds sit at y=192 and scroll. Shares
-   the world-time seam with night darkening and sky colour.
+3. ~~**Sun, moon, stars, clouds.**~~ Landed — the sky is a real dome, not a flat
+   colour: `crates/lodestone-render/src/{sky,sky_pipeline}.rs` plus
+   [`sky-and-air-bubbles.md`](./sky-and-air-bubbles.md), proved by
+   `crates/lodestone-shell/tests/sky_pixels.rs`. What remains is tracked on #96 —
+   the sunrise/sunset horizon band, void fog, gradient banding quality and per-biome
+   sky tint — and on #49, whose finding is that 26.2 deleted `getSkyDarken` in favour
+   of an `EnvironmentAttribute` timeline, so our dusk/dawn ramp is still 1.21's.
 4. **Weather.** No rain/snow/thunder state or rendering. Camera-relative angled quads,
    density from `rainLevel`, rain-vs-snow from biome temperature per column, sky and
    light darkened by `thunderLevel`, looping ambient audio, lightning flashes. Server
@@ -128,9 +132,13 @@ recurring defect classes, not because they are generically useful — see
    [`first-person-held-item.md`](./first-person-held-item.md)); `display.firstperson_righthand`
    *is* reachable — `ItemGeometry::display` carries all nine slots, and the claim
    that "`icon.rs` keeps only the `gui` slot" was stale for two sessions before
-   being deleted from here. What remains: `RenderState::set_main_hand_source` is
-   **unwired in `app.rs`**, so the shell still draws the bare arm (three lines,
-   specified in that doc), plus bow/crossbow-while-drawing, shield, spyglass, map,
+   being deleted from here. `RenderState::set_main_hand_source` is **now wired** —
+   `app.rs` installs it every frame, and the shell draws the held item rather than
+   the bare arm, with `first_person_item_drawn`/`first_person_arm_drawn` asserted
+   mutually exclusive by real pixel gates. (This bullet claimed it was unwired for
+   two sessions; that is the second stale claim in this one entry, which is why the
+   first is preserved above rather than deleted.) What remains is the special-cased
+   poses: bow/crossbow-while-drawing, shield, spyglass, map,
    trident, and the eating/drinking and brush animations — each needing use-item
    state the shell does not track. The off hand is not drawn either, though every
    function supports `Arm::Left`.

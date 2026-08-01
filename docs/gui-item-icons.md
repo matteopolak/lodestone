@@ -234,19 +234,23 @@ the procedural fallback uses a 16 px icon at a 22 px pitch.
 
 ## Known gaps
 
-* **The container screen draws flat icons but not 3-D block items** — issue
-  [#50](https://github.com/matteopolak/lodestone/issues/50). This bullet used to
-  say the screen "is not wired in `app.rs` yet" and kept the colour-swatch
-  fallback; that is **stale**. `app.rs` attaches both halves (`attach_items` at
-  `app.rs:1488`, `attach_item_models` at `app.rs:1496`), so sprite icons draw
-  correctly today. What is still missing is one call: the per-frame draw goes
-  through `render_scaled`, which hardcodes `depth: None, models: None`, so
-  `want_models` is `false` and `push_item_model` returns early for every block
-  item. See [`container-screen.md`](container-screen.md) for the exact swap.
+* ~~**The container screen draws flat icons but not 3-D block items**~~ — issue
+  [#50](https://github.com/matteopolak/lodestone/issues/50), **closed**. `app.rs`
+  now calls `render_with_icons_scaled` with `Some(render.depth_view())` and the real
+  `item_models`, so `want_models = models_attached() && depth.is_some()` is `true`
+  and `push_item_model` emits geometry for block items.
 
-  The symptom's *shape* is the diagnostic: "flat, not missing" means the sprite
-  stream is fine and only the model stream is starved. A missing `attach_items`
-  would have shown swatches instead.
+  This entry is kept because it went stale **twice**, in two different ways, and the
+  progression is the useful part. First it said the screen "is not wired in `app.rs`
+  yet" and kept a colour-swatch fallback — wrong, because `attach_items` and
+  `attach_item_models` were both already installed. Then it said the remaining gap
+  was one call through `render_scaled` hardcoding `depth: None, models: None` —
+  correct when written, now fixed.
+
+  The symptom's *shape* was the diagnostic each time: "flat, not missing" means the
+  sprite stream is fine and only the model stream is starved, whereas a missing
+  `attach_items` would have shown swatches. Reach for that distinction before
+  grepping — it localises the break to one of the two streams in a single frame.
 * **Tint on flat sprites is still deferred** — leather armour, potions and spawn
   eggs draw untinted white. 3-D items *are* tinted, through the shared palette.
 * **The enchantment glint is not drawn** (`ItemIcon::enchanted` is carried but
