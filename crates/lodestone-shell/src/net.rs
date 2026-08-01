@@ -110,7 +110,7 @@ use lodestone_model::event::SoundCategory;
 
 pub use lodestone_testsupport::unique_username;
 
-use crate::entities::EntitySnapshot;
+use crate::entities::{EntitySnapshot, NameTag};
 
 /// A handle to the live client, published by the net thread once the session is
 /// up and read by the render/mesh thread. `None` until login completes.
@@ -556,7 +556,14 @@ impl NetClient {
     #[must_use]
     pub fn entity_snapshots(&self) -> Vec<EntitySnapshot> {
         self.handle.get().map_or_else(Vec::new, |h| {
-            h.entities().into_iter().map(entity_snapshot).collect()
+            // A player's name tag is its tab-list display name (issue #100),
+            // never its metadata custom name — read once per poll rather than
+            // once per entity, same reasoning as `tab_list`/`players` above.
+            let tab_list = h.tab_list();
+            h.entities()
+                .into_iter()
+                .map(|view| entity_snapshot(view, &tab_list))
+                .collect()
         })
     }
 
@@ -1075,7 +1082,7 @@ fn forward(tx: &Sender<NetUpdate>, event: ClientEvent) -> Result<(), ()> {
 /// reduced to its key. Same `count`/`components` losses apply, and they are
 /// currently invisible for equipment: nothing renders a stack size or a dye
 /// colour in a mob's hand.
-fn entity_snapshot(view: EntityView) -> EntitySnapshot {
+fn entity_snapshot(view: EntityView, tab_list: &TabList) -> EntitySnapshot {
     let scale = if view.baby == Some(true) { 0.5 } else { 1.0 };
     // Borrowed, ahead of the by-value `item` match below: `count` only exists
     // on the wire's `ItemStack`, which that match consumes converting the key.
@@ -1124,6 +1131,51 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
             }
         })
         .collect();
+    // Nametag resolution (issue #100). Two entirely different rules, per the
+    // real 26.2 client:
+    //
+    // * **A player's tag is always its tab-list display name.**
+    //   `Player.shouldShowName()` unconditionally returns `true`
+    //   (`Player.java:1637`), overriding `Entity.shouldShowName() =
+    //   isCustomNameVisible()` (`Entity.java:3372`) that every other entity
+    //   uses — a player is never gated on `CUSTOM_NAME_VISIBLE`. The name
+    //   itself comes from `Entity.getDisplayName()`, which for a player is
+    //   scoreboard-team-prefixed in vanilla; team colouring/prefixes are out
+    //   of scope here (issue #100), so this is the plain tab-list name.
+    // * **Every other entity's tag is its custom name**, gated on
+    //   `CUSTOM_NAME_VISIBLE` (`LivingEntity.shouldShowName()` =
+    //   `isCustomNameVisible()`, `LivingEntity.java:2364`/`2365`) — vanilla
+    //   would additionally fall back to the entity's translated type name
+    //   when `CUSTOM_NAME_VISIBLE` is set with no custom name, which this
+    //   deliberately does not reproduce (out of scope: "entities with a
+    //   non-empty custom name" per the issue).
+    let is_player = view.entity_type.path() == "player";
+    let name_tag = if is_player {
+        view.uuid
+            .and_then(|id| tab_list.get(&id))
+            .map(|entry| entry.effective_name().to_plain_string())
+            .filter(|name| !name.is_empty())
+    } else {
+        match &view.custom_name {
+            Reported::Reported(Some(name))
+                if view.custom_name_visible == Some(true) && !name.is_empty() =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+    .map(|text| NameTag {
+        text,
+        // `Entity.isDiscrete()` is `isShiftKeyDown()` (`Entity.java:2703`,
+        // `:2704`), bit 1 of the shared-flags byte
+        // (`FLAG_SHIFT_KEY_DOWN = 1`, `Entity.java:262`). Vanilla submits the
+        // see-through pass only when `!isDiscrete()`
+        // (`SubmitNodeCollection.java:109`) — a sneaking entity's tag never
+        // shows through terrain. `flags` unknown (no metadata yet) defaults
+        // open, matching every other not-yet-reported boolean here.
+        see_through: view.flags.map_or(true, |f| f & 0x02 == 0),
+    });
     EntitySnapshot {
         id: view.entity_id,
         type_path: view.entity_type.path().to_string(),
@@ -1162,6 +1214,7 @@ fn entity_snapshot(view: EntityView) -> EntitySnapshot {
         // layers: sheep wool" section for the rest of the chain this unblocks.
         variant: view.variant,
         count,
+        name_tag,
     }
 }
 
@@ -1400,7 +1453,7 @@ mod tests {
     #[test]
     fn entity_snapshot_carries_velocity_and_on_ground_through() {
         let view = bare_entity_view(Some(Vec3::new(0.08, 0.2, 0.0)), false);
-        let snap = entity_snapshot(view);
+        let snap = entity_snapshot(view, &TabList::new());
         assert_eq!(
             snap.velocity,
             Some(glam::Vec3::new(0.08, 0.2, 0.0)),
@@ -1409,7 +1462,7 @@ mod tests {
         assert!(!snap.on_ground);
 
         let grounded = bare_entity_view(None, true);
-        let snap = entity_snapshot(grounded);
+        let snap = entity_snapshot(grounded, &TabList::new());
         assert_eq!(
             snap.velocity, None,
             "a never-reported velocity must stay None, not collapse to zero"
@@ -1446,7 +1499,7 @@ mod tests {
             },
         ];
 
-        let snap = entity_snapshot(view);
+        let snap = entity_snapshot(view, &TabList::new());
         assert_eq!(
             snap.equipment.len(),
             2,
@@ -1473,7 +1526,7 @@ mod tests {
 
         // Control: a mob the server has said nothing about carries nothing, so a
         // consumer cannot mistake "no data" for "empty hands confirmed".
-        let bare = entity_snapshot(bare_entity_view(None, true));
+        let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
         assert!(bare.equipment.is_empty());
     }
 
@@ -1490,7 +1543,7 @@ mod tests {
             color: 14,
             sheared: false,
         });
-        let snap = entity_snapshot(view);
+        let snap = entity_snapshot(view, &TabList::new());
         assert_eq!(
             snap.variant,
             Some(EntityVariant::Dyed {
@@ -1502,7 +1555,7 @@ mod tests {
 
         // Control: a mob the server has never sent a variant for must read as
         // `None`, not as some default variant.
-        let bare = entity_snapshot(bare_entity_view(None, true));
+        let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
         assert_eq!(bare.variant, None);
     }
 
@@ -1520,14 +1573,132 @@ mod tests {
             ResourceKey::from_str("minecraft:diamond").unwrap(),
             64,
         )));
-        let snap = entity_snapshot(view);
+        let snap = entity_snapshot(view, &TabList::new());
         assert_eq!(snap.count, 64);
 
         // Control: no stack at all must read as the neutral `1`, not `0` — a
         // consumer that multiplies by count must never draw zero copies of
         // nothing.
-        let bare = entity_snapshot(bare_entity_view(None, true));
+        let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
         assert_eq!(bare.count, 1);
+    }
+
+    /// Issue #100's two nametag rules, each pinned directly against
+    /// `entity_snapshot`'s real boundary rather than against the render
+    /// path — the render-level pixel gate
+    /// (`tests/nametag_pixels.rs`) proves the wiring end to end, this proves
+    /// the *resolution logic* in isolation.
+    mod name_tag {
+        use std::str::FromStr;
+
+        use lodestone_game::tablist::{GameProfile, PlayerListEntry};
+        use uuid::Uuid;
+
+        use super::*;
+
+        fn player_view(uuid: Uuid) -> EntityView {
+            let mut view = bare_entity_view(None, true);
+            view.entity_type = lodestone_client::ResourceKey::from_str("minecraft:player").unwrap();
+            view.uuid = Some(uuid);
+            view
+        }
+
+        /// A player's tag is always its tab-list display name —
+        /// `Player.shouldShowName()` returns `true` unconditionally
+        /// (`Player.java:1637`), never gated on any metadata flag.
+        #[test]
+        fn a_player_entitys_tag_is_its_tab_list_display_name() {
+            let id = Uuid::from_u128(1);
+            let mut tabs = TabList::new();
+            tabs.insert(PlayerListEntry::new(GameProfile::new(id, "Steve")));
+
+            let snap = entity_snapshot(player_view(id), &tabs);
+            assert_eq!(
+                snap.name_tag.map(|t| t.text),
+                Some("Steve".to_string()),
+                "a player entity must show its tab-list name unconditionally"
+            );
+        }
+
+        /// The other half: no matching tab-list entry (the player left, or a
+        /// synthetic/demo entity claiming to be a player) draws nothing
+        /// rather than a blank or placeholder tag.
+        #[test]
+        fn a_player_entity_with_no_tab_list_entry_has_no_tag() {
+            let snap = entity_snapshot(player_view(Uuid::from_u128(2)), &TabList::new());
+            assert_eq!(snap.name_tag, None);
+        }
+
+        /// Every other entity's tag is its `CUSTOM_NAME`, gated on
+        /// `CUSTOM_NAME_VISIBLE` — `LivingEntity.shouldShowName() =
+        /// isCustomNameVisible()` (`LivingEntity.java:2364`/`:2365`), unlike
+        /// a player.
+        #[test]
+        fn a_mob_with_a_visible_custom_name_shows_it() {
+            let mut view = bare_entity_view(None, true);
+            view.custom_name = Reported::Reported(Some("Babe".to_string()));
+            view.custom_name_visible = Some(true);
+            let snap = entity_snapshot(view, &TabList::new());
+            assert_eq!(snap.name_tag.map(|t| t.text), Some("Babe".to_string()));
+        }
+
+        /// The gate the base `Entity.shouldShowName()` predicate is: a
+        /// custom name with `CUSTOM_NAME_VISIBLE` unset (or `false`) shows
+        /// nothing, even though the name itself is known.
+        #[test]
+        fn a_mob_with_a_custom_name_but_not_visible_shows_nothing() {
+            let mut view = bare_entity_view(None, true);
+            view.custom_name = Reported::Reported(Some("Babe".to_string()));
+            view.custom_name_visible = Some(false);
+            let snap = entity_snapshot(view, &TabList::new());
+            assert_eq!(
+                snap.name_tag, None,
+                "CUSTOM_NAME_VISIBLE=false must suppress the tag even though a name is known"
+            );
+
+            // Same for "never reported" — the common case for most mobs.
+            let bare = entity_snapshot(bare_entity_view(None, true), &TabList::new());
+            assert_eq!(bare.name_tag, None);
+        }
+
+        /// An explicitly empty custom name must not draw a zero-width
+        /// visible tag — same rule the issue's scope names ("a non-empty
+        /// custom name").
+        #[test]
+        fn a_mob_with_an_empty_custom_name_shows_nothing_even_if_visible() {
+            let mut view = bare_entity_view(None, true);
+            view.custom_name = Reported::Reported(Some(String::new()));
+            view.custom_name_visible = Some(true);
+            let snap = entity_snapshot(view, &TabList::new());
+            assert_eq!(snap.name_tag, None);
+        }
+
+        /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared
+        /// flags byte) gates the see-through pass off while sneaking
+        /// (`SubmitNodeCollection.java:109`).
+        #[test]
+        fn sneaking_suppresses_see_through_but_not_the_tag_itself() {
+            let mut view = bare_entity_view(None, true);
+            view.custom_name = Reported::Reported(Some("Babe".to_string()));
+            view.custom_name_visible = Some(true);
+            view.flags = Some(0x02); // FLAG_SHIFT_KEY_DOWN
+            let snap = entity_snapshot(view, &TabList::new());
+            let tag = snap.name_tag.expect("the tag itself must still draw while sneaking");
+            assert_eq!(tag.text, "Babe");
+            assert!(!tag.see_through, "sneaking must suppress the see-through pass");
+        }
+
+        /// The default (no metadata reported yet) must not suppress
+        /// see-through — most entities aren't sneaking.
+        #[test]
+        fn unknown_flags_default_to_see_through_enabled() {
+            let mut view = bare_entity_view(None, true);
+            view.custom_name = Reported::Reported(Some("Babe".to_string()));
+            view.custom_name_visible = Some(true);
+            assert_eq!(view.flags, None, "control: this test is about the unreported case");
+            let snap = entity_snapshot(view, &TabList::new());
+            assert!(snap.name_tag.expect("tag must draw").see_through);
+        }
     }
 
     /// The hermetic half of the entity-light contract: before login, the

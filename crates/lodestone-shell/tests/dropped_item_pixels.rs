@@ -123,6 +123,7 @@ fn drop_draw(item: Option<ResourceLocation>, age_ticks: f32) -> EntityDraw {
         // silhouette measurement depend on unlanded work.
         wool: None,
         count: 1,
+        name_tag: None,
     }
 }
 
@@ -449,6 +450,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
         equipment: Vec::new(),
         wool: None,
         count: 1,
+        name_tag: None,
     };
     // The same camera, turned to put the projectile squarely behind it.
     let away = Camera {
