@@ -174,13 +174,26 @@ impl OverworldGenerator {
     /// Stage 1: shape. One fresh sampler per chunk mirrors vanilla's per-chunk
     /// `NoiseChunk` and bounds the interpolation-corner cache. Returns a
     /// `16×height×16` solid mask indexed by [`Self::idx`].
+    ///
+    /// Uses [`NoiseChunkSampler::new_bounded`] (a bounded, hash-free dense
+    /// array in place of `slot_get`'s `HashMap`, `src/density/chunk.rs`'s
+    /// `DenseShape`) rather than [`NoiseChunkSampler::new`], because every
+    /// query this loop makes is known in advance to lie within exactly this
+    /// chunk's `(base_x..=base_x+15, min_y..=min_y+height-1,
+    /// base_z..=base_z+15)` — the bounded-sampler contract `new_bounded`
+    /// documents. `docs/worldgen-surface-perf.md` has the profiling story and
+    /// why this is a narrower, lower-risk fix than adopting vanilla's
+    /// incremental cell-walk outright.
     fn shape_stage(&self, base_x: i32, base_z: i32) -> Vec<bool> {
         let height = self.height as usize;
-        let sampler = NoiseChunkSampler::new(
+        let sampler = NoiseChunkSampler::new_bounded(
             self.final_density.clone(),
             self.slot_count,
             CELL_WIDTH,
             CELL_HEIGHT,
+            (base_x, base_x + 15),
+            (self.min_y, self.min_y + self.height - 1),
+            (base_z, base_z + 15),
         );
         let mut solid = vec![false; 16 * 16 * height];
         for lz in 0..16i32 {
