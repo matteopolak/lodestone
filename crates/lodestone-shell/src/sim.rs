@@ -12,6 +12,7 @@ use bevy_ecs::world::World as EcsWorld;
 use lodestone_assets::{Language, ResourceLocation};
 use lodestone_client::{BlockPos, ClientAction, Hand, OpenMenuSnapshot, Rotation};
 use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
+pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
     ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin,
@@ -25,7 +26,6 @@ use lodestone_ecs::session::{
 use lodestone_ecs::{
     ChunkWorld, CorePlugin, EcsHandle, Extract, FrameClock, GameTick, Update, VersionData,
 };
-pub use lodestone_ecs::SessionPhase;
 use lodestone_entity::attribute::attribute_value;
 use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
@@ -161,7 +161,9 @@ pub(crate) fn dig_break_inputs(
 /// `correct_tool: !requires_correct_tool`, `damage_per_block: 0`) rather than
 /// depending on it, since this version-free crate cannot name a protocol crate.
 /// This is Trap 1's negation, kept in exactly one place.
-pub(crate) fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> lodestone_model::ToolMining {
+pub(crate) fn bare_handed_tool_mining(
+    entry: lodestone_model::BlockHardness,
+) -> lodestone_model::ToolMining {
     lodestone_model::ToolMining {
         speed: 1.0,
         correct_tool: !entry.requires_correct_tool,
@@ -197,8 +199,13 @@ pub(crate) fn bare_handed_tool_mining(entry: lodestone_model::BlockHardness) -> 
 /// prototype table exactly as before.
 ///
 /// [`ComponentValue::Tool`]: lodestone_game::item::ComponentValue::Tool
-pub(crate) fn tool_mining_item(held: &lodestone_game::item::ItemStack) -> lodestone_model::ItemStack {
-    let tool = match held.components().get_str(lodestone_game::item::TOOL_COMPONENT) {
+pub(crate) fn tool_mining_item(
+    held: &lodestone_game::item::ItemStack,
+) -> lodestone_model::ItemStack {
+    let tool = match held
+        .components()
+        .get_str(lodestone_game::item::TOOL_COMPONENT)
+    {
         Some(lodestone_game::item::ComponentValue::Tool(patch)) => patch.clone(),
         // Absent (the `Inherited` case) or — defensively — some other component
         // value stored under the tool key: fall back to "no override", which is
@@ -417,7 +424,8 @@ struct LiveCollisionSource(LiveCollision);
 
 impl std::fmt::Debug for LiveCollisionSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LiveCollisionSource").finish_non_exhaustive()
+        f.debug_struct("LiveCollisionSource")
+            .finish_non_exhaustive()
     }
 }
 
@@ -495,6 +503,11 @@ pub struct Sim {
     /// two use disjoint block-id spaces and must never be meshed with the wrong
     /// classifier.
     vanilla_atlas: Option<Arc<BlockAtlas>>,
+    /// The stitched particle sheet, kept alive so `app.rs` can upload the *same*
+    /// object to the GPU that the emitter's `(Sheet, frame) -> UV` table was
+    /// built from — see [`Sim::particle_sheet_atlas`] and issue #45. `None` on
+    /// the demo palette.
+    particle_atlas: Option<Arc<lodestone_assets::ParticleAtlas>>,
     /// The vanilla `en_us.json` table for resolving server-authored `translate`
     /// components (death messages, scoreboard titles, tab-list names, …) into
     /// words before they reach the HUD. `None` on the demo palette or a pack
@@ -716,11 +729,15 @@ impl Sim {
         // every sheet quad is counted into `ParticleFrame::unresolved` rather
         // than drawn, which is why the HUD reports `0/0+Nunres` on a jar-less
         // run instead of silently showing nothing.
+        // The sheet stitch is *also* kept on `Sim` (see `Sim::particle_atlas`):
+        // the emitter needs its UV rects and the GPU needs its pixels, and
+        // issue #45 is what happens when those two come from different images.
+        let particle_atlas = resources.particle_atlas;
         let particles = match resources.vanilla_atlas.as_ref() {
             Some(atlas) => Particles::new(atlas.models()),
             None => Particles::with_demo_palette(&crate::blocks::build_atlas().uv_table),
         }
-        .with_particle_atlas(resources.particle_atlas.as_deref());
+        .with_particle_atlas(particle_atlas.as_deref());
 
         // Per-block-state data (hardness, for the mining predictor) comes from
         // whichever version family the registry has compiled in for the
@@ -811,6 +828,7 @@ impl Sim {
             adopted_live_world: false,
             status,
             vanilla_atlas: resources.vanilla_atlas,
+            particle_atlas,
             language: resources.language,
             teleport_count: 0,
             collide_against_live_world: true,
@@ -1241,6 +1259,21 @@ impl Sim {
     #[must_use]
     pub fn vanilla_atlas(&self) -> Option<&BlockAtlas> {
         self.vanilla_atlas.as_deref()
+    }
+
+    /// The stitched **particle sheet** — flame, smoke, crits, splashes — when
+    /// the session loaded real vanilla assets. `None` on the demo palette.
+    ///
+    /// Exposed so `app.rs` can upload *this exact object* to the GPU
+    /// ([`crate::gpu::RenderState::install_particle_sheet_atlas`]) rather than
+    /// re-stitching the pack a second time. The CPU-side `(Sheet, frame) -> UV`
+    /// table inside [`Particles`] was built from these sprite rects; a second
+    /// `AtlasBuilder` run happens to pack identically today, but issue #45 was
+    /// *exactly* the bug of UVs addressing a different image than the one bound,
+    /// so the identity is made explicit instead of assumed.
+    #[must_use]
+    pub fn particle_sheet_atlas(&self) -> Option<&lodestone_assets::ParticleAtlas> {
+        self.particle_atlas.as_deref()
     }
 
     /// A one-line note when vanilla assets failed to load and the session fell
@@ -1757,10 +1790,7 @@ impl Sim {
     #[must_use]
     pub fn attack_strength_scale(&self) -> f32 {
         let delay = self.attack_strength_delay();
-        let ticker = self.read(|w| {
-            w.get::<AttackStrengthTicker>(self.local)
-                .map_or(0, |t| t.0)
-        });
+        let ticker = self.read(|w| w.get::<AttackStrengthTicker>(self.local).map_or(0, |t| t.0));
         (ticker as f32 / delay).clamp(0.0, 1.0)
     }
 
@@ -1872,7 +1902,9 @@ impl Sim {
         let window_id = open.window_id;
         self.write_local(|w, local| {
             if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
-                menus.0.apply(&lodestone_model::ClientEvent::ScreenClosed { window_id });
+                menus
+                    .0
+                    .apply(&lodestone_model::ClientEvent::ScreenClosed { window_id });
             }
         });
     }
@@ -2374,11 +2406,12 @@ impl Sim {
     /// component default of 6 ticks. Closing that hole is a change of arguments
     /// here, not a change of clock.
     pub(crate) fn swing_hand(&mut self) {
-        self.body_pose.start_swing(lodestone_entity::pose::swing_duration(
-            lodestone_entity::pose::DEFAULT_SWING_DURATION,
-            None,
-            None,
-        ));
+        self.body_pose
+            .start_swing(lodestone_entity::pose::swing_duration(
+                lodestone_entity::pose::DEFAULT_SWING_DURATION,
+                None,
+                None,
+            ));
     }
 
     /// How far through an arm swing the local player is **this frame**, in
@@ -2780,11 +2813,8 @@ impl Sim {
                         return None;
                     }
                     let facts = version.entity_facts(&kind.0)?;
-                    let dims = EntityDimensions::new(
-                        facts.dimensions.width,
-                        facts.dimensions.height,
-                        0.6,
-                    );
+                    let dims =
+                        EntityDimensions::new(facts.dimensions.width, facts.dimensions.height, 0.6);
                     let aabb = dims.bounding_box(feet);
                     let t = ray_aabb(
                         origin,
@@ -2899,7 +2929,9 @@ impl Sim {
     /// break would be local-only and the server would restore the block on the
     /// next chunk update.
     pub fn break_block(&mut self) -> bool {
-        let Some(hit) = self.target() else { return false };
+        let Some(hit) = self.target() else {
+            return false;
+        };
         // Read the state *before* clearing the cell: the debris takes its
         // texture from the block that broke, and after `set_block_world` the
         // cell is air and that information is gone.
@@ -3156,7 +3188,9 @@ impl Sim {
     /// block was placed. The live path uses [`use_item`](Self::use_item) instead
     /// so the server actually hears the placement.
     pub fn place_block(&mut self) -> bool {
-        let Some(hit) = self.target() else { return false };
+        let Some(hit) = self.target() else {
+            return false;
+        };
         let pos = hit.place_position();
         let cell_empty = {
             let store = self.chunk_world();
@@ -3260,9 +3294,11 @@ impl Sim {
                     // Light section `i` covers block section `i-1`, so a caller
                     // for block section `n` asks for light section `n+1`. This
                     // offset is deliberate, not a bug to "align".
-                    let got = handle
-                        .get()?
-                        .sections_and_light_at(&[(pos, section as usize, section as usize + 1)]);
+                    let got = handle.get()?.sections_and_light_at(&[(
+                        pos,
+                        section as usize,
+                        section as usize + 1,
+                    )]);
                     let (_, light) = got.into_iter().next()?;
                     let light = light?;
                     let ly = (y - dims.min_y).rem_euclid(16) as usize;
@@ -3271,8 +3307,10 @@ impl Sim {
                     // Vanilla's `LightTexture.pack`: block light at bit 4, sky
                     // light at bit 20. The particle shader reproduces the
                     // terrain term `0.2 + 0.8 * max(sky, block)` from these.
-                    Some(u32::from(light.block_at(lx, ly, lz)) << 4
-                        | u32::from(light.sky_at(lx, ly, lz)) << 20)
+                    Some(
+                        u32::from(light.block_at(lx, ly, lz)) << 4
+                            | u32::from(light.sky_at(lx, ly, lz)) << 20,
+                    )
                 })
             }
             None => Box::new(|_, _, _| None),
@@ -3414,14 +3452,7 @@ impl Sim {
     ///
     /// One path, not two: before Stage 4 this branched on `vanilla_atlas &&
     /// net && world_dimensions` to pick which of the two `World`s to read.
-    fn remesh_section(
-        &mut self,
-        cx: i32,
-        cz: i32,
-        si: usize,
-        min_y: i32,
-        section_count: usize,
-    ) {
+    fn remesh_section(&mut self, cx: i32, cz: i32, si: usize, min_y: i32, section_count: usize) {
         let key = SectionKey { cx, cz, si, min_y };
         self.terrain_and_world(|store, terrain| terrain.mesh_section(store, key, section_count));
     }
@@ -3448,13 +3479,7 @@ impl Sim {
             if si < 0 || si as usize >= extent.section_count {
                 continue;
             }
-            self.remesh_section(
-                nsx,
-                nsz,
-                si as usize,
-                extent.min_y,
-                extent.section_count,
-            );
+            self.remesh_section(nsx, nsz, si as usize, extent.min_y, extent.section_count);
         }
     }
 
@@ -3574,43 +3599,43 @@ impl Sim {
                     // is moved with it so the frame interpolator does not smear the
                     // camera across the teleport.
                     let placed = self.player_mut(|player| {
-                    let base = player.position;
-                    player.position = Vec3d::new(
-                        if flags.relative_x {
-                            base.x + pos.x
+                        let base = player.position;
+                        player.position = Vec3d::new(
+                            if flags.relative_x {
+                                base.x + pos.x
+                            } else {
+                                pos.x
+                            },
+                            if flags.relative_y {
+                                base.y + pos.y
+                            } else {
+                                pos.y
+                            },
+                            if flags.relative_z {
+                                base.z + pos.z
+                            } else {
+                                pos.z
+                            },
+                        );
+                        player.yaw = if flags.relative_yaw {
+                            player.yaw + rotation.yaw
                         } else {
-                            pos.x
-                        },
-                        if flags.relative_y {
-                            base.y + pos.y
+                            rotation.yaw
+                        };
+                        player.pitch = if flags.relative_pitch {
+                            player.pitch + rotation.pitch
                         } else {
-                            pos.y
-                        },
-                        if flags.relative_z {
-                            base.z + pos.z
-                        } else {
-                            pos.z
-                        },
-                    );
-                    player.yaw = if flags.relative_yaw {
-                        player.yaw + rotation.yaw
-                    } else {
-                        rotation.yaw
-                    };
-                    player.pitch = if flags.relative_pitch {
-                        player.pitch + rotation.pitch
-                    } else {
-                        rotation.pitch
-                    };
-                    player.velocity = Vec3d::ZERO;
-                    // A teleport is not a fall. Vanilla resets fall distance on
-                    // every position snap, and this one handler covers server
-                    // corrections, respawn and every teleport packet — so
-                    // without it, a corrective teleport mid-fall leaves the
-                    // accumulated distance behind to feed `maybeBackOffFromEdge`
-                    // (and, later, fall damage) as though the fall continued.
-                    player.reset_fall_distance();
-                    player.position
+                            rotation.pitch
+                        };
+                        player.velocity = Vec3d::ZERO;
+                        // A teleport is not a fall. Vanilla resets fall distance on
+                        // every position snap, and this one handler covers server
+                        // corrections, respawn and every teleport packet — so
+                        // without it, a corrective teleport mid-fall leaves the
+                        // accumulated distance behind to feed `maybeBackOffFromEdge`
+                        // (and, later, fall damage) as though the fall continued.
+                        player.reset_fall_distance();
+                        player.position
                     });
                     self.set_prev_position(placed);
                     self.teleport_count += 1;
@@ -4107,6 +4132,20 @@ impl Sim {
                 attack_anim: walk.attack_anim,
                 age_ticks: walk.age,
                 aggressive: false,
+                // **Not wired for the local player yet (issue #57).** Remote
+                // entities get their bow/crossbow pose from
+                // `entities::arm_pose_for`, driven by the `ItemUse` component that
+                // `ingest::apply_entity_item_use` folds off the living-flags byte.
+                // The local player cannot use that path: it has no `EntityKind`/
+                // `Position`/`Rotation`/`HeadYaw` (deliberately — that absence is
+                // what keeps a self-model off `ClientHandle::entities()`), so
+                // `entity_view()`'s early `?` returns before the flags are read,
+                // exactly as it does for `Vitals::on_fire`. Reaching it needs a
+                // session-scoped fold and a `PlayerSnapshot` field, the same shape
+                // `apply_local_player_on_fire` has. Left explicit rather than
+                // spread with `..AnimInput::REST` so the gap is visible here.
+                arm_pose: lodestone_render::ArmPose::Empty,
+                arm_pose_left_hand: false,
             },
             scale: 1.0,
             slim: false,
@@ -4184,7 +4223,8 @@ mod tests {
     /// duplicate fold the collapse deleted.
     fn ingest(sim: &mut Sim, event: lodestone_client::ClientEvent) {
         sim.write(|w| {
-            w.resource_mut::<lodestone_ecs::ingest::IngestQueue>().push(event);
+            w.resource_mut::<lodestone_ecs::ingest::IngestQueue>()
+                .push(event);
             w.run_schedule(lodestone_ecs::NetIngest);
         });
     }
@@ -4388,7 +4428,10 @@ mod tests {
         assert!(sim.fluid_state().under_water());
         let water = sim.fog_settings();
         assert_ne!(water, sky, "a submerged eye must not keep the sky fog");
-        assert!(water.end <= sky.end, "water fog cannot reach past the sky edge");
+        assert!(
+            water.end <= sky.end,
+            "water fog cannot reach past the sky edge"
+        );
         assert_eq!(water.start, 0.0, "water fog ramps from the eye");
         assert!(
             water.start < sky.start,
@@ -4569,11 +4612,8 @@ mod tests {
         ] {
             let mut components = ItemComponents::new();
             components.insert(key.clone(), ComponentValue::Tool(patch.clone()));
-            let held = lodestone_game::item::ItemStack::with_components(
-                item_id.clone(),
-                1,
-                components,
-            );
+            let held =
+                lodestone_game::item::ItemStack::with_components(item_id.clone(), 1, components);
             assert_eq!(
                 tool_mining_item(&held).components.tool,
                 patch,
@@ -4701,7 +4741,10 @@ mod tests {
             dirt > stone && stone >= obsidian,
             "stages must order dirt > stone >= obsidian at t={t}, got {dirt}/{stone}/{obsidian}"
         );
-        assert!(dirt >= 5, "dirt is half-broken in 8 ticks, got stage {dirt}");
+        assert!(
+            dirt >= 5,
+            "dirt is half-broken in 8 ticks, got stage {dirt}"
+        );
         assert_eq!(
             obsidian, 0,
             "obsidian (5000 ticks) must still be on stage 0 after 8 ticks"
@@ -4903,12 +4946,16 @@ mod tests {
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
 
         assert!(
-            poll_until(Duration::from_secs(30), Duration::from_millis(100), || async {
-                handle
-                    .players()
-                    .into_iter()
-                    .find(|p| p.name.as_deref() == Some(user.as_str()))
-            })
+            poll_until(
+                Duration::from_secs(30),
+                Duration::from_millis(100),
+                || async {
+                    handle
+                        .players()
+                        .into_iter()
+                        .find(|p| p.name.as_deref() == Some(user.as_str()))
+                }
+            )
             .await
             .is_some(),
             "player {user} never reached Play on the oracle"
@@ -4932,19 +4979,30 @@ mod tests {
             let _ = rcon.cmd(&format!("effect give {user} {eff}")).await;
         }
 
-        let p = poll_until(Duration::from_secs(15), Duration::from_millis(200), || async {
-            handle.position()
-        })
+        let p = poll_until(
+            Duration::from_secs(15),
+            Duration::from_millis(200),
+            || async { handle.position() },
+        )
         .await
         .expect("client never reported a position");
         // Two blocks east at feet level: clear of the player box, inside reach,
         // and never the floor being stood on.
-        let target = BlockPos::new(p.x.floor() as i32 + 2, p.y.floor() as i32, p.z.floor() as i32);
+        let target = BlockPos::new(
+            p.x.floor() as i32 + 2,
+            p.y.floor() as i32,
+            p.z.floor() as i32,
+        );
         let gate = BlockPos::new(target.x, target.y, target.z + 2);
         for q in [target, gate] {
             for dy in 0..=1 {
                 let _ = rcon
-                    .cmd(&format!("setblock {} {} {} minecraft:air", q.x, q.y + dy, q.z))
+                    .cmd(&format!(
+                        "setblock {} {} {} minecraft:air",
+                        q.x,
+                        q.y + dy,
+                        q.z
+                    ))
                     .await;
             }
         }
@@ -5105,7 +5163,10 @@ mod tests {
         for _ in 0..60 {
             sim.step(1.0 / 20.0);
         }
-        assert!(sim.player().on_ground, "player should be standing on terrain");
+        assert!(
+            sim.player().on_ground,
+            "player should be standing on terrain"
+        );
         assert_eq!(sim.stats.position[1], sim.player().position.y);
     }
 
@@ -5134,7 +5195,8 @@ mod tests {
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
         assert!(sent > 0, "a connected sim should send movement packets");
         assert_eq!(
-            sent as u64, sim.tick_count(),
+            sent as u64,
+            sim.tick_count(),
             "exactly one outbound Move per physics tick"
         );
     }
@@ -5148,7 +5210,10 @@ mod tests {
         sim.attach_net(net);
         assert_eq!(sim.session_phase(), SessionPhase::Connecting);
         sim.step(5.0 / 20.0);
-        assert!(sim.tick_count() > 0, "ticks must still run while connecting");
+        assert!(
+            sim.tick_count() > 0,
+            "ticks must still run while connecting"
+        );
         let sent = std::iter::from_fn(|| actions.try_recv().ok()).count();
         assert_eq!(sent, 0, "no movement should be sent before login");
     }
@@ -5357,7 +5422,11 @@ mod tests {
         // Production sees both for one packet; so does this test.
         ingest(&mut sim, login_event(7));
         sim.poll_net();
-        assert_eq!(sim.server_entity_id(), Some(7), "setup: the id must be folded");
+        assert_eq!(
+            sim.server_entity_id(),
+            Some(7),
+            "setup: the id must be folded"
+        );
         assert!(sim.player().effects.levitation.is_none());
 
         feed.send(NetUpdate::EffectApplied {
@@ -6074,7 +6143,11 @@ mod tests {
                 },
             );
         });
-        assert_eq!(sim.health(), None, "pushing must not fold; only NetIngest folds");
+        assert_eq!(
+            sim.health(),
+            None,
+            "pushing must not fold; only NetIngest folds"
+        );
         // …and the local player really is the entity the fold would write, so the
         // assertion above is not passing because it is looking at the wrong one.
         assert!(
@@ -6274,9 +6347,7 @@ mod tests {
                 number_format: None,
             },
         ] {
-            sim.net()
-                .expect("net attached")
-                .ingest_session_event(event);
+            sim.net().expect("net attached").ingest_session_event(event);
         }
 
         let sidebar = sim.sidebar().expect("sidebar objective should be visible");
@@ -6479,7 +6550,8 @@ mod tests {
             "sprinting while submerged must enter the swim pose"
         );
         assert_eq!(
-            sim.player().eye_height, SWIMMING_EYE_HEIGHT,
+            sim.player().eye_height,
+            SWIMMING_EYE_HEIGHT,
             "the shell owns the pose eye height; physics only reads it"
         );
 
@@ -6967,11 +7039,13 @@ mod tests {
         let local = sim.local_player();
         let key = lodestone_model::Identifier::from_str("minecraft:attack_speed").unwrap();
         sim.write(|w| {
-            w.entity_mut(local).insert(Attributes(vec![lodestone_model::EntityAttributeSnapshot {
-                attribute: key,
-                base: 1.6,
-                modifiers: Vec::new(),
-            }]));
+            w.entity_mut(local).insert(Attributes(vec![
+                lodestone_model::EntityAttributeSnapshot {
+                    attribute: key,
+                    base: 1.6,
+                    modifiers: Vec::new(),
+                },
+            ]));
         });
         sim.step(1.0 / 20.0);
         let got = sim.attack_strength_scale();
@@ -7370,7 +7444,10 @@ mod tests {
         // around each vertex, which reach diagonally across section corners.
         let dirty = dirty_sections_for_blocks(0, 0, 0, &[[0, 0, 0]]);
         assert_eq!(dirty.len(), 8, "a corner cell reaches an octant: {dirty:?}");
-        assert!(dirty.contains(&(-1, -1, -1)), "the diagonal corner is included");
+        assert!(
+            dirty.contains(&(-1, -1, -1)),
+            "the diagonal corner is included"
+        );
         assert!(!dirty.contains(&(1, 0, 0)), "the far side is not reachable");
     }
 
@@ -7382,7 +7459,11 @@ mod tests {
         let all: Vec<[u8; 3]> = (0..16u8)
             .flat_map(|x| (0..16u8).flat_map(move |y| (0..16u8).map(move |z| [x, y, z])))
             .collect();
-        assert_eq!(all.len(), 4096, "control: the fixture really is a full section");
+        assert_eq!(
+            all.len(),
+            4096,
+            "control: the fixture really is a full section"
+        );
         let dirty = dirty_sections_for_blocks(0, 0, 0, &all);
         assert_eq!(dirty.len(), 27, "bounded by the 3x3x3 neighbourhood");
     }
@@ -7512,7 +7593,10 @@ mod tests {
         let mut sim = Sim::with_demo_world(test_config());
         // Leave a deliberate sub-tick residual.
         sim.step(lodestone_ecs::TICK_PERIOD * 1.5);
-        assert!(sim.clock().accumulator > 0.0, "control: there is a residual");
+        assert!(
+            sim.clock().accumulator > 0.0,
+            "control: there is a residual"
+        );
         let secs_before = sim.clock().secs;
         let ticks_before = sim.tick_count();
 
