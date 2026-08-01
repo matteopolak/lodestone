@@ -95,17 +95,47 @@ impl SetTime {
     /// # Which clock
     ///
     /// 26.2 has two (`WorldClocks::bootstrap`): `minecraft:overworld` (id `0`)
-    /// and `minecraft:the_end` (id `1`). The day/night cycle is the overworld
-    /// one, and the map is a Java `HashMap`, so **wire order is not registry
-    /// order** and `clocks.first()` cannot be trusted on the full-sync packet.
-    /// This selects the lowest holder id present, which is the overworld clock
-    /// for vanilla's registration order. Resolving it by name would need the
-    /// `minecraft:world_clock` registry from the configuration `registry_data`
-    /// packet, which this crate does not ingest; do that if a data pack ever
-    /// reorders the registry.
+    /// and `minecraft:the_end` (id `1`). The map is a Java `HashMap`, so **wire
+    /// order is not registry order** and `clocks.first()` cannot be trusted on
+    /// the full-sync packet. This selects the lowest holder id present, which is
+    /// the overworld clock for vanilla's registration order.
+    ///
+    /// # This is the fallback now, not the answer
+    ///
+    /// Since issue #288 the crate *does* ingest the `minecraft:world_clock`
+    /// registry (see [`crate::packets::registry`]), so the caller can name the
+    /// clock the current dimension actually follows and pass its holder id to
+    /// [`clock_for`](Self::clock_for). Two things were wrong with the heuristic,
+    /// and only one of them was hypothetical:
+    ///
+    /// * **The End, today, on vanilla.** `the_end`'s dimension type declares
+    ///   `default_clock: minecraft:the_end`, holder id `1`. The lowest-id pick
+    ///   returns holder `0` — the overworld's clock — so the End's sky followed
+    ///   overworld time. Not a data-pack edge case.
+    /// * A data pack reordering the registry, which was the only case the old
+    ///   comment anticipated.
+    ///
+    /// Reach for this only when the registry did not resolve.
     #[must_use]
     pub fn day_clock(&self) -> Option<&ClockUpdate> {
         self.clocks.iter().min_by_key(|c| c.holder_id)
+    }
+
+    /// The update for world-clock holder `holder_id`, falling back to
+    /// [`day_clock`](Self::day_clock) when the caller has no resolved holder.
+    ///
+    /// A `Some(id)` that this packet does not carry yields `None` — "this packet
+    /// says nothing about my clock", which the caller must treat as "keep what
+    /// you had". It must **not** fall through to another dimension's clock: a
+    /// one-entry `modifyClock` broadcast for the overworld would otherwise
+    /// re-anchor an End session to overworld time, which is the original bug in
+    /// a new disguise.
+    #[must_use]
+    pub fn clock_for(&self, holder_id: Option<i32>) -> Option<&ClockUpdate> {
+        match holder_id {
+            Some(id) => self.clocks.iter().find(|c| c.holder_id == id),
+            None => self.day_clock(),
+        }
     }
 }
 

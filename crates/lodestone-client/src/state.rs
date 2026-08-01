@@ -26,8 +26,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::session::{
-    ServerAlive, ServerDimension, ServerEntityId, ServerGameMode, SessionBossBars, SessionMenus,
-    SessionScoreboard, SessionTabList, Vitals, Xp,
+    ServerAlive, ServerDimension, ServerDimensionType, ServerEntityId, ServerGameMode,
+    SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList, Vitals, Xp,
 };
 use lodestone_ecs::{ChunkWorld, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
@@ -38,8 +38,8 @@ use lodestone_game::{
     menu::Menu,
 };
 use lodestone_model::{
-    BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, EntityAttributeSnapshot,
-    EntityEquipment, EntityPose, EntityVariant, GameMode,
+    BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, DimensionTypeInfo,
+    EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, GameMode,
     ItemStack, PlayerListEntry, Reported, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
@@ -57,7 +57,8 @@ use uuid::Uuid;
 /// here except `position`/`rotation`/`on_ground` is read from
 /// `lodestone_ecs::session`'s component set on [`SharedState::session`]:
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
-/// [`ServerDimension`], [`ServerAlive`]. Those three exceptions are the **local
+/// [`ServerDimension`], [`ServerDimensionType`], [`ServerAlive`]. Those three
+/// exceptions are the **local
 /// echo** of our own outbound movement ([`SharedState::set_local_movement`]) —
 /// genuinely not a fold of anything the server said, which is what lets a bot's
 /// `look`/`walk` build on the latest local pose without a round trip.
@@ -101,6 +102,14 @@ pub struct PlayerSnapshot {
     pub game_mode: Option<GameMode>,
     /// Current dimension, once known.
     pub dimension: Option<DimensionId>,
+    /// The **dimension type** the current dimension points at, as the server
+    /// declared it in the Configuration `registry_data` (issue #288). Read from
+    /// [`ServerDimensionType`].
+    ///
+    /// `None` means the server said nothing usable — **not** "the overworld". A
+    /// consumer must state its own fallback; see
+    /// `lodestone_shell::mesher::sky_default_for_dimension`.
+    pub dimension_type: Option<DimensionTypeInfo>,
     /// Whether the player is alive. Set `false` by [`ClientEvent::Death`] and
     /// restored when health becomes positive again after a respawn.
     pub alive: bool,
@@ -130,6 +139,7 @@ impl Default for PlayerSnapshot {
             on_fire: false,
             game_mode: None,
             dimension: None,
+            dimension_type: None,
             alive: true,
             health_known: false,
             xp_progress: 0.0,
@@ -594,6 +604,9 @@ impl SharedState {
             game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
             dimension: world
                 .get::<ServerDimension>(self.session)
+                .and_then(|d| d.0.clone()),
+            dimension_type: world
+                .get::<ServerDimensionType>(self.session)
                 .and_then(|d| d.0.clone()),
             // Absent component reads as *alive*, matching `ServerAlive::default`:
             // a client nobody has told otherwise is not dead.

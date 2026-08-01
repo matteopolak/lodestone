@@ -6,10 +6,11 @@ How the client's render path is supposed to look different in the Nether and the
 End, versus what it actually does today: which parts already work (sky light
 defaulting, and now fog colour and the frame clear colour), the one dimension
 attribute deliberately left unwired (the End's sky-darken factor, pending a
-live-server check), and one confirmed bug that undermines the rest — the
-connected dimension the render path reads goes stale the moment a player
-changes dimension without reconnecting (portal travel, `/execute in`,
-end-gateway teleport).
+live-server check), and one bug that used to undermine the rest — the connected
+dimension the render path read went stale the moment a player changed dimension
+without reconnecting (portal travel, `/execute in`, end-gateway teleport). **That
+one is fixed**; the diagnosis is kept below because it is the best record of how it
+failed and of the trap that hid it.
 
 This doc also carries the portal traversal diagnosis: what the client sends,
 what happens to the dimension-change packet, and where the picture actually
@@ -50,9 +51,18 @@ without a live server. `crates/lodestone-render/src/world.rs`'s `SkyDefault` doc
 comment and `crates/lodestone-render/src/mesher.rs`'s module doc carried the
 same "no sky light in the nether/end" claim and have been corrected to match.
 
-This client has no dimension-type *registry* decode at all (see below) — the
-match is by well-known dimension id, not by an actual `has_skylight` bit read
-off the wire.
+**Superseded by issue #288, which landed the registry decode.**
+`sky_default_for_dimension` now takes a second argument — the server's own
+`minecraft:dimension_type` entry, carried on `PlayerSnapshot::dimension_type` —
+and when it is present its `has_skylight` **is** the answer; the level name is not
+consulted at all. That closes issue #34 properly: a data pack pointing a level called
+`mypack:mine` at the vanilla overworld type used to fall through to
+`SkyDefault::None` and render its terrain dark, and a custom skylight-less type on
+`minecraft:overworld` used to be assumed lit. Both directions are now asserted in
+`mesher.rs`'s `a_server_declared_dimension_type_overrides_the_level_name_match`.
+
+The name match above survives only as the fallback for a server that sends no
+`registry_data`. See [`registry-data-ingest.md`](./registry-data-ingest.md).
 
 ### Fog colour and clear colour — both wired now
 
@@ -152,22 +162,30 @@ regardless of dimension.
   validation log warns about). **Do not wire a guess here** — verify against
   a live End first.
 
-### No dimension-type registry decode at all
+### The dimension-type registry decode — landed (#288); `attributes` still is not
 
-Nowhere in `crates/protocol/v770` does the client decode a `dimension_type`
-registry entry's fields (`has_skylight`, `ambient_light`, `skybox`, or any of
-the new `visual/*` `EnvironmentAttribute`s). The `Respawn`/`Login` packets
-*do* carry a `dimension_type` registry holder id
-(`crates/protocol/v770/src/packets/game.rs`), but it is only ever used to
-select a hardcoded `ChunkShape` by dimension *name*
-(`crates/protocol/v770/src/packets/chunk.rs::ChunkShape::for_dimension`) —
-never resolved to its actual registry payload. Every dimension-conditioned
-choice in this codebase (`SkyDefault`, and the new fog presets above) is
-therefore necessarily a **name-based special case** for the three built-in
-dimensions, not a data-driven read of the real registry entry, and a custom
-datapack dimension falls back to overworld-shaped chunk framing and
-`SkyDefault::None`. Decoding the registry for real is a `protocol/v770`
-change, out of scope for this task's file permissions.
+**This section previously said "no dimension-type registry decode at all". That is
+no longer true and the correction is the point:** `registry_data` is decoded, the
+`login`/`respawn` holder id is resolved against it, and `has_skylight`,
+`min_y`/`height`/`logical_height`, `coordinate_scale`, `ambient_light`,
+`has_ceiling`, `has_fixed_time` and `default_clock` all come off the wire now. The
+chunk shape follows the registry rather than `ChunkShape::for_dimension`'s name
+match. Full detail in [`registry-data-ingest.md`](./registry-data-ingest.md).
+
+What is still **not** decoded, and is what the remaining items in this doc need:
+
+- the dimension type's **`attributes`** map — `minecraft:visual/fog_color`,
+  `visual/sky_color`, `visual/cloud_color`, `visual/cloud_height`,
+  `visual/ambient_light_color`, and the audio entries. These are present in the
+  captured NBT (see `tests/fixtures/registry_data_dimension_type.hex`, and the
+  overworld payload transcribed in `lodestone-core`'s NBT test) and are dropped by
+  the decode. **The fog presets above are still hand-written constants**, and
+  wiring them to the registry is now a parse rather than a protocol change.
+- `skybox` and `cardinal_light`, likewise present and dropped.
+- 26.2's `skyDarken` is computed from `EnvironmentAttributes.SKY_LIGHT_LEVEL`
+  (`Level.java:741`), i.e. from that same `attributes` map — not from a clock
+  directly. So the End's sky-darken item above is blocked on the attributes decode,
+  not on the clock work, and the live-End check it asks for is still required.
 
 ## Portal diagnosis
 
@@ -230,17 +248,21 @@ affected by this bug — those are driven by `ChunkShape`/the placement
 teleport respectively, both of which update correctly and independently of
 `player.dimension`.
 
-**The fix** is a one-arm addition to `Inner::apply` in
-`crates/lodestone-client/src/state.rs`, mirroring the existing `Login` arm:
+**This bug is fixed, and the two paragraphs above it are stale** — kept because
+the diagnosis is still the best description of *how* it failed. `Inner::apply` no
+longer holds the player's dimension at all: the Stage 3 vitals collapse moved it
+to `lodestone_ecs::session::ServerDimension`, whose fold
+(`apply_local_player_state`) handles **`Respawned` as well as `Login`** precisely
+because respawn is how a portal trip is reported. Its regression gate is
+`crates/lodestone-client/tests/read_model.rs`'s
+`respawning_into_another_dimension_updates_the_read_model`, and
+`ServerDimension`'s own doc comment names this bug as the reason.
 
-```rust
-ClientEvent::Respawned { dimension, .. } => {
-    self.player.dimension = Some(dimension.clone());
-}
-```
-
-`lodestone-client` was not in this task's editable file set, so this is
-reported rather than fixed. Flagged as a background-task suggestion.
+Issue #288 then made the whole read moot for the decisions that matter:
+`sky_default_for_dimension` reads `PlayerSnapshot::dimension_type`, folded from
+`ClientEvent::DimensionTypeChanged`, which the adapter emits off **both** `login`
+and `respawn`. So a portal trip moves the sky-light policy through a path that
+never consults the level name.
 
 ## How to change it
 
@@ -251,16 +273,18 @@ reported rather than fixed. Flagged as a background-task suggestion.
   (`crates/lodestone-shell/src/sim.rs`) the same way the Nether/End branches
   already read — a `d.namespace() == "minecraft" && d.path() == "..."` match
   *before* the `_ =>` fallthrough, still inside the lava/water priority order.
-- New dimension-conditioned render decision → resolve the dimension the same
-  way `mesher.rs::sky_default_for_dimension` and `Sim::fog_settings` both do
-  (well-known id match on
-  `net.shared_handle().get().and_then(|h| h.player().dimension)`), until the
-  registry decode above exists.
-- Gotcha: any such decision is only as fresh as `player.dimension`, which is
-  stale after a portal trip until the `state.rs` fix above lands — verify a
-  live gate through an actual dimension change, not just a fresh login into
-  the target dimension, or the same "invisible until traversal" trap will
-  repeat.
+- New dimension-conditioned render decision → read
+  `PlayerSnapshot::dimension_type` (issue #288) and branch on the server's own
+  field, the way `mesher.rs::sky_default_for_dimension` now does. Fall back to the
+  well-known level-id match only for `dimension_type == None`, i.e. a server that
+  sent no `registry_data`. `Sim::fog_settings` has **not** been converted and still
+  matches on the level name — the colours it needs live in the dimension type's
+  `attributes` map, which this decode drops.
+- Gotcha: verify a live gate through an **actual dimension change**, not just a
+  fresh login into the target dimension. Both `ServerDimension` and
+  `ServerDimensionType` move on `Respawned` now, but this is the trap that made the
+  original staleness invisible for a whole pass, and any *new* per-dimension fact
+  added without a `Respawned` arm reproduces it exactly.
 - The clear colour tracks the fog colour automatically now
   (`RenderState::set_clear_color`, called from `app.rs` with
   `desired_fog.color`) — a new dimension colour added to `fog.rs`/

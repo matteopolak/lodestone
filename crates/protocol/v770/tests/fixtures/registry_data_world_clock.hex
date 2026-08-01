@@ -1,0 +1,16 @@
+# Raw clientbound `registry_data` payload for `minecraft:world_clock`,
+# captured from a real vanilla 26.2 server (flat creative oracle, :25570)
+# during Configuration. Payload only — no packet-length or packet-id prefix.
+#
+# The entries are unit compounds (`record WorldClock()`), so the ordered
+# *names* are the whole content: this is the id -> name map `set_time`'s
+# clock keys index into.
+#
+# Recapture: cargo test -p lodestone-v770 --features live-registry \
+# --test live_registry_data -- --ignored --nocapture
+# (with LODESTONE_CAPTURE_FIXTURES=1 to overwrite)
+15 6d 69 6e 65 63 72 61 66 74 3a 77 6f 72 6c 64
+5f 63 6c 6f 63 6b 02 13 6d 69 6e 65 63 72 61 66
+74 3a 6f 76 65 72 77 6f 72 6c 64 01 0a 00 11 6d
+69 6e 65 63 72 61 66 74 3a 74 68 65 5f 65 6e 64
+01 0a 00

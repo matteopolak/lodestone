@@ -2072,6 +2072,26 @@ mod tests {
             "…and something must claim it, or it falls through to the scalar fold \
              that no longer has an arm for it and is silently dropped"
         );
+        // Same shape for `DimensionTypeChanged` (issue #288): folded by
+        // `crate::session::apply_local_player_state` into `ServerDimensionType`,
+        // beside `ServerDimension` off the same packet — so *this* module must
+        // not claim it, and `session` must.
+        //
+        // This pair is the routing check, and it is the check that has caught the
+        // island three times: a decode can be perfect, the component and the
+        // system can be correct, and the whole chain still reaches zero pixels
+        // because `SharedState::apply` only forwards what one of these two
+        // switches lists.
+        let dimension_type_changed = ClientEvent::DimensionTypeChanged {
+            holder_id: 0,
+            dimension_type: None,
+        };
+        assert!(!handles_event(&dimension_type_changed));
+        assert!(
+            crate::session::handles_event(&dimension_type_changed),
+            "registry-driven dimension facts must reach a fold, or #288's decode \
+             is an island"
+        );
     }
 
     #[test]

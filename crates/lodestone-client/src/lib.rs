@@ -125,7 +125,8 @@ pub use handle::WorldDimensions;
 // use the bot API without depending on `lodestone-model` directly.
 pub use lodestone_model::{
     BlockPos, BossAction, BossColor, BossOverlay, ChatAckInfo, ChatKind, ChunkPos, ClientAction,
-    ClientEvent, CollisionRule, ConnectionState, DimensionId, Directive, DisplaySlot,
+    ClientEvent, CollisionRule, ConnectionState, DimensionId, DimensionTypeInfo, Directive,
+    DisplaySlot,
     EntityAttributeSnapshot, GameMode, Hand, LoginProfile, NumberFormat, ObjectiveMode,
     ObjectiveRenderType, PlayerListEntry, Reported, ResourceKey, Rotation, ServerAddress,
     TeamAction, TeamColor, TeamParameters, Text, Vec3, VersionAdapter, Visibility,

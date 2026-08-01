@@ -29,6 +29,66 @@ pub struct DeathLocation {
     pub pos: BlockPos,
 }
 
+/// The server-declared properties of the dimension type the local player is in.
+///
+/// # Why this is a distinct fact from [`DimensionId`]
+///
+/// A [`DimensionId`] names a *level* (`minecraft:the_nether`, or `mypack:mine`);
+/// a dimension **type** is a registry entry that level points at, and it is
+/// where the geometry and lighting rules actually live. Two levels can share one
+/// type, and a data pack can give a level called `mypack:mine` the vanilla
+/// overworld type — which is exactly the case that made matching on the level
+/// name wrong (issue #34).
+///
+/// Version adapters fill this in from the Configuration `registry_data` packet;
+/// before #288 nothing decoded that packet at all, so every field here was
+/// hardcoded client-side by level-name match.
+///
+/// # Field selection
+///
+/// Only the fields a version-free consumer can act on. Vanilla's dimension-type
+/// record additionally carries `infiniburn`, monster-spawn settings, a skybox
+/// choice, a cardinal-light mode, an environment-attribute map and a timeline
+/// set; those are nested registry references with no consumer here. Add one when
+/// something reads it.
+///
+/// Note there is **no `bed_works`**: 26.2 moved that into the dimension type's
+/// environment attributes (`minecraft:gameplay/bed_rule`), so it is not a
+/// top-level dimension-type field any more and cannot be modelled as a bool.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DimensionTypeInfo {
+    /// The dimension type's own registry id, e.g. `minecraft:overworld`. This is
+    /// a `dimension_type` id, **not** the level's [`DimensionId`].
+    pub name: ResourceKey,
+    /// Whether columns here carry sky light. `false` only in the Nether among
+    /// vanilla's four types — the End has sky light exactly like the overworld.
+    pub has_skylight: bool,
+    /// Whether the dimension has a solid ceiling (the Nether).
+    pub has_ceiling: bool,
+    /// Whether the time of day is fixed here (the Nether and the End).
+    pub has_fixed_time: bool,
+    /// Movement scale relative to the overworld — `8.0` in the Nether.
+    pub coordinate_scale: f64,
+    /// Lowest world-`y` a column stores (`-64` overworld, `0` Nether/End).
+    pub min_y: i32,
+    /// Total column height in blocks (`384` overworld, `256` Nether/End).
+    pub height: i32,
+    /// Highest `y` a portal or bed may place the player at (`128` in the Nether,
+    /// against a height of `256`).
+    pub logical_height: i32,
+    /// Baseline light every block receives regardless of sky exposure — `0.0`
+    /// overworld, `0.1` Nether, `0.25` End.
+    pub ambient_light: f32,
+}
+
+impl DimensionTypeInfo {
+    /// Number of 16-tall block sections in a column of this dimension.
+    #[must_use]
+    pub fn section_count(&self) -> usize {
+        usize::try_from(self.height.max(0)).unwrap_or(0) / 16
+    }
+}
+
 /// A signed player-chat acknowledgement input.
 ///
 /// Only signed player chat carries this. System chat, disguised chat, and older
@@ -1729,5 +1789,28 @@ pub enum ClientEvent {
         previous_game_mode: Option<GameMode>,
         /// Last death location, if the server tracks one for this dimension.
         last_death_location: Option<DeathLocation>,
+    },
+    /// The dimension **type** the local player is in changed, resolved against
+    /// the Configuration `registry_data` (issue #288).
+    ///
+    /// Emitted alongside [`Self::Login`] and [`Self::Respawned`] — the two
+    /// packets that carry a dimension-type holder id — and always *before* them,
+    /// so a consumer folding both sees the geometry before the level name that
+    /// depends on it.
+    ///
+    /// # Why `dimension_type` is an `Option`
+    ///
+    /// It is `None` when the id could not be resolved: no `registry_data` was
+    /// received (an older server, or a protocol family that does not send it),
+    /// or the entry's contents were elided or malformed. That is deliberately
+    /// **not** the same as "the overworld" — a consumer must fall back
+    /// explicitly rather than inherit a plausible default, which is the shape
+    /// issue #34 got wrong. `holder_id` is always present, so a consumer can log
+    /// exactly which id failed to resolve.
+    DimensionTypeChanged {
+        /// The `minecraft:dimension_type` holder id the server sent.
+        holder_id: i32,
+        /// The resolved dimension type, or `None` — see above.
+        dimension_type: Option<DimensionTypeInfo>,
     },
 }

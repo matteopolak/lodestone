@@ -325,9 +325,12 @@ pub fn snapshot_section_live(
     let handle = handle.get()?;
     // `WorldDimensions` carries only `min_y`/`height`, not dimension identity, so
     // the sky policy reads the connected dimension off the player snapshot — the
-    // cheapest place this crate can reach it without growing that struct.
-    let dimension = handle.player().dimension;
-    let sky_default = sky_default_for_dimension(dimension.as_ref());
+    // cheapest place this crate can reach it without growing that struct. Since
+    // #288 the snapshot also carries the server's own dimension **type**, which
+    // is what the policy actually wants; the level id stays as the fallback.
+    let player = handle.player();
+    let sky_default =
+        sky_default_for_dimension(player.dimension.as_ref(), player.dimension_type.as_ref());
     let store = handle.chunk_world();
     snapshot_section_in(&store.read(), key, Some(section_count), sky_default)
 }
@@ -353,14 +356,33 @@ pub fn snapshot_section_live(
 /// artificially dark, the same class of bug this function exists to prevent —
 /// just aimed the other direction.
 ///
-/// This client has no dimension-type *registry* decode (no `has_skylight`
-/// field is read off the wire at all — see `docs/dimension-visuals.md`), so
-/// the three built-in dimensions are matched by their well-known id instead of
-/// the registry entry vanilla actually keys this off; a custom datapack
-/// dimension falls back to `None`, same as it did before this function was
-/// extracted.
+/// # The registry answers this now (issue #288), and the name match is the fallback
+///
+/// `dimension_type` is the server's own `minecraft:dimension_type` entry, decoded
+/// off the Configuration `registry_data` packet and carried on
+/// `PlayerSnapshot::dimension_type`. When it is present its `has_skylight` **is**
+/// the answer, and the level name is not consulted at all — which is what closes
+/// issue #34: a data pack pointing a level called `mypack:mine` at the vanilla
+/// overworld type used to fall through to `SkyDefault::None` and render its
+/// terrain dark, and the reverse (a custom 1024-tall type on
+/// `minecraft:overworld`) used to be assumed lit.
+///
+/// The name match survives only for `dimension_type == None`: a server or
+/// protocol family that sends no `registry_data`. It is the pre-#288 behaviour
+/// verbatim, so that path cannot have regressed, and it is deliberately **not**
+/// "assume the overworld".
 #[must_use]
-pub fn sky_default_for_dimension(dimension: Option<&lodestone_client::DimensionId>) -> SkyDefault {
+pub fn sky_default_for_dimension(
+    dimension: Option<&lodestone_client::DimensionId>,
+    dimension_type: Option<&lodestone_client::DimensionTypeInfo>,
+) -> SkyDefault {
+    if let Some(info) = dimension_type {
+        return if info.has_skylight {
+            SkyDefault::Full
+        } else {
+            SkyDefault::None
+        };
+    }
     match dimension {
         // Dimension not yet known (pre-login): keep the previous default.
         None => SkyDefault::Full,
@@ -1228,6 +1250,24 @@ mod tests {
         assert_send::<Meshed>();
     }
 
+    /// A dimension type as the server would send it, with only `has_skylight`
+    /// varied — every other field is irrelevant to this policy and is set to a
+    /// value that would be *wrong* for the overworld, so a test that accidentally
+    /// read one of them fails.
+    fn dim_type(name: &str, has_skylight: bool) -> lodestone_client::DimensionTypeInfo {
+        lodestone_client::DimensionTypeInfo {
+            name: name.parse().unwrap(),
+            has_skylight,
+            has_ceiling: true,
+            has_fixed_time: true,
+            coordinate_scale: 8.0,
+            min_y: 0,
+            height: 256,
+            logical_height: 128,
+            ambient_light: 0.1,
+        }
+    }
+
     #[test]
     fn sky_default_is_full_for_overworld_and_end_none_for_nether_and_unknown() {
         use lodestone_client::DimensionId;
@@ -1237,24 +1277,62 @@ mod tests {
         let the_end: DimensionId = "minecraft:the_end".parse().unwrap();
         let custom: DimensionId = "somemod:cave_dimension".parse().unwrap();
 
+        // Every case here passes `None` for the dimension type: this is the
+        // pre-#288 name-match fallback, kept verbatim for servers that send no
+        // `registry_data`.
         assert_eq!(
-            sky_default_for_dimension(None),
+            sky_default_for_dimension(None, None),
             SkyDefault::Full,
             "pre-login: keep the full-bright default"
         );
         assert_eq!(
-            sky_default_for_dimension(Some(&overworld)),
+            sky_default_for_dimension(Some(&overworld), None),
             SkyDefault::Full
         );
         // The falsifying case this function exists for: the End has real sky
         // light (`has_skylight: true`) exactly like the overworld, and must
         // not be defaulted to `0` just because it isn't the overworld.
-        assert_eq!(sky_default_for_dimension(Some(&the_end)), SkyDefault::Full);
         assert_eq!(
-            sky_default_for_dimension(Some(&the_nether)),
+            sky_default_for_dimension(Some(&the_end), None),
+            SkyDefault::Full
+        );
+        assert_eq!(
+            sky_default_for_dimension(Some(&the_nether), None),
             SkyDefault::None
         );
-        assert_eq!(sky_default_for_dimension(Some(&custom)), SkyDefault::None);
+        assert_eq!(
+            sky_default_for_dimension(Some(&custom), None),
+            SkyDefault::None
+        );
+    }
+
+    #[test]
+    fn a_server_declared_dimension_type_overrides_the_level_name_match() {
+        use lodestone_client::DimensionId;
+
+        let overworld: DimensionId = "minecraft:overworld".parse().unwrap();
+        let custom: DimensionId = "mypack:mine".parse().unwrap();
+
+        // Issue #34, both directions. The name match and the registry disagree
+        // in each case, and the registry must win — a test where they agree
+        // would pass with the registry lookup deleted.
+        assert_eq!(
+            sky_default_for_dimension(
+                Some(&overworld),
+                Some(&dim_type("mypack:dark_overworld", false)),
+            ),
+            SkyDefault::None,
+            "a level called minecraft:overworld with a skylight-less type must be dark"
+        );
+        assert_eq!(
+            sky_default_for_dimension(
+                Some(&custom),
+                Some(&dim_type("minecraft:overworld", true)),
+            ),
+            SkyDefault::Full,
+            "a datapack level pointing at a skylit type must be lit — this is the \
+             case whose name match fell through to None before #288"
+        );
     }
 
     #[test]

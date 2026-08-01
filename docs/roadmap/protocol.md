@@ -141,7 +141,7 @@ symmetric mirror of the server list.
 |---|---|---|
 | [#283](https://github.com/matteopolak/lodestone/issues/283) | Secure chat signing entirely absent client-side | would get us silently dropped by `enforce-secure-profile` servers |
 | [#286](https://github.com/matteopolak/lodestone/issues/286) | `MessageSignatureCache` built, tested, unconsumed | `island` label — cheap, standalone fix |
-| [#288](https://github.com/matteopolak/lodestone/issues/288) | Client never ingests `registry_data` | root cause of #34 and the clock-by-holder-id behaviour |
+| [#288](https://github.com/matteopolak/lodestone/issues/288) | Client never ingests `registry_data` | **client half landed** — dimension types + world clocks decoded and consumed; see [`registry-data-ingest.md`](../registry-data-ingest.md). Server half is still #275 |
 | [#291](https://github.com/matteopolak/lodestone/issues/291) | Cookies and transfers are dead ends | `transfer` is a player-visible gap (hub/lobby networks) |
 | [#294](https://github.com/matteopolak/lodestone/issues/294) | `resource_pack_push`/`pop` only handled in Play, not Configuration | near-direct lift of existing Play-state logic |
 | [#296](https://github.com/matteopolak/lodestone/issues/296) | `update_tags` never decoded | invisible against vanilla today because our hardcoded tables happen to match |
@@ -150,10 +150,17 @@ symmetric mirror of the server list.
 | [#304](https://github.com/matteopolak/lodestone/issues/304) | 12 serverbound packets we cannot encode at all | mostly creative/admin/debug, low urgency |
 | [#306](https://github.com/matteopolak/lodestone/issues/306) | Multi-version: cost of a fifth family, and whether it's worth it | design question, see below |
 
-`registry_data` ingestion (#288) is the highest-leverage single item in this list — it is
-the confirmed root cause of two already-observed bugs (#34 and the clock-selection
-behaviour) and shares a wire format with the server-side gap (#275), so building both
-together is very likely cheaper than reconciling two independent implementations later.
+`registry_data` ingestion (#288) was the highest-leverage single item in this list, and
+the **client half is done**: `crates/protocol/v770/src/packets/registry.rs` decodes the
+packet, `minecraft:dimension_type` and `minecraft:world_clock` are typed, and three
+previously-hardcoded values now come off the wire (column height, `has_skylight`, which
+clock is the day clock). It was the confirmed root cause of two already-observed bugs
+(#34 and the clock selection — the End really was following the overworld's clock on
+plain vanilla). See [`registry-data-ingest.md`](../registry-data-ingest.md).
+
+The **server** half (#275) remains: the wire type there is decode-only. Building it
+against that same `RegistryData` struct is still the right move — an `Encode` impl beside
+the existing `Decode`, not a second implementation.
 
 ## Chat and secure signing
 
@@ -188,9 +195,11 @@ Everything downstream of that has gaps:
 - **Configuration-phase resource-pack push** is unhandled — the Play-state version works
   and is well-tested; it just isn't reachable from the phase real servers most commonly
   use it in (#294).
-- **`registry_data`** is not ingested by the client (#288) and not sent by the server
-  (#275) — the single biggest data-driven-content gap in the whole domain, and the
-  reason two dimension/world-clock bugs exist at all.
+- **`registry_data`** is now ingested by the client (#288, landed) but still not sent by
+  the server (#275). Was the single biggest data-driven-content gap in the domain and the
+  reason two dimension/world-clock bugs existed; what remains of it client-side is the
+  27 registries kept as names-only (damage types, chat types, biomes, …) and the
+  dimension type's `attributes` map, which the visual presets still hardcode.
 - **`update_tags`** is never decoded (#296) — invisible today only because the hardcoded
   fallback tables happen to agree with vanilla defaults.
 

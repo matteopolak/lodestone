@@ -56,9 +56,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   ~4000 `queue.write_buffer` calls/frame (issue #75), and why the crack,
   entity and demo-world paths were deliberately left alone.
 - [Dimension visuals](./dimension-visuals.md) — what already renders differently in
-  the Nether/End (the sky-light default, now End-correct), what is still a hardcoded
-  overworld sky and fog colour, the fog presets built and waiting to wire, and the
-  stale-`player.dimension`-after-a-portal bug that undermined both.
+  the Nether/End (the sky-light default, now registry-driven), what is still a
+  hardcoded fog and sky colour because the dimension type's `attributes` map is not
+  decoded, and the stale-`player.dimension`-after-a-portal bug that undermined both
+  (fixed; the diagnosis is kept as the record of how it hid).
+- [Registry data ingest](./registry-data-ingest.md) — decoding the Configuration
+  `registry_data` packet (issue #288): typed dimension types and world clocks, the
+  three hardcoded guesses they replaced (column height, `has_skylight`, which clock
+  is the day clock), why `the_nether` is holder **3** and the End has its own clock,
+  and the `handles_event` arm without which the whole chain reaches zero pixels.
 - [Time-of-day lighting](./time-of-day-lighting.md) — the day clock and
   `sky_darken`, the one number that darkens terrain *and* mobs at night. Why 26.2's
   `set_time` clock map is empty in 19 packets out of 20, how reading the world age
@@ -288,8 +294,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   measured packet-coverage table for epics #4–#5: serverbound *decode* (being a
   server) is 0/69, a completely different axis from the 53/69 *encode* figure the
   connectedness tool reports; secure chat signing has real bookkeeping but zero
-  cryptography in either role; `registry_data` is ingested by neither side, which is
-  the root cause of two already-filed bugs; the `CHUNK_BATCH_START` "island" that
+  cryptography in either role; `registry_data`, which was ingested by neither side and
+  is the root cause of two already-filed bugs (the client half has since landed — see
+  [Registry data ingest](./registry-data-ingest.md)); the `CHUNK_BATCH_START` "island" that
   turned out to be a benign side-effect-only packet; and the multi-version cost
   analysis, left as a design question rather than a recommendation.
 - [Version table](./version-table.md) — the derived, provenance-tracked protocol

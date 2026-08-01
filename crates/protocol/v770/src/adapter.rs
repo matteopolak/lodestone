@@ -11,7 +11,8 @@ use lodestone_model::{
     BossColor,
     BossOverlay, ChatAckInfo, ChatKind, ChatMode, ChunkPos, ClientAction, ClientEvent,
     ClientSettings, CollisionRule, CommandBlockMode, ConnectionState, ContainerClickType,
-    ContainerSlotChange, DeathLocation, Difficulty, Directive, DisplaySlot, DisplayedSkinParts,
+    ContainerSlotChange, DeathLocation, Difficulty, DimensionTypeInfo, Directive, DisplaySlot,
+    DisplayedSkinParts,
     EntityBaseDimensions,
     EntityEquipment,
     EntityFacts,
@@ -67,6 +68,7 @@ use crate::packets::metadata::{
     MetadataClass, metadata_class, read_entity_metadata, read_update_attributes,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
+use crate::packets::registry::{ClientRegistries, DimensionType, RegistryData};
 use crate::packets::scoreboard::{
     self as sb, BossEvent, ResetScore, SetDisplayObjective, SetObjective, SetPlayerTeam, SetScore,
 };
@@ -107,6 +109,19 @@ pub struct V770Adapter {
     /// The overworld day clock, held across packets because `set_time` mostly
     /// does **not** carry it. See [`DayClock`].
     clock: Arc<Mutex<DayClock>>,
+    /// Registries folded out of the Configuration `registry_data` stream (issue
+    /// #288). Empty until Configuration runs; every reader falls back
+    /// explicitly, because a server that sends none must still play.
+    registries: Arc<Mutex<ClientRegistries>>,
+    /// Holder id of the `minecraft:world_clock` entry the **current dimension**
+    /// follows, resolved at `login`/`respawn` from the dimension type's
+    /// `default_clock`.
+    ///
+    /// `None` means "not resolved" — either no `registry_data` arrived, or the
+    /// dimension type has no clock of its own (the Nether, which has fixed
+    /// time). Both fall back to `SetTime::day_clock`'s lowest-holder-id pick;
+    /// see the `set_time` arm.
+    clock_holder: Arc<Mutex<Option<i32>>>,
 }
 
 /// The client's copy of the server's overworld day clock.
@@ -235,6 +250,8 @@ impl V770Adapter {
             movement: Arc::new(Mutex::new(MovementSendState::default())),
             variants: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(Mutex::new(DayClock::default())),
+            registries: Arc::new(Mutex::new(ClientRegistries::default())),
+            clock_holder: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -263,10 +280,90 @@ impl V770Adapter {
 
     /// Records the chunk shape for `dimension` so subsequent chunk packets in
     /// that dimension decode against the correct build-height window.
+    ///
+    /// The name-matched fallback, used only when `registry_data` did not resolve
+    /// the dimension type — see [`Self::enter_dimension`].
     fn set_dimension(&self, dimension: &str) {
         if let Ok(mut shape) = self.shape.lock() {
             *shape = ChunkShape::for_dimension(dimension);
         }
+    }
+
+    /// Folds one `registry_data` packet into this connection's registry store.
+    fn apply_registry_data(&self, data: RegistryData) {
+        if let Ok(mut registries) = self.registries.lock() {
+            registries.apply(data);
+        }
+    }
+
+    /// Resolves a `login`/`respawn` dimension-type holder id against the
+    /// registries received during Configuration, and installs everything that
+    /// depends on it: the chunk [`ChunkShape`] and the day-clock holder.
+    ///
+    /// Returns the [`DimensionTypeInfo`] to publish, or `None` when the id did
+    /// not resolve — in which case the shape falls back to
+    /// [`ChunkShape::for_dimension`]'s level-name match, exactly the pre-#288
+    /// behaviour. That fallback is *not* dead code: a protocol family or server
+    /// that sends no `registry_data` still has to join, and the client must not
+    /// disconnect over a registry it merely wanted.
+    ///
+    /// # Why the id and not the level name
+    ///
+    /// `login`/`respawn` carry both a level [`DimensionId`](lodestone_model::DimensionId)
+    /// (`minecraft:the_nether`) and a bare `dimension_type` **holder id**. Only
+    /// the latter is authoritative: a data pack can point a level called
+    /// `mypack:mine` at the vanilla overworld type, or give
+    /// `minecraft:overworld` a 1024-tall custom type, and a name match gets both
+    /// wrong. `ChunkShape::for_dimension`'s own doc comment already admitted
+    /// this; it is the height half of the same bug #34 filed for sky light.
+    fn enter_dimension(&self, holder_id: i32, level_name: &str) -> Option<DimensionTypeInfo> {
+        let resolved = self
+            .registries
+            .lock()
+            .ok()
+            .and_then(|registries| {
+                let (name, dimension_type) = registries.dimension_type(holder_id)?;
+                // The clock holder must be resolved *while the lock is held*,
+                // because `default_clock` names an entry in a second registry
+                // living in the same store.
+                let clock_holder = dimension_type
+                    .default_clock
+                    .as_deref()
+                    .and_then(|clock| registries.world_clock_id(clock));
+                Some((name.to_owned(), dimension_type.clone(), clock_holder))
+            });
+
+        let Some((name, dimension_type, clock_holder)) = resolved else {
+            // Unresolved: keep the name match, and forget any clock holder the
+            // previous dimension resolved — a stale holder is worse than none,
+            // since `day_clock`'s fallback at least tracks a real clock.
+            self.set_dimension(level_name);
+            if let Ok(mut holder) = self.clock_holder.lock() {
+                *holder = None;
+            }
+            return None;
+        };
+
+        if let Ok(mut shape) = self.shape.lock() {
+            // Only the vertical window comes from the registry; the palette
+            // framing and the air/biome ids are properties of the *protocol
+            // family*, not of the dimension, so they keep the family's values.
+            *shape = ChunkShape {
+                min_y: dimension_type.min_y,
+                section_count: dimension_type.section_count(),
+                world_height: u32::try_from(dimension_type.height.max(0)).unwrap_or(0),
+                ..ChunkShape::overworld_1_21()
+            };
+        }
+        if let Ok(mut holder) = self.clock_holder.lock() {
+            *holder = clock_holder;
+        }
+        dimension_type_info(&name, &dimension_type)
+    }
+
+    /// The day-clock holder id the current dimension follows, if resolved.
+    fn current_clock_holder(&self) -> Option<i32> {
+        self.clock_holder.lock().ok().and_then(|holder| *holder)
     }
 
     /// Returns the current dimension's chunk shape.
@@ -1958,6 +2055,27 @@ fn handle_update_attributes(payload: &[u8]) -> Vec<Directive> {
     }
 }
 
+/// Lifts a wire [`DimensionType`] into the version-free [`DimensionTypeInfo`].
+///
+/// Returns `None` only when the registry entry's own id is not a valid
+/// identifier — a server sending one has bigger problems, and reporting "not
+/// resolved" is safer than inventing a key. The vertical window has already been
+/// installed by the caller at that point, so a malformed *name* does not cost us
+/// the correct chunk shape.
+fn dimension_type_info(name: &str, value: &DimensionType) -> Option<DimensionTypeInfo> {
+    Some(DimensionTypeInfo {
+        name: name.parse::<ResourceKey>().ok()?,
+        has_skylight: value.has_skylight,
+        has_ceiling: value.has_ceiling,
+        has_fixed_time: value.has_fixed_time,
+        coordinate_scale: value.coordinate_scale,
+        min_y: value.min_y,
+        height: value.height,
+        logical_height: value.logical_height,
+        ambient_light: value.ambient_light,
+    })
+}
+
 /// Maps a numeric game-type byte to the canonical [`GameMode`].
 fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
     match value {
@@ -2031,6 +2149,20 @@ impl V770Adapter {
                 &ServerboundKnownPacks { packs: Vec::new() },
             )?]);
         }
+        if packet_id == configuration::clientbound::REGISTRY_DATA {
+            // Issue #288: this arm did not exist, so 29 registries a join hit
+            // the `Ok(Vec::new())` fall-through below and dimension heights, sky
+            // light and the day clock were all hardcoded by level name instead.
+            //
+            // Decoded with a trailing-byte check, like every other packet here:
+            // a registry we do not model still has to consume its payload
+            // exactly, or a silently-wrong `Optional<Tag>` framing would go
+            // unnoticed until the one registry we *do* read happened to sort
+            // after it.
+            let data: RegistryData = decode_full(payload)?;
+            self.apply_registry_data(data);
+            return Ok(Vec::new());
+        }
         if packet_id == configuration::clientbound::FINISH_CONFIGURATION {
             return Ok(vec![
                 send(
@@ -2072,15 +2204,26 @@ impl V770Adapter {
     ) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::LOGIN {
             let body: GameLogin = decode_body(payload)?;
-            self.set_dimension(&body.dimension);
+            // `dimension_type` is the registry holder id; `dimension` is the
+            // level name. The id wins where the registry resolved it, and
+            // `enter_dimension` falls back to the name match where it did not.
+            let dimension_type = self.enter_dimension(body.dimension_type, &body.dimension);
             let dimension = body.dimension.parse().map_err(|_| {
                 AdapterError::Decode(format!("invalid dimension {}", body.dimension))
             })?;
-            return Ok(vec![Directive::Emit(ClientEvent::Login {
-                entity_id: body.entity_id,
-                game_mode: game_mode(body.game_type)?,
-                dimension,
-            })]);
+            return Ok(vec![
+                // Before `Login`, deliberately: a consumer folding both sees the
+                // dimension's geometry before the level name that depends on it.
+                Directive::Emit(ClientEvent::DimensionTypeChanged {
+                    holder_id: body.dimension_type,
+                    dimension_type,
+                }),
+                Directive::Emit(ClientEvent::Login {
+                    entity_id: body.entity_id,
+                    game_mode: game_mode(body.game_type)?,
+                    dimension,
+                }),
+            ]);
         }
         if packet_id == play::clientbound::KEEP_ALIVE {
             let keep_alive: KeepAlive = decode_body(payload)?;
@@ -2991,7 +3134,10 @@ impl V770Adapter {
             reader
                 .ensure_empty()
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
-            self.set_dimension(&respawn.dimension);
+            // Respawn is also how the server reports portal travel, so the
+            // dimension type moves here too — and it is the *only* place a
+            // Nether trip's `min_y`/`height` change can be picked up.
+            let dimension_type = self.enter_dimension(respawn.dimension_type, &respawn.dimension);
             let dimension = respawn.dimension.parse().map_err(|_| {
                 AdapterError::Decode(format!("invalid dimension {}", respawn.dimension))
             })?;
@@ -3016,12 +3162,18 @@ impl V770Adapter {
                     })
                 })
                 .transpose()?;
-            return Ok(vec![Directive::Emit(ClientEvent::Respawned {
-                dimension,
-                game_mode: mode,
-                previous_game_mode,
-                last_death_location,
-            })]);
+            return Ok(vec![
+                Directive::Emit(ClientEvent::DimensionTypeChanged {
+                    holder_id: respawn.dimension_type,
+                    dimension_type,
+                }),
+                Directive::Emit(ClientEvent::Respawned {
+                    dimension,
+                    game_mode: mode,
+                    previous_game_mode,
+                    last_death_location,
+                }),
+            ]);
         }
         if packet_id == play::clientbound::SET_TIME {
             // 26.2 reshaped set_time: a monotonic world age followed by a map of
@@ -3039,9 +3191,22 @@ impl V770Adapter {
             // `sky_darken` to a session constant. Re-anchor only on a real clock
             // update; otherwise extrapolate the held anchor at the server's own
             // rate. See `DayClock` and `SetTime::day_clock`.
+            // Which clock is "the" day clock is a *registry* question, and until
+            // #288 it was answered by "the lowest holder id present", which is
+            // the overworld clock in every dimension because vanilla registers
+            // it first. In the End the right clock is `minecraft:the_end`
+            // (holder 1) — see `ClientRegistries::world_clock_id`.
+            //
+            // `None` here (no `registry_data`, or a dimension with no clock of
+            // its own — the Nether has fixed time and no `default_clock`) keeps
+            // the lowest-id fallback. That is deliberate rather than reporting
+            // "no time": `time_of_day`'s only consumer is a sky curve that does
+            // not yet gate on `has_fixed_time`, so a Nether trip reporting the
+            // overworld's clock is exactly as good as before and no worse.
             let time_of_day = {
+                let clock_holder = self.current_clock_holder();
                 let mut clock = self.clock.lock().expect("day clock poisoned");
-                if let Some(update) = time.day_clock() {
+                if let Some(update) = time.clock_for(clock_holder) {
                     *clock = DayClock {
                         total_ticks: update.total_ticks,
                         rate: update.rate,
@@ -4315,5 +4480,24 @@ impl VersionAdapter for V770Adapter {
         // table, and skipping them is wrong for 2,618 of 32,366 states. One bit
         // out of rodata. See `lodestone_data::block_solidity`.
         lodestone_data::block_solidity::blocks_motion(state_id)
+    }
+
+    fn block_bubble_column_drag(&self, state_id: u32) -> Option<bool> {
+        // Read straight off the generated state table rather than through a bespoke
+        // census: `drag` is a real blockstate property that Mojang's own
+        // `blocks.json` carries, so `properties()` already has it and there is
+        // nothing to dump. The two states are 15294 (`drag=true`, the block's
+        // default) and 15295 (`drag=false`) in the 26.2 palette.
+        //
+        // The name is checked first because `drag` is not guaranteed unique to this
+        // block across versions, and matching on the property alone would silently
+        // widen if another block ever gained one.
+        if lodestone_data::block_states::block_name(state_id)? != "minecraft:bubble_column" {
+            return None;
+        }
+        lodestone_data::block_states::properties(state_id)?
+            .iter()
+            .find(|(name, _)| *name == "drag")
+            .map(|(_, value)| *value == "true")
     }
 }

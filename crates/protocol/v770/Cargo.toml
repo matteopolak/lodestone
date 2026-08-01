@@ -150,3 +150,16 @@ live-item-entity = []
 # particle emitter that masks a wrong id. Off by default and `#[ignore]`d so
 # `cargo test -p lodestone-v770` stays hermetic.
 live-destroy-block = []
+
+# Enables the live `registry_data` gate (`live_registry_data`, issue #288): joins
+# the flat creative 26.2 oracle (game :25570) and captures the raw
+# `registry_data` payloads the *server* authored for `minecraft:dimension_type`
+# and `minecraft:world_clock`. Those bytes are checked in under `tests/fixtures/`
+# and replayed by the hermetic `registry_data` sibling; the decoded *content* is
+# then checked against Mojang's own shipped data files
+# (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/*.json`), which is an
+# oracle outside this tree entirely. Note `generated/reports/registries.json`
+# does **not** list either registry — both are data-pack registries — so it is
+# the wrong cross-check despite being the obvious one. Off by default and
+# `#[ignore]`d so `cargo test -p lodestone-v770` stays hermetic.
+live-registry = []
