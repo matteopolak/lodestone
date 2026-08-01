@@ -1029,7 +1029,13 @@ impl RenderState {
         // Outline vertices/uniform must be written before the pass opens.
         if let Some(block) = outline {
             let boxes = self.outline_shape.sample(block);
-            self.outline.prepare(queue, &view_proj, block, &boxes);
+            self.outline.prepare(
+                queue,
+                &view_proj,
+                block,
+                &boxes,
+                (self.depth.width, self.depth.height),
+            );
         }
 
         // Same constraint for the debug-line pass: sample and upload before

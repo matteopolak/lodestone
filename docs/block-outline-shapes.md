@@ -203,6 +203,96 @@ sixteenths (`Block.java:176-184`), so kelp's `column(16, 0, 9)` is
 `column(16,0,8)`/`column(16,8,16)`/`Shapes.block()`; `AirBlock.java:29-32` gives
 air's empty outline.
 
+## Rendering: line thickness (issue #364)
+
+This section is about `OutlineRenderer` in `crates/lodestone-shell/src/gpu/outline.rs`
+— the GPU pass that draws the wireframe box from the boxes this module computes. It
+used to draw each of the box's 12 edges as `PrimitiveTopology::LineList`, which
+rasterizes at exactly **one physical pixel** regardless of resolution or DPI scale.
+Reported live as "too dim to read comfortably" (issue #364); confirmed by pixel gate
+to be a thickness problem, not a colour one — see below.
+
+### What vanilla actually does, and what was mis-cited
+
+The issue's first draft cited `LevelRenderer.java:744-756`, which is the F3-style
+debug collision/occlusion/interaction shape dump (`SharedConstants.DEBUG_SHAPES`
+branch of `submitHitOutline`) — colours at alpha `0.4` for black/green/blue. That is
+**not** the block hit outline; it only draws with `F3+B` debug shapes enabled.
+
+The real path is `LevelRenderer.submitBlockOutline` (`:706-729`) →
+`submitHitOutline`'s **non-debug** branch (`:760`):
+`submitNodeCollector.submitShapeOutline(poseStack, state.shape(), renderType, color, width, afterTerrain)`,
+called with `color = ARGB.black(102)` (alpha ≈ 0.4) and
+`width = gameRenderState().windowRenderState.appropriateLineWidth`, which is
+`Window.getAppropriateLineWidth()` (`Window.java:569`):
+`max(2.5, windowWidth / 1920 * 2.5)` — never thinner than **2.5 logical pixels**,
+and scaling up with window/framebuffer width. That width is attached per-vertex via
+`VertexConsumer.setLineWidth` (`ShapeOutlineFeatureRenderer.java:25-26`, the vertex
+format element used by the `LINES` render pipeline,
+`RenderPipelines.java:565` / `DefaultVertexFormat.POSITION_COLOR_NORMAL_LINE_WIDTH`)
+and expanded into real screen-space quad geometry downstream — vanilla does not rely
+on a GPU line-width parameter either, for the same portability reason noted in the
+issue.
+
+**Colour was already right.** Vanilla's real outline draws at alpha ≈ 0.4; this
+pass's shader was already at 0.6 — more opaque, not less. Left unchanged.
+
+**Depth setup was already right.** Vanilla's `LINES` pipeline
+(`RenderPipelines.java:565`, the one the hit outline actually uses — not the
+`LINES_DEPTH_BIAS` variant at `:572`) uses `DepthStencilState.DEFAULT`:
+`GREATER_THAN_OR_EQUAL`, **zero** bias. Per `CLAUDE.md`'s reversed-Z note, that is
+this engine's `LessEqual` at zero bias — exactly what `OutlineRenderer`'s pipeline
+already had. There was no sign-flipped bias to fix; vanilla avoids z-fighting by
+drawing the outline at the block's *exact* coincident boundary and relying on the
+inclusive compare, rather than an epsilon nudge. This pass instead inflates the box
+outward by `PAD = 0.002` world units in `OutlineRenderer::prepare`, because the
+outline and the terrain mesh here do not share a vertex-generation path and are not
+guaranteed bit-identical; `PAD` was measured not to be the source of the dimness.
+
+### The fix: screen-space-thickened quads
+
+`OutlineRenderer` now submits each edge as **6 vertices (2 triangles)** rather than
+a `LineList` segment. Every vertex carries its own position, the edge's *other*
+endpoint, and a `side` (`-1.0`/`+1.0`). The vertex shader transforms both endpoints
+to screen space, finds the on-screen perpendicular to the edge, and pushes the
+vertex out along it by `half_width_px * side` — depth is preserved exactly (only
+x/y move) so it still depth-tests like the original thin line. `half_width_px`
+comes from a uniform written in `prepare`, using the same
+`max(2.5, viewport_width / 1920 * 2.5)` formula as vanilla, driven by the render
+target's real pixel size (`self.depth.width`/`height` in `gpu.rs`, passed in as
+`prepare`'s new `viewport_px` argument).
+
+### How to change it
+
+- Line width lives in `outline.rs`'s `MIN_LINE_WIDTH_PX` / `LINE_WIDTH_REFERENCE_PX`
+  constants — change both together if vanilla's own constant ever moves.
+- The screen-space-expansion vertex shader is the whole trick; if you need a
+  different visual weight, change `half_width_px` in `prepare`, not the shader.
+- Gotcha: `viewport_px` must be the *render target's* pixel size, not a logical/DPI
+  size — `gpu.rs` sources it from `self.depth.width`/`height`, which is set at both
+  `RenderState::new` and `RenderState::resize`, so it always matches the surface
+  actually being drawn to.
+
+### Evidence
+
+`crates/lodestone-shell/src/gpu.rs`'s inline `block_outline_draws_visible_edges`
+(not, despite an earlier note, a file under `crates/lodestone-render/tests/`) proves
+the outline changes pixels at all — it passes on both the old and new geometry and
+so cannot distinguish "thin" from "thick".
+`crates/lodestone-shell/tests/block_outline_thickness_pixels.rs` is the gate that
+can: it isolates edge *thickness* in pixels from edge *length* (a naive "longest
+changed run in any row" is dominated by the horizontal top/bottom edges, whose runs
+span the whole box), by scanning a band of rows/columns clear of the perpendicular
+edges. Measured on the pre-fix `LineList` code (executed via an isolated git
+worktree checked out to the pre-fix `outline.rs`, same scene/camera/resolution as
+the fixed build): thickness **2px both axes**, changed-pixel count **160**, bbox
+`x149..170 y109..130` — the gate's own `>= 3` assertion **fails** against this
+build, which is the executed proof the gate can actually detect "visible but too
+thin" rather than merely "visible". After the fix: thickness **3px both axes**,
+changed-pixel count **268**, bbox `x148..171 y108..131` — same target block and
+camera, so the larger bbox/count is the outline's own line width extending outward,
+not a different scene.
+
 ## Configuration
 
 | knob | where | effect |
