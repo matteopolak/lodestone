@@ -262,6 +262,125 @@ The empty-slot pass also stops after exactly one placement (`break` at
 `AbstractContainerMenu.java:687`), which is why a caller moving more than
 one stack's worth has to loop.
 
+## Audit against 26.2's `doClick` (issue #27)
+
+A line-by-line walk of `AbstractContainerMenu.doClick`
+(`.cache/mc/26.2/src/net/minecraft/world/inventory/AbstractContainerMenu.java:334-557`)
+against every branch in `click.rs`/`menu.rs`, done after the predictor above had
+already landed. This was an audit, not a rewrite — the table below is the
+record of what was checked, what was found undertested, and the one real bug
+this pass found and fixed.
+
+**How "covered" was established.** For every row marked "verified red," the
+implementation was locally broken (a wrong constant, a removed guard, a
+reordered call), the cited test was run and observed to fail, then the break
+was reverted — satisfying `CLAUDE.md`'s "assertions of an absence need a
+control proving the detector works," applied to test coverage itself rather
+than to in-game state. Rows marked "pre-existing, suite discipline" were not
+individually re-broken this pass (budget); confidence there instead comes
+from (a) this module's tests already citing exact vanilla line numbers and
+pairing every negative assertion with a positive control, per its own stated
+evidence standard (`menu.rs:849-862`), and (b) one representative spot-check
+— breaking `quick_craft_place_count`'s `ONE` case from `1` to `2` — which
+`right_drag_one_each` caught immediately, corroborating that the discipline
+described in the comments is real and not just asserted.
+
+| wire `ClickType` (mode / button) | 26.2 location | our location | test(s) | verified red? |
+| --- | --- | --- | --- | --- |
+| `PICKUP` left (`0`/`0`) | `AbstractContainerMenu.java:428-469` | `click.rs::do_pickup` | `left_click_places_whole_cursor_into_empty_slot`, `left_click_full_slot_empty_cursor_picks_up_whole`, `left_click_same_item_merges_up_to_cap`, `left_click_different_items_swaps_cursor_and_slot`, `placing_into_smaller_max_stack_respects_item_cap` | pre-existing, suite discipline |
+| `PICKUP` right (`0`/`1`) | same | `do_pickup` | `right_click_places_one`, `right_click_full_slot_empty_cursor_takes_half_rounding_up` | pre-existing, suite discipline |
+| `PICKUP`/`QUICK_MOVE` outside (slot `-999`) | `:404-412` | `do_drop_cursor` | `drop_cursor_outside_left_drops_all`, `drop_cursor_outside_right_drops_one` | pre-existing, suite discipline |
+| `QUICK_MOVE` (`1`) + per-menu order | `:413-427`, `ChestMenu.java:94-109`, `CraftingMenu.java:107-152`, `InventoryMenu.java:100-152` | `do_quick_move`, `quick_move_generic`/`_crafting`/`_player` | `shift_click_from_hotbar_to_main_in_player_menu`, `shift_click_from_container_to_player_inventory`, `chest_to_player_fills_the_hotbar_first`, `crafting_table_shift_click_loads_the_grid_first`, `player_screen_shift_click_never_loads_the_two_by_two_grid`, `shift_click_equips_armour_before_trying_the_hotbar`/`_out_of_the_offhand_slot`, `shift_clicking_the_result_crafts_once_locally_and_again_on_server_refill` | pre-existing, suite discipline |
+| `SWAP` hotbar keys (`2`/`0-8`) | `:471-507` | `do_swap` | `hotbar_swap_moves_between_slot_and_hotbar`, `hotbar_swap_exchanges_two_stacks`, `number_key_swapping_the_result_out_also_crafts` | pre-existing, suite discipline |
+| `SWAP` off-hand key (`2`/`40`) | same, guard `buttonNum == 40` | `do_swap` | `offhand_swap_moves_between_slot_and_offhand`, `offhand_swap_exchanges_two_stacks` (new) | **yes** — removing the `\|\| button == 40` arm turned both red |
+| `SWAP` overflow (`source.count() > cap`) | `:493-501` | `do_swap` overflow branch + `give_to_player` | `hotbar_swap_overflow_merges_into_the_remainder_it_left_behind`, `control_hotbar_swap_without_overflow_is_a_plain_exchange` (new) | **yes** — see Finding 1, a real bug this test caught and a fix landed for |
+| `CLONE` (`3`) | `:508-512` | `do_clone` | `middle_click_clone_creative_fills_cursor_full_stack`, `middle_click_clone_noop_in_survival`, `middle_click_clone_refuses_when_cursor_is_occupied` (new) | new test not independently re-broken (one-line guard, low risk); other two pre-existing, suite discipline |
+| `THROW` drop-one (`4`/`0`) | `:513-533` | `do_throw` | `throw_q_drops_one_from_slot`, `dropping_the_result_with_q_also_crafts` | pre-existing, suite discipline |
+| `THROW` drop-stack (`4`/`1`) | `:513-533`, incl. the repeat-while-same-item loop at `:523-532` | `do_throw` | `throw_ctrl_q_drops_whole_slot` | pre-existing, suite discipline; the missing loop is Finding 2 (proven inert, not fixed) |
+| `THROW` `canDropItems` gate | `:516-518` | `do_throw`'s `ctx.can_drop` check | `throw_is_a_noop_when_the_player_cannot_drop_items` (new) | **yes** — removing the check turned it red |
+| `QUICK_CRAFT` start/add/end, `EVEN`/`ONE`/`CLONE` (`5`) | `:336-399` | `do_quick_craft`, `finish_quick_craft` | `bare_drag_end_without_start_commits_nothing` / `control_well_formed_drag_does_commit`, `ordinary_click_mid_drag_resets_and_is_itself_swallowed` / `control_same_click_applies_when_no_drag_is_armed`, `drag_with_empty_cursor_commits_nothing`, `paint_stops_when_the_cursor_runs_out_of_items`, `even_split_clamps_at_the_slot_cap_and_returns_the_remainder`, `repainting_a_slot_does_not_inflate_the_divisor`, `clone_drag_resets_in_survival` / `control_clone_drag_commits_in_creative`, `drag_skips_a_slot_holding_a_different_item`, `drag_never_paints_the_result_slot`, `left_drag_even_split_across_three_slots`, `left_drag_even_split_leaves_remainder_on_cursor`, `right_drag_one_each`, `single_slot_drag_degrades_to_place`, `creative_middle_drag_places_full_stacks` | pre-existing, suite discipline — and the one representative spot-check (`right_drag_one_each` against a broken `ONE` place-count) was run this pass and did go red |
+| `PICKUP_ALL` (`6`) | `:534-556` | `do_pickup_all` | `double_click_gathers_matching_partial_stacks_first`, `pickup_all_defers_a_maxed_slot_to_the_second_pass` / `control_pickup_all_takes_a_near_max_slot_in_the_first_pass`, `pickup_all_never_drains_the_crafting_result` | pre-existing, suite discipline |
+
+### Finding 1 (fixed): swap-overflow displaced the wrong stack into a fresh slot instead of merging it back
+
+Number-key-swapping a stack bigger than the target slot's cap (`click.rs`'s
+`do_swap` overflow branch, mirroring `AbstractContainerMenu.java:493-501`)
+splits the overflow into the target slot and has to put the target's old
+contents *somewhere* — `inventory.add(targetItemStack)` in vanilla,
+`give_to_player` here.
+
+The subtlety is aliasing. Vanilla's `source` is the literal object backing
+`inventory.getItem(buttonNum)` (`Inventory.getItem`, `Inventory.java:437-440`,
+returns the live list element) and `ItemStack.split` (`ItemStack.java:327-332`)
+mutates it in place via `shrink`. So by the time `inventory.add` runs, the
+native slot the swap came from **already shows its reduced remainder**, and a
+same-item displaced stack naturally merges back into it. Our `ItemStack` isn't
+aliased — before this fix, `give_to_player` was called *before*
+`set_player_native` wrote the remainder back, so it scanned a stale,
+pre-split native container. A reproduction
+(egg with `max_stack_size` overridden to 16, 20 in the hotbar swapped onto 5
+in a container slot) showed the displaced 5 landing in a **new, previously
+empty** native slot instead of merging into the 4 left behind — confirmed by
+running the test with the old call order and watching it fail
+(`left: Some(4), right: Some(9)`), then again after reordering the two calls.
+Fixed in `click.rs`'s `do_swap`: `set_player_native` now runs before
+`give_to_player`. Regression test:
+`hotbar_swap_overflow_merges_into_the_remainder_it_left_behind`
+(`menu.rs`), with `control_hotbar_swap_without_overflow_is_a_plain_exchange`
+as the non-overflow control.
+
+**Not fixed, filed separately:** `give_to_player`'s own scan order (linear
+0..36, merge pass then first-empty pass) still doesn't model vanilla's actual
+`Inventory.add` → `addResource` → `getSlotWithRemainingSpace` priority — the
+*selected* hotbar slot first, then the off-hand (slot 40), only then a linear
+scan across all 41 native slots (`Inventory.java:224-240`). This only
+surfaces inside the already-rare overflow branch, self-corrects the same way
+the furnace/brewing shift-click approximation does ("a visible flicker, not a
+desync," see above), and fixing it needs the player's selected hotbar index
+threaded through `PlayerCtx`, which nothing currently supplies. Tracked as a
+follow-up rather than folded into this fix.
+
+### Finding 2 (investigated, not a bug): `THROW`'s missing repeat-while-same-item loop
+
+Vanilla's `THROW` branch loops for drop-stack (`buttonNum == 1`,
+`:523-532`): after the first `safeTake`, if the slot still holds the same
+item it takes again, and again, until it doesn't. This is the same idiom as
+`QUICK_MOVE`'s repeat loop, and exists for the same reason — a **server**-side
+result slot recomputes and refills between takes.
+
+`do_throw` here has no such loop. It is provably inert rather than missing:
+`try_remove`'s `max_take` is always `i32::MAX` for a full-stack take, so it
+always empties the slot completely in one call, and nothing in this crate's
+`Menu` ever refills a slot mid-`do_click` — `on_take` (the only refill-shaped
+hook) only decrements grid *input* cells, it never rewrites the *result*
+slot. So the loop's condition (`ItemStack.isSameItem(slot.getItem(),
+itemStack)`) can never be true after our single take; adding the loop would
+be dead code today. This matches the documented model elsewhere in this file
+("a client's `CraftingMenu`... predicted loop exits after exactly one
+craft") — it is the same boundary, not a new one. Left as-is; noted here so
+a future refill mechanism doesn't quietly reintroduce the gap without
+someone remembering `THROW` needs the loop too.
+
+### Not a gap: `PICKUP_ALL`'s reverse-scan direction
+
+`doClick`'s `PICKUP_ALL` branch supports `buttonNum != 0` (scan backwards from
+the last slot). The real 26.2 client never sends it: double-click gather is
+gated on `event.button() == 0` at the call site
+(`AbstractContainerScreen.java:387,401`), so `button` is always `0` on the
+wire. `Click::double`'s hardcoded button-`0` is a correct match to what the
+protocol actually carries, not a missing verb — there is nothing to test
+because there is nothing real to distinguish it from.
+
+### Stale doc pointer fixed by this pass
+
+The **Tests** section below used to say every test lives in
+`crates/lodestone-game/src/{click.rs,menu.rs}`'s own `#[cfg(test)]` modules.
+That stopped being true at some point after it was written: `click.rs` has
+zero tests of its own today — the positive-case suite is in
+`crates/lodestone-game/tests/click_machine.rs` (and crafting-specific cases in
+`tests/crafting_menu.rs`), while `menu.rs`'s `mod tests` holds the
+negative-control suite this doc's own header describes. Corrected below.
+
 ## How to change it
 
 - **Click dispatch and the drag machine** — `crates/lodestone-game/src/click.rs`.
@@ -308,8 +427,15 @@ whatever `lodestone-shell` feeds it from input events.
 
 ## Tests
 
-All in `crates/lodestone-game/src/{click.rs,menu.rs}`'s `#[cfg(test)]`
-modules — hermetic, no server or GPU needed. Notable ones cited above:
+Hermetic, no server or GPU needed — but **not** all in `click.rs`/`menu.rs`'s
+own `#[cfg(test)]` modules as this section used to say. `click.rs` has no
+tests of its own; the positive-case suite lives in
+`crates/lodestone-game/tests/click_machine.rs`, crafting-specific cases in
+`tests/crafting_menu.rs`, and `menu.rs`'s `mod tests` holds the
+negative-control suite (every "commits nothing" / "resets" assertion paired
+with a positive control, per the module's own evidence-standard comment,
+`menu.rs:849-862`) plus the swap-overflow and per-menu shift-click tests.
+Notable ones cited above, across both locations:
 `bare_drag_end_without_start_commits_nothing`,
 `drag_with_empty_cursor_commits_nothing`, `clone_drag_resets_in_survival` /
 `control_clone_drag_commits_in_creative`,
@@ -325,6 +451,14 @@ modules — hermetic, no server or GPU needed. Notable ones cited above:
 `quick_move_refuses_to_merge_differing_components` /
 `control_quick_move_merges_identical_components`,
 `pickup_all_never_drains_the_crafting_result`,
+`offhand_swap_moves_between_slot_and_offhand` /
+`offhand_swap_exchanges_two_stacks`,
+`throw_is_a_noop_when_the_player_cannot_drop_items`,
+`middle_click_clone_refuses_when_cursor_is_occupied`,
+`hotbar_swap_overflow_merges_into_the_remainder_it_left_behind` /
+`control_hotbar_swap_without_overflow_is_a_plain_exchange` — the last four
+landed from the issue #27 audit above, closing test-coverage gaps the audit
+found (and, for the swap-overflow pair, a real bug alongside them),
 `canary_wire_stacks_carry_no_prototype_components` — this last one is now
 stale in a way worth flagging rather than silently trusting: it builds its
 "wire stack" with `ItemComponents::default()` directly, never through

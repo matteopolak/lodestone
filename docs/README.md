@@ -123,8 +123,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `MenuKind`, and why the result slot is never computed locally.
 - [Container clicks](./container-clicks.md) — the click predictor: the seven
   `ContainerInput` modes, the `QUICK_CRAFT` drag machine and exactly what resets it,
-  per-menu shift-click orders, the prediction-vs-authority rule, and three vanilla
-  quirks transcribed on purpose because they read as bugs.
+  per-menu shift-click orders, the prediction-vs-authority rule, three vanilla
+  quirks transcribed on purpose because they read as bugs, and (issue #27) a
+  verb-by-verb audit against 26.2's `doClick` that closed three test-coverage
+  gaps and fixed a real swap-overflow ordering bug.
 - [Crafting](./crafting.md) — the recipe data model and matching rules, loading
   the vanilla corpus from the client jar's datapack JSON, and the crafting-table
   menu layout (including who actually computes the result slot).

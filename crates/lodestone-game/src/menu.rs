@@ -1519,4 +1519,56 @@ mod tests {
             "wolf armour must not be wearable as a chestplate"
         );
     }
+    /// `AbstractContainerMenu.java:493-506`: number-key swapping a bigger stack
+    /// onto a slot whose cap is smaller than the incoming count splits the
+    /// overflow into the slot and pushes the slot's *previous* contents back
+    /// into the inventory via `inventory.add` (`:498`).
+    ///
+    /// The subtlety is aliasing: vanilla's `source` is the *same object* as
+    /// `inventory.getItem(buttonNum)` (`Inventory.getItem`,
+    /// `Inventory.java:437-440`, returns the live list element, not a copy), and
+    /// `ItemStack.split` (`ItemStack.java:327-332`) mutates that object in place
+    /// via `shrink`. So by the time `inventory.add` runs, the hotbar slot the
+    /// swap came from *already* shows its reduced remainder — and a same-item
+    /// displaced stack merges back into it rather than taking a fresh slot.
+    /// Egg's stack cap is overridden to 16 here purely to make the overflow
+    /// branch reachable without exceeding the real 64-cap game items use.
+    #[test]
+    fn hotbar_swap_overflow_merges_into_the_remainder_it_left_behind() {
+        let mut menu = Menu::player();
+        // hotbar key 0 -> native 0 -> menu slot 36.
+        menu.set_slot_item(
+            36,
+            Some(stack("minecraft:egg", 20).with_max_stack_size(16)),
+        );
+        // Target: main storage slot 9 holds 5 eggs.
+        menu.set_slot_item(9, Some(stack("minecraft:egg", 5).with_max_stack_size(16)));
+        Click::hotbar_swap(9, 0).apply(&mut menu, PlayerCtx::survival());
+
+        // cap = min(64, 16) = 16; source(20) > cap, so 16 eggs land in slot 9 and
+        // 4 remain in the hotbar slot the swap came from.
+        assert_eq!(count_at(&menu, 9), Some(16), "the overflow split fills the slot to its cap");
+        assert_eq!(
+            count_at(&menu, 36),
+            Some(9),
+            "the displaced 5 eggs merge back into the 4 left in the hotbar slot"
+        );
+        // No new slot should have been used for the overflow.
+        for i in 37..45 {
+            assert_eq!(count_at(&menu, i), None, "slot {i} must stay empty");
+        }
+    }
+
+    /// The control: with room to spare (cap not exceeded), the ordinary
+    /// no-overflow swap path is unaffected by the reordering above — source and
+    /// target simply trade places (`AbstractContainerMenu.java:501-505`).
+    #[test]
+    fn control_hotbar_swap_without_overflow_is_a_plain_exchange() {
+        let mut menu = Menu::player();
+        menu.set_slot_item(36, Some(stack("minecraft:egg", 10)));
+        menu.set_slot_item(9, Some(stack("minecraft:egg", 5)));
+        Click::hotbar_swap(9, 0).apply(&mut menu, PlayerCtx::survival());
+        assert_eq!(count_at(&menu, 9), Some(10));
+        assert_eq!(count_at(&menu, 36), Some(5));
+    }
 }
