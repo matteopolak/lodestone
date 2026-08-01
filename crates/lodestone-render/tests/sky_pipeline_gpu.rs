@@ -163,8 +163,7 @@ fn sky_pass_paints_the_whole_frame() {
         &mut encoder,
         frame.view(),
         &camera,
-        18_000,
-        [0.24, 0.46, 0.83],
+        &lodestone_render::SkyFrame::new(18_000, [0.24, 0.46, 0.83]),
     );
     ctx.queue().submit(std::iter::once(encoder.finish()));
 
@@ -779,7 +778,14 @@ fn real_jar_sun_is_not_solid_black() {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("real-jar-sun-subject"),
     });
-    sky.render(device, queue, &mut encoder, frame.view(), &camera, 6_000, DAY_SKY);
+    sky.render(
+        device,
+        queue,
+        &mut encoder,
+        frame.view(),
+        &camera,
+        &lodestone_render::SkyFrame::new(6_000, DAY_SKY),
+    );
     queue.submit(std::iter::once(encoder.finish()));
     let subject_pixels = target.read_texels(device, queue);
     let subject_dark = near_black_fraction(&subject_pixels, 20);
@@ -895,7 +901,14 @@ fn real_jar_clouds_are_not_black_fringed() {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("real-jar-clouds-subject"),
     });
-    sky.render(device, queue, &mut encoder, frame.view(), &camera, 6_000, DAY_SKY);
+    sky.render(
+        device,
+        queue,
+        &mut encoder,
+        frame.view(),
+        &camera,
+        &lodestone_render::SkyFrame::new(6_000, DAY_SKY),
+    );
     queue.submit(std::iter::once(encoder.finish()));
     let subject_pixels = target.read_texels(device, queue);
     let subject_fringe = fringe_fraction(&subject_pixels, full_color, background, 12);

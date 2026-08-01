@@ -346,11 +346,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   sky's own pass before the terrain pass and the `Clear`-vs-`Load` handover that
   must key off whether the sky *actually drew*, the six-hop `airSupply` decode
   chain that did not exist at all, why every sky pipeline deliberately has no
-  depth attachment, the deliberate omissions (flat clouds, no sunrise tint, an
-  approximated sky colour), and the two pixel gates — both of which were wrong
-  before they were right, in ways that generalise: a frame percentage cannot
-  tell a uniform-but-wrong clear from a localised blob, and a control premise
-  can be false before the feature under test ever existed.
+  depth attachment, and the pixel gates — several of which were wrong before they
+  were right, in ways that generalise: a frame percentage cannot tell a
+  uniform-but-wrong clear from a localised blob, and a control premise can be
+  false before the feature under test ever existed. Also (issue #96) where
+  vanilla's horizon-to-zenith gradient actually comes from — `sky.fsh` fogging a
+  flat disc, per *vertex*, which is the banding — the 26.2 `day.json` timeline
+  colour tracks and their gamma-space, floor-rounding byte arithmetic, why
+  `sunrise_sunset_color` is ARGB and not RGBA, why the sunrise fan's ring is
+  centred on the **eye** rather than on its own apex, void fog's quadratic
+  world-bottom falloff, a stale module doc that had rotted from "a duplicate of a
+  validated formula" into "a divergent second opinion", and exactly which
+  protocol hop blocks per-biome sky tint.
 - [Served session liveness](./served-session-liveness.md) — keep-alive (vanilla's
   own 15s interval and disconnect-on-timeout, not two different numbers), the
   day/night clock actually advancing over a live connection instead of a

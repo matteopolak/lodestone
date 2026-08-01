@@ -91,10 +91,8 @@ this is deliberately unwired rather than approximated. Purely cosmetic.
 
 **Deliberate sky omissions, so nobody reads them as bugs:** clouds are vanilla's
 flat "fast" mode, not the 3-D voxel-extruded fancy mode; there is no
-below-horizon dark disc; there is no sunrise/sunset tint fan (#96);
-`sky_color_for_time_of_day` is a labelled **approximation** because 26.2's
-`SKY_COLOR` is a biome-blended keyframe track with no classic-era formula to
-port; and the star field uses splitmix64 rather than Java's RNG — same
+below-horizon dark disc; there is no per-biome sky tint (#96 — see below for the
+exact blocker); and the star field uses splitmix64 rather than Java's RNG — same
 distribution shape, different exact positions, a visual choice and not a
 decode-parity claim.
 
@@ -252,25 +250,247 @@ decoding the file) magnified into view, isolating the filter-mode mechanism
 deterministically rather than depending on where in-frame a real 3-D camera
 happens to land relative to cloud blob edges.
 
-**Not fixed, and not claimed to be:** the classic-formula dusk/dawn ramp
-divergence (#49), the missing below-horizon dark disc, and the missing
-sunrise/sunset tint fan (#96) — all pre-existing, documented omissions, not
-part of this regression.
+**Not fixed, and not claimed to be:** the missing below-horizon dark disc, and
+(at the time) the missing sunrise/sunset tint fan — pre-existing, documented
+omissions, not part of that regression. The fan landed later; see the next
+section.
+
+## Update: the gradient, the sunrise band and void fog (issue #96)
+
+Issue #96 asked for four things. Its body opened with *"nothing in this renderer
+draws a sky dome at all today"*, which was true when written and false by the
+time it was picked up — the dome, sun, moon, stars and clouds had all landed in
+the meantime (the sections above). **The stale premise is the reason to record
+the re-derivation, not a footnote to it.** What #96 actually still owed was:
+
+| # | scope | status |
+|---|---|---|
+| 1 | horizon-to-zenith gradient, without banding | **done** |
+| 2 | sunrise/sunset horizon tint band | **done** |
+| 3 | void fog below the negative build limit | **done** |
+| 4 | per-biome sky tint | **open, blocked** — see below |
+
+### Where vanilla's gradient actually comes from
+
+Not from vertex colours. `SkyRenderer.renderSkyDisc` draws the disc a single
+flat colour and `assets/minecraft/shaders/core/sky.fsh` then *fogs* it:
+
+```glsl
+fragColor = apply_fog(ColorModulator, sphericalVertexDistance, cylindricalVertexDistance,
+                      0.0, FogSkyEnd, FogSkyEnd, FogSkyEnd, FogColor);
+```
+
+which with `include/fog.glsl` is `mix(sky_color, fog_color, clamp(dist/512, 0, 1))`.
+`512` is `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s default. The disc sits at
+`y = 16` with radius `512`, so its centre is at distance 16 (factor 0.031, pure
+sky) and its rim at 512 (factor 1.0, pure fog). **That radial ramp is the
+gradient**, and it is why the horizon end of the dome must be the *fog* colour —
+`RenderState::render_inner` passes `self.fog.color`, not a second sky constant.
+
+Two consequences worth writing down:
+
+- The gradient is geometrically compressed into a few degrees above the horizon.
+  A ray only reaches the fully-fogged rim at `atan(16/512) = 1.79°` of elevation
+  and is at half fog by `3.6°`. That is not a bug and it is why the gate uses a
+  30° vertical FOV rather than 90° — at 90° most pixels sit in the flat
+  near-zenith regime and exercise almost none of the ramp.
+- **The banding in #96's title is vanilla's own**, from computing the factor in
+  `sky.vsh` — once per vertex, over ten vertices and eight triangles hundreds of
+  blocks wide. `SKY_DISC_WGSL` interpolates the camera-relative *position* and
+  takes `length()` per fragment instead. One `sqrt` per pixel, no banding, and
+  strictly closer to the radial gradient vanilla is describing.
+
+`apply_fog`'s second (cylindrical) term is **provably dead** for this geometry
+and deliberately not implemented: `max(|xz|, |y|) <= sqrt(x²+y²+z²)` always, so
+any fragment where its step at `SkyEnd` fires already has spherical distance
+`>= SkyEnd`, where the first term is already 1.0.
+
+### The timeline tracks, and a stale note that had rotted into a real divergence
+
+26.2's colours come from keyframe tracks in
+`.cache/mc/26.2/src/data/minecraft/timeline/day.json`, and `sky.rs` now ports
+four of them — `SUNRISE_SUNSET_COLOR`, `SKY_COLOR`, `FOG_COLOR`, `CLOUD_COLOR`.
+Things that are easy to get wrong and were checked rather than assumed:
+
+- **`sunrise_sunset_color` is ARGB, not RGBA.** `#feda6333` is alpha `0xfe` over
+  `(0xda, 0x63, 0x33)` — a warm orange at near-full opacity, not a green at 20%
+  alpha. Blue is a constant `0x33` across every keyframe; **alpha** is what
+  animates. The authority is the declared `AttributeTypes.ARGB_COLOR`, not the
+  hex string's appearance.
+- **`sky_color`/`fog_color`/`cloud_color` are `multiply` modifiers**, so their
+  keyframes are per-tick *multipliers* over a base (a biome's own colour in
+  vanilla). `ARGB.multiply` is `red(lhs)*red(rhs)/255` — **gamma byte space**,
+  which is why `fog::multiply_gamma` exists and why a linear-space multiply is
+  wrong here.
+- **The interpolation is `ARGB.srgbLerp`**, a byte-space lerp — `ARGB.linearLerp`
+  sits right next to it in the same file and is *not* what these tracks use —
+  and `Mth.lerpInt` **floors**, never rounds.
+- **The night sky disc is genuinely `#000000`.** The dark-blue night sky people
+  remember is `FOG_COLOR` (`#0c0c16`/`#161616`) showing through at the horizon
+  end of the gradient. The retired code blended toward a hand-invented
+  `NIGHT = [0.006, 0.008, 0.02]`.
+
+That last change is why `CLOUD_COLOR` is in scope at all: the cloud tint used to
+be `sky_color * 0.9`, which becomes exactly invisible once the sky is correctly
+black at night. Vanilla keeps clouds visible with their own non-black track.
+
+**And the stale note.** `sky.rs`'s module doc used to say it ported the classic
+1.21 cosine formulas, *"the same ones `entity.rs`'s validated port already uses
+for `sky_darken`"*. True when written. By the time #96 was picked up,
+`entity::sky_darken_for_time_of_day` had been rewritten as a timeline port
+validated at all 24000 ticks (`tests/sky_light_factor_timeline.rs`, issue #49) —
+so `sky.rs`'s private `sky_darken_shape` cosine had silently stopped being a
+*duplicate* of a validated formula and become a *divergent second opinion*.
+Nothing about the note looked wrong on inspection, which is precisely
+`CLAUDE.md` rule 2. It is deleted; the sky colour reads the real track.
+
+`celestial_angle_for_time_of_day` and `star_brightness_for_time_of_day` are
+**still** the classic cosines, i.e. still #49. The sunrise band is deliberately
+immune to that: it consumes only the *sign* of `sin(sun_angle)` to pick the dawn
+or dusk side of the sky, and that sign is stable across the whole of each band's
+non-zero-alpha window (measured on the JVM dump: dusk `11302..=14175` all
+positive, dawn `21825..=702` all negative), so a wrong ramp cannot make the band
+flicker sides.
+
+### The sunrise fan's geometry is not what it looks like
+
+`buildSunriseFan`'s perimeter vertices are **not offsets from the bright centre
+vertex**. The centre is `(0, 100, 0)`; the perimeter is
+`(sin·120, cos·120, -cos·40)`. After `sunrise_fan_transform` — which is
+`Rx(90°) · Rz(90° + flip) · S(1, 1, alpha)`, in that order, because `mulPose`
+*post*-multiplies — the perimeter is a ring of radius 120 centred on the **eye**,
+with the bright apex 100 blocks off toward the sun. So the fan wraps the entire
+sky and no screen rect localises it. What makes it read as a *band* is the
+vertical squash (±40·alpha tall against 120 wide) plus the centre-to-rim alpha
+ramp.
+
+Getting that matrix order backwards puts the band 90° from the sun, in the middle
+of nowhere, still looking like a plausible horizon glow in a screenshot.
+
+### Void fog
+
+`FogRenderer.computeFogColor`, and the sign is easy to invert from a summary:
+
+```java
+float darkness = Mth.clamp((onsetRange + level.getMinY() - camera.position().y) / onsetRange, 0, 1);
+float brightness = Mth.square(1.0F - darkness);   // note the square
+```
+
+`darkness` is 0 at `min_y + onset_range` and **1 at `min_y`**, and the falloff is
+**quadratic** — halfway down the onset range is quarter brightness, not half.
+`onsetRange` is `1.0` for a *flat* world and `32.0` otherwise
+(`ClientLevel.java:1277`). The scale multiplies `ARGB.redFloat(color)`, i.e.
+gamma space, hence `fog::scale_gamma`.
+
+### What is still open on #96, and exactly why
+
+**Per-biome sky tint is blocked on protocol work, not on rendering work.** In
+26.2 a biome carries `"attributes": {"minecraft:visual/sky_color": "#78a7ff"}`
+(and the overworld values are tightly clustered around that, with `pale_garden`'s
+`#b9b9b9` the dramatic outlier). Reaching it at runtime needs three hops this
+client does not have:
+
+1. Biomes are a **datapack registry**, so they have no static protocol ids —
+   `generated/reports/registries.json` has `worldgen/biome_source` but no
+   `worldgen/biome`. The numeric ids are assigned by the server and sent in the
+   configuration-phase `registry_data` packet, which this client decodes only as
+   a packet id (`crates/protocol/v770/src/generated/packet_ids.rs`); there is no
+   runtime registry parse.
+2. The standing biome then has to come from the chunk section's biome palette.
+   The data is already there (`lodestone_world::Section::biome_at_block`), but
+   **nothing in the shell calls it** — `lodestone-assets`' `BiomeTint` seam has
+   no consumer either.
+3. Only then can `SkyFrame::day_sky_color` be fed a real biome colour instead of
+   the flat sky constant.
+
+The *composition* half is done and pinned: `SkyFrame` documents the field,
+and `sunrise_sunset_timeline.rs`'s fourth column checks
+`ARGB.multiply(plains #78a7ff, sky_color_track)` against the JVM at every tick,
+so the gamma-space arithmetic the biome path will need is already proven. What is
+missing is a biome id to look up. Deliberately **not** landed as a table with no
+caller — that is the island shape `CLAUDE.md` rule 1 is about.
+
+Also still open: the below-horizon dark disc, and void fog's `min_y`/`onset_range`
+come from `VoidFog::OVERWORLD` (`-64`/`32.0`) rather than the real dimension
+height. `lodestone_ecs::ChunkWorld::extent` already carries `min_y`; threading it
+to `RenderState` is a two-site `app.rs` change plus a source closure, and was
+skipped here to keep this change out of two more shared files.
+
+### The gates, and the two premises that were false
+
+`crates/lodestone-render/tests/sunrise_sunset_timeline.rs` — all three colour
+tracks, **byte-exact at every one of the 24000 ticks**, against
+`oracle-java/SunriseSunsetTimelineOracle.java` (a sibling of #49's
+`SkyLightTimelineOracle.java`; boots the real registries and samples
+`Timeline.createTrackSampler`, so the expected values originate outside the code
+under test). Keyframe *endpoints* are trivially right, so a test that checked
+only named ticks like noon and peak sunset would pass vacuously on a sampler with
+broken wraparound, easing or rounding. Controls, executed:
+
+| deliberately-wrong sampler | ticks where it disagrees with the JVM |
+|---|---|
+| clamp to the first keyframe instead of wrapping | 71 of the 71 pre-first-keyframe ticks |
+| `round` instead of `Mth.lerpInt`'s `floor` | 8825 of 24000 |
+
+`crates/lodestone-render/tests/sky_gradient_pixels.rs` — pixel gates, measured on
+this machine:
+
+| gate | subject | control(s), EXECUTED |
+|---|---|---|
+| gradient | **0** of 28142 disc px outside a 3/255 tolerance; worst error 1 | fog == sky (the pre-#96 flat disc): **28142** bad; per-vertex fog factor: **16062** bad |
+| sunrise band | 9408 of 30880 disc px warm, bbox `y82..120`, mean elevation **7.5°** against the disc region's 18.6° | noon (band alpha `0x00`): **0** warm; camera turned 180°: **0** warm |
+| void fog | eye `+32` → mean byte 135.3; eye `-48` → 7.5; eye `-64` → 0.0. Measured midpoint ratio **0.0552** vs gamma-space prediction **0.0554** | `VoidFog::DISABLED` at the same eye height `-64`: 135.3 |
+
+Three things about those gates are worth keeping:
+
+**Two control premises were false, and running them is what found it.**
+
+- The band gate's noon control found **244 warm pixels in a three-row line at
+  `y119..121`** with the band provably not drawn. The culprit was the gate's own
+  choice of a *warm* fog colour: the disc's fogged rim is warm, so "red beats
+  blue" was never a statement about the band. Each gate now picks the fog colour
+  that makes the *other* draw in frame unable to satisfy its discriminator —
+  warm fog for the gradient, cool for the band.
+- The band gate originally projected the fan's vertices to a screen rect and
+  asserted the warm pixels landed inside it. The rect came out as the entire
+  upper frame, which is how the fan-wraps-the-eye geometry above was discovered.
+  The measurement is now confined to pixels where the *disc* paints (below the
+  horizon the destination is the pass's black clear, so any band fragment
+  trivially "beats blue" there) and localisation is by **mean elevation** and by
+  **turning the camera around** — the only measurement that can distinguish a
+  horizon band from a global warm tint, which no frame average can.
+
+**The banding control's discriminator is a count, not a magnitude.** The
+per-vertex frame's worst per-channel error is only `8/255`, so an assertion on
+the worst error read as "no banding". Its *count* is 16062 pixels against the
+shipped path's 0.
+
+**The gates derive their geometry from the matrix the draw uploads.** Expected
+fog values come from inverting `Camera::sky_view_projection` and intersecting the
+resulting ray with the disc plane, not from a hand-rolled `tan(fov/2)`; the
+band camera's yaw comes from where `sunrise_fan_transform` actually puts the
+apex; the void-fog heights come from `VoidFog::OVERWORLD`'s own fields. That is
+the rule a HUD gate in this repo learned the hard way by hardcoding a moving
+anchor.
 
 ## Configuration
 
 None. The sky reads the same day clock the rest of the renderer does — there is
-no second clock — and `day_sky_color` is fed the renderer's existing clear colour
-so wiring the sky in did not change how noon looks. Air supply is entirely
-server-driven.
+no second clock — and `SkyFrame`'s `day_sky_color`/`day_fog_color` are fed the
+renderer's existing clear and fog colours, so noon is unchanged from before the
+gradient existed. Air supply is entirely server-driven.
 
 ## Dependencies
 
 - `lodestone-assets` — `CelestialAtlas` (sun + 8 moon phases stitched by the same
   `AtlasBuilder` every other atlas uses) and `load_cloud_texture`.
-- `lodestone-render` — `sky`, `sky_pipeline`, `air_bubbles`, and
-  `Camera::sky_view_projection` (translation-stripped, with a test whose negative
-  control proves ordinary `view_projection` *is* translation-sensitive).
+- `lodestone-render` — `sky`, `sky_pipeline`, `fog` (`VoidFog`, `multiply_gamma`,
+  `scale_gamma`), `air_bubbles`, and `Camera::sky_view_projection`
+  (translation-stripped, with a test whose negative control proves ordinary
+  `view_projection` *is* translation-sensitive).
+- A JDK (25, or the `eclipse-temurin:25-jdk` container) **only to regenerate**
+  `tests/support/sunrise_sunset_timeline_jvm.txt` after a version bump; the dump
+  is committed, so the gate itself needs no Java.
 - `crates/protocol/v770` — `metadata.rs` decodes `airSupply`.
 - `lodestone-ecs` / `lodestone-client` — `Vitals::air` and `PlayerSnapshot::air`.
   Note `ingest::handles_event` must list the event or `SharedState::apply` never

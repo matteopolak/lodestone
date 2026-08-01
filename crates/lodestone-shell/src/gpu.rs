@@ -1268,15 +1268,22 @@ impl RenderState {
                 self.clear.g as f32,
                 self.clear.b as f32,
             ];
-            sky.render(
-                device,
-                queue,
-                &mut encoder,
-                view,
-                camera,
+            // The horizon end of the sky dome's gradient is the *fog* colour,
+            // not a second sky constant — `self.fog.color` is already whatever
+            // `set_fog` last computed for this dimension/submersion state, and
+            // `set_clear_color`'s doc records that a second, independently
+            // maintained copy of the sky colour is exactly how the horizon has
+            // banded in a colour the sky never is. Void fog uses the vanilla
+            // overworld geometry (`VoidFog::OVERWORLD`, `min_y = -64`,
+            // `onset_range = 32`) because the dimension's real height is not
+            // threaded to this layer yet; see `docs/sky-and-air-bubbles.md`.
+            let frame = lodestone_render::SkyFrame::new(
                 self.time_of_day.value(),
                 day_sky_color,
-            );
+            )
+            .with_fog_color(self.fog.color)
+            .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD);
+            sky.render(device, queue, &mut encoder, view, camera, &frame);
             true
         } else {
             false

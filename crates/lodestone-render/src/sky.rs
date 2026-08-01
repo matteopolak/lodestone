@@ -29,20 +29,42 @@
 //! the sun's screen position and the lightmap's darken factor will visibly
 //! disagree about what time it is.
 //!
-//! # Known divergence (#49): do not trust the dusk/dawn ramp as vanilla-exact
+//! # Which formulas here are timeline-exact and which are still 1.21's (#49)
 //!
-//! 26.2 replaced the classic cosine `celestialAngle`/`getSkyDarken` with a
-//! keyframed `EnvironmentAttributes` track (`SUN_ANGLE`, `MOON_ANGLE`,
-//! `STAR_ANGLE`, `STAR_BRIGHTNESS`, `SKY_COLOR`, `MOON_PHASE` — see
+//! 26.2 replaced the classic cosine `celestialAngle`/`getSkyDarken` with
+//! keyframed `EnvironmentAttributes` tracks on `Timelines.OVERWORLD_DAY`
+//! (`SUN_ANGLE`, `MOON_ANGLE`, `STAR_ANGLE`, `STAR_BRIGHTNESS`, `SKY_COLOR`,
+//! `FOG_COLOR`, `SUNRISE_SUNSET_COLOR`, `MOON_PHASE` — see
 //! `.cache/mc/26.2/client-src/net/minecraft/client/renderer/SkyRenderer.java`
-//! `extractRenderState`). This module ports the *classic* pre-keyframe formulas
-//! instead (the same ones `entity.rs`'s validated port already uses for
-//! `sky_darken`), which match both plateaus but not necessarily the exact
-//! dusk/dawn ramp shape. [`sky_color_for_time_of_day`] goes further and is not
-//! a port of anything — `SKY_COLOR` is a biome-blended keyframe track with no
-//! classic-era equivalent to port, so it is a clearly-labelled approximation.
+//! `extractRenderState`). The split as of #96:
+//!
+//! * **Timeline-exact, gated against a JVM dump of the real sampler**
+//!   ([`crate::sky_pipeline`]'s consumers of them included):
+//!   [`sunrise_sunset_color_for_time_of_day`],
+//!   [`sky_color_multiplier_for_time_of_day`],
+//!   [`fog_color_multiplier_for_time_of_day`], and therefore
+//!   [`sky_color_for_time_of_day`] / [`fog_color_for_time_of_day`], which are
+//!   thin gamma-space compositions of those multipliers. See
+//!   `crates/lodestone-render/tests/sunrise_sunset_timeline.rs`.
+//! * **Still the classic 1.21 cosine, i.e. still #49**:
+//!   [`celestial_angle_for_time_of_day`] (drives the sun/moon/star *positions*)
+//!   and [`star_brightness_for_time_of_day`]. Both match their plateaus and
+//!   diverge on the ramp shape.
+//!
+//! An earlier version of this module doc claimed the classic formulas were
+//! "the same ones `entity.rs`'s validated port already uses for `sky_darken`".
+//! That was true when written and is **false now**:
+//! `entity::sky_darken_for_time_of_day` is a timeline port validated at all
+//! 24000 ticks (`tests/sky_light_factor_timeline.rs`), so the private
+//! `sky_darken_shape` cosine this module used to blend its sky colour with had
+//! silently become a *divergent* second opinion rather than a duplicate of a
+//! validated one. It is deleted; [`sky_color_for_time_of_day`] now reads the
+//! real `SKY_COLOR` track. That is `CLAUDE.md` rule 2 in miniature — the stale
+//! claim looked entirely correct on inspection.
 
 use glam::{Mat4, Vec3};
+
+use crate::fog::multiply_gamma;
 
 // ---------------------------------------------------------------------------
 // Time-of-day math
@@ -61,38 +83,279 @@ pub fn celestial_angle_for_time_of_day(time_of_day: i64) -> f32 {
     ((frac * 2.0 + eased) / 3.0) as f32
 }
 
-/// `Level::getSkyDarken`'s shape (see module docs on why this is a second copy
-/// of `entity.rs`'s private intermediate): `0.2` at midnight-plateau, `1.0` at
-/// noon-plateau. Used here only as the day/night blend driving
-/// [`sky_color_for_time_of_day`] — *not* re-exported as a lightmap factor,
-/// which remains solely `entity.rs::sky_darken_for_time_of_day`'s job.
-fn sky_darken_shape(time_of_day: i64) -> f32 {
-    let celestial = celestial_angle_for_time_of_day(time_of_day);
-    let mut f = 1.0 - ((celestial * std::f32::consts::TAU).cos() * 2.0 + 0.2);
-    f = f.clamp(0.0, 1.0);
-    f = 1.0 - f;
-    f * 0.8 + 0.2
+// ---------------------------------------------------------------------------
+// Timeline colour tracks (26.2 `data/minecraft/timeline/day.json`)
+// ---------------------------------------------------------------------------
+
+/// One full rotation of `Timelines.OVERWORLD_DAY`, in ticks (`day.json`'s
+/// `period_ticks`).
+pub const DAY_PERIOD_TICKS: i64 = 24_000;
+
+/// `minecraft:visual/sunrise_sunset_color`, verbatim from
+/// `.cache/mc/26.2/src/data/minecraft/timeline/day.json`, as `(tick, ARGB)`.
+///
+/// The values are **ARGB**, not RGBA: `#feda6333` is alpha `0xfe`, red `0xda`,
+/// green `0x63`, blue `0x33` — a warm sunset orange at near-full opacity, not a
+/// green at 20% alpha. Reading the channel order off the hex string the wrong
+/// way round produces a plausible-looking but completely wrong band; the
+/// authority is `EnvironmentAttributes.SUNRISE_SUNSET_COLOR`'s declared
+/// `AttributeTypes.ARGB_COLOR` (`EnvironmentAttributes.java:46`), not the
+/// string's appearance. Blue is a constant `0x33` across every keyframe and
+/// alpha is what animates, from `0x00` through the middle of the day to `0xfe`
+/// at peak sunset (tick 12732).
+///
+/// The track declares no `modifier`, so it takes
+/// `AttributeModifier.override()` (`AttributeTrack.createCodec`'s
+/// `optionalFieldOf("modifier", …)` default) — the sampled keyframe value *is*
+/// the final colour, with no base to combine with.
+const SUNRISE_SUNSET_TRACK: [(i32, u32); 32] = [
+    (71, 0x5f_ef_a3_33),
+    (310, 0x29_f5_ba_33),
+    (565, 0x06_fb_d4_33),
+    (730, 0x00_ff_e5_33),
+    (11_270, 0x00_ff_e5_33),
+    (11_397, 0x04_fc_d8_33),
+    (11_522, 0x0f_f9_cb_33),
+    (11_690, 0x29_f5_ba_33),
+    (11_929, 0x5f_ef_a3_33),
+    (12_243, 0xb1_e7_87_33),
+    (12_358, 0xcc_e4_7e_33),
+    (12_512, 0xe9_e0_72_33),
+    (12_613, 0xf6_dd_6b_33),
+    (12_732, 0xfe_da_63_33),
+    (12_841, 0xfe_d7_5c_33),
+    (13_035, 0xec_d2_51_33),
+    (13_252, 0xc1_cc_47_33),
+    (13_775, 0x36_be_37_33),
+    (13_888, 0x1f_bb_35_33),
+    (14_039, 0x09_b7_33_33),
+    (14_192, 0x00_b3_33_33),
+    (21_807, 0x00_b2_33_33),
+    (21_961, 0x09_b7_33_33),
+    (22_112, 0x1f_bb_35_33),
+    (22_225, 0x36_be_37_33),
+    (22_748, 0xc1_cc_47_33),
+    (22_965, 0xec_d2_51_33),
+    (23_159, 0xfe_d7_5c_33),
+    (23_272, 0xfe_da_63_33),
+    (23_488, 0xe9_e0_72_33),
+    (23_642, 0xcc_e4_7e_33),
+    (23_757, 0xb1_e7_87_33),
+];
+
+/// `minecraft:visual/sky_color`, from the same `day.json`. `"modifier":
+/// "multiply"` (`ColorModifier.MULTIPLY_RGB = ARGB::multiply`), so these are a
+/// per-tick **multiplier** over whatever base sky colour applies — a biome's
+/// own `minecraft:visual/sky_color` in vanilla, the renderer's existing sky
+/// constant here.
+///
+/// White through the whole day, pure black across the night: vanilla's night
+/// sky *disc* is genuinely `#000000`, and the dark-blue night sky people
+/// remember is [`FOG_COLOR_TRACK`] showing through at the horizon via the
+/// disc's own fog gradient (see [`SKY_FOG_END_DISTANCE`]). Alpha is `0xff`
+/// throughout because `AttributeTypes.RGB_COLOR`'s codec parses a 6-digit
+/// `#RRGGBB` as opaque.
+const SKY_COLOR_TRACK: [(i32, u32); 4] = [
+    (133, 0xff_ff_ff_ff),
+    (11_867, 0xff_ff_ff_ff),
+    (13_670, 0xff_00_00_00),
+    (22_330, 0xff_00_00_00),
+];
+
+/// `minecraft:visual/fog_color`, same file, same `multiply` modifier as
+/// [`SKY_COLOR_TRACK`]. Unlike the sky's, this one does **not** reach black:
+/// `#0c0c16` at dusk and `#161616` at deep night, which is why the night
+/// horizon reads faintly blue-grey rather than as a hard edge against a black
+/// zenith.
+const FOG_COLOR_TRACK: [(i32, u32); 4] = [
+    (133, 0xff_ff_ff_ff),
+    (11_867, 0xff_ff_ff_ff),
+    (13_670, 0xff_0c_0c_16),
+    (22_330, 0xff_16_16_16),
+];
+
+/// `minecraft:visual/cloud_color`, same file, same `multiply` modifier. Stored
+/// in `day.json` as raw signed ARGB ints rather than hex strings (`-1` day,
+/// `-15132378` night); `-15132378 as u32` is `0xff191926`, a dark blue-grey.
+///
+/// This track is only *incidentally* part of #96, and it is here because the
+/// sky change would otherwise have caused a regression: the cloud tint used to
+/// be `sky_color * 0.9`, and now that [`SKY_COLOR_TRACK`] correctly reaches
+/// `#000000` at night, that expression makes night clouds exactly invisible.
+/// Vanilla keeps them visible with their own non-black track, so the tint reads
+/// this instead of the sky.
+const CLOUD_COLOR_TRACK: [(i32, u32); 4] = [
+    (133, 0xff_ff_ff_ff),
+    (11_867, 0xff_ff_ff_ff),
+    (13_670, 0xff_19_19_26),
+    (22_330, 0xff_19_19_26),
+];
+
+/// `Mth.lerpInt` (`.cache/mc/26.2/src/net/minecraft/util/Mth.java:541`):
+/// `p0 + floor(alpha * (p1 - p0))`. The `floor` is load-bearing — a `round`
+/// here is off by one byte on roughly half of all ticks, which the JVM gate
+/// catches immediately.
+fn lerp_int(alpha: f32, p0: i32, p1: i32) -> i32 {
+    p0 + (alpha * (p1 - p0) as f32).floor() as i32
 }
 
-/// An approximate day/night sky-dome colour. **Not** a port of vanilla's
-/// `EnvironmentAttributes.SKY_COLOR` keyframe track (biome-blended and
-/// version-specific — see the module docs on the #49 divergence, which this
-/// goes beyond since there is no classic-era formula to port at all here).
+/// `ARGB.srgbLerp` (`ARGB.java:155`): a per-channel [`lerp_int`] over the raw
+/// **bytes**, i.e. interpolation in gamma space, not linear light. Alpha is
+/// interpolated exactly like the colour channels.
+fn srgb_lerp(alpha: f32, from: u32, to: u32) -> u32 {
+    let ch = |shift: u32| {
+        let a = ((from >> shift) & 0xFF) as i32;
+        let b = ((to >> shift) & 0xFF) as i32;
+        (lerp_int(alpha, a, b).clamp(0, 255) as u32) << shift
+    };
+    ch(24) | ch(16) | ch(8) | ch(0)
+}
+
+/// Samples a periodic ARGB keyframe track at `time_of_day`, reproducing
+/// `KeyframeTrackSampler` (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrackSampler.java`)
+/// for a **linear**-eased track.
 ///
-/// Blends `day_color` (pass the renderer's existing clear/fog sky colour, so
-/// noon is visually unchanged from today) toward a fixed dark-navy night
-/// colour, driven by [`sky_darken_shape`] — the same day clock every other
-/// time-varying function in this module reads, not a second signal.
+/// Three details of that class are easy to lose and all three are checked by
+/// the JVM gate:
+///
+/// * `bakeSegments` prepends a wraparound segment
+///   `(last, last.ticks - period) -> (first, first.ticks)` and appends
+///   `(last, last.ticks) -> (first, first.ticks + period)`. So a tick before the
+///   *first* keyframe is not clamped to it — it is on the ramp coming round
+///   from the last keyframe through the tick-0 seam.
+/// * `getSegmentAt` picks the first segment with `t < segment.toTicks`, a
+///   strict `<`, so a tick landing exactly on a keyframe belongs to the segment
+///   *ending* there and `sample`'s `t >= toTicks` branch returns that
+///   keyframe's value exactly.
+/// * the easing is **linear**. `KeyframeTrack.Builder` defaults to
+///   `EasingType.LINEAR` and none of the three tracks in this module declares
+///   an `ease` in `day.json` — only the neighbouring `sun_angle`/`moon_angle`/
+///   `star_angle` tracks opt into a cubic bezier. Issue #49's own text once
+///   said these were bezier-eased; that was a transcription error.
+fn sample_argb_track(track: &[(i32, u32)], time_of_day: i64) -> u32 {
+    debug_assert!(track.len() >= 2, "a periodic track needs at least two keyframes");
+    let period = DAY_PERIOD_TICKS as i32;
+    let tick = time_of_day.rem_euclid(DAY_PERIOD_TICKS) as i32;
+    let &(first_ticks, first_value) = track.first().expect("non-empty track");
+    let &(last_ticks, last_value) = track.last().expect("non-empty track");
+
+    // Segment selection, in `getSegmentAt`'s own order: the leading wrap
+    // segment first, then each consecutive pair, then the trailing wrap
+    // segment as the fallback.
+    let (from_ticks, from_value, to_ticks, to_value) = if tick < first_ticks {
+        (last_ticks - period, last_value, first_ticks, first_value)
+    } else {
+        track
+            .windows(2)
+            .find(|w| tick < w[1].0)
+            .map_or((last_ticks, last_value, first_ticks + period, first_value), |w| {
+                (w[0].0, w[0].1, w[1].0, w[1].1)
+            })
+    };
+
+    if tick <= from_ticks {
+        return from_value;
+    }
+    if tick >= to_ticks {
+        return to_value;
+    }
+    let alpha = (tick - from_ticks) as f32 / (to_ticks - from_ticks) as f32;
+    srgb_lerp(alpha, from_value, to_value)
+}
+
+/// Vanilla's `EnvironmentAttributes.SUNRISE_SUNSET_COLOR` at `time_of_day`, as
+/// `[r, g, b, a]` sRGB bytes (reordered from the track's packed ARGB for a
+/// Rust-natural call site).
+///
+/// `a == 0` for the whole middle of the day and the deep middle of the night —
+/// vanilla skips the draw entirely when `alpha <= 0.001`
+/// (`SkyRenderer.renderSunriseAndSunset`), and so does
+/// [`crate::sky_pipeline::SkyRenderer::render`]. Measured from the JVM dump,
+/// alpha is non-zero only on ticks `0..=702`, `11302..=14175` and
+/// `21825..=23999`: one dusk band and one dawn band, the dawn one wrapping the
+/// tick-0 seam.
+#[must_use]
+pub fn sunrise_sunset_color_for_time_of_day(time_of_day: i64) -> [u8; 4] {
+    let argb = sample_argb_track(&SUNRISE_SUNSET_TRACK, time_of_day);
+    [
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+        ((argb >> 24) & 0xFF) as u8,
+    ]
+}
+
+/// The `SKY_COLOR` track's per-tick multiplier, as sRGB bytes — white at noon,
+/// black at night. Multiply a base sky colour by this in **gamma** space
+/// ([`crate::fog::multiply_gamma`]), which is what `ARGB.multiply` does.
+#[must_use]
+pub fn sky_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
+    let argb = sample_argb_track(&SKY_COLOR_TRACK, time_of_day);
+    [
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+    ]
+}
+
+/// The `FOG_COLOR` track's per-tick multiplier, as sRGB bytes. See
+/// [`sky_color_multiplier_for_time_of_day`]; this one bottoms out at
+/// `#0c0c16`/`#161616` rather than black.
+#[must_use]
+pub fn fog_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
+    let argb = sample_argb_track(&FOG_COLOR_TRACK, time_of_day);
+    [
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+    ]
+}
+
+/// The `CLOUD_COLOR` track's per-tick multiplier, as sRGB bytes. See
+/// [`CLOUD_COLOR_TRACK`] on why the cloud tint has its own track rather than
+/// reusing the sky's.
+#[must_use]
+pub fn cloud_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
+    let argb = sample_argb_track(&CLOUD_COLOR_TRACK, time_of_day);
+    [
+        ((argb >> 16) & 0xFF) as u8,
+        ((argb >> 8) & 0xFF) as u8,
+        (argb & 0xFF) as u8,
+    ]
+}
+
+/// The cloud tint at `time_of_day`: a **linear** `day_cloud` base multiplied by
+/// the real `CLOUD_COLOR` track in gamma space.
+#[must_use]
+pub fn cloud_color_for_time_of_day(time_of_day: i64, day_cloud: [f32; 3]) -> [f32; 3] {
+    let m = cloud_color_multiplier_for_time_of_day(time_of_day);
+    multiply_gamma(day_cloud, m.map(|c| f32::from(c) / 255.0))
+}
+
+/// The sky-dome colour at `time_of_day`: `day_color` (a **linear** RGB base —
+/// pass the renderer's clear/sky colour, or a biome's `visual/sky_color` once
+/// one is reachable) multiplied by the real `SKY_COLOR` track in gamma space.
+///
+/// This replaced a hand-rolled blend toward a fixed dark-navy `NIGHT` constant.
+/// Two things changed measurably: night is now exactly black rather than
+/// `[0.006, 0.008, 0.02]` (which is what vanilla's `#000000` keyframe says),
+/// and the dusk/dawn ramp follows the track's `11867 -> 13670` /
+/// `22330 -> 133` linear segments rather than a cosine. The visible night sky
+/// is *not* black as a result: the horizon end of the disc's gradient is
+/// [`fog_color_for_time_of_day`], not this.
 #[must_use]
 pub fn sky_color_for_time_of_day(time_of_day: i64, day_color: [f32; 3]) -> [f32; 3] {
-    const NIGHT: [f32; 3] = [0.006, 0.008, 0.02];
-    let darken = sky_darken_shape(time_of_day);
-    let t = ((darken - 0.2) / 0.8).clamp(0.0, 1.0);
-    [
-        NIGHT[0] + (day_color[0] - NIGHT[0]) * t,
-        NIGHT[1] + (day_color[1] - NIGHT[1]) * t,
-        NIGHT[2] + (day_color[2] - NIGHT[2]) * t,
-    ]
+    let m = sky_color_multiplier_for_time_of_day(time_of_day);
+    multiply_gamma(day_color, m.map(|c| f32::from(c) / 255.0))
+}
+
+/// The fog colour at `time_of_day`: a **linear** `day_fog` base multiplied by
+/// the real `FOG_COLOR` track in gamma space, exactly as
+/// [`sky_color_for_time_of_day`] does for the sky.
+#[must_use]
+pub fn fog_color_for_time_of_day(time_of_day: i64, day_fog: [f32; 3]) -> [f32; 3] {
+    let m = fog_color_multiplier_for_time_of_day(time_of_day);
+    multiply_gamma(day_fog, m.map(|c| f32::from(c) / 255.0))
 }
 
 /// Vanilla's legacy `getStarBrightness`: `0.0` for most of the day, ramping up
@@ -125,6 +388,49 @@ pub fn moon_phase_index_for_time_of_day(time_of_day: i64) -> u8 {
 
 /// Sky-disc radius in blocks (vanilla `SkyRenderer.SKY_DISC_RADIUS`).
 pub const SKY_DISC_RADIUS: f32 = 512.0;
+
+/// Distance at which the sky disc has faded entirely into the fog colour, in
+/// blocks — `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s default (`512.0`,
+/// `EnvironmentAttributes.java:25-28`).
+///
+/// # This is where vanilla's horizon-to-zenith gradient comes from
+///
+/// The gradient is not baked into the disc's vertex colours; the disc is drawn a
+/// single flat colour and then *fogged*. `assets/minecraft/shaders/core/sky.fsh`
+/// is one line:
+///
+/// ```glsl
+/// fragColor = apply_fog(ColorModulator, sphericalVertexDistance, cylindricalVertexDistance,
+///                       0.0, FogSkyEnd, FogSkyEnd, FogSkyEnd, FogColor);
+/// ```
+///
+/// so with `include/fog.glsl`'s definitions the disc's colour is
+/// `mix(sky_color, fog_color, clamp(dist / SKY_FOG_END_DISTANCE, 0, 1))` where
+/// `dist` is the camera-relative distance of the point being shaded. The disc
+/// sits at `y = 16` with radius `512`, so its centre is at distance `16`
+/// (fog factor `0.031`, essentially pure sky colour) and its rim at `512.25`
+/// (factor `1.0`, pure fog colour). That radial ramp *is* the gradient.
+///
+/// The second `apply_fog` term is provably dead for this geometry and is not
+/// implemented: `total_fog_value` takes the `max` of the spherical ramp and
+/// `linear_fog_value(cylindrical, SkyEnd, SkyEnd)` — a step at `SkyEnd` on
+/// `max(|xz|, |y|)`. Since `sqrt(x²+y²+z²) >= max(sqrt(x²+z²), |y|)` for every
+/// point, any fragment where the step fires already has spherical distance
+/// `>= SkyEnd`, where the first term is already `1.0`. The `max` can therefore
+/// never raise the result.
+///
+/// # Why ours is smoother than vanilla's, deliberately
+///
+/// `RenderPipelines.SKY` computes `sphericalVertexDistance` in the **vertex**
+/// shader (`sky.vsh`) over a 10-vertex, 8-triangle fan whose triangles are
+/// hundreds of blocks across, so vanilla interpolates the fog *factor*
+/// barycentrically and the ramp shows as flat-shaded wedges — the banding in
+/// issue #96's title. `SKY_DISC_WGSL` interpolates the camera-relative
+/// *position* instead and takes `length()` per fragment, which costs one
+/// `sqrt` per pixel and removes the banding entirely. It is a closer
+/// approximation of the radial gradient vanilla is describing, not a departure
+/// from it.
+pub const SKY_FOG_END_DISTANCE: f32 = 512.0;
 
 /// Camera-relative sky-disc triangle-fan positions: the centre plus 9
 /// perimeter points across `-180..=180` degrees in 45-degree steps (vanilla
@@ -222,6 +528,130 @@ pub fn celestial_quad_uvs(rect: [f32; 4], mirrored: bool) -> [[f32; 2]; 4] {
 pub const fn quad_indices() -> [u32; 6] {
     [0, 1, 2, 2, 3, 0]
 }
+
+// ---------------------------------------------------------------------------
+// Sunrise / sunset horizon band
+// ---------------------------------------------------------------------------
+
+/// Perimeter steps in the sunrise/sunset fan (vanilla `SkyRenderer.SUNRISE_STEPS`).
+pub const SUNRISE_STEPS: usize = 16;
+/// Vertices in the sunrise/sunset fan: one centre plus `SUNRISE_STEPS + 1`
+/// perimeter points (the last repeats the first to close the fan) — vanilla's
+/// own `int vertices = 18`.
+pub const SUNRISE_FAN_VERTICES: usize = SUNRISE_STEPS + 2;
+/// Distance from the eye to the fan's bright centre, in blocks
+/// (`buildSunriseFan`'s `addVertex(0, 100, 0)`).
+pub const SUNRISE_FAN_HEIGHT: f32 = 100.0;
+/// The fan's perimeter radius, in blocks (`sinAngle * 120`).
+pub const SUNRISE_FAN_RADIUS: f32 = 120.0;
+/// The fan's out-of-plane bow, in blocks (`-cosAngle * 40`); scaled by the
+/// band's alpha at draw time, which is what makes the band flatten as it fades.
+pub const SUNRISE_FAN_BOW: f32 = 40.0;
+
+/// Camera-relative, **untransformed** positions of the sunrise/sunset fan
+/// (vanilla `SkyRenderer.buildSunriseFan`): a centre vertex at
+/// `(0, SUNRISE_FAN_HEIGHT, 0)` followed by 17 perimeter vertices at
+/// `(sin(a) * 120, cos(a) * 120, -cos(a) * 40)` for `a = i * 2π/16`, `i` in
+/// `0..=16`.
+///
+/// Apply [`sunrise_fan_transform`] to place them; on their own they are a disc
+/// standing in the XY plane 100 blocks *above* the eye, which is not where the
+/// band is drawn.
+#[must_use]
+pub fn sunrise_fan_positions() -> [[f32; 3]; SUNRISE_FAN_VERTICES] {
+    let mut out = [[0.0f32; 3]; SUNRISE_FAN_VERTICES];
+    out[0] = [0.0, SUNRISE_FAN_HEIGHT, 0.0];
+    for i in 0..=SUNRISE_STEPS {
+        let angle = i as f32 * std::f32::consts::TAU / SUNRISE_STEPS as f32;
+        let (sin, cos) = angle.sin_cos();
+        out[i + 1] = [
+            sin * SUNRISE_FAN_RADIUS,
+            cos * SUNRISE_FAN_RADIUS,
+            -cos * SUNRISE_FAN_BOW,
+        ];
+    }
+    out
+}
+
+/// Per-vertex alpha for [`sunrise_fan_positions`]: `1.0` at the centre, `0.0`
+/// at every perimeter vertex (`ARGB.white(1.0F)` / `ARGB.white(0.0F)` in
+/// `buildSunriseFan`).
+///
+/// The *colour* is white in the buffer; the band's actual hue arrives as
+/// `ColorModulator` — `core/position_color.fsh` computes
+/// `vertexColor * ColorModulator`, so the effective fragment is
+/// `sunrise_rgb` with alpha `vertex_alpha * sunrise_alpha`. Both factors are
+/// folded into the vertex colour on the CPU here, exactly as the sky disc's
+/// per-frame colour already is.
+#[must_use]
+pub fn sunrise_fan_vertex_alphas() -> [f32; SUNRISE_FAN_VERTICES] {
+    let mut out = [0.0f32; SUNRISE_FAN_VERTICES];
+    out[0] = 1.0;
+    out
+}
+
+/// Triangle-fan indices for [`sunrise_fan_positions`]: [`SUNRISE_STEPS`]
+/// triangles, all sharing the centre vertex.
+#[must_use]
+pub fn sunrise_fan_indices() -> Vec<u32> {
+    let mut idx = Vec::with_capacity(SUNRISE_STEPS * 3);
+    for i in 1..=SUNRISE_STEPS as u32 {
+        idx.push(0);
+        idx.push(i);
+        idx.push(i + 1);
+    }
+    idx
+}
+
+/// The transform that places the sunrise/sunset fan on the horizon, on the
+/// correct side of the sky, squashed by the band's own `alpha`.
+///
+/// A literal reading of `SkyRenderer.renderSunriseAndSunset`, which builds
+/// `poseStack` from **identity** (`LevelRenderer.addSkyPass` hands it a fresh
+/// `new PoseStack()`, unlike `renderSunMoonAndStars` which adds its own
+/// `Axis.YP.rotationDegrees(-90)`):
+///
+/// ```java
+/// poseStack.mulPose(Axis.XP.rotationDegrees(90.0F));
+/// float angle = Mth.sin(sunAngle) < 0.0F ? 180.0F : 0.0F;
+/// poseStack.mulPose(Axis.ZP.rotationDegrees(angle + 90.0F));
+/// modelViewStack.mul(poseStack.last().pose());
+/// modelViewStack.scale(1.0F, 1.0F, alpha);
+/// ```
+///
+/// `mulPose` *post*-multiplies, so the composed matrix is
+/// `Rx(90°) · Rz(90° + flip) · S(1, 1, alpha)` and a vertex is scaled first,
+/// then Z-rotated, then X-rotated — getting that order backwards puts the band
+/// 90° away from the sun, in the middle of nowhere, still looking like a
+/// plausible horizon glow in a screenshot.
+///
+/// Working the centre vertex through it: `(0, 100, 0)` → `Rz(90°)` →
+/// `(-100, 0, 0)` → `Rx(90°)` → `(-100, 0, 0)`. So the band centres on the
+/// horizon 100 blocks toward `-X`, which is exactly where
+/// [`celestial_quad_positions`] puts the setting sun. The perimeter becomes
+/// `(-cos(a) · 40 · alpha, sin(a) · 120, cos(a) · 120)`: ±120 blocks wide along
+/// the horizon, and only ±40·alpha tall — a band, not a disc, flattening as it
+/// fades.
+///
+/// # Only the *sign* of `sin(sun_angle_rad)` is consumed
+///
+/// The `flip` picks dawn (`+X`) or dusk (`-X`). That makes this function immune
+/// to the #49 ramp-shape divergence in [`celestial_angle_for_time_of_day`]: the
+/// sign is stable across the whole of each band's non-zero-alpha window
+/// (measured on the dump: dusk `11302..=14175` has `sin > 0` throughout, dawn
+/// `21825..=702` has `sin < 0` throughout), so a slightly-wrong ramp cannot make
+/// the band flicker sides.
+#[must_use]
+pub fn sunrise_fan_transform(sun_angle_rad: f32, alpha: f32) -> Mat4 {
+    let flip = if sun_angle_rad.sin() < 0.0 { 180.0 } else { 0.0 };
+    Mat4::from_rotation_x(90f32.to_radians())
+        * Mat4::from_rotation_z((flip + 90.0f32).to_radians())
+        * Mat4::from_scale(Vec3::new(1.0, 1.0, alpha))
+}
+
+/// The alpha below which vanilla skips the sunrise/sunset draw entirely
+/// (`renderSunriseAndSunset`'s `if (!(alpha <= 0.001F))`).
+pub const SUNRISE_MIN_ALPHA: f32 = 0.001;
 
 // ---------------------------------------------------------------------------
 // Star field
@@ -420,6 +850,144 @@ mod tests {
             midnight[2] < day[2] * 0.1,
             "midnight should be much darker than day: {midnight:?}"
         );
+    }
+
+    /// The night disc is now *exactly* black, which is what `SKY_COLOR`'s
+    /// `#000000` keyframe says — the previous hand-rolled `NIGHT` constant
+    /// `[0.006, 0.008, 0.02]` was a guess. The fog track is what keeps the
+    /// night horizon from being black too.
+    #[test]
+    fn night_sky_is_black_but_night_fog_is_not() {
+        let day = [0.25, 0.46, 0.83];
+        assert_eq!(sky_color_for_time_of_day(18_000, day), [0.0, 0.0, 0.0]);
+        let fog = fog_color_for_time_of_day(18_000, day);
+        assert!(
+            fog.iter().any(|c| *c > 0.0),
+            "the night fog multiplier is #161616, never black: {fog:?}"
+        );
+        // ...and it is much darker than day, so this is not just "unchanged".
+        assert!(fog[2] < day[2] * 0.05, "{fog:?}");
+    }
+
+    /// Channel order is the one thing about an ARGB hex table that a plausible
+    /// screenshot cannot disprove, so it is pinned against a hand-decoded
+    /// keyframe: `day.json`'s tick-12732 entry is `#feda6333`.
+    #[test]
+    fn sunrise_color_is_argb_not_rgba() {
+        // Landing exactly on the keyframe returns it verbatim (the `t >= toTicks`
+        // branch of `sample`), so no interpolation can mask a channel swap.
+        assert_eq!(
+            sunrise_sunset_color_for_time_of_day(12_732),
+            [0xda, 0x63, 0x33, 0xfe],
+            "expected the warm orange (218, 99, 51) at alpha 254"
+        );
+        // A green-at-20%-alpha reading of the same hex would put 0x33 in alpha.
+        let [.., a] = sunrise_sunset_color_for_time_of_day(12_732);
+        assert_ne!(a, 0x33);
+    }
+
+    /// Noon and deep midnight both draw no band at all; dusk and dawn both do.
+    /// The dawn window wraps the tick-0 seam, which the periodic sampler's
+    /// leading wrap segment is the only thing that gets right.
+    #[test]
+    fn sunrise_band_is_invisible_by_day_and_visible_at_both_twilights() {
+        let alpha = |t| f32::from(sunrise_sunset_color_for_time_of_day(t)[3]) / 255.0;
+        assert_eq!(alpha(6_000), 0.0, "noon");
+        assert_eq!(alpha(18_000), 0.0, "midnight");
+        assert!(alpha(12_732) > 0.99, "peak sunset: {}", alpha(12_732));
+        assert!(alpha(23_272) > 0.99, "peak sunrise: {}", alpha(23_272));
+        // Tick 0 sits *before* the first keyframe (71), i.e. on the wraparound
+        // segment from the last keyframe (23757) — clamping to the first
+        // keyframe instead would report 0x5f here, and reaching for the last
+        // would report 0xb1.
+        assert_eq!(sunrise_sunset_color_for_time_of_day(0)[3], 0x71);
+    }
+
+    #[test]
+    fn sky_and_fog_multipliers_are_white_all_day_and_dark_all_night() {
+        for t in [1_000, 6_000, 11_000] {
+            assert_eq!(sky_color_multiplier_for_time_of_day(t), [0xff; 3], "tick {t}");
+            assert_eq!(fog_color_multiplier_for_time_of_day(t), [0xff; 3], "tick {t}");
+        }
+        assert_eq!(sky_color_multiplier_for_time_of_day(18_000), [0x00; 3]);
+        assert_eq!(fog_color_multiplier_for_time_of_day(18_000), [0x11, 0x11, 0x16]);
+    }
+
+    /// The fan is 18 vertices with a bright centre and a transparent rim, and
+    /// its first and last perimeter vertices coincide (`i = 0` and `i = 16` are
+    /// the same angle) so the fan closes.
+    #[test]
+    fn sunrise_fan_is_a_closed_eighteen_vertex_fan_bright_only_at_the_centre() {
+        let pos = sunrise_fan_positions();
+        let alphas = sunrise_fan_vertex_alphas();
+        assert_eq!(pos.len(), 18);
+        assert_eq!(pos[0], [0.0, SUNRISE_FAN_HEIGHT, 0.0]);
+        assert_eq!(alphas[0], 1.0);
+        assert!(alphas[1..].iter().all(|a| *a == 0.0));
+        for axis in 0..3 {
+            assert!(
+                (pos[1][axis] - pos[17][axis]).abs() < 1e-3,
+                "fan does not close on axis {axis}: {:?} vs {:?}",
+                pos[1],
+                pos[17]
+            );
+        }
+        let idx = sunrise_fan_indices();
+        assert_eq!(idx.len(), SUNRISE_STEPS * 3);
+        assert!(idx.chunks(3).all(|tri| tri[0] == 0));
+        assert!(idx.iter().all(|i| (*i as usize) < SUNRISE_FAN_VERTICES));
+    }
+
+    /// The band must land on the horizon at the sun's own bearing, and on
+    /// *opposite* sides at dawn and dusk. Derived from the same
+    /// `celestial_quad_positions` the sun draw uses rather than from a restated
+    /// constant, so a change to one has to move the other.
+    #[test]
+    fn sunrise_fan_centres_on_the_horizon_where_the_sun_is() {
+        let horizon_bearing = |time_of_day: i64| {
+            let angle = celestial_angle_for_time_of_day(time_of_day) * std::f32::consts::TAU;
+            let sun = celestial_quad_positions(angle, SUN_HEIGHT, SUN_SIZE);
+            let sun_x = sun.iter().map(|p| p[0]).sum::<f32>() / 4.0;
+            let fan = sunrise_fan_transform(angle, 1.0)
+                .transform_point3(Vec3::from(sunrise_fan_positions()[0]));
+            (sun_x, fan)
+        };
+
+        // Dusk (peak sunset): the sun is toward -X and so is the band.
+        let (sun_x, fan) = horizon_bearing(12_732);
+        assert!(sun_x < -50.0, "expected the sun toward -X at sunset, got {sun_x}");
+        assert!(fan.x < -50.0, "band should follow it: {fan:?}");
+        assert!(fan.y.abs() < 1e-3, "band centre must sit on the horizon: {fan:?}");
+
+        // Dawn (peak sunrise): both flip to +X.
+        let (sun_x, fan) = horizon_bearing(23_272);
+        assert!(sun_x > 50.0, "expected the sun toward +X at sunrise, got {sun_x}");
+        assert!(fan.x > 50.0, "band should follow it: {fan:?}");
+        assert!(fan.y.abs() < 1e-3, "band centre must sit on the horizon: {fan:?}");
+    }
+
+    /// `alpha` squashes the band's vertical extent, not its width — that is the
+    /// whole effect of vanilla's `scale(1, 1, alpha)` once the two rotations
+    /// have moved the bow axis onto Y.
+    #[test]
+    fn fan_alpha_flattens_the_band_vertically_without_narrowing_it() {
+        let pos = sunrise_fan_positions();
+        let extents = |alpha: f32| {
+            let m = sunrise_fan_transform(1.354, alpha); // a dusk sun angle
+            let (mut h, mut v) = (0.0f32, 0.0f32);
+            for p in pos {
+                let t = m.transform_point3(Vec3::from(p));
+                h = h.max(t.z.abs());
+                v = v.max(t.y.abs());
+            }
+            (h, v)
+        };
+        let (h_full, v_full) = extents(1.0);
+        let (h_faint, v_faint) = extents(0.25);
+        assert!((h_full - h_faint).abs() < 1e-3, "width must not change: {h_full} vs {h_faint}");
+        assert!(v_faint < v_full * 0.5, "height must shrink: {v_full} -> {v_faint}");
+        // And the band is wide-and-thin even at full alpha, not a disc.
+        assert!(h_full > v_full * 2.0, "expected a band, got {h_full} x {v_full}");
     }
 
     #[test]

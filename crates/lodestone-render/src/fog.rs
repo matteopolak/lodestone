@@ -111,6 +111,131 @@ impl FogSettings {
     }
 }
 
+/// How far above the world bottom the void darkening starts, and where the
+/// bottom is — the two numbers vanilla's void fog is a function of.
+///
+/// `FogRenderer.computeFogColor`
+/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:124-139`)
+/// reads exactly these two and nothing else:
+///
+/// ```java
+/// float voidDarknessOnsetRange = level.getLevelData().voidDarknessOnsetRange();
+/// float darkness = Mth.clamp((voidDarknessOnsetRange + level.getMinY() - (float)camera.position().y) / voidDarknessOnsetRange, 0.0F, 1.0F);
+/// ...
+/// float brightness = Mth.square(1.0F - darkness);
+/// fogRed *= brightness; fogGreen *= brightness; fogBlue *= brightness;
+/// ```
+///
+/// Note what that expression actually says, because the sign is easy to get
+/// backwards from a summary: `darkness` is `0` at `min_y + onset_range` and
+/// `1` **at** `min_y`, so the fog goes black as the eye *descends* to the world
+/// bottom. `brightness` is the *square* of `1 - darkness`, so the falloff is
+/// quadratic rather than linear.
+///
+/// `onset_range` is not a constant: `ClientLevel.ClientLevelData.voidDarknessOnsetRange`
+/// (`ClientLevel.java:1277`) returns `1.0` for a **flat** world and `32.0`
+/// otherwise, so a superflat world's void fog is a 1-block-tall snap rather
+/// than a 32-block fade.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VoidFog {
+    /// The dimension's bottom Y (`level.getMinY()`), in blocks.
+    pub min_y: f32,
+    /// How many blocks above [`min_y`](Self::min_y) the darkening begins.
+    pub onset_range: f32,
+}
+
+impl VoidFog {
+    /// A normal (non-flat) overworld: `min_y = -64`, `onset_range = 32`.
+    ///
+    /// This is the bring-up default `RenderState` seeds itself with, not a
+    /// claim that every dimension matches it — see
+    /// `docs/sky-and-air-bubbles.md` on why the dimension's real height is not
+    /// threaded to the render layer yet.
+    pub const OVERWORLD: Self = Self {
+        min_y: -64.0,
+        onset_range: 32.0,
+    };
+
+    /// Void fog turned off: a degenerate onset range, which
+    /// [`brightness`](Self::brightness) reports as always `1.0` (no darkening)
+    /// rather than dividing by zero.
+    pub const DISABLED: Self = Self {
+        min_y: f32::NEG_INFINITY,
+        onset_range: 0.0,
+    };
+
+    /// The multiplier vanilla applies to the **gamma-space** fog colour for an
+    /// eye at `eye_y`: `1.0` at or above `min_y + onset_range`, `0.0` at
+    /// `min_y`, quadratic between.
+    ///
+    /// Gamma-space is not a detail: `computeFogColor` scales
+    /// `ARGB.redFloat(color)` — a raw `byte / 255`, never linearised — so
+    /// applying this to a linear-light colour would pull the whole curve toward
+    /// `1.0` and wash the darkening out, exactly the failure `CLAUDE.md`
+    /// records for tint and shade. Use [`scale_gamma`] rather than multiplying
+    /// a linear colour by this directly.
+    #[must_use]
+    pub fn brightness(&self, eye_y: f32) -> f32 {
+        if self.onset_range <= 0.0 {
+            return 1.0;
+        }
+        let darkness =
+            ((self.onset_range + self.min_y - eye_y) / self.onset_range).clamp(0.0, 1.0);
+        let b = 1.0 - darkness;
+        b * b
+    }
+}
+
+/// Multiply a **linear** RGB colour by a gamma-space scalar, the way vanilla's
+/// non-colour-managed pipeline does: decode to sRGB, scale, re-encode.
+///
+/// `CLAUDE.md`'s rendering constraints spell out why this cannot be a plain
+/// linear multiply — a scale applied in linear space pulls every factor toward
+/// `1.0`, so a void-fog `brightness` of `0.25` would read as roughly `0.53` of
+/// the original brightness on screen instead of a quarter of it.
+#[must_use]
+pub fn scale_gamma(linear: [f32; 3], scale: f32) -> [f32; 3] {
+    linear.map(|c| srgb_to_linear_f32(linear_to_srgb_f32(c) * scale))
+}
+
+/// Multiply a **linear** RGB colour by a per-channel gamma-space factor, the
+/// way vanilla's `ARGB.multiply` does (`red(lhs) * red(rhs) / 255`, straight
+/// byte arithmetic on sRGB values — see
+/// `.cache/mc/26.2/src/net/minecraft/util/ARGB.java:80`).
+///
+/// `factor` is in `0.0..=1.0` sRGB units, i.e. a `#RRGGBB` divided by 255, not
+/// a linear-light ratio. The per-channel twin of [`scale_gamma`].
+#[must_use]
+pub fn multiply_gamma(linear: [f32; 3], factor: [f32; 3]) -> [f32; 3] {
+    [
+        srgb_to_linear_f32(linear_to_srgb_f32(linear[0]) * factor[0]),
+        srgb_to_linear_f32(linear_to_srgb_f32(linear[1]) * factor[1]),
+        srgb_to_linear_f32(linear_to_srgb_f32(linear[2]) * factor[2]),
+    ]
+}
+
+/// Component-wise linear → sRGB (the accurate piecewise OETF), matching the
+/// `linear_to_srgb` every WGSL shader in this crate implements.
+#[must_use]
+pub fn linear_to_srgb_f32(c: f32) -> f32 {
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.max(0.0).powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Component-wise sRGB → linear (the accurate piecewise EOTF); the inverse of
+/// [`linear_to_srgb_f32`] and the float twin of [`srgb_u8_to_linear`].
+#[must_use]
+pub fn srgb_to_linear_f32(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c.max(0.0) + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// `nether_wastes`'s `minecraft:visual/fog_color`, sRGB (see
 /// `.cache/mc/26.2/client-src/data/minecraft/worldgen/biome/nether_wastes.json`).
 const NETHER_FOG_SRGB: [u8; 3] = [0x33, 0x08, 0x08];
@@ -332,6 +457,78 @@ mod tests {
         // near-black — nothing like the overworld's saturated sky blue.
         assert!(f.color.iter().all(|c| *c < 0.02), "expected near-black: {:?}", f.color);
         assert_eq!(f.color[0], f.color[2], "R and B channels match (#18__18)");
+    }
+
+    /// The three anchors vanilla's expression fixes, in the direction it fixes
+    /// them: no darkening at or above `min_y + onset_range`, total darkness at
+    /// `min_y`, and **quadratic** (not linear) in between — halfway down the
+    /// onset range is `0.25`, never `0.5`.
+    #[test]
+    fn void_fog_brightness_is_quadratic_and_darkens_downward() {
+        let v = VoidFog::OVERWORLD;
+        assert_eq!(v.brightness(-32.0), 1.0, "at min_y + onset_range: undarkened");
+        assert_eq!(v.brightness(64.0), 1.0, "well above: undarkened");
+        assert_eq!(v.brightness(-64.0), 0.0, "at min_y: black");
+        assert_eq!(v.brightness(-96.0), 0.0, "below min_y: clamped, still black");
+        // Halfway down (eye at -48, i.e. 16 above min_y): darkness 0.5,
+        // brightness 0.25. A linear ramp would read 0.5 here.
+        let mid = v.brightness(-48.0);
+        assert!((mid - 0.25).abs() < 1e-5, "expected quadratic 0.25, got {mid}");
+    }
+
+    /// A flat world's `voidDarknessOnsetRange` is `1.0`, not `32.0`
+    /// (`ClientLevel.java:1277`), so the same eye height that is fully
+    /// undarkened on a superflat world is deep into the fade on a normal one.
+    #[test]
+    fn flat_worlds_have_a_one_block_void_onset() {
+        let flat = VoidFog {
+            min_y: -64.0,
+            onset_range: 1.0,
+        };
+        assert_eq!(flat.brightness(-63.0), 1.0);
+        assert_eq!(flat.brightness(-64.0), 0.0);
+        assert!(VoidFog::OVERWORLD.brightness(-63.0) < 0.01);
+    }
+
+    #[test]
+    fn disabled_void_fog_never_darkens_and_never_divides_by_zero() {
+        for y in [-1024.0, -64.0, 0.0, 320.0] {
+            assert_eq!(VoidFog::DISABLED.brightness(y), 1.0);
+        }
+    }
+
+    /// The gamma-space scale is the whole point of `scale_gamma`: scaling in
+    /// linear space is *measurably* brighter, which is the washed-out failure
+    /// `CLAUDE.md` records. This pins the gap rather than describing it.
+    #[test]
+    fn scale_gamma_is_darker_than_a_linear_multiply() {
+        let sky = [0.242_867, 0.462_361, 0.827_571]; // gpu::SKY_COLOR
+        let gamma = scale_gamma(sky, 0.5);
+        for (i, c) in gamma.iter().enumerate() {
+            let naive = sky[i] * 0.5;
+            assert!(
+                *c < naive,
+                "channel {i}: gamma-space {c} should be darker than linear {naive}"
+            );
+        }
+        // 0.5 in gamma space is ~0.2159 in linear (the textbook sRGB mid-grey),
+        // so a mid-grey scaled by 0.5 lands near 0.2159 * ... — check the
+        // round-trip identity instead, which is exact and version-free.
+        assert_eq!(scale_gamma(sky, 1.0), sky.map(|c| srgb_to_linear_f32(linear_to_srgb_f32(c))));
+        assert_eq!(scale_gamma(sky, 0.0), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn float_transfer_functions_round_trip_and_match_the_u8_version() {
+        for byte in [0u8, 1, 10, 0x80, 200, 255] {
+            let via_u8 = srgb_u8_to_linear([byte, byte, byte])[0];
+            let via_f32 = srgb_to_linear_f32(f32::from(byte) / 255.0);
+            assert!((via_u8 - via_f32).abs() < 1e-6, "byte {byte}: {via_u8} vs {via_f32}");
+        }
+        for linear in [0.0f32, 0.001, 0.2159, 0.5, 1.0] {
+            let back = srgb_to_linear_f32(linear_to_srgb_f32(linear));
+            assert!((back - linear).abs() < 1e-5, "{linear} -> {back}");
+        }
     }
 
     #[test]
