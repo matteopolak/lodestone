@@ -1961,6 +1961,21 @@ impl RenderState {
     /// and group them by model, upload one instance buffer per surviving model,
     /// and record draw/cull counts. Runs before the render pass so every GPU
     /// buffer it creates outlives the pass that reads it.
+    ///
+    /// # Why this plans twice (issue #98's hurt overlay)
+    ///
+    /// `plan_entities` groups by model and drops the input order, so a
+    /// per-entity flag cannot be zipped back onto a batch afterwards — and
+    /// `EntityInstance` (in `lodestone-render`'s `entity.rs`) carries only the
+    /// light byte, not the overlay. The instances are therefore split by
+    /// [`EntityDraw::hurt`] *before* planning, and each half's flag stays
+    /// attached to the plan it produced as a `(bool, EntityFrame)` pair. That
+    /// pairing is the point: a `Vec<bool>` parallel to the batches would be an
+    /// invariant nothing enforces, which is precisely how this class of bug
+    /// comes back. Grouping by `(model, hurt)` instead of `model` is also what
+    /// a hurt mob costs in vanilla — one extra batch while its 10 ticks run,
+    /// and nothing at all the rest of the time (the hurt half is empty, and
+    /// `plan_entities` on an empty slice returns no batches).
     fn prepare_entities(
         &self,
         device: &wgpu::Device,
@@ -2064,21 +2079,6 @@ impl RenderState {
     /// animated by the wearer's render state, so a zombie's chestplate reaches
     /// out in front with `animateZombieArms`. The equivalent here is to run no
     /// second pose at all: `ArmourMesh::attach` pairs each armour part with the
-    ///
-    /// # Why this plans twice (issue #98's hurt overlay)
-    ///
-    /// `plan_entities` groups by model and drops the input order, so a
-    /// per-entity flag cannot be zipped back onto a batch afterwards — and
-    /// `EntityInstance` (in `lodestone-render`'s `entity.rs`) carries only the
-    /// light byte, not the overlay. The instances are therefore split by
-    /// [`EntityDraw::hurt`] *before* planning, and each half's flag stays
-    /// attached to the plan it produced as a `(bool, EntityFrame)` pair. That
-    /// pairing is the point: a `Vec<bool>` parallel to the batches would be an
-    /// invariant nothing enforces, which is precisely how this class of bug
-    /// comes back. Grouping by `(model, hurt)` instead of `model` is also what
-    /// a hurt mob costs in vanilla — one extra batch while its 10 ticks run,
-    /// and nothing at all the rest of the time (the hurt half is empty, and
-    /// `plan_entities` on an empty slice returns no batches).
     /// wearer's index for the same name, and this reads
     /// `instance.part_transforms[i]` — the matrix the mob is *already* being
     /// drawn with.
@@ -2668,6 +2668,7 @@ mod tests {
         let models = EntityModelSet::load();
         let armour = ArmourModelSet::load();
         let draw = EntityDraw {
+            hurt: false,
             id: 7,
             type_path: "zombie".to_string(),
             item: None,
@@ -2707,6 +2708,7 @@ mod tests {
                 attack_anim: 0.0,
                 age_ticks: 11.0,
                 aggressive: false,
+                ..AnimInput::REST
             },
             wool: None,
             count: 1,
@@ -2798,6 +2800,7 @@ mod tests {
                     attack_anim: 0.0,
                     age_ticks: 15.0,
                     aggressive: false,
+                    ..AnimInput::REST
                 },
                 scale: 1.0,
                 slim,
@@ -2835,7 +2838,6 @@ mod tests {
                 );
             }
             for (i, part) in instance.part_transforms.iter().enumerate() {
-            hurt: false,
                 assert!(
                     part.determinant() > 0.0,
                     "{expected_model} part {i}: determinant must be positive, was {}",
@@ -3468,6 +3470,7 @@ mod tests {
 
         let draws = vec![
             EntityDraw {
+                hurt: false,
                 id: 1,
                 type_path: "pig".to_owned(),
                 item: None,
@@ -3485,6 +3488,7 @@ mod tests {
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
             EntityDraw {
+                hurt: false,
                 id: 2,
                 type_path: "pig".to_owned(),
                 item: None,
@@ -3635,7 +3639,6 @@ mod tests {
              run on a host with a GPU (or a software adapter), don't 'skip' — a silent pass \
              here would assert nothing",
         );
-                hurt: false,
         let device = ctx.device();
         let queue = ctx.queue();
         let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -3653,10 +3656,10 @@ mod tests {
             fov_y_degrees: 60.0,
             aspect: w as f32 / h as f32,
             near: 0.05,
-                hurt: false,
             far: Camera::far_for_render_distance(8, 0),
         };
         let draws = vec![EntityDraw {
+            hurt: false,
             id: 1,
             type_path: "zombie".to_owned(),
             item: None,
@@ -3769,4 +3772,3 @@ mod tests {
         );
     }
 }
-            hurt: false,
