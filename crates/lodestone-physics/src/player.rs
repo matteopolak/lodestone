@@ -279,6 +279,53 @@ pub struct PlayerState {
     /// piece rather than the whole branch, and so nothing can silently substitute a
     /// plausible number for it.
     pub water_movement_efficiency: f32,
+    /// `Abilities.flying` — **creative flight is currently engaged**.
+    ///
+    /// This is *server authority*, not a local toggle:
+    /// `ClientboundPlayerAbilitiesPacket` carries it, and vanilla's client-side
+    /// toggle is gated on `abilities.mayfly` (which lives on the driver, not here
+    /// — physics never decides whether flight is *allowed*, only what it does).
+    /// A driver that lets the player fly without a server grant is a bug, not a
+    /// feature: see `docs/creative-flight.md`.
+    ///
+    /// # What setting this does, in three places and no more
+    ///
+    /// Flight is **not** a fourth travel mode beside air/water/lava/elytra. It is
+    /// a set of modifications to the machinery that already exists, because
+    /// `Player.travel` *wraps* `super.travel(input)` rather than replacing it
+    /// (`Player.java:1416-1424`):
+    ///
+    /// 1. **A dispatch suppressor.** `Player.isAffectedByFluids()` is
+    ///    `!abilities.flying` (`Player.java:875-878`) and `shouldTravelInFluid`
+    ///    requires it, so a flying player **never takes the fluid branch** — flying
+    ///    underwater goes through [`tick_air`], not [`tick_water`].
+    /// 2. **A speed substitution**, via [`player_flying_speed`] /
+    ///    [`Self::flying_speed`].
+    /// 3. **A post-travel Y overwrite**: the *pre*-travel Y, times `0.6`,
+    ///    *replaces* the post-travel Y. Gravity's contribution during the tick is
+    ///    discarded outright rather than damped, and there is **no horizontal
+    ///    term** — see [`travel_and_check_inside_blocks`].
+    ///
+    /// Plus the `!flying` conjuncts tabulated in `docs/creative-flight.md`, each of
+    /// which is applied at its own site.
+    ///
+    /// **Collision stays on.** Creative flight is not noclip; only *spectator*
+    /// mode sets `noPhysics`, which this crate does not model at all (see the
+    /// module docs).
+    pub flying: bool,
+    /// `Abilities.flyingSpeed` — the **creative-flight** input speed, server-set,
+    /// default `0.05F` (`Abilities.java`'s `DEFAULT_FLYING_SPEED`).
+    ///
+    /// Consumed by [`player_flying_speed`], which doubles it while sprinting. Note
+    /// the vertical fly impulse (`LocalPlayer.aiStep`'s `inputYa *
+    /// abilities.getFlyingSpeed() * 3.0F`) uses this **raw**, *un*-doubled value
+    /// even while sprinting — that asymmetry is the driver's to reproduce, and
+    /// `lodestone-ecs`'s `apply_creative_flight_input` does.
+    ///
+    /// **Not [`PhysicsProfile::flying_speed`]**, which is the unrelated `0.02F`
+    /// non-flying airborne constant. They are 2.5x apart and both are called
+    /// "flying speed" in vanilla.
+    pub flying_speed: f32,
     /// `Entity.fallDistance` (`Entity.java:245` — a `double`, not a `float`, since
     /// 26.2).
     ///
@@ -402,8 +449,28 @@ impl PlayerState {
             swim_amount: 0.0,
             swim_amount_o: 0.0,
             water_movement_efficiency: 0.0,
+            flying: false,
+            // `Abilities.DEFAULT_FLYING_SPEED`. Seeded to vanilla's default rather
+            // than `0.0` so that a driver which sets `flying` but forgets to
+            // forward the server's speed flies at vanilla's default rate instead
+            // of being unable to move at all — a wrong-but-plausible failure is
+            // far easier to see than a silently frozen one.
+            flying_speed: 0.05,
             fall_distance: 0.0,
         }
+    }
+
+    /// Returns a copy of this state with creative flight engaged or released, and
+    /// the server-reported `Abilities.flyingSpeed` it flies at.
+    ///
+    /// `flying_speed` is ignored while `flying` is `false` — vanilla's
+    /// `Player.getFlyingSpeed()` takes its non-flying arm then — but it is stored
+    /// regardless so a toggle does not have to re-supply it.
+    #[must_use]
+    pub fn with_flight(mut self, flying: bool, flying_speed: f32) -> Self {
+        self.flying = flying;
+        self.flying_speed = flying_speed;
+        self
     }
 
     /// Returns a copy of this state with [`Entity.fallDistance`](Self::fall_distance)
@@ -664,10 +731,23 @@ fn do_move(
     let ctx = MoveContext {
         slow_falling: state.effects.slow_falling,
         suppress_bounce,
-        edge_back_off: EdgeBackOff::Player {
-            staying_on_ground_surface,
-            fall_distance: state.fall_distance,
+        // The same two `Player` overrides `tick_air`'s `AirTravelContext` applies,
+        // kept in step deliberately: this is the fluid/elytra move wrapper, and a
+        // gate that held on one path and not the other would be a divergence
+        // between travel modes rather than against vanilla.
+        edge_back_off: if state.flying {
+            EdgeBackOff::Entity
+        } else {
+            EdgeBackOff::Player {
+                staying_on_ground_surface,
+                fall_distance: state.fall_distance,
+            }
         },
+        // `Player.getBlockSpeedFactor()`: `!flying && !isFallFlying()`. The elytra
+        // half is what this reaches in practice — `do_move`'s fluid callers are
+        // unreachable while flying, because the dispatch suppressor sends a flying
+        // player to `tick_air` instead.
+        suppress_block_speed_factor: state.flying || state.fall_flying,
     };
     move_entity(&mut motion, state.dimensions(), view, profile, ctx);
     state.position = motion.position;
@@ -1162,10 +1242,29 @@ pub fn tick_air(
     let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
     // --- jump -----------------------------------------------------------------
-    if input.jump && state.on_ground && state.no_jump_delay == 0 {
+    // `LivingEntity.aiStep`'s jump block is `if (this.jumping &&
+    // this.isAffectedByFluids())` (`LivingEntity.java:3089`) — and
+    // `Player.isAffectedByFluids()` is `!abilities.flying`. So a **flying player
+    // never jumps from the ground at all**; the `else` arm runs and clears
+    // `noJumpDelay`.
+    //
+    // This conjunct is easy to miss because `isAffectedByFluids` reads like it
+    // should only guard the *fluid* sub-branches, and because vanilla's own
+    // creative-flight feel is unaffected in the common case (you are rarely
+    // `onGround` while flying). It matters at ground level: without it, holding
+    // jump while hovering just above the floor would add `jumpFromGround`'s `0.42`
+    // *on top of* the `flyingSpeed * 3` vertical impulse the driver applies, and
+    // launch the player at three times vanilla's climb rate.
+    //
+    // The one-shot hop vanilla *does* perform when flight is **engaged** while
+    // standing (`LocalPlayer.aiStep`'s `if (abilities.flying && this.onGround())
+    // this.jumpFromGround();`) is the driver's, not this function's — it fires on
+    // the toggle edge, before `super.aiStep()`.
+    let affected_by_fluids = !state.flying;
+    if affected_by_fluids && input.jump && state.on_ground && state.no_jump_delay == 0 {
         jump_from_ground(state, view, profile);
         state.no_jump_delay = 10;
-    } else if !input.jump {
+    } else if !affected_by_fluids || !input.jump {
         state.no_jump_delay = 0;
     }
 
@@ -1174,6 +1273,10 @@ pub fn tick_air(
     // test for its own velocity clamp; both read the pre-move position, so the two
     // checks agree). Only `travelInAir` reaches `handleOnClimbable`
     // (`LivingEntity.java:2666-2669`), so this is `tick_air`-only, matching vanilla.
+    //
+    // `Player.onClimbable()` is `abilities.flying ? false : super.onClimbable()`
+    // (`Player.java:2025`), so flight detaches the player from ladders entirely —
+    // both this reset and `travel_in_air`'s clamp/steady-climb.
     if on_climbable(state, view) {
         state.fall_distance = 0.0;
     }
@@ -1202,10 +1305,30 @@ pub fn tick_air(
         discard_friction: false,
         // `Player.maybeBackOffFromEdge` — a player always has the override; the
         // shift key and the fall distance are what decide whether it does anything.
-        edge_back_off: EdgeBackOff::Player {
-            staying_on_ground_surface: input.sneak,
-            fall_distance: state.fall_distance,
+        //
+        // …except while flying: the override's own first conjunct is
+        // `!this.abilities.flying` (`Player.java:882`), so a flying player gets the
+        // *base* implementation, which is the identity. This is the conjunct
+        // `EdgeBackOff`'s doc records as "satisfied by construction here" because
+        // this crate had no flight — that argument has now expired, so the gate is
+        // real rather than vacuous, and a sneaking player can fly off a ledge.
+        edge_back_off: if state.flying {
+            EdgeBackOff::Entity
+        } else {
+            EdgeBackOff::Player {
+                staying_on_ground_surface: input.sneak,
+                fall_distance: state.fall_distance,
+            }
         },
+        // `Player.getFlyingSpeed()` — sprint- and flight-dependent, so it cannot be
+        // a profile constant. This is also what fixes the non-flying sprint-jump
+        // case, which was reading a flat `0.02`.
+        flying_speed: Some(player_flying_speed(state, profile)),
+        // `Player.getBlockSpeedFactor()` (`Player.java:1855`) — suppressed while
+        // flying **or** gliding.
+        suppress_block_speed_factor: state.flying || state.fall_flying,
+        // `Player.onClimbable()` (`Player.java:2025`).
+        suppress_climbable: state.flying,
     };
     travel_in_air(
         &mut motion,
@@ -1306,7 +1429,14 @@ fn fluid_jump_threshold(eye_height: f32) -> f64 {
 
 /// `LivingEntity.onClimbable()` reduced to the block test this engine models: the
 /// CLIMBABLE tag on the block at the feet block position.
+/// `Player.onClimbable()` is `abilities.flying ? false : super.onClimbable()`
+/// (`Player.java:2025`) — flight detaches the player from ladders and vines.
 fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
+    !state.flying && on_climbable_here(state, view)
+}
+
+#[allow(clippy::doc_markdown)]
+fn on_climbable_here(state: &PlayerState, view: &dyn CollisionView) -> bool {
     view.is_climbable(
         mth::floor(state.position.x),
         mth::floor(state.position.y),
@@ -2129,13 +2259,18 @@ fn travel_and_check_inside_blocks(
     );
     state.eye_in_water = fluid.eye_in_water;
     state.eye_in_lava = fluid.eye_in_lava;
-    state.swimming = update_swimming(
-        state.swimming,
-        state.sprinting,
-        &fluid,
-        view,
-        state.position,
-    );
+    // `Player.updateSwimming` (`Player.java:1433-1439`) forces `setSwimming(false)`
+    // while flying instead of delegating to `super.updateSwimming()`, so a player
+    // who dives, starts sprint-swimming and then takes off drops the swim pose on
+    // the very next tick rather than flying around with a `0.4` eye height.
+    state.swimming = !state.flying
+        && update_swimming(
+            state.swimming,
+            state.sprinting,
+            &fluid,
+            view,
+            state.position,
+        );
     // `LivingEntity.updateSwimAmount()` — see its doc for why this sits here,
     // between `updateSwimming` and the travel dispatch below.
     update_swim_amount(state);
@@ -2155,14 +2290,65 @@ fn travel_and_check_inside_blocks(
         state.fall_distance = 0.0;
     }
 
-    if fluid.in_water() {
+    // `Player.aiStep`: `if (abilities.flying && !isPassenger()) resetFallDistance();`
+    // (`Player.java:449-451`) — **before** `super.aiStep()`, so before the travel
+    // dispatch below, alongside the Slow Falling reset rather than after the move.
+    if state.flying {
+        state.fall_distance = 0.0;
+    }
+
+    // `Player.travel` (`Player.java:1416-1424`) captures `getDeltaMovement().y`
+    // *before* delegating to `super.travel(input)` and then **overwrites** the
+    // post-travel Y with `originalMovementY * 0.6`.
+    //
+    // # Why the capture reads through `snap_small_velocity`
+    //
+    // Vanilla's read happens inside `travel()`, which `LivingEntity.aiStep` calls
+    // *after* its own velocity snap-to-zero prologue — and that prologue lives
+    // inside our per-path `tick_air`/`tick_elytra`, not out here. Applying the
+    // snap non-destructively to derive the capture is **exactly** vanilla's value,
+    // because the only other thing aiStep writes to velocity between the snap and
+    // `travel()` is `jumpFromGround()`, and that whole block is gated on
+    // `isAffectedByFluids()` (`LivingEntity.java:3089`) — `!flying` for a player.
+    // So while flying nothing else can intervene, and `flying` is the only case
+    // this value is read in.
+    //
+    // Getting it wrong here is quiet rather than loud: capturing *before* the snap
+    // leaves a flying player at rest with a residual Y of `1.8e-3 * 0.6^n` that
+    // decays geometrically but never reaches zero, is invisible in position
+    // (the snap re-zeroes it every tick before the move), and then shows up as a
+    // ~0.001 offset the first time they press jump. `tests/travel_seam.rs`'s
+    // `flight_y_overwrite_reads_the_post_snap_velocity` pins it.
+    let original_movement_y = state.flying.then(|| snap_small_velocity(state.velocity).y);
+
+    // `LivingEntity.travel`'s dispatch (`LivingEntity.java:2432-2444`), with
+    // `shouldTravelInFluid`'s `isAffectedByFluids()` conjunct
+    // (`LivingEntity.java:2436-2438`) — which `Player` overrides to `!flying`
+    // (`Player.java:875-878`).
+    //
+    // **This suppressor is what makes flight a wrapper rather than a fourth
+    // travel mode**, and it is the single strongest discriminator between the two
+    // shapes: a player flying through water takes `travelInAir`, so they keep
+    // moving at flight speed with no `0.8` water slow-down, no buoyancy and no
+    // sneak-to-sink. Note it does **not** gate the elytra arm: `canGlide()` is
+    // `!flying && super.canGlide()` (`Player.java:1429`), which stops a flying
+    // player *starting* a glide, but `isFallFlying()` is a server-owned entity-data
+    // bit and vanilla's dispatch still honours it if both are somehow set.
+    let affected_by_fluids = !state.flying;
+    if affected_by_fluids && fluid.in_water() {
         tick_water(state, input, &fluid, view, profile);
-    } else if fluid.in_lava() {
+    } else if affected_by_fluids && fluid.in_lava() {
         tick_lava(state, input, &fluid, view, profile);
     } else if state.fall_flying {
         tick_elytra(state, input, view, profile);
     } else {
         tick_air(state, input, view, profile);
+    }
+    // The Y overwrite, closing `Player.travel`. `with(Direction.Axis.Y, …)` — the
+    // X and Z the dispatch produced are kept untouched. There is **no** horizontal
+    // drag term in this branch, however much "0.6" looks like one.
+    if let Some(y) = original_movement_y {
+        state.velocity.y = y * 0.6;
     }
     // `LivingEntity.aiStep`'s `applyEffectsFromBlocks()` (`LivingEntity.java:3134`),
     // immediately after the `travel()` dispatch above (`:3130`) and before
@@ -2175,8 +2361,15 @@ fn travel_and_check_inside_blocks(
     // writes `velocity.y` and `update_stuck_multiplier` writes
     // `stuck_speed_multiplier`, neither reads what the other writes, and the only
     // field they share is `fall_distance`, which both only ever set to `0.0`.
-    apply_bubble_column(state, view, profile);
-    update_stuck_multiplier(state, view, profile);
+    //
+    // Both are `!flying` for a player: `Player.onAboveBubbleColumn` /
+    // `onInsideBubbleColumn` skip `super` entirely (`Player.java:309-321`), and
+    // `Player.makeStuckInBlock` likewise (`Player.java:1514-1518`). So a flying
+    // player is neither lifted by a soul-sand column nor grabbed by a cobweb.
+    if !state.flying {
+        apply_bubble_column(state, view, profile);
+        update_stuck_multiplier(state, view, profile);
+    }
 }
 
 /// [`tick`] followed by one pass of `LivingEntity.pushEntities` against `nearby`.
@@ -2304,6 +2497,7 @@ fn friction_influenced_speed(
         effective_speed(profile, state),
         block_friction,
         state.on_ground,
+        player_flying_speed(state, profile),
         profile,
     )
 }
@@ -2312,14 +2506,22 @@ fn friction_influenced_speed(
 /// entity-agnostic core. `speed` is the caller's `getSpeed()` — the player's
 /// movement-speed attribute or a mob's AI-supplied speed. On the ground the
 /// `0.21600002F / friction^3` factor rescales it (all in `float`); airborne it
-/// is discarded for `getFlyingSpeed()` (`profile.flying_speed`, `0.02F` for a
-/// non-ridden entity). `speed` therefore only reaches the result on the ground,
+/// is discarded entirely for `flying_speed`, the caller's already-resolved
+/// `getFlyingSpeed()`. `speed` therefore only reaches the result on the ground,
 /// exactly as vanilla.
+///
+/// **`flying_speed` is a parameter, not `profile.flying_speed`, because vanilla's
+/// `getFlyingSpeed()` is virtual and the `Player` override is stateful** — it
+/// depends on `abilities.flying`, `abilities.flyingSpeed` and `isSprinting()`
+/// (`Player.java:1974-1980`). Reading a profile constant here silently
+/// implemented only the "not flying, not sprinting" corner of it; see
+/// [`player_flying_speed`] and `PhysicsProfile::airborne_sprint_speed`.
 #[must_use]
 pub(crate) fn friction_influenced_speed_value(
     speed: f32,
     block_friction: f32,
     on_ground: bool,
+    flying_speed: f32,
     profile: &PhysicsProfile,
 ) -> f32 {
     if on_ground {
@@ -2330,7 +2532,43 @@ pub(crate) fn friction_influenced_speed_value(
             speed
         }
     } else {
-        // getFlyingSpeed(): 0.02 for a player not riding.
+        flying_speed
+    }
+}
+
+/// `Player.getFlyingSpeed()` (`Player.java:1974-1980`) — the airborne input speed
+/// `getFrictionInfluencedSpeed` substitutes for `getSpeed()`.
+///
+/// ```text
+/// if (this.abilities.flying && !this.isPassenger()) {
+///    return this.isSprinting() ? this.abilities.getFlyingSpeed() * 2.0F : this.abilities.getFlyingSpeed();
+/// } else {
+///    return this.isSprinting() ? 0.025999999F : 0.02F;
+/// }
+/// ```
+///
+/// **Four values, not one.** Both arms are sprint-dependent, which is the part
+/// that was missing here entirely: the airborne branch used to return a flat
+/// `0.02F`, so a sprint-**jump** — every sprint-jump, with no creative flight
+/// anywhere in sight — accelerated 30% short of vanilla. The literal is
+/// `0.025999999F` and not `0.026F`; see
+/// [`PhysicsProfile::airborne_sprint_speed`].
+///
+/// `!isPassenger()` is vacuously true: this engine has no riding state (the same
+/// standing argument [`PlayerState::on_ground`] makes). A driver that adds
+/// vehicles must suppress flight for a passenger itself — vanilla falls to the
+/// *non*-flying arm there, it does not merely skip the doubling.
+#[must_use]
+pub fn player_flying_speed(state: &PlayerState, profile: &PhysicsProfile) -> f32 {
+    if state.flying {
+        if state.sprinting {
+            state.flying_speed * 2.0
+        } else {
+            state.flying_speed
+        }
+    } else if state.sprinting {
+        profile.airborne_sprint_speed
+    } else {
         profile.flying_speed
     }
 }

@@ -179,7 +179,11 @@ class Profile:
     air_drag_modifier = f32(1.0)
     friction_modifier = f32(1.0)
     ground_accel = f32(0.21600002)
+    # `Player.getFlyingSpeed()`'s non-flying arms (`Player.java:1974-1980`).
+    # `flying_speed` is the NOT-sprinting one; the sprinting one is a separate
+    # literal and is emphatically not 0.026.
     flying_speed = f32(0.02)
+    airborne_sprint_speed = f32(0.025999999)
     jump_power = f32(0.42)
     sprint_jump_boost = 0.2
     step_height = f32(0.6)
@@ -866,7 +870,16 @@ def tick_air(world, s, forward, strafe, jump, sneak, sprint):
         else:
             speed = player_speed(s)
     else:
-        speed = P.flying_speed
+        # `getFrictionInfluencedSpeed`'s airborne branch returns
+        # `getFlyingSpeed()`, and `Player`'s override is **sprint-dependent**
+        # (`Player.java:1974-1980`). This oracle read a flat `P.flying_speed`
+        # here, matching the Rust's own defect exactly — two ports sharing an
+        # author agreeing with each other and both disagreeing with the jar,
+        # which is why `sprint_jump`'s golden encoded the wrong airborne
+        # acceleration for as long as it existed. Creative flight is not modelled
+        # in this oracle; only the non-flying arms are, which is all any existing
+        # trace can reach.
+        speed = P.airborne_sprint_speed if s.sprinting else P.flying_speed
     ax, ay, az = input_vector(xxa, zza, speed, s.yaw)
     s.vel[0] += ax
     s.vel[1] += ay

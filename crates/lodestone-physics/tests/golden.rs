@@ -276,6 +276,22 @@ fn walk_speed_ii_matches_golden() {
     );
 }
 
+/// # This trace moved in #191, and the movement is the evidence
+///
+/// The airborne branch of `getFrictionInfluencedSpeed` returns
+/// `Player.getFlyingSpeed()`, whose **non**-flying arm is sprint-dependent
+/// (`isSprinting() ? 0.025999999F : 0.02F`, `Player.java:1978`). Both this crate and
+/// `gen_golden.py` returned a flat `0.02F`, so every airborne tick of a sprint-jump
+/// accelerated 30% short — and the two ports agreed with each other while both
+/// disagreed with the jar, which is the whole reason "a self-authored oracle
+/// validates the behaviour you chose to model" is a rule here.
+///
+/// Fixing it moved **238 of this trace's 720 values**, and exactly three of the
+/// suite's 47 traces: this one plus `swim_sprint` and `swim_look_down_dives`, the
+/// only other scenarios where a *sprinting* player is airborne. Reverting the single
+/// oracle line reproduced all 31,620 checked-in values bit-for-bit, which is the
+/// control proving nothing else in that change set moved anything. See
+/// `docs/creative-flight.md`.
 #[test]
 fn sprint_jump_matches_golden() {
     let world = World::flat_floor(4);

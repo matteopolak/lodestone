@@ -157,9 +157,10 @@ pub use handle::{
 };
 pub use player::{
     ActionQueue, AttackStrengthTicker, CollisionSource, Dead, DebugLine, DebugLines, Egress,
-    Flying, LastPlayerInput, LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent,
-    MovementIntent, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot,
-    SprintKeyHeld, Submersion, apply_look_intent, clear_debug_lines, reset_local_player,
+    Flying, JumpTriggerTime, LastFlyingSent, LastPlayerInput, LastSprintingSent, LocalPlayer,
+    LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState, PlayerCollision, PrevPosition,
+    Profile, SelectedSlot, SprintKeyHeld, Submersion, WasJumping, apply_creative_flight_input,
+    apply_look_intent, cancel_flight_on_landing, clear_debug_lines, reset_local_player,
     spawn_local_player, tick_attack_strength,
 };
 pub use plugin::CorePlugin;
@@ -169,7 +170,7 @@ pub use resources::{
 pub use runner::Runner;
 pub use schedules::{Extract, GameTick, NetIngest, Update};
 pub use session::{
-    ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerAlive, ServerDimension,
+    Abilities, ActionBarOverlay, HudEffects, Phase, RespawnCount, ServerAlive, ServerDimension,
     ServerEntityId, ServerGameMode, SessionBossBars, SessionChat, SessionHudPlugin, SessionMenus,
     SessionPhase, SessionPlugin, SessionScoreboard, SessionSet, SessionTabList, TitleOverlay,
     Vitals, Xp, insert_hud_components, insert_session_components, spawn_session,

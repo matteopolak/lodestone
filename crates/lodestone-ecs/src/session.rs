@@ -212,8 +212,87 @@ pub struct ServerEntityId(pub Option<i32>);
 
 /// The local player's game mode as the server last reported it, `None` before
 /// login.
+///
+/// Written on `Login`, `Respawned` **and** `GameModeChanged` — the last of which
+/// is how a runtime `/gamemode` reaches us. Without that arm this froze at
+/// whatever the player logged in as, which is the same stale-value shape
+/// [`ServerDimension`] documents for portal travel.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ServerGameMode(pub Option<GameMode>);
+
+/// The local player's server-granted **abilities** — `Abilities.Packed` on the
+/// wire, `ClientboundPlayerAbilitiesPacket`.
+///
+/// # Why this exists at all: it was a complete island
+///
+/// `ClientEvent::AbilitiesChanged` was decoded correctly at
+/// `crates/protocol/v770/src/adapter.rs:3301`, unit-tested at the protocol layer,
+/// round-tripped in `lodestone-model`'s own tests — and consumed **nowhere**.
+/// `grep -c AbilitiesChanged` returned `0` in both this crate's `ingest.rs` and
+/// the shell's `sim.rs`. That is the exact defect class `CLAUDE.md` §1 names, and
+/// the routing switch ([`handles_event`]) is its usual factory: without an arm
+/// there, `SharedState::apply` never forwards the event and a perfect decode plus
+/// a correct system still reaches zero pixels.
+///
+/// The consequence was **player-visible and not merely missing**: `Flying` (the
+/// debug free-fly camera) was a purely local toggle with no relationship to
+/// [`Self::may_fly`], so the client would happily free-cam on a server that never
+/// granted flight. Whether a player *may* fly is server authority.
+///
+/// # `flying` is state, `may_fly` is permission
+///
+/// They are separate wire bits and must not be collapsed. `may_fly` gates the
+/// client's double-tap toggle (`LocalPlayer.aiStep`, `LocalPlayer.java:825`);
+/// `flying` is whether flight is engaged right now, and the server both reports
+/// it and accepts our echo of it (`ServerboundPlayerAbilities`). A client that
+/// sets `flying` without `may_fly` desyncs and gets corrected.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct Abilities {
+    /// `Abilities.invulnerable`. Not read by physics — recorded because it
+    /// arrives on the same packet and dropping a field silently is how the next
+    /// consumer discovers it is missing.
+    pub invulnerable: bool,
+    /// `Abilities.flying` — flight engaged **right now**, as the server last
+    /// reported (or last accepted from) us. Fed straight to
+    /// `lodestone_physics::PlayerState::flying`.
+    pub flying: bool,
+    /// `Abilities.mayfly` — the server **permits** flight. This is the gate: the
+    /// double-tap toggle does nothing without it.
+    pub may_fly: bool,
+    /// `Abilities.instabuild` (creative-mode instant break).
+    pub instabuild: bool,
+    /// `Abilities.flyingSpeed`, default `0.05F`. Servers do change it, so it is
+    /// carried rather than assumed — see
+    /// `lodestone_physics::PlayerState::flying_speed`.
+    pub flying_speed: f32,
+    /// `Abilities.walkingSpeed`, default `0.1F`.
+    ///
+    /// **Deliberately not fed to physics.** Walk speed reaches movement through
+    /// the `minecraft:movement_speed` *attribute* (`crate::player::player_physics`
+    /// reads it from [`crate::entity::Attributes`]), which is where the server
+    /// folds Speed, Slowness, Soul Speed and boot enchantments. This field is the
+    /// abilities packet's own copy and applying it too would double-count.
+    pub walking_speed: f32,
+}
+
+impl Default for Abilities {
+    /// `Abilities.java`'s field initialisers: everything off, `0.05F` flying and
+    /// `0.1F` walking speed.
+    ///
+    /// **`flying: false` and `may_fly: false` are the load-bearing defaults**: a
+    /// client that has not been told it may fly, may not fly. A `true` default
+    /// would reintroduce exactly the bug this component closes.
+    fn default() -> Self {
+        Self {
+            invulnerable: false,
+            flying: false,
+            may_fly: false,
+            instabuild: false,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        }
+    }
+}
 
 /// The dimension the local player is currently in, `None` before login.
 ///
@@ -322,6 +401,16 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             // reaches zero pixels — the island `CLAUDE.md` §1 names, three times
             // over.
             | ClientEvent::DimensionTypeChanged { .. }
+            // `AbilitiesChanged` (#191). **This arm is the whole wiring.** The
+            // decode has been correct and tested since v770 landed; without this
+            // line `SharedState::apply` routes the event to the dead legacy scalar
+            // fallback and `Abilities` never changes, so flight is either
+            // permanently refused or — worse, and what actually shipped — decided
+            // locally with no server grant at all. Fourth instance of this island.
+            | ClientEvent::AbilitiesChanged { .. }
+            // `GameModeChanged`: `ServerGameMode` existed and was written only on
+            // `Login`/`Respawned`, so a runtime `/gamemode` never reached it.
+            | ClientEvent::GameModeChanged { .. }
             | ClientEvent::HealthChanged { .. }
             | ClientEvent::Death { .. }
             | ClientEvent::ExperienceChanged { .. }
@@ -374,7 +463,7 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
 
 /// `IngestSet::Apply`: the local player's own server-reported state →
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
-/// [`ServerDimension`], [`ServerDimensionType`], [`ServerAlive`].
+/// [`ServerDimension`], [`ServerDimensionType`], [`ServerAlive`], [`Abilities`].
 ///
 /// # Why this is one system over five event families and not five systems
 ///
@@ -402,6 +491,7 @@ pub fn apply_local_player_state(
             &mut ServerDimension,
             &mut ServerDimensionType,
             &mut ServerAlive,
+            &mut Abilities,
         ),
         With<LocalPlayer>,
     >,
@@ -415,6 +505,7 @@ pub fn apply_local_player_state(
             mut dimension,
             mut dimension_type,
             mut alive,
+            mut abilities,
         ) in &mut players
         {
             match event {
@@ -471,6 +562,32 @@ pub fn apply_local_player_state(
                     level,
                     total,
                 } => xp.0 = Some((*progress, *level, *total)),
+                // A runtime `/gamemode`. `Login`/`Respawned` above carry a mode
+                // too, so all three writers of `ServerGameMode` sit together.
+                ClientEvent::GameModeChanged { game_mode: mode } => game_mode.0 = Some(*mode),
+                // #191. Assigned as a **whole record**, never field-by-field:
+                // vanilla's `Abilities.apply(Packed)` overwrites every field from
+                // one packet, so a server that clears `mayfly` clears it here too.
+                // Merging fields would let a stale `may_fly: true` outlive the
+                // grant that set it — which is the failure this fold exists to
+                // prevent, pointing the same direction as the original island.
+                ClientEvent::AbilitiesChanged {
+                    invulnerable,
+                    flying,
+                    can_fly,
+                    instabuild,
+                    flying_speed,
+                    walking_speed,
+                } => {
+                    *abilities = Abilities {
+                        invulnerable: *invulnerable,
+                        flying: *flying,
+                        may_fly: *can_fly,
+                        instabuild: *instabuild,
+                        flying_speed: *flying_speed,
+                        walking_speed: *walking_speed,
+                    };
+                }
                 _ => {}
             }
         }
@@ -507,6 +624,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             ServerDimension::default(),
             ServerDimensionType::default(),
             ServerAlive::default(),
+            Abilities::default(),
         ));
     }
 }
@@ -1210,6 +1328,137 @@ mod tests {
     /// azalea logs the same check at `Warn` (`AmbiguityLoggerPlugin`,
     /// `azalea-client/src/client.rs:246-262`); an error is right here because the
     /// invariant is the point of the stage, not a diagnostic.
+    /// #191's routing control. The decode has been correct since v770 landed and
+    /// the event still reached **nothing**, because `SharedState::apply` forwards
+    /// only what `ingest::handles_event` or [`handles_event`] lists. This pair —
+    /// "someone claims it, and it is the right someone" — is the check that has
+    /// caught this exact island four times now.
+    #[test]
+    fn abilities_changed_is_claimed_by_this_module_and_not_by_ingest() {
+        let event = ClientEvent::AbilitiesChanged {
+            invulnerable: false,
+            flying: true,
+            can_fly: true,
+            instabuild: true,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        };
+        assert!(
+            handles_event(&event),
+            "without this arm the abilities packet is decoded into nothing at all"
+        );
+        assert!(
+            !crate::ingest::handles_event(&event),
+            "abilities are a session scalar, not per-entity ingest; two claimants \
+             would be two folds of one event"
+        );
+
+        // Same pair for `GameModeChanged`, whose absence froze `ServerGameMode` at
+        // whatever the player logged in as.
+        let mode = ClientEvent::GameModeChanged {
+            game_mode: GameMode::Creative,
+        };
+        assert!(handles_event(&mode));
+        assert!(!crate::ingest::handles_event(&mode));
+    }
+
+    /// The fold itself, **through the schedule** rather than by calling the system
+    /// directly — a hermetic call passes whether or not the routing arm above
+    /// exists, which is precisely why the island survived review three times.
+    #[test]
+    fn a_net_ingest_run_folds_abilities_onto_the_component() {
+        let (mut app, entity) = session_app();
+
+        // PRECONDITION, asserted rather than assumed: a fresh session must not
+        // believe it may fly. If this defaulted to `true` the test below would
+        // pass against a fold that did nothing.
+        let before = *app.world().get::<Abilities>(entity).expect("Abilities");
+        assert_eq!(before, Abilities::default());
+        assert!(!before.may_fly, "a fresh session has no flight grant");
+        assert!(!before.flying);
+
+        fold(
+            &mut app,
+            ClientEvent::AbilitiesChanged {
+                invulnerable: true,
+                flying: true,
+                can_fly: true,
+                instabuild: true,
+                flying_speed: 0.075,
+                walking_speed: 0.15,
+            },
+        );
+        let after = *app.world().get::<Abilities>(entity).expect("Abilities");
+        assert!(after.flying);
+        assert!(after.may_fly);
+        assert!(after.invulnerable);
+        assert!(after.instabuild);
+        assert_eq!(after.flying_speed, 0.075);
+        assert_eq!(after.walking_speed, 0.15);
+    }
+
+    /// **The server-gating test, and it needs a genuinely negative input.**
+    ///
+    /// A "flight is server-gated" test whose fixture has `can_fly: true`
+    /// throughout proves nothing about the gate — the *world* species of vacuous
+    /// test, whose flaw lives in the input data and is invisible in the test
+    /// source. So this feeds `can_fly: false` explicitly, and additionally proves
+    /// a revocation clears a previously-granted bit.
+    #[test]
+    fn a_server_that_revokes_flight_clears_both_bits() {
+        let (mut app, entity) = session_app();
+        let grant = |flying, can_fly| ClientEvent::AbilitiesChanged {
+            invulnerable: false,
+            flying,
+            can_fly,
+            instabuild: false,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        };
+
+        fold(&mut app, grant(true, true));
+        assert!(app.world().get::<Abilities>(entity).unwrap().may_fly);
+
+        // A survival server, or `/gamemode survival` mid-session.
+        fold(&mut app, grant(false, false));
+        let after = *app.world().get::<Abilities>(entity).unwrap();
+        assert!(
+            !after.may_fly,
+            "the record is replaced wholesale; a stale grant must not survive"
+        );
+        assert!(!after.flying);
+    }
+
+    /// A runtime `/gamemode` must reach `ServerGameMode`, which before #191 was
+    /// written only by `Login`/`Respawned`.
+    #[test]
+    fn a_runtime_game_mode_change_reaches_the_component() {
+        let (mut app, entity) = session_app();
+        fold(
+            &mut app,
+            ClientEvent::Login {
+                entity_id: 1,
+                game_mode: GameMode::Survival,
+                dimension: dim("overworld"),
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerGameMode>(entity).unwrap().0,
+            Some(GameMode::Survival),
+            "precondition: login must seed the mode, or the change below is invisible"
+        );
+        fold(
+            &mut app,
+            ClientEvent::GameModeChanged {
+                game_mode: GameMode::Creative,
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerGameMode>(entity).unwrap().0,
+            Some(GameMode::Creative)
+        );
+    }
+
     #[test]
     fn exactly_one_system_writes_each_session_component() {
         assert!(

@@ -171,6 +171,21 @@ pub struct MoveContext {
     /// [`EdgeBackOff::Entity`], the identity base implementation, so a mob or a
     /// dropped item is inert by construction.
     pub edge_back_off: EdgeBackOff,
+    /// `getBlockSpeedFactor()` returns a flat `1.0F` instead of consulting the
+    /// block underfoot — i.e. no soul-sand / honey slowdown.
+    ///
+    /// `Player.getBlockSpeedFactor()` (`Player.java:1855`) is
+    /// `!abilities.flying && !isFallFlying() ? super.getBlockSpeedFactor() : 1.0F`,
+    /// so a player suppresses it while **either** creative-flying or gliding. The
+    /// whole disjunction is modelled rather than just the flight half: a partial
+    /// model of one vanilla method is the failure `docs/edge-back-off.md` calls
+    /// out as worse than an explicit stand-in, and the elytra half was already
+    /// wrong here before flight existed (a gliding player was being slowed by
+    /// soul sand that vanilla ignores).
+    ///
+    /// `false` for every mob and item — `Entity.getBlockSpeedFactor` has no such
+    /// gate — so [`Default`] leaves existing callers bit-identical.
+    pub suppress_block_speed_factor: bool,
 }
 
 /// `Entity.move(MoverType.SELF, deltaMovement)` restricted to the parts that
@@ -318,15 +333,21 @@ pub fn move_entity_among_entities(
     // `getBlockSpeedFactor`: query `blockPosition()` (floor of the feet) first,
     // and only if that is 1.0 fall through to the block below that affects
     // movement (`getOnPos(0.500001)`).
-    let bx = mth::floor(motion.position.x);
-    let by = mth::floor(motion.position.y);
-    let bz = mth::floor(motion.position.z);
-    let speed_factor_here = f64::from(view.speed_factor(bx, by, bz));
-    let block_speed_factor = if speed_factor_here == 1.0 {
-        let (fx, fy, fz) = friction_block(motion.position);
-        f64::from(view.speed_factor(fx, fy, fz))
+    let block_speed_factor = if ctx.suppress_block_speed_factor {
+        // `Player.getBlockSpeedFactor()` short-circuits to `1.0F` while flying or
+        // gliding — the block is never queried at all.
+        1.0
     } else {
-        speed_factor_here
+        let bx = mth::floor(motion.position.x);
+        let by = mth::floor(motion.position.y);
+        let bz = mth::floor(motion.position.z);
+        let speed_factor_here = f64::from(view.speed_factor(bx, by, bz));
+        if speed_factor_here == 1.0 {
+            let (fx, fy, fz) = friction_block(motion.position);
+            f64::from(view.speed_factor(fx, fy, fz))
+        } else {
+            speed_factor_here
+        }
     };
     motion.velocity = motion
         .velocity
@@ -369,6 +390,29 @@ pub struct AirTravelContext {
     /// Which `maybeBackOffFromEdge` override this entity has, forwarded to
     /// [`MoveContext`]. Defaults to the inert [`EdgeBackOff::Entity`].
     pub edge_back_off: EdgeBackOff,
+    /// This entity's `getFlyingSpeed()` — the value
+    /// `getFrictionInfluencedSpeed` substitutes for `getSpeed()` **whenever it is
+    /// airborne** (`LivingEntity.java:2710-2716`).
+    ///
+    /// `None` means "use [`PhysicsProfile::flying_speed`]", i.e.
+    /// `LivingEntity.getFlyingSpeed()`'s unridden `0.02F`. That is the
+    /// [`Default`], so every existing mob caller is bit-identical to before this
+    /// field existed — the field is inert by construction rather than by
+    /// convention.
+    ///
+    /// A player passes `Some(...)` from
+    /// [`crate::player::player_flying_speed`], which is sprint- **and**
+    /// flight-dependent in vanilla and therefore cannot be a profile constant.
+    pub flying_speed: Option<f32>,
+    /// Forwarded to [`MoveContext::suppress_block_speed_factor`].
+    pub suppress_block_speed_factor: bool,
+    /// Force `onClimbable()` to `false`, detaching the entity from ladders and
+    /// vines: no pre-move velocity clamp and no steady climb-up.
+    ///
+    /// `Player.onClimbable()` is `abilities.flying ? false : super.onClimbable()`
+    /// (`Player.java:2025`). `false` for mobs, whose `onClimbable` has no such
+    /// override, so [`Default`] is inert.
+    pub suppress_climbable: bool,
 }
 
 /// `LivingEntity.travelInAir(Vec3)` (LivingEntity.java:2460) — the shared,
@@ -411,8 +455,13 @@ pub fn travel_in_air(
     };
 
     // handleRelativeFrictionAndCalculateMovement
-    let friction_speed =
-        friction_influenced_speed_value(speed, block_friction, motion.on_ground, profile);
+    let friction_speed = friction_influenced_speed_value(
+        speed,
+        block_friction,
+        motion.on_ground,
+        ctx.flying_speed.unwrap_or(profile.flying_speed),
+        profile,
+    );
     let accel = input_vector(input.0, input.1, friction_speed, ctx.yaw);
     motion.velocity = motion.velocity.add(accel);
 
@@ -421,11 +470,12 @@ pub fn travel_in_air(
     // the climbable. `onClimbable` tests the block at the feet block position;
     // we evaluate it once (pre-move) and reuse it, as the current player path
     // does, rather than re-querying the post-move position.
-    let climbing = view.is_climbable(
-        mth::floor(motion.position.x),
-        mth::floor(motion.position.y),
-        mth::floor(motion.position.z),
-    );
+    let climbing = !ctx.suppress_climbable
+        && view.is_climbable(
+            mth::floor(motion.position.x),
+            mth::floor(motion.position.y),
+            mth::floor(motion.position.z),
+        );
     if climbing {
         motion.velocity = handle_on_climbable(motion.velocity, ctx.suppress_ladder_slide);
     }
@@ -434,6 +484,7 @@ pub fn travel_in_air(
         slow_falling: ctx.slow_falling,
         suppress_bounce: ctx.suppress_bounce,
         edge_back_off: ctx.edge_back_off,
+        suppress_block_speed_factor: ctx.suppress_block_speed_factor,
     };
     move_entity(motion, dims, view, profile, move_ctx);
 
