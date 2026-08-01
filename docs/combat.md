@@ -290,6 +290,40 @@ by location against a run-time-derived silhouette mask, and asserts **zero**
 changed pixels outside it — the mechanical proof this is still a per-model
 blend and not a screen-space tint.
 
+What it printed on the run that landed this:
+
+```text
+=== HURT OVERLAY PRODUCTION-PATH PIXEL GATE (#98) ===
+overlay alpha byte: 178 (vanilla OverlayTexture red row)
+EntityDraw::hurt  subject: false -> true | control: false -> false
+zombie silhouette (rest vs no entities): x[132..187] y[65..173], 3440 px
+sky bytes: [62, 118, 211]; already-red pixels in the entity-less frame: empty
+reddened by the overlay: x[132..187] y[65..173], 3440 px
+control (never damaged): moved empty, reddened empty
+flag forced off vs rest: empty (must be empty)
+control with the flag forced on: reddened x[132..187] y[65..173], 3440 px
+```
+
+All 3440 silhouette pixels redden and **zero** pixels outside it move. The
+`sky bytes` and `already-red … empty` lines are premise 2 doing its job: this is
+a red-tint gate, so the entity-less frame is checked to contain nothing
+red-dominant before any redness is attributed to the overlay.
+
+**Both negative controls were run and watched failing**, not described — each by
+breaking one hop and re-running:
+
+- *`extract_entity_draws` ignores `HurtTime`* (the island as it actually
+  shipped) → `EntityHurtAnimation reached ingest but EntityDraw::hurt is still
+  false`, exit 101.
+- *`prepare_entities` drops the flag* → `EntityDraw::hurt  subject: false ->
+  true` still prints, the data half is entirely green, and then
+  `reddened by the overlay: empty` →
+  `only 0 of the zombie's 3440 silhouette pixels moved toward vanilla's overlay
+  red`. **This is the one that matters**: it reproduces the exact defect shape
+  where every unit test passes and the screen is wrong, and shows the gate
+  catches it. A gate that only checked `EntityDraw::hurt` would have been green
+  through it.
+
 ### The attack-strength ticker and the crosshair indicator (issue #121)
 
 Built as one unit deliberately: the ticker (state) and the crosshair reticle
