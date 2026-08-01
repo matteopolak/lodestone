@@ -185,11 +185,15 @@ already generic over `(model, texture)`.
 ### There are two consumers of this geometry, not one
 
 The world pass documented here is the first. The **GUI item-icon path is the second**, and it is
-issue [#369](https://github.com/matteopolak/lodestone/issues/369): a chest *item* in the inventory or
-hotbar draws nothing today, because `IconPart::Special` — where vanilla's `ChestSpecialRenderer`
-would go — is an empty match arm at `crates/lodestone-shell/src/hud/item_icon.rs:156`, and
-`block_models.rs`'s `collect_item_model_parts` filters every non-`Model` part out at bake time so no
-chest ever enters `BlockModels::items`.
+issue [#369](https://github.com/matteopolak/lodestone/issues/369) — **landed for chest** in
+`d683a29`. It used to draw nothing, because `IconPart::Special` — where vanilla's
+`ChestSpecialRenderer` goes — was an empty match arm in
+`crates/lodestone-shell/src/hud/item_icon.rs`, and `block_models.rs`'s
+`collect_item_model_parts` filters every non-`Model` part out at bake time so no chest ever
+enters `BlockModels::items`. It now routes through `special_icon_geometry` into a third
+`EntityPipeline` pass; see [`gui-item-icons.md`](gui-item-icons.md) for the consumer chain and
+the per-`kind` table. The assessment below is what that work was built on and was confirmed
+correct in the doing, so it is kept in the indicative rather than rewritten.
 
 Vanilla shares one `ChestModel` between the two: `ChestSpecialRenderer.Unbaked.bake` calls
 `context.entityModelSet().bakeLayer(ChestRenderer.LAYERS.select(chestType))` — literally the same
@@ -219,13 +223,26 @@ model shader has no slot for. The cheap route is the one the world path already 
 `EntityPipeline`, which spends only **2** bind groups, consumes the same vertex layout, is
 double-sided (so the GUI pose's negative determinant is a non-issue) and is depth-tested/writing,
 matching the depth attachment `IconRenderer::draw_models` already clears — recorded inside that
-existing pass. Roughly 300–400 lines across 4–5 files plus a comparable pixel gate, with **no**
-`lodestone-assets` change, and the same shape then covers shulker boxes for free.
+existing pass. That is the route taken, and it came in at **three** files plus a gate (no
+`lodestone-assets` change, no `app.rs` change, no shader change), because the placement seam and
+the `draw_models` pass were both already there to be reused. The same shape covers shulker boxes
+the day their model lands.
 
-Two fidelity caveats to expect if you take that route: the entity shader lights from a fixed
-direction with derivative-reconstructed normals rather than `gui_light`'s per-face constants, so a
-GUI chest is shaded like the world chest rather than like a model item; and `IconPart::Special`'s
-flat-sprite `base` fallback stays unused for chests, because they ship no `base` texture.
+Two fidelity caveats that route carries, now observed rather than predicted: the entity shader
+lights from a fixed direction with derivative-reconstructed normals rather than `gui_light`'s
+per-face constants, so a GUI chest is shaded like the world chest rather than like a model item —
+measured as top/bottom band means of `90.3`/`101.0` in the gate, i.e. the horizontal face is
+*dimmer* than the sides here, the opposite of a `gui_light: Side` model item. And
+`IconPart::Special`'s flat-sprite `base` fallback stays unused, which turned out to be true of the
+**whole family and not just chest**: all ten special `base` models ship no `elements` and no
+`layer0`, only a *block* `particle` texture, so there was never a flat sprite to fall back to. See
+[`gui-item-icons.md`](gui-item-icons.md#known-gaps).
+
+One thing the assessment did **not** predict, and worth carrying to the next block-entity type:
+`IconRenderer::draw_models`' early return was `if count == 0` on the *model* stream's vertex
+count. A slot holding only a chest makes that zero, so the new pass would have been attached, fed
+and never run — the same island one layer down. When you add the second special `kind`, check the
+guard before the geometry.
 
 ## Configuration
 
