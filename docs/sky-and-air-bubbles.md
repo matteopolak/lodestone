@@ -137,6 +137,126 @@ Measured, on this machine:
 | sky (day/night) | 97.6% near-black at midnight | 1.1% at noon |
 | bubbles | 524 px underwater at 150/300 air | 0 px full-air-dry, **760 px full-air-wet**, 0 px `air: None` |
 
+## Update: the sun/cloud regression (issue #24), and the gap that let it through
+
+The sky pass reached the screen (the table above), but the real art was wrong
+in three ways the user reported after actually playing: the sun was
+oversized and solid black, the clouds were a black-fringed silhouette with a
+gradient drop-off, and the clouds visibly teleported once a second instead of
+scrolling. All three were real, and all three are now fixed.
+
+**Why the original gates missed this.** `sky_pixels.rs` and
+`sky_pipeline_gpu.rs` both built their `sky_manager()` from solid-colour
+in-memory PNGs, deliberately, to prove the *wiring* reached pixels without a
+`client.jar` dependency (see the section above). That meant **no gate had
+ever loaded or sampled real vanilla celestial/cloud art** — the wiring was
+proven, the art path was not, and the three defects lived entirely in the
+part nothing exercised. This is the durable lesson: a synthetic pack that
+substitutes solid colours for real textures cannot catch a bug that only
+exists in the *shape* of real texture data (an opaque near-black falloff, a
+hard binary alpha mask). `sky_pipeline_gpu.rs` now also has three
+`real_jar_*` tests, `#[ignore]`d like the others, that load the actual
+`.cache/mc/26.2/client.jar` and fail closed (never skip) if it or a GPU
+adapter is missing.
+
+### 1. The sun (and moon): wrong blend mode, not wrong size
+
+`environment/celestial/sun.png` in the 26.2 client jar is a fully **opaque**
+PNG — palette-indexed, no `tRNS` chunk, confirmed by walking its raw PNG
+chunks — whose RGB is a near-black-to-bright-white radial falloff baked
+straight in. Vanilla's `RenderPipelines.CELESTIAL`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/RenderPipelines.java`)
+blends it with `BlendFunction.OVERLAY` — `(SrcAlpha, One)` for colour, i.e.
+**additive**, with the destination left unattenuated — so that near-black RGB
+only ever adds a sliver onto the sky. `CelestialPipeline` used ordinary
+`SrcAlpha`/`OneMinusSrcAlpha` blending, which *replaces* the destination
+wherever alpha is 1.0 — everywhere, in this texture — painting the whole
+opaque 60-block-wide quad as a mostly-black square. That square being fully
+visible (instead of only its small additive glow) is also why the sun looked
+oversized: `SUN_SIZE = 30.0` was never wrong. It matches vanilla's own
+half-extent exactly (`SkyRenderer.java`'s `modelViewStack.scale(30.0F, 1.0F,
+30.0F)` applied to the same `-1..1` local quad `celestial_quad_positions`
+uses) — only how much of the quad was visible changed. Fix:
+`sky_pipeline.rs`'s new `CELESTIAL_BLEND` constant, `(SrcAlpha, One)` /
+`(One, Zero)`, used by both `CelestialPipeline` and `StarPipeline` (vanilla's
+`RenderPipelines.STARS` is the same `OVERLAY` function).
+
+### 2. The clouds: linear filtering of a hard binary alpha mask
+
+`clouds.png` is a hard **binary** alpha mask — every texel is either fully
+transparent `(0,0,0,0)` or fully opaque white `(255,255,255,255)`, confirmed
+by decoding the real file. `CLOUD_WGSL`'s fragment shader alpha-tests at
+`0.04` and writes the sampled colour straight through with no blend (opaque
+pipeline). Sampling that mask with **linear** filtering — this pipeline's
+setting before this fix — produces a fringe of partial-coverage texels at
+every cell boundary, whose colour interpolates proportionally from black
+toward white; the ones that just clear the alpha threshold still carry
+mostly-black colour, written as-is: the reported black rim, with the gradient
+continuing toward full white just inside it. Fix: the cloud texture's sampler
+is now `Nearest`, which can never return a partial-coverage texel (and reads
+closer to vanilla's own per-*cell*, not per-pixel-sampled, mesh — see the
+"deliberate simplification" note on `cloud_plane_geometry` above). Also
+discovered along the way: vanilla's actual "flat" cloud mode does not sample
+`clouds.png` per pixel in the GPU at all — `CloudRenderer.buildFlatCell`
+builds one CPU-side quad per opaque texel/cell, uniformly coloured — so this
+crate's single-textured-quad approach was already a bigger simplification
+than its own doc comment claimed. Reproducing vanilla's cell-mesh approach
+exactly is out of scope for this fix; `Nearest` filtering removes the visible
+defect within the existing (documented, deliberate) simplified architecture.
+
+### 3. The clouds: once-per-second teleport, not smooth scroll
+
+`sky.rs`'s cloud scroll reads `time_of_day: i64` — the same day clock the
+rest of the renderer uses, by design (no second clock). The problem is what
+feeds that clock: `app.rs` polled `ClientHandle::world_time().1`, which is a
+flat snapshot (`WorldTime` in `lodestone-ecs`) only overwritten when a
+`SET_TIME` packet decodes (`ClientEvent::TimeChanged`), and the server sends
+that roughly once per second (`docs/served-session-liveness.md`'s
+`TIME_SYNC_INTERVAL`). `sky.rs::cloud_plane_geometry`'s `scroll_x = time_of_day
+* CLOUD_SCROLL_BLOCKS_PER_TICK` therefore stepped once/sec — a visible ~0.6
+block jump each time. **Vanilla's own `CloudRenderer.render`** computes its
+scroll from `gameTime % (width * 400L) + partialTicks` — a continuously
+advancing client-side tick count plus the render partial-tick, not a raw
+server snapshot; this repo has an equivalent continuous value already
+(`lodestone_ecs::FrameClock::interp_alpha`), but it is scoped to `Sim`
+(`lodestone-shell/src/sim.rs`, a file this fix could not touch) and was never
+wired to the sky's time source. Rather than plumb a new public accessor
+through a held file, the fix stays local to `app.rs`: a small
+`ContinuousTimeOfDay` helper anchors `(last_seen_tick, Instant::now())` and
+extrapolates forward at the standard 20 ticks/sec between packets, re-
+anchoring whenever a new packet arrives — the same predict-then-correct shape
+vanilla's own client-side day-time uses. This is a minimal, self-contained
+`app.rs` edit (one struct, two call-site changes at both connect paths); it
+does not touch `sim.rs`, `gpu.rs`'s `TimeOfDaySource` signature, or any other
+shared file, and is meant to be reconciled centrally if a broader continuous
+clock lands later.
+
+### Real-jar gate numbers, measured on this machine
+
+`crates/lodestone-render/tests/sky_pipeline_gpu.rs`'s three `real_jar_*`
+tests, run with `-- --ignored --nocapture`:
+
+| gate | subject (shipped, fixed) | control (pre-fix, EXECUTED, same real art) |
+|---|---|---|
+| sun blend | 0.0% near-black | 28.9% near-black |
+| cloud filter | 1.6% fringe (neither sky nor cloud colour) | 29.6% fringe |
+
+The cloud control could not simply reuse the shipped 3-D camera placement:
+looking straight up at the cloud plane from a normal player height put every
+screen pixel in a *magnified* regime (many screen pixels per texel), where
+even the pre-fix Linear filter's blended edge band is sub-pixel and
+undetectable — measured as a literal 0.0% control on the first two attempts.
+The control instead renders a hand-verified real boundary texel pair
+(`clouds.png`'s texels `(4,23)` opaque / `(5,23)` transparent, confirmed by
+decoding the file) magnified into view, isolating the filter-mode mechanism
+deterministically rather than depending on where in-frame a real 3-D camera
+happens to land relative to cloud blob edges.
+
+**Not fixed, and not claimed to be:** the classic-formula dusk/dawn ramp
+divergence (#49), the missing below-horizon dark disc, and the missing
+sunrise/sunset tint fan (#96) — all pre-existing, documented omissions, not
+part of this regression.
+
 ## Configuration
 
 None. The sky reads the same day clock the rest of the renderer does — there is
@@ -156,3 +276,8 @@ server-driven.
   Note `ingest::handles_event` must list the event or `SharedState::apply` never
   forwards it in production, regardless of what a hermetic test shows. That trap
   hid working code twice in one session.
+- `sky_pipeline_gpu.rs`'s three `real_jar_*` tests additionally depend on a
+  fetched `.cache/mc/26.2/client.jar` (`xtask fetch-assets`) — `#[ignore]`d
+  like every other GPU gate, but unlike the synthetic-pack gates they fail
+  closed (never skip) when the jar is missing, per this repo's convention for
+  real-asset gates.

@@ -177,8 +177,9 @@ fn texture_bind_group(
 }
 
 /// Uploads a plain RGBA8 image as a single-mip texture with the given address
-/// mode, no atlas, no mip chain — every texture this module owns is small
-/// (a ~130x40px celestial atlas, a 256x256 cloud map) and sampled directly.
+/// mode and filter, no atlas, no mip chain — every texture this module owns
+/// is small (a ~130x40px celestial atlas, a 256x256 cloud map) and sampled
+/// directly.
 fn upload_plain_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -187,6 +188,7 @@ fn upload_plain_texture(
     height: u32,
     rgba: &[u8],
     address_mode: wgpu::AddressMode,
+    filter: wgpu::FilterMode,
 ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Sampler) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
@@ -227,8 +229,8 @@ fn upload_plain_texture(
         address_mode_u: address_mode,
         address_mode_v: address_mode,
         address_mode_w: address_mode,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
+        mag_filter: filter,
+        min_filter: filter,
         ..Default::default()
     });
     (texture, view, sampler)
@@ -350,6 +352,40 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // Pipelines
 // ---------------------------------------------------------------------------
 
+/// Vanilla's `BlendFunction.OVERLAY` (`.cache/mc/26.2/client-src/com/mojang/blaze3d/pipeline/BlendFunction.java`),
+/// which `RenderPipelines.CELESTIAL` and `.STARS` both use
+/// (`RenderPipelines.java`): colour is `src.rgb * src.a + dst.rgb` — additive,
+/// weighted by the fragment's own alpha, with the destination **not**
+/// attenuated (`dst_factor: One`, not `OneMinusSrcAlpha` as ordinary alpha
+/// blending would use).
+///
+/// This is not a stylistic pick — it is why the real `sun.png` doesn't look
+/// wrong in vanilla. `environment/celestial/sun.png` in the 26.2 client jar
+/// has **no alpha channel at all** (a plain opaque, palette-indexed PNG):
+/// most of its 32x32 RGB is a near-black radial falloff around a small bright
+/// core, by design, because vanilla only ever *adds* that falloff onto the
+/// sky — it never replaces the sky with it. Sampling that same art with
+/// ordinary `SrcAlpha`/`OneMinusSrcAlpha` blending (this pipeline's previous
+/// setting) replaces the destination outright wherever alpha is 1.0 — i.e.
+/// everywhere, since this texture has no transparency at all — painting the
+/// whole opaque square as a mostly-black glyph: the reported "solid black,
+/// too big" sun (and the same-shaped moon). `CELESTIAL_WGSL`'s discard only
+/// ever fires on a texel whose alpha is actually near-zero, which this asset
+/// never has; the *blend function*, not the discard, is what keeps the
+/// square's dark corners from ever painting solid in vanilla.
+const CELESTIAL_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::SrcAlpha,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::Zero,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
 fn depthless_targets(color_format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> [Option<wgpu::ColorTargetState>; 1] {
     [Some(wgpu::ColorTargetState {
         format: color_format,
@@ -469,7 +505,7 @@ impl CelestialPipeline {
             &[camera_layout, &texture_layout],
             vertex_layout(std::mem::size_of::<CelestialVertex>() as u64, &ATTRS),
             color_format,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
+            Some(CELESTIAL_BLEND),
         );
         Self {
             pipeline,
@@ -478,9 +514,10 @@ impl CelestialPipeline {
     }
 }
 
-/// The star-field pipeline: additive-ish alpha blend, position + baked
+/// The star-field pipeline: [`CELESTIAL_BLEND`] (vanilla's `RenderPipelines.STARS`
+/// is the same `BlendFunction.OVERLAY` as `.CELESTIAL`), position + baked
 /// brightness colour. Shares [`SkyDiscPipeline`]'s shader and vertex layout,
-/// but needs its own blend state (translucent over the disc, not opaque).
+/// but needs its own blend state (additive over the disc, not opaque).
 #[derive(Debug)]
 pub struct StarPipeline {
     pipeline: wgpu::RenderPipeline,
@@ -506,7 +543,7 @@ impl StarPipeline {
             &[camera_layout],
             vertex_layout(std::mem::size_of::<StarVertex>() as u64, &ATTRS),
             color_format,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
+            Some(CELESTIAL_BLEND),
         );
         Self { pipeline }
     }
@@ -678,6 +715,7 @@ impl SkyRenderer {
             atlas.height,
             &atlas.rgba,
             wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
         );
         let celestial_bind_group = texture_bind_group(
             device,
@@ -687,6 +725,22 @@ impl SkyRenderer {
             &atlas_sampler,
         );
 
+        // `Nearest`, not `Linear`: `clouds.png` is a hard binary mask (every
+        // texel is either fully transparent or fully opaque white — see
+        // `load_cloud_texture`'s doc — vanilla's own `CloudRenderer.isCellEmpty`
+        // is a per-*cell* boolean, never a partial-coverage float). Linear
+        // filtering interpolates transparent-black and opaque-white texels
+        // across every cell boundary; `CLOUD_WGSL`'s alpha-test threshold lets
+        // the low-but-nonzero-alpha fringe of that interpolation through, and
+        // its near-black *colour* (the same fraction of the way from black to
+        // white) renders as-is because this pipeline is opaque
+        // (`CloudPipeline` has no blend state) — producing exactly the
+        // reported "rounded black outline with a gradient drop-off inside".
+        // Nearest sampling never produces a partial-coverage texel: every
+        // pixel is either the discarded fully-transparent texel or the solid
+        // white one, which also reads closer to vanilla's actual per-cell
+        // (not per-pixel-sampled) cloud mesh — see `cloud_plane_geometry`'s
+        // module docs on that simplification.
         let (_cloud_tex, cloud_view, cloud_sampler) = upload_plain_texture(
             device,
             queue,
@@ -695,6 +749,7 @@ impl SkyRenderer {
             cloud_image.height,
             &cloud_image.rgba,
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Nearest,
         );
         let cloud_bind_group = texture_bind_group(
             device,
