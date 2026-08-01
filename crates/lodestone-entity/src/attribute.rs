@@ -457,6 +457,23 @@ pub fn movement_speed_key() -> Identifier {
     Identifier::from_str("minecraft:movement_speed").expect("valid built-in identifier")
 }
 
+/// Vanilla's transient sprint modifier on `minecraft:movement_speed` —
+/// `LivingEntity.SPRINTING_MODIFIER_ID`
+/// (`.cache/mc/26.2/src/.../LivingEntity.java:153-157`), `+0.3`
+/// `ADD_MULTIPLIED_TOTAL`.
+///
+/// Exposed so a client that predicts sprint locally can tell whether the
+/// server's own modifier has arrived yet. `LivingEntity.setSprinting` adds and
+/// removes this on the entity's `AttributeMap`, and
+/// `ClientboundUpdateAttributesPacket` carries the modifier list — so once the
+/// packet lands the folded value **already includes** the sprint bonus, and
+/// anything applying a second local multiply on top would compound it
+/// (~1.69x rather than 1.3x). See `lodestone_ecs::player::player_physics`.
+#[must_use]
+pub fn sprinting_modifier_id() -> Identifier {
+    Identifier::from_str("minecraft:sprinting").expect("valid built-in identifier")
+}
+
 /// Builds a foldable [`AttributeInstance`] from a wire-shaped
 /// [`EntityAttributeSnapshot`] — the shape `ClientboundUpdateAttributesPacket`
 /// decodes to (see `read_update_attributes`,
