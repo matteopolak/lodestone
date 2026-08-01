@@ -393,6 +393,63 @@ impl Menu {
         self.containers.get(index)
     }
 
+    /// The **native** player-inventory index a menu slot addresses, or `None`
+    /// when the slot belongs to one of this menu's own containers (a crafting
+    /// grid cell, a result slot, a chest's own slots).
+    ///
+    /// This is the same `Slot`-level indirection [`slot_item`](Self::slot_item)
+    /// already walks, exposed so a caller can re-address a *menu*-indexed
+    /// server update as a *native* one. [`crate::menus::Menus`] needs exactly
+    /// that: while a container is open the one player inventory is owned by the
+    /// container's menu, so a window-0 `container_set_slot` has to be forwarded
+    /// there, and forwarding needs the native index. Deriving it here rather
+    /// than from a hand-written window-0 table is what stops the two
+    /// numberings drifting (this module's header table is *documentation*; the
+    /// `slots` vector is the truth).
+    #[must_use]
+    pub fn slot_native(&self, menu_index: usize) -> Option<usize> {
+        let slot = self.slots.get(menu_index)?;
+        (slot.container == self.player_container).then_some(slot.index)
+    }
+
+    /// The player-inventory container this menu's player-section slots read
+    /// through.
+    #[must_use]
+    pub fn player_inventory(&self) -> &Container {
+        &self.containers[self.player_container]
+    }
+
+    /// Moves the player-inventory container **out** of this menu, leaving an
+    /// empty one of the same size behind.
+    ///
+    /// Vanilla has exactly one `Inventory` and every menu's player-section
+    /// `Slot`s hold a *reference* into it, so a quick-move inside a chest
+    /// mutates the same storage the HUD hotbar reads. Rust will not lend the
+    /// same `Container` to two owned [`Menu`]s, so [`crate::menus::Menus`]
+    /// models the aliasing as **single ownership that moves**: opening a
+    /// container hands the inventory to the container's menu, closing it hands
+    /// it back. The point is that at no instant do two copies exist, so there
+    /// is nothing to keep in sync and nothing that can diverge — see issue
+    /// #373, where the two copies were the whole bug.
+    ///
+    /// The menu left behind is a husk with respect to its player section: its
+    /// slots still resolve, they just read an empty container. Do not read them
+    /// — go through [`crate::menus::Menus::player`], which reinstalls the live
+    /// inventory into the window-0 view it hands out.
+    pub fn take_player_inventory(&mut self) -> Container {
+        let index = self.player_container;
+        let size = self.containers[index].size();
+        std::mem::replace(&mut self.containers[index], Container::new(size))
+    }
+
+    /// Installs `inventory` as this menu's player-inventory container,
+    /// returning the container it replaced. See
+    /// [`take_player_inventory`](Self::take_player_inventory).
+    pub fn install_player_inventory(&mut self, inventory: Container) -> Container {
+        let index = self.player_container;
+        std::mem::replace(&mut self.containers[index], inventory)
+    }
+
     /// Returns whether a menu slot may accept `stack`.
     #[must_use]
     pub fn may_place(&self, menu_index: usize, stack: &ItemStack) -> bool {

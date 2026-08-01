@@ -192,6 +192,73 @@ not the truth… read the result slot for what the player is actually holding
 a claim to." `Menu::restore` is likewise labelled "server-authoritative
 resync" (`menu.rs:364`).
 
+### One inventory, one owner (issue #373)
+
+Vanilla has exactly **one** `Inventory`. `InventoryMenu`'s slots and every
+`AbstractContainerMenu`'s player-section slots are all `Slot(inventory, i, x, y)`
+— *references into it*. A crafting table's slots `10..46` **are** the player
+inventory's slots, so a shift-click that lands in the hotbar mutates the one
+container and the HUD reads the change for free.
+
+`Menus` used to hold two `ClientMenu`s that each owned a full 41-slot player
+`Container`: `player` (window 0, what `Sim::player_menu` → `app.rs`'s
+`hotbar_records` reads) and `opened.menu` (what the container screen draws and
+what every click mutates). Measured symptom: a quick-move into the hotbar updated
+the container's copy and left window 0 untouched, so the item was **usable and
+not drawn** — the server had it, only our HUD copy was stale — and it stayed
+stale after the screen closed, because a vanilla server sends nothing on close
+(`ServerPlayer.doCloseContainer` only calls `transferState`).
+
+Rust will not lend one `Container` to two owned `Menu`s, so the aliasing is
+modelled as **ownership that moves**, which is a stronger property than a sync:
+
+| event | what happens to the storage |
+| --- | --- |
+| nothing open | `Menus::player` owns it |
+| `container_set_content` builds a new open menu | `hand_inventory_to_opened` moves it into that menu, **before** the content packet is reconciled into it |
+| `ScreenClosed`, or a different window replacing this one | `reclaim_inventory` moves it back |
+
+At no instant do two copies of the player's 41 native slots exist inside a
+`Menus`, so there is nothing to synchronise and nothing that can diverge. The
+primitives are `Menu::{take,install}_player_inventory` and the `PlayerInventory`
+newtype in `reconcile.rs` (a `ClientMenu` holds *two* `Menu`s by design —
+predicted and confirmed — so "the one inventory" is a pair at that level; those
+two are one window's two points in time and `reconcile` is what collapses them,
+which is a different thing from two windows each owning a copy).
+
+Three consequences, each of which is a trap if you do not know it:
+
+* **`Menus::player()` returns a `Menu` by value, not `&Menu`.** While a container
+  is open, `self.player`'s player section is an empty **husk**; `player()` clones
+  the window-0 menu and reinstalls the live inventory over it, so no caller can
+  obtain a stale — or blank — hotbar. Do not "optimise" it back to a borrow.
+  `Menus::player_native(native)` is the borrow-friendly accessor for reading one
+  stack (used by the mining-speed tool lookup in `lodestone-shell`'s `interact.rs`,
+  which had the same stale read).
+* **A window-0 `container_set_slot`/`container_set_content` has to be forwarded.**
+  Vanilla routes container id `0` to `player.inventoryMenu`, whose slots reference
+  the shared `Inventory`, so a window-0 update reaches an open chest's rows for
+  free. Here `forward_window_zero_slot` re-addresses it, and it derives the
+  native index from `Menu::slot_native` — the same `Slot` table the draw walks —
+  rather than from a second transcription of the window-0 layout. Menu slots
+  `0..5` (window 0's own 2×2 grid and result) have no native index and are left
+  where they are.
+* **The handoff moves all 41 natives, not the 36 the packet mentions.** A chest's
+  `container_set_content` carries main + hotbar only; armour (`36..40`) and the
+  off-hand (`40`) are in no chest packet at all, so moving only the packet's
+  portion would wipe the player's armour from the HUD on every chest open.
+
+`crates/lodestone-game/tests/inventory_is_shared.rs` pins all of it, driven
+through `ScreenOpened` + `ContainerContent` + `Menus::click` — never by writing a
+slot. Its control is the full pre-fix reproduction (handoff, reclaim, forward and
+`player()`'s reinstall all disabled at once), **watched failing** at 5 of 10:
+both quick-move-to-hotbar tests, the after-close test, the window-0-while-open
+test and the native-update test, with both `control_*` tests and the two
+"does not over-reach" tests staying green. Disabling only *part* of the fix was
+not enough — with the handoff off but `player()`'s reinstall still on, 8 of 10
+still passed, because reading through the owner alone repairs the read side.
+That is worth remembering before trusting a partial break as a control.
+
 ### Armour equips — the prototype census landed in `67ff7c3`
 
 This section originally recorded armour as unequippable because

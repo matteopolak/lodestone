@@ -76,6 +76,36 @@ struct PendingOpen {
 }
 
 /// The player's inventory plus at most one open container.
+///
+/// # One inventory, one owner (issue #373)
+///
+/// Vanilla has a single `Inventory`; `InventoryMenu`'s slots and every
+/// `AbstractContainerMenu`'s player-section slots are all `Slot(inventory, i, …)`
+/// **references into it**, which is why a shift-click inside a crafting table
+/// updates the HUD hotbar for free. Two owned [`Menu`]s cannot share a
+/// `Container` in Rust, so the aliasing is modelled as ownership that *moves*:
+///
+/// * [`player`](Self::player) owns the inventory whenever nothing is open;
+/// * opening a container hands it to that container's menu
+///   ([`hand_inventory_to_opened`](Self::hand_inventory_to_opened));
+/// * closing (or replacing) it hands it back
+///   ([`reclaim_inventory`](Self::reclaim_inventory)).
+///
+/// The invariant is that **at no instant do two copies of the player's 41 native
+/// slots exist inside a `Menus`** — so there is nothing to synchronise and
+/// nothing that can diverge. Before this, the HUD read window 0's copy while
+/// every quick-move mutated the container's copy: the item was usable (the
+/// server had it) and the hotbar cell stayed blank.
+///
+/// Two consequences worth knowing before touching this type:
+///
+/// * [`player`](Self::player) hands out a **clone with the live inventory
+///   installed**, not a borrow of the window-0 menu, because that menu's player
+///   section is an empty husk while a container is open.
+/// * a window-0 `container_set_slot`/`container_set_content` addressed at the
+///   player section has to be forwarded to the current owner
+///   ([`forward_window_zero_slot`](Self::forward_window_zero_slot)); vanilla gets
+///   this for free through the reference.
 #[derive(Debug, Clone)]
 pub struct Menus {
     player: ClientMenu,
@@ -100,10 +130,46 @@ impl Menus {
         }
     }
 
-    /// The player's own inventory menu (window 0), always present.
+    /// The player's own inventory menu (window 0), always present, **with the
+    /// live inventory in it**.
+    ///
+    /// # Why this returns a value and not a `&Menu`
+    ///
+    /// There is one player inventory and it has one owner (see
+    /// [`Menu::take_player_inventory`]). While a container is open that owner is
+    /// the *container's* menu, so `&self.player.menu()` would hand out a window-0
+    /// menu whose player section is an empty husk. Returning a clone lets this
+    /// reinstall the live inventory, so a caller cannot obtain a stale — or
+    /// blank — hotbar no matter which screen is up. That is issue #373: the HUD
+    /// read window 0's copy, a quick-move mutated the container's copy, and the
+    /// row never changed.
+    ///
+    /// Both existing callers ([`crate::menus`]'s two shell consumers,
+    /// `Sim::player_menu` and `SharedState::player_menu`) already cloned the
+    /// result, so this costs nothing over the old shape.
     #[must_use]
-    pub fn player(&self) -> &Menu {
-        self.player.menu()
+    pub fn player(&self) -> Menu {
+        let mut menu = self.player.menu().clone();
+        if let Some(open) = &self.opened {
+            menu.install_player_inventory(open.menu.menu().player_inventory().clone());
+        }
+        menu
+    }
+
+    /// One slot of the one player inventory, by **native** index (`0..=8`
+    /// hotbar, `9..=35` main, `36..=39` armour, `40` off-hand), read from
+    /// whichever menu currently owns it.
+    ///
+    /// The borrow-friendly counterpart to [`player`](Self::player) for callers
+    /// that want a stack rather than a screen — the HUD's held item, the
+    /// mining-speed tool lookup. Use this in preference to cloning a whole menu
+    /// to read one slot.
+    #[must_use]
+    pub fn player_native(&self, native_index: usize) -> Option<&ItemStack> {
+        match &self.opened {
+            Some(open) => open.menu.menu().player_native(native_index),
+            None => self.player.menu().player_native(native_index),
+        }
     }
 
     /// The open container menu, if a container screen is open.
@@ -176,6 +242,8 @@ impl Menus {
                     .as_ref()
                     .is_some_and(|o| o.window_id == *window_id)
                 {
+                    // Before the menu goes: take the one inventory back.
+                    self.reclaim_inventory();
                     self.opened = None;
                 }
                 if self
@@ -199,6 +267,13 @@ impl Menus {
                 };
                 if *window_id == 0 {
                     self.player.reconcile(update);
+                    // Same re-addressing as the single-slot case, for every
+                    // player-section slot this content packet just wrote.
+                    if self.opened.is_some() {
+                        for slot in 0..self.player.menu().slot_count() {
+                            self.forward_window_zero_slot(slot);
+                        }
+                    }
                 } else {
                     self.ensure_open(*window_id, items.len()).reconcile(update);
                 }
@@ -209,14 +284,17 @@ impl Menus {
                 slot,
                 item,
             } => {
-                if let Ok(slot) = usize::try_from(*slot)
-                    && let Some(menu) = self.menu_for_mut(*window_id)
-                {
-                    menu.reconcile(ServerUpdate::SetSlot {
-                        state_id: *state_id as u32,
-                        slot,
-                        item: model_item_to_game(item),
-                    });
+                if let Ok(slot) = usize::try_from(*slot) {
+                    if let Some(menu) = self.menu_for_mut(*window_id) {
+                        menu.reconcile(ServerUpdate::SetSlot {
+                            state_id: *state_id as u32,
+                            slot,
+                            item: model_item_to_game(item),
+                        });
+                    }
+                    if *window_id == 0 {
+                        self.forward_window_zero_slot(slot);
+                    }
                 }
             }
             ClientEvent::ContainerData {
@@ -240,13 +318,85 @@ impl Menus {
             }
             ClientEvent::InventorySlotChanged { slot, item } => {
                 if let Ok(native) = usize::try_from(*slot) {
-                    self.player
+                    // Vanilla's container id `-2` writes straight into the one
+                    // `Inventory` (`handleContainerSetSlot`'s `-2` arm), so this
+                    // goes to whichever menu owns it, not unconditionally to
+                    // window 0.
+                    self.inventory_owner_mut()
                         .set_player_native(native, model_item_to_game(item));
                 }
             }
             _ => return false,
         }
         true
+    }
+
+    /// Hands the one player inventory to the open container's menu, so its
+    /// player rows and the HUD hotbar are the **same storage** (issue #373).
+    ///
+    /// Called exactly once per container open, from [`ensure_open`](Self::ensure_open),
+    /// *before* the server's `container_set_content` is reconciled into it — so
+    /// the content packet's own 36 player slots land in the inventory that is
+    /// now there, not in a container that is about to be replaced.
+    fn hand_inventory_to_opened(&mut self) {
+        let inventory = self.player.take_player_inventory();
+        if let Some(open) = self.opened.as_mut() {
+            open.menu.install_player_inventory(inventory);
+        } else {
+            // Nothing to hand it to; put it straight back rather than drop it.
+            self.player.install_player_inventory(inventory);
+        }
+    }
+
+    /// Takes the player inventory back out of the open container's menu before
+    /// that menu is dropped or replaced. The counterpart to
+    /// [`hand_inventory_to_opened`](Self::hand_inventory_to_opened).
+    ///
+    /// **This is what makes the hotbar right after the screen closes.** A vanilla
+    /// server sends nothing on close (`ServerPlayer.doCloseContainer` only calls
+    /// `transferState`), so anything the player rearranged inside the container
+    /// would be lost on close if the storage went out with the menu.
+    fn reclaim_inventory(&mut self) {
+        if let Some(open) = self.opened.as_mut() {
+            let inventory = open.menu.take_player_inventory();
+            self.player.install_player_inventory(inventory);
+        }
+    }
+
+    /// Re-addresses a **window-0** menu slot the server just wrote into
+    /// `self.player` onto whichever menu currently owns the player inventory.
+    ///
+    /// Window 0's player-section slots address the one inventory — vanilla's
+    /// `ClientPacketListener.handleContainerSetSlot` routes container id `0` to
+    /// `player.inventoryMenu`, whose slots reference the shared `Inventory`, so
+    /// a window-0 update lands in the same storage an open chest is showing.
+    /// Here, while a container is open, `self.player`'s player container is a
+    /// husk, so the value has to be forwarded. Slots 0..5 (the 2×2 grid and its
+    /// result) belong to window 0's *own* containers and are already correct.
+    ///
+    /// Reads the value back out of the husk rather than taking it as an
+    /// argument, so the menu-slot → native-index mapping comes from
+    /// [`Menu::slot_native`] — the same `Slot` table the draw walks — and not
+    /// from a second transcription of the window-0 layout.
+    fn forward_window_zero_slot(&mut self, menu_slot: usize) {
+        if self.opened.is_none() {
+            return;
+        }
+        let Some(native) = self.player.menu().slot_native(menu_slot) else {
+            return;
+        };
+        let item = self.player.menu().player_native(native).cloned();
+        if let Some(open) = self.opened.as_mut() {
+            open.menu.set_player_native(native, item);
+        }
+    }
+
+    /// The [`ClientMenu`] that currently owns the player inventory.
+    fn inventory_owner_mut(&mut self) -> &mut ClientMenu {
+        match &mut self.opened {
+            Some(open) => &mut open.menu,
+            None => &mut self.player,
+        }
     }
 
     /// Returns the [`ClientMenu`] for a window id, or `None` if the id is neither
@@ -269,6 +419,9 @@ impl Menus {
             .as_ref()
             .is_some_and(|o| o.window_id == window_id);
         if !matches {
+            // A different window replacing this one (or an open with no close):
+            // the outgoing menu is holding the one player inventory.
+            self.reclaim_inventory();
             let container_size = content_len.saturating_sub(PLAYER_INVENTORY_PORTION);
             let (menu_type, title) = match self.pending.take() {
                 Some(p) if p.window_id == window_id => (Some(p.menu_type), Some(p.title)),
@@ -288,6 +441,10 @@ impl Menus {
                 menu: ClientMenu::new(menu),
                 data: Vec::new(),
             });
+            // Vanilla's shape: the container's player-section slots *are* the
+            // player inventory. Hand it over before the caller reconciles the
+            // content packet into this menu.
+            self.hand_inventory_to_opened();
         }
         &mut self.opened.as_mut().expect("just set").menu
     }
