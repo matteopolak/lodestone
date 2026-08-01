@@ -93,7 +93,9 @@ fn join(net: &NetClient) {
             match u {
                 NetUpdate::LoggedIn { .. } => logged_in = true,
                 NetUpdate::Error(e) => last = Some(e),
-                NetUpdate::Disconnected(r) => last = Some(format!("disconnected: {r}")),
+                NetUpdate::Disconnected(r) => {
+                    last = Some(format!("disconnected: {}", r.to_plain_string()))
+                }
                 _ => {}
             }
         }

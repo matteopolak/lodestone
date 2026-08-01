@@ -3759,6 +3759,13 @@ impl Sim {
                     });
                 }
                 NetUpdate::Disconnected(reason) => {
+                    // `reason` is an unresolved `Text` (issue #68): a kicked
+                    // player's disconnect reason is a `translate` component
+                    // like `multiplayer.disconnect.kicked`, so it has to go
+                    // through the same read-boundary translator that
+                    // `title_overlay`/`action_bar_overlay` already use,
+                    // rather than being formatted straight into `status`.
+                    let reason = self.resolve_text(&reason).to_legacy_string();
                     self.status = format!("disconnected: {reason}");
                     self.set_phase(SessionPhase::Ended(format!("disconnected: {reason}")));
                 }
@@ -5619,6 +5626,8 @@ mod tests {
     #[test]
     fn session_phase_tracks_net_updates() {
         use crate::net::NetUpdate;
+        use lodestone_model::Text;
+
         let (net, _actions, feed) = NetClient::loopback_with_feed();
         let mut sim = Sim::new(test_config());
         // Before any connection: purely local.
@@ -5636,13 +5645,110 @@ mod tests {
 
         // A mid-game disconnect ⇒ Ended with the reason preserved, which is what
         // drives the menu's Error screen. Assert the reason survives, so a
-        // blank/again-Connected mapping can't pass.
-        feed.send(NetUpdate::Disconnected("Server closed".into()))
-            .unwrap();
+        // blank/again-Connected mapping can't pass. `"Server closed"` is a
+        // synthetic, not-a-vanilla-key reason (see `NetUpdate::Disconnected`'s
+        // doc comment), hence `Text::literal` rather than `Text::translate`;
+        // the translation-key path is covered separately by
+        // `disconnect_reason_is_translated_through_the_language_table`.
+        feed.send(NetUpdate::Disconnected(Box::new(Text::literal(
+            "Server closed",
+        ))))
+        .unwrap();
         sim.poll_net();
         match sim.session_phase() {
             SessionPhase::Ended(reason) => {
                 assert!(reason.contains("Server closed"), "reason lost: {reason}");
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
+    }
+
+    /// Control for the two tests below: proves the "no raw key reaches the
+    /// screen" assertion can actually fail, i.e. it is discriminating rather
+    /// than vacuous (`CLAUDE.md`'s evidence standard). `test_config()` is
+    /// `Mode::Headless`, so `Sim::new` always takes the demo-palette path
+    /// (`BlockResources::load(false)`), which never loads a language table —
+    /// `sim.language` is deterministically `None` here regardless of the
+    /// environment. With no table, `resolve_text` still lowers the
+    /// `Translate` node (via `lodestone_game::text::resolve`), but with
+    /// nothing to translate it and no `fallback` set, it falls back to the
+    /// key itself — reproducing byte-for-byte the pre-#68 defect
+    /// (`net::forward` used to send `reason.to_plain_string()`, which hits
+    /// the same "no match, no fallback ⇒ render the key" path against its
+    /// own tiny built-in table). If this ever changed to also disappear the
+    /// key, the positive test below would no longer be proof of anything.
+    #[test]
+    fn disconnect_reason_without_a_language_table_falls_back_to_the_raw_key() {
+        use crate::net::NetUpdate;
+        use lodestone_model::Text;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        assert!(
+            sim.language.is_none(),
+            "control's premise requires no language table loaded"
+        );
+        sim.attach_net(net);
+        feed.send(NetUpdate::Disconnected(Box::new(Text::translate(
+            "multiplayer.disconnect.kicked",
+            vec![],
+        ))))
+        .unwrap();
+        sim.poll_net();
+        match sim.session_phase() {
+            SessionPhase::Ended(reason) => {
+                assert!(
+                    reason.contains("multiplayer.disconnect.kicked"),
+                    "control failed to reproduce the raw-key defect: {reason}"
+                );
+            }
+            other => panic!("expected Ended, got {other:?}"),
+        }
+    }
+
+    /// The proof (issue #68): a real translation key reaches `Screen::Error`
+    /// as the real English vanilla ships for it, not as the raw key. The
+    /// expected string is not this test's own formatter's output — it is
+    /// copied verbatim from the real vanilla `en_us.json`
+    /// (`.cache/mc/26.2/src/assets/minecraft/lang/en_us.json:5773`,
+    /// `"multiplayer.disconnect.kicked": "Kicked by an operator"`), i.e. a
+    /// hand-decoded spec example per `CLAUDE.md`'s evidence standard, so
+    /// this can't pass by agreeing with itself. The fixture below carries
+    /// only that one real entry rather than the whole ~500 KiB table so the
+    /// test stays hermetic and has no `client.jar`/`LODESTONE_ASSETS`
+    /// dependency that could go missing in CI — `Language::from_json_bytes`
+    /// is the same parser [`crate::resources::BlockResources::try_vanilla`]
+    /// feeds the real file through, so this is not a bespoke lookup path.
+    #[test]
+    fn disconnect_reason_is_translated_through_the_language_table() {
+        use crate::net::NetUpdate;
+        use lodestone_assets::Language;
+        use lodestone_model::Text;
+
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        let lang = Language::from_json_bytes(
+            br#"{"multiplayer.disconnect.kicked": "Kicked by an operator"}"#,
+        )
+        .expect("valid language JSON");
+        sim.language = Some(Arc::new(lang));
+        sim.attach_net(net);
+        feed.send(NetUpdate::Disconnected(Box::new(Text::translate(
+            "multiplayer.disconnect.kicked",
+            vec![],
+        ))))
+        .unwrap();
+        sim.poll_net();
+        match sim.session_phase() {
+            SessionPhase::Ended(reason) => {
+                assert!(
+                    reason.contains("Kicked by an operator"),
+                    "translated English missing: {reason}"
+                );
+                assert!(
+                    !reason.contains("multiplayer.disconnect.kicked"),
+                    "raw key leaked through the translator: {reason}"
+                );
             }
             other => panic!("expected Ended, got {other:?}"),
         }
