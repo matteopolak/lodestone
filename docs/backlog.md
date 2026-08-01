@@ -112,10 +112,21 @@ recurring defect classes, not because they are generically useful — see
    count, and the `smoothBlend` substitution so a corner against a wall is not black.
    `render/mesh.rs` has `face_corner_lighting` for the *demo* mesher; the model path
    needs its own. **AO must multiply in gamma space** (§ `4e8f058`).
-2. **Block entity renderers.** None exist. Chests (animated lid, double pairing), signs
-   (text layout, dye, glow), beds, banners (layered patterns), item frames, shulkers,
-   enchanting-table book, bells, conduits, end crystals, decorated pots. Start with
-   chest and sign — the two a player notices first.
+2. **Block entity renderers.** Chest has landed end to end (`docs/block-entity-renderers.md`);
+   still absent are beds, banners (layered patterns), item frames, shulkers,
+   enchanting-table book, bells, conduits, end crystals and decorated pots.
+
+   **This entry used to say "start with chest and sign — the two a player notices first", and
+   the sign half was wrong.** In 26.2 signs *are* real block models — `oak_sign_rot_0..3` carry
+   genuine geometry — and `StandingSignRenderer` declares **no** geometry of its own, only text
+   transforms. The board already meshes through the ordinary block path, so porting "sign
+   geometry" would draw a second board inside the real one. Sign is a **text pass**, a different
+   subsystem sharing the `gpu/nametag.rs` substrate, and it does not belong beside chest.
+
+   Chest was the right first pick for a reason worth keeping: `block/chest.json` in the real jar
+   is `{"textures":{"particle":"block/oak_planks"}}` — **zero elements** — so a chest was not a
+   slightly-wrong box, it was a hole in the world, and `sections_drawn`/`total_quads` were
+   byte-identical with and without it drawing.
 3. ~~**Sun, moon, stars, clouds.**~~ Landed — the sky is a real dome, not a flat
    colour: `crates/lodestone-render/src/{sky,sky_pipeline}.rs` plus
    [`sky-and-air-bubbles.md`](./sky-and-air-bubbles.md), proved by
@@ -139,9 +150,20 @@ recurring defect classes, not because they are generically useful — see
    two sessions; that is the second stale claim in this one entry, which is why the
    first is preserved above rather than deleted.) What remains is the special-cased
    poses: bow/crossbow-while-drawing, shield, spyglass, map,
-   trident, and the eating/drinking and brush animations — each needing use-item
-   state the shell does not track. The off hand is not drawn either, though every
-   function supports `Arm::Left`.
+   trident, and the eating/drinking and brush animations. The off hand is not drawn
+   either, though every function supports `Arm::Left`.
+
+   **Third stale claim in this one entry, now corrected: "each needing use-item state
+   the shell does not track" is no longer true.** Issue #57 decoded
+   `LivingEntity`'s using-item bit and folded it through to a `ItemUse` component;
+   mobs and remote players draw the bow and crossbow-charge arm poses from it
+   ([`item-use-arm-poses.md`](./item-use-arm-poses.md)). Two things remain for the
+   *first-person* pass specifically, and neither is the wire state: a session-scoped
+   fold to reach the local player (which has no `EntityKind`, so `entity_view()`
+   cannot carry it — the `Vitals::on_fire` shape, `7822a60`), and
+   `ItemInHandRenderer`'s own item-pose transforms, which are distinct from the
+   humanoid arm poses. Separately, `ArmPose::CrossbowHold` is blocked on decoding
+   `minecraft:charged_projectiles`, not on render work.
 6. **Full inventory interaction verbs.** Audit `click.rs` against
    `AbstractContainerMenu.doClick`: drag-split (left even / right one-each / middle fill
    in creative), double-click gather, number-key swap, offhand swap, drop and drop-stack,
