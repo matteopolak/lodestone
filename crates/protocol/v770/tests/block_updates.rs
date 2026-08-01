@@ -12,7 +12,9 @@ use lodestone_core::Nbt;
 use lodestone_model::{ConnectionState, VersionAdapter};
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
-use lodestone_world::{ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink};
+use lodestone_world::{
+    BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, World, WorldSink,
+};
 
 /// A [`WorldSink`] that records single- and multi-block writes for assertion.
 #[derive(Default)]
@@ -20,6 +22,7 @@ struct RecordingSink {
     set_block: Vec<(i32, i32, i32, u32)>,
     set_blocks: Vec<SectionWrite>,
     set_block_entity: Vec<(i32, i32, i32, u32, Nbt)>,
+    sync_block_entity: Vec<(i32, i32, i32, Option<u32>)>,
 }
 
 /// One recorded `set_blocks` call: the section grid coordinates and the
@@ -46,6 +49,19 @@ impl WorldSink for RecordingSink {
     fn unload(&mut self, _pos: ChunkPos) {}
     fn set_block_entity(&mut self, x: i32, y: i32, z: i32, type_id: u32, nbt: Nbt) {
         self.set_block_entity.push((x, y, z, type_id, nbt));
+    }
+    fn sync_block_entity(
+        &mut self,
+        x: i32,
+        y: i32,
+        z: i32,
+        block_entity_type: Option<u32>,
+    ) -> BlockEntitySync {
+        self.sync_block_entity.push((x, y, z, block_entity_type));
+        // This sink holds no records, so it cannot report a real outcome; the
+        // adapter ignores the value, and the *world-backed* gates below are what
+        // prove the four real outcomes.
+        BlockEntitySync::ChunkAbsent
     }
 }
 
@@ -365,5 +381,309 @@ fn block_entity_data_rejects_truncated_nbt() {
     assert!(
         result.is_err(),
         "a truncated block_entity_data must be rejected, not panic"
+    );
+}
+
+// ---- block-state writes create and remove block entities (issue #374) ------
+//
+// The three tests above prove the adapter *records* a `sync_block_entity` call.
+// That is not the claim that matters: a recording sink cannot tell a correct
+// type id from a wrong one, and cannot show a record appearing. So these gates
+// dispatch the same real packets into a real [`World`] holding a real loaded
+// chunk, and read the resulting `LoadedChunk::block_entities` — the exact field
+// `lodestone-shell`'s `block_entities::chest_spawns` iterates.
+//
+// The chunk really being loaded is the load-bearing precondition, and it is the
+// `world` species of vacuous test if it is not: every seam here is documented as
+// a silent no-op for an absent column, so a fixture that forgot to `load` would
+// see zero records and read as a broken feature. `world_with_chunk` is therefore
+// asserted non-empty of *sections* and each test asserts the state write landed
+// before it asserts anything about block entities.
+
+/// A `World` holding one loaded, all-air chunk at `pos`, deep enough for
+/// `y = 64`.
+fn world_with_chunk(pos: ChunkPos) -> World {
+    use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, PaletteKind};
+    let mut world = World::new();
+    let column = ChunkColumn::new(-64, 24, PaletteKind::block_states(), PaletteKind::biomes(), 0, 0);
+    world.load(
+        pos,
+        LoadedChunk::new(column, ColumnLight::new(26), Heightmaps::new(), Vec::new()),
+    );
+    world
+}
+
+/// The first block-state id of a named block, from the real 26.2 census.
+///
+/// Never a hardcoded state id: those shift with every data bump, and a stale one
+/// is the classic silently-passing fixture.
+fn first_state_named(name: &str) -> u32 {
+    (0..lodestone_data::block_states::STATE_COUNT)
+        .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+        .unwrap_or_else(|| panic!("{name} is not in the 26.2 block-state table"))
+}
+
+fn block_entity_types_at(world: &World, pos: ChunkPos) -> Vec<(u8, i16, u8, u32)> {
+    world
+        .get(pos)
+        .expect("chunk loaded")
+        .block_entities
+        .iter()
+        .map(|be| (be.rel_x, be.y, be.rel_z, be.type_id))
+        .collect()
+}
+
+fn block_update_payload(x: i32, y: i32, z: i32, state: u32) -> Vec<u8> {
+    let mut payload = pack_block_pos(x, y, z).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(state as i32));
+    payload
+}
+
+/// A `block_update` carrying a chest state must create the block entity, with
+/// the type id the census names — and a following `block_update` carrying air
+/// must remove it.
+///
+/// Both directions in one test on purpose: the removal half is only meaningful
+/// against a record that provably existed a moment earlier.
+#[test]
+fn a_block_update_creates_and_then_removes_a_chests_block_entity() {
+    let adapter = V770Adapter::new();
+    let pos = ChunkPos::new(0, 0);
+    let mut world = world_with_chunk(pos);
+    let chest = first_state_named("minecraft:chest");
+    let air = first_state_named("minecraft:air");
+    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest)
+        .expect("a chest state owns a block entity");
+
+    assert!(
+        block_entity_types_at(&world, pos).is_empty(),
+        "the fixture chunk must start with no block entities"
+    );
+
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_UPDATE,
+            &block_update_payload(3, 64, 9, chest),
+        )
+        .expect("handle block_update");
+
+    // The precondition, measured: the state write itself landed. Without this an
+    // unloaded-chunk fixture would make every assertion below vacuous.
+    assert_eq!(
+        world.get(pos).expect("chunk").column.get_block(3, 64, 9),
+        chest,
+        "the block state must have been written — if not, the chunk was not loaded \
+         and this gate proves nothing"
+    );
+    assert_eq!(
+        block_entity_types_at(&world, pos),
+        vec![(3, 64, 9, chest_type)],
+        "a placed chest must gain a block-entity record from the state alone, with \
+         no block_entity_data packet — this is issue #374"
+    );
+
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_UPDATE,
+            &block_update_payload(3, 64, 9, air),
+        )
+        .expect("handle block_update");
+
+    assert_eq!(
+        world.get(pos).expect("chunk").column.get_block(3, 64, 9),
+        air
+    );
+    assert!(
+        block_entity_types_at(&world, pos).is_empty(),
+        "breaking the chest must drop the record, or the renderer draws a chest in \
+         empty air: {:?}",
+        block_entity_types_at(&world, pos)
+    );
+}
+
+/// Plain terrain must not manufacture records. This is the control on the
+/// census's `None` sentinel: with a `0` sentinel every stone block would gain a
+/// `minecraft:furnace`, and the create half above would still pass.
+#[test]
+fn a_block_update_carrying_plain_terrain_creates_nothing() {
+    let adapter = V770Adapter::new();
+    let pos = ChunkPos::new(0, 0);
+    let mut world = world_with_chunk(pos);
+    let stone = first_state_named("minecraft:stone");
+
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_UPDATE,
+            &block_update_payload(3, 64, 9, stone),
+        )
+        .expect("handle block_update");
+
+    assert_eq!(
+        world.get(pos).expect("chunk").column.get_block(3, 64, 9),
+        stone,
+        "the state write must have landed for this absence to mean anything"
+    );
+    assert!(
+        block_entity_types_at(&world, pos).is_empty(),
+        "stone owns no block entity: {:?}",
+        block_entity_types_at(&world, pos)
+    );
+}
+
+/// `section_blocks_update` is the bulk path a piston, a `/fill` or a falling tree
+/// arrives on — it is *not* N `block_update`s, so it needs its own proof.
+///
+/// One packet places two chests and clears a third cell, all in one section, and
+/// the per-cell coordinate reconstruction (`section << 4 | rel`) is what is really
+/// under test: getting it wrong puts the record 16 blocks away, where it still
+/// exists and still fails to draw.
+#[test]
+fn a_section_blocks_update_creates_and_removes_per_cell() {
+    let adapter = V770Adapter::new();
+    let pos = ChunkPos::new(-1, 2);
+    let mut world = world_with_chunk(pos);
+    let chest = first_state_named("minecraft:chest");
+    let air = first_state_named("minecraft:air");
+    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+
+    // Seed a record that the packet's air cell must remove.
+    world.sync_block_entity(-16, 64, 34, Some(chest_type));
+    assert_eq!(block_entity_types_at(&world, pos), vec![(0, 64, 2, chest_type)]);
+
+    // Section (-1, 4, 2) covers blocks x -16..0, y 64..80, z 32..48.
+    let mut payload = pack_section_pos(-1, 4, 2).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(3));
+    for (rel_x, rel_y, rel_z, state) in [(0u8, 0u8, 2u8, air), (5, 1, 7, chest), (9, 0, 11, chest)] {
+        let local = (i64::from(rel_x) << 8) | (i64::from(rel_z) << 4) | i64::from(rel_y);
+        payload.extend_from_slice(&var_i64((i64::from(state) << 12) | local));
+    }
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::SECTION_BLOCKS_UPDATE,
+            &payload,
+        )
+        .expect("handle section_blocks_update");
+
+    let column = &world.get(pos).expect("chunk").column;
+    assert_eq!(column.get_block(5, 65, 7), chest, "the bulk state writes landed");
+    assert_eq!(column.get_block(0, 64, 2), air);
+
+    let mut records = block_entity_types_at(&world, pos);
+    records.sort_unstable();
+    assert_eq!(
+        records,
+        vec![(5, 65, 7, chest_type), (9, 64, 11, chest_type)],
+        "both chests in the batch must gain records at their own cells, and the \
+         cleared cell must lose its one"
+    );
+}
+
+/// The negative-coordinate case for the bulk path's `section << 4 | rel`
+/// reconstruction, which is where an arithmetic slip hides: section x `-1`,
+/// rel `15` is block `-1`, not `-16 - 15`.
+#[test]
+fn a_section_blocks_update_reconstructs_negative_coordinates() {
+    let adapter = V770Adapter::new();
+    let pos = ChunkPos::new(-1, -1);
+    let mut world = world_with_chunk(pos);
+    let chest = first_state_named("minecraft:chest");
+    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+
+    // Section (-1, -1, -1) covers blocks x/y/z -16..0.
+    let mut payload = pack_section_pos(-1, -1, -1).to_be_bytes().to_vec();
+    payload.extend_from_slice(&var_i32(1));
+    let local = (15i64 << 8) | (13i64 << 4) | 3i64; // rel_x 15, rel_z 13, rel_y 3
+    payload.extend_from_slice(&var_i64((i64::from(chest) << 12) | local));
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::SECTION_BLOCKS_UPDATE,
+            &payload,
+        )
+        .expect("handle section_blocks_update");
+
+    assert_eq!(
+        world.get(pos).expect("chunk").column.get_block(15, -13, 13),
+        chest,
+        "the state write must land at block (-1, -13, -3)"
+    );
+    assert_eq!(
+        block_entity_types_at(&world, pos),
+        vec![(15, -13, 13, chest_type)],
+        "the record must be keyed by the same cell the state was written to"
+    );
+}
+
+/// A `block_entity_data` for a chest whose state is already set must **not** wipe
+/// the record's payload on the next `block_update` that repeats the same state.
+///
+/// This is vanilla's `isValidBlockState` branch (`LevelChunk.java:332-347`): a
+/// same-type sync keeps the existing entity. A chest's contents arrive by
+/// `block_entity_data`, and the server re-sends `block_update` for a chest
+/// whenever its `type`/`facing` changes (a neighbouring chest making it a double),
+/// so getting this wrong empties chests as the player builds next to them.
+#[test]
+fn a_repeated_block_update_keeps_the_nbt_block_entity_data_delivered() {
+    let adapter = V770Adapter::new();
+    let pos = ChunkPos::new(0, 0);
+    let mut world = world_with_chunk(pos);
+    let chest = first_state_named("minecraft:chest");
+
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_UPDATE,
+            &block_update_payload(3, 64, 9, chest),
+        )
+        .expect("handle block_update");
+
+    // The server's payload for that chest.
+    let mut data = pack_block_pos(3, 64, 9).to_be_bytes().to_vec();
+    let chest_type = lodestone_data::block_entity_types::block_entity_type(chest).expect("type");
+    data.extend_from_slice(&var_i32(chest_type as i32));
+    data.extend_from_slice(&empty_compound());
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_ENTITY_DATA,
+            &data,
+        )
+        .expect("handle block_entity_data");
+    assert_eq!(
+        world.get(pos).expect("chunk").block_entities[0].nbt,
+        Nbt::Compound(vec![]),
+        "block_entity_data must reach the record the state write created"
+    );
+
+    // The same state again: keep, do not replace.
+    adapter
+        .handle_packet(
+            &mut world,
+            ConnectionState::Play,
+            play::clientbound::BLOCK_UPDATE,
+            &block_update_payload(3, 64, 9, chest),
+        )
+        .expect("handle block_update");
+    assert_eq!(
+        world.get(pos).expect("chunk").block_entities,
+        vec![lodestone_world::BlockEntity {
+            rel_x: 3,
+            rel_z: 9,
+            y: 64,
+            type_id: chest_type,
+            nbt: Nbt::Compound(vec![]),
+        }],
+        "a same-type state write must keep the record and its NBT, not recreate it"
     );
 }

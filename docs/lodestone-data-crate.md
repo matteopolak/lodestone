@@ -14,6 +14,21 @@ nineteen (`attribute_types`, `block_registry`, `block_solidity`,
 `sound_events`, `tools`) describe **the game**, not **the protocol**, and now
 live here instead.
 
+Tables added since the extraction live here too, and `block_entity_types`
+(issue #374) is the first: `state_id -> minecraft:block_entity_type` for all
+32,366 states, 4,567 of which own one across 49 distinct types. It is what lets a
+**block-state write** create or remove a block entity the way
+`LevelChunk.setBlockState` does — see
+[`block-entity-renderers.md`](block-entity-renderers.md). Its provenance is worth
+noting as a case where *both* Mojang reports are insufficient rather than merely
+stale: `blocks.json` is block properties only, and `registries.json` carries the
+49 type ids but nothing about which blocks each type covers. Recovered from
+`BlockEntityType.isValid(state)` (which *is*
+`validBlocks.contains(state.getBlock())`) rather than by calling
+`newBlockEntity`, so no live `BlockEntity` is constructed; the oracle throws
+rather than emitting a row if a state's `hasBlockEntity()` and its claiming-type
+count disagree, so the dump existing is evidence the invariant held everywhere.
+
 The move is why #204 (`ChunkWorld` classifying every block solid/air instead
 of reading the path-type census) is now a small wiring change rather than an
 architectural dead end — see `docs/roadmap/server-entities.md`.
@@ -41,7 +56,7 @@ architectural dead end — see `docs/roadmap/server-entities.md`.
     `registries.json`/`blocks.json` reports (`.cache/mc/26.2/generated/reports/`),
     no custom oracle program needed — the drift-guard test parses the report
     directly.
-  - **JVM-walked tables** (`hardness`, `collision_shapes`, `block_solidity`,
+  - **JVM-walked tables** (`block_entity_types`, `hardness`, `collision_shapes`, `block_solidity`,
     `entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`,
     `path_types`, `tools`) need an `oracle-java/*Oracle.java` program that boots
     the real 26.2 server headlessly (`SharedConstants.tryDetectVersion();

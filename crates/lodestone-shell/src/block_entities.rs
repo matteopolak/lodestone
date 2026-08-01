@@ -7,7 +7,9 @@
 //! pixels at every link:
 //!
 //! ```text
-//! level_chunk_with_light ─► BlockEntity::decode_list ─► LoadedChunk.block_entities
+//! level_chunk_with_light ─► BlockEntity::decode_list  ─► LoadedChunk.block_entities
+//! block_update           ─► World::sync_block_entity  ─┤   (create / keep /
+//! section_blocks_update  ─► World::sync_block_entity  ─┤    replace / remove)
 //! block_entity_data      ─► World::set_block_entity   ─┘
 //!                                                      │  ← nothing in the shell
 //!                                                      │    read this field: zero
@@ -16,6 +18,24 @@
 //!                                          chest_spawns() ─► gpu/block_entities.rs
 //! ```
 //!
+//! # There are **four** creation routes, not two (issue #374)
+//!
+//! The first version of that diagram listed only the chunk packet and
+//! `block_entity_data`, which was accurate and read as exhaustive. It was not:
+//! in vanilla, **writing a block state is what creates a block entity** — no
+//! packet involved (26.2 `LevelChunk.java:341`,
+//! `((EntityBlock)newBlock).newBlockEntity(pos, state)`) — and
+//! `block_entity_data` is only ever data for an entity that already exists. Our
+//! `block_update` / `section_blocks_update` arms wrote the state and nothing
+//! else, so a freshly placed chest had a state, no record, and this module's
+//! `for be in &chunk.block_entities` loop never saw it. It drew zero pixels and
+//! still *opened*, because interaction resolves from the block state.
+//!
+//! [`lodestone_world::World::sync_block_entity`] is the fix, driven by
+//! [`lodestone_data::block_entity_types`]. Its **removal** half matters as much
+//! as its creation half: without it, breaking a chest would leave a stale record
+//! and this module would keep drawing a chest in empty air.
+//!
 //! # Why the block-entity list is the candidate set, and the block state is the
 //! truth
 //!
@@ -23,10 +43,12 @@
 //! entity type* registry and an NBT payload. This module uses **neither** to
 //! decide what to draw:
 //!
-//! * The `type_id` would need a block-entity-type registry table the shell does
-//!   not have, and it does not distinguish a chest from a trapped chest anyway
-//!   (`minecraft:chest` and `minecraft:trapped_chest` are distinct types, but
-//!   copper chests all share one).
+//! * The `type_id` does not identify the block. `minecraft:chest` and
+//!   `minecraft:trapped_chest` are distinct types, but all four copper chests map
+//!   to `minecraft:chest` — measured, in
+//!   [`lodestone_data::block_entity_types`]' census. (That census now exists, so
+//!   the older reason given here — "the shell has no block-entity-type table" —
+//!   is stale as of issue #374; the type is still the wrong question.)
 //! * The NBT payload is `Nbt::End` for a chest the server sent no data for,
 //!   which is the common case.
 //!
@@ -74,7 +96,7 @@ use std::collections::HashMap;
 
 use glam::Vec3;
 use lodestone_render::{ChestHalf, ChestMaterial, ChestSpawn, horizontal_facing_yaw};
-use lodestone_world::ChunkPos;
+use lodestone_world::{ChunkPos, World};
 
 use crate::net::{SharedHandle, entity_light_at};
 
@@ -223,6 +245,75 @@ fn chest_material(state_id: u32) -> Option<ChestMaterial> {
     ChestMaterial::from_block_path(path)
 }
 
+/// Every block-entity position within [`VIEW_DISTANCE`] of `eye`, paired with the
+/// block state actually at it — the candidate set [`chest_spawns`] filters.
+///
+/// Split out of [`chest_spawns`] so a gate can drive the real gather against a
+/// real [`World`] without a live `ClientHandle`: this is the loop that reads
+/// `chunk.block_entities`, and therefore the loop that saw nothing at all before
+/// issue #374 was fixed. Everything `chest_spawns` adds on top of this and
+/// [`chest_spawn`] is lock handling and a light sample.
+#[must_use]
+pub fn chest_candidates(
+    world: &World,
+    chunks: impl IntoIterator<Item = ChunkPos>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32)> {
+    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
+    let mut candidates = Vec::new();
+    for pos in chunks {
+        let Some(chunk) = world.get(pos) else {
+            continue;
+        };
+        for be in &chunk.block_entities {
+            let x = pos.x * 16 + i32::from(be.rel_x);
+            let z = pos.z * 16 + i32::from(be.rel_z);
+            let y = i32::from(be.y);
+            // Vanilla's `shouldRender`: distance from the camera to the block
+            // *centre*, not its corner, against a flat 64.
+            let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+            if centre.distance_squared(eye) > cutoff {
+                continue;
+            }
+            // `rel_x`/`rel_z` are section-relative and `y` absolute, which is
+            // exactly `ChunkColumn::get_block`'s signature — no conversion, and
+            // no second lookup through a position that would have to be re-split.
+            let state_id = chunk
+                .column
+                .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
+            candidates.push(([x, y, z], state_id));
+        }
+    }
+    candidates
+}
+
+/// One candidate resolved into a [`ChestSpawn`], or `None` if the state at that
+/// position is not a chest.
+///
+/// The block **state** is the truth about appearance (see the module docs); the
+/// block-entity record only says the position is worth looking at. So a stale or
+/// orphan record whose state is not a chest resolves to `None` here and draws
+/// nothing — which is what makes `block_entity_data`'s create-on-miss fallback
+/// inert rather than a way to paint phantom chests.
+#[must_use]
+pub fn chest_spawn(
+    block: [i32; 3],
+    state_id: u32,
+    openness: f32,
+    light: u8,
+) -> Option<ChestSpawn> {
+    let material = chest_material(state_id)?;
+    let (facing_yaw_deg, half) = chest_orientation(state_id)?;
+    Some(ChestSpawn {
+        pos: block,
+        facing_yaw_deg,
+        half,
+        material,
+        openness,
+        light,
+    })
+}
+
 /// Every chest to draw this frame, gathered from the client-owned world's
 /// block-entity records.
 ///
@@ -250,7 +341,6 @@ pub fn chest_spawns(
     };
     let store = client.chunk_world();
     let mut out = Vec::new();
-    let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
 
     // `loaded_chunks()` takes the world's read lock itself, so it is called
     // *before* the guard below rather than inside it. `std::sync::RwLock` gives
@@ -262,56 +352,27 @@ pub fn chest_spawns(
     // Then one read lock for the whole gather. The guard is dropped before the
     // light-sampling loop below, for exactly the same reason:
     // `entity_light_at` reaches for the same lock.
-    let mut candidates: Vec<([i32; 3], u32)> = Vec::new();
-    {
+    let candidates = {
         let world = store.read();
-        for pos in chunks {
-            let Some(chunk) = world.get(ChunkPos {
-                x: pos.x,
-                z: pos.z,
-            }) else {
-                continue;
-            };
-            for be in &chunk.block_entities {
-                let x = pos.x * 16 + i32::from(be.rel_x);
-                let z = pos.z * 16 + i32::from(be.rel_z);
-                let y = i32::from(be.y);
-                // Vanilla's `shouldRender`: distance from the camera to the
-                // block *centre*, against a flat 64.
-                let centre = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                if centre.distance_squared(eye) > cutoff {
-                    continue;
-                }
-                // `rel_x`/`rel_z` are section-relative and `y` absolute, which is
-                // exactly `ChunkColumn::get_block`'s signature — no conversion,
-                // and no second lookup through a position that would have to be
-                // re-split.
-                let state_id =
-                    chunk
-                        .column
-                        .get_block(usize::from(be.rel_x), y, usize::from(be.rel_z));
-                candidates.push(([x, y, z], state_id));
-            }
-        }
-    }
+        // `loaded_chunks` speaks `lodestone_model::ChunkPos`; the world is keyed by
+        // `lodestone_world::ChunkPos`. Same two fields, distinct types.
+        chest_candidates(
+            &world,
+            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            eye,
+        )
+    };
 
     for (block, state_id) in candidates {
-        let Some(material) = chest_material(state_id) else {
-            continue;
-        };
-        let Some((facing_yaw_deg, half)) = chest_orientation(state_id) else {
-            continue;
-        };
+        // The light sample is the only thing here that needs the handle, which is
+        // why it is the only thing `chest_candidates`/`chest_spawn` do not cover.
         let light = entity_light_at(handle, block[0], block[1], block[2])
             .unwrap_or(lodestone_render::ENTITY_FULLBRIGHT);
-        out.push(ChestSpawn {
-            pos: block,
-            facing_yaw_deg,
-            half,
-            material,
-            openness: lids.openness(block, partial_tick),
-            light,
-        });
+        if let Some(spawn) =
+            chest_spawn(block, state_id, lids.openness(block, partial_tick), light)
+        {
+            out.push(spawn);
+        }
     }
     out.sort_by_key(|s| s.pos);
     out
