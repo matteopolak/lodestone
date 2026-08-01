@@ -9,15 +9,25 @@
 //!
 //! Two pieces, deliberately kept separate rather than fused:
 //!
-//! * [`ChunkWorld`] adapts the server's own solid/air [`ChunkColumn`] terrain
-//!   into a [`PathWorld`]. It is the exact analogue of `lodestone-render`'s
-//!   `world.rs`: this crate owns terrain *storage*, `lodestone-entity` owns the
-//!   traversal reasoning, and the adapter is the single seam between them. It is
-//!   version-free by construction — it only ever asks a block "are you solid?",
-//!   never "what block-state id are you?", so no registry knowledge leaks in.
-//!   (A version crate that maps real block-state ids to `PathType`/collision —
-//!   water malus, fence tops at 1.5 — is a separate, higher-fidelity adapter; it
-//!   belongs there, not in this version-free crate.)
+//! * [`ChunkWorld`] adapts the server's own [`ChunkColumn`] terrain (which
+//!   stores real vanilla block-state strings, not just a solid/air bit — see
+//!   its own doc comment) into a [`PathWorld`]. It is the exact analogue of
+//!   `lodestone-render`'s `world.rs`: this crate owns terrain *storage*,
+//!   `lodestone-entity` owns the traversal reasoning, and the adapter is the
+//!   single seam between them. It classifies each cell through the real
+//!   26.2 per-block-state census (`lodestone_data::path_types` +
+//!   `collision_shapes`) rather than a solid/air guess (issue #204) — and it
+//!   stays version-free doing it, because `lodestone-data` is 26.2 *game*
+//!   data (tags, collision geometry, ...) with no protocol dependency of its
+//!   own (`docs/lodestone-data-crate.md`), not a `crates/protocol/*` crate.
+//!   `base_path_type`/`collision_top` now distinguish water from lava from a
+//!   fence from a trapdoor from a damaging block, matching whatever vanilla's
+//!   `WalkNodeEvaluator.getPathTypeFromState`/`getFloorLevel` would say for
+//!   the same state. `PathWorld::collides` (the coarse jump-clearance/
+//!   diagonal-reach sweep) is unchanged and still reads
+//!   [`ChunkColumn::is_solid`] — vanilla's own collision sweep tests real
+//!   per-shape AABBs too, but that is a wider change than this issue asked
+//!   for; its own doc comment below says so.
 //! * [`MobSim`] owns the live mobs and advances them one tick at a time. The
 //!   world outlives the sim (the mobs borrow it), which is why `ChunkWorld` is a
 //!   value the caller holds and hands to [`MobSim::new`] by reference.
@@ -34,7 +44,9 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
+use lodestone_data::{block_states, collision_shapes, path_types};
 use lodestone_entity::ai::goals::{RandomLookAroundGoal, RandomStrollGoal};
 use lodestone_entity::ai::{Goal, GoalSelector, MobController, NavigatingMob};
 use lodestone_entity::attribute::default_attributes;
@@ -44,21 +56,118 @@ use lodestone_entity::{
     AttributeMap, DamageFlags, Defenses, HurtCooldown, HurtDecision, RayView, entity_damage,
     seen_percent,
 };
+use lodestone_model::PathType as CensusPathType;
 use lodestone_model::{Identifier, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
-use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::chunk::{AIR, ChunkColumn, ChunkSource};
 use crate::protocol::EntitySnapshot;
 use crate::mob_spawn::{
     DespawnOutcome, MobCategory, SpawnCandidateSource, SpawnRng, SpawnState, check_despawn,
 };
 
-/// A [`PathWorld`] over the server's version-free solid/air terrain.
+/// Translates `lodestone_model::PathType` (what the census in
+/// [`lodestone_data::path_types`] is keyed by) into
+/// `lodestone_entity::pathfinding::PathType` (what the A* search and malus
+/// table consume). The two enums are deliberately separate crates on
+/// opposite sides of the version seam — see `pathfinding/mod.rs`'s own doc
+/// ("a real adapter... maps real block-state ids to `PathType`") — so this is
+/// the translation layer that doc promises, not a rename. Every variant is
+/// named on both sides identically; the match is exhaustive on the census
+/// side so a future variant added to either enum fails to compile here
+/// instead of silently falling through.
+fn census_to_pathfinding_type(pt: CensusPathType) -> PathType {
+    match pt {
+        CensusPathType::Blocked => PathType::Blocked,
+        CensusPathType::Open => PathType::Open,
+        CensusPathType::Walkable => PathType::Walkable,
+        CensusPathType::WalkableDoor => PathType::WalkableDoor,
+        CensusPathType::Trapdoor => PathType::Trapdoor,
+        CensusPathType::PowderSnow => PathType::PowderSnow,
+        CensusPathType::OnTopOfPowderSnow => PathType::OnTopOfPowderSnow,
+        CensusPathType::Fence => PathType::Fence,
+        CensusPathType::Lava => PathType::Lava,
+        CensusPathType::Water => PathType::Water,
+        CensusPathType::WaterBorder => PathType::WaterBorder,
+        CensusPathType::Rail => PathType::Rail,
+        CensusPathType::UnpassableRail => PathType::UnpassableRail,
+        CensusPathType::FireInNeighbor => PathType::FireInNeighbor,
+        CensusPathType::Fire => PathType::Fire,
+        CensusPathType::DamagingInNeighbor => PathType::DamagingInNeighbor,
+        CensusPathType::Damaging => PathType::Damaging,
+        CensusPathType::DoorOpen => PathType::DoorOpen,
+        CensusPathType::DoorWoodClosed => PathType::DoorWoodClosed,
+        CensusPathType::DoorIronClosed => PathType::DoorIronClosed,
+        CensusPathType::Breach => PathType::Breach,
+        CensusPathType::Leaves => PathType::Leaves,
+        CensusPathType::StickyHoney => PathType::StickyHoney,
+        CensusPathType::Cocoa => PathType::Cocoa,
+        CensusPathType::DamageCautious => PathType::DamageCautious,
+        CensusPathType::OnTopOfTrapdoor => PathType::OnTopOfTrapdoor,
+        CensusPathType::BigMobsCloseToDanger => PathType::BigMobsCloseToDanger,
+    }
+}
+
+/// Renders block-state `id`'s canonical string (`"minecraft:name"`, or
+/// `"minecraft:name[k=v,k2=v2]"` with properties sorted by key) — the exact
+/// format [`ChunkColumn::block_state`] stores, so the two agree without
+/// either side special-casing the other. Mirrors
+/// `lodestone_worldgen::surface::block_json_key`'s key format, which is where
+/// that format is proven to match vanilla's own `BlockState.CODEC`
+/// canonicalisation (see that function's doc comment).
+fn canonical_state_string(id: u32) -> Option<String> {
+    let name = block_states::block_name(id)?;
+    let props = block_states::properties(id)?;
+    if props.is_empty() {
+        return Some(name.to_string());
+    }
+    let mut s = String::with_capacity(name.len() + 2);
+    s.push_str(name);
+    s.push('[');
+    for (i, (k, v)) in props.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(k);
+        s.push('=');
+        s.push_str(v);
+    }
+    s.push(']');
+    Some(s)
+}
+
+/// The reverse of [`canonical_state_string`]: every block-state id's canonical
+/// string, keyed back to its id. Built once (32,366 entries) and cached for
+/// the process lifetime — `lodestone-data` exposes id → name/properties but no
+/// name → id lookup (nothing has ever needed one before this), and `ChunkColumn`
+/// stores block states as those canonical strings, not ids, so `ChunkWorld`
+/// needs this to bridge the two.
+fn state_id_by_name() -> &'static HashMap<String, u32> {
+    static INDEX: OnceLock<HashMap<String, u32>> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut map = HashMap::with_capacity(block_states::STATE_COUNT as usize);
+        for id in 0..block_states::STATE_COUNT {
+            if let Some(key) = canonical_state_string(id) {
+                map.insert(key, id);
+            }
+        }
+        map
+    })
+}
+
+/// A [`PathWorld`] over the server's real per-block-state terrain.
 ///
 /// Backed by a sparse map of [`ChunkColumn`]s keyed by chunk coordinate. Missing
-/// columns and blocks outside the vertical range read as air, matching
-/// [`ChunkColumn::is_solid`]. A solid block is [`PathType::Blocked`] with a
-/// full-cell (`1.0`) collision top; everything else is [`PathType::Open`].
+/// columns and blocks outside the vertical range read as air. Each cell's
+/// canonical block-state string (what [`ChunkColumn::block_state`] stores) is
+/// resolved to its global block-state id and looked up in
+/// [`lodestone_data::path_types`] / [`lodestone_data::collision_shapes`] — the
+/// same 32,366-state census `WalkNodeEvaluator.getPathTypeFromState` produces
+/// in vanilla — so water, lava, fences, doors, rails and damaging blocks
+/// classify distinctly instead of collapsing to solid/air. A state that fails
+/// to resolve (should not happen for anything this crate's own worldgen or
+/// [`set_block`](ChunkWorld::set_block) ever writes) falls back to the old
+/// solid/air guess rather than panicking mid-tick.
 #[derive(Debug, Clone)]
 pub struct ChunkWorld {
     columns: HashMap<(i32, i32), ChunkColumn>,
@@ -122,7 +231,29 @@ impl ChunkWorld {
         col.set_solid(lx, y, lz, solid);
     }
 
-    /// Whether the block at world coordinates is solid.
+    /// Sets a single block's canonical state (e.g. `"minecraft:water"`,
+    /// `"minecraft:oak_fence"`, `"minecraft:oak_slab[type=bottom]"`) at world
+    /// coordinates, creating the owning column on demand. The richer sibling of
+    /// [`set_solid`](Self::set_solid): use this when a test or caller needs a
+    /// specific census-distinguishable state (water vs. lava vs. a fence)
+    /// rather than a bare solid/air bit.
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, name: &str) {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
+        let (min_y, height) = (self.min_y, self.height);
+        let col = self
+            .columns
+            .entry((cx, cz))
+            .or_insert_with(|| ChunkColumn::new(min_y, height));
+        col.set_block(lx, y, lz, name);
+    }
+
+    /// Whether the block at world coordinates is solid (neither air nor a
+    /// fluid). This is [`ChunkColumn::is_solid`]'s coarse topology view, still
+    /// used by [`collides`](PathWorld::collides) and as the fallback for a
+    /// block state the census cannot resolve; [`base_path_type`](PathWorld::base_path_type)
+    /// and [`collision_top`](PathWorld::collision_top) read the real per-state
+    /// census instead.
     #[must_use]
     pub fn is_solid(&self, x: i32, y: i32, z: i32) -> bool {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -130,6 +261,26 @@ impl ChunkWorld {
         self.columns
             .get(&(cx, cz))
             .is_some_and(|col| col.is_solid(lx, y, lz))
+    }
+
+    /// The canonical block-state string at world coordinates, or
+    /// `"minecraft:air"` for a missing column or an out-of-range Y — matching
+    /// [`ChunkColumn::block_state`]'s own out-of-range behaviour.
+    #[must_use]
+    fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
+        let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+        let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
+        self.columns
+            .get(&(cx, cz))
+            .map_or(AIR, |col| col.block_state(lx, y, lz))
+    }
+
+    /// Resolves the global block-state id at world coordinates through
+    /// [`state_id_by_name`], if the state at that cell is one the 26.2 census
+    /// knows about.
+    #[must_use]
+    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+        state_id_by_name().get(self.block_state(x, y, z)).copied()
     }
 }
 
@@ -139,20 +290,48 @@ impl PathWorld for ChunkWorld {
     }
 
     fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
-        if self.is_solid(x, y, z) {
-            PathType::Blocked
-        } else {
-            PathType::Open
-        }
+        // Real per-state classification: `WalkNodeEvaluator.getPathTypeFromState`
+        // via `lodestone_data::path_types` (issue #204). Falls back to the old
+        // solid/air guess only if the state string does not resolve to a known
+        // 26.2 state id — not expected in practice, since every writer of this
+        // world's terrain (worldgen, `set_solid`, `set_block`) emits canonical
+        // vanilla state strings, but a tick must never panic on a lookup miss.
+        self.state_id(x, y, z)
+            .and_then(path_types::path_type)
+            .map_or_else(
+                || {
+                    if self.is_solid(x, y, z) {
+                        PathType::Blocked
+                    } else {
+                        PathType::Open
+                    }
+                },
+                census_to_pathfinding_type,
+            )
     }
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
-        // Full solid cell = 1.0; air = 0.0. The server's worldgen terrain is
-        // solid/air only, so there are no partial (slab) or over-tall (fence,
-        // 1.5) shapes to represent yet. A richer block-state adapter in a version
-        // crate supplies those — clamping fences to 1.0 *here* would silently let
-        // the pathfinder route over pens, which is why that mapping lives there.
-        if self.is_solid(x, y, z) { 1.0 } else { 0.0 }
+        // Vanilla asks exactly this at `WalkNodeEvaluator.getFloorLevel(level,
+        // pos)` (.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/
+        // WalkNodeEvaluator.java:219-222): `shape.isEmpty() ? 0.0 :
+        // shape.max(Direction.Axis.Y)` over the block's real collision shape —
+        // not a naive "one block tall" assumption. So this is the max Y of the
+        // state's collision boxes (`lodestone_data::collision_shapes`), which is
+        // `1.0` for a full cube, `0.5` for a slab, `1.5` for a fence/wall (the
+        // reason a 0.6 step height cannot mount one), and `0.0` for an empty
+        // shape (air, water, lava, cobweb). Falls back to the old full-cell
+        // solid/air guess on the same not-expected-in-practice lookup miss as
+        // `base_path_type` above.
+        self.state_id(x, y, z)
+            .and_then(collision_shapes::collision_boxes)
+            .map_or_else(
+                || if self.is_solid(x, y, z) { 1.0 } else { 0.0 },
+                |boxes| {
+                    boxes
+                        .iter()
+                        .fold(0.0_f64, |acc, b| acc.max(f64::from(b.max[1])))
+                },
+            )
     }
 
     fn collides(&self, aabb: Aabb) -> bool {
@@ -160,6 +339,18 @@ impl PathWorld for ChunkWorld {
         // the box collides. The `-1e-7` on the max edges keeps a box that merely
         // *touches* a block face (shares a boundary) from counting as a collision,
         // matching vanilla's strict-overlap semantics.
+        //
+        // Honest scope note: this still tests coarse [`is_solid`](ChunkWorld::is_solid)
+        // full-cell occupancy, not the real per-state collision boxes
+        // `base_path_type`/`collision_top` now read. Vanilla's own
+        // `noCollision` does test real per-shape AABBs (a fence's `1.5`-tall box
+        // included), so a jump-clearance/diagonal-reach check against, say, a
+        // slab is coarser here than in vanilla. Issue #204 asked for real
+        // path-type classification and collision *tops*, which this closes;
+        // widening `collides` itself to real per-shape sweeps is a separate,
+        // larger change (every caller of this method would need auditing for
+        // the same "is a box in `Aabb` allowed to graze an over-tall shape"
+        // question) and is not part of this issue's scope.
         let x0 = aabb.min_x.floor() as i32;
         let x1 = (aabb.max_x - 1e-7).floor() as i32;
         let y0 = aabb.min_y.floor() as i32;
@@ -178,10 +369,10 @@ impl PathWorld for ChunkWorld {
         false
     }
 
-    fn is_water(&self, _x: i32, _y: i32, _z: i32) -> bool {
-        // Version-free solid/air terrain carries no fluids.
-        false
-    }
+    // `is_water` is no longer overridden: the trait default
+    // (`base_path_type(x, y, z) == PathType::Water`) is now correct, because
+    // `base_path_type` reads the real census instead of a solid/air guess that
+    // could never produce `PathType::Water` in the first place.
 }
 
 impl RayView for ChunkWorld {
