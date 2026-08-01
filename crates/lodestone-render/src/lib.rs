@@ -159,16 +159,22 @@ pub use screen_effects::{
 pub use section::{Cell, Face, SECTION_SIZE, SectionNeighborhood, SectionView, SpriteId, Surface};
 pub use section_arena::{INDEX_SIZE, SectionArena, draw_region_for};
 pub use sky::{
-    CLOUD_CELL_BLOCKS, CLOUD_HEIGHT, CLOUD_SCROLL_BLOCKS_PER_TICK, MOON_HEIGHT, MOON_SIZE,
-    SKY_DISC_RADIUS, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED, SUN_HEIGHT, SUN_SIZE,
-    build_star_field, celestial_angle_for_time_of_day, celestial_quad_positions,
-    celestial_quad_uvs, celestial_rotation_matrix, cloud_plane_geometry,
+    CLOUD_CELL_BLOCKS, CLOUD_HEIGHT, CLOUD_SCROLL_BLOCKS_PER_TICK, DAY_PERIOD_TICKS, MOON_HEIGHT,
+    MOON_SIZE, SKY_DISC_RADIUS, SKY_FOG_END_DISTANCE, STAR_COUNT, STAR_DISTANCE, STAR_FIELD_SEED,
+    SUN_HEIGHT, SUN_SIZE, SUNRISE_FAN_BOW, SUNRISE_FAN_HEIGHT, SUNRISE_FAN_RADIUS,
+    SUNRISE_FAN_VERTICES, SUNRISE_MIN_ALPHA, SUNRISE_STEPS, build_star_field,
+    celestial_angle_for_time_of_day, celestial_quad_positions, celestial_quad_uvs,
+    celestial_rotation_matrix, cloud_color_for_time_of_day, cloud_color_multiplier_for_time_of_day,
+    cloud_plane_geometry, fog_color_for_time_of_day, fog_color_multiplier_for_time_of_day,
     moon_phase_index_for_time_of_day, quad_indices, sky_color_for_time_of_day,
-    sky_disc_indices, sky_disc_positions, star_brightness_for_time_of_day,
+    sky_color_multiplier_for_time_of_day, sky_disc_indices, sky_disc_positions,
+    star_brightness_for_time_of_day, sunrise_fan_indices, sunrise_fan_positions,
+    sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
 };
 pub use sky_pipeline::{
     CelestialPipeline, CelestialVertex, CloudPipeline, CloudVertex, SkyDiscPipeline,
-    SkyDiscVertex, SkyRenderer, StarPipeline, StarVertex,
+    SkyDiscVertex, SkyFrame, SkyRenderer, SkyVertex, StarPipeline, StarVertex, SunrisePipeline,
+    SunriseVertex,
 };
 pub use strategy::{
     DrawRegion, DrawStrategy, MdiCount, MdiZeroInstance, PerDraw, StrategyError, StrategyKind,

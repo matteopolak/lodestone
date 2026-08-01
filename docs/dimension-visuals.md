@@ -96,9 +96,27 @@ This pass had already added the presets to `lodestone-render`:
   dimension type's `visual/fog_color`), reusing the existing
   `for_view_distance` shape rather than vanilla's separate
   `sky_color`/`fog_color` distance blend (`AtmosphericFogEnvironment`'s
-  `skyColorMixFactor`), and not attempting the End's actual starfield sky —
-  nothing in this renderer draws a sky dome at all today, overworld included
-  (the "sky" is only ever the fog colour the frame clears to).
+  `skyColorMixFactor`), and not attempting the End's actual starfield sky.
+
+  > **Stale, corrected.** This bullet used to end "nothing in this renderer draws
+  > a sky dome at all today, overworld included (the 'sky' is only ever the fog
+  > colour the frame clears to)". That was true when written and is now false: the
+  > overworld sky dome, sun, moon, stars, clouds, a per-fragment
+  > horizon-to-zenith gradient, the sunrise/sunset band and void fog all render —
+  > see [the sky pass](./sky-and-air-bubbles.md). Issue #96 was filed quoting this
+  > sentence as evidence, which is exactly `CLAUDE.md` rule 2: the claim was
+  > evidenced when written and nothing about it looked wrong on inspection. The
+  > End specifically still has no dome (`DimensionType.Skybox.END` is a different
+  > draw — a cube-mapped `end_sky.png`, not the overworld disc), so flat fog
+  > remains the right approximation *there*.
+- `lodestone_render::fog::VoidFog` — the world-bottom darkening
+  (`FogRenderer.computeFogColor`'s quadratic `darkness` term). Consumed by the
+  sky pass via `SkyFrame::with_void_fog`; not yet applied to the *distance* fog
+  or the frame clear, which are computed in `sim.rs`/`app.rs`.
+- `lodestone_render::fog::multiply_gamma` / `scale_gamma` — gamma-space colour
+  arithmetic, because vanilla's `ARGB.multiply` is `red(lhs)*red(rhs)/255` on raw
+  sRGB bytes and its fog darkening scales `ARGB.redFloat(color)`. Doing either in
+  linear space pulls the factor toward 1.0 and washes the result out.
 - `lodestone_render::fog::srgb_u8_to_linear` — a CPU-side sRGB→linear helper
   (the same piecewise EOTF the model/entity WGSL shaders already implement),
   so future dimension colours are computed from their real sRGB hex rather than
