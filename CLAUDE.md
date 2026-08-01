@@ -166,6 +166,17 @@ calls the system directly passes either way, so nothing catches it. This has now
 **twice in one session** (`EntityDamaged`/`EntityHurtAnimation`, then air supply). When adding an
 ingest system, the switch is the first thing to check, not the last.
 
+**Generalise it: every terminal `_ =>` arm in an event router is an island factory, and there are at
+least two.** The second is **`net.rs`'s `forward`**, where `BLOCK_EVENT` was decoded, tested, and
+fell straight through the catch-all — so chest lids could never animate no matter how correct the
+renderer was. The shape is identical to `handles_event` and the tell is the same: a `_ => {}` that
+silently discards is indistinguishable, at the call site, from one that has nothing left to handle.
+Note the two routers are **not** interchangeable, and assuming they are wastes a search: ECS-handled
+events go through `SharedState::apply`'s switch, while block events travel the shell's own
+`ClientEvent` stream, so the chest work needed **no** `handles_event` arm at all. When a decoded
+packet reaches no pixels, grep for its variant in *every* router before concluding the decode is
+wrong.
+
 ### 2. Re-verify before routing around "X doesn't exist yet"
 
 Staleness is the most common defect in the written record — **seven instances in one session**.
