@@ -54,13 +54,16 @@ use crate::particles::{ParticleInstance, ParticleRenderer};
 mod debug_lines;
 mod entities;
 mod first_person;
+mod nametag;
 mod outline;
+mod screen_effects;
 mod sources;
 mod stats;
 mod terrain;
 
 pub use debug_lines::{DebugLineVertex, debug_line_vertices};
 pub use outline::CrackTarget;
+pub use screen_effects::ScreenEffects;
 pub use sources::{
     EntityLightSource, HandSwingSource, MainHandSource, OutlineShapeSource, SkyDarkenSource,
     ThirdPersonBodySource, ThirdPersonBodyState,
@@ -70,6 +73,7 @@ pub use stats::RenderStats;
 use debug_lines::{DebugLineRenderer, DebugLinesSource};
 use entities::EntityRenderer;
 use first_person::FirstPersonHand;
+use nametag::NameTagRenderer;
 use outline::OutlineRenderer;
 use sources::TimeOfDaySource;
 use terrain::{
@@ -178,6 +182,20 @@ pub struct RenderState {
     /// [`RenderState::set_time_of_day_source`] — the same "unset means noon"
     /// convention [`SkyDarkenSource`] already uses.
     time_of_day: TimeOfDaySource,
+    /// The underwater/fire screen-overlay pass (issues #108, #112), built once
+    /// the vanilla `underwater.png`/`fire_1.png` textures are available. `None`
+    /// — no `client.jar`, a headless test, or simply before
+    /// [`RenderState::install_screen_effects`] runs — draws neither overlay,
+    /// the same "no pass installed, nothing extra drawn" convention
+    /// [`Self::sky`] uses.
+    screen_effects: Option<lodestone_render::ScreenEffectRenderer>,
+    /// Billboarded entity/player nametags (issue #100). Always constructed —
+    /// unlike [`Self::sky`]/[`Self::screen_effects`], there is no "install"
+    /// step: [`NameTagRenderer::new`] loads its own jar-sourced font
+    /// (fail-open to drawing nothing, same contract as
+    /// [`crate::hud::vanilla_font::VanillaFont::shared`]), so nothing
+    /// downstream needs to know whether it succeeded.
+    nametag: NameTagRenderer,
 }
 
 impl RenderState {
@@ -221,6 +239,7 @@ impl RenderState {
         let outline = OutlineRenderer::new(device, color_format);
         let debug_lines = DebugLineRenderer::new(device, color_format);
         let entities = EntityRenderer::new(device, queue, color_format);
+        let nametag = NameTagRenderer::new(device, color_format);
 
         // The live vanilla atlas carries baked model geometry; build the model
         // render pass over its *complete* atlas (whose UVs the baked quads index,
@@ -355,6 +374,10 @@ impl RenderState {
             // Permanent noon until the shell installs a world clock; see
             // `set_time_of_day_source`.
             time_of_day: TimeOfDaySource::default(),
+            // No underwater/fire overlay until the shell installs one; see
+            // `install_screen_effects`.
+            screen_effects: None,
+            nametag,
             // A calm sky blue, so terrain reads clearly against it.
             clear: wgpu::Color {
                 r: SKY_COLOR[0] as f64,
@@ -487,6 +510,24 @@ impl RenderState {
     #[must_use]
     pub fn has_sky(&self) -> bool {
         self.sky.is_some()
+    }
+
+    /// Install the underwater/fire screen-overlay pass, built once by the
+    /// caller (typically `crate::resources::load_screen_effects`, which owns
+    /// the `client.jar` IO this file deliberately has none of — the same
+    /// split [`install_sky`](Self::install_sky) uses). `None` — no call, a
+    /// jar-less run — leaves [`render_inner`](Self::render_inner) drawing
+    /// neither overlay, whatever [`ScreenEffects`] it is handed.
+    pub fn install_screen_effects(&mut self, fx: lodestone_render::ScreenEffectRenderer) {
+        self.screen_effects = Some(fx);
+    }
+
+    /// Whether the screen-overlay pass is installed. Same reason as
+    /// [`has_sky`](Self::has_sky): a wrong *value* and a missing *wiring* must
+    /// not look identical from outside this module.
+    #[must_use]
+    pub fn has_screen_effects(&self) -> bool {
+        self.screen_effects.is_some()
     }
 
     /// Install the world clock the sky pass reads (see [`TimeOfDaySource`]).
@@ -851,7 +892,16 @@ impl RenderState {
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
     ) -> RenderStats {
-        self.render_inner(device, queue, view, camera, outline, entities, None)
+        self.render_inner(
+            device,
+            queue,
+            view,
+            camera,
+            outline,
+            entities,
+            None,
+            ScreenEffects::default(),
+        )
     }
 
     /// Like [`render`](Self::render), but also draws the progressive mining-crack
@@ -867,7 +917,74 @@ impl RenderState {
         entities: &[EntityDraw],
         crack: CrackTarget,
     ) -> RenderStats {
-        self.render_inner(device, queue, view, camera, outline, entities, Some(crack))
+        self.render_inner(
+            device,
+            queue,
+            view,
+            camera,
+            outline,
+            entities,
+            Some(crack),
+            ScreenEffects::default(),
+        )
+    }
+
+    /// Like [`render`](Self::render), but also drives the underwater/fire
+    /// screen-overlay pass (issues #108, #112) from `screen_effects`. A
+    /// separate method rather than a new required parameter on
+    /// [`render`](Self::render)/[`render_with_crack`](Self::render_with_crack)
+    /// so the ~15 existing call sites across the test suite need no change —
+    /// see `docs/screen-overlays.md`.
+    #[must_use]
+    pub fn render_with_effects(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        camera: &Camera,
+        outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
+        screen_effects: ScreenEffects,
+    ) -> RenderStats {
+        self.render_inner(
+            device,
+            queue,
+            view,
+            camera,
+            outline,
+            entities,
+            None,
+            screen_effects,
+        )
+    }
+
+    /// [`render_with_crack`](Self::render_with_crack) +
+    /// [`render_with_effects`](Self::render_with_effects) together — the shape
+    /// `app.rs`'s real per-frame call site needs (mining and the overlays are
+    /// both possible at once).
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_crack_and_effects(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        camera: &Camera,
+        outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
+        crack: CrackTarget,
+        screen_effects: ScreenEffects,
+    ) -> RenderStats {
+        self.render_inner(
+            device,
+            queue,
+            view,
+            camera,
+            outline,
+            entities,
+            Some(crack),
+            screen_effects,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -880,6 +997,7 @@ impl RenderState {
         outline: Option<[i32; 3]>,
         entities: &[EntityDraw],
         crack: Option<CrackTarget>,
+        screen_effects: ScreenEffects,
     ) -> RenderStats {
         let view_proj = camera.view_projection().to_cols_array_2d();
 
@@ -941,6 +1059,13 @@ impl RenderState {
             }
             None => entities,
         };
+
+        // Nametag vertices (issue #100), same "upload before the pass opens"
+        // constraint as outline/debug-lines above. Reads the same
+        // (possibly body-extended) `entities` slice; the local third-person
+        // body's own draw always carries `name_tag: None`
+        // (`ThirdPersonBodyState::into_draw`), so this is a no-op for it.
+        let name_tag_counts = self.nametag.prepare(queue, &view_proj, camera, entities);
 
         // Resolve, frustum-cull and upload entity instances *before* the pass —
         // buffers can't be created mid-pass, and the entity camera uniform (no
@@ -1291,6 +1416,12 @@ impl RenderState {
             // is a diagnostic overlay, so it should read clearly over
             // everything real that was drawn this frame.
             self.debug_lines.draw(&mut pass, debug_line_count);
+
+            // Nametags (issue #100) last of all, real depth-tested against
+            // this same terrain+entity depth buffer — see `gpu/nametag.rs`'s
+            // module doc for the normal/see-through split and their exact
+            // depth settings.
+            self.nametag.draw(&mut pass, name_tag_counts);
         }
 
         // The first-person arm/held-item pass: its own pass, with the depth
@@ -1298,6 +1429,31 @@ impl RenderState {
         // clear is there and why it is not optional.
         if let Some(hand) = &first_person_hand {
             self.draw_first_person_hand(&mut encoder, view, hand, &mut stats);
+        }
+
+        // The underwater/fire screen overlays (issues #108, #112): their own
+        // `Load` passes (see `ScreenEffectRenderer::draw_underwater`/`draw_fire`'s
+        // doc — they must not erase the world/hand just drawn), run last,
+        // matching vanilla's own order (`GameRenderer.java:568-577`: the hand,
+        // then `screenEffectRenderer.submit`, then the HUD/feature renderers —
+        // this shell's HUD draws in a later, separate pass in `app.rs`). Gated
+        // on first-person and not spectator, matching vanilla's
+        // `isFirstPerson && !isSpectator` (`ScreenEffectRenderer.submit`); this
+        // crate has no "sleeping" state yet, so that conjunct is omitted — see
+        // `ScreenEffects::any_active`'s doc.
+        if let Some(fx) = &self.screen_effects {
+            let first_person = !stats.third_person_body_drawn;
+            if screen_effects.any_active(first_person) {
+                if screen_effects.eye_in_water {
+                    let light = self.entity_light.sample(camera.position);
+                    fx.draw_underwater(queue, &mut encoder, view, camera.yaw, camera.pitch, light);
+                    stats.underwater_overlay_drawn = true;
+                }
+                if screen_effects.on_fire {
+                    fx.draw_fire(queue, &mut encoder, view, screen_effects.tick);
+                    stats.fire_overlay_drawn = true;
+                }
+            }
         }
 
         queue.submit(std::iter::once(encoder.finish()));
@@ -2209,6 +2365,7 @@ mod tests {
             },
             wool: None,
             count: 1,
+            name_tag: None,
         };
 
         let instance = models
@@ -2977,6 +3134,7 @@ mod tests {
                 equipment: Vec::new(),
                 wool: None,
                 count: 1,
+                name_tag: None,
             },
             // A second pig behind the camera so frustum culling has something
             // real to remove — the anti-vacuity guard on the cull path.
@@ -2993,6 +3151,7 @@ mod tests {
                 equipment: Vec::new(),
                 wool: None,
                 count: 1,
+                name_tag: None,
             },
         ];
 
@@ -3162,6 +3321,7 @@ mod tests {
             equipment: Vec::new(),
             wool: None,
             count: 1,
+            name_tag: None,
         }];
 
         // Fraction of a mob's bright pixels whose *hue direction* is far from the

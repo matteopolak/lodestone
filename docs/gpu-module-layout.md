@@ -39,6 +39,12 @@ no test file was edited.
   first-person hand pass: `prepare_first_person_hand`, `hand_light`,
   `write_hand_camera`, and `draw_first_person_hand` (the render-pass
   recording, extracted out of `render_inner` as a same-behaviour method move).
+- `gpu/nametag.rs` — `NameTagRenderer` (issue #100): the billboarded
+  entity/player nametag pass, its own two-pipeline shader (a depth-tested
+  normal draw plus a depth-testless see-through draw), and the world-space
+  glyph-quad layout that reuses `lodestone_assets::font::RasterFont` directly
+  rather than `hud/vanilla_font.rs` (see that file's module doc for why). See
+  `docs/entity-nametags.md`.
 
 ## How to change it, and the gotchas
 
