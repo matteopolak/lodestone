@@ -133,8 +133,17 @@ pub const NO_TINT: u32 = 0x00FF_FFFF;
 /// 0)` — sampled whenever `LivingEntityRenderer.java:281` sets
 /// `state.hasRedOverlay = entity.hurtTime > 0 || entity.deathTime > 0`. `178` is
 /// that overlay's alpha byte; `255, 0, 0` is pure red, which is why the blend
-/// below mixes toward `vec3(1.0, 0.0, 0.0)` rather than reading a colour out of
-/// this word.
+/// below mixes against a literal `vec3(1.0, 0.0, 0.0)` rather than reading a
+/// colour out of this word.
+///
+/// **`178` is how much of the entity's own colour survives, not how much red is
+/// added.** Vanilla's `entity.fsh:57` is
+/// `mix(overlayColor.rgb, color.rgb, overlayColor.a)`, so the alpha is the weight
+/// on `color`, giving roughly 30% red. This comment previously described the
+/// constant correctly and its *role* not at all, and the shader below was written
+/// with the arguments the other way round — 70% red (issue #371). If you are
+/// tempted to tune this number because the flash looks wrong, check the argument
+/// order first.
 pub const HURT_OVERLAY_ALPHA_BYTE: u32 = 178;
 
 impl EntityInstanceRaw {
@@ -1012,7 +1021,34 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // toward black instead of washing it red. Blended in the same gamma-space
     // stage as the tint/shade multiply above, per this shader's convention that
     // colour math happens in gamma bytes, not linear light.
-    let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), in.overlay);
+    // The overlay strength was inverted (issue #371). Vanilla's `entity.fsh:57`:
+    //
+    //     color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);
+    //
+    // The alpha weights **the entity's own colour**, not the red. At vanilla's
+    // hurt alpha of `178/255 = 0.698` that is `0.698*colour + 0.302*red` — about
+    // 30% red. We had `mix(shaded, red, 0.698)`, i.e. 70% red, with the mob's own
+    // colour the minority contributor. That is what shipped, and what a player
+    // reported as far too red.
+    //
+    // Simply swapping the two arguments is wrong, and fails in the loudest
+    // possible way: `mix(a, b, t)` is `a` at `t = 0`, and our `overlay` is **0**
+    // for an unharmed entity, so it would paint every mob — and the first-person
+    // arm — solid red. Vanilla has no such case because its no-overlay state is
+    // alpha *near 1*: `OverlayTexture`'s `y >= 8` rows are white at high alpha,
+    // and `mix(white, colour, ~1)` is a no-op. Our sentinel is the opposite
+    // polarity, so the blend has to be written against ours rather than
+    // transliterated from vanilla's.
+    //
+    // Hence: `overlay` stays vanilla's alpha with 0 meaning absent, and the red
+    // weight is its complement, taken only when the overlay is actually present.
+    //
+    // No double quotes anywhere in this comment: it lives inside a Rust raw
+    // string, so one would end the shader source early and rustc would then parse
+    // the remaining English as code. That cost two builds on this edit alone, the
+    // second because the fix itself spelled out a raw-string literal.
+    let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
+    let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
     let lit = srgb_to_linear(overlaid);
     // Fade toward the fog colour by view distance, on the same curve as terrain,
     // so a mob at the render-distance edge or under water dissolves with the
@@ -1101,6 +1137,36 @@ mod tests {
         assert_eq!((leather_hurt.tint >> 24) & 0xFF, HURT_OVERLAY_ALPHA_BYTE);
     }
 
+    /// [`InstanceTint`] is the thing that stops the overlay flag from being a
+    /// second, parallel slice nothing keeps in step with the tints. Both halves
+    /// must survive the fold into one packed word, in both orders, and
+    /// [`InstanceTint::NONE`] must be indistinguishable from the pre-overlay
+    /// `NO_TINT` — otherwise every undyed mob in the world changes colour the
+    /// day this type lands.
+    #[test]
+    fn instance_tint_carries_both_halves_into_one_packed_word() {
+        let m = glam::Mat4::IDENTITY;
+        let raw = |t: InstanceTint| t.apply(EntityInstanceRaw::new(m, 0)).tint;
+
+        assert_eq!(raw(InstanceTint::NONE), NO_TINT);
+        assert_eq!(InstanceTint::default(), InstanceTint::NONE);
+
+        let leather = lodestone_assets::equipment::UNDYED_LEATHER_RGB;
+        assert_eq!(raw(InstanceTint::rgb(leather)) & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!(raw(InstanceTint::rgb(leather)) >> 24, 0);
+
+        // The case a parallel `&[bool]` gets wrong: a dyed *and* hurt instance.
+        let both = InstanceTint::rgb(leather).with_hurt(true);
+        assert_eq!(raw(both) & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!(raw(both) >> 24, HURT_OVERLAY_ALPHA_BYTE);
+
+        // Hurt with no dye still leaves the texel's own colour alone.
+        let hurt_only = InstanceTint::NONE.with_hurt(true);
+        assert_eq!(raw(hurt_only) & 0x00FF_FFFF, NO_TINT);
+        assert_eq!(raw(hurt_only) >> 24, HURT_OVERLAY_ALPHA_BYTE);
+        assert_eq!(raw(hurt_only.with_hurt(false)), NO_TINT);
+    }
+
     /// The uniform the entity shader's `Camera` struct maps onto: 80 bytes of
     /// camera (a `mat4x4` plus a `vec4`) then 48 of fog (three `vec4`s). If this
     /// ever stops matching the model pipeline's uniform, the two passes would fog
@@ -1139,36 +1205,6 @@ mod tests {
             [1.0, 2.0, 3.0],
         );
         let base = EntityCameraUniform {
-    /// [`InstanceTint`] is the thing that stops the overlay flag from being a
-    /// second, parallel slice nothing keeps in step with the tints. Both halves
-    /// must survive the fold into one packed word, in both orders, and
-    /// [`InstanceTint::NONE`] must be indistinguishable from the pre-overlay
-    /// `NO_TINT` — otherwise every undyed mob in the world changes colour the
-    /// day this type lands.
-    #[test]
-    fn instance_tint_carries_both_halves_into_one_packed_word() {
-        let m = glam::Mat4::IDENTITY;
-        let raw = |t: InstanceTint| t.apply(EntityInstanceRaw::new(m, 0)).tint;
-
-        assert_eq!(raw(InstanceTint::NONE), NO_TINT);
-        assert_eq!(InstanceTint::default(), InstanceTint::NONE);
-
-        let leather = lodestone_assets::equipment::UNDYED_LEATHER_RGB;
-        assert_eq!(raw(InstanceTint::rgb(leather)) & 0x00FF_FFFF, 0x00A0_6540);
-        assert_eq!(raw(InstanceTint::rgb(leather)) >> 24, 0);
-
-        // The case a parallel `&[bool]` gets wrong: a dyed *and* hurt instance.
-        let both = InstanceTint::rgb(leather).with_hurt(true);
-        assert_eq!(raw(both) & 0x00FF_FFFF, 0x00A0_6540);
-        assert_eq!(raw(both) >> 24, HURT_OVERLAY_ALPHA_BYTE);
-
-        // Hurt with no dye still leaves the texel's own colour alone.
-        let hurt_only = InstanceTint::NONE.with_hurt(true);
-        assert_eq!(raw(hurt_only) & 0x00FF_FFFF, NO_TINT);
-        assert_eq!(raw(hurt_only) >> 24, HURT_OVERLAY_ALPHA_BYTE);
-        assert_eq!(raw(hurt_only.with_hurt(false)), NO_TINT);
-    }
-
             camera: CameraUniform {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 section_origin: [0.0; 4],
