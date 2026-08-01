@@ -32,19 +32,62 @@
 //!   mini-block from geometry baked against the *block* atlas
 //!   ([`BlockModels::item`]).
 //!
-//! [`IconPart::Special`] (chests, shulkers, shields, banners) is a code-driven
-//! renderer we do not have, and deliberately draws nothing rather than a wrong
-//! or missing-texture square — but its count and durability still draw, keeping
-//! the well honest.
+//! * [`IconPart::Special`] — the ex-`builtin/entity` family (chest, shulker box,
+//!   banner, shield, …), which in vanilla has **no item model and no block
+//!   model**: every triangle comes from a block-entity renderer, and
+//!   `BlockEntityWithoutLevelRenderer` reuses that same renderer for the
+//!   inventory icon. We do the same, through [`SpecialIcons`] — see
+//!   [`special_icon_geometry`] for which `kind`s have ported geometry today.
+//!
+//! # `Special` is a third stream, not a third case of the second
+//!
+//! It would be natural to expect a chest icon to ride the [`IconPart::Model`]
+//! stream. It cannot, and the reason is the texture rather than the geometry.
+//! The vertices, indices and part hierarchy transfer **unchanged** —
+//! `BlockEntityMesh::part_transforms` takes an arbitrary placement matrix, so
+//! [`gui_item_pose`] slots in exactly where `block_entity_placement_matrix` goes
+//! in the world — but a chest's UVs are `[0,1]` against a standalone 64×64
+//! `entity/chest/*.png`, while the model stream binds the stitched **block**
+//! atlas, which contains nothing under `textures/entity/`. Routing a chest
+//! through [`ModelIcons`] samples arbitrary block texels.
+//!
+//! And [`ModelIcons`] cannot simply bind a second texture: it spends **all four**
+//! bind groups (camera / atlas / palette / anim), which is `wgpu`'s portable
+//! `max_bind_groups` floor. So this pass reuses `EntityPipeline` instead, which
+//! spends exactly **two**, consumes the same `ModelVertex` layout, and is
+//! depth-tested against the depth attachment [`IconRenderer::draw_models`]
+//! already clears — so it records into that *existing* pass and adds no fifth
+//! group anywhere. See `docs/block-entity-renderers.md`.
+//!
+//! # Why not the `base` sprite fallback
+//!
+//! [`IconPart::Special`] carries a `base` model "the renderer can fall back to",
+//! and drawing it as a flat quad looks like the cheap way out. It is not a way
+//! out at all: **every one of the ten special `base` models in 26.2 has no
+//! `elements` and no `layer0`** — only a `particle` texture, which is a *block*
+//! texture (`block/oak_planks` for a chest, `block/soul_sand` for a skull) and is
+//! not in the item atlas. `icon.rs`'s `classify_model` therefore classifies them
+//! as undrawable, so the "fallback" draws the same zero pixels as no fallback at
+//! all. Measured against the real jar, not assumed — the check is
+//! `the_base_sprite_fallback_is_vacuous_for_every_special_kind` in
+//! `tests/hotbar_special_item_pixels.rs`.
+//!
+//! What `base` *does* carry, and what this module uses it for, is the real
+//! `display` map — a chest's `gui` pose is `[30, 45, 0]` at scale `0.625`,
+//! authored on `item/template_chest`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use glam::Mat4;
 use lodestone_assets::font::metrics as font_metrics;
-use lodestone_assets::{IconPart, ItemAtlas, ResourceLocation};
+use lodestone_assets::{DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ResourceLocation};
 use lodestone_render::{
-    BlockModels, GpuAtlas, GuiSpriteQuad, ModelPipeline, ModelVertex, RenderLayer, gui_item_pose,
-    gui_ortho, mesh_item_quads, model_shared_camera_buffer, section_origin_buffer,
-    update_model_shared_camera_buffer,
+    BlockEntityModelSet, BlockModels, CHEST_SINGLE, CameraUniform, ChestHalf, ChestMaterial,
+    EntityCameraUniform, EntityPipeline, GpuAtlas, GpuEntityModel, GuiSpriteQuad, ModelPipeline,
+    ModelVertex, RenderLayer, chest_texture_stem, chest_texture_stems, entity_camera_buffer,
+    fog::FogUniform, gui_item_pose, gui_ortho, mesh_item_quads, model_shared_camera_buffer,
+    section_origin_buffer, update_model_shared_camera_buffer, upload_instances,
 };
 
 use super::font;
@@ -97,6 +140,77 @@ pub(crate) struct IconSink<'o> {
     pub sprite: &'o mut Vec<f32>,
     /// 3-D block-item geometry, already posed into GUI pixel space.
     pub model: &'o mut Vec<ModelVertex>,
+    /// One entry per [`IconPart::Special`] slot with ported geometry: *which*
+    /// block-entity mesh and sheet to draw, and the placement matrix to draw it
+    /// under. Unlike [`Self::model`] this is **not** vertices — the block-entity
+    /// meshes are uploaded once at attach time and posed per frame through a
+    /// per-part instance buffer, exactly as the world pass does, so a chest icon
+    /// costs ~14 matrices rather than a re-transformed vertex copy.
+    pub special: &'o mut Vec<SpecialIconDraw>,
+}
+
+/// One special-renderer icon to draw: a baked block-entity mesh, the sheet it
+/// samples, and where in GUI pixel space to put it.
+///
+/// `placement` goes straight into `BlockEntityMesh::part_transforms` in place of
+/// the world's `block_entity_placement_matrix` — that substitution is the whole
+/// seam between the world's chest and the one in your hand.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SpecialIconDraw {
+    /// The [`BlockEntityModelSet`] model name, e.g. [`CHEST_SINGLE`].
+    pub model: &'static str,
+    /// The jar texture stem, e.g. `entity/chest/normal`.
+    pub texture: &'static str,
+    /// GUI-pixel-space placement, from [`gui_item_pose`].
+    pub placement: Mat4,
+}
+
+/// The block-entity mesh and sheet for one special-renderer `kind`, keyed on the
+/// **`kind`** and not on the item id.
+///
+/// Keying on the item id is the obvious shortcut and it is wrong: the family is
+/// ten `kind`s over 91 item definitions (chest, trapped chest, ender chest, four
+/// weathering stages of copper chest, 17 shulker box colours, 16 banners, shield,
+/// trident, conduit, decorated pot, six heads, player head, and 32 copper golem
+/// statue states). A chest-only `match` on `minecraft:chest` the item leaves the
+/// other twelve chest definitions invisible too.
+///
+/// The item id is still consulted, but only *within* a `kind`, to pick the sheet:
+/// `kind` says "this is a chest", the item path says "an oxidized copper one".
+/// That is exactly vanilla's split — `ChestSpecialRenderer.Unbaked` carries the
+/// `texture` field the item definition names, and `chest_type` defaults to
+/// `SINGLE`, which is why an item chest is always the single-chest layer and
+/// never one of the two double halves.
+///
+/// # Which kinds draw today
+///
+/// Only `minecraft:chest`, because it is the only block-entity model **#23 has
+/// ported** — `BLOCK_ENTITY_MODELS` holds the three chest layers and nothing
+/// else. The remaining nine return `None` and keep drawing nothing, which is the
+/// pre-existing behaviour and *not* a regression; they become one match arm each
+/// the day their geometry lands, with no change to any of the wiring below. See
+/// `docs/gui-item-icons.md` for the table.
+///
+/// `None` is also the right answer for an id a `kind` does not recognise (a
+/// datapack item declaring `minecraft:chest` over some other block): drawing
+/// nothing beats drawing a plain oak chest for something that is not one.
+fn special_icon_geometry(kind: &str, item: &ResourceLocation) -> Option<(&'static str, &'static str)> {
+    match kind {
+        "minecraft:chest" => {
+            let material = ChestMaterial::from_block_path(item.path())?;
+            // `ChestHalf::Single` is not a simplification: `ChestSpecialRenderer
+            // .Unbaked`'s `chest_type` defaults to `ChestType.SINGLE`, and the
+            // 26.2 item definitions never override it. The two double halves are
+            // 15 texels wide against the single's 14 and each omits the face
+            // meeting its partner, so they are separate meshes reachable only
+            // from a placed block.
+            Some((
+                CHEST_SINGLE,
+                chest_texture_stem(material, ChestHalf::Single),
+            ))
+        }
+        _ => None,
+    }
 }
 
 /// Draw one slot's icon into the `size`×`size` rect at `(x, y)`: the icon
@@ -153,7 +267,24 @@ pub(crate) fn draw_item_icon(
                 IconPart::Model { .. } => {
                     push_item_model(sink.model, assets.models, &slot.item, x, y, size);
                 }
-                IconPart::Special { .. } => {}
+                // The pose comes from `icon.display`, not from the part: the
+                // part's `base` is a geometry-less shell whose only real content
+                // *is* its `display` map, and `icon.display` is already that map
+                // (`ItemIconBuilder::part_for` resolves the base model purely to
+                // read it). `DisplaySlot::Gui` on a chest is `[30, 45, 0]` at
+                // `0.625` — note **45**, where a block item is 225, so a chest
+                // faces the viewer rather than showing a corner.
+                IconPart::Special { kind, .. } => {
+                    push_special_icon(
+                        sink.special,
+                        &slot.item,
+                        kind,
+                        &icon.display.get(DisplaySlot::Gui),
+                        x,
+                        y,
+                        size,
+                    );
+                }
             }
         }
     }
@@ -246,6 +377,45 @@ fn push_item_model(
     let pose = gui_item_pose([x, y, size, size], &geometry.transform);
     let mesh = mesh_item_quads(&geometry.quads, pose, geometry.gui_light);
     out.extend(mesh.indices.iter().map(|&i| mesh.vertices[i as usize]));
+}
+
+/// Record one [`IconPart::Special`] slot for the block-entity icon pass.
+///
+/// A no-op for a `kind` whose geometry is not ported (see
+/// [`special_icon_geometry`]) — the pre-existing zero-pixel behaviour, not a new
+/// one. Nothing here touches the GPU or needs the pass to be attached: the
+/// placement matrix is cheap and [`IconRenderer::upload`] discards the list when
+/// there is nowhere to draw it, which keeps this function callable from the
+/// jar-less path exactly like its two siblings.
+///
+/// # The pose is vanilla's, including the part that looks like an off-by-one
+///
+/// [`gui_item_pose`] composes `T(centre) · S(w, -h, min(w,h)) · display_matrix`,
+/// and `display_matrix` ends with the `-0.5` centring translate. A chest spans
+/// `y 0..14` texels, so centring it about `0.5` puts it ~0.6 px low in a 16 px
+/// cell rather than resting on the cell floor. That is **not** a bug to correct:
+/// `ItemTransform.apply` ends with `pose.translate(-0.5F, -0.5F, -0.5F)` in both
+/// its branches, and `ItemStackRenderState.Layer.applyTransform` calls it for the
+/// `specialRenderer != null` branch and the ordinary quad branch from the *same*
+/// line — read from the record definition rather than from a summary of the call
+/// site. Vanilla centres a chest icon about the block centre too.
+fn push_special_icon(
+    out: &mut Vec<SpecialIconDraw>,
+    item: &ResourceLocation,
+    kind: &str,
+    transform: &DisplayTransform,
+    x: f32,
+    y: f32,
+    size: f32,
+) {
+    let Some((model, texture)) = special_icon_geometry(kind, item) else {
+        return;
+    };
+    out.push(SpecialIconDraw {
+        model,
+        texture,
+        placement: gui_item_pose([x, y, size, size], transform),
+    });
 }
 
 /// Push one textured quad (two triangles) from an absolute-pixel destination
@@ -461,6 +631,194 @@ struct ModelIcons {
     capacity_bytes: usize,
 }
 
+/// The GPU resources for drawing the **special-renderer** family (today: chests)
+/// in GUI slots — the ex-`builtin/entity` items that have no item model at all.
+///
+/// # Why this is `EntityPipeline` and not [`ModelIcons`]
+///
+/// See the module docs: the geometry transfers unchanged but the *texture* does
+/// not, and [`ModelIcons`] has no bind group left to spend. `EntityPipeline`
+/// spends two of four, takes the same [`ModelVertex`] layout, and is
+/// `depth_write`/`Less` against the depth attachment
+/// [`IconRenderer::draw_models`] clears to `1.0` — a GUI icon's clip depth lands
+/// near `0.5`, so it passes. It is also `cull_mode: None`, which is why the GUI
+/// pose's **negative** determinant is a non-issue here: unlike the model stream,
+/// nothing depends on the winding surviving the `y` flip.
+///
+/// # Everything is owned, not borrowed
+///
+/// The opposite of [`ModelIcons`], and for the opposite reason. There is nothing
+/// to share: the block atlas, tint palette and animation slots are all irrelevant
+/// to an entity sheet, and the world's own block-entity pass
+/// (`gpu/block_entities.rs`) keeps its bind groups against its own
+/// `EntityPipeline` instance's layouts. Re-decoding the 22 chest PNGs here costs
+/// ~360 KB of 64×64 textures once, which is not worth reaching across the `gpu`
+/// module boundary for — and `entity_texture_from_image` is `pub(super)` to `gpu`
+/// anyway.
+#[derive(Debug)]
+struct SpecialIcons {
+    pipeline: EntityPipeline,
+    /// The baked block-entity corpus, for `part_transforms`. CPU-side; the
+    /// uploaded counterpart is [`Self::gpu_models`].
+    models: BlockEntityModelSet,
+    gpu_models: HashMap<&'static str, GpuEntityModel>,
+    /// Keyed by **texture stem**, not model name: a trapped chest shares the
+    /// single-chest mesh and differs only here. Keying by model draws every
+    /// trapped chest in plain oak — the same trap `gpu/block_entities.rs`
+    /// documents.
+    textures: HashMap<&'static str, wgpu::BindGroup>,
+    /// Group 0: `gui_ortho` with fog disabled. Rewritten each frame because the
+    /// projection depends on the target size.
+    cam_buffer: wgpu::Buffer,
+    cam_bind_group: wgpu::BindGroup,
+    /// This frame's batches, rebuilt by [`IconRenderer::upload`] and consumed by
+    /// [`IconRenderer::draw_models`]. Held rather than returned because
+    /// `draw_models`' signature is shared by two screens and a per-part instance
+    /// buffer list does not fit its `count: u32`.
+    batches: Vec<SpecialBatch>,
+}
+
+/// One uploaded special-icon batch: the mesh and sheet to bind, one instance
+/// buffer per part, and how many icons share them.
+#[derive(Debug)]
+struct SpecialBatch {
+    model: &'static str,
+    texture: &'static str,
+    count: u32,
+    parts: Vec<Option<wgpu::Buffer>>,
+}
+
+impl SpecialIcons {
+    /// Bake the corpus, upload it, and build one bind group per available sheet.
+    ///
+    /// Returns `None` when **no** sheet loaded, which is the jar-less case: with
+    /// no textures there is nothing this pass could ever draw, and reporting that
+    /// as "not attached" keeps [`IconRenderer`]'s negative control meaningful
+    /// rather than leaving an attached pass that silently skips every batch.
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) -> Option<Self> {
+        let pipeline = EntityPipeline::new(device, color_format);
+        let models = BlockEntityModelSet::load();
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("lodestone-special-icon-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let mut gpu_models = HashMap::new();
+        for (name, mesh) in models.iter() {
+            if let Some(gpu) = GpuEntityModel::upload_parts(
+                device,
+                &mesh.vertices,
+                &mesh.indices,
+                mesh.parts.clone(),
+            ) {
+                gpu_models.insert(name, gpu);
+            }
+        }
+
+        let real = crate::resources::load_block_entity_textures();
+        let mut textures = HashMap::new();
+        for stem in chest_texture_stems() {
+            let Some(img) = real.get(stem) else {
+                // The loader already warned. A chest with no sheet draws nothing
+                // rather than a magenta box, matching the world pass.
+                continue;
+            };
+            let view = entity_sheet_texture(device, queue, img);
+            textures.insert(stem, pipeline.texture_bind_group(device, &view, &sampler));
+        }
+        if textures.is_empty() {
+            return None;
+        }
+
+        // `FogUniform::disabled()` leaves the sky-darken lane at its `0.0`
+        // sentinel, which `EntityCameraUniform::sky_darken` reads back as `1.0`
+        // (full daylight). An inventory slot is not in the world: it must not
+        // dim at night, and taking the lane literally would render every chest
+        // icon at the 0.2 floor.
+        let cam_buffer = entity_camera_buffer(
+            device,
+            EntityCameraUniform {
+                camera: CameraUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    section_origin: [0.0, 0.0, 0.0, 0.0],
+                },
+                fog: FogUniform::disabled(),
+            },
+        );
+        let cam_bind_group = pipeline.camera_bind_group(device, &cam_buffer);
+
+        Some(SpecialIcons {
+            pipeline,
+            models,
+            gpu_models,
+            textures,
+            cam_buffer,
+            cam_bind_group,
+            batches: Vec::new(),
+        })
+    }
+
+    /// How many sheets loaded — the counter that separates "no chest in a slot"
+    /// from "no pack, so nothing can ever draw".
+    fn sheet_count(&self) -> usize {
+        self.textures.len()
+    }
+}
+
+/// Upload one entity sheet as an sRGB texture.
+///
+/// A near-copy of `gpu::entities::entity_texture_from_image`, which is
+/// `pub(super)` to the `gpu` module and so not reachable from here. The one
+/// load-bearing line is the format: **`Rgba8UnormSrgb`, not `Rgba8Unorm`.** A
+/// vanilla PNG holds gamma-encoded bytes; binding it as plain `Unorm` hands the
+/// shader `0.50` where the linear value is `0.21` and an sRGB target then encodes
+/// it a second time — measured at +48% on every mob pixel when that pass got it
+/// wrong, which is bright enough to look deliberate.
+fn entity_sheet_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    img: &lodestone_assets::Image,
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: img.width,
+        height: img.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("lodestone-special-icon-sheet"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &img.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(img.width * 4),
+            rows_per_image: Some(img.height),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 /// The GPU half of the item-icon pass, held by every screen that draws slots.
 ///
 /// Both halves start detached. `attach_items` gives flat icons somewhere to
@@ -471,6 +829,19 @@ struct ModelIcons {
 pub(crate) struct IconRenderer {
     sprites: Option<SpriteIcons>,
     models: Option<ModelIcons>,
+    /// The block-entity icon pass (chests). Built **lazily**, on the first frame
+    /// that actually contains a special icon — see [`Self::upload`].
+    special: Option<SpecialIcons>,
+    /// Whether lazy construction has been attempted. Separate from
+    /// `special.is_some()` so a jar-less run (where [`SpecialIcons::new`] returns
+    /// `None`) does not re-decode nothing every frame forever.
+    special_tried: bool,
+    /// The colour format [`Self::attach_item_models`] was given, kept for the
+    /// lazy build. `None` means the model pass was never attached, which is also
+    /// the condition under which the special pass must stay dark: both are the
+    /// same "there is somewhere to draw 3-D icons" signal, and both gates' negative
+    /// control turns exactly on it.
+    color_format: Option<wgpu::TextureFormat>,
 }
 
 impl IconRenderer {
@@ -487,8 +858,21 @@ impl IconRenderer {
 
     /// Whether the 3-D item-model pass is attached. Building model geometry when
     /// it is not is pure waste — there is nowhere to draw it.
+    ///
+    /// Also gates the **special** (block-entity) icon pass, which is built lazily
+    /// off the same signal: both need a depth attachment and both are absent on a
+    /// jar-less run, so the two screens' single `want_models` branch covers both
+    /// and no caller has to learn about a second flag.
     pub(crate) fn models_attached(&self) -> bool {
         self.models.is_some()
+    }
+
+    /// How many block-entity sheets the special-icon pass loaded, or `0` when it
+    /// is not built. The counter that tells "no chest in any slot" apart from "no
+    /// pack, so a chest could never draw" — the distinction a pixel gate cannot
+    /// make on its own.
+    pub(crate) fn special_sheet_count(&self) -> usize {
+        self.special.as_ref().map_or(0, SpecialIcons::sheet_count)
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so slots draw real item icons.
@@ -680,6 +1064,12 @@ impl IconRenderer {
             buffer,
             capacity_bytes,
         });
+        // The special (block-entity) pass needs a `queue` to upload its sheets and
+        // this call has none — every caller's wrapper takes `device` only, up
+        // through `app.rs`. Rather than widen four signatures across three
+        // contended files, remember the format and build on first use in
+        // `upload`, which has both.
+        self.color_format = Some(color_format);
     }
 
     /// Grow the buffers as needed, upload both streams, and rewrite the model
@@ -702,6 +1092,12 @@ impl IconRenderer {
     /// used the logical one would make the model pass disagree with the flat
     /// sprite/colour passes it shares a frame with about how big a "GUI pixel"
     /// is.
+    /// `special` is the third stream: block-entity icons, uploaded as per-part
+    /// instance matrices against meshes that are already resident. It is not
+    /// reflected in the returned counts — the two screens pass those straight to
+    /// `draw_sprites`/`draw_models` as vertex counts, and a special batch has no
+    /// single vertex count — so [`Self::draw_models`] reads the batches back off
+    /// `self` instead. That is also what lets its signature stay unchanged.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn upload(
         &mut self,
@@ -709,12 +1105,14 @@ impl IconRenderer {
         queue: &wgpu::Queue,
         sprite_verts: &[f32],
         model_verts: &[ModelVertex],
+        special: &[SpecialIconDraw],
         width: u32,
         height: u32,
         label: &'static str,
     ) -> (u32, u32) {
         let mut sprite_count = 0;
         let mut model_count = 0;
+        self.prepare_special(device, queue, special, width, height);
 
         if !sprite_verts.is_empty()
             && let Some(s) = self.sprites.as_mut()
@@ -758,6 +1156,129 @@ impl IconRenderer {
         (sprite_count, model_count)
     }
 
+    /// Build this frame's special-icon batches: lazily construct the pass, group
+    /// the draws by `(model, sheet)`, compose one matrix per mesh part per icon,
+    /// and upload them as per-part instance buffers.
+    ///
+    /// # Why `part_transforms` per icon rather than one matrix per icon
+    ///
+    /// Because the mesh's vertices are **part-local** — the same property that
+    /// lets the world pass animate a chest lid. `part_transforms(placement, &[])`
+    /// composes `placement · chain(parent) · rest_pose` for every part, and the
+    /// instance buffer for part *p* holds part *p*'s matrix for every icon in the
+    /// batch. Uploading one matrix per icon and letting the vertices carry their
+    /// own offsets would collapse the hierarchy and put the lid at the origin.
+    ///
+    /// `&[]` overrides: an item chest is `openness = 0`, which is
+    /// `ChestSpecialRenderer.Unbaked`'s default and means the rest pose *is* the
+    /// closed lid. Nothing here drives the lid clock, so a chest in the inventory
+    /// cannot drift open with the one you are standing at.
+    fn prepare_special(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        special: &[SpecialIconDraw],
+        width: u32,
+        height: u32,
+    ) {
+        // Clear first and unconditionally: last frame's batches must not survive
+        // into a frame that closed the inventory. Every early return below is a
+        // frame that draws no special icons.
+        if let Some(s) = self.special.as_mut() {
+            s.batches.clear();
+        }
+        if special.is_empty() {
+            return;
+        }
+        // Gated on the model pass, not on the format alone: `models_attached`
+        // is the one signal both screens branch on, so a special icon can never
+        // reach a frame the model pass was excluded from.
+        let (Some(format), true) = (self.color_format, self.models.is_some()) else {
+            return;
+        };
+        if !self.special_tried {
+            self.special_tried = true;
+            self.special = SpecialIcons::new(device, queue, format);
+        }
+        let Some(s) = self.special.as_mut() else {
+            return;
+        };
+
+        // Group by `(model, sheet)` — the batch key the world pass uses, and for
+        // the same reason: a trapped chest and a plain one share the mesh and
+        // differ only in bind group, so keying on the model alone would draw both
+        // with whichever sheet happened to be bound.
+        let mut keys: Vec<(&'static str, &'static str)> = Vec::new();
+        let mut per_key: Vec<Vec<Mat4>> = Vec::new();
+        for draw in special {
+            let Some(mesh) = s.models.get(draw.model) else {
+                continue;
+            };
+            if !s.textures.contains_key(draw.texture) {
+                continue;
+            }
+            let transforms = mesh.part_transforms(draw.placement, &[]);
+            match keys.iter().position(|k| *k == (draw.model, draw.texture)) {
+                Some(i) => per_key[i].extend(transforms),
+                None => {
+                    keys.push((draw.model, draw.texture));
+                    per_key.push(transforms);
+                }
+            }
+        }
+
+        for ((model, texture), flat) in keys.into_iter().zip(per_key) {
+            let Some(mesh) = s.models.get(model) else {
+                continue;
+            };
+            let part_count = mesh.parts.len();
+            if part_count == 0 || flat.is_empty() {
+                continue;
+            }
+            // `flat` is icon-major (`part_transforms` returns one matrix per part,
+            // appended per icon); the instance buffers must be **part**-major, one
+            // buffer per part holding that part's matrix for each icon. Getting
+            // this transpose wrong draws every part of the mesh at some other
+            // part's position, which for a chest is a scattered pile of boxes.
+            let count = flat.len() / part_count;
+            let parts = (0..part_count)
+                .map(|p| {
+                    let per_icon: Vec<Mat4> = (0..count)
+                        .map(|icon| flat[icon * part_count + p])
+                        .collect();
+                    // No `lights`: an inventory slot has no world light to
+                    // sample, so `upload_instances` falls back to
+                    // `ENTITY_FULLBRIGHT` for every instance.
+                    upload_instances(device, &per_icon, &[])
+                })
+                .collect();
+            s.batches.push(SpecialBatch {
+                model,
+                texture,
+                count: count as u32,
+                parts,
+            });
+        }
+
+        if !s.batches.is_empty() {
+            // `gui_ortho(width, height)`, exactly as the model stream's camera —
+            // the placements were composed in the same GUI pixel space, so the
+            // two passes must project through the same matrix or a chest and the
+            // block beside it disagree about how big a GUI pixel is.
+            queue.write_buffer(
+                &s.cam_buffer,
+                0,
+                bytemuck::bytes_of(&EntityCameraUniform {
+                    camera: CameraUniform {
+                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    },
+                    fog: FogUniform::disabled(),
+                }),
+            );
+        }
+    }
+
     /// Record the flat item-sprite draw into an **already-open** pass, so the
     /// caller can keep icons in the same pass as its other 2-D chrome. A no-op
     /// when `count` is zero or the atlas is not attached.
@@ -782,6 +1303,16 @@ impl IconRenderer {
     ///
     /// A no-op when `count` is zero, the pass is not attached, or the caller has
     /// no depth attachment to lend.
+    /// It also carries the **special** (block-entity) icons, which share the pass
+    /// rather than opening a second one: they need exactly the same depth clear,
+    /// and a second pass would clear it again and erase the block items already
+    /// drawn.
+    ///
+    /// `count` is the *model* stream's vertex count, and deliberately does not
+    /// gate the special draw: a hotbar holding only a chest has `count == 0`, so
+    /// returning early on it would reproduce this issue's original bug one layer
+    /// down — the pass would exist, be attached, hold uploaded batches, and never
+    /// run. The guard therefore asks whether **either** stream has work.
     pub(crate) fn draw_models(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -790,10 +1321,14 @@ impl IconRenderer {
         count: u32,
         label: &'static str,
     ) {
-        if count == 0 {
+        let specials = self
+            .special
+            .as_ref()
+            .map_or(&[][..], |s| s.batches.as_slice());
+        if count == 0 && specials.is_empty() {
             return;
         }
-        let (Some(m), Some(depth_view)) = (&self.models, depth) else {
+        let Some(depth_view) = depth else {
             return;
         };
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -811,14 +1346,48 @@ impl IconRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&m.pipeline.pipeline);
-        // The dynamic offset is always 0: `origin_buffer` is a single
-        // permanent zero slot (see `ModelIcons::origin_buffer`'s doc).
-        pass.set_bind_group(0, &m.camera_bind_group, &[0]);
-        pass.set_bind_group(1, &m.atlas_bind_group, &[]);
-        pass.set_bind_group(2, &m.palette_bind_group, &[]);
-        pass.set_bind_group(3, &m.anim_bind_group, &[]);
-        pass.set_vertex_buffer(0, m.buffer.slice(..));
-        pass.draw(0..count, 0..1);
+        if count > 0
+            && let Some(m) = &self.models
+        {
+            pass.set_pipeline(&m.pipeline.pipeline);
+            // The dynamic offset is always 0: `origin_buffer` is a single
+            // permanent zero slot (see `ModelIcons::origin_buffer`'s doc).
+            pass.set_bind_group(0, &m.camera_bind_group, &[0]);
+            pass.set_bind_group(1, &m.atlas_bind_group, &[]);
+            pass.set_bind_group(2, &m.palette_bind_group, &[]);
+            pass.set_bind_group(3, &m.anim_bind_group, &[]);
+            pass.set_vertex_buffer(0, m.buffer.slice(..));
+            pass.draw(0..count, 0..1);
+        }
+
+        // The special-renderer icons (chests), through `EntityPipeline`: two bind
+        // groups, the same `ModelVertex` layout, indexed and instanced per part.
+        // Second, so a chest cannot be depth-rejected by a block item that has
+        // not been drawn yet — they never share a slot, but the order is free.
+        if let Some(s) = &self.special
+            && !specials.is_empty()
+        {
+            pass.set_pipeline(&s.pipeline.pipeline);
+            pass.set_bind_group(0, &s.cam_bind_group, &[]);
+            for batch in specials {
+                let Some(model) = s.gpu_models.get(batch.model) else {
+                    continue;
+                };
+                let Some(texture) = s.textures.get(batch.texture) else {
+                    continue;
+                };
+                pass.set_bind_group(1, texture, &[]);
+                pass.set_vertex_buffer(0, model.vertices.slice(..));
+                pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for (range, buffer) in model.parts.iter().zip(&batch.parts) {
+                    let (Some(buffer), true) = (buffer.as_ref(), range.index_count > 0) else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(1, buffer.slice(..));
+                    let end = range.index_start + range.index_count;
+                    pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                }
+            }
+        }
     }
 }

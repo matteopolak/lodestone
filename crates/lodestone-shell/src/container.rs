@@ -41,7 +41,9 @@ use std::sync::Arc;
 
 use crate::hud::HotbarSlot;
 use crate::hud::VanillaFont;
-use crate::hud::item_icon::{self, ColourStream, IconAssets, IconRenderer, IconSink};
+use crate::hud::item_icon::{
+    self, ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw,
+};
 
 const FLOATS_PER_VERTEX: usize = 6;
 const SLOT: f32 = 18.0;
@@ -476,6 +478,12 @@ pub struct ContainerGeometry {
     /// The 3-D **block-item** icons, already posed into GUI pixel space on the
     /// CPU. Empty unless a [`BlockModels`] was supplied.
     pub model_verts: Vec<ModelVertex>,
+    /// The **special-renderer** icons (chest, and the rest of the ex-
+    /// `builtin/entity` family as their geometry lands): the baked block-entity
+    /// mesh and sheet to draw plus a GUI-space placement, not vertices. See
+    /// [`crate::hud::HudGeometry::special`] — the two screens carry the same
+    /// stream because they share one `draw_item_icon`.
+    pub(crate) special: Vec<SpecialIconDraw>,
     /// Flat `[x, y, u, v, r, g, b, a]` per vertex sampling
     /// [`ContainerBackground`]'s atlas — vanilla's real `container/*.png` panel
     /// art (issue #51). Empty unless a background was supplied; drawn on its
@@ -578,6 +586,7 @@ impl ContainerGeometry {
                 verts: Vec::new(),
                 item_verts: Vec::new(),
                 model_verts: Vec::new(),
+                special: Vec::new(),
                 bg_verts: Vec::new(),
                 dim_vertex_count: 0,
                 chrome_vertex_count: 0,
@@ -772,6 +781,7 @@ impl ContainerGeometry {
             verts: b.verts,
             item_verts: b.item_verts,
             model_verts: b.model_verts,
+            special: b.special,
             bg_verts: b.bg_verts,
             widget_rect: Some(Rect {
                 x,
@@ -1441,6 +1451,8 @@ struct Builder<'a> {
     verts: Vec<f32>,
     item_verts: Vec<f32>,
     model_verts: Vec<ModelVertex>,
+    /// Special-renderer (block-entity) icons; see [`ContainerGeometry::special`].
+    special: Vec<SpecialIconDraw>,
     /// Flat `[x, y, u, v, r, g, b, a]` per vertex, off
     /// [`ContainerBackground`]'s atlas.
     bg_verts: Vec<f32>,
@@ -1458,6 +1470,7 @@ impl<'a> Builder<'a> {
             verts: Vec::new(),
             item_verts: Vec::new(),
             model_verts: Vec::new(),
+            special: Vec::new(),
             bg_verts: Vec::new(),
             font,
         }
@@ -1530,6 +1543,7 @@ impl<'a> Builder<'a> {
             },
             sprite: &mut self.item_verts,
             model: &mut self.model_verts,
+            special: &mut self.special,
         };
         item_icon::draw_item_icon(&mut sink, assets, (w, h), record, x, y, size, self.font);
     }
@@ -1974,10 +1988,14 @@ impl ContainerRenderer {
             self.font.as_deref(),
             self.background.as_ref().map(|bg| bg.data.as_ref()),
         );
+        // `geo.special` counts too — see the same guard in
+        // `HudRenderer::render_with_item_models`. A frame whose only content is a
+        // chest icon must not be discarded before it reaches `upload`.
         if geo.verts.is_empty()
             && geo.item_verts.is_empty()
             && geo.model_verts.is_empty()
             && geo.bg_verts.is_empty()
+            && geo.special.is_empty()
         {
             return;
         }
@@ -2022,6 +2040,7 @@ impl ContainerRenderer {
             queue,
             &geo.item_verts,
             &geo.model_verts,
+            &geo.special,
             logical_w.max(1.0) as u32,
             logical_h.max(1.0) as u32,
             "container-item-verts",
