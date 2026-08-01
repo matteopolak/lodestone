@@ -1833,6 +1833,71 @@ fn handle_set_entity_motion(payload: &[u8]) -> Result<Vec<Directive>, AdapterErr
     })])
 }
 
+/// Decodes `move_minecart_along_track`: a VarInt entity id followed by a
+/// VarInt-counted list of `NewMinecartBehavior.MinecartStep` lerp steps, each
+/// `(Vec3 position, Vec3 movement, ROTATION_BYTE yRot, ROTATION_BYTE xRot,
+/// f32 weight)` in that order — verified against
+/// `NewMinecartBehavior.MinecartStep.STREAM_CODEC` in 26.2 decompiled source.
+/// `Vec3.STREAM_CODEC` is three big-endian f64s (matching every other
+/// absolute-position decode in this adapter); `ROTATION_BYTE` is the same
+/// signed-byte-angle encoding [`unpack_degrees`] already inverts for
+/// `rotate_head`/`move_entity_*`.
+///
+/// Vanilla spends the whole list smoothly interpolating the cart across the
+/// tick window the steps span (a curved rail sends more than one step per
+/// packet); this adapter has no multi-waypoint movement event, so every
+/// step's bytes are read and validated — a wire-format drift is still
+/// caught — but only the **terminal** step's position/velocity/rotation is
+/// applied, as an absolute jump rather than a spline. That is a documented
+/// fidelity loss (movement will look stepped on curved track), not a
+/// misdecode: minecarts stopped receiving ordinary `move_entity_*` packets
+/// once this one exists, so without it a minecart snaps to reachable but
+/// visibly discrete positions.
+fn handle_move_minecart_along_track(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let entity_id = reader.var_i32().map_err(dec_err)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    if count < 0 {
+        return Err(AdapterError::Decode(format!(
+            "negative minecart lerp step count {count}"
+        )));
+    }
+    let mut terminal = None;
+    for _ in 0..count {
+        let x = reader.f64().map_err(dec_err)?;
+        let y = reader.f64().map_err(dec_err)?;
+        let z = reader.f64().map_err(dec_err)?;
+        let vx = reader.f64().map_err(dec_err)?;
+        let vy = reader.f64().map_err(dec_err)?;
+        let vz = reader.f64().map_err(dec_err)?;
+        let yaw = reader.i8().map_err(dec_err)?;
+        let pitch = reader.i8().map_err(dec_err)?;
+        let _weight = reader.f32().map_err(dec_err)?;
+        terminal = Some((
+            Vec3::new(x, y, z),
+            Vec3::new(vx, vy, vz),
+            unpack_degrees(yaw),
+            unpack_degrees(pitch),
+        ));
+    }
+    reader.ensure_empty().map_err(dec_err)?;
+
+    let Some((pos, velocity, yaw, pitch)) = terminal else {
+        // An empty step list carries no new pose; nothing to apply.
+        return Ok(Vec::new());
+    };
+    Ok(vec![
+        Directive::Emit(ClientEvent::EntityMoved {
+            entity_id,
+            movement: EntityMovement::Absolute(pos),
+            rotation: Some(Rotation::new(yaw, pitch)),
+            // MinecartStep carries no on-rail/on-ground bit.
+            on_ground: false,
+        }),
+        Directive::Emit(ClientEvent::EntityVelocity { entity_id, velocity }),
+    ])
+}
+
 /// Decodes `set_entity_data` into a metadata update event.
 ///
 /// A metadata payload is length-framed, so a misparse is contained to this one
@@ -2749,6 +2814,9 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::SET_ENTITY_MOTION {
             return handle_set_entity_motion(payload);
+        }
+        if packet_id == play::clientbound::MOVE_MINECART_ALONG_TRACK {
+            return handle_move_minecart_along_track(payload);
         }
         if packet_id == play::clientbound::SET_ENTITY_DATA {
             return Ok(handle_set_entity_data(payload, &self.variants));
