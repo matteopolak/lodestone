@@ -111,3 +111,73 @@ fn interpolated_final_density_matches_jvm_over_whole_chunk() {
         );
     }
 }
+
+/// Same real JVM oracle as the test above, driven through
+/// [`NoiseChunkSampler::new_bounded`] instead of [`NoiseChunkSampler::new`] —
+/// proves the bounded, hash-free dense-array memoisation
+/// (`src/density/chunk.rs`'s `DenseShape`/`SlotStore::Dense`, added to
+/// eliminate `slot_get`'s `HashMap::get` cost, `docs/worldgen-surface-perf.md`)
+/// is bit-exact against the *same* real dump `chunk_parity` proves the
+/// original hashmap-backed sampler against — not a self-comparison against
+/// this crate's own prior output, which `CLAUDE.md`'s evidence standard would
+/// treat as materially weaker.
+#[test]
+fn interpolated_final_density_matches_jvm_over_whole_chunk_bounded_dense() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+    let resolver = FsResolver { root: root.clone() };
+    let settings: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+    )
+    .unwrap();
+
+    let builder = Builder::new(SEED, &resolver);
+    let final_density = builder.build(&settings["noise_router"]["final_density"]);
+    // Chunk (0,0)'s exact bounds: x/z in [0,15], y over the full generated
+    // range the reference dump covers (-64..=319, see the file's own y
+    // values) — the bounded-sampler contract `new_bounded` documents.
+    let sampler = NoiseChunkSampler::new_bounded(
+        final_density,
+        builder.slot_count(),
+        CELL_WIDTH,
+        CELL_HEIGHT,
+        (0, 15),
+        (-64, 319),
+        (0, 15),
+    );
+
+    let mut mismatches = Vec::new();
+    let mut total = 0usize;
+    for line in REFERENCE.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        total += 1;
+        let (coords, exp) = line.rsplit_once(' ').expect("malformed line");
+        let mut it = coords.split(',');
+        let x: i32 = it.next().unwrap().parse().unwrap();
+        let y: i32 = it.next().unwrap().parse().unwrap();
+        let z: i32 = it.next().unwrap().parse().unwrap();
+        let got = bits(sampler.final_density(x, y, z));
+        if got != exp {
+            mismatches.push(format!("{x},{y},{z}: rust={got} jvm={exp}"));
+        }
+    }
+
+    let matched = total - mismatches.len();
+    let pct = 100.0 * matched as f64 / total as f64;
+    println!(
+        "interpolated final-density whole-chunk parity (bounded dense sampler): {matched}/{total} = {pct:.4}% bit-exact"
+    );
+
+    if !mismatches.is_empty() {
+        let shown = mismatches.len().min(40);
+        panic!(
+            "{}/{} blocks diverged ({:.4}% match):\n{}",
+            mismatches.len(),
+            total,
+            pct,
+            mismatches[..shown].join("\n")
+        );
+    }
+}
