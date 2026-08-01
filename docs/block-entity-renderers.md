@@ -184,13 +184,48 @@ already generic over `(model, texture)`.
 
 ### There are two consumers of this geometry, not one
 
-The world pass documented here is the first. The **GUI item-icon path is the second**: a chest
-*item* in the inventory or hotbar has no baked icon either (`IconPart::Special` is where vanilla's
-`ChestSpecialRenderer` would go), which is issue
-[#369](https://github.com/matteopolak/lodestone/issues/369). Vanilla shares one `ChestModel` between
-`ChestRenderer` and `ChestSpecialRenderer`, so the geometry here is the right source for both — but
-they are separate call sites with separate pipelines, and a change to the models must be checked
-against **both**. Do not assume a chest that looks right in the world looks right in the hand.
+The world pass documented here is the first. The **GUI item-icon path is the second**, and it is
+issue [#369](https://github.com/matteopolak/lodestone/issues/369): a chest *item* in the inventory or
+hotbar draws nothing today, because `IconPart::Special` — where vanilla's `ChestSpecialRenderer`
+would go — is an empty match arm at `crates/lodestone-shell/src/hud/item_icon.rs:156`, and
+`block_models.rs`'s `collect_item_model_parts` filters every non-`Model` part out at bake time so no
+chest ever enters `BlockModels::items`.
+
+Vanilla shares one `ChestModel` between the two: `ChestSpecialRenderer.Unbaked.bake` calls
+`context.entityModelSet().bakeLayer(ChestRenderer.LAYERS.select(chestType))` — literally the same
+layer definition the block-entity renderer bakes — with `openness` defaulting to `0.0`. So the
+geometry here **is** the right source for both, and a change to the models must be checked against
+both call sites. Do not assume a chest that looks right in the world looks right in the hand.
+
+**What is and is not reusable, assessed rather than hoped:**
+
+- **Reusable as-is: the vertices, indices and part hierarchy.** Both passes consume
+  `ModelVertex::vertex_layout()`, so there is no re-bake and no repacking.
+  `BlockEntityMesh::part_transforms(placement, overrides)` already takes an **arbitrary** placement
+  matrix and is public — that is the seam. `gui_item_pose(rect, display.gui)` slots in exactly where
+  `block_entity_placement_matrix` goes in the world, and vanilla applies the identical
+  `ItemTransform` + `-0.5` centring composition. An item chest is `openness = 0`, so there are no
+  lid overrides and no animation to drive.
+- **Not reusable: the texture binding.** The chest's UVs are `[0,1]` against the standalone 64×64
+  `entity/chest/normal.png`; the GUI item pass binds the **stitched block atlas**, which contains
+  nothing under `textures/entity/`, and it spends **all four** bind groups
+  (camera+origin / atlas / palette / anim). Routing a chest through `ModelIcons` would sample
+  arbitrary block texels.
+
+So #369 is **not** a re-bake and **not** a UV remap. Stitching the 22 chest stems into the block
+atlas and remapping the baked UVs would give the chest two texture paths, fight mip-4 atlas
+mipmapping on a 64×64 entity sheet, and need either 22 mesh variants or a per-draw UV offset the
+model shader has no slot for. The cheap route is the one the world path already proves: draw it with
+`EntityPipeline`, which spends only **2** bind groups, consumes the same vertex layout, is
+double-sided (so the GUI pose's negative determinant is a non-issue) and is depth-tested/writing,
+matching the depth attachment `IconRenderer::draw_models` already clears — recorded inside that
+existing pass. Roughly 300–400 lines across 4–5 files plus a comparable pixel gate, with **no**
+`lodestone-assets` change, and the same shape then covers shulker boxes for free.
+
+Two fidelity caveats to expect if you take that route: the entity shader lights from a fixed
+direction with derivative-reconstructed normals rather than `gui_light`'s per-face constants, so a
+GUI chest is shaded like the world chest rather than like a model item; and `IconPart::Special`'s
+flat-sprite `base` fallback stays unused for chests, because they ship no `base` texture.
 
 ## Configuration
 
