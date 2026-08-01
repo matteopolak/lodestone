@@ -265,6 +265,23 @@ fn reddened(a: [i32; 3], b: [i32; 3]) -> bool {
     dist_to_overlay_sq(b) + 400 < dist_to_overlay_sq(a)
 }
 
+/// A channel byte from the `Rgba8Unorm` target, back to the gamma-encoded value
+/// the shader was blending.
+///
+/// The target is `Rgba8Unorm`, not `…Srgb`, so its bytes are the shader's
+/// post-`srgb_to_linear` output. The magnitude check has to compare in the space
+/// the blend happened in, which is gamma — see `CLAUDE.md`: vanilla is not
+/// colour-managed and tint, shade and this overlay all multiply in gamma bytes.
+/// This is the standard sRGB EOTF inverse, matching the shader's own pair.
+fn linear_byte_to_gamma(byte: i32) -> f64 {
+    let linear = f64::from(byte) / 255.0;
+    if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 fn differs(a: &[u8], b: &[u8], i: usize) -> bool {
     let (p, q) = (rgb(a, i), rgb(b, i));
     (0..3).map(|k| (p[k] - q[k]).abs()).sum::<i32>() > 8
@@ -440,6 +457,70 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
         reddened_px.len(),
         mask.len(),
         reddened_px.bbox()
+    );
+
+    // ---- magnitude, not just direction (issue #371) ----
+    //
+    // Everything above this point measures *whether* the overlay applied. None of
+    // it can see *how much*, and that is how the swapped `mix` shipped: the gate
+    // reported 3440/3440 reddened while the shader rendered ~70% red where vanilla
+    // renders ~30%. `reddened()` is satisfied by both.
+    //
+    // Green is the channel that makes this cheap and unambiguous. Vanilla's
+    // overlay green is **0**, so in gamma space the blend is a pure scaling with
+    // no additive term:
+    //
+    //   correct  (`mix(red, shaded, a)`):  G_out = a       * G_in  = 0.698 * G_in
+    //   swapped  (`mix(shaded, red, a)`):  G_out = (1 - a) * G_in  = 0.302 * G_in
+    //
+    // Both hypotheses are computed and the measurement must land on vanilla's.
+    // Expressed as a ratio rather than an absolute, so it needs no knowledge of
+    // the mob's own texel colours — the expected value comes from vanilla's
+    // formula and the 178 constant, never from a pixel we rendered.
+    //
+    // Measured in **gamma** space because that is where the shader blends; the
+    // target is `Rgba8Unorm`, so its bytes are linear and have to be converted
+    // back. Only pixels with enough signal to give a stable ratio are used.
+    let alpha = f64::from(HURT_OVERLAY_ALPHA_BYTE) / 255.0;
+    let mut ratios: Vec<f64> = Vec::new();
+    for i in 0..(W as usize * H as usize) {
+        if !mask.contains(i) {
+            continue;
+        }
+        let g_rest = linear_byte_to_gamma(rgb(&subject_rest_px, i)[1]);
+        let g_hurt = linear_byte_to_gamma(rgb(&subject_hurt_px, i)[1]);
+        if g_rest > 0.15 {
+            ratios.push(g_hurt / g_rest);
+        }
+    }
+    assert!(
+        ratios.len() > 100,
+        "only {} silhouette pixels had enough green signal to measure a ratio — this \
+         magnitude check would be reading noise",
+        ratios.len()
+    );
+    ratios.sort_by(|a, b| a.partial_cmp(b).expect("no NaN ratios"));
+    let measured = ratios[ratios.len() / 2];
+    let correct = alpha;
+    let swapped = 1.0 - alpha;
+    eprintln!(
+        "green retention over {} px: measured {measured:.4} | vanilla {correct:.4} | \
+         swapped-args {swapped:.4}",
+        ratios.len()
+    );
+    assert!(
+        (measured - correct).abs() < (measured - swapped).abs(),
+        "green retention is {measured:.4}, closer to the swapped-argument prediction \
+         {swapped:.4} than to vanilla's {correct:.4} — `mix`'s first two arguments are \
+         the wrong way round in the entity shader. Vanilla's entity.fsh is \
+         `mix(overlayColor.rgb, color.rgb, overlayColor.a)`, so the alpha weights the \
+         entity's own colour, not the red. This is issue #371."
+    );
+    assert!(
+        (measured - correct).abs() < 0.06,
+        "green retention is {measured:.4} but vanilla's blend predicts {correct:.4} — the \
+         overlay is applying at the wrong strength even though the arguments are in the \
+         right order (fog contamination, a linear-space blend, or a changed alpha)"
     );
 
     // A *model* overlay, not the full-screen tint issue #98's title asked for:
