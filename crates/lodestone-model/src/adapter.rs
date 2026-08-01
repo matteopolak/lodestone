@@ -1076,4 +1076,34 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         let _ = state_id;
         None
     }
+
+    /// `BubbleColumnBlock`'s `DRAG_DOWN` property for `state_id`, or `None` when the
+    /// state is not a bubble column (which is every state but two).
+    ///
+    /// `Some(true)` is the magma-block drain, `Some(false)` the soul-sand lift. The
+    /// consumer is [`lodestone_physics::CollisionView::bubble_column`], which drives
+    /// the vertical impulse in `apply_bubble_column`. Issue #199.
+    ///
+    /// # Why this is a seam and not a name lookup
+    ///
+    /// Every other block-physics constant in this engine is keyed by block *name*
+    /// (`block_physics`), because friction and speed factors are per-block. This one
+    /// cannot be: both bubble-column states carry the same name and differ only in a
+    /// property, and the property is the entire payload. `drag=true` versus
+    /// `drag=false` is the difference between an elevator and a drowning trap.
+    ///
+    /// Vanilla resolves the base block (soul sand versus magma) into this boolean
+    /// **once, at block-update time**, in `BubbleColumnBlock.getColumnState`. The
+    /// entity-side code reads only the boolean and never looks below the column, so a
+    /// consumer needs nothing else — in particular there is no "doubled for magma"
+    /// term, despite that being a natural guess.
+    ///
+    /// The default returns `None` for every state: a version with no bubble-column
+    /// data reports "no column anywhere", which degrades to the pre-#199 behaviour
+    /// (a bubble column moves you like the plain water it already classifies as)
+    /// rather than to a wrong impulse.
+    fn block_bubble_column_drag(&self, state_id: u32) -> Option<bool> {
+        let _ = state_id;
+        None
+    }
 }

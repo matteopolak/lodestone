@@ -150,6 +150,34 @@ pub trait CollisionView {
         false
     }
 
+    /// `BubbleColumnBlock`'s `DRAG_DOWN` blockstate property for the cell at
+    /// `(x, y, z)`, or `None` when the cell is not a bubble column.
+    ///
+    /// * `Some(true)` — **drag down**. The column stands over a
+    ///   `BlockTags.ENABLES_BUBBLE_COLUMN_DRAG_DOWN` block, which in 26.2 is
+    ///   `minecraft:magma_block` alone (`data/minecraft/tags/block/
+    ///   enables_bubble_column_drag_down.json`). This is also the block's
+    ///   *default* state (`BubbleColumnBlock:49`).
+    /// * `Some(false)` — **push up**. The column stands over a
+    ///   `ENABLES_BUBBLE_COLUMN_PUSH_UP` block, which in 26.2 is
+    ///   `minecraft:soul_sand` alone.
+    ///
+    /// The property is on the wire and in the generated state table — the two
+    /// bubble-column states are `15294` (`drag=true`, default) and `15295`
+    /// (`drag=false`) in the 26.2 global palette, per Mojang's own
+    /// `generated/reports/blocks.json`. Physics stays version-free by asking here
+    /// rather than knowing ids, exactly as [`Self::stuck_multiplier`] does.
+    ///
+    /// **The base block is not this seam's business.** Vanilla resolves soul sand
+    /// versus magma once, at *block-update* time, into this single boolean
+    /// (`BubbleColumnBlock.getColumnState`); the entity-side code
+    /// (`Entity.handleOnInsideBubbleColumn`) only ever reads the boolean and never
+    /// looks below the column. So there is no "doubled if a magma block is the
+    /// base" term to model — see [`crate::player::tick_water`]'s notes.
+    fn bubble_column(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
+        None
+    }
+
     /// Effective bounce restitution of the block at `(x, y, z)`
     /// (`Block.getBounceRestitution`, already accounting for
     /// `BlockTags.SUPPRESSES_BOUNCE` → `0.0`). Default `0.0`.

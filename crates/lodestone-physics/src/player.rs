@@ -1491,7 +1491,12 @@ fn jump_out_of_fluid(
 ///
 /// # Not modelled
 ///
-/// * Bubble columns (`BubbleColumnBlock`'s own up/down impulses).
+/// * Bubble-column impulses are **not** here, and never were vanilla's to put
+///   here: `BubbleColumnBlock.entityInside` is reached from
+///   `applyEffectsFromBlocks`, which `LivingEntity.aiStep` calls *after*
+///   `travel()` (`LivingEntity.java:3130` then `:3134`). They live one level up,
+///   in [`apply_bubble_column`], beside the other `entityInside` effect this
+///   crate models ([`update_stuck_multiplier`]). Issue #199.
 /// * `WATER_MOVEMENT_EFFICIENCY` has no source in this repo — see
 ///   [`PlayerState::water_movement_efficiency`]. The arithmetic is here; the value
 ///   is `0.0`.
@@ -1918,6 +1923,156 @@ fn update_stuck_multiplier(
     state.stuck_speed_multiplier = found;
 }
 
+/// `BubbleColumnBlock.entityInside` → `Entity.onInsideBubbleColumn` /
+/// `onAboveBubbleColumn` (`Entity.java:2851-2898`) — the soul-sand lift and the
+/// magma-block drain. Issue #199.
+///
+/// # The four constants, and the branch that picks between them
+///
+/// Vanilla decides *capped or not* per cell, in `BubbleColumnBlock.entityInside`
+/// (`BubbleColumnBlock.java:56-64`): the cell **above** this one is inspected, and
+/// if its collision shape is empty **and** its fluid state is empty — i.e. it is
+/// open air — the entity is "above" the column and gets the stronger, surface-
+/// launch pair. Anything else (more column, water, a solid lid) is the "inside"
+/// pair.
+///
+/// | | `drag=false` (soul sand, up) | `drag=true` (magma, down) |
+/// |---|---|---|
+/// | inside | `min(0.7, vy + 0.06)` | `max(-0.3, vy - 0.03)` |
+/// | above (air over the cell) | `min(1.8, vy + 0.1)` | `max(-0.9, vy - 0.03)` |
+///
+/// All four are `double` arithmetic on `Vec3.y` against `double` literals, so
+/// there is no `f32` narrowing anywhere in this function.
+///
+/// Note the asymmetry in the drag-down column: the **step** is `-0.03` in both
+/// rows and only the *clamp* differs (`-0.3` inside, `-0.9` above). It is the
+/// push-up column whose step changes too (`+0.06` → `+0.1`). Transcribing this as
+/// "the above case is three times stronger" would be wrong in one of the two
+/// columns, which is why the table is written out rather than summarised.
+///
+/// # One impulse *per cell*, not per tick
+///
+/// This is the part that surprises. `Entity.checkInsideBlocks` visits every block
+/// the movement intersects, dedupes by *position* (`visitedBlocks`), and calls
+/// `entityInside` on each — and `BubbleColumnBlock` applies its impulse
+/// **immediately**, inside that callback, rather than deferring it to the
+/// `InsideBlockEffectApplier` the way fire and freezing do. So a standing player
+/// (a `1.8`-high box) inside a column spans two cells and takes **two** impulses
+/// every tick. The clamp is what keeps that from diverging: repeated
+/// `min(0.7, vy + 0.06)` converges on `0.7` instead of running away. Applying the
+/// impulse once per tick would reach the same terminal velocity but climb to it at
+/// half the rate, which is exactly the kind of sub-tick divergence the server's
+/// movement check accumulates.
+///
+/// # `resetFallDistance` on `inside` only
+///
+/// `handleOnInsideBubbleColumn` ends with `entity.resetFallDistance()`
+/// (`Entity.java:2897`); `handleOnAboveBubbleColumn` ends with
+/// `sendBubbleColumnParticles` and **no** reset (`:2865`). The asymmetry is
+/// reproduced here faithfully, but **no test pins it, because it is currently
+/// unobservable and cannot honestly be made observable.** A bubble column *is* a
+/// water source cell (`BubbleColumnBlock.java:73-75`), so any player this function
+/// finds in one has already been through [`tick_water`], which zeroes
+/// `fall_distance` unconditionally at its top. The only world that would separate
+/// the two is a bubble column in a cell that does not hold water — which vanilla
+/// cannot represent, so a test fixture asserting it would be the *world* species of
+/// vacuous test: green, and measuring a scene the game cannot produce. The
+/// asymmetry is coded correctly so that it is already right if the classification
+/// ever changes; it is deliberately unproven until something can see it.
+///
+/// # Divergences, deliberate
+///
+/// * **Cell enumeration is the post-move box, not the swept path.** Vanilla walks
+///   `forEachBlockIntersectedBetween(from, to, …)`, so a player moving fast enough
+///   to pass *through* a column cell without ending inside it still takes that
+///   cell's impulse. This function enumerates the cells of the post-move bounding
+///   box only — which is exactly the approximation
+///   [`update_stuck_multiplier`] has always made for the *same* vanilla call
+///   (`applyEffectsFromBlocks`), so the two stay consistent rather than one being
+///   quietly better than the other. It is unobservable for the case the feature
+///   exists to serve (a player riding a column, whose per-tick displacement is at
+///   most `0.7`, well under a cell); it would matter for a player launched through
+///   the top of a column at `1.8`/tick.
+/// * **The deflation constant is `1.0e-5`, not vanilla's widened `1.0E-5F`.**
+///   Vanilla deflates the target box by a *float* literal, which widens to
+///   `1.0000000116860974e-5`. This function uses the `f64` `1.0e-5` that
+///   [`update_stuck_multiplier`] already uses, for the same reason: they model one
+///   vanilla sweep and must not disagree. The difference can only change an answer
+///   when a box edge lies within `1.2e-13` of a cell boundary.
+/// * **`Player`'s `!abilities.flying` gate is not applied.** Both overrides
+///   (`Player.java:310-321`) skip the impulse entirely for a flying player. This
+///   crate has no abilities state, so the conjunct is vacuously true — see
+///   [`tick`]'s note. A driver with a flight mode must not route a flying player
+///   through [`tick`].
+fn apply_bubble_column(
+    state: &mut PlayerState,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    let bb = state.bounding_box(profile);
+    // Same cell enumeration as `update_stuck_multiplier` — see this function's
+    // "Divergences" note for why the two are deliberately identical.
+    let min_x = mth::floor(bb.min_x + 1.0e-5);
+    let max_x = mth::floor(bb.max_x - 1.0e-5);
+    let min_y = mth::floor(bb.min_y + 1.0e-5);
+    let max_y = mth::floor(bb.max_y - 1.0e-5);
+    let min_z = mth::floor(bb.min_z + 1.0e-5);
+    let max_z = mth::floor(bb.max_z - 1.0e-5);
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let Some(drag_down) = view.bubble_column(x, y, z) else {
+                    continue;
+                };
+                let vy = state.velocity.y;
+                if cell_is_open_air(view, x, y + 1, z) {
+                    // `Entity.handleOnAboveBubbleColumn`. The particle burst is
+                    // server-side only (`sendBubbleColumnParticles` checks
+                    // `instanceof ServerLevel`) and carries no motion, so nothing
+                    // is owed here; note it does *not* reset fall distance.
+                    state.velocity.y = if drag_down {
+                        (vy - 0.03).max(-0.9)
+                    } else {
+                        (vy + 0.1).min(1.8)
+                    };
+                } else {
+                    // `Entity.handleOnInsideBubbleColumn`.
+                    state.velocity.y = if drag_down {
+                        (vy - 0.03).max(-0.3)
+                    } else {
+                        (vy + 0.06).min(0.7)
+                    };
+                    state.fall_distance = 0.0;
+                }
+            }
+        }
+    }
+}
+
+/// `BubbleColumnBlock.entityInside`'s `nothingAbove` test
+/// (`BubbleColumnBlock.java:58`): `stateAbove.getCollisionShape(…).isEmpty() &&
+/// stateAbove.getFluidState().isEmpty()`.
+///
+/// The fluid half is what makes the common cases fall out correctly without any
+/// special-casing: a bubble column's own `getFluidState` is a **water source**
+/// (`BubbleColumnBlock.java:73-75`), and this engine classifies the block as water
+/// for the same reason (`docs/fluid-classification.md`'s
+/// `UNCONDITIONAL_WATER_BLOCKS`), so a cell with more column above it reports
+/// `false` here and takes the *inside* branch. Only the cell at the very top of a
+/// column, with real air over it, reports `true`.
+///
+/// **One vanilla quirk deliberately not reproduced.** Vanilla calls
+/// `stateAbove.getCollisionShape(level, pos)` — passing `pos`, the *lower* cell,
+/// while asking the *upper* cell's state. It is a genuine mismatch in the game's
+/// own source, not a transcription slip here, and it is unobservable for every
+/// block whose shape does not vary with position. This seam is position-keyed and
+/// cannot express the quirk anyway.
+fn cell_is_open_air(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> bool {
+    let mut boxes = Vec::new();
+    view.collision_boxes(x, y, z, &mut boxes);
+    boxes.is_empty() && !view.is_water(x, y, z) && !view.is_lava(x, y, z)
+}
+
 /// Advances the player one tick: dispatches to the fluid/elytra/air travel path
 /// exactly as vanilla's `LivingEntity.travel()`, records any stuck-in-block
 /// multiplier for the next tick to consume (`Entity.checkInsideBlocks`), and
@@ -2009,6 +2164,18 @@ fn travel_and_check_inside_blocks(
     } else {
         tick_air(state, input, view, profile);
     }
+    // `LivingEntity.aiStep`'s `applyEffectsFromBlocks()` (`LivingEntity.java:3134`),
+    // immediately after the `travel()` dispatch above (`:3130`) and before
+    // `pushEntities()` (`:3163`). Both calls below are `Block.entityInside` effects
+    // reached from that one sweep, which is why they sit together here.
+    //
+    // Their order is unobservable: vanilla visits each cell once and a cell is
+    // either a bubble column or a stuck-in-block, never both, so the two never see
+    // the same cell. Beyond that they touch disjoint state — `apply_bubble_column`
+    // writes `velocity.y` and `update_stuck_multiplier` writes
+    // `stuck_speed_multiplier`, neither reads what the other writes, and the only
+    // field they share is `fall_distance`, which both only ever set to `0.0`.
+    apply_bubble_column(state, view, profile);
     update_stuck_multiplier(state, view, profile);
 }
 

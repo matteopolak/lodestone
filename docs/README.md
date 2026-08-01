@@ -29,6 +29,12 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   block state carry water?", shared by the mesher and by physics (swimming, fog,
   overlay, ambient sounds) — and why that is a different question from "can I break
   what is in this cell", which the pick ray answers on its own.
+- [Bubble columns](./bubble-columns.md) — the soul-sand lift and magma drain
+  (issue #199): four constants, one impulse **per occupied cell** rather than per
+  tick, and why the impulse belongs beside `update_stuck_multiplier` rather than in
+  `tick_water` — `applyEffectsFromBlocks` runs *after* `travel()`, so it lands on the
+  next tick. Also the "doubled for magma" term that the issue described and vanilla
+  does not have.
 - [Fluid rendering](./fluid-rendering.md) — given that a cell carries water, what
   gets drawn: vanilla `FluidRenderer`'s three different face predicates, which
   sprite each face takes, and the shoreline bug that proved occlusion is a
@@ -38,7 +44,7 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Swimming](./swimming.md) — the water-movement port: the missing `PlayerCommand`
   packet that meant the server never believed a sprint-swim, double-tap-to-sprint's
   fixed-tick timing, Depth Strider's attribute now reaching physics for real, and
-  the deliberate gaps that remain (`movement_speed`, bubble columns). Also lava's
+  the deliberate gaps that remain (`movement_speed`). Also lava's
   shallow-vs-deep `travelInLava` branch (issue #214) — a structurally different
   arm rather than water with different numbers, and one that no coarse
   presence-cell scenario could have distinguished, since coarse presence reads as
