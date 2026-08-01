@@ -156,10 +156,11 @@ pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
 };
 pub use player::{
-    ActionQueue, CollisionSource, Dead, DebugLine, DebugLines, Egress, Flying, LastPlayerInput,
-    LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState,
-    PlayerCollision, PrevPosition, Profile, SelectedSlot, SprintKeyHeld, Submersion,
-    apply_look_intent, clear_debug_lines, reset_local_player, spawn_local_player,
+    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, DebugLine, DebugLines, Egress,
+    Flying, LastPlayerInput, LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent,
+    MovementIntent, PhysicsState, PlayerCollision, PrevPosition, Profile, SelectedSlot,
+    SprintKeyHeld, Submersion, apply_look_intent, clear_debug_lines, reset_local_player,
+    spawn_local_player, tick_attack_strength,
 };
 pub use plugin::CorePlugin;
 pub use resources::{
