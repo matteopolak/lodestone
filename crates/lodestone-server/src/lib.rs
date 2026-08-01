@@ -35,6 +35,14 @@
 //!   version-free solid/air terrain into `lodestone-entity`'s `PathWorld` seam,
 //!   and [`MobSim`] ticks goal-driven `NavigatingMob`s over it. Streaming the
 //!   result to a client is a separate (encoder) seam.
+//! * [`PlayerVitals`] — the server-authoritative air-supply countdown and
+//!   drowning damage (issue #267). Player-only for now (see its own module
+//!   doc comment for why `MobSim` does not yet participate); ticked from
+//!   `serve_play`'s per-tick timer against a submersion test over
+//!   [`ChunkSource::block_state`] at the tracked player position, with the
+//!   two new [`ServerProtocol`] methods (`encode_air_supply_update`,
+//!   `encode_set_health`) defaulting to emit nothing, exactly like the
+//!   keep-alive/time/view-streaming encoders above.
 //!
 //! Wiring a real vanilla client to this server end-to-end requires the version
 //! crate to provide client-bound *encoders* (join game, registry data,
@@ -52,6 +60,7 @@ mod mobs;
 mod protocol;
 mod server;
 mod spawn;
+mod vitals;
 mod worldgen_data;
 
 pub use chunk::{ChunkColumn, ChunkSource, OverworldChunkSource, WorldgenChunkSource};
@@ -63,6 +72,7 @@ pub use mob_spawn::{
 pub use mobs::{ChunkWorld, MobSim, SimMob};
 pub use protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
 pub use server::{EntitySource, NoEntities, ServeSummary, ServerError, serve_connection};
+pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{overworld_chunk_source, overworld_generator};
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator

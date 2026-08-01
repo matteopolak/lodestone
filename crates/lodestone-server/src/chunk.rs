@@ -66,6 +66,17 @@ pub(crate) fn is_air_or_fluid(name: &str) -> bool {
     )
 }
 
+/// Returns `true` for water (any level state), the block `PlayerVitals`'
+/// submersion test cares about (`LivingEntity.baseTick`'s
+/// `this.isEyeInFluid(FluidTags.WATER)` — see `crate::vitals`'s module doc
+/// comment for the full jar excerpt). Deliberately narrower than
+/// [`is_air_or_fluid`]: lava does not drown a player (it burns, a mechanic
+/// this crate does not model), so a drowning check must not treat the two
+/// fluids as interchangeable the way "can this cell be replaced" does.
+pub(crate) fn is_water(name: &str) -> bool {
+    name.split('[').next().unwrap_or(name) == "minecraft:water"
+}
+
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
 ///

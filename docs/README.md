@@ -359,6 +359,26 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   start/abort/stop semantics, why placement always writes plain stone (there is no
   inventory model to pick from), and the unrelated pre-existing gap it uncovered in
   the whole-column encoder.
+- [Drowning: air-supply countdown and damage](./drowning.md) — issue #267's
+  server half: `PlayerVitals` ticking air down while submerged and dealing damage
+  on vanilla's exact 320-then-every-20-tick cadence; the discovery that the server
+  tracked **no player `y` and no health at all** before this, so this is really
+  *server-side player vitals* with drowning as its first consumer; what is
+  modelled versus deliberately deferred (Respiration, water-breathing, i-frames,
+  non-player entities, death/respawn); and the undrained-`EventStream` trap that
+  silently stalled a real-client test with no error anywhere.
+- [Underwater and fire screen overlays](./screen-overlays.md) — issues #108 and
+  #112: one shared one-bind-group pass, why the underwater tint is **grayscale**
+  and independent of `fog.rs` (the blue comes from the texture's own pixels), and
+  the on-fire flag's missing session-scoped fold — it decodes, but the local player
+  is deliberately excluded from the generic entity-view path that would carry it.
+- [Entity and player nametags](./entity-nametags.md) — issue #100: billboarded text
+  above named entities and other players, why the two are resolved by genuinely
+  different vanilla predicates at `net::entity_snapshot` rather than in the draw
+  pass, the jar-verified normal/see-through depth settings including the
+  wgpu-forced `Always`/`write:false` substitute for vanilla's "no depth attachment
+  at all" (found only by a validation error), and why the occlusion gate asserts
+  **pixel-identity** with the occluder baseline rather than mere absence.
 - [Chunk column encoding](./chunk-column-encoding.md) — issue #363: why every
   served chunk was stone-and-air only, `build_world_column`'s real-per-cell fix
   with its memoized `resolve_state_id` lookup, and the **second, independent** bug

@@ -16,8 +16,9 @@ use lodestone_core::State;
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos};
 use lodestone_net::{Connection, NetError, Transport};
 
-use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid};
+use crate::chunk::{AIR, ChunkSource, STONE, is_air_or_fluid, is_water};
 use crate::protocol::{EntitySnapshot, ServerBound, ServerDirective, ServerProtocol};
+use crate::vitals::{EYE_HEIGHT, PlayerVitals};
 
 /// Server-initiated keep-alive interval, and the width of the window in
 /// which an echo must arrive before the connection is treated as dead.
@@ -53,6 +54,19 @@ const TIME_SYNC_INTERVAL: Duration = Duration::from_millis(1_000);
 /// per-tick server loop.
 #[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
+
+/// Cadence of the air-supply/drowning-damage tick ([`crate::vitals`]).
+/// Vanilla ticks `LivingEntity.baseTick`'s water-breath block once per real
+/// server tick (20 TPS); this crate has no fixed tick loop (see the module
+/// docs), so — exactly like [`TIME_SYNC_INTERVAL`] standing in for "every 20
+/// ticks" — a wall-clock interval of [`MILLIS_PER_TICK`] stands in for "every
+/// tick". Getting this cadence right matters more here than for time-of-day:
+/// the drowning countdown's exact tick counts (300 to empty, +20 to the first
+/// hit, then every 20 thereafter — see `crate::vitals`'s module doc comment)
+/// are the whole point, not an approximation, so this must fire at the real
+/// 20 TPS rate rather than some coarser stand-in.
+#[cfg(not(target_arch = "wasm32"))]
+const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A read-only view of the entities in the world right now, supplied by the
 /// caller that owns the simulation and its tick.
@@ -547,6 +561,7 @@ where
 /// [`State::Play`]: matches a keep-alive echo against the pending challenge
 /// (clearing it, so the next keep-alive tick does not mistake a live client
 /// for a dead one), streams the view when the player's chunk column changed,
+/// tracks the player's latest position for [`PlayerVitals`]' submersion test,
 /// or applies a block break/placement (see [`apply_block_action`]/
 /// [`apply_use_item_on`]). Every other packet decodes to
 /// [`ServerBound::Ignored`] in `State::Play` under the current protocols (no
@@ -562,6 +577,7 @@ async fn dispatch_play_packet<T, P, S>(
     view: &mut ViewTracker,
     pending_keep_alive: &mut Option<i64>,
     pending_break: &mut Option<BlockPos>,
+    player_pos: &mut Option<(f64, f64, f64)>,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -576,7 +592,9 @@ where
                 *pending_keep_alive = None;
             }
         }
-        ServerBound::PlayerMoved { x, z, .. } => {
+        ServerBound::PlayerMoved { x, y, z } => {
+            *player_pos = Some((x, y, z));
+
             // Chunk coordinate = floor(block / 16), not truncating division —
             // `-1.0_f64 / 16.0` must floor to chunk `-1`, matching vanilla's
             // `SectionPos.blockToSectionCoord` (an arithmetic right shift).
@@ -678,6 +696,8 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<BlockPos> = None;
+    let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut vitals = PlayerVitals::default();
     let mut keep_alive_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + KEEP_ALIVE_INTERVAL,
         KEEP_ALIVE_INTERVAL,
@@ -692,6 +712,12 @@ where
     let mut time_sync_tick = tokio::time::interval_at(
         tokio::time::Instant::now() + TIME_SYNC_INTERVAL,
         TIME_SYNC_INTERVAL,
+    );
+    // Same reasoning as `time_sync_tick`: anchored one interval out so the
+    // first vitals tick does not fire in the same instant as join.
+    let mut vitals_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + VITALS_TICK_INTERVAL,
+        VITALS_TICK_INTERVAL,
     );
     let play_start = tokio::time::Instant::now();
     let mut next_keep_alive_id: i64 = 0;
@@ -711,6 +737,7 @@ where
                     &mut view,
                     &mut pending_keep_alive,
                     &mut pending_break,
+                    &mut player_pos,
                     packet_id,
                     &payload,
                 )
@@ -732,6 +759,27 @@ where
             _ = time_sync_tick.tick() => {
                 let game_time = ticks_since(play_start);
                 apply(conn, &mut state, proto.encode_set_time(game_time, None)).await?;
+            }
+
+            _ = vitals_tick.tick() => {
+                // No position yet (client has not sent a single move since
+                // join): nothing to test submersion against, so skip rather
+                // than guess a spawn position this version-free crate does
+                // not otherwise track (see `crate::vitals`'s module docs).
+                if let Some((x, y, z)) = player_pos {
+                    let eye_state = source.block_state(
+                        x.floor() as i32,
+                        (y + EYE_HEIGHT).floor() as i32,
+                        z.floor() as i32,
+                    );
+                    let outcome = vitals.tick(is_water(&eye_state));
+                    if let Some(air) = outcome.air_changed {
+                        apply(conn, &mut state, proto.encode_air_supply_update(air)).await?;
+                    }
+                    if outcome.damage.is_some() {
+                        apply(conn, &mut state, proto.encode_set_health(vitals.health())).await?;
+                    }
+                }
             }
         }
     }
@@ -764,6 +812,14 @@ where
 {
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<BlockPos> = None;
+    // Tracked for parity with the native loop's `dispatch_play_packet` calls
+    // (shared function, shared signature), but never ticked here: like
+    // keep-alive and time-of-day above, `PlayerVitals` needs a timer
+    // independent of inbound packets, and `tokio::time` has none on
+    // `wasm32`. Drowning simply does not happen in a `wasm32`-served session
+    // today — a real, documented gap, not a silent one (see this function's
+    // own doc comment).
+    let mut player_pos: Option<(f64, f64, f64)> = None;
 
     while let Some((packet_id, payload)) = conn.read_packet().await? {
         dispatch_play_packet(
@@ -775,6 +831,7 @@ where
             &mut view,
             &mut pending_keep_alive,
             &mut pending_break,
+            &mut player_pos,
             packet_id,
             &payload,
         )
