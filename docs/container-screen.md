@@ -254,9 +254,29 @@ its own icon.
 `Menu::carried()` — the stack the player has picked up and is dragging — draws
 **last**, after every slot, through the same `Builder::draw_stack` helper the
 per-slot loop uses (real icon if an atlas resolves it, else the hash-derived
-swatch fallback). "Last" matters: it is appended after the per-slot loop on all
-three streams, and every pass draws its stream in append order, so the carried
-stack lands on top of whatever slot the cursor happens to be over.
+swatch fallback).
+
+**"Last on the stream" was not enough, and this section used to say it was.** It
+claimed "every pass draws its stream in append order, so the carried stack lands
+on top of whatever slot the cursor happens to be over" — true for two of the four
+combinations and false for the other two, which is issue #377 and was reported
+from play as "the cursor stack draws under the slot items". The item passes run
+**model first, then flat sprites** (only the model pass needs a depth
+attachment), so a *3-D block* on the cursor drew under a slot's flat sprite; and
+two blocks at the same GUI depth resolve against the depth buffer rather than
+against append order. On top of that the slot layer's stack-count glyphs are on
+the colour stream's second run and painted over the carried icon too.
+
+The carried stack is therefore its own **stratum**: `build_inner` records
+`slot_vertex_count` / `slot_item_vertex_count` / `slot_model_vertex_count` /
+`slot_special_count`, and `render_with_icons_scaled` replays all three streams in
+`container-carried-model-pass` + `container-carried-pass` after every slot pass.
+The carried model pass **clears depth again**, which is the load-bearing part and
+is exactly what vanilla's `graphics.nextStratum()`
+(`AbstractContainerScreen.java:126`) buys. Full account, including the
+four-case table and the measured control, in
+[`gui-item-icons.md`](gui-item-icons.md); gate is
+`tests/container_cursor_pixels.rs`.
 
 It only draws when `ContainerFrame::cursor` is `Some([x, y])` — viewport
 pixels, the same space `hit_test` takes, **not** local widget coordinates.
@@ -269,6 +289,40 @@ one line `app.rs` needs.
 There is no tooltip yet, so "below the tooltip" (vanilla's actual third layer)
 is currently moot — the carried stack is simply the topmost thing this screen
 draws.
+
+### Keyboard: the number keys are `SWAP`, not slot selection (issue #378 part 3)
+
+While a container screen is open, `resolve_key`'s container arm consumes every key
+— that is deliberate, so no gameplay binding fires behind an inventory. The nine
+number keys fell into that swallow, which was correct for half the job and wrong
+for the other half: vanilla's `1`–`9` **do not** change the selected hotbar slot
+while a screen is up (that lives in `Minecraft.handleKeybinds`, gated on
+`screen == null`) — they issue a `ContainerInput::SWAP` with that hotbar index
+against the **hovered** slot, `AbstractContainerScreen.checkHotbarKeyPressed`
+(`AbstractContainerScreen.java:506-522`).
+
+The order inside the arm is vanilla's own, from `keyPressed`
+(`AbstractContainerScreen.java:489-503`): the inventory binding closes the screen
+first, *then* the hotbar keys. `KeyOutcome::ContainerSwap { button }` carries the
+raw wire button number, and `App::send_container_swap` applies vanilla's two
+**state** guards — an empty cursor and a hovered slot — before sending. Those
+guards are in the driver, not in `resolve_key`, which only knows about keys;
+failing either does nothing, which is what these keys did before, so a miss is not
+a new dead end. The hover comes from the same
+`active_container_menu` + `hit_test_with_scale` pair the mouse path uses, so key
+and mouse cannot disagree about which slot is under the pointer.
+
+**The off-hand key (vanilla's `F`) is still missing, and it is a decision, not
+code.** `Click::offhand_swap` and `do_swap`'s `button == 40` arm both exist and are
+tested (#27), and `send_container_swap` already has the branch. What is missing is
+an `InputAction::SwapOffhand` — and adding it with vanilla's default of `F`
+(`Options.java:663`, GLFW keysym 70) collides with this client's Lodestone-only
+`key.lodestone.toggleFly`, which turns `keybinds.rs`'s conflict-free-defaults test
+red. Either move `toggleFly` off `F` (vanilla parity, changes a default in use) or
+ship `key.swapOffhand` unbound (no collision, unreachable out of the box). Both
+options and the separate matter of the *gameplay* hand-swap — a
+`ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND` this client never sends —
+are recorded in `keybinds.rs`'s module header.
 
 ## How to change it
 
