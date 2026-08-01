@@ -1051,12 +1051,17 @@ impl Sim {
     /// session attaches.
     fn refresh_mesh_policy(&mut self) {
         let sky_default = match &self.net {
-            Some(net) => crate::mesher::sky_default_for_dimension(
-                net.shared_handle()
-                    .get()
-                    .and_then(|h| h.player().dimension)
-                    .as_ref(),
-            ),
+            Some(net) => {
+                // Since #288 the server's own dimension **type** decides this;
+                // the level id is only the fallback for a server that sent no
+                // `registry_data`. Both come off one `player()` snapshot so they
+                // cannot describe two different moments.
+                let player = net.shared_handle().get().map(|h| h.player());
+                crate::mesher::sky_default_for_dimension(
+                    player.as_ref().and_then(|p| p.dimension.as_ref()),
+                    player.as_ref().and_then(|p| p.dimension_type.as_ref()),
+                )
+            }
             // The offline fixture world is the overworld.
             None => lodestone_render::SkyDefault::Full,
         };

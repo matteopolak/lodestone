@@ -77,10 +77,23 @@ rate`.
 ### Which clock
 
 26.2 registers two (`WorldClocks::bootstrap`): `minecraft:overworld` = `0`,
-`minecraft:the_end` = `1`. The day/night cycle is the overworld one.
-`SetTime::day_clock()` selects **the lowest holder id**, not the first on the
-wire, because the wire type is a Java `HashMap` and the join-time full sync's two
-entries can arrive in either order.
+`minecraft:the_end` = `1` — now **confirmed off the wire** rather than read out of
+`bootstrap`, by the captured `minecraft:world_clock` registry payload
+(`crates/protocol/v770/tests/fixtures/registry_data_world_clock.hex`).
+
+`SetTime::day_clock()` selects **the lowest holder id**, not the first on the wire,
+because the wire type is a Java `HashMap` and the join-time full sync's two entries
+can arrive in either order. **Since issue #288 that is the fallback, not the
+answer**: the adapter resolves the current dimension type's `default_clock`
+(`minecraft:overworld` in the overworld, **`minecraft:the_end` in the End**, absent
+in the Nether) against the ingested `world_clock` registry and passes the resulting
+holder id to `SetTime::clock_for`.
+
+That mattered on plain vanilla, not only under a data pack: **in the End the
+lowest-id pick returned holder `0`, the overworld's clock**, so the End's sky
+followed overworld time. The old note here anticipated only "a data pack reorders
+the registry" and missed the default case. See
+[`registry-data-ingest.md`](./registry-data-ingest.md).
 
 The key codec is `holderRegistry`, i.e. `registry(key, Registry::asHolderIdMap)`:
 a **bare** VarInt registry id. There is no `+1` offset and no inline-direct path —
@@ -203,13 +216,27 @@ the black-faces-at-the-frontier bug the bridge exists to prevent.
 ## How to change it
 
 * **The clock anchor** lives in `DayClock` in `crates/protocol/v770/src/adapter.rs`.
-  If a second clock ever needs surfacing (the End clock, id `1`), widen it to a map
-  keyed by `holder_id` and select per dimension. The constraint is
-  `ClientEvent::TimeChanged`'s single `time_of_day` field, not the struct.
-* **Resolving the clock by name** rather than by lowest id needs the
-  `minecraft:world_clock` registry from the configuration `registry_data` packet,
-  which this crate does not ingest. Only necessary if a data pack reorders the
-  registry.
+  It still holds exactly **one** clock — the one the current dimension follows,
+  selected by `V770Adapter::clock_holder` and re-selected on every
+  `login`/`respawn`. Surfacing two clocks *at once* would need it widened to a map
+  keyed by `holder_id`; the constraint that makes that pointless today is
+  `ClientEvent::TimeChanged`'s single `time_of_day` field, not the struct. (The
+  older note here said selecting per dimension needed that widening. It did not —
+  re-anchoring one slot on a dimension change was enough.)
+* **Resolving the clock by name** is done, as of issue #288: the crate ingests the
+  `minecraft:world_clock` registry (`packets::registry::ClientRegistries`), the
+  adapter resolves the current dimension type's `default_clock` to a holder id in
+  `enter_dimension`, and `SetTime::clock_for` selects that clock. The old note
+  here said this "needs the registry, which this crate does not ingest" and framed
+  it as a data-pack-only concern; both halves are now out of date — see the *Which
+  clock* section above for the vanilla End case it was already getting wrong.
+* **A dimension with no clock of its own** (the Nether: `has_fixed_time: true`, no
+  `default_clock`) still falls back to the lowest-id pick. That is deliberate and
+  documented rather than fixed: `time_of_day`'s only consumer is the sky curve
+  below, which does not yet gate on `has_fixed_time`, so reporting the overworld's
+  clock there is exactly the pre-#288 behaviour and no worse. Gating the curve on
+  `has_fixed_time` — the field *is* decoded and carried on
+  `DimensionTypeInfo` — is the real fix and is unclaimed.
 * **The curve** is `sky_darken_for_time_of_day` in
   `crates/lodestone-render/src/entity.rs`. It is a direct port of 26.2's
   `EnvironmentAttributes.SKY_LIGHT_FACTOR` timeline track
@@ -345,7 +372,8 @@ Kept deliberately separate so a pass on one cannot mask the other.
 
 | gate | what it can see | what it structurally cannot |
 |---|---|---|
-| `crates/protocol/v770/tests/world_state.rs` | the hold-and-extrapolate rule: empty maps do not clobber, `rate 0` freezes, lowest-holder-id selection | anything above the adapter |
+| `crates/protocol/v770/tests/world_state.rs` | the hold-and-extrapolate rule: empty maps do not clobber, `rate 0` freezes, lowest-holder-id fallback selection | anything above the adapter |
+| `crates/protocol/v770/tests/registry_data.rs` | **which clock is the day clock**: the `minecraft:world_clock` holder ids, off captured server bytes, and each dimension type's `default_clock` | that the adapter actually *uses* the resolved holder (`world_state.rs`'s `clock_for` cases) |
 | `crates/lodestone-shell/tests/live_time_of_day.rs` | **the runtime feed**: the client's day clock follows the real server's `/time set`, and the derived `sky_darken` spans the curve | pixels |
 | `crates/lodestone-render/tests/entity_night_pixels.rs` | the entity shader responds to a `sky_darken` it is *handed* | where that value comes from |
 | `crates/lodestone-render/tests/grass_light_response_gate.rs` | the model shader responds to a light byte it is *handed* | where that value comes from |

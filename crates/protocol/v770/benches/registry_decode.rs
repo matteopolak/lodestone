@@ -1,9 +1,11 @@
 //! Block-state registry resolution benchmark (issue #78 epic, sub-issue #146).
 //!
-//! Not a wire-packet decode — this crate has no runtime `registry_data`
-//! configuration-packet decoder to benchmark (26.2's per-block-state census is
-//! baked in at compile time from the real server dump, per `CLAUDE.md`'s data
-//! sources; see `src/generated/block_states.rs`'s header). The real per-chunk
+//! Not a wire-packet decode, despite the name. There *is* a runtime
+//! `registry_data` decoder now (`src/packets/registry.rs`, issue #288), but it
+//! runs 29 times per connection during Configuration and never again, so it is
+//! not a hot path worth a bench. 26.2's per-block-state census — what this file
+//! actually measures — is baked in at compile time from the real server dump, per
+//! `CLAUDE.md`'s data sources; see `lodestone_data::block_states`'s header. The real per-chunk
 //! hot path this data feeds is turning a wire block-state id into a name +
 //! properties — `crate::block_states`'s [`block_name`]/[`properties`]
 //! zero-heap accessors and the heap-owning [`BlockStateTable`] the

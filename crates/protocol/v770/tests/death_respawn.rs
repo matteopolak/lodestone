@@ -126,19 +126,28 @@ fn handle_play_respawn_emits_dimension_and_game_mode_without_death_location() {
             golden,
         )
         .expect("handle respawn");
+    // Since issue #288 a respawn emits the dimension **type** first, then the
+    // `Respawned` event. `None` here because this test feeds no `registry_data`,
+    // which is also the assertion that the holder id is not defaulted.
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Respawned {
-            dimension,
-            game_mode,
-            previous_game_mode,
-            last_death_location,
-        })] => {
+        [
+            Directive::Emit(ClientEvent::DimensionTypeChanged {
+                dimension_type: None,
+                ..
+            }),
+            Directive::Emit(ClientEvent::Respawned {
+                dimension,
+                game_mode,
+                previous_game_mode,
+                last_death_location,
+            }),
+        ] => {
             assert_eq!(dimension.to_string(), "minecraft:the_nether");
             assert_eq!(*game_mode, GameMode::Creative);
             assert_eq!(*previous_game_mode, None);
             assert_eq!(*last_death_location, None);
         }
-        other => panic!("expected a single Respawned event, got {other:?}"),
+        other => panic!("expected DimensionTypeChanged then Respawned, got {other:?}"),
     }
 }
 
@@ -166,12 +175,18 @@ fn handle_play_respawn_emits_death_location_and_previous_game_mode() {
         )
         .expect("handle respawn");
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Respawned {
-            dimension,
-            game_mode,
-            previous_game_mode,
-            last_death_location,
-        })] => {
+        [
+            Directive::Emit(ClientEvent::DimensionTypeChanged {
+                dimension_type: None,
+                ..
+            }),
+            Directive::Emit(ClientEvent::Respawned {
+                dimension,
+                game_mode,
+                previous_game_mode,
+                last_death_location,
+            }),
+        ] => {
             assert_eq!(dimension.to_string(), "minecraft:overworld");
             assert_eq!(*game_mode, GameMode::Survival);
             assert_eq!(*previous_game_mode, Some(GameMode::Survival));
@@ -187,7 +202,7 @@ fn handle_play_respawn_emits_death_location_and_previous_game_mode() {
                 })
             );
         }
-        other => panic!("expected a single Respawned event, got {other:?}"),
+        other => panic!("expected DimensionTypeChanged then Respawned, got {other:?}"),
     }
 }
 

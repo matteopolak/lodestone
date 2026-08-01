@@ -106,13 +106,18 @@ impl ChunkShape {
 
     /// Selects the shape for a vanilla dimension by its identifier.
     ///
-    /// Heights properly belong to the dimension-type registry (sent as registry
-    /// data during configuration); until that registry is decoded, the three
-    /// vanilla dimensions are mapped by name and anything else — including
-    /// datapack-custom dimensions — falls back to the overworld window. That
-    /// fallback is a documented limitation, not a silent guess: a custom
-    /// dimension with a non-standard height would need the registry to decode
-    /// correctly.
+    /// **This is the fallback, not the primary path, since issue #288.** Heights
+    /// belong to the dimension-type registry, and the adapter now decodes it
+    /// (`crate::packets::registry`): `V770Adapter::enter_dimension` builds the
+    /// shape from the resolved dimension type's real `min_y`/`height`, and only
+    /// calls this when the `login`/`respawn` holder id did not resolve — a server
+    /// or protocol family that sent no `registry_data`.
+    ///
+    /// On that fallback path the three vanilla dimensions are mapped by name and
+    /// anything else — including datapack-custom dimensions — falls back to the
+    /// overworld window. That remains a documented limitation rather than a silent
+    /// guess, but it is no longer the limitation the client normally operates
+    /// under.
     #[must_use]
     pub fn for_dimension(name: &str) -> Self {
         match name {

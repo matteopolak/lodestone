@@ -36,6 +36,20 @@ fn decode<T: Decode>(bytes: &[u8]) -> T {
     T::decode(&mut reader, CTX).expect("decode")
 }
 
+/// A minimal well-formed `registry_data` body with data-less entries. Only
+/// enough to prove the join flow accepts and consumes the packet; the real wire
+/// format is validated against captured server bytes in `tests/registry_data.rs`.
+fn registry_data_payload(registry: &str, entries: &[&str]) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.string(registry);
+    w.var_i32(i32::try_from(entries.len()).expect("entry count"));
+    for id in entries {
+        w.string(id);
+        w.bool(false);
+    }
+    w.into_vec()
+}
+
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -270,13 +284,50 @@ fn full_login_sequence_produces_expected_directives() {
         }]
     );
 
-    // Registry data (and any unhandled packet) is skipped wholesale.
+    // Registry data is now *ingested* (issue #288) rather than skipped: it
+    // produces no directive — nothing is sent, no event is emitted from
+    // Configuration — but it is decoded, folded into the connection's registry
+    // store, and checked for trailing bytes. `tests/registry_data.rs` asserts
+    // the decode against captured server bytes; here the point is only that the
+    // join flow is unchanged by it.
+    //
+    // This used to assert the opposite ("skipped wholesale") with a payload of
+    // `deadbeef`, which is exactly what made #288 invisible: the packet reaching
+    // the unhandled fall-through was pinned as intended behaviour.
     assert!(
         adapter
             .handle_packet(
                 &mut World::new(),
                 ConnectionState::Configuration,
                 configuration::clientbound::REGISTRY_DATA,
+                &registry_data_payload("minecraft:world_clock", &["minecraft:overworld"]),
+            )
+            .unwrap()
+            .is_empty()
+    );
+
+    // …and a malformed one is a decode error rather than a silent skip. The
+    // control for the assertion above: without this, "produced no directive"
+    // would also be true of the fall-through that ignored the packet entirely.
+    assert!(
+        adapter
+            .handle_packet(
+                &mut World::new(),
+                ConnectionState::Configuration,
+                configuration::clientbound::REGISTRY_DATA,
+                &[0xde, 0xad, 0xbe, 0xef],
+            )
+            .is_err(),
+        "a truncated registry_data must fail to decode, not be skipped"
+    );
+
+    // An *unhandled* configuration packet is still skipped wholesale.
+    assert!(
+        adapter
+            .handle_packet(
+                &mut World::new(),
+                ConnectionState::Configuration,
+                9999,
                 &[0xde, 0xad, 0xbe, 0xef],
             )
             .unwrap()
@@ -312,11 +363,22 @@ fn full_login_sequence_produces_expected_directives() {
                 &hex(GAME_LOGIN_HEX),
             )
             .unwrap(),
-        vec![Directive::Emit(ClientEvent::Login {
-            entity_id: 1,
-            game_mode: GameMode::Survival,
-            dimension: "minecraft:overworld".parse().unwrap(),
-        })]
+        // Two directives since issue #288: the dimension **type** resolved against
+        // the ingested `registry_data`, then `Login`. `dimension_type: None`
+        // because this flow feeds only a `world_clock` registry above — the
+        // holder id must report as unresolved rather than defaulting to the
+        // overworld.
+        vec![
+            Directive::Emit(ClientEvent::DimensionTypeChanged {
+                holder_id: 0,
+                dimension_type: None,
+            }),
+            Directive::Emit(ClientEvent::Login {
+                entity_id: 1,
+                game_mode: GameMode::Survival,
+                dimension: "minecraft:overworld".parse().unwrap(),
+            }),
+        ]
     );
 }
 

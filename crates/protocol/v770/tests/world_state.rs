@@ -119,19 +119,34 @@ fn handle_play_respawn_emits_respawned_event() {
             &respawn_golden(),
         )
         .expect("handle respawn");
+    // Two directives since issue #288: the dimension **type** (resolved against
+    // the ingested `registry_data`, `None` here because no registry was fed)
+    // then the `Respawned` event, in that order.
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::Respawned {
-            dimension,
-            game_mode,
-            previous_game_mode,
-            last_death_location,
-        })] => {
+        [
+            Directive::Emit(ClientEvent::DimensionTypeChanged {
+                holder_id,
+                dimension_type,
+            }),
+            Directive::Emit(ClientEvent::Respawned {
+                dimension,
+                game_mode,
+                previous_game_mode,
+                last_death_location,
+            }),
+        ] => {
+            assert_eq!(*holder_id, 0, "the golden respawn's dimension_type varint");
+            assert_eq!(
+                *dimension_type, None,
+                "no registry_data was fed, so the holder id must not resolve — \
+                 and must not silently become the overworld"
+            );
             assert_eq!(dimension.to_string(), "minecraft:the_nether");
             assert_eq!(*game_mode, lodestone_model::GameMode::Survival);
             assert_eq!(*previous_game_mode, None);
             assert_eq!(*last_death_location, None);
         }
-        other => panic!("expected a single Respawned event, got {other:?}"),
+        other => panic!("expected DimensionTypeChanged then Respawned, got {other:?}"),
     }
 }
 
@@ -390,4 +405,200 @@ fn handle_play_set_time_rejects_trailing_bytes() {
         &payload,
     );
     assert!(result.is_err(), "a misaligned set_time must be rejected");
+}
+
+// --- The registry-resolved day clock (issue #288) --------------------------
+
+/// A `respawn` body pointing at dimension-type holder `holder_id` and level
+/// `dimension`. Built off [`respawn_golden`] so the rest of the layout stays in
+/// one place; only the two fields this section is about vary.
+fn respawn_into(holder_id: u8, dimension: &str) -> Vec<u8> {
+    let mut bytes = vec![holder_id];
+    bytes.push(u8::try_from(dimension.len()).expect("short dimension name"));
+    bytes.extend_from_slice(dimension.as_bytes());
+    bytes.extend_from_slice(&respawn_golden()[1 + 1 + b"minecraft:the_nether".len()..]);
+    bytes
+}
+
+/// A `registry_data` body with data-less entries, for `minecraft:world_clock`
+/// (whose real entries *are* contentless — `record WorldClock()`).
+fn world_clock_registry(entries: &[&str]) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.string("minecraft:world_clock");
+    w.var_i32(i32::try_from(entries.len()).expect("entry count"));
+    for id in entries {
+        w.string(id);
+        w.bool(false);
+    }
+    w.into_vec()
+}
+
+/// The **real** `minecraft:dimension_type` payload a 26.2 server sent, captured
+/// by `tests/live_registry_data.rs`. Used rather than a hand-built entry so the
+/// `default_clock` values driving this selection come from the server, not from
+/// this file.
+fn captured_dimension_type_registry() -> Vec<u8> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/registry_data_dimension_type.hex");
+    let text = std::fs::read_to_string(&path).expect("captured dimension_type fixture");
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .map(|tok| u8::from_str_radix(tok, 16).expect("fixture hex byte"))
+        .collect()
+}
+
+fn feed_configuration(adapter: &V770Adapter, payload: &[u8]) {
+    adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Configuration,
+            lodestone_v770::packet_ids::configuration::clientbound::REGISTRY_DATA,
+            payload,
+        )
+        .expect("registry_data must decode");
+}
+
+fn respawn(adapter: &V770Adapter, holder_id: u8, dimension: &str) {
+    adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::RESPAWN,
+            &respawn_into(holder_id, dimension),
+        )
+        .expect("handle respawn");
+}
+
+/// A full-sync `set_time` carrying **both** clocks, as `createFullSyncPacket`
+/// sends at join. The two tick counts differ, which is what makes the selection
+/// observable at all — a fixture where both clocks agree passes either way.
+fn set_time_full_sync(game_time: i64, overworld_ticks: u32, end_ticks: u32) -> Vec<u8> {
+    let mut bytes = game_time.to_be_bytes().to_vec();
+    bytes.push(0x02); // two clock updates
+    for (holder, ticks) in [(0u8, overworld_ticks), (1u8, end_ticks)] {
+        bytes.push(holder);
+        let mut v = u64::from(ticks);
+        loop {
+            let byte = (v & 0x7F) as u8;
+            v >>= 7;
+            if v == 0 {
+                bytes.push(byte);
+                break;
+            }
+            bytes.push(byte | 0x80);
+        }
+        bytes.extend_from_slice(&0.0_f32.to_be_bytes()); // partial_tick
+        bytes.extend_from_slice(&1.0_f32.to_be_bytes()); // rate
+    }
+    bytes
+}
+
+/// Issue #288. In the End the day clock is `minecraft:the_end`, holder id `1`.
+/// `day_clock`'s lowest-holder-id pick returned holder `0` — the *overworld's*
+/// clock — in every dimension, so the End's sky followed overworld time. This is
+/// vanilla's default behaviour, not a data-pack edge case.
+///
+/// The registry payloads are fed through `handle_packet` in the Configuration
+/// state, exactly as a real join delivers them, so this also covers the
+/// `REGISTRY_DATA` arm being reachable at all.
+#[test]
+fn in_the_end_the_resolved_clock_is_the_end_clock_not_the_lowest_holder_id() {
+    let adapter = V770Adapter::new();
+    feed_configuration(&adapter, &world_clock_registry(&["minecraft:overworld", "minecraft:the_end"]));
+    feed_configuration(&adapter, &captured_dimension_type_registry());
+
+    // Holder 2 is `minecraft:the_end` in the captured registry (entries arrive
+    // alphabetically: overworld, overworld_caves, the_end, the_nether).
+    respawn(&adapter, 2, "minecraft:the_end");
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_full_sync(1000, 6_000, 18_000)),
+        18_000,
+        "the End must follow its own clock (holder 1), not the overworld's"
+    );
+
+    // A portal trip back must move the selection with it.
+    respawn(&adapter, 0, "minecraft:overworld");
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_full_sync(2000, 6_000, 18_000)),
+        6_000,
+        "back in the overworld the overworld clock wins again"
+    );
+}
+
+/// The control for the test above, and the reason it is evidence of anything:
+/// with **no** `registry_data` the very same packets select the lowest holder id,
+/// i.e. the overworld's `6_000`, in the End. That is the pre-#288 behaviour, and
+/// it is also the fallback a server sending no registries still has to get.
+#[test]
+fn without_registry_data_the_end_still_falls_back_to_the_lowest_holder_id() {
+    let adapter = V770Adapter::new();
+    respawn(&adapter, 2, "minecraft:the_end");
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_full_sync(1000, 6_000, 18_000)),
+        6_000,
+        "no registry: the lowest-holder-id fallback, unchanged from before #288"
+    );
+}
+
+/// A one-entry `modifyClock` broadcast for a clock we are **not** following must
+/// not re-anchor us. Without this, a `/time set` in the overworld would drag an
+/// End session's time of day with it — the original bug wearing a new hat.
+#[test]
+fn a_clock_update_for_another_dimension_does_not_re_anchor_us() {
+    let adapter = V770Adapter::new();
+    feed_configuration(&adapter, &world_clock_registry(&["minecraft:overworld", "minecraft:the_end"]));
+    feed_configuration(&adapter, &captured_dimension_type_registry());
+    respawn(&adapter, 2, "minecraft:the_end");
+
+    // Anchor the End clock at 18_000.
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_full_sync(1000, 6_000, 18_000)),
+        18_000
+    );
+    // Now the *overworld's* clock changes. We must keep extrapolating ours.
+    assert_eq!(
+        time_of_day_after(&adapter, &set_time_with_clock(1020, 0, 500, 1.0)),
+        18_020,
+        "an update for holder 0 must not become our time of day"
+    );
+}
+
+/// The `respawn` arm emits the dimension type *before* `Respawned`, so a consumer
+/// folding both sees the geometry before the level name that depends on it.
+#[test]
+fn respawn_emits_the_dimension_type_before_the_respawned_event() {
+    let adapter = V770Adapter::new();
+    feed_configuration(&adapter, &captured_dimension_type_registry());
+    let directives = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Play,
+            play::clientbound::RESPAWN,
+            &respawn_into(3, "minecraft:the_nether"),
+        )
+        .expect("handle respawn");
+    match directives.as_slice() {
+        [
+            Directive::Emit(ClientEvent::DimensionTypeChanged {
+                holder_id,
+                dimension_type,
+            }),
+            Directive::Emit(ClientEvent::Respawned { .. }),
+        ] => {
+            assert_eq!(*holder_id, 3);
+            let info = dimension_type
+                .as_ref()
+                .expect("holder 3 resolves to minecraft:the_nether");
+            assert_eq!(info.name.to_string(), "minecraft:the_nether");
+            assert!(
+                !info.has_skylight,
+                "this is the bit `sky_default_for_dimension` reads (#34)"
+            );
+            assert_eq!(info.min_y, 0);
+            assert_eq!(info.height, 256);
+            assert_eq!(info.logical_height, 128);
+        }
+        other => panic!("expected DimensionTypeChanged then Respawned, got {other:?}"),
+    }
 }

@@ -11,9 +11,17 @@
 //! version crate (§3.4 — no per-version index escapes). The variant registries
 //! themselves are data-driven and are synced to a real client during
 //! configuration, but this crate deliberately resolves them from a static table
-//! rather than tracking `registry_data`, for the same reason every other id
-//! table here (entity types, items, attributes, sound events) is static: the
-//! ids are stable for vanilla, and a static table needs no cross-phase state.
+//! rather than from the `registry_data` those packets carry, for the same reason
+//! every other id table here (entity types, items, attributes, sound events) is
+//! static: the ids are stable for vanilla, and a static table needs no
+//! cross-phase state.
+//!
+//! Note that since issue #288 the cross-phase state *does* exist —
+//! `crate::packets::registry::ClientRegistries` keeps the ordered entry names of
+//! every synchronized registry, these variant registries included — so switching
+//! a table here to a registry lookup is now a choice rather than a blocked one.
+//! It is still deliberately not taken: a static table is faster and cannot be
+//! absent, and the id outside a table resolves to `None` either way.
 //! The ordering below is transcribed from each registry's vanilla bootstrap
 //! *registration order* in the 26.2 source (`MappedRegistry` assigns ids in
 //! registration order and transmits entries in id order), which is the same

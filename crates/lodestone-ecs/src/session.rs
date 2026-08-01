@@ -84,7 +84,7 @@ use bevy_ecs::component::Component;
 use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
-use lodestone_model::{ClientEvent, DimensionId, GameMode};
+use lodestone_model::{ClientEvent, DimensionId, DimensionTypeInfo, GameMode};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
 use crate::player::LocalPlayer;
@@ -228,6 +228,27 @@ pub struct ServerGameMode(pub Option<GameMode>);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ServerDimension(pub Option<DimensionId>);
 
+/// The **dimension type** the local player's dimension points at, as the server
+/// declared it in the Configuration `registry_data` (issue #288). `None` before
+/// login, and `None` on a server whose registry did not resolve.
+///
+/// # Why this is not derivable from [`ServerDimension`]
+///
+/// [`ServerDimension`] holds a *level* id; this holds the registry entry that
+/// level's geometry and lighting rules come from. Deriving one from the other is
+/// the name match issue #34 filed: a data pack can point `mypack:mine` at the
+/// vanilla overworld type, or give `minecraft:overworld` a 1024-tall custom type.
+/// The two are folded together in [`apply_local_player_state`] off two events
+/// the adapter emits back to back, so they can never disagree about *when* they
+/// moved.
+///
+/// **`None` must not be read as "the overworld".** It means the server said
+/// nothing usable, and every consumer has to state its own fallback — see
+/// `lodestone_shell::mesher::sky_default_for_dimension`, which keeps its
+/// pre-#288 name match for exactly this case.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct ServerDimensionType(pub Option<DimensionTypeInfo>);
+
 /// Whether the **server** considers the local player alive.
 ///
 /// Defaults to `true`: a client that has not been told otherwise is alive, and a
@@ -294,6 +315,13 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             // the local player's server-reported state
             | ClientEvent::Login { .. }
             | ClientEvent::Respawned { .. }
+            // `DimensionTypeChanged` (#288) is folded by `apply_local_player_state`
+            // into `ServerDimensionType`. **This arm is the whole wiring**: without
+            // it `SharedState::apply` routes the event to the dead legacy scalar
+            // fallback, which has no arm for it either, and a fully correct decode
+            // reaches zero pixels — the island `CLAUDE.md` §1 names, three times
+            // over.
+            | ClientEvent::DimensionTypeChanged { .. }
             | ClientEvent::HealthChanged { .. }
             | ClientEvent::Death { .. }
             | ClientEvent::ExperienceChanged { .. }
@@ -346,7 +374,7 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
 
 /// `IngestSet::Apply`: the local player's own server-reported state →
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
-/// [`ServerDimension`], [`ServerAlive`].
+/// [`ServerDimension`], [`ServerDimensionType`], [`ServerAlive`].
 ///
 /// # Why this is one system over five event families and not five systems
 ///
@@ -372,14 +400,38 @@ pub fn apply_local_player_state(
             &mut ServerEntityId,
             &mut ServerGameMode,
             &mut ServerDimension,
+            &mut ServerDimensionType,
             &mut ServerAlive,
         ),
         With<LocalPlayer>,
     >,
 ) {
     for event in batch.events() {
-        for (mut vitals, mut xp, mut id, mut game_mode, mut dimension, mut alive) in &mut players {
+        for (
+            mut vitals,
+            mut xp,
+            mut id,
+            mut game_mode,
+            mut dimension,
+            mut dimension_type,
+            mut alive,
+        ) in &mut players
+        {
             match event {
+                // Issue #288. Emitted immediately *before* `Login`/`Respawned`
+                // by the adapter, off the same packet's dimension-type holder id.
+                //
+                // Assigned unconditionally, `None` included: an unresolvable
+                // dimension must **clear** the previous one, or a portal trip
+                // into a custom dimension would keep reporting the overworld's
+                // `has_skylight` — the stale-value failure mode that is worse
+                // than an honest `None`.
+                ClientEvent::DimensionTypeChanged {
+                    dimension_type: info,
+                    ..
+                } => {
+                    dimension_type.0 = info.clone();
+                }
                 ClientEvent::Login {
                     entity_id,
                     game_mode: mode,
@@ -453,6 +505,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             ServerEntityId::default(),
             ServerGameMode::default(),
             ServerDimension::default(),
+            ServerDimensionType::default(),
             ServerAlive::default(),
         ));
     }
@@ -1019,6 +1072,94 @@ mod tests {
         assert!(
             world.get::<ServerAlive>(entity).unwrap().0,
             "a respawn is exactly when the player stops being dead"
+        );
+    }
+
+    /// A dimension type as the adapter builds it from `registry_data`.
+    fn dim_type(name: &str, has_skylight: bool) -> DimensionTypeInfo {
+        DimensionTypeInfo {
+            name: format!("minecraft:{name}").parse().expect("valid key"),
+            has_skylight,
+            has_ceiling: !has_skylight,
+            has_fixed_time: !has_skylight,
+            coordinate_scale: if has_skylight { 1.0 } else { 8.0 },
+            min_y: if has_skylight { -64 } else { 0 },
+            height: if has_skylight { 384 } else { 256 },
+            logical_height: if has_skylight { 384 } else { 128 },
+            ambient_light: if has_skylight { 0.0 } else { 0.1 },
+        }
+    }
+
+    /// Issue #288: the registry-driven dimension type must reach
+    /// [`ServerDimensionType`] **through the schedule**, and must move on a
+    /// portal trip the same way [`ServerDimension`] does.
+    ///
+    /// The pre-login assertion is the control: it proves the component starts
+    /// `None` and is genuinely written, rather than having happened to hold the
+    /// expected value all along.
+    #[test]
+    fn a_net_ingest_run_folds_the_registry_dimension_type_and_a_portal_trip_moves_it() {
+        let (mut app, entity) = session_app();
+        assert_eq!(
+            app.world().get::<ServerDimensionType>(entity).unwrap().0,
+            None,
+            "pre-login there is no dimension type — not a defaulted overworld"
+        );
+
+        fold(
+            &mut app,
+            ClientEvent::DimensionTypeChanged {
+                holder_id: 0,
+                dimension_type: Some(dim_type("overworld", true)),
+            },
+        );
+        let folded = app
+            .world()
+            .get::<ServerDimensionType>(entity)
+            .unwrap()
+            .0
+            .clone()
+            .expect("the fold must reach the component");
+        assert!(folded.has_skylight);
+        assert_eq!(folded.min_y, -64);
+        assert_eq!(folded.height, 384);
+
+        // A portal trip: the adapter emits this off `respawn`'s own dimension-type
+        // holder id, immediately before `Respawned`.
+        fold(
+            &mut app,
+            ClientEvent::DimensionTypeChanged {
+                holder_id: 3,
+                dimension_type: Some(dim_type("the_nether", false)),
+            },
+        );
+        let nether = app
+            .world()
+            .get::<ServerDimensionType>(entity)
+            .unwrap()
+            .0
+            .clone()
+            .expect("a portal trip must install the new type");
+        assert!(
+            !nether.has_skylight,
+            "the Nether's has_skylight is the value the mesher's sky default reads"
+        );
+        assert_eq!(nether.logical_height, 128);
+
+        // An unresolvable dimension **clears** rather than keeping the last one:
+        // a stale `has_skylight` renders a dark dimension lit, which is worse
+        // than an honest `None` that makes the consumer state its fallback.
+        fold(
+            &mut app,
+            ClientEvent::DimensionTypeChanged {
+                holder_id: 99,
+                dimension_type: None,
+            },
+        );
+        assert_eq!(
+            app.world().get::<ServerDimensionType>(entity).unwrap().0,
+            None,
+            "an unresolved holder id must clear the previous dimension type"
         );
     }
 
