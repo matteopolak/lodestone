@@ -126,14 +126,13 @@ The branch is **per block**, not per quad — `parts.getFirst()` in vanilla appl
 to the whole block, and `mesh_models` mirrors that: `ambient_occlusion_at` is
 read once per cell, before the quad loop.
 
-**The live shell does not call `ambient_occlusion_at` yet.** `ModelSectionView`'s
-default (`true`) reproduces the exact pre-existing behaviour, so nothing regresses,
-but no block actually renders flat via this mechanism until
-`crates/lodestone-shell/src/mesher.rs`'s `SnapshotModelView` (or whatever type
-implements `ModelSectionView` there) overrides it with
-`block_models.ambient_occlusion(state_id)`. That file is outside this crate's
-ownership for this change; the patch is one method, mirroring the existing
-`occludes_at`/`face_light_at` overrides already on that type:
+**The live shell now calls `ambient_occlusion_at`** — `2b96bbb` added the override
+to `crates/lodestone-shell/src/mesher.rs`, closing what had been an island: the
+mechanism was built and tested inside this crate while `ModelSectionView`'s default
+(`true`) meant no block in the live world ever rendered flat through it. The
+default is still the correct fallback, and still reproduces pre-#22 behaviour for
+any view that does not override it. For reference, the override is one method,
+mirroring the `occludes_at`/`face_light_at` overrides beside it:
 
 ```rust
 fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
