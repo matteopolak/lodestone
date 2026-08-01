@@ -1,0 +1,227 @@
+# Entity and player nametags
+
+## What it is
+
+Billboarded text above every entity with a visible custom name, and above
+every other player (issue #100). Before this landed, `EntityView` already
+decoded `DATA_CUSTOM_NAME`/`DATA_CUSTOM_NAME_VISIBLE` in full
+(`crates/protocol/v770/src/packets/metadata.rs`, indices 2/3), folded them
+into real ECS components (`lodestone_ecs::entity::CustomName`/
+`CustomNameVisible`, wired into `apply_entity_metadata`'s routing switch),
+and reconstituted them onto `EntityView` — but `net::entity_snapshot`, the
+one place that lowers `EntityView` into the version-free `EntitySnapshot`
+the renderer actually consumes, dropped both fields on the floor. The data
+was fully decoded and simply never read past that boundary — the exact
+"island" shape this repo's other entity-metadata fixes (velocity, equipment,
+variant) already had.
+
+## How it works
+
+### The two different rules
+
+A player's tag and every other entity's tag are resolved by genuinely
+different vanilla predicates, both applied once, at `net::entity_snapshot`
+(`crates/lodestone-shell/src/net.rs`):
+
+- **A player's tag is always its tab-list display name.**
+  `Player.shouldShowName()` returns `true` unconditionally
+  (`Player.java:1637`), overriding the base `Entity.shouldShowName() =
+  isCustomNameVisible()` every other entity uses. The name comes from
+  `NetClient::tab_list()` (already-existing, already-folded state — see
+  `crates/lodestone-shell/src/tablist.rs`), matched by `EntityView::uuid`.
+  Scoreboard team colouring/prefixes are genuinely part of vanilla's
+  `getDisplayName()` for a player and are **out of scope here** — this is
+  the plain tab-list name.
+- **Every other entity's tag is its `CUSTOM_NAME`**, gated on
+  `CUSTOM_NAME_VISIBLE` (`LivingEntity.shouldShowName() =
+  isCustomNameVisible()`, `LivingEntity.java:2364`/`:2365`). An entity with
+  `CUSTOM_NAME_VISIBLE=true` but no custom name shows nothing here — vanilla
+  would fall back to drawing the entity's translated type name (`Entity.
+  getDisplayName()`'s default), which is **deliberately not reproduced**
+  (out of scope: the issue's own checklist says "a non-empty custom name").
+
+Both resolve to one `crate::entities::NameTag { text, see_through }`, carried
+as `EntitySnapshot::name_tag` → `RenderNameTag` (a `bevy_ecs` component,
+folded/updated in `entities.rs::spawn_track`/`update_track` exactly like
+`RenderEquipment`/`RenderWool`) → `EntityDraw::name_tag`, the same
+extract-to-plain-POD boundary every other render-side entity field crosses
+(`docs/bevy-migration.md` §4.4).
+
+`see_through` is `Entity.isDiscrete()` (`isShiftKeyDown()`, bit `0x02` of the
+shared flags byte, `Entity.java:262`/`:2703`) — sneaking suppresses the
+depth-testless pass, resolved once at the same boundary.
+
+### The draw path: `crates/lodestone-shell/src/gpu/nametag.rs`
+
+A new `gpu/` submodule (`docs/gpu-module-layout.md`), following the same
+"small, self-contained, world-space colour pipeline" shape
+`gpu/debug_lines.rs`/`gpu/outline.rs` already use — one `view_proj` uniform,
+no texture, one bind group, well under the model shader's 4-bind-group
+floor.
+
+- **Font data**: [`lodestone_assets::font::RasterFont`] loaded directly (the
+  same jar-sourced `FontLoader::load_raster("minecraft:default", …)` call
+  `hud/vanilla_font.rs::VanillaFont::load` makes), not `VanillaFont` itself —
+  its glyph rasteriser is private and its public draw methods target a 2-D
+  screen-space `ColourStream` in `hud/item_icon.rs`; both files belong to a
+  different area of the render stack. `layout_ink_runs` re-derives the same
+  run-length ink walk `VanillaFont::glyph` does, emitting local rects instead
+  of screen quads.
+- **Billboarding**: `lodestone_render::entity::camera_orientation(camera.
+  view_matrix())`, the same already-verified camera→world rotation
+  `thrown_item_matrix` uses for projectiles — not a hand-derived
+  `cross(forward, up)`, which `docs/thrown-projectiles.md` records getting
+  wrong three times running. Every nametag this frame shares one basis
+  (`orientation.x_axis`/`.y_axis`), matching vanilla's single
+  `camera.orientation` applied identically per tag
+  (`SubmitNodeCollection.java:104`).
+- **Anchor**: `feet.y + base_height * scale + 0.5` — `base_height` from
+  `lodestone_data::entity_dimensions::base_dimensions` (the real jar-derived
+  hitbox census), not a guessed constant. This is vanilla's
+  `EntityAttachment.NAME_TAG` fallback (`AT_HEIGHT`, `EntityAttachment.
+  java:9`/`:25`) plus `SubmitNodeCollection.java:103`'s `+0.5`. Per-type
+  attachment overrides (a sitting cat, a sleeping villager) are not ported —
+  every entity uses the fallback, which the overwhelming majority (players,
+  every standard mob) genuinely get.
+- **Distance cutoff**: `64.0` blocks, squared-distance from the camera to
+  the entity's **feet** (`EntityRenderer.java:246`/`:252`), not the tag
+  anchor.
+
+### The two depth passes
+
+Reconciled against `.cache/mc/26.2/client-src`'s
+`RenderPipelines.java`/`RenderTypes.java`, not guessed:
+
+| | vanilla (jar) | here (`wgpu`) |
+|---|---|---|
+| normal | `DepthStencilState.DEFAULT` = `(GREATER_THAN_OR_EQUAL, writeDepth=true)` (`DepthStencilState.java:6`) | `CompareFunction::LessEqual`, `depth_write_enabled: true` |
+| see-through | `Optional.empty()` — no depth attachment at all (`RenderPipelines.java:507`) | `CompareFunction::Always`, `depth_write_enabled: false` |
+
+The normal-pass sign flip is the same one every other depth-tested pass in
+this codebase applies: our depth is `[0,1]` DirectX-style, not vanilla's
+reversed-Z, so "closer or equal" flips from `GREATER_THAN_OR_EQUAL` to
+`LessEqual`.
+
+**The see-through row is not a straight port.** Vanilla's abstraction lets a
+pipeline declare *no* depth-stencil state at all; `wgpu` does not have an
+equivalent for "this pipeline ignores the pass's depth attachment" while
+sharing a render pass that has one — every pipeline drawn inside such a pass
+must declare a matching-format depth-stencil state of its own. This was
+found the hard way, not reasoned out in advance: an initial
+`depth_stencil: None` pipeline validation-errored at draw time
+(`Incompatible depth-stencil attachment format: … Some(Depth32Float) but the
+RenderPipeline … uses an attachment with format None`), it did not silently
+no-op or fall back to something plausible. `CompareFunction::Always` (every
+fragment passes — no comparison operator, hence no sign to get backwards)
+with `depth_write_enabled: false` is the equivalent-in-effect substitute:
+functionally "no depth interaction", expressed the only way `wgpu` allows it
+within a single shared pass.
+
+Colours (`SubmitNodeCollection.java:113`/`:117`): normal is opaque white
+(`-1`); see-through is `0x81_FFFFFF` — white at alpha `129/255 ≈ 0.506`. Both
+use plain alpha blending; with the normal pass's alpha at `1.0` the blend is
+a no-op there, so draw order between the two passes does not affect the
+final pixel wherever both would cover the same texel.
+
+Both passes are drawn last in `gpu.rs`'s single "block pass", after
+`debug_lines`, so they read the same depth buffer terrain and every entity
+already wrote this frame — see `RenderState::render_inner`.
+
+## How to change it, and the gotchas
+
+- **The two rules live at `net::entity_snapshot`, not in `gpu/nametag.rs`.**
+  If a scoreboard-team-prefixed player name, or vanilla's translated-type-name
+  fallback, is ever wanted, that is a change to the *resolution* logic in
+  `net.rs`, not to the draw pass — the draw pass only ever sees an already-
+  resolved `Option<NameTag>` and does not know which rule produced it.
+- **`wgpu`'s depth-stencil constraint is per render *pass*, not per
+  pipeline in isolation.** Any future pass that wants "no depth interaction"
+  while sharing this crate's single monolithic block pass needs the same
+  `Always`/`write: false` substitute this module uses — a bare
+  `depth_stencil: None` will validation-error the moment it shares a pass
+  with anything that has a depth attachment, which every pass in
+  `render_inner` does.
+- **The billboard basis is per-frame, not per-entity.** `NameTagRenderer::
+  prepare` computes `right`/`up` once from the camera and reuses it for
+  every entity's tag — this is deliberate (it matches vanilla) and also
+  the only realistic way to keep this a single small vertex upload; do not
+  "fix" it into a per-entity look-at without re-reading
+  `SubmitNodeCollection.java:104`'s call order first.
+- **`entity_base_height` falls back to `1.8`** for a type path the
+  jar-derived census cannot resolve (an unregistered/synthetic type path,
+  or the rare `0`-height marker types) — not a crash, not a `0`-height tag
+  glued to the entity's feet.
+
+## Configuration
+
+None. The font, like every other jar-sourced asset in this crate, is
+discovered via `LODESTONE_ASSETS` or the highest-sorting `.cache/mc/<ver>`
+under an ancestor of the working directory (see `jar_manager`/`pack_root` in
+`gpu/nametag.rs` — a deliberate duplicate of `hud/vanilla_font.rs`'s own
+discovery snippet, for the same reason that module duplicates it from
+`crate::resources` rather than the `#[cfg(test)]`-gated original: see that
+module's doc).
+
+## Dependencies
+
+- `lodestone-assets` (`font::{FontLoader, FontOptions, RasterFont, metrics}`)
+  — the jar-sourced glyph data.
+- `lodestone-data` (`entity_dimensions`, `entity_types`) — new direct
+  dependency of `lodestone-shell`, added for this feature; the jar-derived
+  per-entity-type hitbox census used for the tag's vertical anchor.
+- `lodestone-render` (`Camera`, `DEPTH_FORMAT`, `entity::camera_orientation`)
+  — the camera math and the shared depth format.
+- `lodestone-game::tablist::TabList` — already-folded tab-list state, for
+  player names.
+- `wgpu` — the pass's own pipeline/shader, ~200 lines, no shared bind groups
+  with the model/entity pipelines.
+
+## What is deliberately not built
+
+- **The background plate.** Vanilla draws a translucent black quad behind
+  the glyphs, sized from the `chatOpacity` game option
+  (`SubmitNodeCollection.java:108`). Not in the issue's scope checklist and
+  not required for legibility (the drop shadow already separates text from
+  background) — a genuine gap, not an oversight.
+- **Per-frame packed-light modulation.** Vanilla forces near-full brightness
+  for the normal pass specifically so a tag stays legible in the dark
+  (`LightCoordsUtil.lightCoordsWithEmission(lightCoords, 2)`); this renderer
+  draws plain full-bright white unconditionally, which is a close
+  approximation of that override rather than a divergence from it.
+- **`EntityAttachment` per-type overrides**, the crosshair-look-at override
+  to `shouldShowName` (`EntityRenderer.java:113`), scoreboard team
+  colouring/prefixes, and the `belowName` scoreboard line — all explicitly
+  out of scope per the issue.
+- **The local third-person body's own nametag.** `ThirdPersonBodyState::
+  into_draw` always sets `name_tag: None` — the camera never needs to read
+  its own name off its own head.
+
+## Verification
+
+- `crates/lodestone-shell/src/gpu/nametag.rs`'s own unit tests (`cargo test
+  -p lodestone-shell --lib gpu::nametag`) — the distance cutoff and empty-name
+  cases, driven directly against `push_entity_quads` with no GPU.
+- `crates/lodestone-shell/src/net.rs`'s `net::tests::name_tag` module — the
+  two resolution rules (player-vs-mob, visibility gating, sneaking) pinned
+  against `entity_snapshot` in isolation.
+- `crates/lodestone-shell/tests/nametag_pixels.rs` — the real pixel gates,
+  through `RenderState::render`:
+  - `a_named_entity_draws_text_pixels_above_it`: a tagged entity against an
+    otherwise-identical untagged control, with the pixel-diff bounding box
+    checked against an *analytically projected* anchor point (derived from
+    the same `lodestone_data` census the render code reads, not a
+    remembered literal).
+  - `occlusion`: a giant, close occluder entity (real depth-tested-and-written
+    geometry via the ordinary entity pass — no terrain harness needed) placed
+    between the camera and a distant tagged entity. A sneaking tag (no
+    see-through pass) is pixel-identical to the no-tag baseline — this is
+    also the control proving the occluder genuinely blocks the depth-tested
+    normal pass, per `CLAUDE.md`'s "a control's premise can be false before
+    the feature under test existed". A standing tag in the same occluded
+    position still contributes real, faded pixels.
+
+```text
+cargo test -p lodestone-shell --lib gpu::nametag
+cargo test -p lodestone-shell --lib net::tests::name_tag
+cargo test -p lodestone-shell --test nametag_pixels -- --ignored --nocapture
+```

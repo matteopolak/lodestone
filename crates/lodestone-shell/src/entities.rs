@@ -332,6 +332,30 @@ const YAW_EPS: f32 = 1.0e-2;
 /// components), and once ingest writes the render components directly there is
 /// nothing left for it to carry. It survives today only because its producer
 /// lives in `net.rs` and its consumer in `sim.rs` — see [`fold_snapshots`].
+/// A resolved nametag (issue #100): the plain text to draw above the entity,
+/// plus whether the depth-see-through pass applies.
+///
+/// Resolved once, at the `net::entity_snapshot` boundary — a player's tag
+/// from the tab list, every other entity's from its `CUSTOM_NAME`/
+/// `CUSTOM_NAME_VISIBLE` metadata — so [`EntitySnapshot`], [`EntityDraw`] and
+/// the nametag pass never need to know the two rules differ. See
+/// `crate::net::entity_snapshot`'s doc for the exact vanilla predicates
+/// (jar file:line) and `docs/entity-nametags.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameTag {
+    /// The plain string to draw (already flattened through
+    /// [`lodestone_model::Text::to_plain_string`] — a translation-key custom
+    /// name, the rare case, draws its raw key rather than resolving through
+    /// the shell's chat language table; see `docs/entity-nametags.md`).
+    pub text: String,
+    /// Whether the depth-testless, faded pass draws in addition to the normal
+    /// depth-tested one — `false` while the entity is sneaking
+    /// (`Entity.isDiscrete()`), which is when vanilla suppresses it. See
+    /// `gpu/nametag.rs`'s module doc for the two passes' exact depth
+    /// settings.
+    pub see_through: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntitySnapshot {
     /// The server-assigned entity id (interpolation key).
@@ -426,6 +450,10 @@ pub struct EntitySnapshot {
     /// only this plain `u32` — see [`EntityDraw::count`] for where the
     /// multi-copy draw itself still needs wiring.
     pub count: u32,
+    /// This entity's resolved nametag (issue #100), or `None` when nothing
+    /// should draw above it — a mob with no visible custom name, or a player
+    /// entity with no matching tab-list entry. See [`NameTag`].
+    pub name_tag: Option<NameTag>,
 }
 
 /// A sheep's decoded wool state, narrowed from [`EntitySnapshot::variant`] for
@@ -564,6 +592,10 @@ pub struct EntityDraw {
     /// `head_yaw_deg` is **relative to the body**, matching vanilla's
     /// `netHeadYaw`.
     pub anim: AnimInput,
+    /// This entity's resolved nametag (issue #100), narrowed from
+    /// [`RenderNameTag`]. `None` draws nothing — the common case for every
+    /// entity with no visible custom name.
+    pub name_tag: Option<NameTag>,
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +712,17 @@ pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 /// hazard and a despawn prunes it for free.
 #[derive(Component, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RenderWool(pub Option<SheepWool>);
+
+/// This entity's resolved nametag (issue #100), narrowed from
+/// [`EntitySnapshot::name_tag`].
+///
+/// A component for the same reason [`RenderEquipment`]/[`RenderWool`] are:
+/// replaced wholesale every poll (a player's tab-list name can change, a
+/// mob's `CUSTOM_NAME_VISIBLE` can toggle, both with no movement at all), so
+/// there is no "reported once, then silence" hazard and a despawn prunes it
+/// for free.
+#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
+pub struct RenderNameTag(pub Option<NameTag>);
 
 // ---------------------------------------------------------------------------
 // Resources
@@ -889,6 +932,7 @@ pub fn extract_entity_draws(
         &WalkAnim,
         &RenderEquipment,
         &RenderWool,
+        &RenderNameTag,
     )>,
     mut out: ResMut<ExtractedDraws>,
 ) {
@@ -898,7 +942,7 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
-    for (id, kind, scale, from, to, clock, walk, equipment, wool) in &tracks {
+    for (id, kind, scale, from, to, clock, walk, equipment, wool, name_tag) in &tracks {
         // One lookup, not two: `item` and `count` both come from the same
         // recorded stack, and a drop with no stack yet must not manufacture a
         // count out of nowhere.
@@ -925,6 +969,7 @@ pub fn extract_entity_draws(
             pitch: render_pitch(from, to, clock),
             scale: scale.0,
             anim: render_anim(from, to, clock, walk, partial_tick, swing_progress),
+            name_tag: name_tag.0.clone(),
         });
     }
 }
@@ -1105,6 +1150,7 @@ fn spawn_track(world: &mut World, snap: &EntitySnapshot) {
         },
         RenderEquipment(occupied_equipment(&snap.equipment)),
         RenderWool(sheep_wool(&snap.type_path, snap.variant.as_ref())),
+        RenderNameTag(snap.name_tag.clone()),
     ));
     if is_item {
         entity.insert(new_item_physics(snap));
@@ -1145,6 +1191,12 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntitySnapshot) {
     let wool = sheep_wool(&snap.type_path, snap.variant.as_ref());
     if let Some(mut render_wool) = entity.get_mut::<RenderWool>() {
         render_wool.0 = wool;
+    }
+    // Same reasoning again: a player's tab-list name can change (a nickname
+    // plugin, a rejoin under a different profile name) and a mob's
+    // `CUSTOM_NAME_VISIBLE` can toggle, neither of which moves the entity.
+    if let Some(mut name_tag) = entity.get_mut::<RenderNameTag>() {
+        name_tag.0.clone_from(&snap.name_tag);
     }
 
     let (Some(from), Some(to), Some(clock)) = (
@@ -1612,6 +1664,7 @@ mod tests {
             equipment: Vec::new(),
             variant: None,
             count: 1,
+            name_tag: None,
         }
     }
 
@@ -2108,6 +2161,7 @@ mod tests {
             equipment: Vec::new(),
             variant: None,
             count: 1,
+            name_tag: None,
         }
     }
 

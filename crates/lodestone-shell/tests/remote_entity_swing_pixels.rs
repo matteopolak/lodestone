@@ -121,6 +121,7 @@ fn world_with_two_tracked_zombies(feet: glam::Vec3) -> World {
         equipment: Vec::new(),
         variant: None,
         count: 1,
+        name_tag: None,
     };
     fold_entity_snapshots(&mut world, &[snapshot(1), snapshot(2)]);
     world
