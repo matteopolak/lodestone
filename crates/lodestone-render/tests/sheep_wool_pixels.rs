@@ -47,7 +47,7 @@ use lodestone_render::camera::Camera;
 use lodestone_render::entity::{EntityMesh, EntityModelSet, plan_entities};
 use lodestone_render::entity_anim::AnimInput;
 use lodestone_render::entity_pipeline::{
-    EntityPipeline, GpuEntityModel, upload_instances, upload_instances_tinted,
+    EntityPipeline, GpuEntityModel, InstanceTint, upload_instances, upload_instances_tinted,
 };
 
 const W: u32 = 256;
@@ -272,7 +272,14 @@ fn render_sheep(gpu: &Gpu, models: &EntityModelSet, wool_tint: Option<[u8; 3]>) 
                     let range = gpu_wool.parts[wool_idx];
                     let world: Mat4 = batch.parts[body_idx][0];
                     if let Some(buf) =
-                        upload_instances_tinted(device, &[world], &batch.lights[..1], &[tint])
+                        upload_instances_tinted(
+                            device,
+                            &[world],
+                            &batch.lights[..1],
+                            // `InstanceTint::rgb` is the no-overlay tint: this gate
+                            // measures the dye multiply, not issue #98's hurt blend.
+                            &[InstanceTint::rgb(tint)],
+                        )
                     {
                         draws.push((
                             1u32,

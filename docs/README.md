@@ -134,7 +134,10 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   columns instead of asserting on the source string.
 - [Container screen](./container-screen.md) — laying out an open `Menu` (chest,
   inventory, crafting table), why the crafting branch hangs off `Menu` instead of
-  `MenuKind`, and why the result slot is never computed locally.
+  `MenuKind`, why the result slot is never computed locally, and (issue #370)
+  vanilla's **two** labels: their per-screen anchors, why `inventoryLabelY` must be
+  derived from `imageHeight` rather than restated, and why the player inventory
+  screen is titled "Crafting" and is the only screen that omits the second label.
 - [Container clicks](./container-clicks.md) — the click predictor: the seven
   `ContainerInput` modes, the `QUICK_CRAFT` drag machine and exactly what resets it,
   per-menu shift-click orders, the prediction-vs-authority rule, three vanilla

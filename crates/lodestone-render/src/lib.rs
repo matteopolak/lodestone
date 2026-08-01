@@ -121,8 +121,9 @@ pub use entity::{
 };
 pub use entity_anim::{AnimFamily, AnimInput, Skeleton};
 pub use entity_pipeline::{
-    EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel, NO_TINT,
-    entity_camera_buffer, upload_instances, upload_instances_tinted,
+    EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel,
+    HURT_OVERLAY_ALPHA_BYTE, InstanceTint, NO_TINT, entity_camera_buffer, upload_instances,
+    upload_instances_tinted,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use frame::SystemClock;

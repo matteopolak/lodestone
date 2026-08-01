@@ -91,8 +91,31 @@ pub struct SlotLayout {
 pub struct ContainerFrame<'a> {
     /// Menu contents to draw. `None` draws nothing.
     pub menu: Option<&'a Menu>,
-    /// Title to draw at the top-left of the panel.
+    /// The screen's own title, already resolved to words — vanilla's
+    /// `AbstractContainerScreen.title`. Drawn at
+    /// [`LabelLayout::title_x`]/[`title_y`](LabelLayout::title_y), which is
+    /// **not** always `(8, 6)`: see [`label_layout`].
+    ///
+    /// For a server-opened container this is the `Text` from `OPEN_SCREEN` run
+    /// through the language table ([`menu_title`]), so a chest renamed in an
+    /// anvil opens as its custom name. Nothing here consults a table keyed on
+    /// menu type; the generic name is only the server's default.
     pub title: &'a str,
+    /// Vanilla's *second* label — `AbstractContainerScreen.playerInventoryTitle`,
+    /// the word "Inventory" over the player's own storage rows.
+    ///
+    /// Unlike [`title`](Self::title) this never comes from a packet: vanilla
+    /// reads it from `Inventory.getDisplayName()`, whose default is the
+    /// client-side constant `Component.translatable("container.inventory")`
+    /// (`Inventory.java:55`), so resolving it locally *is* the vanilla
+    /// behaviour. The default below is `en_us.json:3218`'s value, which is what
+    /// a jar-less run and every hermetic gate see; `app.rs` overrides it with
+    /// the same key run through the live language table so a non-English client
+    /// gets its own word.
+    ///
+    /// Drawn only when [`LabelLayout::inventory`] is `Some` — the player
+    /// inventory screen omits it (`InventoryScreen.extractLabels`).
+    pub inventory_label: &'a str,
     /// Viewport-pixel position of the mouse cursor, the same coordinate space
     /// [`hit_test`] takes — **not** local widget coordinates. `None` (the
     /// default from [`new`](Self::new)) draws no carried stack even if
@@ -118,6 +141,7 @@ impl<'a> ContainerFrame<'a> {
         Self {
             menu,
             title,
+            inventory_label: DEFAULT_INVENTORY_LABEL,
             cursor: None,
             recipe_book: None,
         }
@@ -129,9 +153,19 @@ impl<'a> ContainerFrame<'a> {
         Self {
             menu: None,
             title: "",
+            inventory_label: DEFAULT_INVENTORY_LABEL,
             cursor: None,
             recipe_book: None,
         }
+    }
+
+    /// Override the player-inventory label with a translated one — see
+    /// [`inventory_label`](Self::inventory_label) and
+    /// [`player_inventory_label`].
+    #[must_use]
+    pub fn with_inventory_label(mut self, label: &'a str) -> Self {
+        self.inventory_label = label;
+        self
     }
 
     /// Attach the mouse position, in viewport pixels, so a loaded cursor
@@ -178,6 +212,109 @@ pub fn menu_title(
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> String {
     lodestone_game::text::resolve_to_string(title, translate)
+}
+
+/// `en_us.json:3218`'s value for `container.inventory` — the fallback
+/// [`ContainerFrame::inventory_label`] carries when no caller supplies a
+/// translated one.
+const DEFAULT_INVENTORY_LABEL: &str = "Inventory";
+
+/// The player inventory screen's own title: **"Crafting"**, not "Inventory".
+///
+/// `InventoryScreen.java:28` passes `Component.translatable("container.crafting")`
+/// to `super`, naming the 2×2 grid rather than the screen. This client used to
+/// hardcode the string `"Inventory"` here (`app.rs`), which is wrong twice over:
+/// wrong word, and — because it went in as the *title* — drawn at the title
+/// anchor, which for this one screen is `x = 97` (`InventoryScreen.java:29`), not
+/// `x = 8`.
+///
+/// Resolved through the language table for the same reason [`menu_title`] is: a
+/// raw `container.crafting` on screen is issue #52's defect class.
+#[must_use]
+pub fn player_inventory_title(translate: &dyn Fn(&str) -> Option<String>) -> String {
+    menu_title(
+        &lodestone_model::Text::translate("container.crafting", vec![]),
+        translate,
+    )
+}
+
+/// Vanilla's `playerInventoryTitle` — `container.inventory`, "Inventory".
+///
+/// A *client-side* constant in vanilla too (`Inventory.java:55`'s `DEFAULT_NAME`),
+/// so unlike a container's title this is legitimately resolved locally rather
+/// than read off a packet. See [`ContainerFrame::inventory_label`].
+#[must_use]
+pub fn player_inventory_label(translate: &dyn Fn(&str) -> Option<String>) -> String {
+    menu_title(
+        &lodestone_model::Text::translate("container.inventory", vec![]),
+        translate,
+    )
+}
+
+/// Where a screen's two labels go, in **local widget pixels** (add
+/// [`panel_origin`] to reach the canvas).
+///
+/// The reason this is a computed record and not four constants: `inventoryLabelY`
+/// is `imageHeight - 94`, and `imageHeight` moves with the row count. Restating
+/// it as a number is the exact failure `CLAUDE.md` documents for the HUD's
+/// `cluster_top` — a gate measured 20 logical pixels above a row that was drawing
+/// perfectly and reported zero.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabelLayout {
+    /// `titleLabelX`. `8` on a generic container, `29` on a crafting table,
+    /// `97` on the player inventory screen.
+    pub title_x: f32,
+    /// `titleLabelY` — `6` everywhere in vanilla.
+    pub title_y: f32,
+    /// `(inventoryLabelX, inventoryLabelY)`, or `None` on the one screen that
+    /// draws no such label.
+    pub inventory: Option<[f32; 2]>,
+}
+
+/// Vanilla's label anchors for `menu`'s screen, derived from `layout` rather than
+/// restated.
+///
+/// Read out of `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`:
+///
+/// | screen | `titleLabelX` | second label | source |
+/// |---|---|---|---|
+/// | generic container | `8` | yes | `AbstractContainerScreen.java:68-71` |
+/// | crafting table | `29` | yes | `CraftingScreen.java:22` |
+/// | player inventory | `97` | **no** | `InventoryScreen.java:29,73-75` |
+///
+/// The player inventory screen is the only one that omits the second label, and
+/// it does so by *overriding `extractLabels`* to drop the second `graphics.text`
+/// call entirely (`InventoryScreen.java:73-75`) — so the label is not wrong in
+/// general, only there. Deleting it globally would trade one bug for another.
+///
+/// `inventory` is `[8, layout.height - 94]`: `inventoryLabelX = 8` and
+/// `inventoryLabelY = imageHeight - 94` (`AbstractContainerScreen.java:70-71`,
+/// restated by `ContainerScreen.java:17` for the row-count-dependent chest).
+/// [`SlotLayout::height`] *is* `imageHeight` — 166 for the player and crafting
+/// panels, `114 + rows * 18` for a chest, both matching vanilla's own
+/// constructors — so this is the same expression the panel art is blitted with,
+/// not a parallel one that can drift.
+///
+/// Not modelled: `AbstractFurnaceScreen.java:39` centres its title
+/// (`(imageWidth - font.width(title)) / 2`), which is the only vanilla anchor
+/// that depends on the *text*. There is no furnace [`MenuKind`] yet — a furnace
+/// arrives here as a `Generic` and gets `x = 8`. When one is added, that branch
+/// needs the measured title width and therefore the font, which this function
+/// deliberately does not take.
+#[must_use]
+pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
+    match menu.kind() {
+        MenuKind::Player => LabelLayout {
+            title_x: 97.0,
+            title_y: 6.0,
+            inventory: None,
+        },
+        MenuKind::Generic { .. } => LabelLayout {
+            title_x: if menu.craft_layout().is_some() { 29.0 } else { 8.0 },
+            title_y: 6.0,
+            inventory: Some([8.0, layout.height - 94.0]),
+        },
+    }
 }
 
 /// Vanilla's real container-background art (issue #51): `container/inventory`,
@@ -507,23 +644,50 @@ impl ContainerGeometry {
                 [0.22, 0.20, 0.17, 0.70],
             );
         }
-        // Vanilla's real background bakes dark grey title text
-        // (`-12566464` == `0xFF404040`, `InventoryScreen.java:76`) into a light
-        // wood/stone panel; the programmatic fallback's warm-light text was
-        // chosen for contrast against its own dark flat fill, so the two must
-        // not share a colour.
-        let title_colour = if bg_quads.is_some() {
+        // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
+        // them (`AbstractContainerScreen.java:189-191`):
+        //
+        //     graphics.text(font, title,               titleLabelX, titleLabelY, -12566464, false);
+        //     graphics.text(font, playerInventoryTitle, inventoryLabelX, inventoryLabelY, -12566464, false);
+        //
+        // Three things this got wrong before, all of which the play report read
+        // as one blurred "the font is wrong":
+        //
+        // * `-12566464` is `0xFF404040`, a **dark grey**, and the trailing
+        //   `false` means **no drop shadow**. `Builder::label` honours the
+        //   second; the first only applies against vanilla's own light panel art
+        //   — the programmatic fallback's flat fill is dark, so dark grey on it
+        //   would be invisible and it keeps a warm-light ink instead. That
+        //   divergence is the jar-less path only, and the pixel gate asserts the
+        //   vanilla value on the path that has the art.
+        // * The text was pushed through `to_ascii_uppercase()`. Vanilla never
+        //   does, `hud::font` has had lowercase glyphs all along, and the cost
+        //   was worst on the thing the player noticed: a chest renamed "Loot"
+        //   drew as "LOOT".
+        // * It drew with `ColourStream::text` — the fixed-advance 5x7 *debug*
+        //   font — while `Builder` was already holding a `VanillaFont` for stack
+        //   counts. Right glyphs, wrong typeface and wrong advances.
+        //
+        // `label_layout` supplies the anchors; `titleLabelY` is 6, not 7, and
+        // `titleLabelX` is not always 8.
+        let labels = label_layout(menu, &layout);
+        let label_colour = if bg_quads.is_some() {
             [64.0 / 255.0, 64.0 / 255.0, 64.0 / 255.0, 1.0]
         } else {
             [0.88, 0.84, 0.73, 1.0]
         };
-        b.text(
-            &frame.title.to_ascii_uppercase(),
-            x + 8.0,
-            y + 7.0,
+        b.label(
+            frame.title,
+            x + labels.title_x,
+            y + labels.title_y,
             1.0,
-            title_colour,
+            label_colour,
         );
+        // `None` on the player inventory screen and nowhere else — see
+        // `label_layout`.
+        if let Some([lx, ly]) = labels.inventory {
+            b.label(frame.inventory_label, x + lx, y + ly, 1.0, label_colour);
+        }
 
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
@@ -1319,6 +1483,26 @@ impl<'a> Builder<'a> {
         self.colour().text(s, x, y, scale, c);
     }
 
+    /// One of vanilla's two container labels: the **proportional** font when one
+    /// is attached, and **no drop shadow** either way — the trailing `false` in
+    /// `AbstractContainerScreen.java:190-191`'s `graphics.text` calls. Every
+    /// other text surface in this crate is shadowed, which is why this needs its
+    /// own entry point rather than reusing `VanillaFont::draw`.
+    ///
+    /// Degrades to the fixed-advance 5×7 debug font on a jar-less run, the same
+    /// way stack counts do — advances will be wrong, but the words are readable
+    /// and the anchor is identical, so the geometry gate still measures the same
+    /// thing.
+    fn label(&mut self, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
+        match self.font {
+            Some(f) => {
+                let mut cs = self.colour();
+                f.draw_plain(&mut cs, s, x, y, scale, c);
+            }
+            None => self.colour().text(s, x, y, scale, c),
+        }
+    }
+
     /// A handle onto the colour stream, for the shared pixel-space primitives.
     fn colour(&mut self) -> ColourStream<'_> {
         ColourStream {
@@ -1623,6 +1807,16 @@ impl ContainerRenderer {
     #[must_use]
     pub fn background_attached(&self) -> bool {
         self.background.is_some()
+    }
+
+    /// Whether the vanilla proportional font resolved — the second half of "this
+    /// screen looks like vanilla". Without it the two container labels fall back
+    /// to the fixed-advance 5×7 debug font, which is *legible* and therefore
+    /// invisible to a coverage assertion: exactly how issue #370's "wrong font"
+    /// survived. A gate asserting typeface must assert this first.
+    #[must_use]
+    pub fn font_attached(&self) -> bool {
+        self.font.is_some()
     }
 
     /// Attach the flat item-sprite [`ItemAtlas`] so container slots draw real

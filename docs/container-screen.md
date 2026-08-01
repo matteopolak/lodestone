@@ -82,9 +82,69 @@ Fallback order is `table[key]` → the component's own `fallback` → the key. T
 demo palette loads no `en_us.json`, and a renamed chest arrives as a plain
 literal; neither may cost the title.
 
-The "Inventory" title for the local inventory screen (`ui.is_container_open()`
-with no server menu) is still a Lodestone-chosen literal, not
-`container.inventory` — there is no server component to resolve in that case.
+### The two labels (issue #370)
+
+`AbstractContainerScreen::extractLabels` draws **two** pieces of text, not one
+(`AbstractContainerScreen.java:189-191`):
+
+```java
+graphics.text(font, title,                titleLabelX,     titleLabelY,     -12566464, false);
+graphics.text(font, playerInventoryTitle, inventoryLabelX, inventoryLabelY, -12566464, false);
+```
+
+`-12566464` is `0xFF404040`, a dark grey, and the trailing `false` means **no
+drop shadow**. `container::label_layout(menu, layout)` returns the anchors:
+
+| screen | `titleLabelX` | second label | vanilla source |
+| --- | --- | --- | --- |
+| generic container | `8` | yes | `AbstractContainerScreen.java:68-71` |
+| crafting table | `29` | yes | `CraftingScreen.java:22` |
+| player inventory | `97` | **no** | `InventoryScreen.java:29, 73-75` |
+
+`titleLabelY` is `6` everywhere. The second label is always
+`(8, imageHeight - 94)`, and `SlotLayout::height` *is* vanilla's `imageHeight`
+(166 for the player and crafting panels, `114 + rows * 18` for a chest — both
+asserted against vanilla's own constructors in `tests/container_labels.rs`), so
+the anchor is derived from the same expression the panel art is blitted with.
+**Never restate it as a number**: a 6-row chest's label sits 54 px below a 3-row
+chest's, and `CLAUDE.md` records what hardcoding a moving anchor cost the HUD.
+
+The player inventory screen is the **only** screen that omits the second label,
+and it does so by overriding `extractLabels` to drop the second `graphics.text`
+call. Removing the label globally trades one bug for another — a chest, a furnace
+and a crafting table all draw it.
+
+What was wrong before, all of it reported as one blurred "the font is wrong":
+
+* The title was pushed through `to_ascii_uppercase()`. Vanilla never does, and
+  `hud::font` has had lowercase glyphs since it was written. The visible cost was
+  worst on the thing that prompted the report: a chest renamed "Loot" in an anvil
+  drew as **LOOT**.
+* It drew via `ColourStream::text` — the fixed-advance **5×7 debug font** — while
+  `Builder` was already holding a `VanillaFont` for stack counts. Right glyphs,
+  wrong typeface, wrong advances. `Builder::label` now picks the proportional
+  font, through `VanillaFont::draw_plain` (added for this: every other text
+  surface in the crate is shadowed, and these two labels are not).
+* `titleLabelY` was `7`, and `titleLabelX` was `8` on every screen.
+* The player inventory screen's title was the literal `"Inventory"`, hardcoded in
+  `app.rs`. Wrong twice: vanilla's title there is
+  `translatable("container.crafting")` — **"Crafting"**, naming the 2×2 grid
+  (`InventoryScreen.java:28`) — and going in as the *title* it was drawn at the
+  title anchor, which on that one screen is `x = 97`, not `8`.
+
+`container::player_inventory_title` and `player_inventory_label` resolve
+`container.crafting` and `container.inventory` through the language table.
+The second one being a local key is **not** issue #52 repeating: vanilla reads
+`playerInventoryTitle` from `Inventory.getDisplayName()`, itself the client-side
+constant `translatable("container.inventory")` (`Inventory.java:55`), so there is
+no server component to resolve. A container's *title* is the opposite case and
+must always come from the packet.
+
+Not modelled: `AbstractFurnaceScreen.java:39` centres its title
+(`(imageWidth - font.width(title)) / 2`), the only vanilla anchor that depends on
+the text itself. There is no furnace `MenuKind` yet (issue #28) — a furnace
+arrives as a `Generic` and gets `x = 8`. Adding that branch means giving
+`label_layout` the font, which it deliberately does not take today.
 
 ### The panel is real vanilla art now (issue #51)
 
@@ -297,6 +357,16 @@ default builds all the geometry correctly and draws none of it.
   `&str`, so the resolution has to happen at the call site, and the type cannot
   stop you passing an unresolved one. Use `menu_title`. `container.crafting`
   shipped to screen once already.
+* **`ContainerFrame::title` is the *screen's* title, not "the container's name".**
+  On the player inventory screen it is "Crafting". If you find yourself writing
+  the word "Inventory" as a title, you want `inventory_label`.
+* **A label gate that reports a coverage fraction is useless here.** Both bugs
+  #370 fixed were labels drawn *legibly, in the wrong place or the wrong
+  typeface* — every one of which satisfies "something drew". `container_labels.rs`
+  measures **bounding boxes** and isolates the ink by subtracting a build with the
+  label blanked, so it can tell "20 px off" from "not drawn". It also asserts the
+  premise (nothing else in the screen paints in the label colour) rather than
+  assuming it.
 
 ## Configuration
 
@@ -307,7 +377,9 @@ None. The behavioural switches are all "is a thing attached":
 | `attach_items` not called | colour-swatch + letter fallback in every occupied slot |
 | `attach_item_models` not called | flat sprites draw; block items draw nothing |
 | no `depth` passed to `render_with_icons` | as above |
-| `attach_background` not called | flat programmatic panel fill + wells, instead of vanilla's real `container/*.png` art; the dim still draws either way |
+| `attach_background` not called | flat programmatic panel fill + wells, instead of vanilla's real `container/*.png` art; the dim still draws either way. Also switches the label ink from vanilla's `0xFF404040` to a warm light — dark grey on the dark fallback panel would be invisible. `background_attached()` is the gate for asserting the vanilla colour |
+| `VanillaFont::shared()` returns `None` (no jar) | both labels fall back to the fixed-advance 5×7 debug font: legible, so no coverage assertion can see it. `font_attached()` is the gate |
+| `ContainerFrame::with_inventory_label` not called | the second label reads `"Inventory"`, `en_us.json`'s value for `container.inventory`; `app.rs` supplies the translated one |
 | `ContainerFrame::menu` is `None` | nothing is drawn at all, and `widget_rect` is `None` |
 | `ContainerFrame::cursor` is `None` (the default) | `menu.carried()`, even if `Some`, draws nowhere |
 

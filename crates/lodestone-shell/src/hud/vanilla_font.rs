@@ -189,6 +189,26 @@ impl VanillaFont {
         self.legacy_run(cs, s, x, y, scale, base, alpha, false);
     }
 
+    /// Draw `s` with **no** drop shadow, the string's top-left at `(x, y)`.
+    ///
+    /// Vanilla's `graphics.text(font, component, x, y, colour, shadow)` takes the
+    /// flag as an argument, and the two container labels
+    /// (`AbstractContainerScreen.java:190-191`) pass `false`. Every other text
+    /// surface in this crate passes it implicitly by calling
+    /// [`draw`](Self::draw), so the shadowless case needs its own name rather
+    /// than a bool parameter on the common path.
+    pub(crate) fn draw_plain(
+        &self,
+        cs: &mut ColourStream<'_>,
+        s: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        c: [f32; 4],
+    ) {
+        self.run(cs, s, x, y, scale, c);
+    }
+
     /// One unshadowed pass over a plain string.
     fn run(&self, cs: &mut ColourStream<'_>, s: &str, x: f32, y: f32, scale: f32, c: [f32; 4]) {
         let mut cursor = x;

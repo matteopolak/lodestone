@@ -135,7 +135,7 @@ use bevy_ecs::world::World;
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::entity::{AttackSwing, EntityIndex, MinecraftEntityId};
+use lodestone_ecs::entity::{AttackSwing, EntityIndex, HurtTime, ItemUse, MinecraftEntityId};
 use lodestone_ecs::player::{CollisionSource, PlayerCollision, Profile};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
@@ -148,7 +148,7 @@ use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
 };
-use lodestone_render::AnimInput;
+use lodestone_render::{AnimInput, ArmPose};
 
 /// Converts a render-space [`glam::Vec3`] into the `f64` [`lodestone_model::Vec3`]
 /// [`ItemMotion`] is expressed in.
@@ -596,6 +596,29 @@ pub struct EntityDraw {
     /// [`RenderNameTag`]. `None` draws nothing — the common case for every
     /// entity with no visible custom name.
     pub name_tag: Option<NameTag>,
+    /// Whether the hurt/death **red overlay** applies to this entity's model
+    /// this frame — vanilla's `state.hasRedOverlay = entity.hurtTime > 0 ||
+    /// entity.deathTime > 0` (`LivingEntityRenderer.java:281`), issue #98.
+    ///
+    /// Boolean, not a fade: vanilla does not interpolate by how much of
+    /// `hurtTime` remains, so neither does this (see
+    /// [`lodestone_render::EntityInstanceRaw::with_hurt_overlay`]).
+    ///
+    /// Read off [`lodestone_ecs::entity::HurtTime`] through [`EntityIndex`] in
+    /// [`extract_entity_draws`], **not** folded through [`EntitySnapshot`] —
+    /// exactly like [`Self::anim`]'s `attack_anim`, and for the same two
+    /// reasons: the component lives on the *ingest* entity rather than the
+    /// render one, and `EntitySnapshot` is the copy `docs/bevy-migration.md`
+    /// Stage 1 deletes. `docs/combat.md`'s original patch spec called for an
+    /// `EntitySnapshot::hurt` field instead; that would have added a third
+    /// hop and rippled through ~15 struct literals for a value the extract
+    /// system can already reach directly.
+    ///
+    /// `deathTime` has no component on this side of the wire — vanilla's death
+    /// animation is not decoded — so today this is `hurtTime > 0` alone. That
+    /// makes the overlay end ~10 ticks after the killing blow instead of
+    /// persisting through the fall-over, which is the only visible divergence.
+    pub hurt: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +857,7 @@ fn render_anim(
     walk: &WalkAnim,
     partial_tick: f32,
     swing_progress: f32,
+    arm_pose: ArmPoseChoice,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -846,6 +870,97 @@ fn render_anim(
         age_ticks: clock.age,
         // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.
         aggressive: false,
+        arm_pose: arm_pose.pose,
+        arm_pose_left_hand: arm_pose.left_hand,
+    }
+}
+
+/// Vanilla's namespace. Matched explicitly rather than ignored: a resource pack
+/// or mod item at `mypack:bow` is a *different* item and must not inherit the
+/// bow's arm pose from its path alone.
+const VANILLA: &str = "minecraft";
+/// The `minecraft:bow` item path, matched by identity because the arm pose is a
+/// per-item special case in vanilla too (`ItemUseAnimation.BOW`).
+const BOW_PATH: &str = "bow";
+/// The `minecraft:crossbow` item path.
+const CROSSBOW_PATH: &str = "crossbow";
+
+/// Vanilla's `CrossbowItem.getChargeDuration` with **no Quick Charge**:
+/// `25 - 5 * level`, at level 0.
+///
+/// The enchantment level is not modelled. Reading it would mean resolving a
+/// stack's `minecraft:enchantments` list against the enchantment registry, and
+/// while [`lodestone_model::ItemComponents::enchantments`] does carry the list,
+/// the render-side equipment set is narrowed to bare item ids
+/// ([`RenderEquipment`]) long before it reaches here — an enchanted crossbow
+/// therefore charges visually slower than it really does, and finishes its wind
+/// animation late. Recorded rather than fixed because widening `RenderEquipment`
+/// to full stacks is a larger change than the pose it would serve.
+const CROSSBOW_CHARGE_TICKS: f32 = 25.0;
+
+/// Which arm pose an entity's arms take, and in which hand.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct ArmPoseChoice {
+    pose: ArmPose,
+    left_hand: bool,
+}
+
+/// Chooses the arm pose from the item in the used hand and how long it has been
+/// used — vanilla's `AvatarRenderer.getArmPose` / `AbstractSkeletonRenderer.getArmPose`,
+/// reduced to the poses [`ArmPose`] models (issue #57).
+///
+/// # Bow vs crossbow: two different triggers, and only one is the using-item bit
+///
+/// * **Bow** — `ItemUseAnimation.BOW`, gated purely on
+///   `getUsedItemHand() == hand && getUseItemRemainingTicks() > 0`. Our
+///   [`ItemUse`] flag is exactly that gate.
+/// * **Crossbow charge** — `ItemUseAnimation.CROSSBOW`, same gate, plus the wind
+///   fraction from the tick counter.
+/// * **Crossbow hold** — **not** an in-use pose at all. Vanilla checks
+///   `!swinging && is(CROSSBOW) && CrossbowItem.isCharged(stack)`, where
+///   `isCharged` reads the stack's `minecraft:charged_projectiles` component.
+///   That component is **not modelled** by this build's item codec
+///   ([`lodestone_model::ItemComponents`] has no field for it, and an
+///   unrecognised component sets `has_unmodeled` and halts the patch decode), so
+///   a charged crossbow is indistinguishable here from an empty one and this
+///   function can never return [`ArmPose::CrossbowHold`]. The pose *math* is
+///   implemented and tested in `lodestone-render`; what is missing is the wire
+///   fact that selects it. Deliberately left as a gap rather than approximated:
+///   guessing "charged" from anything else available would make every crossbow in
+///   the world hold the shooting pose permanently, which is more wrong, more
+///   often, than the resting pose it gets today.
+fn arm_pose_for(equipment: &[(EquipmentSlot, ResourceLocation)], item_use: Option<ItemUse>) -> ArmPoseChoice {
+    let Some(item_use) = item_use else {
+        return ArmPoseChoice::default();
+    };
+    if !item_use.using {
+        return ArmPoseChoice::default();
+    }
+    let slot = if item_use.off_hand {
+        EquipmentSlot::OffHand
+    } else {
+        EquipmentSlot::MainHand
+    };
+    let Some((_, held)) = equipment.iter().find(|(s, _)| *s == slot) else {
+        // Using something we were never told about. `Empty` rather than a guess:
+        // equipment and metadata are separate packets and either can arrive first.
+        return ArmPoseChoice::default();
+    };
+    if held.namespace() != VANILLA {
+        return ArmPoseChoice::default();
+    }
+    let pose = match held.path() {
+        BOW_PATH => ArmPose::BowAndArrow,
+        CROSSBOW_PATH => ArmPose::CrossbowCharge {
+            progress: item_use.ticks as f32 / CROSSBOW_CHARGE_TICKS,
+        },
+        // Every other item's use animation (eat, drink, block, spyglass, …) is a
+        // pose `ArmPose` does not model yet; see its docs.
+        _ => return ArmPoseChoice::default(),
+    };
+    ArmPoseChoice {
+        pose,
+        left_hand: item_use.off_hand,
     }
 }
 
@@ -922,6 +1037,16 @@ pub fn extract_entity_draws(
     // like every other field here.
     index: Res<EntityIndex>,
     swings: Query<&AttackSwing>,
+    // `HurtTime` lives on the ingest entity too (`apply_entity_damaged` /
+    // `apply_entity_hurt_animation` resolve it through the same `EntityIndex`),
+    // so it is bridged the same way `AttackSwing` is rather than folded through
+    // `EntitySnapshot` — see `EntityDraw::hurt`.
+    hurts: Query<&HurtTime>,
+    // `ItemUse` lives on the ingest entity too (`apply_entity_item_use` resolves
+    // the living-flags byte through the same `EntityIndex`), bridged the same way
+    // `AttackSwing` and `HurtTime` are. It is what turns a metadata bit into a bow
+    // draw — see `arm_pose_for` and issue #57.
+    item_uses: Query<&ItemUse>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -956,6 +1081,24 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| swings.get(entity).ok())
             .map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick));
+        // `hurtTime > 0`, vanilla's `hasRedOverlay` gate. `false` for an entity
+        // that has never been hit (`HurtTime` absent, like `AttackSwing`) — and
+        // also for one whose countdown has aged out, since `tick_hurt_time`
+        // leaves the component in place at zero rather than removing it.
+        let hurt = index
+            .get(id.0)
+            .and_then(|entity| hurts.get(entity).ok())
+            .is_some_and(|hurt| hurt.0 > 0);
+        // The using-item state behind the bow/crossbow arm pose. `None` for an
+        // entity that has never reported the byte (`ItemUse` absent, like
+        // `AttackSwing`), which `arm_pose_for` reads as "not using anything".
+        let arm_pose = arm_pose_for(
+            &equipment.0,
+            index
+                .get(id.0)
+                .and_then(|entity| item_uses.get(entity).ok())
+                .map(|item_use| *item_use),
+        );
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -968,8 +1111,9 @@ pub fn extract_entity_draws(
             head_yaw: render_head_yaw(from, to, clock),
             pitch: render_pitch(from, to, clock),
             scale: scale.0,
-            anim: render_anim(from, to, clock, walk, partial_tick, swing_progress),
+            anim: render_anim(from, to, clock, walk, partial_tick, swing_progress, arm_pose),
             name_tag: name_tag.0.clone(),
+            hurt,
         });
     }
 }
@@ -1712,6 +1856,52 @@ mod tests {
         assert!(
             attack_anim > 0.1,
             "a mid-swing AttackSwing must reach the extracted anim, got {attack_anim}"
+        );
+    }
+
+    /// Issue #98's render-side half, the same shape as the swing test above:
+    /// [`extract_entity_draws`] must read [`HurtTime`] through [`EntityIndex`]
+    /// and land it on [`EntityDraw::hurt`].
+    ///
+    /// Three states, not two, because `HurtTime` is **not removed** when it
+    /// expires — `tick_hurt_time` saturates it at zero and leaves the component
+    /// attached. A `hurt` wired as `hurts.get(entity).is_ok()` rather than
+    /// `.0 > 0` would therefore leave every mob that was ever hit permanently
+    /// red, and only the third assertion here can see that. The first is the
+    /// negative control (`false` before any component exists, the value this
+    /// field had hardcoded everywhere until now); without it, a `hurt` stuck at
+    /// `true` would pass the second assertion on its own.
+    #[test]
+    fn a_ticking_hurt_time_reaches_the_extracted_draw_and_expires() {
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        assert!(
+            !interp.draws()[0].hurt,
+            "no HurtTime yet: no overlay, the negative control"
+        );
+
+        // Exactly what `lodestone_ecs::ingest::apply_entity_damaged` inserts.
+        let ingest_entity = interp.world_mut().spawn(HurtTime(10)).id();
+        interp
+            .world_mut()
+            .resource_mut::<EntityIndex>()
+            .insert(1, ingest_entity);
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        assert!(
+            interp.draws()[0].hurt,
+            "a live HurtTime must reach EntityDraw::hurt — this is issue #98's island"
+        );
+
+        // The expiry case: `tick_hurt_time` saturates at zero and leaves the
+        // component in place, so a presence check would stay red forever.
+        *interp
+            .world_mut()
+            .get_mut::<HurtTime>(ingest_entity)
+            .expect("HurtTime was just inserted") = HurtTime(0);
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        assert!(
+            !interp.draws()[0].hurt,
+            "HurtTime(0) is an expired countdown, not an absent one — the overlay must clear"
         );
     }
 

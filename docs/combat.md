@@ -208,40 +208,87 @@ the HUD heart flash, `hud.rs`'s territory).
   `hurtTime` remains, so `with_hurt_overlay` takes a `bool`, not a
   `0.0..=1.0` strength.
 
-**What does not reach the shell yet: per-entity `HurtTime`.** This is the
-`on_fire` shape exactly (`docs/screen-overlays.md`'s "What does not reach the
-shell yet" section) — a real, gated, pixel-proven mechanism with no data
-feeding it, not a placeholder pretending to work. `HurtTime` already exists and
-already counts down (`crates/lodestone-ecs/src/entity.rs`), but nothing in
-`crates/lodestone-shell/src/entities.rs` (`EntitySnapshot`'s builder) or
-`gpu.rs` (the actual `upload_instances_tinted` call sites, `gpu.rs:1997` and
-`:2110`) reads it yet. Both files are out of scope for the change that landed
-`with_hurt_overlay` — the patch spec:
+**The production wiring (the part that was an island for one session).** When
+`with_hurt_overlay` landed, production called it **zero times anywhere in
+`lodestone-shell`** — a real, pixel-gated mechanism with no data feeding it,
+which is `CLAUDE.md`'s dominant defect class and the twelfth confirmed instance
+of it. The chain that closes it, every hop shipped:
 
-1. **`crates/lodestone-shell/src/entities.rs`**: `EntitySnapshot` needs a
-   `hurt: bool` field (`HurtTime(u32) > 0`, read off the same per-entity query
-   `fold_snapshots`/whatever assembles the snapshot already has `HurtTime`
-   available from, since the component exists and ticks today). This is a
-   *per-entity* value, unlike `on_fire`'s single session-scoped bool, so it
-   cannot reuse `on_fire`'s `Vitals`-field shape — it belongs on
-   `EntitySnapshot` itself, next to `item`/`velocity`.
-2. **`crates/lodestone-shell/src/gpu.rs`**: the batch struct `p` that
-   `upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)` reads
-   at `gpu.rs:1997`/`:2110` needs a parallel `p.hurt: Vec<bool>` (or the tint
-   byte pre-folded into a single `Vec<u32>` alongside `p.tints`), and the call
-   site needs a new `upload_instances_tinted_and_hurt`-shaped helper (or
-   `EntityInstanceRaw::with_tint(...).with_hurt_overlay(...)` chained inside a
-   new upload helper in `entity_pipeline.rs`) to set both bits of the same
-   `tint` word. `upload_instances` (the untinted call at `gpu.rs:1818`, armour
-   and most mobs) needs the equivalent `_hurt` variant too, since most hurt
-   entities are not wearing dyed leather.
-3. Local-player-specific behaviour: the local player's own third-person body
-   (when one exists — see `apply_local_player_login`'s doc on why the local
-   player has no `EntityKind`/`Position` today, `docs/screen-overlays.md`'s
-   "on-fire" section covers the identical gap) would need the same
-   `entity_view()` reachability fix `on_fire` still needs before it can ever
-   show a hurt overlay on the player's own body in a future third-person
-   camera.
+```text
+ClientboundHurtAnimationPacket / ClientboundDamageEventPacket
+  -> ClientEvent::EntityHurtAnimation / ::EntityDamaged
+  -> ingest::handles_event                       (the routing switch; already listed
+                                                  both arms as of 24943a3)
+  -> ingest::apply_entity_hurt_animation
+     / ::apply_entity_damaged                    -> HurtTime(10)
+  -> ingest::tick_hurt_time                      (TickSet::Animate, one per GameTick)
+  -> entities::extract_entity_draws              -> EntityDraw::hurt
+  -> gpu::prepare_entities / ::prepare_armour / ::prepare_wool
+  -> InstanceTint { rgb, hurt } -> upload_instances_tinted
+  -> EntityInstanceRaw::with_hurt_overlay        -> ENTITY_WGSL fs_main -> pixels
+```
+
+Three decisions in there are worth knowing before changing any of it.
+
+**1. `hurt` rides `EntityDraw`, not `EntitySnapshot`.** The spec this section
+used to carry called for an `EntitySnapshot::hurt` field. That was the wrong
+hop: `HurtTime` lives on the *ingest* entity, not the render entity, so a
+snapshot field would need the value copied ingest → snapshot → draw, and
+`EntitySnapshot` is the second of three pose copies that `docs/bevy-migration.md`
+Stage 1 deletes outright. `extract_entity_draws` already bridges the two entity
+families through `EntityIndex` for `AttackSwing`; `HurtTime` reads the same way,
+one hop shorter, and ~15 `EntitySnapshot` literals across the test suite needed
+no edit.
+
+**2. `hurt` is `HurtTime(n).0 > 0`, never `HurtTime` being present.**
+`tick_hurt_time` saturates at zero and **leaves the component attached**, so a
+presence check leaves every mob that was ever hit permanently red. There is a
+test for exactly this third state
+(`a_ticking_hurt_time_reaches_the_extracted_draw_and_expires`).
+
+**3. `upload_instances_tinted` takes `&[InstanceTint]`, not `&[[u8; 3]]` plus a
+parallel `&[bool]`.** The obvious patch was a second slice beside the tints;
+`InstanceTint { rgb, hurt }` bundles them so a tint cannot travel without its
+overlay flag. Same move as `sprite_rect` returning its atlas alongside its rect.
+
+**Why `prepare_entities` plans twice.** `plan_entities` groups by model and
+drops the input order, and `EntityInstance` (in `lodestone-render`'s
+`entity.rs`) carries only the light byte — so the flag cannot be zipped back
+onto a batch afterwards. The instances are split by `EntityDraw::hurt` *before*
+planning and each half's flag stays attached to the plan it produced, as a
+`(bool, EntityFrame)` pair. Effectively grouping by `(model, hurt)`: one extra
+batch per hurt model while its 10 ticks run, and nothing at all otherwise
+(`plan_entities` on an empty slice returns no batches). **If you widen
+`EntityInstance` to carry the overlay directly, delete the split rather than
+keeping both** — two mechanisms for one flag is how they drift.
+
+**Armour and wool redden too**, because vanilla's overlay is sampled by every
+layer of a `LivingEntityRenderer`'s model, not just the body. A hurt mob whose
+breastplate stayed its own colour would read as a rendering fault.
+
+**Still not wired, and why.**
+
+- **`deathTime`.** Vanilla's gate is `hurtTime > 0 || deathTime > 0`; nothing
+  decodes the death animation on this side of the wire, so the overlay ends
+  ~10 ticks after the killing blow instead of persisting through the fall-over.
+  That is the only known divergence.
+- **The local player's own body.** `gpu/sources.rs`'s `into_draw` passes
+  `hurt: false` by construction: the local player has no ingest entity carrying
+  `HurtTime` (`apply_local_player_login` gives it no `EntityKind`/`Position`),
+  and with no third-person camera there is nothing to see either. The identical
+  gap blocks `on_fire` — see `docs/screen-overlays.md`. Both unblock together
+  with the same `entity_view()` reachability fix.
+
+**The gate is `crates/lodestone-shell/tests/hurt_overlay_pixels.rs`**
+(`-- --ignored --nocapture`). It pushes a `ClientEvent` into the real
+`IngestQueue` and reads texels out the other end, touching no render-crate type
+directly — the render crate's own gate
+(`entity_hurt_overlay_pixels.rs`) was green throughout the session in which
+nothing called the code it tested, which is precisely why a second gate through
+production was needed rather than a stronger version of the first. It measures
+by location against a run-time-derived silhouette mask, and asserts **zero**
+changed pixels outside it — the mechanical proof this is still a per-model
+blend and not a screen-space tint.
 
 ### The attack-strength ticker and the crosshair indicator (issue #121)
 
@@ -357,14 +404,15 @@ already landed as the natural place a crit read would plug into
 half, so they stay unbuilt rather than half-started. Whoever adds the sweep
 sound or the crit particle burst is the natural owner.
 
-**`HurtTime` still has no render-side consumer wired to production.** Issue
-#98 landed the render *mechanism* — `EntityInstanceRaw::with_hurt_overlay` and
-the shader blend in `crates/lodestone-render/src/entity_pipeline.rs`, pixel-
-gated in `crates/lodestone-render/tests/entity_hurt_overlay_pixels.rs` — but
-`entities.rs` still does not read `HurtTime` into `EntitySnapshot`, and
-`gpu.rs` still does not call the new builder. See "The per-entity hurt/death
-red overlay (issue #98, entity half)" above for the exact patch spec and why
-those two files were out of scope for that change. Local-player-specific
+**`HurtTime` now reaches pixels** (issue #98, the entity half) — the chain and
+its three design decisions are in "The per-entity hurt/death red overlay"
+above. It did not for one session: the render mechanism landed with **zero**
+callers in `lodestone-shell`, and the sentence that used to stand here said so.
+Note what that sentence got *wrong* even while its headline was right — it
+named `EntitySnapshot` and two `gpu.rs` line numbers as the patch site, and the
+real fix went through `extract_entity_draws` instead and touched neither. A
+patch spec written from the outside ages faster than the claim it wraps; verify
+the shape before following one. Local-player-specific
 camera feedback (`bobHurt`, the "screen tilt thing") is issue #58's, not #98's
 or this component's — confirmed against #58's own checklist, which already
 names `bobHurt`/`hurtTime`/`hurtDir` as its scope. There is no vanilla
