@@ -11,13 +11,32 @@
 //!   reconstructed from two longs);
 //! * **truncated / over-long payloads are rejected**, not panicked on — the
 //!   negative control that proves the zero-trailing-bytes check actually fires.
+//!
+//! Palettes/direct sections here are built from the **wire's** legacy
+//! `(blockId << 4) | meta` composite ids (that is what a real 1.12.2 server
+//! sends), but decoded output is asserted against the **canonical 26.2**
+//! state ids [`canonical::resolve`] produces — `packets::chunk` now
+//! translates every block through `crate::canonical` before it reaches
+//! [`lodestone_world`] storage, so a decoded column is never in the wire's
+//! id space. See `crate::canonical`'s module docs for why.
 
 use lodestone_core::{Reader, Writer};
+use lodestone_v340::canonical::{self, CanonicalBlockState};
 use lodestone_v340::packets::chunk::{ChunkShape, MapChunk};
 
-const AIR: u32 = 0;
-const BEDROCK: u32 = 7 << 4; // block id 7, meta 0 → state 112
-const STONE: u32 = 1 << 4; // block id 1, meta 0 → state 16
+// Wire-format composite ids, used only to build input packet bytes.
+const AIR_WIRE: u32 = 0;
+const BEDROCK_WIRE: u32 = 7 << 4; // block id 7, meta 0
+const STONE_WIRE: u32 = 1 << 4; // block id 1, meta 0
+
+/// The canonical 26.2 state id `crate::canonical::resolve(old_block_id,
+/// meta)` produces, for asserting decoded output against.
+fn canonical_id(old_block_id: u8, meta: u8) -> u32 {
+    match canonical::resolve(old_block_id, meta) {
+        CanonicalBlockState::Resolved(id) => id,
+        other => panic!("expected a resolved canonical state, got {other:?}"),
+    }
+}
 
 /// Container index for section-relative `(x, y, z)` in YZX order.
 fn idx(x: usize, y: usize, z: usize) -> usize {
@@ -73,8 +92,9 @@ fn direct_section(value_at: impl Fn(usize, usize, usize) -> u32, skylight: bool)
 /// Builds one section body with an **indirect** palette at 4 bits, exercising
 /// the palette-index mapping path (no straddling at 4 bits, which divides 64).
 fn indirect_section(skylight: bool) -> Vec<u8> {
-    // palette: [AIR, BEDROCK, STONE]; index 1 → bedrock at y=0, else air.
-    let palette = [AIR, BEDROCK, STONE];
+    // palette: [AIR, BEDROCK, STONE] (wire composite ids); index 1 → bedrock
+    // at y=0, else air.
+    let palette = [AIR_WIRE, BEDROCK_WIRE, STONE_WIRE];
     let mut indices = vec![0u32; 4096];
     for z in 0..16 {
         for x in 0..16 {
@@ -121,7 +141,7 @@ fn build_map_chunk(x: i32, z: i32, section_body: &[u8], biome: u8, block_entitie
 
 #[test]
 fn decodes_full_chunk_zero_trailing_bytes() {
-    let section = direct_section(|_, y, _| if y == 0 { BEDROCK } else { AIR }, true);
+    let section = direct_section(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE }, true);
     let body = build_map_chunk(3, -5, &section, 1, 0);
 
     let mut r = Reader::new(&body);
@@ -141,9 +161,9 @@ fn straddling_unpack_lands_known_blocks_at_known_y() {
     // If the unpack used the 1.16+ non-straddling layout, these ids scramble.
     let section = direct_section(
         |_, y, _| match y {
-            0 => BEDROCK,
-            1 => STONE,
-            _ => AIR,
+            0 => BEDROCK_WIRE,
+            1 => STONE_WIRE,
+            _ => AIR_WIRE,
         },
         true,
     );
@@ -153,12 +173,15 @@ fn straddling_unpack_lands_known_blocks_at_known_y() {
     let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
     r.ensure_empty().expect("aligned");
 
+    let bedrock = canonical_id(7, 0);
+    let stone = canonical_id(1, 0);
+    let air = canonical::air_state_id();
     let col = &chunk.column;
     for x in [0usize, 7, 15] {
         for z in [0usize, 9, 15] {
-            assert_eq!(col.get_block(x, 0, z), BEDROCK, "bedrock at y=0 ({x},{z})");
-            assert_eq!(col.get_block(x, 1, z), STONE, "stone at y=1 ({x},{z})");
-            assert_eq!(col.get_block(x, 2, z), AIR, "air at y=2 ({x},{z})");
+            assert_eq!(col.get_block(x, 0, z), bedrock, "bedrock at y=0 ({x},{z})");
+            assert_eq!(col.get_block(x, 1, z), stone, "stone at y=1 ({x},{z})");
+            assert_eq!(col.get_block(x, 2, z), air, "air at y=2 ({x},{z})");
         }
     }
 }
@@ -172,14 +195,14 @@ fn indirect_palette_maps_indices() {
     let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
     r.ensure_empty().expect("aligned");
 
-    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK);
-    assert_eq!(chunk.column.get_block(5, 1, 9), STONE);
-    assert_eq!(chunk.column.get_block(0, 2, 0), AIR);
+    assert_eq!(chunk.column.get_block(0, 0, 0), canonical_id(7, 0));
+    assert_eq!(chunk.column.get_block(5, 1, 9), canonical_id(1, 0));
+    assert_eq!(chunk.column.get_block(0, 2, 0), canonical::air_state_id());
 }
 
 #[test]
 fn light_and_biome_decoded() {
-    let section = direct_section(|_, y, _| if y == 0 { BEDROCK } else { AIR }, true);
+    let section = direct_section(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE }, true);
     let body = build_map_chunk(0, 0, &section, 4, 0); // biome id 4 everywhere
 
     let mut r = Reader::new(&body);
@@ -195,7 +218,7 @@ fn light_and_biome_decoded() {
 
 #[test]
 fn no_skylight_shape_omits_sky_arrays() {
-    let section = direct_section(|_, y, _| if y == 0 { BEDROCK } else { AIR }, false);
+    let section = direct_section(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE }, false);
     let body = build_map_chunk(0, 0, &section, 1, 0);
 
     let mut r = Reader::new(&body);
@@ -203,7 +226,7 @@ fn no_skylight_shape_omits_sky_arrays() {
     r.ensure_empty()
         .expect("no-skylight geometry consumes the whole packet");
 
-    assert_eq!(chunk.column.get_block(0, 0, 0), BEDROCK);
+    assert_eq!(chunk.column.get_block(0, 0, 0), canonical_id(7, 0));
     assert_eq!(chunk.light.sky(1).get(0), None);
 }
 
@@ -230,7 +253,7 @@ fn truncated_blob_errors_cleanly() {
 fn extra_trailing_bytes_rejected() {
     // A valid section padded with stray bytes decodes the geometry but must fail
     // the zero-trailing-bytes detector inside the bounded chunkData sub-reader.
-    let section = direct_section(|_, y, _| if y == 0 { BEDROCK } else { AIR }, true);
+    let section = direct_section(|_, y, _| if y == 0 { BEDROCK_WIRE } else { AIR_WIRE }, true);
     let mut blob = Vec::new();
     blob.extend_from_slice(&section);
     blob.extend_from_slice(&[1u8; 256]); // biomes

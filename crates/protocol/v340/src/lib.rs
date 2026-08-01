@@ -43,6 +43,7 @@ pub(crate) mod generated_entity_types;
 pub(crate) mod generated_flattening;
 
 pub mod adapter;
+pub mod canonical;
 pub mod entity_types;
 pub mod flattening;
 pub mod packets;
