@@ -368,6 +368,60 @@ described in the comments is real and not just asserted.
 | `QUICK_CRAFT` start/add/end, `EVEN`/`ONE`/`CLONE` (`5`) | `:336-399` | `do_quick_craft`, `finish_quick_craft` | `bare_drag_end_without_start_commits_nothing` / `control_well_formed_drag_does_commit`, `ordinary_click_mid_drag_resets_and_is_itself_swallowed` / `control_same_click_applies_when_no_drag_is_armed`, `drag_with_empty_cursor_commits_nothing`, `paint_stops_when_the_cursor_runs_out_of_items`, `even_split_clamps_at_the_slot_cap_and_returns_the_remainder`, `repainting_a_slot_does_not_inflate_the_divisor`, `clone_drag_resets_in_survival` / `control_clone_drag_commits_in_creative`, `drag_skips_a_slot_holding_a_different_item`, `drag_never_paints_the_result_slot`, `left_drag_even_split_across_three_slots`, `left_drag_even_split_leaves_remainder_on_cursor`, `right_drag_one_each`, `single_slot_drag_degrades_to_place`, `creative_middle_drag_places_full_stacks` | pre-existing, suite discipline — and the one representative spot-check (`right_drag_one_each` against a broken `ONE` place-count) was run this pass and did go red |
 | `PICKUP_ALL` (`6`) | `:534-556` | `do_pickup_all` | `double_click_gathers_matching_partial_stacks_first`, `pickup_all_defers_a_maxed_slot_to_the_second_pass` / `control_pickup_all_takes_a_near_max_slot_in_the_first_pass`, `pickup_all_never_drains_the_crafting_result` | pre-existing, suite discipline |
 
+### What this table is *scoped to*, and the bug that hid behind that scope (issue #378 part 1)
+
+**The table above audits `doClick` and nothing else.** Every row cites a range
+of `AbstractContainerMenu.java` against a function in
+`crates/lodestone-game/src/`. That is the *machine* — the thing that interprets
+a click packet once it exists. It says nothing about the layer that decides
+**which packet is sent**, which is `MenuInput` in
+`crates/lodestone-shell/src/container.rs`, a reimplementation of
+`AbstractContainerScreen`'s press/drag/release protocol.
+
+Issue #378 part 1 reported that taking from a crafting output onto a cursor
+already holding the same item did nothing. The suspicion was that the audit had
+missed `PICKUP`'s cursor-merge arm. It had not: the arm is at
+`click.rs:303-314`, mirrors `AbstractContainerMenu.java:459-465` line for line,
+and driving a bare `Click::left(result)` into the machine merges correctly.
+**The `PICKUP` row is right.**
+
+What was wrong was that no `PICKUP` was ever sent. `MenuInput::dragged`
+recorded *every* slot the pointer crossed with the button down, where vanilla's
+`mouseDragged` gates the paint on `shouldAddSlotToQuickCraft`
+(`AbstractContainerScreen.java:554-561`), whose `slot.mayPlace(carried)` arm a
+result slot always fails. So a click that jiggled the mouse by one pixel over
+the output painted it, and the *emptiness of the painted set is what selects the
+packet*:
+
+| painted set at release | packet sent |
+| --- | --- |
+| non-empty | `QUICK_CRAFT` start / add… / end |
+| empty | plain `PICKUP` (`mouseReleased`'s `else if (!carried.isEmpty())`, `:420-430`) |
+
+The machine then dropped the `ADD` at its own `can_drag_place` — correctly, the
+two gates agree — and `finish_quick_craft` saw an empty painted set at `END` and
+returned. Result: a well-formed packet sequence that provably commits nothing,
+with the merge arm sitting one layer below, fully working, never reached.
+
+The old code's justification was explicit and half-true: filtering is "left to
+`Menu::do_click`'s own `can_drag_place`, which both sides run — an `ADD` the
+server rejects is simply not recorded there, so painting liberally cannot
+desynchronise." Painting liberally indeed cannot desynchronise. It can still
+**suppress a different click entirely**, and that is not a desync so nothing in
+the desync argument could see it.
+
+The lesson for this table: a row marked covered means *the machine's branch is
+covered*. An end-to-end symptom needs the shell's protocol audited too, and
+there is no equivalent table for it. The gates that now cover this arm are in
+`container.rs`'s own test module (`dragging_across_a_crafting_result_sends_a_pickup_not_a_dead_drag`,
+`the_resulting_pickup_merges_the_result_onto_the_matching_cursor`, plus
+`control_dragging_across_a_placeable_cell_still_paints_it` so a `dragged` that
+refuses everything cannot pass), **verified red**: with only the `may_place`
+arm removed, both result-slot tests fail and the cursor reads
+`left: Some(4), right: Some(5)` — the reported symptom exactly — while the
+identity/count test stays green, so each arm of the gate is separately
+discriminated rather than passing as a lump.
+
 ### Finding 1 (fixed): swap-overflow displaced the wrong stack into a fresh slot instead of merging it back
 
 Number-key-swapping a stack bigger than the target slot's cap (`click.rs`'s

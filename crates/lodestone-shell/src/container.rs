@@ -29,7 +29,9 @@
 //! was an atlas to draw from, so a jar-less run still shows *something* in an
 //! occupied slot.
 
-use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
+use lodestone_game::click::{
+    Click, ContainerInput, can_item_quick_replace, drag_header, drag_type, quick_craft_mask,
+};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
 use lodestone_game::recipe::RecipeBook;
@@ -1291,20 +1293,83 @@ impl MenuInput {
     /// The cursor moved to `hit` with the button still down. Records a painted
     /// slot; never emits.
     ///
-    /// Filtering (cursor has enough items, the slot may accept them) is left to
-    /// [`Menu::do_click`](lodestone_game::menu::Menu)'s own `can_drag_place`,
-    /// which both sides run — an `ADD` the server rejects is simply not recorded
-    /// there, so painting liberally cannot desynchronise.
-    pub fn dragged(&mut self, hit: MenuHit) {
+    /// Mirrors vanilla `AbstractContainerScreen.mouseDragged` (`:361-370`),
+    /// whose paint site is gated on `shouldAddSlotToQuickCraft` (`:554-561`):
+    ///
+    /// ```java
+    /// return this.isQuickCrafting
+    ///    && !carried.isEmpty()
+    ///    && (carried.getCount() > this.quickCraftSlots.size() || this.quickCraftingType == 2)
+    ///    && AbstractContainerMenu.canItemQuickReplace(slot, carried, true)
+    ///    && slot.mayPlace(carried)
+    ///    && this.menu.canDragTo(slot);
+    /// ```
+    ///
+    /// # This filter is load-bearing, and its absence was issue #378 part 1
+    ///
+    /// This used to record **every** slot the pointer crossed, on the argument
+    /// that filtering belongs to `Menu::do_click`'s own `can_drag_place`, which
+    /// both sides run, so "painting liberally cannot desynchronise". The desync
+    /// half of that was true. What it missed is that the *emptiness* of the
+    /// painted set is what decides which packet the release sends at all:
+    ///
+    /// * painted non-empty → `QUICK_CRAFT` start/add…/end;
+    /// * painted empty → a plain [`ContainerInput::Pickup`].
+    ///
+    /// So a click on a slot the drag may not paint — most visibly a **crafting
+    /// result**, whose [`SlotKind::Output`](lodestone_game::container::SlotKind)
+    /// fails `mayPlace` — recorded the slot here, sent the drag sequence, and
+    /// the machine then dropped the `ADD` at `can_drag_place` and committed
+    /// nothing at `END`. The plain `PICKUP` that vanilla would have sent, and
+    /// with it `do_pickup`'s cursor-merge arm (`click.rs:303-314`, vanilla
+    /// `AbstractContainerMenu.java:459-465`), never went out. The reported
+    /// symptom was "taking from a crafting output onto a matching cursor does
+    /// nothing"; the arm that does the merge was present and correct the whole
+    /// time, one layer below the one that was broken.
+    ///
+    /// Note this needs the mouse to have moved at least once during the click,
+    /// which is why it read as intermittent from play rather than absolute.
+    ///
+    /// `canDragTo` is `true` for every menu this client models (vanilla
+    /// overrides it only in `HorseInventoryMenu`), so it is not restated here.
+    pub fn dragged(&mut self, hit: MenuHit, menu: &Menu) {
         let MenuHit::Slot(i) = hit else {
             return;
         };
-        let Some((_, slots)) = self.drag.as_mut() else {
+        let Some((button, slots)) = self.drag.as_mut() else {
             return;
         };
+        let Some(carried) = menu.carried() else {
+            return;
+        };
+        // `quickCraftingType == 2` (creative stack-per-slot) is the one type that
+        // ignores how many items the cursor holds.
+        let unlimited = button.drag_kind() == drag_type::CLONE;
+        if !unlimited && carried.count() <= slots.len() as i32 {
+            return;
+        }
+        if !can_item_quick_replace(menu.slot_item(i), carried, true) {
+            return;
+        }
+        if !menu.may_place(i, carried) {
+            return;
+        }
         if !slots.contains(&i) {
             slots.push(i);
         }
+    }
+
+    /// The in-progress paint, for the on-screen preview: the drag type
+    /// ([`drag_type`]) and the slots painted so far, in paint order.
+    ///
+    /// This is vanilla's `quickCraftSlots` / `quickCraftingType` pair, read by
+    /// `AbstractContainerScreen.extractSlot` (`:202-222`) to draw the provisional
+    /// per-cell stack. `None` when no drag is armed.
+    #[must_use]
+    pub fn drag_paint(&self) -> Option<(i32, &[usize])> {
+        self.drag
+            .as_ref()
+            .map(|(button, slots)| (button.drag_kind(), slots.as_slice()))
     }
 
     /// Mouse-button release. Returns the clicks to send.
@@ -2564,13 +2629,28 @@ mod tests {
 
     #[test]
     fn painting_slots_emits_the_full_quick_craft_sequence() {
-        let menu = blank_menu();
+        // Two things changed here with issue #378 part 1, both because `dragged`
+        // now reads the menu instead of recording blindly:
+        //
+        // * the cursor really has to hold something. This used to run against a
+        //   menu whose cursor was empty while `loaded()` claimed otherwise — the
+        //   two were free to disagree because nothing consulted the menu.
+        // * the **menu** has to be one where cells 1/2/4/5 are all paintable.
+        //   On `Menu::player()` (the old `blank_menu()`) slot 5 is an *armour*
+        //   slot, whose `may_place` needs a `minecraft:equippable` component, so
+        //   a plank genuinely cannot be painted there and vanilla would not
+        //   paint it either. A crafting table's 1..=9 are all grid cells.
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_carried(Some(ItemStack::new(
+            "minecraft:oak_planks".parse().unwrap(),
+            8,
+        )));
         let mut input = MenuInput::new();
         input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false, &menu);
         for cell in [1usize, 2, 4, 5] {
-            input.dragged(MenuHit::Slot(cell));
+            input.dragged(MenuHit::Slot(cell), &menu);
         }
-        input.dragged(MenuHit::Slot(5)); // a repeat must not be painted twice
+        input.dragged(MenuHit::Slot(5), &menu); // a repeat must not be painted twice
         let clicks = input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded(), &menu);
         assert_eq!(clicks.len(), 6, "start + 4 slots + end, got {clicks:?}");
         assert_eq!(clicks[0].slot, OUTSIDE_SLOT);
@@ -2606,7 +2686,7 @@ mod tests {
         let mut input = MenuInput::new();
         input.press(MenuHit::Slot(1), MenuButton::Right, false, loaded(), false, &menu);
         for cell in [1usize, 2, 4, 5] {
-            input.dragged(MenuHit::Slot(cell));
+            input.dragged(MenuHit::Slot(cell), &menu);
         }
         for click in input.release(MenuHit::Slot(5), MenuButton::Right, false, loaded(), &menu) {
             click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
@@ -2801,6 +2881,169 @@ mod tests {
             Vec::new(),
             "an empty slot's captured stack is vanilla's ItemStack.EMPTY, which suppresses \
              the shift+double-click gather"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #378 part 1: taking from a crafting result onto a matching cursor.
+    //
+    // The machine's arm for this (`click.rs::do_pickup`'s "slot rejects
+    // placement but same item" branch, vanilla
+    // `AbstractContainerMenu.java:459-465`) was present, correct and tested.
+    // What was broken is *which packet the release sends*: an unfiltered paint
+    // set turned a click-with-a-jiggle on the result slot into a
+    // `QUICK_CRAFT` sequence the machine then dropped on the floor. These tests
+    // are at the shell layer for that reason — the click audit in
+    // `docs/container-clicks.md` covers `doClick` and structurally could not
+    // see this.
+    // ---------------------------------------------------------------------
+
+    /// A crafting table whose result slot holds `result_count` sticks and whose
+    /// cursor holds `carried_count` of the same, i.e. the state a player is in
+    /// halfway through emptying a stack of crafted sticks onto the cursor.
+    fn result_and_cursor(result_count: i32, carried_count: i32) -> Menu {
+        let mut menu = Menu::crafting(3, 3);
+        let stick = |n: i32| ItemStack::new("minecraft:stick".parse().unwrap(), n);
+        let craft = menu.craft_layout().expect("a crafting table has a grid");
+        menu.set_slot_item(craft.result_slot, Some(stick(result_count)));
+        // A loaded grid, so `on_take` has something to charge and the take is a
+        // real craft rather than a free pull.
+        menu.set_slot_item(craft.first_input, Some(ItemStack::new(
+            "minecraft:oak_planks".parse().unwrap(),
+            8,
+        )));
+        menu.set_carried(Some(stick(carried_count)));
+        menu
+    }
+
+    /// **The reproduction.** A drag that crossed the result slot must not paint
+    /// it, so the release falls through to the plain `PICKUP` vanilla sends —
+    /// which is the only click that reaches the cursor-merge arm.
+    ///
+    /// Hand-derived from `AbstractContainerScreen.java:554-561`: the result
+    /// slot's `mayPlace` is `false` (`ResultSlot.java:24-27`), so
+    /// `shouldAddSlotToQuickCraft` is `false`, `quickCraftSlots` stays empty, and
+    /// `mouseReleased`'s `isQuickCrafting && !quickCraftSlots.isEmpty()` test
+    /// fails into the `else if (!carried.isEmpty())` branch at `:420-430`.
+    #[test]
+    fn dragging_across_a_crafting_result_sends_a_pickup_not_a_dead_drag() {
+        let menu = result_and_cursor(1, 4);
+        let craft = menu.craft_layout().expect("a crafting table has a grid");
+        let result = MenuHit::Slot(craft.result_slot);
+        let mut input = MenuInput::new();
+        input.press(result, MenuButton::Left, false, loaded(), false, &menu);
+        input.dragged(result, &menu);
+        assert_eq!(
+            input.drag_paint().map(|(_, slots)| slots.len()),
+            Some(0),
+            "a result slot fails `mayPlace`, so vanilla never paints it"
+        );
+        assert_eq!(
+            input.release(result, MenuButton::Left, false, loaded(), &menu),
+            vec![Click::left(craft.result_slot)],
+            "an unpaintable slot must degrade to the plain PICKUP, which is what \
+             carries the cursor merge"
+        );
+    }
+
+    /// …and driven into the real machine, that `PICKUP` **merges**: the cursor
+    /// grows by the result's count and the grid is charged one item per cell.
+    ///
+    /// Expected value hand-derived from `AbstractContainerMenu.java:459-465`,
+    /// which on `!slot.mayPlace(carried) && isSameItemSameComponents` does
+    /// `tryRemove(clicked.getCount(), carried.getMaxStackSize() - carried.getCount())`
+    /// then `carried.grow(taken)` — 4 + 1 = 5 — plus `ResultSlot.onTake`
+    /// consuming one plank from the loaded cell (8 → 7).
+    #[test]
+    fn the_resulting_pickup_merges_the_result_onto_the_matching_cursor() {
+        let mut menu = result_and_cursor(1, 4);
+        let craft = menu.craft_layout().expect("a crafting table has a grid");
+        let result = MenuHit::Slot(craft.result_slot);
+        let mut input = MenuInput::new();
+        input.press(result, MenuButton::Left, false, loaded(), false, &menu);
+        input.dragged(result, &menu);
+        let clicks = input.release(result, MenuButton::Left, false, loaded(), &menu);
+        for click in clicks {
+            click.apply(&mut menu, lodestone_game::click::PlayerCtx::survival());
+        }
+        assert_eq!(
+            menu.carried().map(ItemStack::count),
+            Some(5),
+            "the cursor must grow by the result's count"
+        );
+        assert_eq!(menu.slot_item(craft.result_slot), None, "the result was taken");
+        assert_eq!(
+            menu.slot_item(craft.first_input).map(ItemStack::count),
+            Some(7),
+            "`ResultSlot.onTake` charges the grid one item per occupied cell"
+        );
+    }
+
+    /// Control: the filter must be *selective*, not a blanket refusal to paint.
+    /// The same press/jiggle/release on an ordinary empty grid cell — which does
+    /// pass `mayPlace` — still paints and still emits the drag sequence. Without
+    /// this, `dragged` returning early unconditionally would satisfy both tests
+    /// above and delete the entire paint gesture.
+    #[test]
+    fn control_dragging_across_a_placeable_cell_still_paints_it() {
+        let menu = result_and_cursor(1, 4);
+        let craft = menu.craft_layout().expect("a crafting table has a grid");
+        // The second grid cell: empty, `CraftingInput`, so `mayPlace` is true.
+        let cell = MenuHit::Slot(craft.first_input + 1);
+        let mut input = MenuInput::new();
+        input.press(cell, MenuButton::Left, false, loaded(), false, &menu);
+        input.dragged(cell, &menu);
+        assert_eq!(
+            input.drag_paint().map(|(_, slots)| slots.to_vec()),
+            Some(vec![craft.first_input + 1])
+        );
+        let clicks = input.release(cell, MenuButton::Left, false, loaded(), &menu);
+        assert!(
+            clicks.iter().all(|c| c.input == ContainerInput::QuickCraft),
+            "a paintable cell must still produce the drag sequence: {clicks:?}"
+        );
+    }
+
+    /// The other two arms of `shouldAddSlotToQuickCraft`, each with the same
+    /// slot flipped to the passing case so neither is measuring a slot that was
+    /// unpaintable for an unrelated reason.
+    #[test]
+    fn the_paint_gate_also_honours_item_identity_and_the_cursor_count() {
+        let stick = |n: i32| ItemStack::new("minecraft:stick".parse().unwrap(), n);
+        let dirt = |n: i32| ItemStack::new("minecraft:dirt".parse().unwrap(), n);
+
+        // `canItemQuickReplace`: an occupied cell holding a *different* item is
+        // never painted (`AbstractContainerMenu.java:726-731`).
+        let mut mismatched = Menu::generic(9);
+        mismatched.set_slot_item(0, Some(dirt(1)));
+        mismatched.set_carried(Some(stick(8)));
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(0), MenuButton::Left, false, loaded(), false, &mismatched);
+        input.dragged(MenuHit::Slot(0), &mismatched);
+        assert_eq!(input.drag_paint().map(|(_, s)| s.len()), Some(0));
+
+        // Control for it: the same slot holding the *same* item is painted.
+        let mut matched = Menu::generic(9);
+        matched.set_slot_item(0, Some(stick(1)));
+        matched.set_carried(Some(stick(8)));
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(0), MenuButton::Left, false, loaded(), false, &matched);
+        input.dragged(MenuHit::Slot(0), &matched);
+        assert_eq!(input.drag_paint().map(|(_, s)| s.to_vec()), Some(vec![0]));
+
+        // `carried.getCount() > quickCraftSlots.size()`: a cursor of two cannot
+        // paint a third cell, so the paint stops at two.
+        let mut small = Menu::generic(9);
+        small.set_carried(Some(stick(2)));
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(0), MenuButton::Left, false, loaded(), false, &small);
+        for cell in [0usize, 1, 2, 3] {
+            input.dragged(MenuHit::Slot(cell), &small);
+        }
+        assert_eq!(
+            input.drag_paint().map(|(_, s)| s.to_vec()),
+            Some(vec![0, 1]),
+            "vanilla stops painting once the painted count reaches the cursor's"
         );
     }
 

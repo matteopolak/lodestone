@@ -2163,7 +2163,11 @@ impl ApplicationHandler for WindowApp {
                             self.cursor.0,
                             self.cursor.1,
                         );
-                        self.menu_input.dragged(hit);
+                        // `&menu` supplies the cursor stack and the slot rules
+                        // vanilla's `shouldAddSlotToQuickCraft` gate needs — see
+                        // `MenuInput::dragged`, and issue #378 part 1 for what an
+                        // unfiltered paint set costs.
+                        self.menu_input.dragged(hit, &menu);
                     }
                 }
             }
