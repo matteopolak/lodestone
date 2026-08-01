@@ -65,7 +65,7 @@ use crate::packets::login::{
     LoginFinished,
 };
 use crate::packets::metadata::{
-    MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
+    TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
 use crate::packets::registry::{ClientRegistries, DimensionType, RegistryData};
