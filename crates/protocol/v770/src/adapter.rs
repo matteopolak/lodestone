@@ -27,6 +27,7 @@ use lodestone_model::{
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray};
 
+use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::block_states::block_type_name;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
 use lodestone_data::data_component_types::component_type_name;
@@ -2798,6 +2799,14 @@ impl V770Adapter {
             let state = u32::try_from(state)
                 .map_err(|_| AdapterError::Decode(format!("negative block state id {state}")))?;
             world.set_block(pos.x, pos.y, pos.z, state);
+            // Writing a block state is what creates (or destroys) a block
+            // entity: vanilla does it inside `LevelChunk.setBlockState`, with no
+            // packet involved (`LevelChunk.java:341`). Skipping this is issue
+            // #374 — a placed chest with a state, no record, and zero pixels,
+            // which still *opened* because interaction reads the state.
+            // `World::sync_block_entity` documents the create/keep/replace/remove
+            // rule; the `Option` is the version-specific half.
+            world.sync_block_entity(pos.x, pos.y, pos.z, block_entity_type(state));
             // Dirty exactly the section that owns the block. Without this a
             // break/place the *server* sends is applied to the world but never
             // drawn until some other event happens to dirty the column — the
@@ -2843,6 +2852,23 @@ impl V770Adapter {
             }
             reader.ensure_empty().map_err(dec_err)?;
             world.set_blocks(section_x, section_y, section_z, &blocks);
+            // Every state write goes through `sync_block_entity`, one call per
+            // changed cell, for the same reason `BLOCK_UPDATE` does: in vanilla
+            // `LevelChunk.setBlockState` is what creates and removes block
+            // entities, no packet involved (`LevelChunk.java:308-348`). A piston
+            // or a `/fill` arrives here rather than as N `BLOCK_UPDATE`s, so
+            // skipping it would leave exactly the #374 bug for bulk edits.
+            // Section-relative coordinates back to absolute — `set_blocks` does
+            // the same conversion internally, but this seam takes absolute
+            // coordinates because a block entity is keyed by world position.
+            for &(rel_x, rel_y, rel_z, state) in &blocks {
+                world.sync_block_entity(
+                    (section_x << 4) | i32::from(rel_x),
+                    (section_y << 4) | i32::from(rel_y),
+                    (section_z << 4) | i32::from(rel_z),
+                    block_entity_type(state),
+                );
+            }
             // Dirty the owning column so a server-authoritative multi-block
             // change (e.g. a falling tree, a piston, another player's edits) is
             // re-meshed rather than silently applied-but-invisible. An empty
@@ -2863,6 +2889,19 @@ impl V770Adapter {
             // not necessarily the full save tag). Mutates the world directly,
             // mirroring BLOCK_UPDATE/SECTION_BLOCKS_UPDATE: a no-op if the owning
             // chunk is not currently loaded.
+            //
+            // Since #374 this is what it is in vanilla — *data for an entity that
+            // already exists*, created by the chunk packet's block-entity list or
+            // by a state write through `sync_block_entity`. It nonetheless still
+            // **creates** on a miss (`set_block_entity` is an upsert), which is a
+            // deliberate divergence: vanilla's `handleBlockEntityData` drops the
+            // payload when `getBlockEntity(pos, type)` is empty
+            // (`ClientPacketListener.java:1476`, `BlockGetter.java:27-30`) because
+            // it has `pendingBlockEntities` to promote from later, and we do not.
+            // The two failure modes are not symmetric: an orphan record whose
+            // state is not a chest resolves to no material and draws nothing (see
+            // `lodestone-shell`'s `block_entities`), so creating is inert, whereas
+            // dropping would lose server data we cannot ask for again.
             let mut reader = Reader::new(payload);
             let packed = reader.i64().map_err(dec_err)?;
             let type_id = reader.var_i32().map_err(dec_err)?;

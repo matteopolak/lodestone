@@ -47,11 +47,14 @@ Two links already existed and reached **nothing**. Both are marked; if you are e
 are the shape of failure to expect.
 
 ```
-level_chunk_with_light ─► BlockEntity::decode_list ─► LoadedChunk.block_entities
-block_entity_data      ─► World::set_block_entity  ─┘        ▲
+level_chunk_with_light ─► BlockEntity::decode_list  ─► LoadedChunk.block_entities
+block_update           ─► World::sync_block_entity  ─┤       ▲
+section_blocks_update  ─► World::sync_block_entity  ─┤       │
+block_entity_data      ─► World::set_block_entity   ─┘       │
                                                     was DEAD: zero shell call sites
                                                              │
                        shell/block_entities.rs::chest_spawns ┘
+                        (chest_candidates ─► chest_spawn)
                                     │
 BLOCK_EVENT ─► v770 adapter ─► ClientEvent::BlockEvent
                                     ▲ was DEAD: fell through net.rs `forward`'s
@@ -72,6 +75,48 @@ BLOCK_EVENT ─► v770 adapter ─► ClientEvent::BlockEvent
 **`ingest::handles_event` needed no new arm.** Checked rather than assumed, because that switch is
 this repo's island factory: `SharedState::apply` forwards only ECS-handled events, and block events
 travel the shell's own `ClientEvent` stream, so the ECS routing switch is not on this path at all.
+The same holds for #374 below: `sync_block_entity` is a `WorldSink` call inside the adapter, not an
+event, so none of the three routers is involved.
+
+### There are **four** creation routes, not two — issue [#374](https://github.com/matteopolak/lodestone/issues/374)
+
+The first version of that diagram listed only `level_chunk_with_light` and `block_entity_data`. Both
+links were accurate, and the pair read as exhaustive. It was not, and the gap was visible in play: a
+**freshly placed chest was invisible** while still opening.
+
+In vanilla, **writing a block state is what creates the block entity** — no packet involved
+(`LevelChunk.java:341`, `blockEntity = ((EntityBlock)newBlock).newBlockEntity(pos, state)`), and
+`block_entity_data` is only ever *data for an entity that already exists* (its handler
+`ClientPacketListener.java:1476` calls `getBlockEntity(pos, type)` and **drops** the payload when
+nothing is there). Our `block_update` / `section_blocks_update` arms wrote the state and stopped, so
+a placed chest had a state, no record, and `chest_candidates`' `for be in &chunk.block_entities` loop
+never saw it. Interaction kept working the whole time because it resolves from the block state, which
+is exactly why the bug reads as "the renderer is broken" and is not.
+
+The fix is `World::sync_block_entity(x, y, z, Option<block_entity_type>)` in `lodestone-world`, a port
+of `LevelChunk.setBlockState`'s tail, called immediately after every state write:
+
+| new state | existing record | outcome |
+|---|---|---|
+| owns type `T` | none | **create** with `T` and `Nbt::End` |
+| owns type `T` | type `T` | **keep**, NBT included (`isValidBlockState`) |
+| owns type `T` | type `U ≠ T` | **replace**, NBT cleared ("Found mismatched block entity") |
+| owns nothing | any | **remove** |
+
+**The removal row matters as much as the creation row.** Without it, breaking a chest leaves a stale
+record and this pass keeps drawing a chest in empty air — the same defect pointing the other way.
+
+`lodestone-world` cannot resolve a state id itself (it would need `lodestone-data`, and
+`lodestone-data → lodestone-model → lodestone-world` makes that a cycle), so the **caller** passes
+the type and the version-specific answer comes from `lodestone_data::block_entity_types` — a census
+walked out of the real jar, because neither `blocks.json` nor `registries.json` carries the
+state→type pairing. See [`lodestone-data-crate.md`](lodestone-data-crate.md).
+
+`block_entity_data` still creates on a miss, deliberately unlike vanilla: vanilla can afford to drop
+because it has `pendingBlockEntities` to promote from later and we do not, and the two failure modes
+are not symmetric. An orphan record whose block state is not a chest resolves to no material in
+`chest_spawn` and draws **nothing**, so creating is inert; dropping would lose server data we cannot
+ask for again.
 
 ### Geometry, and the one difference from entity models
 
@@ -181,6 +226,12 @@ already generic over `(model, texture)`.
 - **The source must be re-installed every frame.** It captures this frame's partial tick and a
   snapshot of the lid map. A one-shot install at connect draws every lid frozen at the fraction of a
   tick the session happened to join on.
+- **Every block-state write must call `World::sync_block_entity`.** #374 was one write path that
+  did not, and the whole rule is that there are no exceptions — "this one cannot need it" is the
+  reasoning that produced the bug. The one live gap left is `Sim::set_block_world`, the **demo-world**
+  editor, which still writes bare block states; it is harmless today only because the only values it
+  is ever passed are `PLACE_BLOCK` (stone), air and water, none of which own a block entity. Closing
+  it is a one-line addition and should happen the moment that world can contain a chest.
 
 ### There are two consumers of this geometry, not one
 
@@ -305,6 +356,51 @@ Unit tests: 6 in `lodestone-assets`, 17 in `lodestone-render`, 10 in `lodestone-
 `prepare_block_entities`, so every one would stay green with the draw deleted. Only the pixel gates
 can see that.
 
+### #374: the creation half
+
+`chest_block_entity_pixels.rs` hands `RenderState` a synthetic `ChestSpawn`, so it is silent about
+where spawns come from and stayed green throughout #374.
+`crates/lodestone-shell/tests/placed_chest_block_entity_pixels.rs` starts one layer earlier — a real
+`World` with a real loaded chunk, written through the `WorldSink` seam (`set_block` then
+`sync_block_entity`, the exact pair the adapter's `BLOCK_UPDATE` arm calls), then the **real** shell
+gather (`chest_candidates` + `chest_spawn`), then the real `RenderState::render`:
+
+```bash
+cargo test -p lodestone-shell --test placed_chest_block_entity_pixels -- --ignored --nocapture
+```
+
+| frame | world write | measured |
+|---|---|---|
+| subject | `set_block(chest)` + `sync_block_entity(Some(1))` | rect `x137..183 y98..144`, fill **89.6%** (1980/2209) |
+| pre-fix control | `set_block(chest)` **only** | **0 px** in that rect; 0 spawns gathered |
+| removed | then `set_block(air)` + `sync_block_entity(None)` | **0 px**; pixel-identical to the never-had-a-chest frame |
+
+The middle row is #374 reproduced verbatim as a permanent control — a *world state* rather than a
+deleted line of code, so it cannot rot. Its changed bbox is `x138..181 y98..142`, entirely inside the
+rect, and the arm sits at `x247..319 y169..239`, re-measured disjoint.
+
+**The negative control was watched failing**, twice and at two layers:
+
+- the pixel gate with its subject switched to the pre-fix write —
+  `assertion left == right failed  left: 0  right: 1` on `block_entities_drawn`, with
+  `subject_spawns = []`; and
+- the two `sync_block_entity` calls temporarily deleted from `adapter.rs`, which fails **three** of
+  `crates/protocol/v770/tests/block_updates.rs`' world-backed gates on real `BLOCK_UPDATE` /
+  `SECTION_BLOCKS_UPDATE` packet bytes:
+  `a placed chest must gain a block-entity record from the state alone ... left: []`.
+
+Those v770 gates are what join the pixel gate to the wire: they dispatch real packet bytes into a real
+`World` and assert the resulting records, in both directions and for the bulk path (whose
+`section << 4 | rel` reconstruction has its own negative-coordinate gate, because getting it wrong
+puts the record 16 blocks away, where it still exists and still fails to draw). Each asserts its state
+write landed **before** asserting anything about block entities — every seam here is a documented
+no-op for an absent chunk, so a fixture that forgot to load one would read as a broken feature.
+
+Note that `a_repeated_block_update_keeps_the_nbt_block_entity_data_delivered` passes with or without
+the fix: it guards the `Kept` branch (a re-sent chest state must not wipe contents `block_entity_data`
+delivered — the server re-sends `block_update` for a chest whenever a neighbour makes it a double), not
+#374 itself.
+
 ## What is not built
 
 Eleven of the twelve types on #23, in the order the issue puts them:
@@ -332,9 +428,11 @@ share one light sample, and the `SpecialDates.isExtendedChristmas()` clock behin
   `Image::decode_png`, `ResourceManager`/`ZipSource` for the jar.
 - `lodestone-render` — `entity::{push_part_quads, PartRange}`, `entity_pipeline::{EntityPipeline,
   GpuEntityModel, EntityCameraUniform, upload_instances}`, `camera::Frustum`, `models::ModelVertex`.
-- `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`.
+- `lodestone-world` — `BlockEntity`, `LoadedChunk::block_entities`, `ChunkColumn::get_block`,
+  `World::sync_block_entity` / `BlockEntitySync`.
 - `lodestone-data` — `block_states::{block_name, properties}` for the material and the
-  `facing`/`type` properties.
+  `facing`/`type` properties; `block_entity_types::block_entity_type` for the state→type census the
+  block-update path creates records from.
 - `lodestone-shell` — `net::{SharedHandle, entity_light_at}`, `resources::asset_root`.
 
 ## Related
