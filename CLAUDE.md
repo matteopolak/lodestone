@@ -137,6 +137,31 @@ Oracles (not part of repo state — recreate them):
   `docs/README.md` by exact path and still captured another agent's index line pointing at a doc
   that commit did not include — shipping a broken link. Review the staged diff, not just the file
   list.
+- **`rtk` is not a transparent proxy. Do not trust it for evidence — use `/usr/bin/grep` and the
+  real `cargo`/`git`.** It is a token-saving filter, and its filtering silently destroys exactly the
+  output a search exists to produce. Verified here directly, on one file, one pattern:
+
+  | | output for `ambient_occlusion_at` in `mesher.rs` |
+  |---|---|
+  | `rtk grep -n` | `usize, y: usize, z: usize) -> bool {` |
+  | `/usr/bin/grep -n` | `fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {` |
+
+  **It strips the matched pattern and everything before it on the line** — it deletes the one thing
+  you searched for, so you cannot tell a real match from a near-miss, and a symbol looks absent when
+  it is present. This is the `| head` trap with no visible pipe: rule 2's whole class of "X doesn't
+  exist yet" mistakes can now be manufactured by the search tool itself.
+
+  Also observed by agents, each nearly producing a wrong conclusion: `rtk proxy cargo test` reporting
+  **exit 0 while its own output said 7 failed**, and rewriting `-p lodestone-render` into a run that
+  executed `lodestone-physics`' tests; and `rtk proxy git diff HEAD -- $LONG_VAR` returning **zero
+  hunks while the content plainly differed**, which nearly had an agent conclude its work was already
+  committed (single literal paths worked). Exit-code preservation *is* fine for `cargo check`
+  failures — measured 101 both through `rtk proxy` and through `~/.cargo/bin/cargo` — so the failure
+  is not uniform, which is worse than if it were: it is unpredictable per subcommand.
+
+  Practical rule: `rtk` for reading something you already believe, the real binary for anything a
+  conclusion rests on. **Re-read every exit code from a captured file with a program, not from a
+  pipeline.**
 - **This machine is shared with an unrelated project.** Docker holds images and volumes belonging to
   other work (`mht-*`, postgres, valkey, seaweedfs). **Never run `docker system prune`,
   `docker volume prune`, or `docker builder prune`.** Name every target explicitly; note Docker's
