@@ -212,6 +212,64 @@ pub fn load_entity_textures() -> std::collections::HashMap<&'static str, lodesto
     out
 }
 
+/// Decode every **block-entity** sheet the renderer can ask for, keyed by the
+/// same texture *stem* the renderer resolves (`entity/chest/normal_left`).
+///
+/// Version-free and fail-open: an empty map means no pack was found, and a chest
+/// then draws nothing rather than a synthetic-colour box. See
+/// `gpu/block_entities.rs`'s module doc for why the asymmetry with
+/// [`load_entity_textures`]' placeholder is deliberate.
+///
+/// # Keyed by stem, not by model
+///
+/// [`load_entity_textures`] keys by *model name* because a mob's sheet is
+/// determined by its model. A chest's is not: plain, trapped, christmas, ender
+/// and four copper stages all share three meshes, so the key has to be the sheet.
+/// Reusing the model-keyed shape here would load one sheet per mesh and draw
+/// every trapped chest in plain oak.
+///
+/// # Why these are individual PNGs and not the chest *atlas*
+///
+/// 26.2 stitches `textures/entity/chest/*.png` into `textures/atlas/chest.png`
+/// and `ChestRenderer` submits a `SpriteId` into it. The per-file PNGs are still
+/// in the jar and each sprite **is** the whole 64×64 sheet, so the model's own
+/// UVs (normalised against 64×64 by the bake) address a direct upload correctly
+/// and identically. Going through the atlas would only add a UV remap this
+/// renderer does not need.
+#[must_use]
+pub fn load_block_entity_textures()
+-> std::collections::HashMap<&'static str, lodestone_assets::Image> {
+    use lodestone_assets::Image;
+
+    let mut out = std::collections::HashMap::new();
+    let Some(root) = asset_root() else {
+        return out;
+    };
+    let Some(manager) = open_client_jar(&root) else {
+        return out;
+    };
+
+    for stem in lodestone_render::chest_texture_stems() {
+        let path = format!("assets/minecraft/textures/{stem}.png");
+        let Some(png) = manager.read(&path) else {
+            tracing::warn!(target: "assets", "missing block-entity sheet {path}");
+            continue;
+        };
+        match Image::decode_png(&png) {
+            Ok(img) => {
+                out.insert(stem, img);
+            }
+            Err(e) => tracing::warn!(target: "assets", "decode {path}: {e}"),
+        }
+    }
+    tracing::info!(
+        target: "assets",
+        loaded = out.len(),
+        "loaded vanilla block-entity textures"
+    );
+    out
+}
+
 /// Load the vanilla GUI sprite atlas (`assets/<ns>/textures/gui/sprites/**`) from
 /// `client.jar`, for the HUD. Version-free and fail-open: returns `None` when no
 /// pack is found or the jar can't be opened/stitched, so the HUD keeps its

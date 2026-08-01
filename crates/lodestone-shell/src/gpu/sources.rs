@@ -388,3 +388,41 @@ impl std::fmt::Debug for ThirdPersonBodySource {
     }
 }
 
+/// Where this frame's block entities (chests, issue #23) come from.
+///
+/// A `Fn(Vec3) -> Vec<ChestSpawn>` taking the **camera position**, because
+/// vanilla's own gate is per-block-entity distance from the camera
+/// (`BlockEntityRenderer.shouldRender`, a flat 64 blocks against the block
+/// *centre*) and the cheapest place to apply it is where the world is being
+/// walked, not after a `Vec` of every chest in the world has been built.
+///
+/// Re-installed **every frame** rather than once at connect, like
+/// [`MainHandSource`] and unlike [`EntityLightSource`]: a chest lid is
+/// partial-tick-interpolated, and a closure captured once would freeze the
+/// animation at whatever fraction of a tick it was installed on.
+///
+/// Unset — the offline demo, every headless test that does not opt in — yields an
+/// empty vec, which draws nothing and reproduces this struct's behaviour before
+/// block entities existed exactly.
+#[derive(Default)]
+pub struct BlockEntitySource(
+    #[allow(clippy::type_complexity)]
+    pub(super)  Option<
+        Box<dyn Fn(glam::Vec3) -> Vec<lodestone_render::ChestSpawn> + Send + Sync>,
+    >,
+);
+
+impl BlockEntitySource {
+    #[must_use]
+    pub(super) fn chests(&self, eye: glam::Vec3) -> Vec<lodestone_render::ChestSpawn> {
+        self.0.as_ref().map(|f| f(eye)).unwrap_or_default()
+    }
+}
+
+impl std::fmt::Debug for BlockEntitySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("BlockEntitySource")
+            .field(&if self.0.is_some() { "set" } else { "empty" })
+            .finish()
+    }
+}

@@ -579,6 +579,21 @@ pub struct Sim {
     /// view by 1.22 blocks in a single frame. Ticked once per physics tick beside
     /// [`Self::body_pose`], read interpolated in [`Self::camera`].
     eye_height_smoother: crate::camera_rig::EyeHeightSmoother,
+    /// Per-position chest lid animation state (issue #23) — vanilla's
+    /// `ChestLidController`, one per open or closing chest.
+    ///
+    /// A plain field rather than an ECS resource for the same reason
+    /// [`Self::death_message`] is one: exactly one consumer reads it
+    /// (`app.rs`'s per-frame render-source install, via
+    /// [`Self::block_entity_source`]) and nothing needs it to survive a session
+    /// teardown — a reconnect re-derives every lid from the block events the new
+    /// session sends.
+    ///
+    /// Fed by `NetUpdate::BlockEvent` in [`Self::poll_net`] and advanced once per
+    /// physics tick in [`Self::step`]. Both halves are required: the wire carries
+    /// only "somebody is looking in this chest", and the *angle* is a client-side
+    /// accumulator — see `crate::block_entities::ChestLids`.
+    chest_lids: crate::block_entities::ChestLids,
 }
 
 impl Sim {
@@ -812,6 +827,7 @@ impl Sim {
             // from zero — vanilla's `Camera` is likewise aligned before its first
             // tick, not zero-initialised.
             eye_height_smoother: crate::camera_rig::EyeHeightSmoother::new(player.eye_height),
+            chest_lids: crate::block_entities::ChestLids::new(),
         };
         sim.refresh_mesh_policy();
         sim
@@ -2232,6 +2248,55 @@ impl Sim {
         })
     }
 
+    /// This frame's block entities (chests, issue #23) as a `'static` closure for
+    /// [`RenderState::set_block_entity_source`].
+    ///
+    /// `None` without a live session — the offline demo world has no chests, and a
+    /// closure that always returned an empty vec would look installed while
+    /// carrying nothing.
+    ///
+    /// # Why this is not gated on `vanilla_atlas`
+    ///
+    /// [`Self::outline_shape_source`] is, because an outline is only meaningful
+    /// against real block states. This is not, and the difference matters: the
+    /// chest sheets are loaded by the *renderer* from its own jar lookup, so a
+    /// session with a live world but no stitched atlas still draws chests
+    /// correctly. Copying the atlas gate here would silently switch chests off in
+    /// exactly the configuration that most needs them visible.
+    ///
+    /// # Two snapshots, both deliberate
+    ///
+    /// The lid map is **cloned** and the partial tick **sampled** rather than
+    /// borrowed, because the closure outlives this call (`RenderState` owns it)
+    /// and must not hold `&self`. The clone is one small `HashMap` — it holds only
+    /// chests that are open or moving, since
+    /// [`ChestLids::tick`](crate::block_entities::ChestLids::tick) drops the
+    /// settled-shut — and re-taking it every frame is what makes the animation
+    /// move at all. Installing this once at connect freezes every lid at the
+    /// fraction of a tick it was installed on.
+    ///
+    /// [`RenderState::set_block_entity_source`]: crate::gpu::RenderState::set_block_entity_source
+    #[must_use]
+    pub fn block_entity_source(
+        &self,
+    ) -> Option<impl Fn(glam::Vec3) -> Vec<lodestone_render::ChestSpawn> + Send + Sync + 'static>
+    {
+        let handle = self.net.as_ref()?.shared_handle();
+        let lids = self.chest_lids.clone();
+        let partial_tick = self.clock().interp_alpha;
+        Some(move |eye: glam::Vec3| {
+            crate::block_entities::chest_spawns(&handle, &lids, eye, partial_tick)
+        })
+    }
+
+    /// How many chest lids are currently animating or open — for the debug
+    /// overlay and for the live gate, which needs to distinguish "the block event
+    /// never arrived" from "the lid is drawn shut".
+    #[must_use]
+    pub fn chest_lid_count(&self) -> usize {
+        self.chest_lids.len()
+    }
+
     /// The chunk store as a `'static` [`CollisionSource`].
     ///
     /// Cheap: an `Arc` refcount bump, with the read lock taken inside
@@ -2428,6 +2493,12 @@ impl Sim {
             // The tick was counted and withdrawn by `FrameClock::take_tick` at the
             // top of this loop, so there is nothing to book-keep here any more.
             self.tick_particles();
+            // Chest lids (issue #23), on the same fixed 20 Hz as everything else
+            // here: `ChestLidController.tickLid()` ramps by ±0.1 per tick, so a
+            // lid takes exactly 10 ticks to swing. Advancing it per *frame*
+            // instead would open a chest in a third of a second at 60 fps and
+            // make the animation speed a function of the frame rate.
+            self.chest_lids.tick();
             // The HUD status effects and the title/action-bar overlays used to be
             // aged by three hand-written `tick(1)` calls right here. They are now
             // `lodestone_ecs::session::tick_hud_overlays` in `TickSet::Animate`,
@@ -3471,6 +3542,16 @@ impl Sim {
                     // `remesh_around` also handles the boundary case, so a break
                     // at x=15 dirties the neighbouring column's face too.
                     self.remesh_changed_blocks(x, y, z, &blocks);
+                }
+                NetUpdate::BlockEvent { pos, b0, b1 } => {
+                    // Chest lids (issue #23). `ChestBlockEntity.triggerEvent`
+                    // takes `b0 == 1` and `b1 > 0` as "somebody is looking in
+                    // this chest"; `ChestLids` owns both that rule and the
+                    // per-tick ramp, so this arm forwards the raw bytes rather
+                    // than interpreting them here. Every other `b0` belongs to
+                    // some other block type (a note block's pitch, a piston's
+                    // direction) and is dropped by `apply_block_event`.
+                    self.chest_lids.apply_block_event(pos, b0, b1);
                 }
                 NetUpdate::Teleport {
                     pos,

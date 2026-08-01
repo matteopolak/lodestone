@@ -25,6 +25,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod block_entities;
 pub mod blocks;
 pub mod camera_rig;
 pub mod chat;
