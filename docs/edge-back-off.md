@@ -139,7 +139,8 @@ both of these wrong.
     (`Entity.java:1564-1582`), called from inside `Entity.move()` itself
     (`Entity.java:783-784`) — reproduced right after every `do_move`/`travel_in_air`
     call in `tick_air`/`tick_water`/`tick_lava`/`tick_elytra`;
-  - the water reset (`Entity.java:1658-1659`), at the top of `tick_water`;
+  - the water reset (`Entity.java:1658-1659`), reached from `baseTick`
+    (`Entity.java:537`), at the top of `tick_water`;
   - the `*= 0.5` lava halving in `baseTick` (`:555-557`), at the top of `tick_lava`;
   - the climbable reset (`LivingEntity.java:2693-2695`), in `tick_air` only — vanilla
     reaches it only through `travelInAir`;
@@ -149,6 +150,24 @@ both of these wrong.
     travel dispatch;
   - the stuck-in-block reset (`Entity.makeStuckInBlock`, `:2945-2947`), riding along
     with `update_stuck_multiplier`'s existing block scan.
+
+  **One known divergence, bounded and pinned.** `updateFluidInteraction` has
+  **two** call sites, not one: `Entity.baseTick` (`Entity.java:537`) *and*
+  `LivingEntity.checkFallDamage` (`LivingEntity.java:365`), the latter running
+  inside `move()` against the **post-move** position under `if (!isInWater())`.
+  `isInWater()` is the *cached* `wasTouchingWater` (`Entity.java:1605-1607`) that
+  `updateFluidInteraction` itself rewrites, so vanilla resets mid-`move` on the
+  tick a fall first touches water and then skips that tick's accumulation,
+  ending at exactly `0.0`. This crate freezes the summary per tick, so the entry
+  tick still runs `tick_air` and accumulates. **It cannot move the player**: the
+  accumulation runs at the end of the move, after the back-off gate has read the
+  old value, and the next tick's `tick_water` resets before any gate reads it —
+  so the divergence is a one-tick transient visible only to an external reader
+  (a future fall-damage predictor). Closing it costs a second
+  `compute_fluid_state` on every air tick. Both halves of that claim — that it
+  *is* positive on the entry tick, and that it is `0.0` again one tick later —
+  are pinned by `fall_distance.rs`'s
+  `water_entry_tick_is_the_one_known_divergence_and_it_lasts_exactly_one_tick`.
 
   **Still not modelled**, matching pre-existing gaps elsewhere in this crate: the
   `movementLength >= 1.0` clip-through reset inside `move` (`:747-754`, needs a world
