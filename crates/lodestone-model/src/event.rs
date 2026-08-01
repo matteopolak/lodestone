@@ -332,6 +332,29 @@ pub struct EntityMetadataUpdate {
     /// which a consumer must treat as "not using an item", never as a cleared
     /// bitfield.
     pub living_flags: Option<u8>,
+    /// The **mob** flags byte (no-AI / left-handed / **aggressive**), when present
+    /// and when the entity is known to be a `Mob`. Decode through
+    /// `lodestone_entity::metadata::MobFlags` rather than by masking inline.
+    ///
+    /// # Why this is separate from [`living_flags`](Self::living_flags)
+    ///
+    /// It is a different byte at a different index, declared by a different
+    /// vanilla class, and it is what actually drives a *mob*'s arm pose. Vanilla's
+    /// mob renderers (`AbstractSkeletonRenderer`, `DrownedRenderer`,
+    /// `AbstractZombieModel`) read `Mob.isAggressive()`; the using-item bit behind
+    /// [`living_flags`](Self::living_flags) is the *player* mechanism. A skeleton
+    /// drawing on you never sets the using-item bit, so a client that only decodes
+    /// index 8 leaves every mob in the rest pose (issue #379).
+    ///
+    /// # Why this can be absent on a packet that carried the byte
+    ///
+    /// Same reason as [`living_flags`](Self::living_flags), one notch tighter. The
+    /// byte's index is shared with `ArmorStand`'s client-flags byte of the same
+    /// serializer, and an armour stand *is* a living entity — so establishing
+    /// "living" is not enough and the adapter must establish `Mob`. `None`
+    /// therefore means "not known to be mob flags", which a consumer must read as
+    /// "not aggressive", never as a cleared bitfield.
+    pub mob_flags: Option<u8>,
     /// The custom name. [`Reported::Unreported`] when this packet did not
     /// mention it; [`Reported::Reported(None)`](Reported::Reported) is an
     /// explicit clear; [`Reported::Reported(Some(name))`](Reported::Reported)
@@ -384,6 +407,7 @@ impl EntityMetadataUpdate {
     pub fn is_empty(&self) -> bool {
         self.flags.is_none()
             && self.living_flags.is_none()
+            && self.mob_flags.is_none()
             && !self.custom_name.is_reported()
             && self.custom_name_visible.is_none()
             && self.pose.is_none()

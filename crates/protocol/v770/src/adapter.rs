@@ -1798,18 +1798,21 @@ fn handle_add_entity(
     })?;
 
     // Remember the facts a later `set_entity_data` cannot recover from the wire:
-    // the concrete class for mobs whose variant index is ambiguous, and whether
-    // the type is a `LivingEntity` (which decides whether index 8's byte is a
-    // using-item bitfield or an arrow's crit flag — see `IDX_LIVING_FLAGS`).
-    // Types with neither fact stay out of the map, so it is still bounded to the
-    // mobs actually present rather than every entity in render distance.
+    // the concrete class for mobs whose variant index is ambiguous, whether the
+    // type is a `LivingEntity` (which decides whether index 8's byte is a
+    // using-item bitfield or an arrow's crit flag — see `IDX_LIVING_FLAGS`), and
+    // whether it is a `Mob` (index 15: mob flags, or an armour stand's client
+    // flags — see `IDX_MOB_FLAGS`). Types with none of those stay out of the map,
+    // so it is still bounded to the mobs actually present rather than every
+    // entity in render distance.
     //
-    // `is_living` returning `None` for an id outside the census means "we cannot
-    // establish it is living", which fails closed to `living: false`: a missing
-    // pose is a visible gap, a wrongly-decoded flags byte is a silent lie.
+    // `is_living`/`is_mob` returning `None` for an id outside the census means "we
+    // cannot establish it", which fails closed to `false`: a missing pose is a
+    // visible gap, a wrongly-decoded flags byte is a silent lie.
     let tracked = TrackedEntity {
         class: metadata_class(name),
         living: lodestone_data::entity_census::is_living(type_id).unwrap_or(false),
+        mob: lodestone_data::entity_census::is_mob(type_id).unwrap_or(false),
     };
     if tracked.is_tracked()
         && let Ok(mut map) = variants.lock()
@@ -2040,7 +2043,7 @@ fn handle_set_entity_data(
         .ok()
         .and_then(|map| map.get(&entity_id).copied())
         .unwrap_or_default();
-    match read_entity_metadata(&mut reader, tracked.class, tracked.living) {
+    match read_entity_metadata(&mut reader, tracked) {
         // `complete == false` short-circuits the trailing-bytes check: the
         // reader is deliberately parked mid-payload there.
         Ok(decoded)

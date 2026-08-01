@@ -61,7 +61,7 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::entity_census::{pushes_players, TYPE_COUNT};
+use lodestone_data::entity_census::{is_mob, pushes_players, TYPE_COUNT};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +86,10 @@ struct Row {
     /// without a re-dump, and carried here so a future model can reach it.
     impl_class: String,
     living: bool,
+    /// `Mob.class.isAssignableFrom(impl)` — strictly narrower than
+    /// [`living`](Self::living), and the class that declares the flags byte
+    /// behind `isAggressive()`. Shipped unreduced as `ENTITY_IS_MOB`.
+    mob: bool,
     /// Class declaring `pushEntities()`, or `None` when nothing in the hierarchy
     /// does (the expected value for a plain `Entity` subclass).
     push_entities_decl: Option<String>,
@@ -238,6 +242,11 @@ fn parse_dump(text: &str) -> Vec<Row> {
             "false" => false,
             other => panic!("living column is not a boolean: {other:?}"),
         };
+        let mob = match tok.next().expect("mob column") {
+            "true" => true,
+            "false" => false,
+            other => panic!("mob column is not a boolean: {other:?}"),
+        };
         let decl = |token: &str| match token {
             "-" => None,
             class => Some(class.to_owned()),
@@ -254,6 +263,7 @@ fn parse_dump(text: &str) -> Vec<Row> {
             name,
             impl_class,
             living,
+            mob,
             push_entities_decl,
             do_push_decl,
             width_bits,
@@ -367,6 +377,29 @@ fn generate(rows: &[Row]) -> String {
     }
     out.push_str("];\n");
 
+    // The raw `mob` column, likewise unreduced — and a *third* distinct fact.
+    // `Mob` is where `DATA_MOB_FLAGS_ID` (metadata index 15, the aggressive bit)
+    // is declared, and index 15 is *also* `ArmorStand.DATA_CLIENT_FLAGS` and
+    // `Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`, all three `BYTE`. An armour
+    // stand's `0x04` is "show arms" where a mob's is "aggressive", so an
+    // is-*living* guard is not enough for index 15 the way it is for index 8:
+    // `ArmorStand` is living. See `tests/support/entity_data_index_jvm.txt` in
+    // the `v770` crate for the collision, read off the jar (issue #379).
+    let _ = writeln!(
+        out,
+        "\n/// Whether this type's implementation class is a `Mob`, by network registry id."
+    );
+    let _ = writeln!(out, "pub static ENTITY_IS_MOB: [bool; {count}] = [");
+    for row in rows {
+        let literal = format!("{},", row.mob);
+        let _ = writeln!(
+            out,
+            "    {literal:<7}// {} {} — {}",
+            row.id, row.name, row.impl_class
+        );
+    }
+    out.push_str("];\n");
+
     out
 }
 
@@ -395,6 +428,87 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
         checked += 1;
     }
     assert_eq!(checked, 158, "expected 158 entity types checked, got {checked}");
+}
+
+#[test]
+fn the_committed_is_mob_column_matches_the_dump_row_for_row() {
+    // `is_mob` ships the dump's `mob` column with no reduction at all, so the
+    // check is equality over all 158 rows.
+    let rows = parse_dump(DUMP);
+    let mut mobs = 0usize;
+    for row in &rows {
+        let actual = is_mob(row.id as i32)
+            .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        assert_eq!(
+            actual, row.mob,
+            "mob mismatch for {} (id {}): table {actual}, dump {} ({})",
+            row.name, row.id, row.mob, row.impl_class
+        );
+        mobs += usize::from(row.mob);
+    }
+    // Non-vacuity: the column must actually separate the population, not be all
+    // one value (which would satisfy the equality above just as well).
+    assert!(
+        (40..rows.len()).contains(&mobs),
+        "{mobs} of {} types are mobs — implausible, the column is probably degenerate",
+        rows.len()
+    );
+    assert_eq!(is_mob(TYPE_COUNT as i32), None);
+    assert_eq!(is_mob(i32::MAX), None);
+}
+
+#[test]
+fn is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named() {
+    // The whole reason a third column exists. Metadata index 15 is
+    // `Mob.DATA_MOB_FLAGS_ID` on a mob and `ArmorStand.DATA_CLIENT_FLAGS` on an
+    // armour stand, both `BYTE` — and bit `0x04` is "aggressive" on one and "show
+    // arms" on the other. `ArmorStand` is a `LivingEntity`, so unlike index 8 the
+    // is-living guard does **not** resolve this one, and reading `is_living` as an
+    // is-mob test would make every armour stand with arms report itself as an
+    // aggressive mob (issue #379).
+    let rows = parse_dump(DUMP);
+    for row in &rows {
+        assert!(
+            !row.mob || row.living,
+            "{} is a mob but not living, which is impossible (Mob extends LivingEntity)",
+            row.name
+        );
+    }
+    let living_non_mobs: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.living && !row.mob)
+        .map(|row| row.name.as_str())
+        .collect();
+    // Read off the 26.2 tree: `LivingEntity`'s direct non-`Mob` descendants.
+    // Asserted by name because the *identity* of the gap is the finding, not its
+    // size — a later version adding one must be looked at, not absorbed.
+    assert_eq!(
+        living_non_mobs,
+        vec![
+            "minecraft:armor_stand",
+            "minecraft:mannequin",
+            "minecraft:player",
+        ],
+        "the living-but-not-Mob set changed; each of these has its own claimant on \
+         metadata index 15 and needs reading before the guard is widened"
+    );
+    // And the positive side: the mobs whose arm pose the aggressive bit drives.
+    for name in [
+        "minecraft:skeleton",
+        "minecraft:stray",
+        "minecraft:bogged",
+        "minecraft:wither_skeleton",
+        "minecraft:zombie",
+        "minecraft:drowned",
+        "minecraft:husk",
+        "minecraft:pillager",
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("{name} is not in the dump"));
+        assert!(row.mob, "{name} must be a Mob");
+    }
 }
 
 #[test]
@@ -458,6 +572,7 @@ fn the_reduction_is_default_deny() {
         name: "test:unknown_gadget".to_owned(),
         impl_class: "SomeFutureGadget".to_owned(),
         living: false,
+        mob: false,
         push_entities_decl: None,
         do_push_decl: None,
         width_bits: 0,

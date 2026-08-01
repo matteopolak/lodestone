@@ -13,6 +13,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.EntityTypes;
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
 
 /**
  * Authoritative per-entity-type census: the facts needed to decide, per type,
@@ -59,12 +60,13 @@ import net.minecraft.world.entity.LivingEntity;
  * One line per type, ordered by network registry id, space-separated:
  *
  * <pre>
- *   &lt;id&gt; &lt;name&gt; &lt;implClass&gt; &lt;isLiving&gt; &lt;pushEntitiesDecl&gt; &lt;doPushDecl&gt; &lt;widthBits&gt; &lt;heightBits&gt;
+ *   &lt;id&gt; &lt;name&gt; &lt;implClass&gt; &lt;isLiving&gt; &lt;isMob&gt; &lt;pushEntitiesDecl&gt; &lt;doPushDecl&gt; &lt;widthBits&gt; &lt;heightBits&gt;
  * </pre>
  *
  * where {@code implClass} and the two {@code *Decl} columns are simple class
- * names (nested classes as {@code Outer.Inner}), {@code isLiving} is
- * {@code true}/{@code false}, and the two bit columns are raw {@code f32} bits
+ * names (nested classes as {@code Outer.Inner}), {@code isLiving} and
+ * {@code isMob} are {@code true}/{@code false}, and the two bit columns are raw
+ * {@code f32} bits
  * in hex. A {@code *Decl} column is {@code -} when the class hierarchy declares
  * the method nowhere, which cannot happen for a {@code LivingEntity} subclass
  * and is the expected value for a plain {@code Entity} one.
@@ -110,10 +112,18 @@ public final class EntityCensusOracle {
             String name = BuiltInRegistries.ENTITY_TYPE.getKey(type).toString();
             Class<?> impl = implByT.get(id);
             boolean living = LivingEntity.class.isAssignableFrom(impl);
+            // `Mob` is strictly narrower than `LivingEntity` (a `Player` and an
+            // `ArmorStand` are living and not mobs), and it is the class that
+            // declares the flags byte behind `isAggressive()`. See
+            // `EntityDataIndexOracle` for why the distinction is load-bearing:
+            // index 15 is `Mob.DATA_MOB_FLAGS_ID` on a mob and
+            // `ArmorStand.DATA_CLIENT_FLAGS` on an armour stand, same serializer.
+            boolean mob = Mob.class.isAssignableFrom(impl);
             lines[id] = id
                     + " " + name
                     + " " + simpleName(impl)
                     + " " + living
+                    + " " + mob
                     + " " + declarerOf(impl, "pushEntities")
                     + " " + declarerOf(impl, "doPush", Entity.class)
                     + " " + Integer.toHexString(Float.floatToRawIntBits(type.getWidth()))

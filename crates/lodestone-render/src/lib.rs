@@ -117,7 +117,7 @@ pub use entity::{
     ENTITY_FULLBRIGHT, ArmourMesh, ArmourModelSet, EntityBatch, EntityCullStats, EntityFrame,
     EntityInstance, EntityMesh, EntityModelSet, EntitySpawn, MODEL_FEET_OFFSET, PartRange,
     SheepWoolModelSet, WoolMesh, armour_layer_tint, armour_layers, entity_model_matrix,
-    entity_texture_candidates, model_for_type, plan_entities,
+    entity_texture_candidates, mob_draws_bow_when_aggressive, model_for_type, plan_entities,
 };
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{

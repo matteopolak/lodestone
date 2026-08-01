@@ -135,7 +135,9 @@ use bevy_ecs::world::World;
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::entity::{AttackSwing, EntityIndex, HurtTime, ItemUse, MinecraftEntityId};
+use lodestone_ecs::entity::{
+    AttackSwing, EntityIndex, HurtTime, ItemUse, MinecraftEntityId, MobState,
+};
 use lodestone_ecs::player::{CollisionSource, PlayerCollision, Profile};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
@@ -148,7 +150,7 @@ use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
 };
-use lodestone_render::{AnimInput, ArmPose};
+use lodestone_render::{AnimInput, ArmPose, mob_draws_bow_when_aggressive};
 
 /// Converts a render-space [`glam::Vec3`] into the `f64` [`lodestone_model::Vec3`]
 /// [`ItemMotion`] is expressed in.
@@ -850,6 +852,11 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// arm (issue #10 / `docs/arm-swing-animation.md`). The local player's own
 /// swing is *not* this path — it is not a tracked network entity, and it goes
 /// through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
+/// `aggressive` is `Mob.isAggressive()` — bit `0x04` of the mob-flags byte, folded
+/// into [`MobState`] by `ingest::apply_entity_metadata` and resolved by the caller
+/// through [`EntityIndex`] the same way `swing_progress` is (issue #379). It was a
+/// hardcoded `false` here, which made the zombie arm lift in
+/// `Skeleton::animate_zombie_arms` unreachable.
 fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
@@ -858,6 +865,7 @@ fn render_anim(
     partial_tick: f32,
     swing_progress: f32,
     arm_pose: ArmPoseChoice,
+    aggressive: bool,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -868,8 +876,7 @@ fn render_anim(
         limb_swing_amount: walk.walk.speed_lerp(partial_tick),
         attack_anim: swing_progress,
         age_ticks: clock.age,
-        // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.
-        aggressive: false,
+        aggressive,
         arm_pose: arm_pose.pose,
         arm_pose_left_hand: arm_pose.left_hand,
     }
@@ -916,6 +923,23 @@ struct ArmPoseChoice {
 ///   [`ItemUse`] flag is exactly that gate.
 /// * **Crossbow charge** — `ItemUseAnimation.CROSSBOW`, same gate, plus the wind
 ///   fraction from the tick counter.
+/// # The mob trigger is a *different flag*, and it is checked first
+///
+/// Vanilla selects an arm pose per **renderer**, and
+/// `AbstractSkeletonRenderer.getArmPose` overrides the base one:
+/// `isAggressive() && mainHandItem.is(BOW)` ⇒ `BOW_AND_ARROW`, else `super`. That
+/// branch is what makes a skeleton shooting at you actually draw. It is **not**
+/// the using-item bit: a skeleton's ranged attack goal calls
+/// `performRangedAttack` and never enters the item-use state, so `item_use` is
+/// forever `using: false` for it and #57's mechanism — correct for players and
+/// remote players — reaches zero mobs (issue #379).
+///
+/// The override is keyed on the entity type by
+/// [`mob_draws_bow_when_aggressive`], because it is genuinely per-renderer: an
+/// aggressive *zombie* holding a bow gets no such pose in vanilla, and an
+/// aggressive pillager's poses come from a different enum on a different model
+/// class entirely.
+///
 /// * **Crossbow hold** — **not** an in-use pose at all. Vanilla checks
 ///   `!swinging && is(CROSSBOW) && CrossbowItem.isCharged(stack)`, where
 ///   `isCharged` reads the stack's `minecraft:charged_projectiles` component.
@@ -929,7 +953,25 @@ struct ArmPoseChoice {
 ///   guessing "charged" from anything else available would make every crossbow in
 ///   the world hold the shooting pose permanently, which is more wrong, more
 ///   often, than the resting pose it gets today.
-fn arm_pose_for(equipment: &[(EquipmentSlot, ResourceLocation)], item_use: Option<ItemUse>) -> ArmPoseChoice {
+fn arm_pose_for(
+    type_path: &str,
+    equipment: &[(EquipmentSlot, ResourceLocation)],
+    item_use: Option<ItemUse>,
+    aggressive: bool,
+) -> ArmPoseChoice {
+    // `AbstractSkeletonRenderer.getArmPose`'s override, ahead of the base
+    // using-item rule exactly as vanilla's `? :` puts it ahead of `super`.
+    //
+    // `getMainArm() == arm` is vanilla's left-handed fork; a right-handed mob is
+    // assumed here, so the pose always lands in the main hand. `MobFlags`
+    // decodes the left-handed bit and nothing consumes it yet — see that
+    // accessor's doc for why.
+    if aggressive && mob_draws_bow_when_aggressive(type_path) && main_hand_holds_bow(equipment) {
+        return ArmPoseChoice {
+            pose: ArmPose::BowAndArrow,
+            left_hand: false,
+        };
+    }
     let Some(item_use) = item_use else {
         return ArmPoseChoice::default();
     };
@@ -962,6 +1004,19 @@ fn arm_pose_for(equipment: &[(EquipmentSlot, ResourceLocation)], item_use: Optio
         pose,
         left_hand: item_use.off_hand,
     }
+}
+
+/// `mob.getMainHandItem().is(Items.BOW)` — the *item identity* half of the
+/// skeleton override.
+///
+/// Split out so the "does the fixture's mob actually hold a bow in the equipment
+/// the draw reads" question has one place to be true. That is the world species of
+/// vacuous test: a gate whose skeleton has a bow in `OffHand`, or in no slot at
+/// all, exercises none of this and still reads as a wiring failure.
+fn main_hand_holds_bow(equipment: &[(EquipmentSlot, ResourceLocation)]) -> bool {
+    equipment.iter().any(|(slot, item)| {
+        *slot == EquipmentSlot::MainHand && item.namespace() == VANILLA && item.path() == BOW_PATH
+    })
 }
 
 /// Wraps degrees into `(-180, 180]`, like `Mth.wrapDegrees`.
@@ -1047,6 +1102,11 @@ pub fn extract_entity_draws(
     // `AttackSwing` and `HurtTime` are. It is what turns a metadata bit into a bow
     // draw — see `arm_pose_for` and issue #57.
     item_uses: Query<&ItemUse>,
+    // `MobState` lives on the ingest entity too (`apply_entity_metadata` folds the
+    // *mob* flags byte into it), bridged the same way. It is what turns
+    // `Mob.isAggressive()` into a drawn bow and into a zombie's raised arms — see
+    // `arm_pose_for` and issue #379.
+    mob_states: Query<&MobState>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -1092,12 +1152,21 @@ pub fn extract_entity_draws(
         // The using-item state behind the bow/crossbow arm pose. `None` for an
         // entity that has never reported the byte (`ItemUse` absent, like
         // `AttackSwing`), which `arm_pose_for` reads as "not using anything".
+        // `Mob.isAggressive()`. `false` for an entity that has never reported the
+        // mob-flags byte (`MobState` absent) — which includes every non-`Mob`
+        // entity permanently, because the adapter withholds index 15 for those.
+        let aggressive = index
+            .get(id.0)
+            .and_then(|entity| mob_states.get(entity).ok())
+            .is_some_and(|state| state.aggressive);
         let arm_pose = arm_pose_for(
+            &kind.0,
             &equipment.0,
             index
                 .get(id.0)
                 .and_then(|entity| item_uses.get(entity).ok())
                 .map(|item_use| *item_use),
+            aggressive,
         );
         out.0.push(EntityDraw {
             id: id.0,
@@ -1111,7 +1180,16 @@ pub fn extract_entity_draws(
             head_yaw: render_head_yaw(from, to, clock),
             pitch: render_pitch(from, to, clock),
             scale: scale.0,
-            anim: render_anim(from, to, clock, walk, partial_tick, swing_progress, arm_pose),
+            anim: render_anim(
+                from,
+                to,
+                clock,
+                walk,
+                partial_tick,
+                swing_progress,
+                arm_pose,
+                aggressive,
+            ),
             name_tag: name_tag.0.clone(),
             hurt,
         });
@@ -1792,6 +1870,104 @@ fn lerp_angle(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bow in the main hand, the shape [`arm_pose_for`] reads.
+    fn bow_in_main_hand() -> Vec<(EquipmentSlot, ResourceLocation)> {
+        vec![(
+            EquipmentSlot::MainHand,
+            "minecraft:bow".parse().expect("valid item key"),
+        )]
+    }
+
+    /// Vanilla's `AbstractSkeletonRenderer.getArmPose` override, all four terms of
+    /// its conjunction moved one at a time (issue #379).
+    ///
+    /// Each `false` case below is a way the bug could come back, and each is a
+    /// *different* mechanism: the flag not arriving, the wrong renderer family, and
+    /// the item not being where the rule looks.
+    #[test]
+    fn an_aggressive_skeleton_with_a_bow_draws_and_nothing_else_does() {
+        // The positive.
+        assert_eq!(
+            arm_pose_for("skeleton", &bow_in_main_hand(), None, true).pose,
+            ArmPose::BowAndArrow
+        );
+        // Every `AbstractSkeletonRenderer` subclass, so the type set is not just
+        // "skeleton" with the others assumed.
+        for kind in ["wither_skeleton", "stray", "bogged", "parched"] {
+            assert_eq!(
+                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                ArmPose::BowAndArrow,
+                "{kind} is drawn by AbstractSkeletonRenderer and must get the draw too"
+            );
+        }
+        // It lands in the main hand: vanilla's `getMainArm() == arm` term, with a
+        // right-handed mob assumed.
+        assert!(!arm_pose_for("skeleton", &bow_in_main_hand(), None, true).left_hand);
+
+        // Not aggressive — the flag is the trigger, and this is the case every
+        // skeleton in the world was stuck in before #379.
+        assert_eq!(
+            arm_pose_for("skeleton", &bow_in_main_hand(), None, false).pose,
+            ArmPose::Empty
+        );
+        // Aggressive, bow, wrong renderer family. `AbstractZombieRenderer` and
+        // `IllagerRenderer` have no such override.
+        for kind in ["zombie", "husk", "drowned", "pillager", "player"] {
+            assert_eq!(
+                arm_pose_for(kind, &bow_in_main_hand(), None, true).pose,
+                ArmPose::Empty,
+                "{kind} is not drawn by AbstractSkeletonRenderer and must not get the draw"
+            );
+        }
+        // Aggressive skeleton, bow in the *off* hand: vanilla reads
+        // `getMainHandItem()`, so this is the rest pose.
+        let off_hand = vec![(
+            EquipmentSlot::OffHand,
+            "minecraft:bow".parse::<ResourceLocation>().expect("key"),
+        )];
+        assert_eq!(
+            arm_pose_for("skeleton", &off_hand, None, true).pose,
+            ArmPose::Empty
+        );
+        // Aggressive skeleton, no bow at all.
+        assert_eq!(
+            arm_pose_for("skeleton", &[], None, true).pose,
+            ArmPose::Empty
+        );
+        // And a *non-vanilla* `bow` is a different item, not a bow.
+        let modded = vec![(
+            EquipmentSlot::MainHand,
+            "mypack:bow".parse::<ResourceLocation>().expect("key"),
+        )];
+        assert_eq!(
+            arm_pose_for("skeleton", &modded, None, true).pose,
+            ArmPose::Empty
+        );
+    }
+
+    /// The aggressive override must not eat the using-item path #57 built: a
+    /// *player* drawing a bow has no mob-flags byte at all, and still poses.
+    #[test]
+    fn the_using_item_path_still_works_for_a_non_aggressive_entity() {
+        let drawing = ItemUse {
+            using: true,
+            off_hand: false,
+            ticks: 5,
+        };
+        assert_eq!(
+            arm_pose_for("player", &bow_in_main_hand(), Some(drawing), false).pose,
+            ArmPose::BowAndArrow,
+            "a remote player drawing a bow is #57's mechanism and must be untouched"
+        );
+        // ...including on a skeleton, where both mechanisms could apply. Vanilla's
+        // `? :` puts the aggressive branch first, but the answer is the same pose,
+        // so what matters is that neither path is shadowed into never firing.
+        assert_eq!(
+            arm_pose_for("skeleton", &bow_in_main_hand(), Some(drawing), false).pose,
+            ArmPose::BowAndArrow
+        );
+    }
 
     fn snap(id: i32, feet: Vec3, yaw: f32) -> EntitySnapshot {
         EntitySnapshot {

@@ -120,6 +120,31 @@ const IDX_POSE: u8 = 6;
 /// before the index match.
 const IDX_LIVING_FLAGS: u8 = 8;
 const IDX_HEALTH: u8 = 9;
+/// `Mob.DATA_MOB_FLAGS_ID` (`Mob.java:100`), `Mob`'s **only** `defineId` and
+/// therefore index 15 — the byte carrying no-AI `0x01` / left-handed `0x02` /
+/// **aggressive `0x04`** (`Mob.java:1313-1336`). Aggressive is what makes a
+/// skeleton draw its bow: vanilla's mob renderers read `isAggressive()`, *not*
+/// the using-item bit at index 8, which is a player mechanism (issue #379).
+///
+/// # This index is ambiguous too, and `living` is **not** a strong enough guard
+///
+/// The jar dump (`tests/support/entity_data_index_jvm.txt`) reports three
+/// claimants on index 15, all `EntityDataSerializers.BYTE`:
+///
+/// | owner | field | `0x04` |
+/// |---|---|---|
+/// | `Mob` | `DATA_MOB_FLAGS_ID` | aggressive |
+/// | `ArmorStand` | `DATA_CLIENT_FLAGS` | show arms |
+/// | `Display` | `DATA_BILLBOARD_RENDER_CONSTRAINTS_ID` | an enum ordinal |
+///
+/// Index 8's collision was between a living entity and a non-living one, so
+/// `is_living` resolved it. **`ArmorStand` is a `LivingEntity`**, so the same
+/// guard would let a decorative armour stand with arms shown report itself as an
+/// aggressive mob — and, holding a bow, draw it. This byte is therefore gated on
+/// `entity_census::is_mob`, a strictly narrower census column, resolved from the
+/// concrete type at `add_entity` exactly as `living` is. See
+/// [`TrackedEntity::mob`].
+const IDX_MOB_FLAGS: u8 = 15;
 const IDX_BABY: u8 = 16;
 // Class-specific indices that alias the same numbers across mobs, so they are
 // only meaningful once the entity's concrete type is known (see `MetadataClass`).
@@ -175,6 +200,8 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
 ///   mobs reuse for unrelated fields.
 /// * [`living`](Self::living) — whether index 8's byte is
 ///   `LivingEntity.DATA_LIVING_ENTITY_FLAGS` or `AbstractArrow.ID_FLAGS`.
+/// * [`mob`](Self::mob) — whether index 15's byte is `Mob.DATA_MOB_FLAGS_ID` or
+///   `ArmorStand.DATA_CLIENT_FLAGS`.
 ///
 /// # Why this does not grow the tracked set to every entity
 ///
@@ -183,16 +210,35 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
 /// boats and every other non-living type with no ambiguous variant stay out of the
 /// map exactly as they did when it held bare `MetadataClass`es. The population it
 /// adds is the living entities, which is the population whose flags we want.
+///
+/// # Why the whole record is passed to [`read_entity_metadata`]
+///
+/// It used to take `class` and `living` as separate positional arguments. Every
+/// fact here is of one kind — "something about the concrete type that the
+/// metadata packet does not carry" — and adding a third such fact should not
+/// re-thread a signature through the adapter, which several agents share. So the
+/// decoder takes the record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TrackedEntity {
     /// The ambiguous-variant class, if this type has one.
     pub class: Option<MetadataClass>,
     /// Whether this type is a vanilla `LivingEntity`.
     pub living: bool,
+    /// Whether this type is a vanilla `Mob` — strictly narrower than
+    /// [`living`](Self::living), and the guard on index 15. A `Player`, an
+    /// `ArmorStand` and a `Mannequin` are living and **not** mobs, and the armour
+    /// stand's own index-15 byte is a `BYTE` whose `0x04` means "show arms". See
+    /// [`IDX_MOB_FLAGS`].
+    pub mob: bool,
 }
 
 impl TrackedEntity {
     /// Whether this record says anything, and so is worth an entry in the map.
+    ///
+    /// `mob` is deliberately **not** a term here: every mob is living, so a
+    /// `mob: true, living: false` record cannot occur, and adding the disjunct
+    /// would be dead code that reads as a real condition. Asserted by
+    /// `a_mob_is_tracked_through_the_living_disjunct`.
     #[must_use]
     pub const fn is_tracked(self) -> bool {
         self.class.is_some() || self.living
@@ -456,9 +502,9 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
 /// not an option.
 pub fn read_entity_metadata(
     reader: &mut Reader<'_>,
-    class: Option<MetadataClass>,
-    living: bool,
+    tracked: TrackedEntity,
 ) -> Result<DecodedMetadata> {
+    let TrackedEntity { class, living, mob } = tracked;
     let mut md = EntityMetadataUpdate::default();
     loop {
         let index = reader.u8()?;
@@ -492,6 +538,11 @@ pub fn read_entity_metadata(
             // `_ => {}` arm below and deliberately not surfaced, so a critical
             // arrow never reports itself as drawing a bow.
             (IDX_LIVING_FLAGS, Value::Byte(b)) if living => md.living_flags = Some(b as u8),
+            // Gated on `mob`, which is narrower than `living` and has to be:
+            // `ArmorStand` is a living entity whose own index-15 `BYTE` sets
+            // `0x04` for "show arms". See `IDX_MOB_FLAGS`. Ungated, every armour
+            // stand with arms would report itself aggressive.
+            (IDX_MOB_FLAGS, Value::Byte(b)) if mob => md.mob_flags = Some(b as u8),
             (IDX_AIR_SUPPLY, Value::Int(v)) => md.air_supply = Some(v),
             (IDX_CUSTOM_NAME, Value::OptText(t)) => md.custom_name = Reported::Reported(t),
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
@@ -601,6 +652,48 @@ mod tests {
     use super::*;
     use lodestone_core::Writer;
 
+    /// A tracked record for an ordinary hostile/passive mob: living, a `Mob`, no
+    /// ambiguous-variant class. The default subject of the index tests below.
+    fn a_mob() -> TrackedEntity {
+        TrackedEntity {
+            class: None,
+            living: true,
+            mob: true,
+        }
+    }
+
+    /// A **living non-mob** — a player, an armour stand, a mannequin. The
+    /// population index 15's guard exists to exclude, and the reason that guard
+    /// cannot be `living`.
+    fn a_living_non_mob() -> TrackedEntity {
+        TrackedEntity {
+            class: None,
+            living: true,
+            mob: false,
+        }
+    }
+
+    /// A non-living entity: an arrow, a dropped item, a display entity.
+    fn not_living() -> TrackedEntity {
+        TrackedEntity::default()
+    }
+
+    fn a_sheep() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Sheep),
+            living: true,
+            mob: true,
+        }
+    }
+
+    fn a_horse() -> TrackedEntity {
+        TrackedEntity {
+            class: Some(MetadataClass::Horse),
+            living: true,
+            mob: true,
+        }
+    }
+
     /// Appends a network-NBT string component (`TAG_String` + modified-utf8) so
     /// tests can build an `OPTIONAL_COMPONENT` payload without a full NBT writer.
     fn push_string_component(bytes: &mut Vec<u8>, text: &str) {
@@ -655,7 +748,7 @@ mod tests {
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("no trailing bytes");
@@ -686,7 +779,7 @@ mod tests {
         bytes.extend(varint(247));
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("no trailing bytes");
@@ -707,7 +800,7 @@ mod tests {
         bytes.push(0x03);
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("no trailing bytes");
@@ -740,7 +833,7 @@ mod tests {
         bytes.extend(2.5f32.to_be_bytes());
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, false)
+        let md = read_entity_metadata(&mut reader, not_living())
             .expect("decode")
             .metadata;
         reader
@@ -764,7 +857,7 @@ mod tests {
         bytes.push(EOF_MARKER);
         let decode = |living: bool| {
             let mut reader = Reader::new(&bytes);
-            let md = read_entity_metadata(&mut reader, None, living)
+            let md = read_entity_metadata(&mut reader, TrackedEntity { class: None, living, mob: false })
                 .expect("decode")
                 .metadata;
             reader.ensure_empty().expect("aligned");
@@ -791,19 +884,130 @@ mod tests {
     #[test]
     fn only_entities_with_a_fact_worth_remembering_are_tracked() {
         assert!(!TrackedEntity::default().is_tracked());
-        assert!(
-            TrackedEntity {
-                class: None,
-                living: true
-            }
-            .is_tracked()
-        );
+        assert!(a_living_non_mob().is_tracked());
         assert!(
             TrackedEntity {
                 class: Some(MetadataClass::Sheep),
-                living: false
+                living: false,
+                mob: false,
             }
             .is_tracked()
+        );
+    }
+
+    /// `is_tracked` has no `mob` disjunct, and this is why that is not a hole:
+    /// `Mob extends LivingEntity`, so a mob is always caught by the `living` one.
+    /// Stated as a test because "the missing disjunct is unreachable" is exactly
+    /// the kind of claim that rots into a real gap.
+    #[test]
+    fn a_mob_is_tracked_through_the_living_disjunct() {
+        assert!(a_mob().is_tracked());
+        // The impossible record, asserted anyway: were a future census ever to
+        // report `mob && !living`, the insert gate would drop it and the mob flags
+        // would silently never arrive. `entity_census`'s own
+        // `is_mob_is_strictly_narrower_than_is_living_and_the_gap_is_named` is
+        // what rules the input out; this documents the consequence if it did not.
+        assert!(
+            !TrackedEntity {
+                class: None,
+                living: false,
+                mob: true,
+            }
+            .is_tracked(),
+            "a mob-but-not-living record is untracked, so the census guarantee \
+             that it cannot occur is load-bearing, not decorative"
+        );
+    }
+
+    /// Index 15, `BYTE`, on a **`Mob`** decodes to `mob_flags` — the byte whose
+    /// `0x04` is `isAggressive()` and therefore whether a skeleton draws its bow
+    /// (issue #379). The index comes from the jar dump, not a hand count; see
+    /// `every_metadata_index_constant_matches_the_jar_dump`.
+    #[test]
+    fn decodes_mob_flags_at_index_15_for_a_mob() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_MOB_FLAGS);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x04); // aggressive, nothing else
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(md.mob_flags, Some(0x04));
+        // And it landed in *this* byte, not in either of the other two flag bytes
+        // that also live at low indices. 0x04 is `spin_attack` in the living byte
+        // and `sprinting` in the shared one, both plausible and both wrong.
+        assert_eq!(md.living_flags, None);
+        assert_eq!(md.flags, None);
+    }
+
+    /// The guard, and the reason it is `mob` rather than `living`.
+    ///
+    /// An **armour stand** is a `LivingEntity`, so `living` does not exclude it —
+    /// and its own index-15 `BYTE` uses `0x04` for `CLIENT_FLAG_SHOW_ARMS`
+    /// (`ArmorStand.java:71`). An armour stand with arms is the ordinary
+    /// decorative case, so a `living`-gated decode would report a large fraction
+    /// of all armour stands as aggressive mobs and, holding a bow, draw it.
+    ///
+    /// Without the `if mob` guard this test fails with `left: Some(4), right:
+    /// None` — run and watched.
+    #[test]
+    fn index_15_on_a_living_non_mob_is_consumed_but_not_surfaced() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_MOB_FLAGS);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x04); // an armour stand showing its arms
+        // A following field must still decode cleanly: the unmatched byte is
+        // consumed for *alignment*, not skipped.
+        bytes.push(IDX_HEALTH);
+        bytes.extend(varint(SER_FLOAT));
+        bytes.extend(6.5f32.to_be_bytes());
+        bytes.push(EOF_MARKER);
+        let mut reader = Reader::new(&bytes);
+        let md = read_entity_metadata(&mut reader, a_living_non_mob())
+            .expect("decode")
+            .metadata;
+        reader.ensure_empty().expect("no trailing bytes");
+        assert_eq!(
+            md.mob_flags, None,
+            "an armour stand's show-arms bit must not surface as mob flags"
+        );
+        assert_eq!(md.health, Some(6.5), "the following field must still align");
+    }
+
+    /// The two `mob` polarities over one fixture, so neither is a lone assertion
+    /// about a shape that might differ between the two paths. Mirrors
+    /// `the_living_guard_is_the_only_difference_between_the_two_decodes`.
+    #[test]
+    fn the_mob_guard_is_the_only_difference_between_the_two_decodes() {
+        let mut bytes = Vec::new();
+        bytes.push(IDX_MOB_FLAGS);
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x04);
+        bytes.push(EOF_MARKER);
+
+        let decode = |tracked: TrackedEntity| {
+            let mut reader = Reader::new(&bytes);
+            let md = read_entity_metadata(&mut reader, tracked)
+                .expect("decode")
+                .metadata;
+            reader.ensure_empty().expect("no trailing bytes");
+            md
+        };
+        let as_mob = decode(a_mob());
+        let as_stand = decode(a_living_non_mob());
+        assert_eq!(as_mob.mob_flags, Some(0x04));
+        assert_eq!(as_stand.mob_flags, None);
+        assert!(
+            !as_mob.is_empty(),
+            "a mob's flags byte is a reportable field"
+        );
+        assert!(
+            as_stand.is_empty(),
+            "with nothing else in the list, an armour stand's index-15 byte leaves \
+             the update empty — so `handle_set_entity_data` emits no event at all"
         );
     }
 
@@ -812,7 +1016,7 @@ mod tests {
     fn empty_list_is_empty_update() {
         let bytes = [EOF_MARKER];
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -830,7 +1034,7 @@ mod tests {
         bytes.push(0); // absent
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -847,7 +1051,7 @@ mod tests {
         bytes.extend_from_slice(&[0x41, 0x20]); // 2 of 4 float bytes
         // no terminator
         let mut reader = Reader::new(&bytes);
-        assert!(read_entity_metadata(&mut reader, None, true).is_err());
+        assert!(read_entity_metadata(&mut reader, a_mob()).is_err());
     }
 
     /// The complex serializers that remain unmodelled (particle, particles,
@@ -864,7 +1068,7 @@ mod tests {
             bytes.push(EOF_MARKER);
             let mut reader = Reader::new(&bytes);
             assert!(
-                read_entity_metadata(&mut reader, None, true).is_err(),
+                read_entity_metadata(&mut reader, a_mob()).is_err(),
                 "serializer {serializer} must not be guessed at"
             );
         }
@@ -886,7 +1090,7 @@ mod tests {
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
-        let decoded = read_entity_metadata(&mut reader, None, true).expect("decode");
+        let decoded = read_entity_metadata(&mut reader, a_mob()).expect("decode");
         reader.ensure_empty().expect("no trailing bytes");
 
         assert!(decoded.complete);
@@ -904,7 +1108,7 @@ mod tests {
         bytes.push(0x1E); // colour 14 (red) + sheared bit (0x10)
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep), true)
+        let md = read_entity_metadata(&mut reader, a_sheep())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -929,7 +1133,7 @@ mod tests {
 
         for class in [None, Some(MetadataClass::Horse)] {
             let mut reader = Reader::new(&bytes);
-            let md = read_entity_metadata(&mut reader, class, true)
+            let md = read_entity_metadata(&mut reader, TrackedEntity { class, living: true, mob: true })
                 .expect("decode")
                 .metadata;
             reader.ensure_empty().expect("empty");
@@ -947,7 +1151,7 @@ mod tests {
         bytes.extend(varint(0x0305)); // markings 3, colour 5
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Horse), true)
+        let md = read_entity_metadata(&mut reader, a_horse())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -969,7 +1173,7 @@ mod tests {
         bytes.extend(varint(0x0305));
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, Some(MetadataClass::Sheep), true)
+        let md = read_entity_metadata(&mut reader, a_sheep())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -987,7 +1191,7 @@ mod tests {
         bytes.extend(varint(5)); // holder wire value → registry id 4 → ashen
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -1006,7 +1210,7 @@ mod tests {
         bytes.extend(varint(2)); // wire value → registry id 1 → warm
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -1029,7 +1233,7 @@ mod tests {
         bytes.extend(5.0f32.to_be_bytes());
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -1049,7 +1253,7 @@ mod tests {
         bytes.extend(varint(3)); // level
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, None, true)
+        let md = read_entity_metadata(&mut reader, a_mob())
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("empty");
@@ -1217,6 +1421,7 @@ mod tests {
                 SER_BYTE,
             ),
             (IDX_HEALTH, "IDX_HEALTH", "LivingEntity.DATA_HEALTH_ID", SER_FLOAT),
+            (IDX_MOB_FLAGS, "IDX_MOB_FLAGS", "Mob.DATA_MOB_FLAGS_ID", SER_BYTE),
             (IDX_BABY, "IDX_BABY", "AgeableMob.DATA_BABY_ID", SER_BOOLEAN),
             (IDX_SHEEP_WOOL, "IDX_SHEEP_WOOL", "Sheep.DATA_WOOL_ID", SER_BYTE),
             (

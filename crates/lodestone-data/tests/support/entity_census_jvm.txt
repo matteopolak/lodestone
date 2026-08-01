@@ -12,6 +12,9 @@
 #   impl              implementation class, from the generic signature of the
 #                     EntityTypes constant that registered the type
 #   living            LivingEntity.class.isAssignableFrom(impl)
+#   mob               Mob.class.isAssignableFrom(impl) -- strictly narrower than
+#                     living (a player and an armour stand are living, not mobs),
+#                     and the class that declares the isAggressive() flags byte
 #   pushEntitiesDecl  class in impl's hierarchy declaring pushEntities(), or -
 #   doPushDecl        class in impl's hierarchy declaring doPush(Entity), or -
 #   widthBits         raw f32 bits (hex) of EntityType.getWidth()
@@ -25,161 +28,161 @@
 # Nothing in this file is a decision. Every column is mechanically derived, so
 # the modelling step ("which of these can shove the local player") is visible in
 # Rust beside its vanilla citations rather than baked in here.
-0 minecraft:acacia_boat Boat false - - 3fb00000 3f100000
-1 minecraft:acacia_chest_boat ChestBoat false - - 3fb00000 3f100000
-2 minecraft:allay Allay true LivingEntity LivingEntity 3eb33333 3f19999a
-3 minecraft:area_effect_cloud AreaEffectCloud false - - 40c00000 3f000000
-4 minecraft:armadillo Armadillo true LivingEntity LivingEntity 3f333333 3f266666
-5 minecraft:armor_stand ArmorStand true ArmorStand ArmorStand 3f000000 3ffccccd
-6 minecraft:arrow Arrow false - - 3f000000 3f000000
-7 minecraft:axolotl Axolotl true LivingEntity LivingEntity 3f400000 3ed70a3d
-8 minecraft:bamboo_chest_raft ChestRaft false - - 3fb00000 3f100000
-9 minecraft:bamboo_raft Raft false - - 3fb00000 3f100000
-10 minecraft:bat Bat true Bat Bat 3f000000 3f666666
-11 minecraft:bee Bee true LivingEntity LivingEntity 3f0ccccd 3f000000
-12 minecraft:birch_boat Boat false - - 3fb00000 3f100000
-13 minecraft:birch_chest_boat ChestBoat false - - 3fb00000 3f100000
-14 minecraft:blaze Blaze true LivingEntity LivingEntity 3f19999a 3fe66666
-15 minecraft:block_display Display.BlockDisplay false - - 0 0
-16 minecraft:bogged Bogged true LivingEntity LivingEntity 3f19999a 3ffeb852
-17 minecraft:breeze Breeze true LivingEntity LivingEntity 3f19999a 3fe28f5c
-18 minecraft:breeze_wind_charge BreezeWindCharge false - - 3ea00000 3ea00000
-19 minecraft:camel Camel true LivingEntity LivingEntity 3fd9999a 40180000
-20 minecraft:camel_husk CamelHusk true LivingEntity LivingEntity 3fd9999a 40180000
-21 minecraft:cat Cat true LivingEntity LivingEntity 3f19999a 3f333333
-22 minecraft:cave_spider CaveSpider true LivingEntity LivingEntity 3f333333 3f000000
-23 minecraft:cherry_boat Boat false - - 3fb00000 3f100000
-24 minecraft:cherry_chest_boat ChestBoat false - - 3fb00000 3f100000
-25 minecraft:chest_minecart MinecartChest false - - 3f7ae148 3f333333
-26 minecraft:chicken Chicken true LivingEntity LivingEntity 3ecccccd 3f333333
-27 minecraft:cod Cod true LivingEntity LivingEntity 3f000000 3e99999a
-28 minecraft:copper_golem CopperGolem true LivingEntity LivingEntity 3efae148 3f7ae148
-29 minecraft:command_block_minecart MinecartCommandBlock false - - 3f7ae148 3f333333
-30 minecraft:cow Cow true LivingEntity LivingEntity 3f666666 3fb33333
-31 minecraft:creaking Creaking true LivingEntity LivingEntity 3f666666 402ccccd
-32 minecraft:creeper Creeper true LivingEntity LivingEntity 3f19999a 3fd9999a
-33 minecraft:dark_oak_boat Boat false - - 3fb00000 3f100000
-34 minecraft:dark_oak_chest_boat ChestBoat false - - 3fb00000 3f100000
-35 minecraft:dolphin Dolphin true LivingEntity LivingEntity 3f666666 3f19999a
-36 minecraft:donkey Donkey true LivingEntity LivingEntity 3fb2c000 3fc00000
-37 minecraft:dragon_fireball DragonFireball false - - 3f800000 3f800000
-38 minecraft:drowned Drowned true LivingEntity LivingEntity 3f19999a 3ff9999a
-39 minecraft:egg ThrownEgg false - - 3e800000 3e800000
-40 minecraft:elder_guardian ElderGuardian true LivingEntity LivingEntity 3fffae14 3fffae14
-41 minecraft:enderman EnderMan true LivingEntity LivingEntity 3f19999a 4039999a
-42 minecraft:endermite Endermite true LivingEntity LivingEntity 3ecccccd 3e99999a
-43 minecraft:ender_dragon EnderDragon true LivingEntity LivingEntity 41800000 41000000
-44 minecraft:ender_pearl ThrownEnderpearl false - - 3e800000 3e800000
-45 minecraft:end_crystal EndCrystal false - - 40000000 40000000
-46 minecraft:evoker Evoker true LivingEntity LivingEntity 3f19999a 3ff9999a
-47 minecraft:evoker_fangs EvokerFangs false - - 3f000000 3f4ccccd
-48 minecraft:experience_bottle ThrownExperienceBottle false - - 3e800000 3e800000
-49 minecraft:experience_orb ExperienceOrb false - - 3f000000 3f000000
-50 minecraft:eye_of_ender EyeOfEnder false - - 3e800000 3e800000
-51 minecraft:falling_block FallingBlockEntity false - - 3f7ae148 3f7ae148
-52 minecraft:fireball LargeFireball false - - 3f800000 3f800000
-53 minecraft:firework_rocket FireworkRocketEntity false - - 3e800000 3e800000
-54 minecraft:fox Fox true LivingEntity LivingEntity 3f19999a 3f333333
-55 minecraft:frog Frog true LivingEntity LivingEntity 3f000000 3f000000
-56 minecraft:furnace_minecart MinecartFurnace false - - 3f7ae148 3f333333
-57 minecraft:ghast Ghast true LivingEntity LivingEntity 40800000 40800000
-58 minecraft:happy_ghast HappyGhast true LivingEntity LivingEntity 40800000 40800000
-59 minecraft:giant Giant true LivingEntity LivingEntity 40666666 41400000
-60 minecraft:glow_item_frame GlowItemFrame false - - 3f000000 3f000000
-61 minecraft:glow_squid GlowSquid true LivingEntity LivingEntity 3f4ccccd 3f4ccccd
-62 minecraft:goat Goat true LivingEntity LivingEntity 3f666666 3fa66666
-63 minecraft:guardian Guardian true LivingEntity LivingEntity 3f59999a 3f59999a
-64 minecraft:hoglin Hoglin true LivingEntity LivingEntity 3fb2c000 3fb33333
-65 minecraft:hopper_minecart MinecartHopper false - - 3f7ae148 3f333333
-66 minecraft:horse Horse true LivingEntity LivingEntity 3fb2c000 3fcccccd
-67 minecraft:husk Husk true LivingEntity LivingEntity 3f19999a 3ff9999a
-68 minecraft:illusioner Illusioner true LivingEntity LivingEntity 3f19999a 3ff9999a
-69 minecraft:interaction Interaction false - - 0 0
-70 minecraft:iron_golem IronGolem true LivingEntity IronGolem 3fb33333 402ccccd
-71 minecraft:item ItemEntity false - - 3e800000 3e800000
-72 minecraft:item_display Display.ItemDisplay false - - 0 0
-73 minecraft:item_frame ItemFrame false - - 3f000000 3f000000
-74 minecraft:jungle_boat Boat false - - 3fb00000 3f100000
-75 minecraft:jungle_chest_boat ChestBoat false - - 3fb00000 3f100000
-76 minecraft:leash_knot LeashFenceKnotEntity false - - 3ec00000 3f000000
-77 minecraft:lightning_bolt LightningBolt false - - 0 0
-78 minecraft:llama Llama true LivingEntity LivingEntity 3f666666 3fef5c29
-79 minecraft:llama_spit LlamaSpit false - - 3e800000 3e800000
-80 minecraft:magma_cube MagmaCube true LivingEntity LivingEntity 3f051eb8 3f051eb8
-81 minecraft:mangrove_boat Boat false - - 3fb00000 3f100000
-82 minecraft:mangrove_chest_boat ChestBoat false - - 3fb00000 3f100000
-83 minecraft:mannequin Mannequin true LivingEntity LivingEntity 3f19999a 3fe66666
-84 minecraft:marker Marker false - - 0 0
-85 minecraft:minecart Minecart false - - 3f7ae148 3f333333
-86 minecraft:mooshroom MushroomCow true LivingEntity LivingEntity 3f666666 3fb33333
-87 minecraft:mule Mule true LivingEntity LivingEntity 3fb2c000 3fcccccd
-88 minecraft:nautilus Nautilus true LivingEntity LivingEntity 3f600000 3f733333
-89 minecraft:oak_boat Boat false - - 3fb00000 3f100000
-90 minecraft:oak_chest_boat ChestBoat false - - 3fb00000 3f100000
-91 minecraft:ocelot Ocelot true LivingEntity LivingEntity 3f19999a 3f333333
-92 minecraft:ominous_item_spawner OminousItemSpawner false - - 3e800000 3e800000
-93 minecraft:painting Painting false - - 3f000000 3f000000
-94 minecraft:pale_oak_boat Boat false - - 3fb00000 3f100000
-95 minecraft:pale_oak_chest_boat ChestBoat false - - 3fb00000 3f100000
-96 minecraft:panda Panda true LivingEntity LivingEntity 3fa66666 3fa00000
-97 minecraft:parched Parched true LivingEntity LivingEntity 3f19999a 3ffeb852
-98 minecraft:parrot Parrot true LivingEntity Parrot 3f000000 3f666666
-99 minecraft:phantom Phantom true LivingEntity LivingEntity 3f666666 3f000000
-100 minecraft:pig Pig true LivingEntity LivingEntity 3f666666 3f666666
-101 minecraft:piglin Piglin true LivingEntity LivingEntity 3f19999a 3ff9999a
-102 minecraft:piglin_brute PiglinBrute true LivingEntity LivingEntity 3f19999a 3ff9999a
-103 minecraft:pillager Pillager true LivingEntity LivingEntity 3f19999a 3ff9999a
-104 minecraft:polar_bear PolarBear true LivingEntity LivingEntity 3fb33333 3fb33333
-105 minecraft:splash_potion ThrownSplashPotion false - - 3e800000 3e800000
-106 minecraft:lingering_potion ThrownLingeringPotion false - - 3e800000 3e800000
-107 minecraft:pufferfish Pufferfish true LivingEntity LivingEntity 3f333333 3f333333
-108 minecraft:rabbit Rabbit true LivingEntity LivingEntity 3efae148 3f19999a
-109 minecraft:ravager Ravager true LivingEntity LivingEntity 3ff9999a 400ccccd
-110 minecraft:salmon Salmon true LivingEntity LivingEntity 3f333333 3ecccccd
-111 minecraft:sheep Sheep true LivingEntity LivingEntity 3f666666 3fa66666
-112 minecraft:shulker Shulker true LivingEntity LivingEntity 3f800000 3f800000
-113 minecraft:shulker_bullet ShulkerBullet false - - 3ea00000 3ea00000
-114 minecraft:silverfish Silverfish true LivingEntity LivingEntity 3ecccccd 3e99999a
-115 minecraft:skeleton Skeleton true LivingEntity LivingEntity 3f19999a 3ffeb852
-116 minecraft:skeleton_horse SkeletonHorse true LivingEntity LivingEntity 3fb2c000 3fcccccd
-117 minecraft:slime Slime true LivingEntity LivingEntity 3f051eb8 3f051eb8
-118 minecraft:small_fireball SmallFireball false - - 3ea00000 3ea00000
-119 minecraft:sniffer Sniffer true LivingEntity LivingEntity 3ff33333 3fe00000
-120 minecraft:snowball Snowball false - - 3e800000 3e800000
-121 minecraft:snow_golem SnowGolem true LivingEntity LivingEntity 3f333333 3ff33333
-122 minecraft:spawner_minecart MinecartSpawner false - - 3f7ae148 3f333333
-123 minecraft:spectral_arrow SpectralArrow false - - 3f000000 3f000000
-124 minecraft:spider Spider true LivingEntity LivingEntity 3fb33333 3f666666
-125 minecraft:spruce_boat Boat false - - 3fb00000 3f100000
-126 minecraft:spruce_chest_boat ChestBoat false - - 3fb00000 3f100000
-127 minecraft:squid Squid true LivingEntity LivingEntity 3f4ccccd 3f4ccccd
-128 minecraft:stray Stray true LivingEntity LivingEntity 3f19999a 3ffeb852
-129 minecraft:strider Strider true LivingEntity LivingEntity 3f666666 3fd9999a
-130 minecraft:sulfur_cube SulfurCube true LivingEntity SulfurCube 3efae148 3efae148
-131 minecraft:tadpole Tadpole true LivingEntity LivingEntity 3ecccccd 3e99999a
-132 minecraft:text_display Display.TextDisplay false - - 0 0
-133 minecraft:tnt PrimedTnt false - - 3f7ae148 3f7ae148
-134 minecraft:tnt_minecart MinecartTNT false - - 3f7ae148 3f333333
-135 minecraft:trader_llama TraderLlama true LivingEntity LivingEntity 3f666666 3fef5c29
-136 minecraft:trident ThrownTrident false - - 3f000000 3f000000
-137 minecraft:tropical_fish TropicalFish true LivingEntity LivingEntity 3f000000 3ecccccd
-138 minecraft:turtle Turtle true LivingEntity LivingEntity 3f99999a 3ecccccd
-139 minecraft:vex Vex true LivingEntity LivingEntity 3ecccccd 3f4ccccd
-140 minecraft:villager Villager true LivingEntity LivingEntity 3f19999a 3ff9999a
-141 minecraft:vindicator Vindicator true LivingEntity LivingEntity 3f19999a 3ff9999a
-142 minecraft:wandering_trader WanderingTrader true LivingEntity LivingEntity 3f19999a 3ff9999a
-143 minecraft:warden Warden true LivingEntity Warden 3f666666 4039999a
-144 minecraft:wind_charge WindCharge false - - 3ea00000 3ea00000
-145 minecraft:witch Witch true LivingEntity LivingEntity 3f19999a 3ff9999a
-146 minecraft:wither WitherBoss true LivingEntity LivingEntity 3f666666 40600000
-147 minecraft:wither_skeleton WitherSkeleton true LivingEntity LivingEntity 3f333333 4019999a
-148 minecraft:wither_skull WitherSkull false - - 3ea00000 3ea00000
-149 minecraft:wolf Wolf true LivingEntity LivingEntity 3f19999a 3f59999a
-150 minecraft:zoglin Zoglin true LivingEntity LivingEntity 3fb2c000 3fb33333
-151 minecraft:zombie Zombie true LivingEntity LivingEntity 3f19999a 3ff9999a
-152 minecraft:zombie_horse ZombieHorse true LivingEntity LivingEntity 3fb2c000 3fcccccd
-153 minecraft:zombie_nautilus ZombieNautilus true LivingEntity LivingEntity 3f600000 3f733333
-154 minecraft:zombie_villager ZombieVillager true LivingEntity LivingEntity 3f19999a 3ff9999a
-155 minecraft:zombified_piglin ZombifiedPiglin true LivingEntity LivingEntity 3f19999a 3ff9999a
-156 minecraft:player Player true LivingEntity LivingEntity 3f19999a 3fe66666
-157 minecraft:fishing_bobber FishingHook false - - 3e800000 3e800000
+0 minecraft:acacia_boat Boat false false - - 3fb00000 3f100000
+1 minecraft:acacia_chest_boat ChestBoat false false - - 3fb00000 3f100000
+2 minecraft:allay Allay true true LivingEntity LivingEntity 3eb33333 3f19999a
+3 minecraft:area_effect_cloud AreaEffectCloud false false - - 40c00000 3f000000
+4 minecraft:armadillo Armadillo true true LivingEntity LivingEntity 3f333333 3f266666
+5 minecraft:armor_stand ArmorStand true false ArmorStand ArmorStand 3f000000 3ffccccd
+6 minecraft:arrow Arrow false false - - 3f000000 3f000000
+7 minecraft:axolotl Axolotl true true LivingEntity LivingEntity 3f400000 3ed70a3d
+8 minecraft:bamboo_chest_raft ChestRaft false false - - 3fb00000 3f100000
+9 minecraft:bamboo_raft Raft false false - - 3fb00000 3f100000
+10 minecraft:bat Bat true true Bat Bat 3f000000 3f666666
+11 minecraft:bee Bee true true LivingEntity LivingEntity 3f0ccccd 3f000000
+12 minecraft:birch_boat Boat false false - - 3fb00000 3f100000
+13 minecraft:birch_chest_boat ChestBoat false false - - 3fb00000 3f100000
+14 minecraft:blaze Blaze true true LivingEntity LivingEntity 3f19999a 3fe66666
+15 minecraft:block_display Display.BlockDisplay false false - - 0 0
+16 minecraft:bogged Bogged true true LivingEntity LivingEntity 3f19999a 3ffeb852
+17 minecraft:breeze Breeze true true LivingEntity LivingEntity 3f19999a 3fe28f5c
+18 minecraft:breeze_wind_charge BreezeWindCharge false false - - 3ea00000 3ea00000
+19 minecraft:camel Camel true true LivingEntity LivingEntity 3fd9999a 40180000
+20 minecraft:camel_husk CamelHusk true true LivingEntity LivingEntity 3fd9999a 40180000
+21 minecraft:cat Cat true true LivingEntity LivingEntity 3f19999a 3f333333
+22 minecraft:cave_spider CaveSpider true true LivingEntity LivingEntity 3f333333 3f000000
+23 minecraft:cherry_boat Boat false false - - 3fb00000 3f100000
+24 minecraft:cherry_chest_boat ChestBoat false false - - 3fb00000 3f100000
+25 minecraft:chest_minecart MinecartChest false false - - 3f7ae148 3f333333
+26 minecraft:chicken Chicken true true LivingEntity LivingEntity 3ecccccd 3f333333
+27 minecraft:cod Cod true true LivingEntity LivingEntity 3f000000 3e99999a
+28 minecraft:copper_golem CopperGolem true true LivingEntity LivingEntity 3efae148 3f7ae148
+29 minecraft:command_block_minecart MinecartCommandBlock false false - - 3f7ae148 3f333333
+30 minecraft:cow Cow true true LivingEntity LivingEntity 3f666666 3fb33333
+31 minecraft:creaking Creaking true true LivingEntity LivingEntity 3f666666 402ccccd
+32 minecraft:creeper Creeper true true LivingEntity LivingEntity 3f19999a 3fd9999a
+33 minecraft:dark_oak_boat Boat false false - - 3fb00000 3f100000
+34 minecraft:dark_oak_chest_boat ChestBoat false false - - 3fb00000 3f100000
+35 minecraft:dolphin Dolphin true true LivingEntity LivingEntity 3f666666 3f19999a
+36 minecraft:donkey Donkey true true LivingEntity LivingEntity 3fb2c000 3fc00000
+37 minecraft:dragon_fireball DragonFireball false false - - 3f800000 3f800000
+38 minecraft:drowned Drowned true true LivingEntity LivingEntity 3f19999a 3ff9999a
+39 minecraft:egg ThrownEgg false false - - 3e800000 3e800000
+40 minecraft:elder_guardian ElderGuardian true true LivingEntity LivingEntity 3fffae14 3fffae14
+41 minecraft:enderman EnderMan true true LivingEntity LivingEntity 3f19999a 4039999a
+42 minecraft:endermite Endermite true true LivingEntity LivingEntity 3ecccccd 3e99999a
+43 minecraft:ender_dragon EnderDragon true true LivingEntity LivingEntity 41800000 41000000
+44 minecraft:ender_pearl ThrownEnderpearl false false - - 3e800000 3e800000
+45 minecraft:end_crystal EndCrystal false false - - 40000000 40000000
+46 minecraft:evoker Evoker true true LivingEntity LivingEntity 3f19999a 3ff9999a
+47 minecraft:evoker_fangs EvokerFangs false false - - 3f000000 3f4ccccd
+48 minecraft:experience_bottle ThrownExperienceBottle false false - - 3e800000 3e800000
+49 minecraft:experience_orb ExperienceOrb false false - - 3f000000 3f000000
+50 minecraft:eye_of_ender EyeOfEnder false false - - 3e800000 3e800000
+51 minecraft:falling_block FallingBlockEntity false false - - 3f7ae148 3f7ae148
+52 minecraft:fireball LargeFireball false false - - 3f800000 3f800000
+53 minecraft:firework_rocket FireworkRocketEntity false false - - 3e800000 3e800000
+54 minecraft:fox Fox true true LivingEntity LivingEntity 3f19999a 3f333333
+55 minecraft:frog Frog true true LivingEntity LivingEntity 3f000000 3f000000
+56 minecraft:furnace_minecart MinecartFurnace false false - - 3f7ae148 3f333333
+57 minecraft:ghast Ghast true true LivingEntity LivingEntity 40800000 40800000
+58 minecraft:happy_ghast HappyGhast true true LivingEntity LivingEntity 40800000 40800000
+59 minecraft:giant Giant true true LivingEntity LivingEntity 40666666 41400000
+60 minecraft:glow_item_frame GlowItemFrame false false - - 3f000000 3f000000
+61 minecraft:glow_squid GlowSquid true true LivingEntity LivingEntity 3f4ccccd 3f4ccccd
+62 minecraft:goat Goat true true LivingEntity LivingEntity 3f666666 3fa66666
+63 minecraft:guardian Guardian true true LivingEntity LivingEntity 3f59999a 3f59999a
+64 minecraft:hoglin Hoglin true true LivingEntity LivingEntity 3fb2c000 3fb33333
+65 minecraft:hopper_minecart MinecartHopper false false - - 3f7ae148 3f333333
+66 minecraft:horse Horse true true LivingEntity LivingEntity 3fb2c000 3fcccccd
+67 minecraft:husk Husk true true LivingEntity LivingEntity 3f19999a 3ff9999a
+68 minecraft:illusioner Illusioner true true LivingEntity LivingEntity 3f19999a 3ff9999a
+69 minecraft:interaction Interaction false false - - 0 0
+70 minecraft:iron_golem IronGolem true true LivingEntity IronGolem 3fb33333 402ccccd
+71 minecraft:item ItemEntity false false - - 3e800000 3e800000
+72 minecraft:item_display Display.ItemDisplay false false - - 0 0
+73 minecraft:item_frame ItemFrame false false - - 3f000000 3f000000
+74 minecraft:jungle_boat Boat false false - - 3fb00000 3f100000
+75 minecraft:jungle_chest_boat ChestBoat false false - - 3fb00000 3f100000
+76 minecraft:leash_knot LeashFenceKnotEntity false false - - 3ec00000 3f000000
+77 minecraft:lightning_bolt LightningBolt false false - - 0 0
+78 minecraft:llama Llama true true LivingEntity LivingEntity 3f666666 3fef5c29
+79 minecraft:llama_spit LlamaSpit false false - - 3e800000 3e800000
+80 minecraft:magma_cube MagmaCube true true LivingEntity LivingEntity 3f051eb8 3f051eb8
+81 minecraft:mangrove_boat Boat false false - - 3fb00000 3f100000
+82 minecraft:mangrove_chest_boat ChestBoat false false - - 3fb00000 3f100000
+83 minecraft:mannequin Mannequin true false LivingEntity LivingEntity 3f19999a 3fe66666
+84 minecraft:marker Marker false false - - 0 0
+85 minecraft:minecart Minecart false false - - 3f7ae148 3f333333
+86 minecraft:mooshroom MushroomCow true true LivingEntity LivingEntity 3f666666 3fb33333
+87 minecraft:mule Mule true true LivingEntity LivingEntity 3fb2c000 3fcccccd
+88 minecraft:nautilus Nautilus true true LivingEntity LivingEntity 3f600000 3f733333
+89 minecraft:oak_boat Boat false false - - 3fb00000 3f100000
+90 minecraft:oak_chest_boat ChestBoat false false - - 3fb00000 3f100000
+91 minecraft:ocelot Ocelot true true LivingEntity LivingEntity 3f19999a 3f333333
+92 minecraft:ominous_item_spawner OminousItemSpawner false false - - 3e800000 3e800000
+93 minecraft:painting Painting false false - - 3f000000 3f000000
+94 minecraft:pale_oak_boat Boat false false - - 3fb00000 3f100000
+95 minecraft:pale_oak_chest_boat ChestBoat false false - - 3fb00000 3f100000
+96 minecraft:panda Panda true true LivingEntity LivingEntity 3fa66666 3fa00000
+97 minecraft:parched Parched true true LivingEntity LivingEntity 3f19999a 3ffeb852
+98 minecraft:parrot Parrot true true LivingEntity Parrot 3f000000 3f666666
+99 minecraft:phantom Phantom true true LivingEntity LivingEntity 3f666666 3f000000
+100 minecraft:pig Pig true true LivingEntity LivingEntity 3f666666 3f666666
+101 minecraft:piglin Piglin true true LivingEntity LivingEntity 3f19999a 3ff9999a
+102 minecraft:piglin_brute PiglinBrute true true LivingEntity LivingEntity 3f19999a 3ff9999a
+103 minecraft:pillager Pillager true true LivingEntity LivingEntity 3f19999a 3ff9999a
+104 minecraft:polar_bear PolarBear true true LivingEntity LivingEntity 3fb33333 3fb33333
+105 minecraft:splash_potion ThrownSplashPotion false false - - 3e800000 3e800000
+106 minecraft:lingering_potion ThrownLingeringPotion false false - - 3e800000 3e800000
+107 minecraft:pufferfish Pufferfish true true LivingEntity LivingEntity 3f333333 3f333333
+108 minecraft:rabbit Rabbit true true LivingEntity LivingEntity 3efae148 3f19999a
+109 minecraft:ravager Ravager true true LivingEntity LivingEntity 3ff9999a 400ccccd
+110 minecraft:salmon Salmon true true LivingEntity LivingEntity 3f333333 3ecccccd
+111 minecraft:sheep Sheep true true LivingEntity LivingEntity 3f666666 3fa66666
+112 minecraft:shulker Shulker true true LivingEntity LivingEntity 3f800000 3f800000
+113 minecraft:shulker_bullet ShulkerBullet false false - - 3ea00000 3ea00000
+114 minecraft:silverfish Silverfish true true LivingEntity LivingEntity 3ecccccd 3e99999a
+115 minecraft:skeleton Skeleton true true LivingEntity LivingEntity 3f19999a 3ffeb852
+116 minecraft:skeleton_horse SkeletonHorse true true LivingEntity LivingEntity 3fb2c000 3fcccccd
+117 minecraft:slime Slime true true LivingEntity LivingEntity 3f051eb8 3f051eb8
+118 minecraft:small_fireball SmallFireball false false - - 3ea00000 3ea00000
+119 minecraft:sniffer Sniffer true true LivingEntity LivingEntity 3ff33333 3fe00000
+120 minecraft:snowball Snowball false false - - 3e800000 3e800000
+121 minecraft:snow_golem SnowGolem true true LivingEntity LivingEntity 3f333333 3ff33333
+122 minecraft:spawner_minecart MinecartSpawner false false - - 3f7ae148 3f333333
+123 minecraft:spectral_arrow SpectralArrow false false - - 3f000000 3f000000
+124 minecraft:spider Spider true true LivingEntity LivingEntity 3fb33333 3f666666
+125 minecraft:spruce_boat Boat false false - - 3fb00000 3f100000
+126 minecraft:spruce_chest_boat ChestBoat false false - - 3fb00000 3f100000
+127 minecraft:squid Squid true true LivingEntity LivingEntity 3f4ccccd 3f4ccccd
+128 minecraft:stray Stray true true LivingEntity LivingEntity 3f19999a 3ffeb852
+129 minecraft:strider Strider true true LivingEntity LivingEntity 3f666666 3fd9999a
+130 minecraft:sulfur_cube SulfurCube true true LivingEntity SulfurCube 3efae148 3efae148
+131 minecraft:tadpole Tadpole true true LivingEntity LivingEntity 3ecccccd 3e99999a
+132 minecraft:text_display Display.TextDisplay false false - - 0 0
+133 minecraft:tnt PrimedTnt false false - - 3f7ae148 3f7ae148
+134 minecraft:tnt_minecart MinecartTNT false false - - 3f7ae148 3f333333
+135 minecraft:trader_llama TraderLlama true true LivingEntity LivingEntity 3f666666 3fef5c29
+136 minecraft:trident ThrownTrident false false - - 3f000000 3f000000
+137 minecraft:tropical_fish TropicalFish true true LivingEntity LivingEntity 3f000000 3ecccccd
+138 minecraft:turtle Turtle true true LivingEntity LivingEntity 3f99999a 3ecccccd
+139 minecraft:vex Vex true true LivingEntity LivingEntity 3ecccccd 3f4ccccd
+140 minecraft:villager Villager true true LivingEntity LivingEntity 3f19999a 3ff9999a
+141 minecraft:vindicator Vindicator true true LivingEntity LivingEntity 3f19999a 3ff9999a
+142 minecraft:wandering_trader WanderingTrader true true LivingEntity LivingEntity 3f19999a 3ff9999a
+143 minecraft:warden Warden true true LivingEntity Warden 3f666666 4039999a
+144 minecraft:wind_charge WindCharge false false - - 3ea00000 3ea00000
+145 minecraft:witch Witch true true LivingEntity LivingEntity 3f19999a 3ff9999a
+146 minecraft:wither WitherBoss true true LivingEntity LivingEntity 3f666666 40600000
+147 minecraft:wither_skeleton WitherSkeleton true true LivingEntity LivingEntity 3f333333 4019999a
+148 minecraft:wither_skull WitherSkull false false - - 3ea00000 3ea00000
+149 minecraft:wolf Wolf true true LivingEntity LivingEntity 3f19999a 3f59999a
+150 minecraft:zoglin Zoglin true true LivingEntity LivingEntity 3fb2c000 3fb33333
+151 minecraft:zombie Zombie true true LivingEntity LivingEntity 3f19999a 3ff9999a
+152 minecraft:zombie_horse ZombieHorse true true LivingEntity LivingEntity 3fb2c000 3fcccccd
+153 minecraft:zombie_nautilus ZombieNautilus true true LivingEntity LivingEntity 3f600000 3f733333
+154 minecraft:zombie_villager ZombieVillager true true LivingEntity LivingEntity 3f19999a 3ff9999a
+155 minecraft:zombified_piglin ZombifiedPiglin true true LivingEntity LivingEntity 3f19999a 3ff9999a
+156 minecraft:player Player true false LivingEntity LivingEntity 3f19999a 3fe66666
+157 minecraft:fishing_bobber FishingHook false false - - 3e800000 3e800000

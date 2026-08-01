@@ -50,7 +50,7 @@ use lodestone_physics::Vec3d;
 use crate::entity::{
     Attributes, AttackSwing, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
     EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId,
-    OnGround, Pose, Position, Rotation, Variant, Velocity,
+    MobState, OnGround, Pose, Position, Rotation, Variant, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -649,6 +649,18 @@ pub fn apply_entity_metadata(
         }
         if let Some(baby) = metadata.baby {
             entity.insert(Baby(baby));
+        }
+        // The *mob* flags byte (issue #379) — a different byte at a different
+        // index from the living-entity one [`apply_entity_item_use`] folds, and
+        // the one that actually makes a mob hold a weapon pose. It belongs in this
+        // system rather than beside `ItemUse` because it is a plain latched
+        // boolean with no counter, so `insert`'s replace-the-component semantics
+        // are exactly right. Present only for entities the adapter established are
+        // `Mob`s: an armour stand's index-15 byte means "show arms".
+        if let Some(bits) = metadata.mob_flags {
+            entity.insert(MobState {
+                aggressive: lodestone_entity::metadata::MobFlags::from_bits(bits).aggressive(),
+            });
         }
         if let Some(variant) = &metadata.variant {
             entity.insert(Variant(variant.clone()));
@@ -1326,6 +1338,106 @@ mod tests {
             handles_event(&event),
             "living flags ride `EntityMetadataUpdated`; if this module stops \
              claiming it, `apply_entity_item_use` never runs in production"
+        );
+    }
+
+    /// The same routing check for the **mob** flags byte (issue #379). It rides
+    /// the same `EntityMetadataUpdated` event, so no new arm was needed — which is
+    /// exactly why it is asserted: "no change required" is the state in which a
+    /// later narrowing of the switch silently deletes a feature, and the switch
+    /// was checked *before* the fold was written rather than after.
+    #[test]
+    fn the_metadata_event_carrying_mob_flags_is_claimed_by_this_module() {
+        let event = metadata(
+            EntityMetadataUpdate {
+                mob_flags: Some(0x04),
+                ..EntityMetadataUpdate::default()
+            },
+            7,
+        );
+        assert!(
+            handles_event(&event),
+            "mob flags ride `EntityMetadataUpdated`; if this module stops claiming it, \
+             `apply_entity_metadata` never folds `MobState` in production and every \
+             skeleton stays in the rest pose"
+        );
+    }
+
+    /// End-to-end through the **real schedule**: a spawn, then a metadata packet
+    /// carrying the mob-flags byte, produces a [`crate::entity::MobState`].
+    ///
+    /// Driven by `run_schedule`, not by calling the system, so a fold that was
+    /// written but never registered fails here.
+    #[test]
+    fn mob_flags_fold_into_mob_state() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(21, "minecraft:skeleton"));
+        assert!(
+            entity_for(&world, 21).get::<MobState>().is_none(),
+            "absent until the first byte mentions it, like ItemUse and HurtTime"
+        );
+
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    mob_flags: Some(0x04),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<MobState>(),
+            Some(&MobState { aggressive: true })
+        );
+
+        // And it *latches down* as well as up: an attack goal that releases its
+        // target clears the bit, and a skeleton left permanently drawing would be
+        // as visible a defect as one that never draws.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    mob_flags: Some(0x00),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<MobState>(),
+            Some(&MobState { aggressive: false })
+        );
+
+        // A metadata packet that does not mention the byte must leave the
+        // component completely alone — metadata is incremental, and the common
+        // case is a health-only update arriving mid-draw.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    mob_flags: Some(0x04),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(3.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                21,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 21).get::<MobState>(),
+            Some(&MobState { aggressive: true }),
+            "a health-only update cleared the aggressive latch — a skeleton would drop its \
+             draw every time it took damage"
         );
     }
 

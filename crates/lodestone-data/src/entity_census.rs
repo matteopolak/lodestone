@@ -77,7 +77,7 @@
 //! network entity-type registry id — the same id space as [`crate::entity_types`]
 //! and [`crate::entity_dimensions`].
 
-use crate::generated_entity_census::{ENTITY_IS_LIVING, ENTITY_PUSHES_PLAYERS};
+use crate::generated_entity_census::{ENTITY_IS_LIVING, ENTITY_IS_MOB, ENTITY_PUSHES_PLAYERS};
 pub use crate::generated_entity_census::TYPE_COUNT;
 
 /// Whether an entity of this network type id is a vanilla `LivingEntity`.
@@ -106,6 +106,42 @@ pub fn is_living(id: i32) -> Option<bool> {
     usize::try_from(id)
         .ok()
         .and_then(|index| ENTITY_IS_LIVING.get(index).copied())
+}
+
+/// Whether an entity of this network type id is a vanilla `Mob`.
+///
+/// Returns `None` for ids outside `0..TYPE_COUNT`. An unrecognised id must be
+/// read as **not** a mob, for the same default-deny reason as everything else
+/// here: the consumer is a metadata guard, and guessing wrong surfaces a byte
+/// that means something else.
+///
+/// # This is not [`is_living`], and index 15 is why
+///
+/// `Mob` is where `DATA_MOB_FLAGS_ID` is declared — metadata index **15**,
+/// `BYTE`, carrying no-AI `0x01` / left-handed `0x02` / **aggressive `0x04`**
+/// (`Mob.java:100,1313-1336`). Index 15 has three claimants in 26.2, all `BYTE`:
+///
+/// | owner | field | `0x04` means |
+/// |---|---|---|
+/// | `Mob` | `DATA_MOB_FLAGS_ID` | aggressive |
+/// | `ArmorStand` | `DATA_CLIENT_FLAGS` | show arms |
+/// | `Display` | `DATA_BILLBOARD_RENDER_CONSTRAINTS_ID` | (an enum ordinal) |
+///
+/// This is the same shape of hazard as index 8 (issue #57) with one extra twist:
+/// **`ArmorStand` is a `LivingEntity`**, so [`is_living`] does *not* resolve it.
+/// An armour stand with arms shown — the common decorative case — would report
+/// itself as an aggressive mob and, holding a bow, draw it. Hence a third column
+/// rather than a reuse of the second (issue #379).
+///
+/// The collision was read off the jar, not reasoned about: see
+/// `crates/protocol/v770/tests/support/entity_data_index_jvm.txt`, which dumps
+/// every `EntityDataAccessor` in the game sorted by index so collisions are
+/// adjacent lines.
+#[must_use]
+pub fn is_mob(id: i32) -> Option<bool> {
+    usize::try_from(id)
+        .ok()
+        .and_then(|index| ENTITY_IS_MOB.get(index).copied())
 }
 
 /// Whether an entity of this network type id can shove the local player through
