@@ -514,6 +514,70 @@ pub fn tick_entity_swing(mut entities: Query<&mut AttackSwing>) {
     }
 }
 
+/// `IngestSet::Apply`: the living-entity flags byte of
+/// `ClientEvent::EntityMetadataUpdated` → [`ItemUse`] (issue #57).
+///
+/// # Why this is not another arm inside [`apply_entity_metadata`]
+///
+/// That system writes each field with `Commands::insert`, which *replaces* the
+/// component. [`ItemUse`] carries a tick counter that must survive a repeated
+/// metadata packet — see [`crate::entity::ItemUse::apply_flags`] for why a
+/// server re-sending the same byte is the common case and why resetting on it
+/// would pin every bow at un-drawn. So this needs read-modify-write against the
+/// existing component, i.e. a `Query`, which is the same shape
+/// [`apply_entity_animation`] uses for [`AttackSwing`] and for the same reason.
+///
+/// # `living_flags` is `None` on a non-living entity *by design*
+///
+/// The byte's metadata index is shared with a non-living entity's own flags byte
+/// of the same serializer, so the version adapter withholds it unless it can
+/// establish the entity is living. Nothing here has to re-check that: a `None`
+/// means "not known to be living flags" and this system simply does not fold it.
+pub fn apply_entity_item_use(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut uses: Query<&mut crate::entity::ItemUse>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityMetadataUpdated {
+            entity_id,
+            metadata,
+        } = event
+        else {
+            continue;
+        };
+        let Some(flags) = metadata.living_flags else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        let decoded = lodestone_entity::metadata::LivingEntityFlags::from_bits(flags);
+        let using = decoded.using_item();
+        let off_hand = decoded.used_hand() == lodestone_entity::metadata::UsedHand::Off;
+        if let Ok(mut item_use) = uses.get_mut(entity) {
+            item_use.apply_flags(using, off_hand);
+        } else {
+            let mut item_use = crate::entity::ItemUse::default();
+            item_use.apply_flags(using, off_hand);
+            commands.entity(entity).insert(item_use);
+        }
+    }
+}
+
+/// `TickSet::Animate`: advance every entity's [`ItemUse`] one tick.
+///
+/// This is the client-side counter vanilla's own client keeps, because
+/// `useItemRemaining` is not a synced field — see [`crate::entity::ItemUse`]. It
+/// sits in `Animate` beside [`tick_entity_swing`] rather than in a physics set
+/// because it drives a pose and nothing else.
+pub fn tick_entity_item_use(mut entities: Query<&mut crate::entity::ItemUse>) {
+    for mut item_use in &mut entities {
+        item_use.tick();
+    }
+}
+
 /// `IngestSet::Apply`: `ClientEvent::EntityHeadRotation` → [`HeadYaw`].
 pub fn apply_entity_head_rotation(
     batch: Res<IngestBatch>,
@@ -878,6 +942,11 @@ impl Plugin for IngestPlugin {
                 // is placed right after it so the two stay visibly paired.
                 apply_local_player_air_supply,
                 apply_local_player_on_fire,
+                // Third reader of the same batch, folding the *living*-entity flags
+                // byte into `ItemUse` (issue #57). A separate system because it
+                // read-modify-writes a tick counter rather than replacing a
+                // component — see its own doc.
+                apply_entity_item_use,
                 apply_entity_attributes,
                 apply_entity_equipment,
                 apply_entity_damaged,
@@ -896,7 +965,7 @@ impl Plugin for IngestPlugin {
         // all.
         app.add_systems(
             GameTick,
-            (tick_hurt_time, tick_entity_swing).in_set(TickSet::Animate),
+            (tick_hurt_time, tick_entity_swing, tick_entity_item_use).in_set(TickSet::Animate),
         );
     }
 }
@@ -1233,6 +1302,152 @@ mod tests {
              component — nothing reads it for the local player, and it would \
              be a second, wrong source of truth"
         );
+    }
+
+    // ---- issue #57: using-item state reaching a component ------------------
+
+    /// **The routing check, and the reason this feature is not an island.**
+    /// `SharedState::apply` only forwards events one of the two `handles_event`
+    /// switches lists, so `apply_entity_item_use` can be correct, registered and
+    /// unit-tested green while never running in production.
+    /// `EntityMetadataUpdated` is already claimed — asserted here so a later
+    /// narrowing of that switch fails *this* test rather than silently deleting
+    /// the bow pose.
+    #[test]
+    fn the_metadata_event_carrying_living_flags_is_claimed_by_this_module() {
+        let event = metadata(
+            EntityMetadataUpdate {
+                living_flags: Some(0x01),
+                ..EntityMetadataUpdate::default()
+            },
+            7,
+        );
+        assert!(
+            handles_event(&event),
+            "living flags ride `EntityMetadataUpdated`; if this module stops \
+             claiming it, `apply_entity_item_use` never runs in production"
+        );
+    }
+
+    /// End-to-end through the **real schedule**: a spawn, then a metadata packet
+    /// with the using-item bit, produces an [`crate::entity::ItemUse`] whose
+    /// counter then advances on `GameTick`.
+    ///
+    /// Deliberately driven by `run_schedule` rather than by calling the system, so
+    /// a system that was written but never registered fails here.
+    #[test]
+    fn living_flags_fold_into_item_use_and_the_counter_advances() {
+        use crate::entity::ItemUse;
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(11, "minecraft:skeleton"));
+        assert!(
+            entity_for(&world, 11).get::<ItemUse>().is_none(),
+            "absent until the first byte mentions it"
+        );
+
+        // Using, main hand.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    living_flags: Some(0x01),
+                    ..EntityMetadataUpdate::default()
+                },
+                11,
+            ),
+        );
+        let got = *entity_for(&world, 11).get::<ItemUse>().expect("folded");
+        assert!(got.using, "the using-item bit must reach the component");
+        assert!(!got.off_hand);
+        assert_eq!(got.ticks, 0, "no ticks have run yet");
+
+        for _ in 0..5 {
+            world.run_schedule(GameTick);
+        }
+        assert_eq!(
+            entity_for(&world, 11).get::<ItemUse>().unwrap().ticks,
+            5,
+            "`tick_entity_item_use` must be registered in `TickSet::Animate` — a \
+             counter stuck at 0 is a bow that never draws"
+        );
+
+        // A **repeat** of the same byte must not restart the draw. This is the
+        // failure mode that looks perfect at the wire level: the server re-sends
+        // metadata freely, and a reset here pins every bow un-drawn forever.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    living_flags: Some(0x01),
+                    ..EntityMetadataUpdate::default()
+                },
+                11,
+            ),
+        );
+        assert_eq!(
+            entity_for(&world, 11).get::<ItemUse>().unwrap().ticks,
+            5,
+            "a repeated metadata byte is not a rising edge"
+        );
+
+        // Releasing clears both the flag and the counter.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    living_flags: Some(0x00),
+                    ..EntityMetadataUpdate::default()
+                },
+                11,
+            ),
+        );
+        let released = *entity_for(&world, 11).get::<ItemUse>().unwrap();
+        assert!(!released.using);
+        assert_eq!(released.ticks, 0);
+        // ...and the counter stays put while released, rather than counting up
+        // from a stale `using`.
+        world.run_schedule(GameTick);
+        assert_eq!(entity_for(&world, 11).get::<ItemUse>().unwrap().ticks, 0);
+    }
+
+    /// A metadata update that carries **no** living flags leaves [`ItemUse`]
+    /// alone — the control for the fold above. Without it, a system that
+    /// unconditionally inserted a default `ItemUse` on every metadata packet
+    /// would pass the test above and silently clear a bow draw whenever any
+    /// other field changed.
+    #[test]
+    fn metadata_without_living_flags_does_not_touch_item_use() {
+        use crate::entity::ItemUse;
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(12, "minecraft:skeleton"));
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    living_flags: Some(0x01),
+                    ..EntityMetadataUpdate::default()
+                },
+                12,
+            ),
+        );
+        world.run_schedule(GameTick);
+        world.run_schedule(GameTick);
+        assert_eq!(entity_for(&world, 12).get::<ItemUse>().unwrap().ticks, 2);
+
+        // Health only — `living_flags: None`.
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(12.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                12,
+            ),
+        );
+        let after = *entity_for(&world, 12).get::<ItemUse>().unwrap();
+        assert!(after.using, "an unrelated field must not end the use");
+        assert_eq!(after.ticks, 2, "...nor rewind the draw");
     }
 
     /// Metadata naming our own id folds `air_supply` into the session
