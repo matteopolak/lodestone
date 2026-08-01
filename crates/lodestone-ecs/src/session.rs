@@ -166,6 +166,23 @@ pub struct Vitals {
     /// [`apply_local_player_state`] alongside the other three. See
     /// `docs/air-supply.md`.
     pub air: Option<i32>,
+    /// Whether the player entity is burning, or `None` before the first
+    /// entity-metadata update naming our own id arrives.
+    ///
+    /// Session-scoped for exactly the reason `air` above is, and it is worth
+    /// spelling out because the generic path *looks* like it should work:
+    /// `apply_entity_metadata` does set `EntityFlags` on the local player's own
+    /// ECS entity, but `lodestone_client::state::entity_view` requires
+    /// `EntityKind`/`Position`/`Rotation`/`HeadYaw` and the local player
+    /// deliberately has none of them — that absence is what keeps a self-model
+    /// out of `ClientHandle::entities()` and rendering at the camera's own eye.
+    /// So `entity_view()`'s early `?` returns before `flags` is ever read, and
+    /// the flag can only reach the session through a dedicated fold
+    /// ([`crate::ingest::apply_local_player_on_fire`]).
+    ///
+    /// `None` reads as "not burning" downstream — the safe default, unlike
+    /// `air`'s, which reads as full. See `docs/screen-overlays.md`.
+    pub on_fire: Option<bool>,
 }
 
 /// Server-reported experience as `(progress, level, total)`, `None` until

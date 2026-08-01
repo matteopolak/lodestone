@@ -90,6 +90,13 @@ pub struct PlayerSnapshot {
     /// the first report is the same "not yet reported reads as full" convention
     /// `HudState::default` already uses (`docs/air-supply.md`).
     pub air: i32,
+    /// Whether the player entity is burning — `Entity.FLAG_ONFIRE`, folded from
+    /// `Vitals::on_fire` (issue #112).
+    ///
+    /// Unreported reads as `false`, the safe default: an absent flag meaning
+    /// "not burning" is the harmless direction, unlike `air` above, whose absence
+    /// has to read as *full* or the bubble row would appear on join.
+    pub on_fire: bool,
     /// Current game mode, once known.
     pub game_mode: Option<GameMode>,
     /// Current dimension, once known.
@@ -120,6 +127,7 @@ impl Default for PlayerSnapshot {
             food: 0,
             saturation: 0.0,
             air: lodestone_game::player_state::HudState::MAX_AIR,
+            on_fire: false,
             game_mode: None,
             dimension: None,
             alive: true,
@@ -581,6 +589,7 @@ impl SharedState {
             // `_known` bit precisely because zero is a plausible real value;
             // air has no such ambiguity worth a second field for).
             air: vitals.air.unwrap_or(lodestone_game::player_state::HudState::MAX_AIR),
+            on_fire: vitals.on_fire.unwrap_or(false),
             health_known: vitals.health.is_some(),
             game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
             dimension: world
