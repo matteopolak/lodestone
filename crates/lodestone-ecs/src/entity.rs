@@ -150,6 +150,94 @@ pub struct Health(pub f32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HurtTime(pub u32);
 
+/// A **remote** entity's arm-swing progress — vanilla's `LivingEntity`
+/// `swingTime`/`swinging`/`attackAnim`/`oAttackAnim`, folded from
+/// `ClientboundAnimatePacket`'s `SWING_MAIN_HAND` action (id `0`) by
+/// [`crate::ingest::apply_entity_animation`] and advanced once per tick by
+/// [`crate::ingest::tick_entity_swing`].
+///
+/// # Why this duplicates three fields of [`lodestone_entity::pose::EntityPose`]
+/// instead of embedding it
+///
+/// `EntityPose` is the *full* per-entity render pose — walk cycle, head/body
+/// orientation and age alongside the swing clock — because that is what the
+/// **local player's** third-person body (`Sim::body_pose` in
+/// `lodestone-shell::sim`) needs: one pose, one entity, one clock. A tracked
+/// network entity already has all of those *except* the swing clock, spread
+/// across `lodestone-shell::entities`' `WalkAnim`/`InterpFrom`/`InterpTo` — on
+/// a **different** `bevy_ecs::Entity`, since `EntityInterpPlugin` spawns a
+/// render-side entity per mob distinct from this crate's ingest entity (see
+/// `entities.rs`'s `EntityInterpPlugin` docs). Embedding `EntityPose` here
+/// would carry a second, unused walk cycle and a body/head orientation nothing
+/// reads; this type carries only the three fields (`swing_time`, `swinging`,
+/// `swing_duration`) a remote swing actually needs, with the identical
+/// algorithm — see [`Self::start_swing`], [`Self::tick`] and
+/// [`Self::attack_anim_lerp`], each cross-referencing the `EntityPose` method
+/// it mirrors term-for-term.
+///
+/// **Absent** until the first `SwingMainHand` report, like [`HurtTime`].
+#[derive(Component, Debug, Clone, Copy, PartialEq, Default)]
+pub struct AttackSwing {
+    swing_time: i32,
+    swinging: bool,
+    swing_duration: i32,
+    /// Current tick's swing progress, `0.0..=1.0` — vanilla's `attackAnim`.
+    pub attack_anim: f32,
+    /// Previous tick's swing progress, for [`Self::attack_anim_lerp`]'s
+    /// forward-wrapped interpolation — vanilla's `oAttackAnim`.
+    pub o_attack_anim: f32,
+}
+
+impl AttackSwing {
+    /// Begins a swing, or extends one already running — `LivingEntity.swing`,
+    /// mirrored from [`lodestone_entity::pose::EntityPose::start_swing`].
+    /// Swallows a restart before the half-way point, which is what turns a
+    /// held mine's every-tick `SwingMainHand` report into one continuous arc
+    /// instead of a stutter — see that method's doc for the full reasoning.
+    pub fn start_swing(&mut self, duration: i32) {
+        if !self.swinging || self.swing_time >= duration / 2 || self.swing_time < 0 {
+            self.swing_time = -1;
+            self.swinging = true;
+            self.swing_duration = duration.max(1);
+        }
+    }
+
+    /// One tick's advance — the swing half of
+    /// [`lodestone_entity::pose::EntityPose::tick`] (`LivingEntity.updateSwingTime`).
+    /// A no-op sawtooth hold at `0.0` before the first [`Self::start_swing`]
+    /// call, since `swing_duration` defaults to `0` and is clamped to at least
+    /// `1` in the division below rather than dividing by zero.
+    pub fn tick(&mut self) {
+        self.o_attack_anim = self.attack_anim;
+        if self.swinging {
+            self.swing_time += 1;
+            if self.swing_time >= self.swing_duration {
+                self.swing_time = 0;
+                self.swinging = false;
+            }
+        } else {
+            self.swing_time = 0;
+        }
+        self.attack_anim = self.swing_time.max(0) as f32 / self.swing_duration.max(1) as f32;
+    }
+
+    /// Interpolated swing progress for a partial tick — vanilla's
+    /// `LivingEntity.getAttackAnim`, identical to
+    /// [`lodestone_entity::pose::EntityPose::attack_anim_lerp`]: a negative
+    /// delta is wrapped forward by one whole swing so the arm carries forward
+    /// to rest instead of rewinding backward through the arc when a swing ends
+    /// or restarts mid-tick. See that method's doc for why a plain lerp is
+    /// wrong here.
+    #[must_use]
+    pub fn attack_anim_lerp(&self, partial_tick: f32) -> f32 {
+        let mut diff = self.attack_anim - self.o_attack_anim;
+        if diff < 0.0 {
+            diff += 1.0;
+        }
+        self.o_attack_anim + diff * partial_tick
+    }
+}
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

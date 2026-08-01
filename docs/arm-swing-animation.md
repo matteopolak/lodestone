@@ -10,7 +10,7 @@ three separate things off one number — `attackAnim`, swing progress in
 |---|---|---|---|
 | first-person arm | `ItemInHandRenderer.renderPlayerArm` | `first_person_arm_chain` | **wired** |
 | your own third-person body | `HumanoidModel.setupAttackAnimation` | `Skeleton::pose`'s `attack_anim` | **wired** |
-| other players and mobs | `ClientboundAnimatePacket` | — | **not wired**, see below |
+| other players and mobs | `ClientboundAnimatePacket` | `AttackSwing` (issue #10) | **wired**, see below |
 
 The packet half — telling the *server* we swung — was already done before this
 existed and is untouched: `lodestone_game::mining` emits
@@ -146,28 +146,70 @@ through zero, and down again, rather than making a single hump like `x` and `z`.
   deliberately — reordering that loop would move wire-ordering-sensitive code for
   an invisible gain. Documented on `Sim::swing_hand`.
 
-### Remote players and mobs are not wired
+### Remote players and mobs (issue #10)
 
-`ClientboundAnimatePacket` **is** decoded — `crates/protocol/v770/src/adapter.rs`
-handles `play::clientbound::ANIMATE` and emits
-`ClientEvent::EntityAnimation { entity_id, action }` with
-`AnimationAction::SwingMainHand`, covered by
-`crates/protocol/v770/tests/entity_events.rs`. **Nothing consumes that event
-anywhere.** So other players' and mobs' swings are invisible, and this is the one
-consumer of the three still at zero pixels.
+`ClientboundAnimatePacket` decodes into `ClientEvent::EntityAnimation { entity_id,
+action }` (`crates/protocol/v770/src/adapter.rs`, `play::clientbound::ANIMATE`),
+covered by `crates/protocol/v770/tests/entity_events.rs`. Only one of its five
+named actions is a swing at all — see
+`ClientboundAnimatePacket.java`/`ClientPacketListener.handleAnimate` in
+`.cache/mc/26.2/client-src`:
 
-Closing it needs, in order:
+| action id | `AnimationAction` | vanilla does | handled here |
+|---|---|---|---|
+| `0` | `SwingMainHand` | `mob.swing(MAIN_HAND)` | **yes** — the only one that reaches a pixel |
+| `2` | `WakeUp` | `player.stopSleepInBed(false, false)` | no — not an animation; no sleep-pose rendering exists to leave a bed from |
+| `3` | `SwingOffHand` | `mob.swing(OFF_HAND)` | no — animates the *left* arm, which `lodestone-render`'s `attack_anim` never draws (it assumes the right arm is attacking, same as the local player's own off-hand swing) |
+| `4` | `CriticalHit` | spawns a tracked `CRIT` particle emitter | no — a particle burst, not a swing; no particle system exists to hand it to |
+| `5` | `MagicCriticalHit` | spawns a tracked `ENCHANTED_HIT` particle emitter | no — same as `CriticalHit` |
+| anything else | `Other(u8)` | — | no |
 
-1. `lodestone-ecs/src/ingest.rs` — add `EntityAnimation` to `handles_event` and an
-   `apply_entity_animation` system resolving `entity_id` through `EntityIndex`.
-   (The ingest fold already receives raw `ClientEvent`s, so **no** `net.rs`
-   `NetUpdate` variant is needed.)
-2. `lodestone-shell/src/entities.rs` — the swing state alongside `WalkAnim` (a new
-   component, or an `EntityPose` swing field on the existing one), advanced in
-   `tick_walk_animation`'s `TickSet::Animate` slot so it is tick-driven.
-3. `render_anim` — replace the hardcoded `attack_anim: 0.0` with the interpolated
-   read. That line is the island marker; everything downstream of it
-   (`Skeleton::pose`'s `attack_anim`) already works and is unit-tested.
+`lodestone_ecs::entity::AttackSwing` is the remote-entity swing clock:
+`swing_time`/`swinging`/`swing_duration`/`attack_anim`/`o_attack_anim`, with
+`start_swing`/`tick`/`attack_anim_lerp` mirroring
+`lodestone_entity::pose::EntityPose`'s identical fields and formulas term for
+term (see that type's own doc for why it is a deliberate three-field subset
+rather than embedding `EntityPose` outright — the walk cycle and head/body
+orientation `EntityPose` also carries already live on a *different* `bevy_ecs`
+entity for a tracked network mob, in `lodestone-shell::entities`'s
+`WalkAnim`/`InterpFrom`/`InterpTo`).
+
+The wiring, in the order the event travels:
+
+1. `lodestone_ecs::ingest::handles_event` — has an arm for `EntityAnimation`, so
+   `SharedState::apply` actually routes it into `NetIngest`. This is the
+   traditional trap for this repo (`CLAUDE.md`'s "one specific island
+   factory"): a decoded event with no `matches!` arm here is silently dropped by
+   the live path regardless of what a hermetic `feed()`-based test shows, since
+   that helper bypasses this exact switch.
+2. `apply_entity_animation` (same module) — filters to `SwingMainHand` only,
+   resolves `entity_id` through `lodestone_ecs::entity::EntityIndex` (the
+   *ingest*-side id→entity map), and calls `AttackSwing::start_swing` on that
+   entity, inserting the component on first use.
+3. `tick_entity_swing` (same module, `GameTick`/`TickSet::Animate`) — advances
+   every tracked `AttackSwing` one tick, the same rate `tick_hurt_time` ages
+   `HurtTime`.
+4. `lodestone-shell::entities::extract_entity_draws` — reads `AttackSwing` off
+   the *ingest* entity via `EntityIndex`, keyed by the same `id.0` the render
+   entity's own `MinecraftEntityId` carries, and calls
+   `attack_anim_lerp(partial_tick)` to feed `render_anim`'s `swing_progress`
+   parameter. This is a direct `EntityIndex` lookup, not a hop through
+   `EntitySnapshot`/`EntityView` like every other field on `EntityDraw`: those
+   two entities (ingest and render) are genuinely different `bevy_ecs::Entity`s
+   for the same mob (see `EntityInterpPlugin`'s own doc), and `AttackSwing`
+   lives on the ingest one because that is where `apply_entity_animation`
+   already had a race-free `EntityIndex` lookup, whereas the render-side
+   `TrackIndex` entry for a brand-new spawn is only populated once per frame by
+   `fold_snapshots`, not once per event.
+5. `render_anim` — what used to be a hardcoded `attack_anim: 0.0` (the island
+   marker) is now the resolved `swing_progress`. Everything downstream
+   (`Skeleton::pose`'s `attack_anim`) was already correct and already
+   unit-tested; this was the one missing hop.
+
+The local player's own swing is **not** this path: it is not a tracked network
+entity at all (`lodestone_ecs::entity::EntityIndex` never holds our own id — see
+`apply_local_player_login`'s doc), and goes through `Sim::body_pose`/
+`Sim::hand_swing_progress` instead, per the sections above.
 
 ## Configuration
 
@@ -188,12 +230,17 @@ arguments at one call site.
 
 ## Dependencies
 
-- `lodestone-entity` — `pose::EntityPose`, the tick clock.
+- `lodestone-entity` — `pose::EntityPose`, the local player's tick clock.
+- `lodestone-ecs` — `entity::AttackSwing` (the remote-entity swing clock,
+  mirroring `EntityPose`'s swing fields), `entity::EntityIndex`,
+  `ingest::{handles_event, apply_entity_animation, tick_entity_swing}`.
 - `lodestone-render` — `entity::first_person_arm_chain` / `first_person_arm_pose`
-  (first person), `entity_anim::Skeleton::pose` (third person).
-- `lodestone-shell` — `sim.rs` (clock owner and both accessors), `gpu.rs`
-  (`HandSwingSource`, the arm pass), `app.rs` (installs the source per frame).
-- `lodestone-game` — `mining`, the main producer of swings.
+  (first person), `entity_anim::Skeleton::pose` (third person and remote).
+- `lodestone-shell` — `sim.rs` (the local player's clock owner and both
+  accessors), `entities.rs` (`extract_entity_draws`/`render_anim`, the remote
+  path), `gpu.rs` (`HandSwingSource`, the first-person arm pass), `app.rs`
+  (installs the first-person source per frame).
+- `lodestone-game` — `mining`, the main producer of the local player's swings.
 
 ## Gates
 
@@ -204,9 +251,17 @@ arguments at one call site.
 | `pose.rs::swing_duration_models_haste_and_mining_fatigue` | the effect model, including Haste-wins |
 | `entity.rs::arm_swing_terms_match_hand_evaluated_vanilla` | the `sqrt`/`a²` shaping, against closed-form values at `a = 0.25` where `sqrt` is exact |
 | `entity.rs::arm_chain_at_rest_matches_the_static_chain` | the swing is additive, with a control that it moves at all |
-| `sim.rs::a_queued_main_hand_swing_reaches_the_arm_pose` | **the island** — producer to consumer, with an idle control |
-| `sim.rs::an_off_hand_swing_does_not_drive_the_main_arm` | the `Hand::Main` match |
+| `sim.rs::a_queued_main_hand_swing_reaches_the_arm_pose` | the local-player island — producer to consumer, with an idle control |
+| `sim.rs::an_off_hand_swing_does_not_drive_the_main_arm` | the `Hand::Main` match, local player |
 | `first_person_arm_swing_pixels.rs` | pixels actually move, with a zero-difference negative control, plus a coverage floor so "swung out of frame" cannot read as success |
+| `ingest.rs::handles_event_covers_exactly_the_variants_with_a_system` | `EntityAnimation` is in the routing switch — the same trap that hid `EntityDamaged`/`EntityHurtAnimation` and air supply |
+| `ingest.rs::swing_main_hand_starts_a_swing_that_ticks_to_completion_and_stops` | the full six-tick sawtooth, through the real `NetIngest`/`GameTick` schedules |
+| `ingest.rs::only_swing_main_hand_starts_a_swing` | the action-id filter — `SwingOffHand` (which vanilla *does* run through `LivingEntity.swing`) must not start a remote swing |
+| `ingest.rs::a_restart_before_the_half_way_point_is_swallowed` | the held-mine continuous-arc behaviour, ported to the remote path |
+| `entities.rs::a_swinging_attack_swing_reaches_the_extracted_anim` | `AttackSwing` reaches `EntityDraw.anim.attack_anim` through `EntityIndex`, with a before-any-report negative control |
+| `remote_entity_swing_pixels.rs` | **the island** — a remote entity's arm moves on screen after a real `EntityAnimation` event, through the actual `Sim` plugin pair and the real render path, with a same-pipeline silent-entity negative control |
 
 The pixel gates are `#[ignore]`d; run them with
-`cargo test -p lodestone-render --test first_person_arm_swing_pixels -- --ignored --nocapture`.
+`cargo test -p lodestone-render --test first_person_arm_swing_pixels -- --ignored --nocapture`
+and
+`cargo test -p lodestone-shell --test remote_entity_swing_pixels -- --ignored --nocapture`.

@@ -43,13 +43,13 @@ use bevy_app::{App, Plugin};
 use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::{Commands, IntoScheduleConfigs, Query, Res, ResMut, With};
 use bevy_ecs::resource::Resource;
-use lodestone_model::{ClientEvent, EntityMovement, Reported};
+use lodestone_model::{AnimationAction, ClientEvent, EntityMovement, Reported};
 use lodestone_physics::Vec3d;
 
 use crate::entity::{
-    Attributes, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags, EntityIndex,
-    EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId, OnGround,
-    Pose, Position, Rotation, Variant, Velocity,
+    Attributes, AttackSwing, Baby, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
+    EntityIndex, EntityKind, EntityUuid, Equipment, HeadYaw, Health, HurtTime, MinecraftEntityId,
+    OnGround, Pose, Position, Rotation, Variant, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
 use crate::schedules::{GameTick, NetIngest};
@@ -127,6 +127,7 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             | ClientEvent::EntityEquipmentUpdated { .. }
             | ClientEvent::EntityDamaged { .. }
             | ClientEvent::EntityHurtAnimation { .. }
+            | ClientEvent::EntityAnimation { .. }
     )
 }
 
@@ -451,6 +452,67 @@ pub fn tick_hurt_time(mut entities: Query<&mut HurtTime>) {
     }
 }
 
+/// `IngestSet::Apply`: `ClientEvent::EntityAnimation` → [`AttackSwing`].
+///
+/// **Only `AnimationAction::SwingMainHand` starts a swing.** The other four
+/// named actions are deliberately not handled here, each for a different
+/// reason (`ClientPacketListener.handleAnimate`, `.cache/mc/26.2/client-src`):
+///
+/// | action | vanilla does | why not here |
+/// |---|---|---|
+/// | `SwingOffHand` | `mob.swing(OFF_HAND)` | animates the **left** arm; `lodestone-render`'s `attack_anim` assumes the right arm is attacking (it does not decode a mob's main hand) and neither render consumer draws a swinging left arm, so a main-hand swing is the only one that reaches a pixel — the same reason `sim.rs`'s local-player swing ignores an off-hand `SwingArm` |
+/// | `WakeUp` | `player.stopSleepInBed(false, false)` | not an animation at all; no sleep-pose rendering exists to leave a bed from |
+/// | `CriticalHit` / `MagicCriticalHit` | spawns a tracked particle emitter | a particle burst, not a swing; this crate has no particle system to hand it to |
+///
+/// `AnimationAction::Other(_)` (an id this table does not name) is likewise
+/// ignored. The duration is [`lodestone_entity::pose::swing_duration`] with
+/// **no** effect inputs, for the identical reason `Sim::swing_hand` (the local
+/// player's own swing, `lodestone-shell::sim`) has none: no per-entity
+/// mob-effect state is reachable yet (`docs/arm-swing-animation.md`'s
+/// "Configuration" section).
+pub fn apply_entity_animation(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut swings: Query<&mut AttackSwing>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::EntityAnimation { entity_id, action } = event else {
+            continue;
+        };
+        if *action != AnimationAction::SwingMainHand {
+            continue;
+        }
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        let duration = lodestone_entity::pose::swing_duration(
+            lodestone_entity::pose::DEFAULT_SWING_DURATION,
+            None,
+            None,
+        );
+        if let Ok(mut swing) = swings.get_mut(entity) {
+            swing.start_swing(duration);
+        } else {
+            let mut swing = AttackSwing::default();
+            swing.start_swing(duration);
+            commands.entity(entity).insert(swing);
+        }
+    }
+}
+
+/// `TickSet::Animate`: advance every entity's [`AttackSwing`] one tick, the
+/// same rate [`crate::entity::AttackSwing::tick`] models
+/// `LivingEntity.updateSwingTime` at. Runs over every entity that carries the
+/// component; a remote entity gains one only once [`apply_entity_animation`]
+/// has seen its first `SwingMainHand` report, exactly like [`tick_hurt_time`]
+/// and [`HurtTime`].
+pub fn tick_entity_swing(mut entities: Query<&mut AttackSwing>) {
+    for mut swing in &mut entities {
+        swing.tick();
+    }
+}
+
 /// `IngestSet::Apply`: `ClientEvent::EntityHeadRotation` → [`HeadYaw`].
 pub fn apply_entity_head_rotation(
     batch: Res<IngestBatch>,
@@ -723,18 +785,22 @@ impl Plugin for IngestPlugin {
                 apply_entity_equipment,
                 apply_entity_damaged,
                 apply_entity_hurt_animation,
+                apply_entity_animation,
             )
                 .chain()
                 .in_set(IngestSet::Apply),
         );
-        // `tick_hurt_time` lives in `GameTick`/`TickSet::Animate`, not
-        // `NetIngest` — it ages [`HurtTime`] once per simulated tick regardless
-        // of how many (or how few) hurt packets arrived that tick, the same way
-        // `SessionHudPlugin::tick_hud_overlays` ages its own countdowns.
+        // `tick_hurt_time`/`tick_entity_swing` live in `GameTick`/`TickSet::Animate`,
+        // not `NetIngest` — they age [`HurtTime`]/[`AttackSwing`] once per simulated
+        // tick regardless of how many (or how few) packets arrived that tick, the
+        // same way `SessionHudPlugin::tick_hud_overlays` ages its own countdowns.
         // `IngestQueuePlugin` (added above) already guarantees `CorePlugin` is
-        // present, which is what configures `TickSet::Animate` into the
-        // schedule at all.
-        app.add_systems(GameTick, tick_hurt_time.in_set(TickSet::Animate));
+        // present, which is what configures `TickSet::Animate` into the schedule at
+        // all.
+        app.add_systems(
+            GameTick,
+            (tick_hurt_time, tick_entity_swing).in_set(TickSet::Animate),
+        );
     }
 }
 
@@ -1196,6 +1262,125 @@ mod tests {
         assert_eq!(world.get::<HurtTime>(entity).map(|h| h.0), Some(0));
     }
 
+    /// The island this closes (issue #10): a `SwingMainHand` report reaches
+    /// [`AttackSwing`] on the *ingest* entity, and [`tick_entity_swing`] then
+    /// carries it through a full swing and back to rest — the same six-tick
+    /// arc [`lodestone_entity::pose::EntityPose`] drives for the local player.
+    #[test]
+    fn swing_main_hand_starts_a_swing_that_ticks_to_completion_and_stops() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        assert!(
+            entity_for(&world, 1).get::<AttackSwing>().is_none(),
+            "absent until the first SwingMainHand report, like HurtTime"
+        );
+
+        feed(
+            &mut world,
+            ClientEvent::EntityAnimation {
+                entity_id: 1,
+                action: AnimationAction::SwingMainHand,
+            },
+        );
+        let entity = entity_for(&world, 1).id();
+        assert!(
+            world.get::<AttackSwing>(entity).is_some(),
+            "a SwingMainHand report must insert AttackSwing"
+        );
+
+        // `DEFAULT_SWING_DURATION` is 6 ticks: `attack_anim` climbs
+        // `0/6, 1/6, .., 5/6` and then the sixth tick resets `swing_time` to 0
+        // and clears `swinging`, landing back at `attack_anim == 0.0` — the
+        // same sawtooth `docs/arm-swing-animation.md` documents.
+        let expected = [0.0_f32, 1.0 / 6.0, 2.0 / 6.0, 3.0 / 6.0, 4.0 / 6.0, 5.0 / 6.0, 0.0];
+        for want in expected {
+            world.run_schedule(GameTick);
+            let got = world
+                .get::<AttackSwing>(entity)
+                .expect("still tracked")
+                .attack_anim;
+            assert!(
+                (got - want).abs() < 1.0e-6,
+                "attack_anim was {got}, wanted {want}"
+            );
+        }
+        // One more tick with no new report must not resurrect the swing.
+        world.run_schedule(GameTick);
+        assert_eq!(world.get::<AttackSwing>(entity).map(|s| s.attack_anim), Some(0.0));
+    }
+
+    /// The negative control for the action-id filter documented on
+    /// [`apply_entity_animation`]: every action byte other than
+    /// `SwingMainHand` — including `SwingOffHand`, which vanilla *does* run
+    /// through `LivingEntity.swing` — must leave [`AttackSwing`] absent,
+    /// proving the filter actually runs rather than every action starting a
+    /// swing by accident.
+    #[test]
+    fn only_swing_main_hand_starts_a_swing() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        for action in [
+            AnimationAction::SwingOffHand,
+            AnimationAction::WakeUp,
+            AnimationAction::CriticalHit,
+            AnimationAction::MagicCriticalHit,
+            AnimationAction::Other(200),
+        ] {
+            feed(
+                &mut world,
+                ClientEvent::EntityAnimation {
+                    entity_id: 1,
+                    action,
+                },
+            );
+            assert!(
+                entity_for(&world, 1).get::<AttackSwing>().is_none(),
+                "{action:?} must not start a swing"
+            );
+        }
+    }
+
+    /// [`AttackSwing::start_swing`] swallows a restart before the half-way
+    /// point, exactly like [`lodestone_entity::pose::EntityPose::start_swing`]
+    /// — the mechanism that turns a held mine's every-tick `SwingMainHand`
+    /// report into one continuous arc rather than a stutter, per
+    /// `docs/arm-swing-animation.md`.
+    #[test]
+    fn a_restart_before_the_half_way_point_is_swallowed() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:pig"));
+        feed(
+            &mut world,
+            ClientEvent::EntityAnimation {
+                entity_id: 1,
+                action: AnimationAction::SwingMainHand,
+            },
+        );
+        let entity = entity_for(&world, 1).id();
+        world.run_schedule(GameTick); // swing_time: -1 -> 0, attack_anim = 0/6
+
+        // A restart this early (well before the 3-tick half-way point of a
+        // 6-tick swing) must be swallowed rather than snapping back to -1: it
+        // must land exactly where an *un*-restarted swing would after the same
+        // two ticks, not one tick behind.
+        feed(
+            &mut world,
+            ClientEvent::EntityAnimation {
+                entity_id: 1,
+                action: AnimationAction::SwingMainHand,
+            },
+        );
+        world.run_schedule(GameTick); // swing_time: 0 -> 1, attack_anim = 1/6
+        let got = world.get::<AttackSwing>(entity).expect("tracked").attack_anim;
+        // The discriminating value: a `start_swing` that did *not* swallow the
+        // restart would reset `swing_time` to `-1` on the second call, and the
+        // following tick would land back at `attack_anim == 0.0` instead.
+        assert!(
+            (got - 1.0 / 6.0).abs() < 1.0e-6,
+            "a restart before the half-way point must not rewind the arc, got {got}"
+        );
+    }
+
     // ---- spawn / move / despawn ------------------------------------------
 
     #[test]
@@ -1584,6 +1769,15 @@ mod tests {
         assert!(handles_event(&ClientEvent::EntityHurtAnimation {
             entity_id: 1,
             yaw: 0.0,
+        }));
+        // `EntityAnimation` was the identical shape of island a third time
+        // (issue #10 / `docs/arm-swing-animation.md`): decoded, unit-tested at
+        // the protocol layer, and reachable from a hermetic `feed()` call, but
+        // absent from this `matches!` — so `SharedState::apply` never routed it
+        // into `NetIngest` and `apply_entity_animation` never ran in production.
+        assert!(handles_event(&ClientEvent::EntityAnimation {
+            entity_id: 1,
+            action: AnimationAction::SwingMainHand,
         }));
         assert!(!handles_event(&ClientEvent::TimeChanged {
             world_age: 1,

@@ -135,7 +135,7 @@ use bevy_ecs::world::World;
 use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
-use lodestone_ecs::entity::MinecraftEntityId;
+use lodestone_ecs::entity::{AttackSwing, EntityIndex, MinecraftEntityId};
 use lodestone_ecs::player::{CollisionSource, PlayerCollision, Profile};
 use lodestone_ecs::{CorePlugin, Extract, ExtractSet, FrameSet, GameTick, TickSet, Update};
 use lodestone_entity::item_entity::{ITEM_AIR_DRAG, ITEM_GRAVITY, ItemMotion};
@@ -774,12 +774,23 @@ fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
 /// *relative* to it, because that is what `LivingEntityRenderer` feeds
 /// `setupAnim` — passing the absolute value would spin every mob's head with its
 /// body.
+///
+/// `swing_progress` is the entity's interpolated `attack_anim` for this frame —
+/// `0.0` for an entity that has never swung, otherwise
+/// [`lodestone_ecs::entity::AttackSwing::attack_anim_lerp`] resolved by the
+/// caller through [`EntityIndex`] (see [`extract_entity_draws`]). This used to
+/// be a hardcoded `0.0`: `ClientboundAnimatePacket` was decoded and folded
+/// nowhere, so every other player and mob mined, hit and placed with a rigid
+/// arm (issue #10 / `docs/arm-swing-animation.md`). The local player's own
+/// swing is *not* this path — it is not a tracked network entity, and it goes
+/// through `Sim::body_pose`/`Sim::hand_swing_progress` instead.
 fn render_anim(
     from: &InterpFrom,
     to: &InterpTo,
     clock: &InterpClock,
     walk: &WalkAnim,
     partial_tick: f32,
+    swing_progress: f32,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -788,26 +799,7 @@ fn render_anim(
         head_pitch_deg: render_pitch(from, to, clock),
         limb_swing: walk.walk.position_lerp(partial_tick),
         limb_swing_amount: walk.walk.speed_lerp(partial_tick),
-        // **Remote swings are not wired**, so every other player and mob mines,
-        // hits and places with a rigid arm. This zero is the island marker, and
-        // the only missing piece is on *this* side of the wire: v770 already
-        // decodes `ClientboundAnimatePacket` (`adapter.rs`'s
-        // `play::clientbound::ANIMATE` → `ClientEvent::EntityAnimation` with
-        // `AnimationAction::SwingMainHand`, covered by
-        // `v770/tests/entity_events.rs`) and **nothing consumes that event
-        // anywhere**. Downstream of this line is already done and tested:
-        // `Skeleton::pose`'s `attack_anim` is a faithful
-        // `HumanoidModel.setupAttackAnimation`, and it early-returns on `<= 0.0`,
-        // which is exactly why it is currently dead code for network entities.
-        //
-        // Closing it needs a swing timer component beside `WalkAnim`, advanced in
-        // `tick_walk_animation`'s `TickSet::Animate` slot (tick-driven — see this
-        // module's note on why the walk cycle is not per frame), started from an
-        // ingest system on `EntityAnimation` resolved through `EntityIndex`. The
-        // local player's own swing is *not* this path: it is not a tracked network
-        // entity, and it goes through `Sim::body_pose` instead. See
-        // `docs/arm-swing-animation.md`.
-        attack_anim: 0.0,
+        attack_anim: swing_progress,
         age_ticks: clock.age,
         // `Mob.isAggressive` rides a shared-flags bit nothing decodes yet.
         aggressive: false,
@@ -879,6 +871,14 @@ pub fn tick_walk_animation(
 pub fn extract_entity_draws(
     clock: Res<lodestone_ecs::FrameClock>,
     stacks: Res<ItemStacks>,
+    // `AttackSwing` lives on the *ingest* entity (`lodestone_ecs::ingest::
+    // apply_entity_animation` resolves `EntityAnimation` through `EntityIndex`),
+    // not on the render entity this query's tuple is drawn from — `entity_id`
+    // is the only key the two families share, so `index` is the bridge. See
+    // `render_anim`'s doc for why this is not folded through `EntitySnapshot`
+    // like every other field here.
+    index: Res<EntityIndex>,
+    swings: Query<&AttackSwing>,
     tracks: Query<(
         &MinecraftEntityId,
         &RenderKind,
@@ -905,6 +905,13 @@ pub fn extract_entity_draws(
         let stack = (kind.0 == ITEM_ENTITY_TYPE_PATH)
             .then(|| stacks.0.get(&id.0))
             .flatten();
+        // `0.0` for an id with no ingest entity (shouldn't happen — a render
+        // track only exists once the entity has been spawned) or one that has
+        // never swung (`AttackSwing` absent, like `HurtTime`).
+        let swing_progress = index
+            .get(id.0)
+            .and_then(|entity| swings.get(entity).ok())
+            .map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick));
         out.0.push(EntityDraw {
             id: id.0,
             type_path: kind.0.clone(),
@@ -917,7 +924,7 @@ pub fn extract_entity_draws(
             head_yaw: render_head_yaw(from, to, clock),
             pitch: render_pitch(from, to, clock),
             scale: scale.0,
-            anim: render_anim(from, to, clock, walk, partial_tick),
+            anim: render_anim(from, to, clock, walk, partial_tick, swing_progress),
         });
     }
 }
@@ -1238,6 +1245,14 @@ impl Plugin for EntityInterpPlugin {
         app.init_resource::<ItemStacks>();
         app.init_resource::<TrackIndex>();
         app.init_resource::<ExtractedDraws>();
+        // `extract_entity_draws` reads `AttackSwing` through this — normally
+        // `lodestone_ecs::ingest::IngestPlugin` owns it, but this plugin is
+        // also installed alone by `EntityInterpolator::new()` (this module's
+        // own harness and the live GPU gates), which never adds `IngestPlugin`
+        // at all. `init_resource` is a no-op when it is already present, so
+        // this does not race or double-initialize the production case where
+        // both plugins are installed in the same `App`.
+        app.init_resource::<EntityIndex>();
         // `Profile` is `lodestone_ecs::player`'s type, shared rather than
         // duplicated: the item integrator wants the same `PhysicsProfile` the
         // player's does, and since §4.1(c) they genuinely are one resource.
@@ -1598,6 +1613,53 @@ mod tests {
             variant: None,
             count: 1,
         }
+    }
+
+    /// The render-side half of issue #10's fix: [`extract_entity_draws`] must
+    /// read a swinging [`AttackSwing`] through [`EntityIndex`] and land it on
+    /// [`EntityDraw::anim`]`.attack_anim`. `lodestone-ecs::ingest`'s own tests
+    /// cover the producer (`SwingMainHand` → `AttackSwing`); this is the
+    /// consumer, driven directly off the component rather than through a full
+    /// `IngestPlugin` World, since this module's harness installs only
+    /// `EntityInterpPlugin` (see [`EntityInterpolator::new`]'s doc).
+    ///
+    /// The **negative control** is the first assertion: the same track, before
+    /// any `AttackSwing` exists at all, must read exactly `0.0` — the old
+    /// hardcoded value `render_anim` used to return unconditionally. Without
+    /// this control, a `swing_progress` that was wired to the wrong id (or
+    /// never wired at all) could still pass on the strength of the second
+    /// assertion alone, the same "control's premise can be false" trap
+    /// `CLAUDE.md` warns about.
+    #[test]
+    fn a_swinging_attack_swing_reaches_the_extracted_anim() {
+        let mut interp = EntityInterpolator::new();
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], INTERP_WINDOW);
+        assert_eq!(
+            interp.draws()[0].anim.attack_anim,
+            0.0,
+            "no AttackSwing yet: rigid arm, the negative control"
+        );
+
+        // Exactly what `lodestone_ecs::ingest::apply_entity_animation` +
+        // three `tick_entity_swing` runs would have produced for id 1 after a
+        // `SwingMainHand` report: `swing_time` at 2 of a 6-tick swing.
+        let mut swing = AttackSwing::default();
+        swing.start_swing(6);
+        swing.tick();
+        swing.tick();
+        swing.tick();
+        let ingest_entity = interp.world_mut().spawn(swing).id();
+        interp
+            .world_mut()
+            .resource_mut::<EntityIndex>()
+            .insert(1, ingest_entity);
+
+        interp.update(&[snap(1, Vec3::ZERO, 0.0)], 0.0);
+        let attack_anim = interp.draws()[0].anim.attack_anim;
+        assert!(
+            attack_anim > 0.1,
+            "a mid-swing AttackSwing must reach the extracted anim, got {attack_anim}"
+        );
     }
 
     #[test]
