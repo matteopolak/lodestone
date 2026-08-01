@@ -163,9 +163,13 @@ fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction
 /// menu and error screens never get here at all: `draw_menu` returns early.
 fn hud_follows_world(screen: crate::menu::Screen) -> bool {
     use crate::menu::Screen;
+    // `Screen::Death` (issue #103) follows the same rule as `Paused`: vanilla's
+    // `Hud.extractRenderState` gates only on F1/`LevelLoadingScreen`, never on
+    // which screen is open, so the hotbar/hearts/hunger keep drawing (dimmed by
+    // the death screen's own background pass) behind the death screen too.
     matches!(
         screen,
-        Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused
+        Screen::Playing | Screen::Chat | Screen::Container | Screen::Paused | Screen::Death
     )
 }
 
@@ -584,6 +588,39 @@ fn requested_a_connection(config: &Config) -> bool {
     config.connect_in_window || config.address_given
 }
 
+/// Extrapolates the server's `time_of_day` continuously between the ~1/sec
+/// `SET_TIME` packets that are its only source (`WorldTime` is a flat
+/// snapshot — see the doc at both [`WindowApp::connect_to`] call sites for
+/// why the raw value alone made the sky's cloud scroll visibly step once a
+/// second). `advance` is meant to be polled once per frame from a
+/// [`RenderState::set_time_of_day_source`](crate::gpu::RenderState::set_time_of_day_source)
+/// closure: on a still-current tick it adds elapsed wall-clock time at the
+/// standard 20 ticks/sec, and on a new tick from the network it re-anchors —
+/// the same local-prediction-then-correct shape vanilla's own client-side
+/// day-time uses. `Mutex`, not `Cell`, only because the closure trait bound is
+/// `Fn` (shared refs) rather than `FnMut`.
+struct ContinuousTimeOfDay(std::sync::Mutex<Option<(i64, Instant)>>);
+
+impl ContinuousTimeOfDay {
+    fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    fn advance(&self, server_tick: i64) -> i64 {
+        let mut anchor = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        match *anchor {
+            Some((tick, at)) if tick == server_tick => {
+                tick + (now.duration_since(at).as_secs_f64() * 20.0) as i64
+            }
+            _ => {
+                *anchor = Some((server_tick, now));
+                server_tick
+            }
+        }
+    }
+}
+
 struct WindowApp {
     config: Config,
     sim: Sim,
@@ -771,8 +808,24 @@ impl WindowApp {
                 }
             }
         }
+        // The death screen (issue #103): `net::run` now builds the client
+        // with `RespawnPolicy::Manual`, so nothing auto-respawns any more —
+        // `Sim::is_dead` is the ground truth for whether the screen should be
+        // up, reconciled here the same way `SessionPhase` is reconciled into
+        // `UiState` above. The `!self.ui.is_death()` guard makes `die` fire
+        // exactly once per death rather than re-latching (and re-cloning) the
+        // message every frame the screen stays up; the `respawn_confirmed`
+        // side needs no such guard — it is already a no-op off `Screen::Death`.
+        if self.sim.is_dead() {
+            if !self.ui.is_death() {
+                self.ui.die(self.sim.death_message().map(str::to_string));
+            }
+        } else if self.ui.is_death() {
+            self.ui.respawn_confirmed();
+        }
         // A transition may have changed grab intent (Connected → Playing grabs;
-        // Ended → Error releases). Only touch the OS grab when it disagrees.
+        // Ended/Death → menu-owned screens release). Only touch the OS grab
+        // when it disagrees.
         let want = self.ui.wants_cursor_grab();
         if want != self.grabbed {
             self.set_grab(want);
@@ -849,6 +902,23 @@ impl WindowApp {
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
     fn connect_to(&mut self, host: String, port: u16) {
+        // `sky_clock.get().map(|h| h.world_time().1)` used to be handed to
+        // `set_time_of_day_source` directly. `WorldTime` is a flat snapshot the
+        // network thread only overwrites on a decoded `SET_TIME`
+        // (`ClientEvent::TimeChanged` — `lodestone-client/src/state.rs`), and the
+        // server sends that roughly once per second
+        // (`docs/served-session-liveness.md`'s `TIME_SYNC_INTERVAL`), so the raw
+        // value steps once/sec instead of advancing per frame. That produced the
+        // reported once-a-second cloud "teleport" (`sky.rs::cloud_plane_geometry`'s
+        // `scroll_x` is `time_of_day * CLOUD_SCROLL_BLOCKS_PER_TICK`, so a
+        // once/sec step is a visible ~0.6-block jump).
+        //
+        // `ContinuousTimeOfDay::advance` wraps the same raw value with a local,
+        // wall-clock extrapolation between packets — the same trick vanilla's own
+        // client-side day-time prediction uses, and it keeps `sky.rs` itself
+        // clock-agnostic per its own module docs ("there is deliberately no
+        // second clock... anywhere in this module"): the extrapolation lives here,
+        // at the render-source boundary, not inside the sky module.
         // §4.1(c): `Sim::connect` builds the client *with* the shell's one `World`
         // and attaches it, so the render sources below are installed from the
         // already-attached client's shared handle rather than from a `NetClient`
@@ -869,6 +939,7 @@ impl WindowApp {
             // why it needs the raw tick rather than `set_sky_darken_source`'s
             // already-derived factor.
             let sky_clock = net_handle;
+            let continuous_time_of_day = ContinuousTimeOfDay::new();
             render.set_sky_darken_source(move || {
                 clock
                     .get()
@@ -882,7 +953,11 @@ impl WindowApp {
                     feet.z.floor() as i32,
                 )
             });
-            render.set_time_of_day_source(move || sky_clock.get().map(|h| h.world_time().1));
+            render.set_time_of_day_source(move || {
+                sky_clock
+                    .get()
+                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+            });
         }
         // The sky pass itself needs GPU handles `RenderState::set_*_source`'s
         // closures don't (it uploads the celestial atlas + cloud texture
@@ -1026,16 +1101,24 @@ impl WindowApp {
             }
             MenuAction::QuitToTitle => {
                 // `UiState` has already moved to `MainMenu` — `nav.rs`'s
-                // `key_paused` calls `ui.quit_to_title()` before returning this
-                // action. What is left is tearing down whatever live session is
-                // attached to `Sim` so a fresh connect afterward starts clean;
-                // see `Sim::end_session` for exactly what resets vs. persists.
+                // `key_paused` (and, issue #103, `key_death`) calls
+                // `ui.quit_to_title()` before returning this action. What is
+                // left is tearing down whatever live session is attached to
+                // `Sim` so a fresh connect afterward starts clean; see
+                // `Sim::end_session` for exactly what resets vs. persists.
                 self.sim.end_session();
-                // The pause screen already released the pointer on entry, so
-                // this is normally a no-op; cheap insurance against a future
-                // caller reaching `QuitToTitle` some other way.
+                // The pause/death screen already released the pointer on
+                // entry, so this is normally a no-op; cheap insurance against
+                // a future caller reaching `QuitToTitle` some other way.
                 self.set_grab(false);
             }
+            // The death screen's Respawn button (issue #103): submit the
+            // manual `ClientAction::Respawn` — `Sim::respawn` is a no-op
+            // unless `Sim::is_dead` is still true, so a stray/duplicate call
+            // (e.g. a double-click before the server's confirmation lands)
+            // costs nothing. `UiState` stays on `Screen::Death` until
+            // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
+            MenuAction::Respawn => self.sim.respawn(),
         }
     }
 
@@ -1057,6 +1140,12 @@ impl WindowApp {
     fn menu_row_at(&mut self, x: f32, y: f32) -> Option<usize> {
         let frame = if self.ui.is_paused() {
             crate::menu::render::pause_frame(&self.nav)
+        } else if self.ui.is_death() {
+            // Same reasoning as the `is_paused()` branch above (issue #103):
+            // `Screen::Death` gets its frame from `death_frame` directly, not
+            // `frame_for`, which returns `None` for it by design (see
+            // `owns_frame`'s doc on why the death screen is not one).
+            crate::menu::render::death_frame(&self.nav, self.sim.death_message())
         } else {
             crate::menu::render::frame_for(
                 &self.ui,
@@ -1598,6 +1687,18 @@ impl WindowApp {
             menu.render_overlay(device, queue, frame.view(), &pause_frame, w, h);
         }
 
+        // The death screen (issue #103) follows exactly the same overlay
+        // shape as pause, for the same reason: a live server holds a dead
+        // player with no chunk stream until it respawns, so this must draw
+        // over the still-rendering, still-ticking world rather than replace
+        // it — see `Screen::Death`'s doc comment.
+        if self.ui.is_death()
+            && let Some(menu) = self.menu.as_mut()
+        {
+            let death_frame = crate::menu::render::death_frame(&self.nav, self.sim.death_message());
+            menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
+        }
+
         if let Some(window) = &self.window {
             window.pre_present_notify();
         }
@@ -1766,6 +1867,10 @@ impl ApplicationHandler for WindowApp {
             // See `connect_to`: the sky pass's own clock, next to (but distinct
             // from) `set_sky_darken_source`'s already-derived factor.
             let sky_clock = net.shared_handle();
+            // See `connect_to`: extrapolates between the ~1/sec `SET_TIME`
+            // packets so the cloud scroll advances smoothly instead of
+            // stepping once a second.
+            let continuous_time_of_day = ContinuousTimeOfDay::new();
             render.set_sky_darken_source(move || {
                 clock
                     .get()
@@ -1779,7 +1884,11 @@ impl ApplicationHandler for WindowApp {
                     feet.z.floor() as i32,
                 )
             });
-            render.set_time_of_day_source(move || sky_clock.get().map(|h| h.world_time().1));
+            render.set_time_of_day_source(move || {
+                sky_clock
+                    .get()
+                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+            });
             // See `connect_to`: the sky pass itself, from the GPU handles this
             // path already has locally (`self.gpu`/`self.target` are not set
             // until the end of this function).
@@ -1864,7 +1973,9 @@ impl ApplicationHandler for WindowApp {
             // doc — because it has its own row navigation to hover just like
             // every screen this renderer owns.
             WindowEvent::CursorMoved { position, .. }
-                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() =>
+                if crate::menu::render::owns_frame(self.ui.screen())
+                    || self.ui.is_paused()
+                    || self.ui.is_death() =>
             {
                 self.cursor = (position.x as f32, position.y as f32);
                 if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
@@ -1872,7 +1983,9 @@ impl ApplicationHandler for WindowApp {
                 }
             }
             WindowEvent::MouseInput { state, button, .. }
-                if crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused() =>
+                if crate::menu::render::owns_frame(self.ui.screen())
+                    || self.ui.is_paused()
+                    || self.ui.is_death() =>
             {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     // Only a click *on a row* activates: clicking the backdrop
@@ -2032,7 +2145,9 @@ impl ApplicationHandler for WindowApp {
                 // be unit-tested without a window (see its docs and the tests at
                 // the bottom of this file). This match is only the effects half.
                 let gate = KeyGate {
-                    menu: crate::menu::render::owns_frame(self.ui.screen()) || self.ui.is_paused(),
+                    menu: crate::menu::render::owns_frame(self.ui.screen())
+                        || self.ui.is_paused()
+                        || self.ui.is_death(),
                     chat_open: self.ui.is_chat_open(),
                     // `active_container_menu`, **not** `ui.is_container_open()`.
                     // That flag only tracks the *locally* opened player inventory;
@@ -2367,6 +2482,7 @@ mod tests {
             Screen::Chat,
             Screen::Container,
             Screen::Paused,
+            Screen::Death,
         ] {
             assert!(
                 hud_follows_world(screen),
