@@ -1,20 +1,37 @@
 //! Live regression gate for death handling: when the server kills the local
-//! player, the shell must **survive, respawn, and resume streaming chunks** —
-//! not strand itself on a terminal death screen forever.
+//! player, the shell must **survive, gate on the death screen's Respawn click,
+//! respawn, and resume streaming chunks** — not strand itself on a terminal
+//! death screen forever, and not (issue #103's actual behaviour change) ride
+//! through death with no screen at all.
 //!
 //! ## The bug this reproduces
 //!
 //! The old shell answered `ClientEvent::Death` by setting
 //! `SessionPhase::Ended("player died")`, which flips the app to its terminal
 //! Error screen. Meanwhile the client library's `RespawnPolicy::Automatic`
-//! already answers the death packet with a `ClientAction::Respawn` and keeps the
-//! session alive underneath — so the *library* recovered while the *shell* had
-//! declared the game over. One spider ended the session; survival was untestable
-//! past the first mob.
+//! already answered the death packet with an unconditional `ClientAction::
+//! Respawn` and kept the session alive underneath — so the *library* recovered
+//! while the *shell* had declared the game over. One spider ended the session;
+//! survival was untestable past the first mob.
 //!
 //! The status line `server: player dead (no chunks)` was also a lie: being dead
 //! does not unload chunks. The server holds the death screen, but the world the
 //! client already streamed stays put, and it streams again on respawn.
+//!
+//! ## Issue #103: manual respawn, not automatic
+//!
+//! `crate::net::run` now builds the client with `RespawnPolicy::Manual`
+//! instead of the library's default `Automatic` — the whole point of a death
+//! *screen* is that something gates the respawn on a click, and the automatic
+//! policy answered the death packet before the shell (or this test) ever got
+//! a chance to react. This test now stands in for that click: once
+//! `sim.is_dead()` is observed, it calls `Sim::respawn` exactly once — the
+//! same call the death screen's Respawn button makes
+//! (`MenuAction::Respawn` → `apply_menu_action` in `app.rs`) — before waiting
+//! for the server's confirmation. A run that never reaches `is_dead()` before
+//! its deadline, or whose `sim.respawn()` call never gets a confirmed
+//! respawn, is exactly the failure this exists to catch: the manual gate
+//! wired up with nothing to click it.
 //!
 //! ## Structure — negative control first, then the invariant
 //!
@@ -22,8 +39,9 @@
 //!    restores the old "death is terminal" path. After an RCON kill we assert the
 //!    session goes **`Ended`** — the stuck-on-the-death-screen state the director
 //!    hit. A gate for this bug that never observes the failure is worthless.
-//! 2. **The invariant (post-fix):** default death handling. After the same kill
-//!    the session stays **`Connected`**, the player is **alive again**
+//! 2. **The invariant (post-fix):** default death handling, plus the manual
+//!    `sim.respawn()` call standing in for the screen's button. After the same
+//!    kill the session stays **`Connected`**, the player is **alive again**
 //!    (`respawn_count >= 1`, `is_dead() == false`), and chunks are streaming with
 //!    the player's own column loaded.
 //!
@@ -229,9 +247,15 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
     let kill_reply = rcon.cmd("kill @a");
     eprintln!("[kill] RCON `kill @a` -> {kill_reply:?}");
 
-    // Phase 2: watch the death/respawn window. The auto-respawn is near-instant,
-    // so track whether we *ever* saw the dead flag as well as the final state.
+    // Phase 2: watch the death/respawn window. With `RespawnPolicy::Manual`
+    // (issue #103) nothing respawns on its own any more, so this stands in
+    // for the death screen's Respawn click: the first tick `is_dead()` is
+    // observed, call `sim.respawn()` exactly once, then keep watching for the
+    // server's confirmation. `respawn_sent` is only meaningful on the fixed
+    // path (`recover == true`) — the terminal control ends the session before
+    // any of this matters.
     let mut saw_dead = false;
+    let mut respawn_sent = false;
     let watch_deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < watch_deadline {
         sim.step(1.0 / 20.0);
@@ -239,6 +263,10 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
         let _ = sim.drain_removals();
         if sim.is_dead() {
             saw_dead = true;
+            if recover && !respawn_sent {
+                sim.respawn();
+                respawn_sent = true;
+            }
         }
         // Stop early once we have a clean recovery (only meaningful on the fixed
         // path; the terminal control never satisfies it and runs the full window).
@@ -258,7 +286,14 @@ fn join_kill_and_watch(rcon: &mut RconClient, recover: bool) -> DeathOutcome {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    eprintln!("[watch] saw_dead flag at some tick = {saw_dead}");
+    eprintln!("[watch] saw_dead flag at some tick = {saw_dead}, respawn_sent = {respawn_sent}");
+    if recover {
+        assert!(
+            respawn_sent,
+            "never observed is_dead() within the watch window, so `sim.respawn()` was never \
+             called — the kill did not land, or the death event never reached `Sim`."
+        );
+    }
 
     let loaded = sim.net().map_or(0, |n| n.loaded_chunks().len());
     let pcx = (sim.player().position.x.floor() as i32).div_euclid(16);

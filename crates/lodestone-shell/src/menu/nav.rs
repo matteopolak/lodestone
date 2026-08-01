@@ -78,13 +78,22 @@ pub enum MenuAction {
     /// [`MenuAction::Reprobe`] so the app does not start a probe for an address
     /// that is no longer in the list.
     Forget(ServerEntry),
-    /// The pause menu's "Quit to Title" was activated: [`UiState`] has already
-    /// moved to [`Screen::MainMenu`] (see [`UiState::quit_to_title`]); the app
-    /// must now tear down whatever live session (net connection and/or
-    /// integrated server) is still attached to `Sim`, exactly as it would for
-    /// an ordinary disconnect — nothing here does that on its own, since
+    /// The pause menu's "Quit to Title" was activated, or (issue #103) the
+    /// death screen's "Title Screen" button was: [`UiState`] has already moved
+    /// to [`Screen::MainMenu`] (see [`UiState::quit_to_title`]); the app must
+    /// now tear down whatever live session (net connection and/or integrated
+    /// server) is still attached to `Sim`, exactly as it would for an
+    /// ordinary disconnect — nothing here does that on its own, since
     /// `MenuNav` holds no session state to tear down.
     QuitToTitle,
+    /// The death screen's Respawn button was activated (issue #103): the app
+    /// must call `Sim::respawn` to submit the manual `ClientAction::Respawn`
+    /// — `MenuNav` holds no `Sim` to send it through. [`UiState`] stays on
+    /// [`Screen::Death`] until the server confirms the respawn (see
+    /// `net::NetUpdate::Respawned`), so a duplicate click before that lands
+    /// just resubmits the same request — harmless, since `Sim::respawn` is a
+    /// no-op once `Sim::is_dead` has already gone false.
+    Respawn,
 }
 
 /// Which field of the add/edit form has focus.
@@ -429,6 +438,43 @@ impl PauseButton {
     }
 }
 
+/// The death screen's two widgets (issue #103), vanilla's
+/// `DeathScreen.init` (`DeathScreen.java:42-60`). Both live; unlike
+/// [`MainButton`]/[`PauseButton`] there is nothing present-and-disabled here
+/// — vanilla itself only ever shows these two.
+///
+/// No hardcore variant: this client has no hardcore mode (nothing decodes a
+/// client-visible hardcore flag), so vanilla's fork —
+/// `deathScreen.spectate`/no-confirm-dialog when hardcore, `deathScreen.respawn`
+/// otherwise — always takes the non-hardcore branch. See [`super::render::death_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathButton {
+    /// `deathScreen.respawn` ("Respawn"): submit a manual `ClientAction::Respawn`.
+    Respawn,
+    /// `deathScreen.titleScreen` ("Title Screen"): leave for the main menu.
+    /// Vanilla pops a confirm dialog first (skipped, non-hardcore only) or
+    /// disconnects straight away (hardcore) — this client always takes the
+    /// pause menu's own simplification of skipping the confirm, the same
+    /// scope cut named for `PauseButton::QuitToTitle`.
+    TitleScreen,
+}
+
+/// Every death-screen widget, in vanilla's display order — the one index
+/// space keyboard selection, mouse hover, hit-testing and the renderer share,
+/// same as [`MAIN_BUTTONS`]/[`PAUSE_BUTTONS`].
+pub const DEATH_BUTTONS: [DeathButton; 2] = [DeathButton::Respawn, DeathButton::TitleScreen];
+
+impl DeathButton {
+    /// Vanilla's `en_us.json` strings verbatim.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            DeathButton::Respawn => "Respawn",
+            DeathButton::TitleScreen => "Title Screen",
+        }
+    }
+}
+
 /// Selection state and the saved server list.
 ///
 /// No longer `Clone`: [`accounts`](MenuNav::accounts) holds a live channel
@@ -442,6 +488,8 @@ pub struct MenuNav {
     server: usize,
     /// Highlighted row on the pause menu ([`PAUSE_BUTTONS`]).
     paused: usize,
+    /// Highlighted row on the death screen ([`DEATH_BUTTONS`], issue #103).
+    death: usize,
     form: EditForm,
     list: ServerList,
     /// Where the list is persisted. Held rather than recomputed so a test can
@@ -512,6 +560,7 @@ impl MenuNav {
             main: 0,
             server: 0,
             paused: 0,
+            death: 0,
             form: EditForm::adding(),
             list: ServerList::load_from(&path),
             path,
@@ -581,6 +630,18 @@ impl MenuNav {
         self.paused
     }
 
+    /// The highlighted death-screen button (issue #103).
+    #[must_use]
+    pub fn death_button(&self) -> DeathButton {
+        DEATH_BUTTONS[self.death.min(DEATH_BUTTONS.len() - 1)]
+    }
+
+    /// Index of the highlighted death-screen button.
+    #[must_use]
+    pub fn death_index(&self) -> usize {
+        self.death
+    }
+
     /// The add/edit form.
     #[must_use]
     pub fn form(&self) -> &EditForm {
@@ -617,6 +678,7 @@ impl MenuNav {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
             Screen::ServerList if row < self.list.len() => self.server = row,
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
+            Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
             Screen::Accounts => self.accounts.hover(row),
             Screen::ServerEdit => {
                 self.form.field = match row {
@@ -642,6 +704,14 @@ impl MenuNav {
             // `owns_frame` screen — see `render::pause_frame`'s docs — but it
             // still owns its own row navigation exactly like they do.
             Screen::Paused => self.key_paused(ui, key),
+            // Same reasoning as `Screen::Paused` — not `owns_frame`, still
+            // owns its own row navigation. Its own arm rather than falling
+            // through to the catch-all below (issue #103): that catch-all
+            // routes Escape through `UiState::on_escape`, but the death
+            // screen must swallow Escape entirely (vanilla's
+            // `shouldCloseOnEsc() == false`), which `key_death` does by
+            // simply never calling `on_escape`.
+            Screen::Death => self.key_death(ui, key),
             // The error screen has exactly one affordance — go back — reachable
             // with Escape or by activating its single row.
             Screen::Error if matches!(key, MenuKey::Escape | MenuKey::Enter) => {
@@ -928,6 +998,39 @@ impl MenuNav {
                 ui.on_escape();
                 MenuAction::None
             }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// The death screen (issue #103): Up/Down move the highlight between the
+    /// two widgets, Enter activates the highlighted one. Both are always
+    /// enabled (see [`DeathButton`]'s docs), so this wraps with
+    /// [`wrap_prev`]/[`wrap_next`] rather than [`step_enabled`] — there is no
+    /// disabled row to step over, unlike [`key_main`](Self::key_main)/
+    /// [`key_paused`](Self::key_paused).
+    ///
+    /// **Escape is deliberately absent from this match** — it falls to `_`,
+    /// which does nothing. Vanilla's `DeathScreen.shouldCloseOnEsc()` returns
+    /// `false` (`DeathScreen.java:64-66`): the only way off this screen is a
+    /// click. Every sibling `key_*` above calls `ui.on_escape()` for
+    /// `MenuKey::Escape`; this one is the one screen that must not.
+    fn key_death(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        match key {
+            MenuKey::Up => {
+                self.death = wrap_prev(self.death, DEATH_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Down => {
+                self.death = wrap_next(self.death, DEATH_BUTTONS.len());
+                MenuAction::None
+            }
+            MenuKey::Enter => match self.death_button() {
+                DeathButton::Respawn => MenuAction::Respawn,
+                DeathButton::TitleScreen => {
+                    ui.quit_to_title();
+                    MenuAction::QuitToTitle
+                }
+            },
             _ => MenuAction::None,
         }
     }
@@ -1754,5 +1857,82 @@ mod tests {
             assert_eq!(nav.key(&mut ui, key), MenuAction::None, "{key:?}");
             assert!(ui.is_playing(), "{key:?} left the world");
         }
+    }
+
+    // -- the death screen (issue #103) -------------------------------------
+
+    fn dead(nav_tag: &str) -> (MenuNav, UiState) {
+        let (nav, _) = nav(nav_tag);
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.die(Some("blew up".to_string()));
+        assert_eq!(ui.screen(), Screen::Death, "test setup did not reach Death");
+        (nav, ui)
+    }
+
+    #[test]
+    fn hovering_a_death_row_moves_the_highlight() {
+        let (mut nav, ui) = dead("death-hover");
+        assert_eq!(nav.death_index(), 0);
+        nav.hover(&ui, 1);
+        assert_eq!(nav.death_button(), DeathButton::TitleScreen);
+        // Out-of-range rows are ignored rather than clamped, matching every
+        // other screen's `hover`.
+        nav.hover(&ui, 99);
+        assert_eq!(nav.death_button(), DeathButton::TitleScreen);
+    }
+
+    #[test]
+    fn death_screen_keyboard_navigation_wraps_between_the_two_buttons() {
+        let (mut nav, mut ui) = dead("death-wrap");
+        assert_eq!(nav.death_button(), DeathButton::Respawn);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(nav.death_button(), DeathButton::TitleScreen);
+        nav.key(&mut ui, MenuKey::Down);
+        assert_eq!(
+            nav.death_button(),
+            DeathButton::Respawn,
+            "Down from the last row must wrap to the first"
+        );
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(
+            nav.death_button(),
+            DeathButton::TitleScreen,
+            "Up from the first row must wrap to the last"
+        );
+    }
+
+    #[test]
+    fn enter_on_respawn_asks_the_app_to_respawn_and_stays_on_the_death_screen() {
+        let (mut nav, mut ui) = dead("death-respawn");
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Respawn);
+        // `UiState` only leaves `Screen::Death` once the server confirms the
+        // respawn (`UiState::respawn_confirmed`, driven by `Sim::is_dead`
+        // going false) — activating the button must not jump the gun.
+        assert_eq!(
+            ui.screen(),
+            Screen::Death,
+            "the screen must wait for the server's confirmation, not the click"
+        );
+    }
+
+    #[test]
+    fn enter_on_title_screen_leaves_for_the_main_menu() {
+        let (mut nav, mut ui) = dead("death-title");
+        nav.hover(&ui, 1);
+        assert_eq!(nav.death_button(), DeathButton::TitleScreen);
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::QuitToTitle);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    #[test]
+    fn escape_does_nothing_on_the_death_screen() {
+        // Vanilla's `DeathScreen.shouldCloseOnEsc()` returns `false`
+        // (`DeathScreen.java:64-66`) — unlike every other screen in this
+        // file, Escape here must not even unwind one level, let alone quit.
+        let (mut nav, mut ui) = dead("death-escape");
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Death);
+        assert!(!ui.quit_requested());
     }
 }

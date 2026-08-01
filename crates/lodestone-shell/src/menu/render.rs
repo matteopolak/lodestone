@@ -406,6 +406,14 @@ pub enum Origin {
     /// Cancel). Not vanilla-sourced like the others above: nothing in
     /// `TitleScreen`/`PauseScreen` anchors a widget row to the bottom edge.
     ScreenBottom,
+    /// `(w / 4, 0)` — the death screen's title anchor (issue #103).
+    /// `DeathScreen.visitText` draws it at `middleLine / 2` where
+    /// `middleLine = this.width / 2` (`DeathScreen.java:118-120`), i.e.
+    /// **centred on the screen's left quarter, not the middle** — this is
+    /// vanilla's own layout (seemingly an oversight nobody ever fixed, not a
+    /// deliberate design), reproduced faithfully rather than "corrected" to
+    /// [`Origin::ScreenTop`].
+    DeathTitle,
 }
 
 impl Origin {
@@ -423,6 +431,7 @@ impl Origin {
             Origin::BottomRight => (width, height),
             Origin::TopRight => (width, 0.0),
             Origin::ScreenBottom => (width * 0.5, height),
+            Origin::DeathTitle => (width * 0.25, 0.0),
         }
     }
 }
@@ -556,6 +565,31 @@ pub fn pause_slot(button: PauseButton) -> Slot {
     }
 }
 
+/// Vanilla's rect for one death-screen button (issue #103):
+/// `this.width / 2 - 100, this.height / 4 + 72 | 96, 200, 20`
+/// (`DeathScreen.java:47-58`). Both buttons share `x`; only `y` differs.
+///
+/// `height / 4 + 72` and `+ 96` are `Origin::TitleTop`'s own anchor
+/// (`height / 4 + 48`, `TitleScreen.java:113`) plus `24`/`48` — the death
+/// screen and the title screen both lay their stacks out from
+/// `this.height / 4`, so reusing that origin here rather than adding a
+/// second one is deliberate, not a coincidence to "clean up".
+#[must_use]
+pub fn death_slot(button: super::nav::DeathButton) -> Slot {
+    use super::nav::DeathButton;
+    let dy = match button {
+        DeathButton::Respawn => 24.0,
+        DeathButton::TitleScreen => 48.0,
+    };
+    Slot {
+        origin: Origin::TitleTop,
+        dx: -100.0,
+        dy,
+        w: WIDE_W,
+        h: WIDGET_H,
+    }
+}
+
 /// Horizontal alignment of a [`MenuLabel`] about its anchored x.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -586,6 +620,12 @@ pub struct MenuLabel {
     /// RGBA, sRGB 0..1 written verbatim (the shell's convention — see
     /// `docs/vanilla-hud-text.md`).
     pub colour: [f32; 4],
+    /// Font-pixel scale. `1.0` for ordinary vanilla component text (every
+    /// label before issue #103 used this implicitly — `build`'s `frame.vanilla`
+    /// loop hardcoded it). The death screen's title needs `2.0`:
+    /// `DeathScreen.visitText` sets `output.defaultParameters(normalParameters.
+    /// withScale(2.0F))` before drawing it (`DeathScreen.java:23,119`).
+    pub scale: f32,
 }
 
 /// One drawable row: a main-menu button, a server, or a form field.
@@ -813,7 +853,120 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
             dy: PAUSE_TITLE_Y,
             align: Align::Centre,
             colour: LABEL,
+            scale: 1.0,
         }],
+        ..Default::default()
+    }
+}
+
+/// The score line's format, vanilla's `deathScreen.score.value` with the
+/// value substituted (`DeathScreen.java:38-39`).
+const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
+
+/// Builds the death screen's overlay frame (issue #103): vanilla's
+/// `DeathScreen` — the title, the server's death message, the score line, and
+/// two buttons (Respawn / Title Screen) at vanilla's rects (see
+/// [`death_slot`] and [`super::nav::DeathButton`]) — reproduced from
+/// `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DeathScreen.java`.
+///
+/// Like [`pause_frame`], not gated by [`owns_frame`]: the world (and, on a
+/// live server, the session) keeps rendering and ticking behind it — a dead
+/// player is held with no chunk stream until the respawn this screen gates,
+/// and this overlay must not itself stop that (see
+/// [`super::Screen::Death`]'s doc comment). Callers draw it with
+/// [`MenuRenderer::render_overlay`] every frame the death screen is up, and
+/// resolve the highlighted row through [`super::nav::MenuNav::death_index`]
+/// exactly like [`pause_frame`] does for [`super::nav::MenuNav::pause_index`].
+///
+/// `message` is the server's own death message
+/// (`net::NetUpdate::Death`/`Sim::death_message`, already flattened to plain
+/// text) — `None` draws no message line, matching vanilla's own `if
+/// (this.causeOfDeath != null)` guard (`DeathScreen.java:122-124`).
+///
+/// Two simplifications named rather than silently taken:
+/// - **No hardcore variant.** This client has no hardcore mode (nothing
+///   decodes a client-visible hardcore flag), so the title is always
+///   `deathScreen.title` ("You Died!") and the first button is always
+///   `deathScreen.respawn` ("Respawn"), never the hardcore
+///   `deathScreen.title.hardcore` ("Game Over!") / `deathScreen.spectate`
+///   pair — see [`super::nav::DeathButton`].
+/// - **The score line is always [`DEATH_SCORE_UNTRACKED`].** Vanilla's score
+///   is `LocalPlayer.getScore()`, synced through a `Player`-entity metadata
+///   field (`Player.DATA_SCORE_ID`) nothing in this workspace decodes yet.
+///   Drawing the vanilla line at the vanilla position with the only value
+///   available (0) is the same "present, honestly simplified" choice
+///   `docs/main-menu.md`/`docs/pause-menu.md` make for a present-but-disabled
+///   button, rather than omitting the line and drawing a screen vanilla would
+///   not recognise the shape of.
+///
+/// The backdrop is [`OVERLAY_BG`] — the same flat dim [`pause_frame`] draws
+/// — rather than vanilla's own reddish `fillGradient`
+/// (`DeathScreen.java:134-136`): this pipeline's [`Quads::rect`] takes one
+/// flat colour with no per-vertex gradient, and reproducing the gradient
+/// would mean extending it for one screen. Left for polish, like the
+/// panorama/splash-text gaps `docs/main-menu.md` names for the title screen.
+#[must_use]
+pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFrame<'static> {
+    use super::nav::DEATH_BUTTONS;
+
+    let mut labels = vec![
+        // `output.defaultParameters(normalParameters.withScale(2.0F))` then
+        // drawn at `(middleLine / 2, 30)` (`DeathScreen.java:119-120`) — see
+        // `Origin::DeathTitle`'s doc for why that x is `width / 4`, not the
+        // screen centre.
+        MenuLabel {
+            text: "You Died!".to_string(),
+            origin: Origin::DeathTitle,
+            dx: 0.0,
+            dy: 30.0,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 2.0,
+        },
+    ];
+    if let Some(text) = message
+        && !text.is_empty()
+    {
+        // `output.accept(CENTER, middleLine, 85, this.causeOfDeath)`
+        // (`DeathScreen.java:123`) — `middleLine == width / 2`, i.e.
+        // `Origin::ScreenTop`, at normal (1.0) scale.
+        labels.push(MenuLabel {
+            text: text.to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 85.0,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        });
+    }
+    // `output.accept(CENTER, middleLine, 100, this.deathScore)`
+    // (`DeathScreen.java:126`) — always drawn, message or not.
+    labels.push(MenuLabel {
+        text: DEATH_SCORE_UNTRACKED.to_string(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: 100.0,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    });
+
+    MenuFrame {
+        rows: DEATH_BUTTONS
+            .iter()
+            .map(|b| MenuRow {
+                label: b.label().to_string(),
+                enabled: true,
+                slot: Some(death_slot(*b)),
+                ..Default::default()
+            })
+            .collect(),
+        selected: nav.death_index(),
+        gui_scale: nav.gui_scale(),
+        overlay: true,
+        vanilla: true,
+        labels,
         ..Default::default()
     }
 }
@@ -1045,6 +1198,7 @@ pub fn frame_for<'a>(
                     dy: CORNER_TEXT_Y,
                     align: Align::Left,
                     colour: LABEL,
+                    scale: 1.0,
                 },
                 MenuLabel {
                     text: COPYRIGHT.to_string(),
@@ -1053,6 +1207,7 @@ pub fn frame_for<'a>(
                     dy: CORNER_TEXT_Y,
                     align: Align::Right,
                     colour: LABEL,
+                    scale: 1.0,
                 },
             ],
             ..Default::default()
@@ -1415,13 +1570,13 @@ pub fn build(
     if frame.vanilla {
         for label in &frame.labels {
             let (ax, ay) = label.origin.anchor(width, height);
-            let tw = b.text_width(&label.text, 1.0);
+            let tw = b.text_width(&label.text, label.scale);
             let x = match label.align {
                 Align::Left => ax + label.dx,
                 Align::Centre => (ax + label.dx - tw * 0.5).floor(),
                 Align::Right => ax + label.dx - tw,
             };
-            b.text(&label.text, x, ay + label.dy, 1.0, label.colour);
+            b.text(&label.text, x, ay + label.dy, label.scale, label.colour);
         }
     } else {
         // The row-stack screens' own centred title block.
@@ -2342,6 +2497,7 @@ mod tests {
             Screen::Chat,
             Screen::Container,
             Screen::Paused,
+            Screen::Death,
             Screen::Error,
         ] {
             let mut ui = UiState::new();
@@ -2367,6 +2523,10 @@ mod tests {
                 Screen::Paused => {
                     ui.enter_dev_world();
                     ui.pause();
+                }
+                Screen::Death => {
+                    ui.enter_dev_world();
+                    ui.die(Some("blew up".to_string()));
                 }
                 Screen::Error => {
                     ui.begin(SessionKind::Multiplayer);
@@ -2402,7 +2562,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(reached, 11, "a screen was added without being covered here");
+        assert_eq!(reached, 12, "a screen was added without being covered here");
         let _ = &mut nav;
     }
 
@@ -3056,6 +3216,84 @@ mod tests {
     }
 
     #[test]
+    fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
+        use crate::menu::nav::{DEATH_BUTTONS, DeathButton};
+
+        let mut nav = test_nav("death-frame");
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.die(Some("was slain by a Skeleton".to_string()));
+        nav.hover(&ui, 1);
+
+        let f = death_frame(&nav, ui.death_message());
+        assert!(f.overlay, "the death screen must draw as an overlay");
+        assert!(f.vanilla, "and be laid out from vanilla's arithmetic");
+        assert_eq!(f.rows.len(), 2, "vanilla's death screen has two widgets");
+        assert_eq!(f.rows[0].label, DeathButton::Respawn.label());
+        assert_eq!(f.rows[1].label, DeathButton::TitleScreen.label());
+        assert!(
+            f.rows.iter().all(|r| r.enabled),
+            "unlike title/pause, neither death-screen button is ever disabled"
+        );
+        assert!(f.rows.iter().all(|r| r.slot.is_some()));
+        assert_eq!(f.selected, 1, "selection follows the nav's death_index");
+        assert_eq!(DEATH_BUTTONS.len(), 2);
+
+        // The heading is a positioned label (the title), not the row stack's
+        // centred title string.
+        assert!(f.title.is_empty());
+        // Title + message + score.
+        assert_eq!(f.labels.len(), 3);
+        assert_eq!(f.labels[0].text, "You Died!");
+        assert_eq!(f.labels[0].scale, 2.0, "vanilla scales the title 2x");
+        assert_eq!(f.labels[1].text, "was slain by a Skeleton");
+        assert_eq!(f.labels[2].text, "Score: 0");
+        assert!(!geometry(&f, V_W, V_H).is_empty());
+
+        // No message: two labels, not three, and the score line still draws —
+        // matching vanilla's own `if (this.causeOfDeath != null)` guard.
+        let no_message = death_frame(&nav, None);
+        assert_eq!(no_message.labels.len(), 2);
+        assert_eq!(no_message.labels[0].text, "You Died!");
+        assert_eq!(no_message.labels[1].text, "Score: 0");
+    }
+
+    #[test]
+    fn the_death_screen_rects_are_vanillas_own() {
+        use crate::menu::nav::DeathButton as B;
+        // Hand-derived from `DeathScreen.init` (`DeathScreen.java:42-60`) at
+        // 854×480: both buttons are `width/2-100, height/4+72|96, 200x20`,
+        // and `height/4+72 == TitleTop.anchor().1 + 24` since `TitleTop` is
+        // itself `floor(height/4) + 48` — 168 + 24 = 192, 168 + 48 = 216.
+        let expected = [
+            (B::Respawn, (327.0, 192.0, 200.0, 20.0)),
+            (B::TitleScreen, (327.0, 216.0, 200.0, 20.0)),
+        ];
+        for (button, want) in expected {
+            assert_eq!(
+                death_slot(button).resolve(V_W, V_H),
+                want,
+                "{button:?} is not where vanilla puts it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_death_screens_title_is_anchored_on_the_left_quarter_not_the_centre() {
+        // The trap named in `Origin::DeathTitle`'s docs: `DeathScreen.
+        // visitText` draws the title at `middleLine / 2` where `middleLine ==
+        // width / 2`, i.e. `width / 4` — not `width / 2` like every other
+        // centred heading in this file (`Origin::ScreenTop`). A layout
+        // "corrected" to the screen centre would fail this by a wide margin.
+        assert_eq!(Origin::DeathTitle.anchor(V_W, V_H), (V_W / 4.0, 0.0));
+        assert_ne!(
+            Origin::DeathTitle.anchor(V_W, V_H).0,
+            Origin::ScreenTop.anchor(V_W, V_H).0,
+            "the death title and the score/message lines are not on the same x"
+        );
+    }
+
+    #[test]
     fn every_vanilla_widget_is_on_screen_and_none_overlap() {
         // The layout arithmetic has to hold at more than one canvas size, and a
         // widget that lands on top of another is a hit-test that activates the
@@ -3068,8 +3306,11 @@ mod tests {
         ui.enter_dev_world();
         ui.pause();
         let pause = pause_frame(&nav);
+        ui.enter_dev_world();
+        ui.die(Some("fell from a high place".to_string()));
+        let death = death_frame(&nav, ui.death_message());
 
-        for (name, frame) in [("title", &title), ("pause", &pause)] {
+        for (name, frame) in [("title", &title), ("pause", &pause), ("death", &death)] {
             // 320×240 is the smallest canvas `calculate_gui_scale` will produce
             // (see `config.rs`'s MIN_SCALED_*), so it is the real lower bound.
             for (w, h) in [(320.0f32, 240.0f32), (V_W, V_H), (1280.0, 720.0)] {

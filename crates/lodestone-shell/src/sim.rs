@@ -534,6 +534,15 @@ pub struct Sim {
     /// on the death screen forever" bug as the live gate's negative control. Never
     /// flipped in real play.
     pub recover_from_death: bool,
+    /// The most recent death's message (`NetUpdate::Death`'s `message`, already
+    /// flattened to plain text), for the death screen (issue #103) to draw.
+    /// `Some` from the moment [`Self::set_dead`] marks the player dead until the
+    /// server-confirmed respawn clears it (or [`Self::end_session`] resets it).
+    /// Not an ECS component: it is read by exactly one consumer (`app.rs`'s
+    /// per-frame UI reconciliation) and does not need to survive a session
+    /// teardown/reconnect the way `RespawnCount` and the other session-lifetime
+    /// state in `lodestone_ecs::session` do.
+    death_message: Option<String>,
     /// Live audio, or `None` when disabled (no asset root, no device — see
     /// [`ShellAudio::from_env`]). The whole audio path is `if let Some`, so a
     /// disabled engine is simply silent, never a crash.
@@ -795,6 +804,7 @@ impl Sim {
             collide_against_live_world: true,
             asset_banner: resources.banner,
             recover_from_death: true,
+            death_message: None,
             audio: ShellAudio::from_env(),
             third_person: false,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
@@ -1375,6 +1385,12 @@ impl Sim {
         self.net = None;
 
         self.teleport_count = 0;
+        // A death screen (issue #103) must not survive into the next session —
+        // `reset_local_player` below clears the `Dead` marker itself, but this
+        // field is plain `Sim` state, not an ECS component, so it needs its own
+        // line (see its doc comment on why it lives here rather than in
+        // `lodestone_ecs::session`).
+        self.death_message = None;
 
         // §4.1(c): the entity interpolator no longer owns a `World` to throw away,
         // so its tracks are cleared explicitly. Replacing the whole interpolator
@@ -1384,6 +1400,13 @@ impl Sim {
         // and it is reset on the next line, deliberately rather than incidentally.
         self.write(|w| {
             crate::entities::reset_entity_tracks(w);
+            // The ingest-side twin of the line above: `reset_entity_tracks` only
+            // clears the *render* fold, and until this call nothing ever cleared
+            // `lodestone_ecs::entity::EntityIndex`, so a rejoin's fresh server ids
+            // left every previous session's entity indexed, still enumerated by
+            // `SharedState::entities`, and redrawn frozen alongside its live
+            // duplicate. See `reset_ingest_entities`'s own docs for the full trace.
+            lodestone_ecs::ingest::reset_ingest_entities(w);
             w.resource_mut::<FrameClock>().reset_accumulator();
         });
 
@@ -1496,6 +1519,34 @@ impl Sim {
     #[must_use]
     pub fn is_dead(&self) -> bool {
         self.read(|w| w.get::<Dead>(self.local).is_some())
+    }
+
+    /// The current death's message, for the death screen (issue #103) to draw
+    /// — `None` once the player is alive again, or before any death this
+    /// session. See [`Self::death_message`]'s field doc.
+    #[must_use]
+    pub fn death_message(&self) -> Option<&str> {
+        self.death_message.as_deref()
+    }
+
+    /// Submit a manual respawn request (`ClientAction::Respawn`) — the death
+    /// screen's Respawn button. A no-op unless the player is actually flagged
+    /// dead, so a stray call (a double-click, a leftover queued action after
+    /// the server already respawned us) cannot send an unsolicited respawn
+    /// mid-game, and a no-op off a live session (nothing to send to).
+    ///
+    /// Manual because [`crate::net::run`] now builds the client with
+    /// [`lodestone_client::RespawnPolicy::Manual`] (issue #103): the library
+    /// used to answer every `Death` event with an automatic
+    /// `ClientAction::Respawn`, which is what let the shell ride through death
+    /// with no screen at all. See `docs/pause-menu.md`'s note on the death
+    /// screen for the full picture.
+    pub fn respawn(&mut self) {
+        if self.is_dead()
+            && let Some(net) = &self.net
+        {
+            net.send_action(ClientAction::Respawn);
+        }
     }
 
     /// Number of respawns observed since the session started — a diagnostic the
@@ -3559,21 +3610,23 @@ impl Sim {
                 // components on `self.local`, so [`Self::health`], [`Self::food`]
                 // and [`Self::experience`] read what they always read and this
                 // side has nothing left to do. Death is still a separate event
-                // ([`NetUpdate::Death`], which the library always emits on the
-                // death packet); health reaching zero is not itself a session
-                // event and does not unload chunks.
-                NetUpdate::Death => {
+                // ([`NetUpdate::Death`]); health reaching zero is not itself a
+                // session event and does not unload chunks.
+                NetUpdate::Death { message } => {
                     // Death is a state the shell rides through, not the end of the
-                    // session. The client library's `RespawnPolicy::Automatic`
-                    // already answers the death packet with a `ClientAction::
-                    // Respawn`, so the shell does not send anything here: it marks
-                    // itself dead (which freezes movement in `step`) and stays
-                    // Connected, waiting for the server-confirmed respawn. The new
-                    // position rides in on the placement teleport that follows
+                    // session. `net::run` now builds the client with
+                    // `RespawnPolicy::Manual` (issue #103), so nothing respawns
+                    // automatically here: this arm marks the player dead (which
+                    // freezes movement in `step`) and records the message for the
+                    // death screen (`app.rs`'s `drive_ui_from_session` notices
+                    // `is_dead()` and shows it); the screen's Respawn button is
+                    // what eventually calls `Self::respawn`. The new position
+                    // rides in on the placement teleport that follows
                     // `NetUpdate::Respawned`, whose arm snaps `prev_position` too.
                     if self.recover_from_death {
                         self.set_dead(true);
-                        self.status = "you died — respawning…".into();
+                        self.death_message = Some(message);
+                        self.status = "you died".into();
                     } else {
                         // Retained only as the live death gate's negative control:
                         // the pre-fix behaviour that declared the session over and
@@ -3591,6 +3644,7 @@ impl Sim {
                     // site across the world to the new spawn (the same class of
                     // bug as the original far-spawn camera gap).
                     self.set_dead(false);
+                    self.death_message = None;
                     let local = self.local;
                     self.write(|w| {
                         if let Some(mut count) = w.get_mut::<RespawnCount>(local) {
