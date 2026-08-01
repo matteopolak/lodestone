@@ -145,6 +145,104 @@ vanilla's per-tick decrement. `EntityHurtAnimation`'s `yaw` field is not
 carried into the component — vanilla's own override accepts the parameter and
 never stores it either.
 
+### The per-entity hurt/death red overlay (issue #98, entity half)
+
+Issue #98 asked for a "hurt flash and screen shake." Before writing any code,
+both premises were checked against `.cache/mc/26.2/client-src` directly, and
+**neither is a full-screen effect in vanilla**:
+
+- `ScreenEffectRenderer.java` — the class this port's underwater/fire overlay
+  pass (`crate::screen_effects`, `docs/screen-overlays.md`) already
+  transliterates — has zero `hurt` references. `Gui.java`, `LevelRenderer.java`
+  and `GameRenderer.java` were also grepped clean for any screen-space quad tied
+  to `hurtTime`. The only two things vanilla ties to the **local player's own**
+  `hurtTime` are `bobHurt` (a camera *roll*, `GameRenderer.java:297-313`) and
+  the per-entity overlay below — there is no third, separate "screen effect."
+- **`bobHurt` is issue #58's, not #98's**, by #58's own checklist text: "`bobHurt`
+  — the damage tilt, from `hurtTime`/`hurtDuration` and `hurtDir`. This is the
+  'screen tilt thing': a roll about the damage direction, not a shake." Issue
+  #98's own body agrees — "Not the same as bobHurt (#58)". This repo's
+  `camera_rig.rs` was deliberately left untouched by the #98 work below to
+  avoid duplicating or conflicting with whoever picks up #58.
+- **No camera-shake mechanism exists anywhere in `client-src`**, for
+  explosions or anything else: grepping `client/` for `[Ss]hake` turns up only
+  the bow-draw item wobble in `ItemInHandRenderer.java` (a held-item pose
+  animation, unrelated to the camera). `ClientExplosionTracker.java` — the
+  class that *does* react to a nearby explosion client-side — only ever spawns
+  particles; it holds no camera reference at all. Issue #98's "vanilla shakes
+  the camera on nearby explosions" does not hold up, and nothing was built for
+  it here. If this is still wanted, it is a **new game-feel mechanic**, not a
+  vanilla port, and should be scoped as one explicitly rather than silently
+  invented under a "port" issue.
+
+What vanilla **does** have, and what this pass actually builds, is a per-entity
+model overlay: `LivingEntityRenderer.java:281` sets `state.hasRedOverlay =
+entity.hurtTime > 0 || entity.deathTime > 0`, sampled from the baked
+`OverlayTexture` lookup (`OverlayTexture.java`) — the `y < 8` row is a flat
+ARGB `-1291911168` for every `x`, i.e. `(178, 255, 0, 0)`: pure red at alpha
+`178/255`. This is a **blend toward red, not a multiply** — vanilla's own
+overlay is composited over the shaded texel, not folded into the tint's
+gamma-multiply, and treating it as a multiply would crush the mob toward black
+instead of washing it red. It applies to *any* drawn living entity — including
+the local player's own third-person body — never the local player's own
+screen; a first-person player cannot see their own overlay, matching vanilla
+(there is no first-person hurt feedback beyond `bobHurt`, #58's territory, and
+the HUD heart flash, `hud.rs`'s territory).
+
+**The render mechanism**, in `crates/lodestone-render/src/entity_pipeline.rs`:
+
+- `EntityInstanceRaw::tint`'s previously-unused top byte (bits 24–31) now
+  carries the overlay's alpha, `HURT_OVERLAY_ALPHA_BYTE = 178` when active, `0`
+  when not — the tint word already rides the instance buffer at wgpu's
+  4-bind-group floor (see the field's own doc on why a fifth bind group is the
+  one thing this shader cannot afford), so this reuses that byte instead of
+  adding a new vertex attribute or a new group.
+- `EntityInstanceRaw::with_hurt_overlay(bool)` is the builder, chainable with
+  `with_tint` (dyed leather plus a hurt wearer both read back correctly — see
+  `hurt_overlay_shares_the_tint_word_without_colliding`).
+- `ENTITY_WGSL`'s `fs_main` blends `mix(shaded, vec3(1.0, 0.0, 0.0), in.overlay)`
+  in the same gamma-space stage the tint/shade multiply already uses, then
+  round-trips back to linear — one round-trip, matching the shader's existing
+  convention rather than adding a second one.
+- Vanilla's gate is boolean (`hurtTime > 0`), not a fade by how much of
+  `hurtTime` remains, so `with_hurt_overlay` takes a `bool`, not a
+  `0.0..=1.0` strength.
+
+**What does not reach the shell yet: per-entity `HurtTime`.** This is the
+`on_fire` shape exactly (`docs/screen-overlays.md`'s "What does not reach the
+shell yet" section) — a real, gated, pixel-proven mechanism with no data
+feeding it, not a placeholder pretending to work. `HurtTime` already exists and
+already counts down (`crates/lodestone-ecs/src/entity.rs`), but nothing in
+`crates/lodestone-shell/src/entities.rs` (`EntitySnapshot`'s builder) or
+`gpu.rs` (the actual `upload_instances_tinted` call sites, `gpu.rs:1997` and
+`:2110`) reads it yet. Both files are out of scope for the change that landed
+`with_hurt_overlay` — the patch spec:
+
+1. **`crates/lodestone-shell/src/entities.rs`**: `EntitySnapshot` needs a
+   `hurt: bool` field (`HurtTime(u32) > 0`, read off the same per-entity query
+   `fold_snapshots`/whatever assembles the snapshot already has `HurtTime`
+   available from, since the component exists and ticks today). This is a
+   *per-entity* value, unlike `on_fire`'s single session-scoped bool, so it
+   cannot reuse `on_fire`'s `Vitals`-field shape — it belongs on
+   `EntitySnapshot` itself, next to `item`/`velocity`.
+2. **`crates/lodestone-shell/src/gpu.rs`**: the batch struct `p` that
+   `upload_instances_tinted(device, &p.transforms, &p.lights, &p.tints)` reads
+   at `gpu.rs:1997`/`:2110` needs a parallel `p.hurt: Vec<bool>` (or the tint
+   byte pre-folded into a single `Vec<u32>` alongside `p.tints`), and the call
+   site needs a new `upload_instances_tinted_and_hurt`-shaped helper (or
+   `EntityInstanceRaw::with_tint(...).with_hurt_overlay(...)` chained inside a
+   new upload helper in `entity_pipeline.rs`) to set both bits of the same
+   `tint` word. `upload_instances` (the untinted call at `gpu.rs:1818`, armour
+   and most mobs) needs the equivalent `_hurt` variant too, since most hurt
+   entities are not wearing dyed leather.
+3. Local-player-specific behaviour: the local player's own third-person body
+   (when one exists — see `apply_local_player_login`'s doc on why the local
+   player has no `EntityKind`/`Position` today, `docs/screen-overlays.md`'s
+   "on-fire" section covers the identical gap) would need the same
+   `entity_view()` reachability fix `on_fire` still needs before it can ever
+   show a hurt overlay on the player's own body in a future third-person
+   camera.
+
 ### The attack-strength ticker and the crosshair indicator (issue #121)
 
 Built as one unit deliberately: the ticker (state) and the crosshair reticle
@@ -259,14 +357,19 @@ already landed as the natural place a crit read would plug into
 half, so they stay unbuilt rather than half-started. Whoever adds the sweep
 sound or the crit particle burst is the natural owner.
 
-**`HurtTime` has no render-side consumer yet.** `entities.rs` does not read it
-— nobody asked it to. The patch spec for that hookup: read `HurtTime` (and
-maybe `EntityFlags`) off each drawn entity in whatever assembles
-`EntitySnapshot` (`crates/lodestone-shell/src/entities.rs`), and drive a red
-tint / a "just hit" pose the same way the walk cycle already reads other
-per-entity components there. Local-player-specific hurt feedback (screen tint,
-camera shake on being hit) is issue #58, not this one — it needs per-tick
-camera state that does not exist yet.
+**`HurtTime` still has no render-side consumer wired to production.** Issue
+#98 landed the render *mechanism* — `EntityInstanceRaw::with_hurt_overlay` and
+the shader blend in `crates/lodestone-render/src/entity_pipeline.rs`, pixel-
+gated in `crates/lodestone-render/tests/entity_hurt_overlay_pixels.rs` — but
+`entities.rs` still does not read `HurtTime` into `EntitySnapshot`, and
+`gpu.rs` still does not call the new builder. See "The per-entity hurt/death
+red overlay (issue #98, entity half)" above for the exact patch spec and why
+those two files were out of scope for that change. Local-player-specific
+camera feedback (`bobHurt`, the "screen tilt thing") is issue #58's, not #98's
+or this component's — confirmed against #58's own checklist, which already
+names `bobHurt`/`hurtTime`/`hurtDir` as its scope. There is no vanilla
+full-screen colour overlay or camera shake for taking damage at all — see
+issue #98's section above for the jar evidence.
 
 ## Configuration
 
@@ -275,6 +378,10 @@ camera state that does not exist yet.
   modifier tracked.
 - `crates/lodestone-ecs/src/ingest.rs::HURT_DURATION_TICKS` — `10`, vanilla's
   `hurtDuration` constant.
+- `crates/lodestone-render/src/entity_pipeline.rs::HURT_OVERLAY_ALPHA_BYTE` —
+  `178`, vanilla's hurt/death overlay alpha (`OverlayTexture`'s red row,
+  `-1291911168`'s alpha channel). Not configurable; matches
+  `LivingEntityRenderer.java:281`'s boolean gate exactly, with no fade.
 - The attack-strength delay has no standalone constant: it is
   `20.0 / attack_speed_attribute`, computed fresh in
   `Sim::attack_strength_delay` every call. The only literal is the registry
@@ -304,6 +411,10 @@ camera state that does not exist yet.
 - The GUI atlas's `hud/crosshair_attack_indicator_background`/
   `hud/crosshair_attack_indicator_progress` sprites (already stitched from
   `client.jar` — no new asset plumbing).
+- `lodestone_render::entity_pipeline::{EntityInstanceRaw, HURT_OVERLAY_ALPHA_BYTE}`
+  — the per-entity hurt/death overlay's render-side mechanism (issue #98).
+  Currently reached only by `crates/lodestone-render/tests/
+  entity_hurt_overlay_pixels.rs`; not yet called from `lodestone-shell`.
 
 ## How to change it
 
@@ -331,8 +442,13 @@ camera state that does not exist yet.
   will *not* change the delay, because nothing generates that packet without
   a server; that is a real, current gap for offline testing, not a bug in the
   live path.
-- Adding the render-side hurt tint: `HurtTime` already exists and already
-  counts down correctly; the missing half is entirely in `entities.rs`.
+- Adding the render-side hurt tint: the mechanism (`EntityInstanceRaw::
+  with_hurt_overlay`, `entity_pipeline.rs`) already exists and is pixel-gated;
+  `HurtTime` already exists and already counts down correctly. The missing
+  half is entirely `entities.rs` (build a per-entity `hurt: bool`) plus
+  `gpu.rs` (thread it into the `upload_instances*` call sites) — see the exact
+  spec in "The per-entity hurt/death red overlay (issue #98, entity half)"
+  above.
 - Changing entity reach/attribute modifiers: `ENTITY_REACH` is a `const`
   today, not attribute-driven. Creative's `+2.0` needs an attribute-modifier
   pipeline this shell does not have; do not hardcode `5.0` for creative
@@ -341,3 +457,30 @@ camera state that does not exist yet.
   (`Sim::update_target` calls `update_entity_target` with the exact `origin`/
   `dir`/`block_hit` it just used) — computing them independently would let the
   two disagree about, e.g., a diagonal look direction.
+
+## The hurt-overlay gate, and what it printed (issue #98)
+
+`#[ignore]`d GPU gate, needs no `client.jar` (a synthetic flat sheet, like
+`entity_variant_pixels.rs`'s): `cargo test -p lodestone-render --test
+entity_hurt_overlay_pixels -- --ignored --nocapture`. Actually run on this
+machine, not predicted:
+
+```text
+=== HURT OVERLAY PIXEL GATE ===
+mob bbox: x[96..159] y[0..229], area 9498 px
+control A (no with_hurt_overlay call) vs control B (with_hurt_overlay(false)): 0 px differ (must be 0)
+determinism (hurt x2): 0 px differ (must be 0)
+reddened mob pixels: 9498 / 9498
+background pixels changed by the overlay: 0 (must be 0)
+overlay alpha byte: 178 (vanilla OverlayTexture red row, LivingEntityRenderer.java:281)
+```
+
+Both controls are executed, not described: control A/B proves `false` (the
+`HurtTime == 0` case) is bit-identical to the code path that existed before
+this change, and the background count proves the effect never leaks outside
+the entity's own silhouette — it cannot become a de-facto full-screen tint by
+accident. 100% of the silhouette reddened rather than a fraction, because the
+comparison is per-pixel against that same pixel's own pre-overlay colour
+(cancelling out per-face diffuse shading), not a global average — see the
+gate's own module doc for why a bounding box is printed on every run, not just
+on failure.

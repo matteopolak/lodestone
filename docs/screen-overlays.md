@@ -70,6 +70,26 @@ drew. Vanilla runs both at once when submerged (short water fog *and* the
 tinted overlay); nothing here changes `fog.rs`, and this pass does not read
 `FogSettings` at all.
 
+### Not added here: a "hurt flash" (issue #98)
+
+Issue #98 asked for a full-screen red tint on taking damage, framed as
+plausibly belonging in this pass — this file's own module doc, and the fact
+that this pass already draws "exactly this shape of thing," is why a later
+agent's task briefing pointed here first. It does not belong here, and nothing
+was added: `ScreenEffectRenderer.java` (this pass's own vanilla source) has
+**zero** references to `hurt`/`hurtTime` anywhere in it, and `Gui.java`/
+`LevelRenderer.java`/`GameRenderer.java` were grepped clean too. Vanilla's only
+local-player-facing responses to taking damage are `bobHurt` (a camera roll,
+issue #58's scope, not a screen-space overlay) and a per-entity model overlay
+that is invisible on the local player's own first-person view (that overlay's
+render mechanism, and the full jar citations, are in `docs/combat.md`'s "The
+per-entity hurt/death red overlay (issue #98, entity half)" section). A
+full-screen tint here would be **invented**, not ported — if one is still
+wanted, it needs to be scoped as new game-feel work, not vanilla parity, and
+this file's `ScreenEffects` struct is still the right place to add it *if*
+that decision is made (one more `bool`, one more mix in `OVERLAY_WGSL`,
+exactly `on_fire`'s shape) — it just was not built speculatively here.
+
 ### Fire: a real animated texture, a simplified placement
 
 `submitFire` (`ScreenEffectRenderer.java:168-180`) draws two quads sampling

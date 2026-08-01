@@ -101,20 +101,41 @@ pub struct EntityInstanceRaw {
     /// [`ModelVertex::light`](crate::models::ModelVertex::light), so the entity
     /// and model shaders unpack it with identical code.
     pub light: u32,
-    /// Packed `0x00RRGGBB` **gamma-space** tint, multiplied into the texel.
-    /// [`NO_TINT`] (white) is "no tint" and is what every mob passes.
+    /// Packed `AARRGGBB`: bits 0–23 are the **gamma-space** tint, multiplied
+    /// into the texel exactly as before; bits 24–31 are the hurt/death overlay
+    /// alpha, added on top ([`HURT_OVERLAY_ALPHA_BYTE`] when set, `0` when not).
+    /// [`NO_TINT`] (white, no overlay) is what every mob passes by default.
+    ///
+    /// The overlay byte rides in the tint word's previously-unused top byte
+    /// rather than a new vertex attribute, for the same reason fog rides in the
+    /// group-0 camera uniform: this shader is at wgpu's 4-bind-group floor (see
+    /// `CLAUDE.md`), and this instance buffer already has a spare byte sitting
+    /// idle in every existing tint value, so widening the *meaning* of one
+    /// `Uint32` costs nothing a new attribute would.
     ///
     /// Gamma space, not linear: vanilla is not colour-managed and its vertex
     /// colour multiplies the gamma-encoded texel byte. The shader therefore
-    /// folds this into the *same* `srgb_to_linear(linear_to_srgb(rgb) * …)`
-    /// round-trip the directional and world-light shades already use. Doing it
-    /// in linear light pulls every factor toward 1.0 and washes dyed leather
-    /// out.
+    /// folds the tint multiply into the *same* `srgb_to_linear(linear_to_srgb(rgb)
+    /// * …)` round-trip the directional and world-light shades already use, and
+    /// blends the overlay in that same gamma-space stage. Doing either in linear
+    /// light pulls the factor toward 1.0 and washes the result out.
     pub tint: u32,
 }
 
-/// The `tint` value meaning "leave the texel alone": opaque white.
+/// The `tint` value meaning "leave the texel alone": opaque white, no overlay.
 pub const NO_TINT: u32 = 0x00FF_FFFF;
+
+/// The hurt/death overlay's alpha byte, packed into `tint`'s bits 24–31.
+///
+/// Vanilla's `OverlayTexture` (`net/minecraft/client/renderer/texture/
+/// OverlayTexture.java`) bakes a 16×16 lookup texture whose `y < 8` (red) row is
+/// a flat `ARGB.color(...)` of `-1291911168` for every `x` — i.e. `(178, 255, 0,
+/// 0)` — sampled whenever `LivingEntityRenderer.java:281` sets
+/// `state.hasRedOverlay = entity.hurtTime > 0 || entity.deathTime > 0`. `178` is
+/// that overlay's alpha byte; `255, 0, 0` is pure red, which is why the blend
+/// below mixes toward `vec3(1.0, 0.0, 0.0)` rather than reading a colour out of
+/// this word.
+pub const HURT_OVERLAY_ALPHA_BYTE: u32 = 178;
 
 impl EntityInstanceRaw {
     /// Pack a [`glam::Mat4`] into the instance format (column-major), lit
@@ -144,8 +165,27 @@ impl EntityInstanceRaw {
     /// [`EntityInstance::with_light`]: crate::entity::EntityInstance::with_light
     #[must_use]
     pub fn with_tint(mut self, rgb: [u8; 3]) -> Self {
-        self.tint =
-            (u32::from(rgb[0]) << 16) | (u32::from(rgb[1]) << 8) | u32::from(rgb[2]);
+        self.tint = (self.tint & 0xFF00_0000)
+            | (u32::from(rgb[0]) << 16)
+            | (u32::from(rgb[1]) << 8)
+            | u32::from(rgb[2]);
+        self
+    }
+
+    /// Set or clear the hurt/death red overlay (bits 24–31 of `tint`).
+    ///
+    /// Vanilla's gate is boolean, not a fade: `hasRedOverlay = entity.hurtTime
+    /// > 0 || entity.deathTime > 0` (`LivingEntityRenderer.java:281`) — no
+    /// interpolation by how much of `hurtTime` remains, so this takes a `bool`
+    /// rather than a `0.0..=1.0` strength. Builder-style, like [`with_tint`],
+    /// so a caller that also dyes leather can chain both without either
+    /// clobbering the other's bits.
+    ///
+    /// [`with_tint`]: Self::with_tint
+    #[must_use]
+    pub fn with_hurt_overlay(mut self, active: bool) -> Self {
+        let alpha = if active { HURT_OVERLAY_ALPHA_BYTE } else { 0 };
+        self.tint = (self.tint & 0x00FF_FFFF) | (alpha << 24);
         self
     }
 
@@ -797,6 +837,10 @@ struct VsOut {
     // submitted model. `vec3(1)` is `NO_TINT` and is what every mob carries;
     // dyed leather armour is the only thing that sets it today.
     @location(3) @interpolate(flat) tint: vec3<f32>,
+    // Flat, and boolean-shaped (0.0 or HURT_OVERLAY_ALPHA_BYTE/255): vanilla's
+    // hurt/death overlay is a hard per-tick gate, not a fade — see
+    // `HURT_OVERLAY_ALPHA_BYTE`'s doc.
+    @location(4) @interpolate(flat) overlay: f32,
 };
 
 @vertex
@@ -826,14 +870,16 @@ fn vs_main(
     out.uv = uv;
     out.world = world.xyz;
     out.light_term = 0.2 + 0.8 * max(sky, block);
-    // Unpack 0x00RRGGBB. These bytes are *gamma-space* sRGB, exactly as
-    // vanilla's vertex colour is, and are multiplied inside the transfer
-    // round-trip below rather than in linear light.
+    // Unpack bits 0-23 as 0x00RRGGBB. These bytes are *gamma-space* sRGB,
+    // exactly as vanilla's vertex colour is, and are multiplied inside the
+    // transfer round-trip below rather than in linear light.
     out.tint = vec3<f32>(
         f32((tint >> 16u) & 255u),
         f32((tint >> 8u) & 255u),
         f32(tint & 255u),
     ) / 255.0;
+    // Bits 24-31: the hurt/death overlay alpha (0 or HURT_OVERLAY_ALPHA_BYTE).
+    out.overlay = f32((tint >> 24u) & 255u) / 255.0;
     return out;
 }
 
@@ -858,7 +904,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // colour multiplied into the gamma-encoded texel byte, and doing it in
     // linear light would pull it toward white. Leather's base sheet is
     // near-greyscale, so it is the whole visible colour of the piece.
-    let lit = srgb_to_linear(linear_to_srgb(tex_col.rgb) * in.tint * diffuse * in.light_term);
+    let shaded = linear_to_srgb(tex_col.rgb) * in.tint * diffuse * in.light_term;
+    // Vanilla's hurt/death overlay (`OverlayTexture`, sampled per
+    // `LivingEntityRenderer.java:281`'s `hasRedOverlay`) is a flat-red **blend**
+    // at a fixed alpha, not a multiply — multiplying by red would crush the mob
+    // toward black instead of washing it red. Blended in the same gamma-space
+    // stage as the tint/shade multiply above, per this shader's convention that
+    // colour math happens in gamma bytes, not linear light.
+    let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), in.overlay);
+    let lit = srgb_to_linear(overlaid);
     // Fade toward the fog colour by view distance, on the same curve as terrain,
     // so a mob at the render-distance edge or under water dissolves with the
     // blocks around it instead of hanging in front of them.
@@ -906,6 +960,44 @@ mod tests {
         // R in the high byte: a byte-order slip would make leather blue.
         assert_eq!((leather.tint >> 16) & 0xFF, 0xA0);
         assert_eq!(leather.tint & 0xFF, 0x40);
+    }
+
+    /// The overlay byte lives in bits 24-31, and setting or clearing it must
+    /// never disturb the tint's own bits 0-23 (or vice versa) — dyed leather
+    /// worn by a hurt mob needs both at once.
+    #[test]
+    fn hurt_overlay_shares_the_tint_word_without_colliding() {
+        let m = glam::Mat4::IDENTITY;
+
+        // Off by default, same as tint.
+        let plain = EntityInstanceRaw::new(m, 0);
+        assert_eq!(plain.tint, NO_TINT);
+
+        // Overlay alone: RGB bits untouched (still opaque white), alpha byte set
+        // to vanilla's 178 (`-1291911168`'s alpha channel, `OverlayTexture`'s red
+        // row, `LivingEntityRenderer.java:281`).
+        let hurt = EntityInstanceRaw::new(m, 0).with_hurt_overlay(true);
+        assert_eq!(hurt.tint & 0x00FF_FFFF, NO_TINT);
+        assert_eq!((hurt.tint >> 24) & 0xFF, HURT_OVERLAY_ALPHA_BYTE);
+        assert_eq!(HURT_OVERLAY_ALPHA_BYTE, 178);
+
+        // Setting then clearing must return to exactly the untouched value, not
+        // merely a "no visible effect" value — a stray bit here would silently
+        // change the packed word's meaning for any future consumer.
+        let cleared = hurt.with_hurt_overlay(false);
+        assert_eq!(cleared.tint, NO_TINT);
+
+        // Tint and overlay compose: dyed leather (bits 0-23) plus hurt (bits
+        // 24-31) must both read back correctly regardless of call order.
+        let leather_hurt = EntityInstanceRaw::new(m, 0)
+            .with_tint(lodestone_assets::equipment::UNDYED_LEATHER_RGB)
+            .with_hurt_overlay(true);
+        let hurt_leather = EntityInstanceRaw::new(m, 0)
+            .with_hurt_overlay(true)
+            .with_tint(lodestone_assets::equipment::UNDYED_LEATHER_RGB);
+        assert_eq!(leather_hurt.tint, hurt_leather.tint);
+        assert_eq!(leather_hurt.tint & 0x00FF_FFFF, 0x00A0_6540);
+        assert_eq!((leather_hurt.tint >> 24) & 0xFF, HURT_OVERLAY_ALPHA_BYTE);
     }
 
     /// The uniform the entity shader's `Camera` struct maps onto: 80 bytes of
