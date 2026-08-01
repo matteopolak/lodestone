@@ -345,12 +345,18 @@ pub struct AnimInput {
     /// which raises a zombie's arms from `-PI/2.25` to `-PI/1.5`.
     ///
     /// It rides bit `0x04` of `Mob.DATA_MOB_FLAGS_ID` — a *separate* byte from
-    /// the shared entity flags, at its own metadata index (15 in 26.2), which
-    /// nothing decodes yet. (An earlier note here called it a shared-flags bit;
-    /// it is not, and looking for it at index 0 would find the unrelated
-    /// unused bit there.) So the shell always passes `false` — the
-    /// non-aggressive branch is the pose a player sees on an idle or
-    /// merely-walking zombie, and it is the one that was missing.
+    /// the shared entity flags, at its own metadata index (15 in 26.2, confirmed
+    /// against a jar dump rather than counted). An earlier note here called it a
+    /// shared-flags bit; it is not, and looking for it at index 0 would find the
+    /// unrelated unused bit there.
+    ///
+    /// **This used to be hardcoded `false` at every call site**, which made both
+    /// consumers of it dead code: the zombie arm lift here, and (once #57 landed
+    /// the pose machinery) the skeleton bow draw, which vanilla selects from this
+    /// flag and *not* from the using-item bit. Issue #379 decoded the byte;
+    /// `lodestone_shell::entities::render_anim` now feeds it from a `MobState`
+    /// component. A `false` here still means exactly what it says — the pose an
+    /// idle or merely-walking mob is in.
     pub aggressive: bool,
     /// How the arms are held for the item in use, if any (issue #57).
     ///

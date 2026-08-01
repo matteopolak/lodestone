@@ -137,7 +137,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `ITEM_STACK` serializer so a dropped item knows what it is, why the item codec
   is shared rather than duplicated, and the one place the decoder deliberately
   abandons alignment instead of misreading it.
-- [Item-use arm poses](./item-use-arm-poses.md) — the bow draw and crossbow wind
+- [Arm poses](./item-use-arm-poses.md) — the bow draw and crossbow wind, from
+  either of the two metadata bits that drive them (using-item for players,
+  aggressive for mobs)
   (issue #57): why metadata index 8 is ambiguous between `LivingEntity`'s
   using-item bitfield and an arrow's **crit** flag (both plain bytes, so a naive
   decoder reports every critical arrow as drawing a bow), why the draw fraction has

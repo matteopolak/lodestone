@@ -1,38 +1,92 @@
-# Item-use arm poses (bow and crossbow)
+# Arm poses (bow and crossbow)
 
 ## What it is
 
-The chain that turns `LivingEntity`'s synced **using-item** bit into a visibly drawn
-bow or a winding crossbow on a mob or a remote player. Closes the mob half of
-[issue #57](https://github.com/matteopolak/lodestone/issues/57); the local player's
-own first-person view is **not** covered — see [Not done](#not-done).
+The chain that turns a synced metadata bit into a visibly drawn bow or a winding
+crossbow. There are **two different bits, on two different bytes, and which one
+applies depends on what kind of entity it is**:
 
-Before this, nothing in the tree decoded the bit at all. The only trace of the
+| entity | bit | vanilla source |
+|---|---|---|
+| a player, or a remote player | `LivingEntity` **using-item**, index 8 `0x01` | `AvatarRenderer.getArmPose` |
+| a **mob** | `Mob` **aggressive**, index 15 `0x04` | `AbstractSkeletonRenderer.getArmPose` |
+
+[Issue #57](https://github.com/matteopolak/lodestone/issues/57) landed the first
+row and the whole pose machinery.
+[Issue #379](https://github.com/matteopolak/lodestone/issues/379) landed the
+second, because the first **reaches zero mobs** — see
+[Two mechanisms](#two-mechanisms-and-why-the-first-one-covers-no-mobs). The local
+player's own first-person view is still not covered — see
+[Not done](#not-done).
+
+Before #57, nothing in the tree decoded either bit. The only trace of the
 mechanism was a doc comment in `lodestone-render/src/entity.rs` describing what
 vanilla does with it.
+
+## Two mechanisms, and why the first one covers no mobs
+
+#57 selected the pose from the using-item bit alone. That is exactly right for a
+player: `startUsingItem` sets the bit, and `AvatarRenderer` reads it.
+
+It is the wrong mechanism for a mob, and not by a little. A skeleton's ranged
+attack goal calls `performRangedAttack` — it **never enters the item-use state** —
+so `LivingEntity`'s using-item bit is `false` for the entire life of every
+skeleton that has ever shot at anyone. Vanilla's mob renderers do not read it;
+they read `Mob.isAggressive()` (`AbstractSkeletonRenderer.java:38`):
+
+```java
+return mob.getMainArm() == arm && mob.isAggressive() && mob.getMainHandItem().is(Items.BOW)
+       ? HumanoidModel.ArmPose.BOW_AND_ARROW : super.getArmPose(mob, arm);
+```
+
+So after #57 the pose was implemented, unit-tested, proven to reach pixels by its
+own GPU gate — and drawn on nothing. That gate sets `AnimInput::arm_pose`
+*directly* and is structurally blind to it: it starts downstream of the decision
+about which entities get the pose. **A gate that starts below the selection cannot
+see a wrong selection**, which is the general lesson.
+
+The override is per **renderer**, not per model, so it is keyed on the entity
+type by `lodestone_render::mob_draws_bow_when_aggressive` — every
+`AbstractSkeletonRenderer` subclass in 26.2: `skeleton`, `wither_skeleton`,
+`stray`, `bogged`, `parched`. An aggressive *zombie* holding a bow gets no such
+pose in vanilla, and a pillager's arms come from a different enum on a different
+model class (see [Not done](#not-done)).
+
+### The second island the same flag was hiding
+
+`AnimInput::aggressive` already existed and `Skeleton::animate_zombie_arms`
+already consumed it — `AnimationUtils.animateZombieArms`' arm drop is `-PI/1.5`
+when aggressive and `-PI/2.25` when not. **Every call site in the shell passed a
+hardcoded `false`**, with a comment saying the bit was undecoded. So an aggressive
+zombie's raised arms were dead code too, and #379 closed both with one decode.
+`zombified_piglin` was also missing from `humanoid_arms_for`'s zombie family
+(`ZombifiedPiglinModel:14` calls `animateZombieArms`), so it was getting a plain
+player arm swing; that is fixed in the same change.
 
 ## How it works
 
 The whole chain, producer to pixels:
 
-| stage | where |
-|---|---|
-| `set_entity_data` index 8, a `BYTE` | `protocol/v770/src/packets/metadata.rs` (`IDX_LIVING_FLAGS`) |
-| gated on the entity being a `LivingEntity` | `TrackedEntity` in the same file, populated at `add_entity` in `adapter.rs` |
-| version-free `EntityMetadataUpdate::living_flags` | `lodestone-model/src/event.rs` |
-| bit meanings | `LivingEntityFlags` in `lodestone-entity/src/metadata.rs` |
-| fold into a component + local tick counter | `ingest::apply_entity_item_use`, `ingest::tick_entity_item_use` |
-| the component | `ItemUse` in `lodestone-ecs/src/entity.rs` |
-| pick a pose from the held item | `entities::arm_pose_for` in `lodestone-shell` |
-| carry it to the renderer | `AnimInput::arm_pose` / `arm_pose_left_hand` |
-| apply it to the arms | `Skeleton::pose_arms_for_item` in `lodestone-render/src/entity_anim.rs` |
-| draw | the ordinary entity pass — `EntityInstance::new` already composes posed parts, and `hand_transform` follows, so the **held bow model follows the posed arm for free** |
+| stage | player path (index 8) | mob path (index 15) |
+|---|---|---|
+| `set_entity_data` byte | `IDX_LIVING_FLAGS` | `IDX_MOB_FLAGS` — both in `protocol/v770/src/packets/metadata.rs` |
+| the ambiguity guard | `TrackedEntity::living` | `TrackedEntity::mob` — same file, both populated at `add_entity` in `adapter.rs` |
+| version-free field | `EntityMetadataUpdate::living_flags` | `::mob_flags` — `lodestone-model/src/event.rs` |
+| bit meanings | `LivingEntityFlags` | `MobFlags` — both `lodestone-entity/src/metadata.rs` |
+| fold to a component | `ingest::apply_entity_item_use` (+ `tick_entity_item_use`) | `ingest::apply_entity_metadata` |
+| the component | `ItemUse` | `MobState` — both `lodestone-ecs/src/entity.rs` |
+| which types the rule applies to | every living entity | `lodestone_render::mob_draws_bow_when_aggressive` |
+| pick a pose | `entities::arm_pose_for` in `lodestone-shell` — the aggressive branch first, then the using-item one, matching vanilla's `? :` over `super` | |
+| carry it to the renderer | `AnimInput::arm_pose` / `arm_pose_left_hand`, plus `AnimInput::aggressive` | |
+| apply it to the arms | `Skeleton::pose_arms_for_item`, and `animate_zombie_arms` for the zombie family — `lodestone-render/src/entity_anim.rs` | |
+| draw | the ordinary entity pass — `EntityInstance::new` already composes posed parts, and `hand_transform` follows, so the **held bow model follows the posed arm for free** | |
 
-`ingest::handles_event`'s routing switch needed **no new arm**: living flags ride
-`EntityMetadataUpdated`, which the switch already claimed. That is asserted anyway
-by `the_metadata_event_carrying_living_flags_is_claimed_by_this_module`, because
-that switch is this repo's island factory and a later narrowing of it would delete
-the pose silently.
+Both bytes ride the same `ClientEvent::EntityMetadataUpdated`, so
+`ingest::handles_event` needed **no new arm** for either. That is asserted anyway,
+once per byte (`the_metadata_event_carrying_living_flags_is_claimed_by_this_module`
+and `..._mob_flags_...`), because that switch is this repo's island factory and
+"no change required" is exactly the state in which a later narrowing deletes a
+feature silently. It was checked *before* the fold was written, not after.
 
 ### Metadata index 8 is ambiguous, and the wire cannot resolve it
 
@@ -56,6 +110,44 @@ new JVM run. **It is not derivable from `ENTITY_PUSHES_PLAYERS`:** `armor_stand`
 `bat` and `parrot` are `LivingEntity` subclasses that do not push, so reading the
 push table as an is-living test misclassifies exactly the entities whose arm poses
 matter.
+
+### Index 15 is ambiguous too, and `is_living` is **not** enough for it
+
+The mob-flags byte has the same problem one notch tighter, and the interesting part
+is that the obvious guard does not work. The jar dump reports three claimants on
+index 15, all `EntityDataSerializers.BYTE`:
+
+| owner | field | `0x04` means |
+|---|---|---|
+| `Mob` | `DATA_MOB_FLAGS_ID` | **aggressive** |
+| `ArmorStand` | `DATA_CLIENT_FLAGS` | **show arms** (`CLIENT_FLAG_SHOW_ARMS`) |
+| `Display` | `DATA_BILLBOARD_RENDER_CONSTRAINTS_ID` | an enum ordinal |
+
+**`ArmorStand` is a `LivingEntity`.** So unlike index 8, where the collision was
+living-vs-non-living and `is_living` resolved it, this one is living-vs-living: an
+armour stand with arms shown — the ordinary decorative case — would report itself
+as an aggressive mob and, holding a bow, draw it. The guard is therefore
+`entity_census::is_mob`, a **third** census column, strictly narrower than
+`is_living` and generated from a `mob` column added to the same JVM dump. The
+three living non-mobs in 26.2 are `armor_stand`, `mannequin` and `player`,
+asserted by name rather than by count, because the identity of the gap is the
+finding and a later version adding one must be looked at rather than absorbed.
+
+### The index came from the jar, not from a count
+
+Both indices were originally *hand counted* over `SynchedEntityData.defineId`'s
+per-hierarchy declaration-order counter — "8 fields on `Entity`, 7 on
+`LivingEntity`, so `Mob`'s only one is 15". Both counts are right, and looking for
+a way to *check* them turned up **two others that were wrong**:
+`Sheep.DATA_WOOL_ID` and `Horse.DATA_ID_TYPE_VARIANT` were each off by one because
+nobody counted `AgeableMob.AGE_LOCKED` (index 17). See
+`crates/protocol/v770/oracle-java/EntityDataIndexOracle.java` and
+`tests/support/entity_data_index_jvm.txt`: a headless-server dump of every
+`EntityDataAccessor` in the game, sorted by index so **collisions are adjacent
+lines**, with `every_metadata_index_constant_matches_the_jar_dump` asserting all
+ten constants against it — index *and* serializer, since a right index with a
+wrong serializer arm silently never matches, which is exactly how the sheep defect
+behaved.
 
 ### The draw fraction is not on the wire, so we keep our own counter
 
@@ -142,6 +234,36 @@ perfectly correct.
   `Empty`. `ITEM` needs only "is something held", which equipment already says, so
   it is a cheap separate follow-up.
 
+### Aggressive-driven poses deliberately left (#379)
+
+- **A drowned's `THROW_TRIDENT`** (`DrownedRenderer.java:54`: aggressive + a
+  trident). The pose body is two lines (`HumanoidModel.java:359`), and it is left
+  anyway because it is vanilla's first **one-handed** pose —
+  `ArmPose.THROW_TRIDENT(false, true)` — where every pose modelled here is
+  two-handed. One-handed means `HumanoidModel.setupAnim`'s `affectsOffhandPose`
+  fork actually branches, and `Skeleton::pose_arms_for_item` does not implement
+  that fork; adding the pose without it would silently pose the *wrong arm* on an
+  off-hand trident. That is the same defect class as folding the bow's two branches
+  into one signed expression, which already happened once here and looked
+  plausible. **It needs the one-handed dispatch first, not a new pose branch.**
+- **Every illager pose.** `IllagerRenderer:27` does copy `isAggressive` into its
+  render state, but an illager's arms are driven by
+  `AbstractIllager.IllagerArmPose` — a *different enum*, on `IllagerModel`, a
+  different model class — and the value is computed per subclass
+  (`Vindicator.java:107` → `ATTACKING` when aggressive; `Pillager.java:135` the
+  same behind two crossbow cases) rather than being a metadata bit at all.
+  Reaching it needs an illager arm family in `lodestone-render/src/entity_anim.rs`.
+- **`Mob.isLeftHanded`** (bit `0x02` of the same byte) is decoded by `MobFlags` and
+  consumed by nothing. It flips `getMainArm()`, which flips which arm every pose
+  applies to, so a left-handed skeleton draws with the wrong arm. Vanilla sets it
+  for about 5% of mobs at spawn. Plumbing a main-arm through the pose chain is
+  wider than the bit that would feed it, so it is recorded rather than guessed.
+- **`Mob.isNoAi`** (bit `0x01`) is decoded and unused, and correctly so — it is not
+  a render fact. It is modelled because the alternative is a bare `0x04` mask with
+  no name for the bits either side of it. Note for anyone building a live fixture:
+  `NoAI:1b` also **stops a skeleton drawing a bow**, so an aggressive-flag fixture
+  has to set the flag directly rather than provoke real AI.
+
 ## Proof
 
 `crates/lodestone-render/tests/bow_draw_pose_pixels.rs`, `#[ignore]`d:
@@ -177,6 +299,63 @@ deleting the `if living` guard in the decoder turns
 `index_8_on_a_non_living_entity_is_consumed_but_not_surfaced` red with
 `left: Some(1), right: None`.
 
+### The #379 gate: `crates/lodestone-shell/tests/aggressive_bow_pose_pixels.rs`
+
+```
+cargo test -p lodestone-shell --test aggressive_bow_pose_pixels -- --ignored --nocapture
+```
+
+The gate above is not enough, because it sets `AnimInput::arm_pose` **directly**.
+This one starts at a `ClientEvent` in `IngestQueue` and ends at texels: through the
+production `IngestPlugin` + `EntityInterpPlugin` pair, the real
+`extract_entity_draws`, and `RenderState::render` — `app.rs`'s own frame call.
+Reference run (broadside, 320x240):
+
+```
+subject : aggressive=true  arm_pose=BowAndArrow
+control : aggressive=false arm_pose=Empty
+zombie  : aggressive=true  arm_pose=Empty
+rest silhouette : rows 65..=174 cols 146..=173 (28x110, 1544 px)
+bow  silhouette : rows 65..=174 cols 146..=194 (49x110, 1692 px)
+zombie rest sil : rows 65..=174 cols 146..=197 (52x110, 2481 px)
+zombie angry sil: rows 65..=174 cols 146..=195 (50x110, 2381 px)
+changed by pose : rows 91..=129 cols 153..=194 (42x39, 564 px)
+calm control    : identical (correct)
+zombie arm lift : rows 73..=112 cols 150..=197 (48x40, 829 px)
+width gain      : skeleton +21 px, zombie -2 px
+```
+
+Four controls, each run and watched to fail:
+
+| control | how it was broken | what it printed |
+|---|---|---|
+| the selection reaches pixels | `arm_pose_for`'s aggressive branch made unreachable | `arm_pose=Empty`, `left: Empty right: BowAndArrow` |
+| the *pose* reaches pixels | `pose_arms_for_item` early-returns | `changed by pose : NOTHING` |
+| specificity | `"zombie"` added to `mob_draws_bow_when_aggressive` | zombie `arm_pose=BowAndArrow`, specificity assert red |
+| the decoder guard | `if mob` deleted from the index-15 arm | `left: Some(4), right: None`, two tests red |
+
+Each file was restored by `cp` from a scratchpad backup with an md5 check, never by
+`git checkout`.
+
+#### Two of this gate's own premises were false, and both failed *safely*
+
+Worth recording, because both fired an assertion **on correct rendering** — the
+failure direction that looks like a bug in the feature:
+
+1. **"Everything unlike the frame's corner pixel is the mob."** It reported the
+   silhouette as `rows 65..=239 cols 146..=319` — the whole lower-right quadrant,
+   clipped against two borders — and tripped `assert_unclipped`. The cause is
+   `CLAUDE.md`'s *ask what else already paints here*: the **sky is a gradient**, so
+   the corner is not the colour of the rest of the sky. Fixed by differencing
+   against a real entity-free frame rendered through the identical path, which
+   needs no assumption about the background at all.
+2. **"The bow draw must change more pixels than the zombie's arm lift."** False:
+   the measured run has the zombie at 829 px against the skeleton's 564. A zombie's
+   arms already point forward, so lifting them sweeps a wide arc high up. **Area is
+   not the discriminator**; the *directional* broadside **width gain** is
+   (`+21 px` vs `−2 px`), which is what the assertion now reads. This is
+   `CLAUDE.md`'s magnitude species caught in the gate rather than in production.
+
 ### A gate assertion whose own premise was false
 
 The first form of the arm-height assertion was "nothing below the waist differs",
@@ -197,11 +376,15 @@ no-Quick-Charge duration rather than a preference.
 
 ## Dependencies
 
-- `lodestone-data`'s `entity_census::is_living` — the ambiguity guard.
-- `lodestone-entity`'s `LivingEntityFlags` / `UsedHand` — bit meanings.
-- `lodestone-model`'s `EntityMetadataUpdate::living_flags` — the version-free seam.
-- `lodestone-ecs`'s `ItemUse` and its two systems.
-- `lodestone-render`'s `ArmPose`, `AnimInput`, `Skeleton::pose_arms_for_item`.
+- `lodestone-data`'s `entity_census::is_living` and `::is_mob` — the two ambiguity
+  guards, for index 8 and index 15 respectively.
+- `lodestone-entity`'s `LivingEntityFlags` / `UsedHand` / `MobFlags` — bit meanings.
+- `lodestone-model`'s `EntityMetadataUpdate::living_flags` and `::mob_flags` — the
+  version-free seam.
+- `lodestone-ecs`'s `ItemUse` and its two systems, plus `MobState` folded by
+  `apply_entity_metadata`.
+- `lodestone-render`'s `ArmPose`, `AnimInput`, `Skeleton::pose_arms_for_item`,
+  `Skeleton::animate_zombie_arms` and `mob_draws_bow_when_aggressive`.
 - `lodestone-shell`'s `entities::arm_pose_for` and `extract_entity_draws`.
 - Reference only, never transliterated: `.cache/mc/26.2/{src,client-src}`'s
   `LivingEntity`, `AbstractArrow`, `HumanoidModel`, `AnimationUtils`, `AvatarRenderer`,

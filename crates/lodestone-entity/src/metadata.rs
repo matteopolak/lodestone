@@ -343,6 +343,85 @@ impl LivingEntityFlags {
     }
 }
 
+/// The bit meanings inside the **mob** flags byte — a *third* distinct byte, at a
+/// third metadata index, declared by vanilla's `Mob` rather than by `Entity`
+/// ([`SharedEntityFlags`]) or `LivingEntity` ([`LivingEntityFlags`]).
+///
+/// # Why a client needs this, and why the using-item bit is not a substitute
+///
+/// [`aggressive`](Self::aggressive) is what makes a **mob** hold a weapon pose.
+/// Vanilla's mob renderers read `Mob.isAggressive()` directly:
+/// `AbstractSkeletonRenderer.getArmPose` returns `BOW_AND_ARROW` for
+/// `isAggressive() && mainHandItem.is(BOW)`, `DrownedRenderer` returns
+/// `THROW_TRIDENT` on the same test with a trident, and
+/// `AnimationUtils.animateZombieArms` takes it as a parameter and lifts the arms
+/// further when it is set.
+///
+/// The using-item bit in [`LivingEntityFlags`] is a *player* mechanism, driven by
+/// `startUsingItem`. A skeleton shooting at you never sets it — its attack goal
+/// calls `performRangedAttack` without ever entering the item-use state — so a
+/// client that decodes only that bit leaves every mob permanently in the rest
+/// pose while looking, at the wire level, entirely correct (issue #379).
+///
+/// # This byte's index collides with an armour stand's, and *living* is too weak
+///
+/// `Mob.DATA_MOB_FLAGS_ID` is metadata index 15, `BYTE`, and so is
+/// `ArmorStand.DATA_CLIENT_FLAGS` — where the same `0x04` means "show arms". An
+/// armour stand is a `LivingEntity`, so an is-living guard does not separate them;
+/// the version adapter must establish `Mob`. A `None` mob-flags byte therefore
+/// means "not known to be mob flags" and must be read as *not aggressive*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MobFlags {
+    /// The raw byte value.
+    pub bits: u8,
+}
+
+impl MobFlags {
+    const NO_AI: u8 = 0x01;
+    const LEFT_HANDED: u8 = 0x02;
+    const AGGRESSIVE: u8 = 0x04;
+
+    /// Wraps a raw byte.
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self { bits }
+    }
+
+    /// Whether the mob's AI is disabled (`Mob.isNoAi`, `Mob.java:1328`).
+    ///
+    /// Not consumed by rendering, and modelled anyway because the alternative is a
+    /// bare `0x04` mask with no name for the bits either side of it.
+    #[must_use]
+    pub const fn no_ai(self) -> bool {
+        self.bits & Self::NO_AI != 0
+    }
+
+    /// Whether the mob is left-handed (`Mob.isLeftHanded`, `Mob.java:1332`).
+    ///
+    /// Vanilla's `Mob.getMainArm()` returns `LEFT` when this is set, which flips
+    /// which arm every arm pose applies to. Decoded but **not yet consumed**: the
+    /// pose selection assumes a right-handed mob, so a left-handed skeleton draws
+    /// its bow with the wrong arm. That is a visible cosmetic divergence on a rare
+    /// case (vanilla sets it for 5% of mobs at spawn), recorded rather than
+    /// guessed at, because plumbing a main-arm through the pose chain is a wider
+    /// change than the bit that would feed it.
+    #[must_use]
+    pub const fn left_handed(self) -> bool {
+        self.bits & Self::LEFT_HANDED != 0
+    }
+
+    /// Whether the mob is aggressive — `Mob.isAggressive`, `(flags & 4) != 0`
+    /// (`Mob.java:1335`).
+    ///
+    /// "Aggressive" is vanilla's own name for it and it is set by the ranged and
+    /// melee attack goals while a target is being engaged, so it is closer to
+    /// "currently attacking" than to a permanent disposition.
+    #[must_use]
+    pub const fn aggressive(self) -> bool {
+        self.bits & Self::AGGRESSIVE != 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +505,37 @@ mod tests {
         // 0x02 is `crouching` in the shared byte and `offhand` in the living one.
         assert!(SharedEntityFlags::from_bits(0x02).crouching());
         assert_eq!(LivingEntityFlags::from_bits(0x02).used_hand(), UsedHand::Off);
+    }
+
+    #[test]
+    fn mob_flags_decode_each_bit_independently() {
+        assert!(MobFlags::from_bits(0x01).no_ai());
+        assert!(MobFlags::from_bits(0x02).left_handed());
+        assert!(MobFlags::from_bits(0x04).aggressive());
+        assert!(!MobFlags::from_bits(0x03).aggressive());
+        assert!(!MobFlags::from_bits(0x00).aggressive());
+        // All three at once, so no accessor is secretly reading the whole byte.
+        let all = MobFlags::from_bits(0x07);
+        assert!(all.no_ai() && all.left_handed() && all.aggressive());
+    }
+
+    /// The *third* byte's turn at the same trap. `0x04` is `spin_attack` in the
+    /// living byte and `aggressive` in the mob byte, and `0x01` means three
+    /// different things across the three. A byte read through the wrong type is
+    /// plausibly, silently wrong in every direction.
+    #[test]
+    fn all_three_flag_bytes_disagree_on_the_same_bits() {
+        assert!(LivingEntityFlags::from_bits(0x04).spin_attack());
+        assert!(MobFlags::from_bits(0x04).aggressive());
+        // 0x01: on fire / using item / no AI.
+        assert!(SharedEntityFlags::from_bits(0x01).on_fire());
+        assert!(LivingEntityFlags::from_bits(0x01).using_item());
+        assert!(MobFlags::from_bits(0x01).no_ai());
+        // And the mob byte's aggressive bit is *not* the living byte's using-item
+        // bit, which is the whole substance of issue #379: a drawing skeleton sets
+        // the former and never the former's namesake in the other byte.
+        assert!(!LivingEntityFlags::from_bits(0x04).using_item());
+        assert!(!MobFlags::from_bits(0x01).aggressive());
     }
 
     #[test]

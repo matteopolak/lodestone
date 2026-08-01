@@ -312,6 +312,37 @@ impl ItemUse {
     }
 }
 
+/// The mob-flags byte's decoded state — today just **aggressive**, vanilla's
+/// `Mob.isAggressive()` (issue #379).
+///
+/// # Why this is not a field on [`ItemUse`]
+///
+/// They come from *different bytes at different metadata indices* and mean
+/// unrelated things. `ItemUse` is `LivingEntity`'s using-item state, which is what
+/// a **player** sets when drawing a bow; this is `Mob`'s attack state, which is
+/// what a **mob** sets. A skeleton shooting at you sets this and never the other,
+/// and a player drawing a bow sets the other and never this — so folding them
+/// would make "is the bow drawn" read off whichever byte arrived last.
+///
+/// # Why it has no tick counter
+///
+/// A bow draw's *fraction* has to be counted locally because vanilla never syncs
+/// it. Aggressive has no fraction: `AbstractSkeletonRenderer` maps it straight to
+/// `BOW_AND_ARROW`, which is a fixed pose, and `animateZombieArms` maps it to one
+/// of two constants. So this is a plain latched boolean and `IngestSet::Apply`'s
+/// `Commands::insert` (which *replaces* the component) is the right shape for it,
+/// unlike `ItemUse`.
+///
+/// **Absent** until the first metadata packet carrying the byte, like
+/// [`AttackSwing`], [`HurtTime`] and [`ItemUse`] — and absent forever for every
+/// non-`Mob` entity, because the adapter withholds the byte for those (an armour
+/// stand's index-15 byte means something else entirely).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MobState {
+    /// `Mob.isAggressive()` — set by the attack goals while a target is engaged.
+    pub aggressive: bool,
+}
+
 /// Whether the entity is a baby (ageable mobs only). **Absent** until reported.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Baby(pub bool);

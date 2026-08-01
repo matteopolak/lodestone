@@ -269,12 +269,97 @@ pub fn player_model_name(slim: bool) -> &'static str {
 #[must_use]
 pub fn humanoid_arms_for(model_name: &str) -> HumanoidArms {
     match model_name {
-        // `ZombieModel`, `DrownedModel` and `ZombieVillagerModel` all call
-        // `AnimationUtils.animateZombieArms` after `super.setupAnim`.
-        "zombie" | "husk" | "drowned" | "zombie_villager" => HumanoidArms::Zombie,
+        // Every model that calls `AnimationUtils.animateZombieArms` after
+        // `super.setupAnim`, enumerated from the 26.2 client tree rather than from
+        // the name "zombie": `AbstractZombieModel:15` (which is `ZombieModel`,
+        // `DrownedModel` and `HuskRenderer`'s reuse of `ZombieModel`),
+        // `ZombieVillagerModel:98`, and `ZombifiedPiglinModel:14`.
+        //
+        // `zombified_piglin` was missing until issue #379 and got
+        // `HumanoidArms::Swinging`, i.e. a plain player arm swing where vanilla
+        // gives it the raised undead arms. `giant` is deliberately absent:
+        // `GiantMobRenderer` uses a bare `HumanoidModel`, not a zombie one, so its
+        // arms hang. `IllagerModel:118` also calls `animateZombieArms` but passes
+        // a hardcoded `true` inside one arm-pose branch of a different model
+        // family, so it is not this mapping (see `mob_draws_bow_when_aggressive`
+        // for the illager gap).
+        "zombie" | "husk" | "drowned" | "zombie_villager" | "zombified_piglin" => {
+            HumanoidArms::Zombie
+        }
         _ => HumanoidArms::Swinging,
     }
 }
+
+/// Whether this entity type's renderer maps **`isAggressive()` + a bow in the
+/// main hand** to `ArmPose::BowAndArrow` — i.e. whether vanilla draws it with
+/// `AbstractSkeletonRenderer` (issue #379).
+///
+/// # Why this is a per-type rule and not a general one
+///
+/// `HumanoidModel.ArmPose` is chosen per *renderer*, not per model, and only
+/// `AbstractSkeletonRenderer.getArmPose` has this override
+/// (`AbstractSkeletonRenderer.java:38`):
+///
+/// ```text
+/// mob.getMainArm() == arm && mob.isAggressive() && mob.getMainHandItem().is(Items.BOW)
+///     ? ArmPose.BOW_AND_ARROW : super.getArmPose(mob, arm)
+/// ```
+///
+/// An aggressive **zombie** holding a bow does *not* get this pose — its renderer
+/// only overrides `getArmPose` for the spear/stab case — and neither does a
+/// pillager, whose whole arm-pose vocabulary is a different enum
+/// (`AbstractIllager.IllagerArmPose`) on a different model class. So applying
+/// "aggressive + bow ⇒ draw" to every mob would put half the hostile mobs in the
+/// world into a pose vanilla never shows.
+///
+/// # The type set
+///
+/// Every `AbstractSkeletonRenderer` subclass in the 26.2 client tree:
+/// `SkeletonRenderer`, `WitherSkeletonRenderer`, `StrayRenderer`,
+/// `BoggedRenderer`, `ParchedRenderer`. Keyed by entity type path (all five are
+/// registered types — ids 115, 147, 128, 16, 97 in the census dump), because that
+/// is what the extract stage has; note this is *not* the
+/// [`canonical_model_name`] space, where `bogged` currently aliases to
+/// `skeleton`. Rendering `bogged` through the skeleton mesh does not change which
+/// renderer class vanilla would have used, so the rule is keyed on the real type.
+#[must_use]
+pub fn mob_draws_bow_when_aggressive(type_path: &str) -> bool {
+    matches!(
+        type_path,
+        "skeleton" | "wither_skeleton" | "stray" | "bogged" | "parched"
+    )
+}
+
+// Aggressive-driven poses vanilla has that this build does **not** model, and why
+// each is left rather than approximated. Kept as a comment beside the rule it
+// bounds, rather than as a doc on some function nobody calls.
+//
+// * **`DrownedRenderer.getArmPose`** (`DrownedRenderer.java:54`): aggressive +
+//   a trident ⇒ `THROW_TRIDENT`. The pose body is two lines
+//   (`HumanoidModel.java:359`), but `THROW_TRIDENT` is the first **one-handed**
+//   pose in vanilla's table (`ArmPose(false, true)`) and every pose
+//   [`crate::ArmPose`] models today is two-handed. One-handed means
+//   `HumanoidModel.setupAnim`'s `affectsOffhandPose` fork actually branches, and
+//   `Skeleton::pose_arms_for_item` does not implement that fork. Adding the pose
+//   without it would silently pose the wrong arm on an off-hand trident — the
+//   defect class #57 already hit once by folding the bow's two branches into one
+//   signed expression.
+// * **`IllagerRenderer`** (`IllagerRenderer.java:27`): copies `isAggressive` into
+//   its render state, but an illager's arms are driven by
+//   `AbstractIllager.IllagerArmPose` — a *different enum* on `IllagerModel`, a
+//   different model class — and the value is computed server-side per subclass
+//   (`Vindicator.java:107` returns `ATTACKING` when aggressive;
+//   `Pillager.java:135` the same, behind two crossbow cases). Reaching it needs
+//   an illager arm family in [`crate::entity_anim`], not a metadata bit.
+// * **`Mob.isLeftHanded`** (bit `0x02` of the same byte, decoded and unconsumed):
+//   flips `getMainArm()`, which flips which arm every pose applies to. See
+//   `lodestone_entity::metadata::MobFlags::left_handed`.
+//
+// What *is* covered besides the bow: [`humanoid_arms_for`]'s `HumanoidArms::Zombie`
+// family, whose arm drop reads the same flag
+// (`AnimationUtils.animateZombieArms`, `-PI/1.5` aggressive vs `-PI/2.25` not).
+// That was a second island — the field existed on `AnimInput` and every shell call
+// site passed `false`.
 
 /// Which [`HandPoseOverride`] a model's `translateToHand` needs, keyed by the
 /// same [`entity_models`] name [`humanoid_arms_for`] reads. The five corpus
@@ -2902,6 +2987,20 @@ mod tests {
         assert_eq!(
             humanoid_arms_for("zombie"),
             crate::entity_anim::HumanoidArms::Zombie
+        );
+        // Every model that calls `animateZombieArms`, so the set is not "zombie
+        // plus whatever was remembered". `zombified_piglin` was the one missing.
+        for name in ["husk", "drowned", "zombie_villager", "zombified_piglin"] {
+            assert_eq!(
+                humanoid_arms_for(name),
+                crate::entity_anim::HumanoidArms::Zombie,
+                "{name}'s model calls AnimationUtils.animateZombieArms"
+            );
+        }
+        // `GiantMobRenderer` uses a bare `HumanoidModel`, so a giant's arms hang.
+        assert_eq!(
+            humanoid_arms_for("giant"),
+            crate::entity_anim::HumanoidArms::Swinging
         );
         // Model -Z is the mob's facing, so the arms extend the *minimum* Z.
         // The arm cube ends 10 texels (0.625 blocks) down from its pivot, so at

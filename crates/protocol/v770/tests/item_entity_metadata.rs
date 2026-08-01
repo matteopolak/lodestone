@@ -29,7 +29,7 @@ use lodestone_model::{
 };
 use lodestone_v770::V770Adapter;
 use lodestone_v770::packet_ids::play;
-use lodestone_v770::packets::metadata::read_entity_metadata;
+use lodestone_v770::packets::metadata::{TrackedEntity, read_entity_metadata};
 use lodestone_world::World;
 
 const DIAMOND_FIXTURE: &str = include_str!("fixtures/item_entity_metadata_diamond.hex");
@@ -114,7 +114,7 @@ fn a_plain_drop_consumes_its_whole_payload() {
     let payload = fixture_bytes(DIAMOND_FIXTURE);
     let (_, list) = split_payload(&payload);
     let mut reader = Reader::new(list);
-    let decoded = read_entity_metadata(&mut reader, None, false).expect("decode");
+    let decoded = read_entity_metadata(&mut reader, TrackedEntity::default()).expect("decode");
 
     assert!(
         decoded.complete,
@@ -155,7 +155,7 @@ fn an_unmodeled_component_parks_the_reader_mid_payload() {
     let payload = fixture_bytes(UNMODELED_FIXTURE);
     let (_, list) = split_payload(&payload);
     let mut reader = Reader::new(list);
-    let decoded = read_entity_metadata(&mut reader, None, false).expect("must not be an error");
+    let decoded = read_entity_metadata(&mut reader, TrackedEntity::default()).expect("must not be an error");
 
     assert!(
         !decoded.complete,
@@ -197,7 +197,7 @@ fn fields_after_a_partial_stack_are_abandoned_not_misread() {
     spliced.push(0xff);
 
     let mut reader = Reader::new(&spliced);
-    let decoded = read_entity_metadata(&mut reader, None, false).expect("must not be an error");
+    let decoded = read_entity_metadata(&mut reader, TrackedEntity::default()).expect("must not be an error");
 
     assert!(!decoded.complete);
     assert_eq!(
