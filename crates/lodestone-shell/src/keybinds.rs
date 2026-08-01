@@ -61,6 +61,29 @@
 //!    `key.lodestone.toggleFly` rather than squatting on a vanilla name. `F` in
 //!    vanilla is `key.swapOffhand`, which this client does not implement.
 //!
+//!    **That last sentence is now the only thing keeping `F` here, and it is
+//!    load-bearing rather than incidental** (issue #378 part 3). The container
+//!    half of `key.swapOffhand` — `ContainerInput::SWAP` with button `40`
+//!    against the hovered slot, `AbstractContainerScreen.java:506-522` — is now
+//!    implemented on the machine side and reachable from
+//!    `app.rs`'s `KeyOutcome::ContainerSwap`; the number keys `1`–`9` route to it
+//!    already. The **off-hand key does not**, and the blocker is this table, not
+//!    the click path: adding `SwapOffhand` with vanilla's default of `F`
+//!    (`Options.java:663`, GLFW keysym 70) collides with `ToggleFly` and turns
+//!    `a_conflict_is_reported_for_both_actions_and_only_for_them` red, which is
+//!    that test doing its job. Landing the off-hand key needs a **decision**
+//!    first, not more code:
+//!
+//!    * move `key.lodestone.toggleFly` off `F` (restores vanilla parity, changes
+//!      a default a player is using today), or
+//!    * ship `key.swapOffhand` as [`Binding::Unbound`] and let the player bind it
+//!      (no default collision, but the feature is unreachable out of the box).
+//!
+//!    Whichever is chosen, note the *gameplay* half of vanilla's `F` — the
+//!    `ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND` that swaps hands in
+//!    the world — is a separate serverbound action this client does not send at
+//!    all, so a binding added for the container half only is half a feature.
+//!
 //! ## Physical keys, and what that costs on non-QWERTY layouts
 //!
 //! The keyboard identity is winit's **physical** [`KeyCode`], i.e. the key's

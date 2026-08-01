@@ -21,7 +21,8 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use crate::chat::ChatInput;
 use crate::config::{Config, Mode};
 use crate::container::{
-    ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuInput, hit_test_with_scale,
+    ContainerFrame, ContainerRenderer, MenuButton, MenuContext, MenuHit, MenuInput,
+    hit_test_with_scale,
 };
 use crate::effects::EffectsRenderer;
 use crate::gpu::RenderState;
@@ -103,6 +104,13 @@ fn movement_action_for(binds: &Keybinds, code: KeyCode) -> Option<Action> {
         .filter(|a| binds.is(*a, code))
         .find_map(InputAction::movement)
 }
+
+/// Wire button number for an off-hand `SWAP` click — vanilla's literal `40` in
+/// `AbstractContainerScreen.checkHotbarKeyPressed` and the `buttonNum == 40`
+/// guard in `AbstractContainerMenu.doClick`'s `SWAP` arm. Not a slot index: the
+/// off-hand's *native* index happens to be 40 too, which is why this is named
+/// after the button rather than the slot.
+const OFFHAND_SWAP_BUTTON: i32 = 40;
 
 /// The hotbar slot index `0..=8` that `code` selects under `binds`, or `None`.
 ///
@@ -215,6 +223,23 @@ pub(crate) enum KeyOutcome {
     TogglePerspective,
     /// Select hotbar slot `0..=8`.
     SelectSlot(usize),
+    /// A `ContainerInput::SWAP` against the **hovered** slot while a container
+    /// screen is open: vanilla's number keys and `key.swapOffhand`, which do
+    /// *not* change the selected hotbar slot while a screen is up
+    /// (`AbstractContainerScreen.checkHotbarKeyPressed`,
+    /// `AbstractContainerScreen.java:506-522`).
+    ///
+    /// `button` is the wire button number: `0..=8` for a hotbar key, `40` for the
+    /// off-hand key. It is carried raw rather than as an enum because that is
+    /// exactly what `Click::hotbar_swap`/`offhand_swap` encode and what the
+    /// server reads.
+    ///
+    /// Vanilla's own two guards — an **empty cursor** and a **hovered slot** —
+    /// are session state, not key state, so they live at the driver's `match`
+    /// arm. Failing either does nothing, which is what a container screen did
+    /// with these keys before (it swallowed them), so a miss is not a
+    /// regression.
+    ContainerSwap { button: i32 },
     /// Begin (`true`) or end (`false`) a dig.
     Attack(bool),
     Use,
@@ -274,11 +299,30 @@ pub(crate) fn resolve_key(
     if binds.is(InputAction::Pause, code) && pressed {
         Some(KeyOutcome::Pause)
     } else if gate.container_open && pressed {
-        // The inventory binding doubles as "close the inventory". Anything else
-        // is swallowed — hence `None`, not a fall-through.
-        binds
-            .is(InputAction::Inventory, code)
-            .then_some(KeyOutcome::CloseContainer)
+        // Vanilla's order, from `AbstractContainerScreen.keyPressed`
+        // (`AbstractContainerScreen.java:489-503`): the inventory binding closes
+        // the screen first, then `checkHotbarKeyPressed` tries the off-hand key
+        // and then the nine hotbar keys. Anything else is swallowed — hence
+        // `None`, not a fall-through, so no gameplay binding fires behind an open
+        // inventory.
+        //
+        // The number keys used to fall into that swallow, which is issue #378's
+        // part 3: they neither selected a slot (correct) nor swapped (the gap).
+        //
+        // The **off-hand key is not here**, and that is a blocked decision rather
+        // than an oversight: vanilla's `key.swapOffhand` defaults to `F`, which
+        // this client's Lodestone-only `key.lodestone.toggleFly` already occupies.
+        // Adding it turns `keybinds.rs`'s own conflict-free-defaults test red. The
+        // two ways out, and why neither is free, are recorded in that module's
+        // header. `Click::offhand_swap` and `do_swap`'s `button == 40` arm are both
+        // already in place and tested, so it is one binding away.
+        if binds.is(InputAction::Inventory, code) {
+            Some(KeyOutcome::CloseContainer)
+        } else {
+            hotbar_slot_for(binds, code).map(|slot| KeyOutcome::ContainerSwap {
+                button: slot as i32,
+            })
+        }
     } else if binds.is(InputAction::DebugOverlay, code) && pressed {
         Some(KeyOutcome::ToggleDebugOverlay)
     } else if binds.is(InputAction::PlayerList, code) && gate.gameplay {
@@ -1038,6 +1082,50 @@ impl WindowApp {
         // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
         // /`::creative()` explicitly rather than reading one off anything).
         let _ = handle.menu_click(click, PlayerCtx::survival());
+    }
+
+    /// A number-key / off-hand-key `SWAP` against the slot under the cursor
+    /// (issue #378 part 3).
+    ///
+    /// Vanilla's `AbstractContainerScreen.checkHotbarKeyPressed`
+    /// (`AbstractContainerScreen.java:506-522`) guards on exactly two pieces of
+    /// **state**: `menu.getCarried().isEmpty()` and `hoveredSlot != null`. Both
+    /// are checked here rather than in `resolve_key`, which only knows about keys.
+    /// Failing either does nothing — the same thing an open container did with
+    /// these keys before this landed, so a miss is not a new dead end.
+    ///
+    /// The hover is resolved through the identical
+    /// `active_container_menu` + `hit_test_with_scale` pair the mouse path uses,
+    /// so the key and the mouse can never disagree about which slot is under the
+    /// pointer (the layout module's own warning about that class of bug).
+    fn send_container_swap(&self, button: i32) {
+        let (Some(menu), Some((w, h))) = (
+            self.active_container_menu(),
+            self.target.as_ref().map(RenderTarget::size),
+        ) else {
+            return;
+        };
+        // An occupied cursor is vanilla's first guard, and it is not arbitrary: a
+        // swap with something already in hand has no defined meaning, so vanilla
+        // lets the key fall through to nothing.
+        if menu.carried().is_some() {
+            return;
+        }
+        let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
+        let MenuHit::Slot(index) = hit else { return };
+        // Vanilla's `40` is the off-hand button and `do_swap`'s `button == 40` arm
+        // already handles it, but nothing currently *produces* a `40` here — the
+        // off-hand binding is blocked on the default-key collision above. The
+        // branch is written anyway: it is the one line the binding needs, so the
+        // eventual change does not have to reach into two files.
+        let click = if button == OFFHAND_SWAP_BUTTON {
+            Click::offhand_swap(index)
+        } else if let Ok(hotbar) = u8::try_from(button) {
+            Click::hotbar_swap(index, hotbar)
+        } else {
+            return;
+        };
+        self.send_menu_click(click);
     }
 
     /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
@@ -2288,6 +2376,9 @@ impl ApplicationHandler for WindowApp {
                     // Vanilla's own third-/first-person toggle.
                     Some(KeyOutcome::TogglePerspective) => self.sim.toggle_third_person(),
                     Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
+                    Some(KeyOutcome::ContainerSwap { button }) => {
+                        self.send_container_swap(button);
+                    }
                     Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
                     Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
                     Some(KeyOutcome::Use) => self.sim.use_item(),
@@ -3017,8 +3108,16 @@ mod tests {
             },
         ] {
             for (code, would_have) in default_playing_expectations() {
-                // Escape and the inventory key have their own jobs on this screen.
-                if matches!(code, KeyCode::Escape | KeyCode::KeyE) {
+                // Escape and the inventory key have their own jobs on this screen,
+                // and since #378 part 3 so do the nine number keys — they issue a
+                // `SWAP` against the hovered slot rather than being swallowed.
+                // Their own test is `the_number_keys_swap_with_the_hovered_slot`
+                // below; excluding them here is not weakening this test, because
+                // what it asserts is that nothing reaches *gameplay*, and
+                // `ContainerSwap` is not a gameplay outcome.
+                if matches!(code, KeyCode::Escape | KeyCode::KeyE)
+                    || hotbar_slot_for(&Keybinds::new(), code).is_some()
+                {
                     continue;
                 }
                 assert_eq!(
@@ -3058,6 +3157,69 @@ mod tests {
         // also not fall through to the gameplay arms.
         assert_eq!(resolve(gate, KeyCode::KeyE, false), None);
         assert_eq!(resolve(gate, KeyCode::KeyW, false), None);
+    }
+
+    /// Issue #378 part 3. Vanilla's `1`–`9` **do not** change the selected hotbar
+    /// slot while a container screen is open; they issue a `ContainerInput::SWAP`
+    /// with that hotbar index against the hovered slot
+    /// (`AbstractContainerScreen.checkHotbarKeyPressed`,
+    /// `AbstractContainerScreen.java:506-522`, and the number keys are handled in
+    /// `Minecraft.handleKeybinds` only when `screen == null`).
+    ///
+    /// Before this they fell into the container arm's swallow: they neither
+    /// selected a slot — correct — nor swapped, which is the gap.
+    #[test]
+    fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
+        let gate = KeyGate {
+            container_open: true,
+            ..KeyGate::default()
+        };
+        let digits = [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        for (i, code) in digits.into_iter().enumerate() {
+            // The button number is the hotbar index, `0..=8` — vanilla passes the
+            // loop counter straight through as `buttonNum`.
+            assert_eq!(
+                resolve(gate, code, true),
+                Some(KeyOutcome::ContainerSwap { button: i as i32 }),
+                "{code:?} must swap with hotbar index {i} while a container is open"
+            );
+            // -- the two controls -------------------------------------------
+            // 1. The same key while *playing* still selects the slot. Without
+            //    this, a resolver that had simply lost `SelectSlot` altogether
+            //    would satisfy the assertion above.
+            assert_eq!(
+                resolve(playing(), code, true),
+                Some(KeyOutcome::SelectSlot(i)),
+                "control failed: {code:?} no longer selects a hotbar slot in the \
+                 world either, so this is not a container-specific route"
+            );
+            // 2. A key *release* is not a swap. Vanilla acts on `keyPressed`
+            //    only, and a swap on both edges would fire every action twice.
+            assert_eq!(
+                resolve(gate, code, false),
+                None,
+                "{code:?} released must do nothing"
+            );
+        }
+        // And the outcome is genuinely distinct from selecting a slot: nothing in
+        // the container arm may produce `SelectSlot`, or the hotbar would jump
+        // under an open inventory.
+        for code in digits {
+            assert!(
+                !matches!(resolve(gate, code, true), Some(KeyOutcome::SelectSlot(_))),
+                "{code:?} must not change the selected slot behind a screen"
+            );
+        }
     }
 
     #[test]
