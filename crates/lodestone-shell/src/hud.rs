@@ -224,7 +224,7 @@ const FLOATS_PER_VERTEX: usize = 6;
 /// Floats per textured-sprite vertex: position (x, y in NDC), atlas UV (u, v),
 /// and an RGBA tint. The GUI sprite stream is separate from the colour stream
 /// so the existing colour pipeline is untouched.
-const SPRITE_FLOATS_PER_VERTEX: usize = 8;
+pub(crate) const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 
 /// Everything the HUD draws for one frame, bundled so the geometry builder and
 /// the GPU renderer take one argument that can grow without churning every call
@@ -1811,6 +1811,9 @@ impl HudRenderer {
             &geo.item_verts,
             &geo.model_verts,
             &geo.special,
+            // The hotbar has no carried stack, so every special icon is in the
+            // slot stratum — see `IconRenderer::upload`'s `special_carried_from`.
+            geo.special.len(),
             logical_w.max(1.0) as u32,
             logical_h.max(1.0) as u32,
             "hud-item-verts",

@@ -676,6 +676,11 @@ struct SpecialIcons {
     /// `draw_models`' signature is shared by two screens and a per-part instance
     /// buffer list does not fit its `count: u32`.
     batches: Vec<SpecialBatch>,
+    /// The carried stack's batches, kept separate from [`Self::batches`] so the
+    /// container screen can draw them in a later stratum — see [`IconStratum`].
+    /// A grouped batch cannot straddle the two, because the group is what a
+    /// single draw call binds.
+    carried_batches: Vec<SpecialBatch>,
 }
 
 /// One uploaded special-icon batch: the mesh and sheet to bind, one instance
@@ -762,6 +767,7 @@ impl SpecialIcons {
             cam_buffer,
             cam_bind_group,
             batches: Vec::new(),
+            carried_batches: Vec::new(),
         })
     }
 
@@ -1098,6 +1104,15 @@ impl IconRenderer {
     /// `draw_sprites`/`draw_models` as vertex counts, and a special batch has no
     /// single vertex count — so [`Self::draw_models`] reads the batches back off
     /// `self` instead. That is also what lets its signature stay unchanged.
+    ///
+    /// `special_carried_from` splits that third stream into the two **strata**
+    /// [`IconStratum`] names: `special[..from]` belongs to the slots and
+    /// `special[from..]` to the carried stack drawn above them. The sprite and
+    /// model streams need no such argument — they are plain vertex slices, so the
+    /// caller draws sub-ranges of one upload — but a special batch is *grouped*
+    /// by `(model, sheet)` during upload, and a group spanning the split would
+    /// draw a carried chest in the slot stratum. Pass `special.len()` for a
+    /// screen with no carried stack (the hotbar).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn upload(
         &mut self,
@@ -1106,13 +1121,21 @@ impl IconRenderer {
         sprite_verts: &[f32],
         model_verts: &[ModelVertex],
         special: &[SpecialIconDraw],
+        special_carried_from: usize,
         width: u32,
         height: u32,
         label: &'static str,
     ) -> (u32, u32) {
         let mut sprite_count = 0;
         let mut model_count = 0;
-        self.prepare_special(device, queue, special, width, height);
+        self.prepare_special(
+            device,
+            queue,
+            special,
+            special_carried_from.min(special.len()),
+            width,
+            height,
+        );
 
         if !sprite_verts.is_empty()
             && let Some(s) = self.sprites.as_mut()
@@ -1178,6 +1201,7 @@ impl IconRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         special: &[SpecialIconDraw],
+        carried_from: usize,
         width: u32,
         height: u32,
     ) {
@@ -1186,6 +1210,7 @@ impl IconRenderer {
         // frame that draws no special icons.
         if let Some(s) = self.special.as_mut() {
             s.batches.clear();
+            s.carried_batches.clear();
         }
         if special.is_empty() {
             return;
@@ -1204,6 +1229,45 @@ impl IconRenderer {
             return;
         };
 
+        let base = build_special_batches(device, s, &special[..carried_from]);
+        let carried = build_special_batches(device, s, &special[carried_from..]);
+        s.batches = base;
+        s.carried_batches = carried;
+
+        if !s.batches.is_empty() || !s.carried_batches.is_empty() {
+            // `gui_ortho(width, height)`, exactly as the model stream's camera —
+            // the placements were composed in the same GUI pixel space, so the
+            // two passes must project through the same matrix or a chest and the
+            // block beside it disagree about how big a GUI pixel is.
+            queue.write_buffer(
+                &s.cam_buffer,
+                0,
+                bytemuck::bytes_of(&EntityCameraUniform {
+                    camera: CameraUniform {
+                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
+                        section_origin: [0.0, 0.0, 0.0, 0.0],
+                    },
+                    fog: FogUniform::disabled(),
+                }),
+            );
+        }
+    }
+}
+
+/// Group one stratum's [`SpecialIconDraw`]s into uploaded per-part instance
+/// batches. Factored out of [`IconRenderer::prepare_special`] so the slot layer
+/// and the carried stack can each get their own batch list without the grouping
+/// being written twice — see [`IconStratum`].
+fn build_special_batches(
+    device: &wgpu::Device,
+    s: &SpecialIcons,
+    special: &[SpecialIconDraw],
+) -> Vec<SpecialBatch> {
+    let mut out: Vec<SpecialBatch> = Vec::new();
+    if special.is_empty() {
+        return out;
+    }
+    {
         // Group by `(model, sheet)` — the batch key the world pass uses, and for
         // the same reason: a trapped chest and a plain one share the mesh and
         // differ only in bind group, so keying on the model alone would draw both
@@ -1252,38 +1316,57 @@ impl IconRenderer {
                     upload_instances(device, &per_icon, &[])
                 })
                 .collect();
-            s.batches.push(SpecialBatch {
+            out.push(SpecialBatch {
                 model,
                 texture,
                 count: count as u32,
                 parts,
             });
         }
-
-        if !s.batches.is_empty() {
-            // `gui_ortho(width, height)`, exactly as the model stream's camera —
-            // the placements were composed in the same GUI pixel space, so the
-            // two passes must project through the same matrix or a chest and the
-            // block beside it disagree about how big a GUI pixel is.
-            queue.write_buffer(
-                &s.cam_buffer,
-                0,
-                bytemuck::bytes_of(&EntityCameraUniform {
-                    camera: CameraUniform {
-                        view_proj: gui_ortho(width, height).to_cols_array_2d(),
-                        section_origin: [0.0, 0.0, 0.0, 0.0],
-                    },
-                    fog: FogUniform::disabled(),
-                }),
-            );
-        }
     }
+    out
+}
 
+/// Which **stratum** an icon draw belongs to — vanilla's `graphics.nextStratum()`
+/// in `AbstractContainerScreen.extractCarriedItem`
+/// (`AbstractContainerScreen.java:126`), which is called immediately before the
+/// carried stack is drawn and nowhere else on that screen.
+///
+/// The distinction is not cosmetic and cannot be expressed as push order, which
+/// is why it is a type. The GUI item passes run **model first, then flat
+/// sprites**, because only the model pass needs a depth attachment and its
+/// attachments are fixed for its lifetime. So within one stratum a block item
+/// always loses to a flat sprite, and two block items at the same GUI depth
+/// resolve against a depth buffer rather than against append order. A carried
+/// stack has to be *above every slot*, whichever of the four combinations of
+/// (flat, block) × (cursor, slot) it happens to be — so it gets a second, later
+/// stratum whose model pass clears depth again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IconStratum {
+    /// The slot layer: wells, slot contents, their counts and durability bars.
+    Slots,
+    /// The carried (cursor) stack, drawn above the slot layer.
+    Carried,
+}
+
+impl IconRenderer {
     /// Record the flat item-sprite draw into an **already-open** pass, so the
     /// caller can keep icons in the same pass as its other 2-D chrome. A no-op
     /// when `count` is zero or the atlas is not attached.
     pub(crate) fn draw_sprites(&self, pass: &mut wgpu::RenderPass<'_>, count: u32) {
-        if count == 0 {
+        self.draw_sprites_range(pass, 0..count);
+    }
+
+    /// As [`draw_sprites`](Self::draw_sprites), but for one sub-range of the
+    /// uploaded sprite stream — how the container screen draws its slot icons and
+    /// then, in a later pass, the carried stack. Both strata live in one upload
+    /// because they are one contiguous `Vec<f32>`; only the *draw* splits.
+    pub(crate) fn draw_sprites_range(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        range: std::ops::Range<u32>,
+    ) {
+        if range.is_empty() {
             return;
         }
         let Some(s) = &self.sprites else {
@@ -1292,7 +1375,7 @@ impl IconRenderer {
         pass.set_pipeline(&s.pipeline);
         pass.set_bind_group(0, &s.bind_group, &[]);
         pass.set_vertex_buffer(0, s.buffer.slice(..));
-        pass.draw(0..count, 0..1);
+        pass.draw(range, 0..1);
     }
 
     /// Record the 3-D block-item pass. It gets its **own** pass because it is
@@ -1321,10 +1404,31 @@ impl IconRenderer {
         count: u32,
         label: &'static str,
     ) {
-        let specials = self
-            .special
-            .as_ref()
-            .map_or(&[][..], |s| s.batches.as_slice());
+        self.draw_models_range(encoder, view, depth, 0..count, IconStratum::Slots, label);
+    }
+
+    /// As [`draw_models`](Self::draw_models), but for one sub-range of the
+    /// uploaded model stream and one [`IconStratum`]'s special batches.
+    ///
+    /// **Each stratum clears depth again**, which is the whole point: that is what
+    /// makes vanilla's `nextStratum()` mean "above everything drawn so far" for
+    /// depth-tested geometry, and it is why a carried block item cannot be
+    /// resolved into a slot block item's silhouette. Clearing is free here for the
+    /// same reason the first clear is — nothing later in the frame reads depth.
+    pub(crate) fn draw_models_range(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        range: std::ops::Range<u32>,
+        stratum: IconStratum,
+        label: &'static str,
+    ) {
+        let count = range.end.saturating_sub(range.start);
+        let specials = self.special.as_ref().map_or(&[][..], |s| match stratum {
+            IconStratum::Slots => s.batches.as_slice(),
+            IconStratum::Carried => s.carried_batches.as_slice(),
+        });
         if count == 0 && specials.is_empty() {
             return;
         }
@@ -1357,7 +1461,7 @@ impl IconRenderer {
             pass.set_bind_group(2, &m.palette_bind_group, &[]);
             pass.set_bind_group(3, &m.anim_bind_group, &[]);
             pass.set_vertex_buffer(0, m.buffer.slice(..));
-            pass.draw(0..count, 0..1);
+            pass.draw(range, 0..1);
         }
 
         // The special-renderer icons (chests), through `EntityPipeline`: two bind
