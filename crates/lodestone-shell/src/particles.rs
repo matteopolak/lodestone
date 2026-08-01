@@ -33,6 +33,19 @@
 //! unresolved into [`ParticleFrame::unresolved`] so the gap — full, partial,
 //! or none — is always visible rather than looking like a working system that
 //! quietly emits nothing.
+//!
+//! # The atlas a UV belongs to is part of the UV (issue #45)
+//!
+//! The sheet stitch and the block-model stitch are **different textures with
+//! different packings**, so a UV rect on its own does not identify a texel.
+//! For months this pass bound one texture — the block-model atlas — and
+//! resolved sheet UVs against it, so `/particle minecraft:flame` drew
+//! fragments of arbitrary block textures. `unresolved` stayed at zero the
+//! whole time, correctly: the UVs *did* resolve, just against the wrong
+//! image. Since then every [`ParticleInstance`] carries a [`SpriteAtlas`]
+//! selector decided by the same [`Particles::sprite_rect`] match that
+//! produced its rect, and [`ParticleRenderer`] binds both stitches. See
+//! `docs/break-particles.md`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -43,6 +56,23 @@ use lodestone_physics::{CollisionView, Vec3d};
 use lodestone_render::{BlockModels, Camera};
 use wgpu::util::DeviceExt;
 
+/// Which stitched texture a [`ParticleInstance`]'s UVs address.
+///
+/// This travels *with* the UVs, decided by the same
+/// [`Particles::sprite_rect`] match that produced them, because a UV rect
+/// without its atlas is meaningless and was for months exactly that: the
+/// renderer bound one texture — the block-model atlas — and every
+/// [`SpriteSource::Sheet`] particle sampled block texels at particle-sheet
+/// coordinates (issue #45). Making the pair inseparable is the point; a
+/// future emitter cannot forget to say which atlas it meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpriteAtlas {
+    /// The block-model atlas the terrain pass samples. `SpriteSource::BlockState`.
+    Block = 0,
+    /// The stitched [`ParticleAtlas`] — its own packing, its own dimensions.
+    Sheet = 1,
+}
+
 /// One particle's GPU instance. Four vertices are generated per instance from
 /// `vertex_index`, so there is no vertex or index buffer.
 #[repr(C)]
@@ -50,12 +80,19 @@ use wgpu::util::DeviceExt;
 pub struct ParticleInstance {
     /// Camera-relative centre, `w` = half-extent in blocks.
     centre_size: [f32; 4],
-    /// Absolute atlas UVs `[u0, v0, u1, v1]`.
+    /// Absolute atlas UVs `[u0, v0, u1, v1]`, in the space of [`Self::atlas`].
     uv: [f32; 4],
     /// Linear RGBA tint, already multiplied by the light term.
     colour: [f32; 4],
     /// `x` = roll about the view axis in radians; `yzw` padding.
     roll: [f32; 4],
+    /// [`SpriteAtlas`] as `u32` — which of the fragment shader's two bound
+    /// textures [`Self::uv`] addresses. A separate vertex attribute rather
+    /// than a spare lane of `roll` so that reading the struct tells you the
+    /// UVs are atlas-relative; the 68-byte stride is deliberate and harmless
+    /// (`u32` needs 4-byte alignment, so there is no padding and `Pod` still
+    /// derives).
+    atlas: u32,
 }
 
 /// The particle camera uniform. Positions are camera-relative, so the matrix is
@@ -85,6 +122,16 @@ pub struct ParticleFrame {
     /// [`Particles::with_particle_atlas`]), or a block state with no
     /// `#particle`.
     pub unresolved: usize,
+    /// Of [`Self::drawn`], how many address the **particle sheet** rather than
+    /// the block-model atlas.
+    ///
+    /// This is an **anti-vacuity counter**, not a game value, and it exists
+    /// because of issue #45: the pre-fix renderer bound one texture, so
+    /// `unresolved == 0` was satisfied by flame/smoke/crit UVs that resolved
+    /// perfectly and then sampled *block* texels. A gate on sheet particles
+    /// has to be able to prove the sheet path was exercised at all —
+    /// `drawn > 0` alone is satisfied by terrain debris.
+    pub sheet_drawn: usize,
 }
 
 /// The live particle simulation plus its per-frame extraction scratch.
@@ -457,16 +504,20 @@ impl Particles {
             .extract(eye, partial_tick, light, &mut self.quads);
 
         let mut unresolved = 0usize;
+        let mut sheet_drawn = 0usize;
         for q in &self.quads {
             // Translucent-layer ordering is not implemented; every particle
             // draws in one blended pass with depth writes off, which is correct
             // for the additive-looking terrain debris and slightly wrong for
             // overlapping alpha sprites. Recorded rather than hidden.
             let _ = matches!(q.layer, Layer::Translucent);
-            let Some(rect) = self.sprite_rect(q.sprite) else {
+            let Some((rect, atlas)) = self.sprite_rect(q.sprite) else {
                 unresolved += 1;
                 continue;
             };
+            if atlas == SpriteAtlas::Sheet {
+                sheet_drawn += 1;
+            }
             // Sprite-local UVs -> absolute atlas UVs.
             let (u0, v0) = (rect[0], rect[1]);
             let (du, dv) = (rect[2] - rect[0], rect[3] - rect[1]);
@@ -491,6 +542,7 @@ impl Particles {
                     q.colour[3],
                 ],
                 roll: [q.roll, 0.0, 0.0, 0.0],
+                atlas: atlas as u32,
             });
         }
 
@@ -498,19 +550,33 @@ impl Particles {
             alive: self.engine.particles().len(),
             drawn: self.instances.len(),
             unresolved,
+            sheet_drawn,
         };
         self.last = frame;
         frame
     }
 
-    fn sprite_rect(&self, sprite: SpriteSource) -> Option<[f32; 4]> {
+    /// A sprite's absolute UV rect **and the atlas that rect belongs to**.
+    ///
+    /// The two are returned together on purpose. `state_uv` and `sheet_uv` are
+    /// keyed into two independent stitches with different dimensions and
+    /// different packings, so a rect alone does not identify a texel — which is
+    /// precisely how issue #45 happened: the renderer bound the block-model
+    /// atlas for both and flame drew fragments of arbitrary block textures
+    /// while `ParticleFrame::unresolved` stayed at zero.
+    fn sprite_rect(&self, sprite: SpriteSource) -> Option<([f32; 4], SpriteAtlas)> {
         match sprite {
-            SpriteSource::BlockState(id) => {
-                self.state_uv.get(id as usize).copied().flatten()
-            }
-            SpriteSource::Sheet { sheet, frame } => {
-                self.sheet_uv.get(&(sheet, frame)).copied()
-            }
+            SpriteSource::BlockState(id) => self
+                .state_uv
+                .get(id as usize)
+                .copied()
+                .flatten()
+                .map(|rect| (rect, SpriteAtlas::Block)),
+            SpriteSource::Sheet { sheet, frame } => self
+                .sheet_uv
+                .get(&(sheet, frame))
+                .copied()
+                .map(|rect| (rect, SpriteAtlas::Sheet)),
         }
     }
 }
@@ -548,8 +614,26 @@ fn sheet_uv_table(atlas: &ParticleAtlas) -> HashMap<(Sheet, u16), [f32; 4]> {
 }
 
 /// The billboard render pass: one pipeline, one growable instance buffer, one
-/// camera uniform. Binds whichever atlas the terrain draws from, so a fragment's
-/// UVs address the same texture its parent block does.
+/// camera uniform.
+///
+/// # Two atlases, one pass
+///
+/// Group 1 binds **both** stitches — the block-model atlas the terrain samples
+/// *and* the stitched particle sheet — and each instance carries a
+/// [`SpriteAtlas`] selector saying which of them its UVs address. Before that
+/// (issue #45) this pass bound one texture and every sheet particle sampled
+/// block texels at particle-sheet coordinates: `/particle minecraft:flame`
+/// drew fragments of arbitrary block textures, and nothing observed it because
+/// the UVs *did* resolve.
+///
+/// The alternative shape — a second bind group plus two draws, block-atlas
+/// instances then sheet instances — was rejected because it makes correctness
+/// depend on the instance list staying **partitioned by atlas**, an invariant
+/// nothing in the type system holds and which any future sort (by depth, say)
+/// would silently break, reintroducing exactly this bug. Sampling both
+/// textures and selecting costs one extra tap per particle fragment and makes
+/// a mis-pairing unrepresentable. Two bind groups total also keeps this pass
+/// far below the 4-group floor `CLAUDE.md` warns about.
 #[derive(Debug)]
 pub struct ParticleRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -560,6 +644,12 @@ pub struct ParticleRenderer {
     instances: wgpu::Buffer,
     capacity: u32,
     count: u32,
+    /// Of [`Self::count`], how many address the particle sheet. Kept so a
+    /// caller that never installed a sheet texture can *notice* it is
+    /// submitting sheet instances instead of drawing nothing — see
+    /// [`ParticleFrame::sheet_drawn`] for why that distinction is the whole
+    /// point of issue #45.
+    sheet_count: u32,
 }
 
 /// Instances allocated up front; the buffer grows (never shrinks) past this.
@@ -591,25 +681,33 @@ impl ParticleRenderer {
             }],
         });
 
+        // Bindings 0/1 are the block-model atlas + its sampler; 2/3 are the
+        // particle sheet + *its* sampler. Two samplers, not one: the two
+        // stitches are separate textures with separate mip pyramids, and
+        // sharing a sampler object across them would only work by accident.
+        let texture_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-particle-atlas-bgl"),
             entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
+                texture_entry(0),
+                sampler_entry(1),
+                texture_entry(2),
+                sampler_entry(3),
             ],
         });
 
@@ -630,7 +728,8 @@ impl ParticleRenderer {
                     array_stride: std::mem::size_of::<ParticleInstance>() as u64,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4
+                        0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4,
+                        4 => Uint32
                     ],
                 })],
             },
@@ -701,17 +800,29 @@ impl ParticleRenderer {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            sheet_count: 0,
         }
     }
 
-    /// Build the atlas bind group this pass samples. Call once with the same
-    /// atlas view the terrain pass binds.
+    /// Build the atlas bind group this pass samples.
+    ///
+    /// `block_*` must be the **same** atlas view the terrain pass binds, so a
+    /// terrain fragment is textured from the same pixels as the block it came
+    /// off. `sheet_*` is the stitched [`ParticleAtlas`] upload, which is a
+    /// wholly separate texture with its own packing — passing the block atlas
+    /// twice is what the renderer effectively did before issue #45 was fixed,
+    /// and it draws block texels for flame and smoke. See
+    /// [`crate::gpu::RenderState::install_particle_sheet_atlas`] for the
+    /// jar-less fallback, which binds a 1×1 transparent texture instead so an
+    /// unresolvable sheet particle draws *nothing* rather than garbage.
     #[must_use]
     pub fn atlas_bind_group(
         &self,
         device: &wgpu::Device,
-        view: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
+        block_view: &wgpu::TextureView,
+        block_sampler: &wgpu::Sampler,
+        sheet_view: &wgpu::TextureView,
+        sheet_sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lodestone-particle-atlas-bg"),
@@ -719,11 +830,19 @@ impl ParticleRenderer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
+                    resource: wgpu::BindingResource::TextureView(block_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(block_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(sheet_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(sheet_sampler),
                 },
             ],
         })
@@ -744,6 +863,18 @@ impl ParticleRenderer {
         camera: &Camera,
     ) {
         self.count = u32::try_from(instances.len()).unwrap_or(u32::MAX);
+        // Counted here rather than plumbed down from `ParticleFrame` because
+        // this is the last place that sees the bytes actually being uploaded:
+        // a caller that extracted one list and uploaded another would make the
+        // frame report a lie, and this counter is the thing `gpu.rs` uses to
+        // warn about a missing sheet texture.
+        self.sheet_count = u32::try_from(
+            instances
+                .iter()
+                .filter(|i| i.atlas == SpriteAtlas::Sheet as u32)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
         if self.count == 0 {
             return;
         }
@@ -781,6 +912,14 @@ impl ParticleRenderer {
         self.count as usize
     }
 
+    /// Of [`count`](Self::count), how many sample the **particle sheet**.
+    ///
+    /// Non-zero here with no sheet texture installed is a wiring defect, not a
+    /// quiet frame — see [`ParticleFrame::sheet_drawn`].
+    pub fn sheet_count(&self) -> usize {
+        self.sheet_count as usize
+    }
+
     /// Record the draw. No-op when the last [`prepare`](Self::prepare) produced
     /// nothing.
     pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, atlas: &wgpu::BindGroup) {
@@ -810,20 +949,28 @@ struct Camera {
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var atlas: texture_2d<f32>;
-@group(1) @binding(1) var atlas_sampler: sampler;
+// Two stitches, two samplers. `Instance.atlas` picks between them per
+// particle: 0 = the block-model atlas the terrain samples, 1 = the stitched
+// particle sheet. Binding only the first is issue #45 — flame and smoke then
+// sample block texels at particle-sheet coordinates.
+@group(1) @binding(0) var block_atlas: texture_2d<f32>;
+@group(1) @binding(1) var block_sampler: sampler;
+@group(1) @binding(2) var sheet_atlas: texture_2d<f32>;
+@group(1) @binding(3) var sheet_sampler: sampler;
 
 struct Instance {
     @location(0) centre_size: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) colour: vec4<f32>,
     @location(3) roll: vec4<f32>,
+    @location(4) atlas: u32,
 };
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) colour: vec4<f32>,
+    @location(2) @interpolate(flat) atlas: u32,
 };
 
 @vertex
@@ -850,12 +997,20 @@ fn vs_main(inst: Instance, @builtin(vertex_index) vi: u32) -> VsOut {
         select(inst.uv.w, inst.uv.y, cy > 0.0),
     );
     out.colour = inst.colour;
+    out.atlas = inst.atlas;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = textureSample(atlas, atlas_sampler, in.uv);
+    // Both taps are issued unconditionally and one is thrown away, rather than
+    // branching: `textureSample` requires uniform control flow, and `select`
+    // over two already-evaluated samples has it by construction. The discarded
+    // tap costs one fetch per particle fragment — particles are a handful of
+    // small billboards, so this is not a measurable cost.
+    let from_block = textureSample(block_atlas, block_sampler, in.uv);
+    let from_sheet = textureSample(sheet_atlas, sheet_sampler, in.uv);
+    let texel = select(from_block, from_sheet, in.atlas == 1u);
     let out = texel * in.colour;
     // Terrain fragments come from opaque sprites; discarding near-zero alpha
     // keeps a cutout parent block (leaves, grass) from throwing square debris.
@@ -905,6 +1060,65 @@ mod tests {
         assert_eq!(frame.alive, 7);
         assert_eq!(frame.unresolved, 0, "flame's sheet is in the table");
         assert_eq!(frame.drawn, 7);
+        assert_eq!(
+            frame.sheet_drawn, 7,
+            "every one of these addresses the particle sheet, not the block atlas"
+        );
+    }
+
+    /// The atlas a resolved UV belongs to must reach the instance, and the two
+    /// sources must land on **different** selectors (issue #45).
+    ///
+    /// This is the hermetic half of `tests/sheet_particle_atlas_pixels.rs`
+    /// (which judges the same thing in pixels against the real stitches): the
+    /// tables are installed directly, so the assertion is on the *pairing* —
+    /// `sprite_rect`'s two arms tagging their rects — with no dependency on a
+    /// GPU or a jar. It is deliberately a **paired** test: `Sheet == 1` alone
+    /// is satisfied by a constant, and `Block == 0` alone by a zeroed field.
+    #[test]
+    fn an_instances_atlas_selector_distinguishes_a_sheet_sprite_from_a_block_sprite() {
+        let rect = [0.0f32, 0.0, 0.0625, 0.0625];
+        let mut p = Particles::new(None);
+        p.state_uv = Arc::new(vec![None, Some(rect)]);
+        p.sheet_uv = Arc::new(HashMap::from([((Sheet::Flame, 0u16), rect)]));
+
+        // Terrain debris — the block-model atlas.
+        p.destroy_block([0, 64, 0], 1, [1.0; 3]);
+        let terrain = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert!(terrain.drawn > 0, "the burst must resolve");
+        assert_eq!(
+            terrain.sheet_drawn, 0,
+            "a block-state sprite must never be tagged as a sheet sprite, or terrain \
+             debris would sample the particle stitch"
+        );
+        assert!(
+            p.instances
+                .iter()
+                .all(|i| i.atlas == SpriteAtlas::Block as u32),
+            "every terrain instance must select the block atlas"
+        );
+
+        // The same rect, from the sheet — the selector, not the rect, is what
+        // tells the shader which texture the numbers belong to.
+        p.engine.clear();
+        emit::flame(p.engine_mut(), 0.5, 65.0, 0.5, 0.0, 0.05, 0.0);
+        let sheet = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert!(sheet.drawn > 0, "flame must resolve");
+        assert_eq!(
+            sheet.sheet_drawn, sheet.drawn,
+            "every flame instance must select the particle sheet"
+        );
+        assert!(
+            p.instances
+                .iter()
+                .all(|i| i.atlas == SpriteAtlas::Sheet as u32),
+            "a sheet sprite tagged as a block sprite is issue #45 exactly: the UVs \
+             resolve and address the wrong image"
+        );
     }
 
     /// Negative control: an unrecognised particle type must not spawn

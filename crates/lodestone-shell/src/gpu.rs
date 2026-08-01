@@ -136,10 +136,27 @@ pub struct RenderState {
     debug_lines: DebugLineRenderer,
     debug_lines_source: DebugLinesSource,
     entities: EntityRenderer,
-    /// Block-break debris. Bound to whichever atlas the terrain draws from, so a
-    /// fragment is textured from the same pixels as the block it came off.
+    /// Block-break debris **and** sheet particles (flame, smoke, crits,
+    /// splashes). Bound to *both* stitches: whichever atlas the terrain draws
+    /// from, so a debris fragment is textured from the same pixels as the block
+    /// it came off, and the separate particle sheet, so a flame is textured
+    /// from `textures/particle/flame.png` — see [`Self::particle_sheet_atlas`].
     particles: ParticleRenderer,
     particle_atlas_bind_group: wgpu::BindGroup,
+    /// The stitched particle sheet uploaded to the GPU, or `None` on a jar-less
+    /// run (headless tests, no `client.jar`), in which case
+    /// [`Self::particle_atlas_bind_group`] holds a 1×1 transparent stand-in in
+    /// the sheet slots.
+    ///
+    /// Kept as a field, not dropped after building the bind group: `has_*`
+    /// needs it, and issue #45's whole lesson is that "the sheet texture is
+    /// installed" must be answerable from outside this module rather than
+    /// inferred from pixels.
+    particle_sheet_atlas: Option<GpuAtlas>,
+    /// One-shot latch for the "sheet instances submitted, no sheet texture"
+    /// warning in [`Self::prepare_particles`]. A per-frame log would be 60
+    /// lines a second of the same sentence.
+    warned_missing_particle_sheet: bool,
     /// What a pixel nothing else drew this frame clears to. Seeded from
     /// [`SKY_COLOR`] at construction; kept in step with [`fog`](Self::fog)'s
     /// colour thereafter via [`RenderState::set_clear_color`] — see that
@@ -330,14 +347,29 @@ impl RenderState {
             }
         });
 
-        // Particles sample the same atlas the terrain does. The two atlases are
-        // disjoint UV spaces (the packed cube atlas vs the complete baked-model
-        // atlas), so binding the wrong one throws correctly-shaped debris in
-        // some other block's colours.
+        // Terrain debris samples the same atlas the terrain does. The two block
+        // atlases are disjoint UV spaces (the packed cube atlas vs the complete
+        // baked-model atlas), so binding the wrong one throws correctly-shaped
+        // debris in some other block's colours.
+        //
+        // Sheet particles (flame, smoke, crits, splashes) come from a *third*
+        // stitch, which `RenderState` cannot build for itself (it does no
+        // `client.jar` IO, by design) — so it starts with a transparent
+        // stand-in in the sheet slots and the shell calls
+        // `install_particle_sheet_atlas` once it has the atlas. Until then a
+        // sheet particle samples transparent black and is discarded on alpha:
+        // it draws *nothing*, which is wrong but honest, instead of the
+        // arbitrary block texels issue #45 reported.
         let particles = ParticleRenderer::new(device, color_format);
         let particle_atlas = model.as_ref().map_or(&atlas, |m| &m.atlas);
-        let particle_atlas_bind_group =
-            particles.atlas_bind_group(device, &particle_atlas.view, &particle_atlas.sampler);
+        let sheet_placeholder = transparent_placeholder_atlas(device, queue);
+        let particle_atlas_bind_group = particles.atlas_bind_group(
+            device,
+            &particle_atlas.view,
+            &particle_atlas.sampler,
+            &sheet_placeholder.view,
+            &sheet_placeholder.sampler,
+        );
 
         Self {
             pipeline,
@@ -353,6 +385,8 @@ impl RenderState {
             entities,
             particles,
             particle_atlas_bind_group,
+            particle_sheet_atlas: None,
+            warned_missing_particle_sheet: false,
             // Full-bright until the shell installs a world sampler; see
             // `set_entity_light_source`.
             entity_light: EntityLightSource::default(),
@@ -530,6 +564,65 @@ impl RenderState {
         self.screen_effects.is_some()
     }
 
+    /// Upload the stitched particle sheet and rebind the particle pass to it
+    /// (issue #45).
+    ///
+    /// `atlas` **must** be the very same [`ParticleAtlas`] whose UV table was
+    /// installed into [`crate::particles::Particles`] via
+    /// `with_particle_atlas` — not a second stitch of the same pack. Two
+    /// `AtlasBuilder` runs over one pack are byte-identical *today* (the
+    /// definition paths are sorted and deduplicated), but that is a property of
+    /// the packer, not a guarantee the type system holds, and the failure mode
+    /// if it ever changes is precisely the bug this method exists to fix: UVs
+    /// that resolve against a different packing. `app.rs` therefore hands the
+    /// same `Arc` to both sides.
+    ///
+    /// Same install shape and reason as [`install_sky`](Self::install_sky): the
+    /// `client.jar` IO lives in [`crate::resources`], and this module does
+    /// none. Never called — a jar-less run — leaves the 1×1 transparent
+    /// stand-in [`new`](Self::new) bound, so a sheet particle draws nothing
+    /// rather than a block texel.
+    pub fn install_particle_sheet_atlas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &lodestone_assets::Atlas,
+    ) {
+        let sheet = GpuAtlas::from_atlas(device, queue, atlas);
+        // Re-derived rather than remembered: the block half of this bind group
+        // is whichever atlas the terrain pass draws from, and that choice is
+        // already expressed once in `new`. Restating it here keeps the two from
+        // drifting apart — a particle textured from an atlas the terrain does
+        // not draw from is the same class of bug one layer over.
+        let bind_group = {
+            let block = self.model.as_ref().map_or(&self.atlas, |m| &m.atlas);
+            self.particles.atlas_bind_group(
+                device,
+                &block.view,
+                &block.sampler,
+                &sheet.view,
+                &sheet.sampler,
+            )
+        };
+        tracing::info!(
+            target: "assets",
+            width = sheet.width,
+            height = sheet.height,
+            "bound the stitched particle sheet to the particle pass"
+        );
+        self.particle_sheet_atlas = Some(sheet);
+        self.particle_atlas_bind_group = bind_group;
+    }
+
+    /// Whether the stitched particle sheet is uploaded and bound. Same reason
+    /// as [`has_sky`](Self::has_sky), with more teeth: with this `false` every
+    /// flame, smoke and crit particle resolves, uploads, submits a draw — and
+    /// discards on alpha. `particles_drawn` counts them all.
+    #[must_use]
+    pub fn has_particle_sheet_atlas(&self) -> bool {
+        self.particle_sheet_atlas.is_some()
+    }
+
     /// Install the world clock the sky pass reads (see [`TimeOfDaySource`]).
     /// Install once, at connect time, next to
     /// [`set_sky_darken_source`](Self::set_sky_darken_source) — `f` is polled
@@ -675,6 +768,24 @@ impl RenderState {
         camera: &Camera,
     ) {
         self.particles.prepare(device, queue, instances, camera);
+        // The one asymmetry the type system cannot close: `Particles` gets its
+        // sheet UV table from `Sim` and this pass gets the sheet *texture* from
+        // `app.rs`, so a build that wires one and not the other resolves sheet
+        // particles that then sample a transparent stand-in and vanish. Said
+        // once, loudly, instead of leaving it to look like an idle frame.
+        if self.particle_sheet_atlas.is_none()
+            && self.particles.sheet_count() > 0
+            && !self.warned_missing_particle_sheet
+        {
+            self.warned_missing_particle_sheet = true;
+            tracing::warn!(
+                target: "particles",
+                sheet_instances = self.particles.sheet_count(),
+                "sheet particles resolved but no particle sheet is bound; they will draw \
+                 nothing. Call RenderState::install_particle_sheet_atlas with the same \
+                 ParticleAtlas Particles::with_particle_atlas was given (issue #45)."
+            );
+        }
     }
 
     /// Recreate the depth buffer to match a resized target.
@@ -1413,6 +1524,8 @@ impl RenderState {
             self.particles
                 .draw(&mut pass, &self.particle_atlas_bind_group);
             stats.particles_drawn = self.particles.count();
+            stats.particles_from_sheet = self.particles.sheet_count();
+            stats.particle_sheet_atlas_bound = self.particle_sheet_atlas.is_some();
 
             if outline.is_some() {
                 self.outline.draw(&mut pass);
@@ -2196,6 +2309,21 @@ fn humanoid_armour_slot(slot: EquipmentSlot) -> Option<ArmourSlot> {
         | EquipmentSlot::Body
         | EquipmentSlot::Saddle => None,
     }
+}
+
+/// A 1×1 fully transparent [`GpuAtlas`], for a texture slot whose real contents
+/// are not available yet.
+///
+/// Used for the particle pass's sheet slot before
+/// [`RenderState::install_particle_sheet_atlas`] runs. Transparent rather than
+/// magenta-or-similar on purpose: the particle shader discards below `a < 0.02`,
+/// so an unbacked sheet particle disappears instead of painting a debug colour
+/// over the world. The *loud* half of that pairing is the one-shot warning in
+/// [`RenderState::prepare_particles`] plus
+/// [`RenderState::has_particle_sheet_atlas`] — a silent placeholder with no way
+/// to observe it would be the island pattern again.
+fn transparent_placeholder_atlas(device: &wgpu::Device, queue: &wgpu::Queue) -> GpuAtlas {
+    GpuAtlas::from_rgba(device, queue, 1, 1, &[0, 0, 0, 0], &[])
 }
 
 #[cfg(test)]

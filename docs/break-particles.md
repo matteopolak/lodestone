@@ -184,6 +184,12 @@ a gate can prove the table is populated rather than trusting that it is.
   first-model-wins rule beside it.
 - **Debris draws nothing** → check `ParticleFrame::unresolved` before anything else; an
   unresolved sprite is silent in pixels but loud in that counter.
+- **A flame/smoke/crit particle is the wrong texture, or draws nothing while
+  `unresolved == 0`** → this is issue #45's shape. Check
+  `RenderStats::particle_sheet_atlas_bound` and `particles_from_sheet` together, in that
+  order: sheet instances submitted with no sheet bound all discard on alpha, and
+  `prepare_particles` warns once when it happens. `unresolved` will *not* tell you —
+  the whole point of that bug is that the UVs resolve.
 - **Debris fills the whole cell for a slab or a fence** → known, deliberate gap.
   `Particles::destroy_block` passes `emit::FULL_CUBE` because vanilla derives the fragment
   grid from the block's **outline** shape (not its collision shape — `short_grass` has an
@@ -231,6 +237,8 @@ None at runtime. Everything is baked from the resource pack at startup:
 | `lodestone-shell` `tests/break_particle_tint.rs` | the real vanilla atlas: cascading blocks' debris is tinted, untinted blocks are untouched, and a census of every tinted `(block, tint)` pair | `client.jar` + `blocks.json` |
 | `lodestone-v770` `tests/live_destroy_block_event.rs` | 2001's `data` really is the cascaded block's state id, hand-decoded from captured server bytes | flat creative oracle (`:25570`, RCON `:25571`) |
 | `lodestone-shell` `tests/break_particles_pixels.rs` | that debris reaches the framebuffer at all | GPU adapter |
+| `lodestone-shell` `tests/sheet_particle_atlas_pixels.rs` | that a flame particle is textured from the **particle sheet**, by colour, against the pre-fix wiring as control (issue #45) | GPU adapter + `client.jar` |
+| `lodestone-shell` `particles::tests::an_instances_atlas_selector_distinguishes_a_sheet_sprite_from_a_block_sprite` | a resolved rect carries the atlas it belongs to, both ways | nothing |
 
 `break_particle_tint.rs` derives its **control** by substituting the state's tint back out
 of the extracted instance colour, so subject and control come from one burst and differ
@@ -257,20 +265,102 @@ in the input data, not in the test source, and no amount of reading the test rev
   the pass samples), `Camera`, `GpuAtlas`.
 - `lodestone-v770` — `packets::game::LevelEvent`, `block_states` (the state-id census).
 
-## Known open gap: sheet particles sample the wrong atlas
+## The wrong-atlas bug (issue #45, fixed), and what was measured
 
-Not the white-debris bug, found beside it, and **not fixed here** because the fix is in a
-file another agent holds.
+The second bug in this file's history, found beside the white-debris one and fixed later.
 
 `Particles::sheet_uv` resolves `SpriteSource::Sheet` (flame, smoke, crits, splashes)
 against `ParticleAtlas` — a **separate stitch** from the block-model atlas, with its own
-dimensions and packing. But `crates/lodestone-shell/src/gpu.rs` builds exactly one
-`particle_atlas_bind_group`, from the *block model* atlas, and `ParticleRenderer::draw`
-binds only that. So a resolved sheet particle samples block-atlas texels at
-particle-atlas coordinates: `/particle minecraft:flame` draws fragments of arbitrary block
-textures.
+dimensions and packing. But `gpu.rs` built exactly one `particle_atlas_bind_group`, from
+the *block-model* atlas, and `ParticleRenderer::draw` bound only that. So every resolved
+sheet particle sampled block-atlas texels at particle-atlas coordinates:
+`/particle minecraft:flame` drew fragments of arbitrary block textures.
 
-It is invisible to `tests/live_particles.rs`, which asserts `unresolved == 0` — and the
-UVs *do* resolve. Fixing it needs a second bind group (`ParticleRenderer` already has the
-`tex_layout` to build one) plus a per-particle choice of which to bind, i.e. splitting the
-draw into a block-atlas pass and a sheet-atlas pass.
+Measured, on the real 26.2 pack: flame's sprite is 8×8 at `(165, 254)` of a 512×512
+particle sheet, UV rect `[0.322, 0.496, 0.338, 0.512]`. The **same** rect in the 1024×2048
+block-model atlas is a 17×33 region at `(330, 1016)`, and the pre-fix renderer drew it —
+40,731 screen pixels of `#250912`, `#350b18`, `#12050a`, dark maroon block texture. Not one
+of them was a colour `flame.png` can produce.
+
+### Why nothing saw it
+
+`ParticleFrame::unresolved` stayed at **0** the whole time, correctly: the UVs *did*
+resolve. Three gates all passed:
+
+| gate | what it asserts | why it is blind |
+|---|---|---|
+| `tests/live_particles.rs` | `unresolved == 0` after RCON `/particle` | the UVs resolve — against the wrong image |
+| `particles::tests::sheet_particle_resolves_with_an_atlas` | UVs land inside the declared rect | true of *both* atlases |
+| `tests/break_particles_pixels.rs` | debris reaches the framebuffer | renders the demo palette, which has no sheet particles at all |
+
+This is the **assertion** species of vacuous test from `CLAUDE.md` in its most awkward
+form: the assert is not merely weak, it is *correct*, and the thing it does not mention is
+the thing that was wrong.
+
+### The fix
+
+**Not** the two-pass split the issue proposed. A second bind group plus "block instances
+then sheet instances" makes correctness depend on the instance list staying **partitioned
+by atlas** — an invariant nothing holds, and which any future sort (by depth, for the
+translucent-ordering gap noted above) would silently break, reproducing this exact bug.
+
+Instead: group 1 binds **both** stitches (four bindings — two textures, two samplers), and
+every `ParticleInstance` carries a `SpriteAtlas` selector chosen by the same
+`Particles::sprite_rect` match that produced its UV rect. `sprite_rect` returns
+`([f32; 4], SpriteAtlas)`, so a rect cannot travel without its atlas. The fragment shader
+takes both taps and `select`s — `textureSample` needs uniform control flow, and two
+unconditional samples have it by construction. Cost is one discarded fetch per particle
+fragment; two bind groups total stays well below the 4-group floor.
+
+`RenderState` starts with a **1×1 transparent** texture in the sheet slots and the shell
+calls `install_particle_sheet_atlas` once it has the stitch. So a jar-less run draws
+*nothing* for a sheet particle instead of a block texel — wrong but honest — and the loud
+half of that pairing is `RenderStats::particles_from_sheet` +
+`particle_sheet_atlas_bound`, plus a one-shot `tracing::warn!` in `prepare_particles` when
+sheet instances are submitted with no sheet bound.
+
+### One `Arc`, not two stitches
+
+`resources::load_particle_atlas` is memoised in a `OnceLock`. The emitter needs the atlas's
+sprite *rects* and the renderer needs its *pixels*, and this bug is exactly a UV table
+addressing an image other than the one bound — so both sides get the same object rather
+than two `AtlasBuilder` runs that happen to pack identically. (They do today: the
+definition paths are sorted and deduplicated for precisely that reason. That is a property
+of the packer, not a guarantee, and the failure mode if it ever changes is invisible in
+every counter.)
+
+### The gate, and what it discriminates on
+
+`tests/sheet_particle_atlas_pixels.rs` (needs a GPU adapter + `client.jar`).
+
+`flame.png` is 8×8 with **22 opaque texels in four colours** — `#ff0000`, `#ff6a00`,
+`#ffd800`, `#fff5c6`, every one `R == 0xff`. Flame's particle colour is `[1, 1, 1]` and its
+alpha is `1.0`, so at `FULL_BRIGHT` a drawn flame pixel into an `Rgba8Unorm` target is
+*exactly* `255 · srgb_to_linear(texel)` — four permitted values, `[ff0000, ff2500, ffaf00,
+ffe990]`, **derived from the sprite at run time** rather than hardcoded. Measured: subject
+22,134/22,134 pixels (100.00%) inside that set.
+
+The **control is the pre-fix renderer, reconstructed through public API**:
+`install_particle_sheet_atlas` handed the *block-model* atlas. It runs every time and is
+asserted to fail — 40,731 pixels, 0.00% agreement. A control that merely *would* fail is
+not evidence.
+
+Four premises are checked rather than assumed, because a control's premise can be false
+before the feature under test existed (`CLAUDE.md`, four instances):
+
+1. **`sheet_drawn > 0`.** `drawn > 0` is satisfied by terrain debris, which samples the
+   block atlas legitimately. `ParticleFrame::sheet_drawn` exists for this.
+2. **Every flame texel is fully opaque or fully clear** (measured: 0 partial). A partial
+   texel would blend with the sky and the four-value prediction would be wrong.
+3. **The two atlases genuinely disagree over this rect** — 0 of 364 block texels there
+   would pass as flame. If the block atlas happened to be flame-coloured, the gate would be
+   measuring nothing *and passing*.
+4. **The control drew something** (40,731 px). A control that drew zero pixels would
+   satisfy "does not look like flame" vacuously — which is the failure this gate is about.
+
+Failures print a **bounding box** and the top off-set colours, never a bare percentage: a
+fraction cannot tell a uniform-but-wrong frame from a localised blob.
+
+Hermetic companion: `particles::tests::an_instances_atlas_selector_distinguishes_a_sheet_sprite_from_a_block_sprite`
+pins the pairing with no GPU and no jar, and is deliberately two-sided — `Sheet == 1` alone
+is satisfied by a constant and `Block == 0` alone by a zeroed field.

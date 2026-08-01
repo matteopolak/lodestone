@@ -109,7 +109,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `#particle` sprite (which is not the texture of any face), the per-state tint that
   vanilla applies with a *different* virtual method from the in-world one, and the
   hardcoded `[1.0; 3]` that rendered every greyscale-sprite block's debris white —
-  plus the two hypotheses about that bug that captured server bytes refuted.
+  plus the two hypotheses about that bug that captured server bytes refuted. Also the
+  wrong-atlas bug (issue #45): why a flame particle drew *block* texels for months while
+  `unresolved` sat at zero, and the pixel gate that discriminates by colour.
 - [GUI item icons](./gui-item-icons.md) — the draw half of putting an item in a
   slot: which of the two icon streams a part reaches, the pass order, and the
   four GPU resources borrowed from the world renderer rather than uploaded twice.

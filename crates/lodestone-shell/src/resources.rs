@@ -10,7 +10,7 @@
 //! silently-empty atlas that would render an invisible world.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use lodestone_assets::{
     ItemAtlas, Language, ParticleAtlas, ResourceManager, ResourceSource, ZipSource,
@@ -395,8 +395,30 @@ pub fn load_container_background() -> Option<Arc<crate::container::ContainerBack
 /// them. Vanilla ships no pre-baked `particles.png` — 26.2 has 289 loose PNGs
 /// under `textures/particle/` that the client stitches at runtime, exactly as
 /// it does for blocks and items.
+///
+/// # Why this one is cached and the others are not
+///
+/// This atlas has **two consumers that must agree**: the emitter
+/// ([`crate::particles::Particles::with_particle_atlas`]) reads its sprite
+/// *rects* and the renderer
+/// ([`crate::gpu::RenderState::install_particle_sheet_atlas`]) uploads its
+/// *pixels*. Issue #45 was precisely a UV table addressing an image other than
+/// the one bound, so handing both sides the same `Arc` — rather than two stitches
+/// that happen to pack identically — makes that class of mismatch
+/// unrepresentable instead of merely unlikely. The [`OnceLock`] is what buys
+/// that: every caller in the process gets the same object.
+///
+/// (Two `AtlasBuilder` runs over one pack *are* byte-identical today — the
+/// definition paths are sorted and deduplicated for exactly that reason — but
+/// that is a property of the packer, not a guarantee, and the failure mode if it
+/// ever changes is invisible in every counter.)
 #[must_use]
 pub fn load_particle_atlas() -> Option<Arc<ParticleAtlas>> {
+    static CACHE: OnceLock<Option<Arc<ParticleAtlas>>> = OnceLock::new();
+    CACHE.get_or_init(build_particle_atlas).clone()
+}
+
+fn build_particle_atlas() -> Option<Arc<ParticleAtlas>> {
     let root = asset_root()?;
     let manager = open_client_jar(&root)?;
     let (atlas, report) = match ParticleAtlas::build_reported(&manager) {

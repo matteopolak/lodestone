@@ -17,6 +17,22 @@ pub struct RenderStats {
     pub entities_culled: usize,
     /// Particle billboards drawn this frame.
     pub particles_drawn: usize,
+    /// Of [`particles_drawn`](Self::particles_drawn), how many sample the
+    /// stitched **particle sheet** (flame, smoke, crits, splashes) rather than
+    /// the block-model atlas that terrain debris comes from.
+    ///
+    /// Its own counter because of issue #45: the particle pass used to bind one
+    /// texture, so sheet particles resolved, uploaded, drew — and sampled
+    /// *block* texels at particle-sheet coordinates. `particles_drawn` was
+    /// perfectly healthy throughout. Read together with
+    /// [`particle_sheet_atlas_bound`](Self::particle_sheet_atlas_bound): non-zero
+    /// here with that `false` means every one of them discarded on alpha.
+    pub particles_from_sheet: usize,
+    /// Whether [`RenderState::install_particle_sheet_atlas`] has run, i.e.
+    /// whether the sheet slots of the particle pass's bind group hold the real
+    /// stitched sheet or the 1×1 transparent stand-in. `false` on a jar-less run
+    /// and in every headless test that does not install one.
+    pub particle_sheet_atlas_bound: bool,
     /// Dropped-item entities drawn this frame (item entities with a known stack
     /// *and* baked geometry). Distinct from `entities_drawn`, which counts only
     /// the cuboid-rig mobs the entity pipeline handles — an item entity never

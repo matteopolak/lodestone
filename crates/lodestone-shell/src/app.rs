@@ -1755,6 +1755,17 @@ impl ApplicationHandler for WindowApp {
         // Size the sky fog to our real render distance so terrain fades into the
         // sky where chunks actually stop, not at the render crate's 8-chunk default.
         render.set_fog(sky_fog(self.config.render_distance));
+        // Upload the stitched particle sheet the emitter already resolves its
+        // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
+        // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
+        // its `(Sheet, frame) -> UV` table from — not a second stitch that
+        // happens to pack the same way. The bug being closed here is a UV table
+        // addressing a different image than the one bound, and every counter
+        // reads perfectly healthy while it is happening, so the identity is made
+        // structural rather than assumed.
+        if let Some(sheet) = crate::resources::load_particle_atlas() {
+            render.install_particle_sheet_atlas(gpu.device(), gpu.queue(), sheet.atlas());
+        }
         let mut hud = HudRenderer::new(gpu.device(), format);
         // Attach the vanilla GUI sprite atlas so the survival vitals draw from
         // real textures; on a jar-less run this is `None` and the HUD keeps its
