@@ -103,6 +103,21 @@ pub struct BakedModel {
     /// fragments where vanilla throws dirt. `None` when the model declares no
     /// `particle` variable or it resolves to no atlas sprite.
     pub particle_uv: Option<[f32; 4]>,
+    /// The model's `ambientocclusion` flag (JSON default `true`), from the
+    /// **first** model resolved for this state.
+    ///
+    /// Mirrors vanilla's `ModelBlockRenderer.tesselateBlock`, which reads
+    /// `this.parts.getFirst().useAmbientOcclusion()` — a multipart block (e.g. a
+    /// fence with several part models) is gated by its first part only, the same
+    /// "first resolved model wins" rule [`particle_uv`](Self::particle_uv)
+    /// already follows. This is **half** of vanilla's AO gate; the other half,
+    /// `blockState.getLightEmission() == 0`, is a block-state property this
+    /// crate has no source for yet (not in `blocks.json` — see `CLAUDE.md`'s
+    /// data-sources note — and not read by any oracle dump in the repo), so it
+    /// is not applied. A light-emitting full-cube model (e.g. `sea_lantern`)
+    /// will therefore still take the smooth-AO path here where vanilla would
+    /// flatten it.
+    pub ambient_occlusion: bool,
 }
 
 impl BakedModel {
@@ -947,6 +962,12 @@ impl<'a> BlockBaker<'a> {
 
         let mut quads = Vec::new();
         let mut particle_uv = None;
+        // `parts.getFirst()` in vanilla — see `BakedModel::ambient_occlusion`.
+        // `true` is the correct value when a state bakes no parts at all (no
+        // quads follow, so it is never read), and matches the JSON default for
+        // the (overwhelmingly common) single-part case.
+        let mut ambient_occlusion = true;
+        let mut ambient_occlusion_set = false;
         for group in states.applicable_models(properties) {
             if group.is_empty() {
                 continue;
@@ -978,10 +999,18 @@ impl<'a> BlockBaker<'a> {
                         [min[0], min[1], max[0], max[1]]
                     });
             }
+            if !ambient_occlusion_set {
+                ambient_occlusion = resolved.ambient_occlusion;
+                ambient_occlusion_set = true;
+            }
             let transform = ModelTransform::from_model_ref(model_ref);
             quads.extend(bake_model(&resolved, self.atlas, transform)?);
         }
-        Ok(BakedModel { quads, particle_uv })
+        Ok(BakedModel {
+            quads,
+            particle_uv,
+            ambient_occlusion,
+        })
     }
 
     /// Bakes a block from a numeric block state id via a [`BlockStateRegistry`].

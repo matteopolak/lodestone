@@ -391,6 +391,30 @@ pub trait ModelSectionView {
         let _ = (x, y, z);
         0xF0
     }
+
+    /// Whether ambient occlusion applies to the block at section-local
+    /// `(x, y, z)`, or its quads should fall back to flat per-face light —
+    /// vanilla's `ModelBlockRenderer.tesselateBlock` choosing between
+    /// `tesselateAmbientOcclusion` and `tesselateFlat`:
+    /// `this.ambientOcclusion && blockState.getLightEmission() == 0 &&
+    /// parts.getFirst().useAmbientOcclusion()`.
+    ///
+    /// `this.ambientOcclusion` is the renderer-wide "Smooth Lighting" video
+    /// option, which this client has no equivalent setting for (smooth
+    /// lighting is always on), so this method only needs to answer the
+    /// remaining two, block-specific conditions. It currently answers only
+    /// the model half (`useAmbientOcclusion`, the JSON `ambientocclusion`
+    /// property) — see
+    /// [`BlockModels::ambient_occlusion`](crate::BlockModels::ambient_occlusion)
+    /// for why the light-emission half is not applied yet.
+    ///
+    /// Defaults to `true`, matching the JSON default and the overwhelming
+    /// majority of blocks — existing [`ModelSectionView`] implementations
+    /// (tests, GUI items) need no change to keep compiling.
+    fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
+        let _ = (x, y, z);
+        true
+    }
 }
 
 /// AO shade of a fully-occluding corner neighbour. Mirrors [`crate::mesh`]'s
@@ -538,6 +562,12 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                 if quads.is_empty() {
                     continue;
                 }
+                // Per *block*, matching vanilla: `tesselateBlock` picks AO or
+                // flat once per block (`parts.getFirst().useAmbientOcclusion()`),
+                // not per quad, so every quad of a `"ambientocclusion": false`
+                // model (or, once light emission is threaded through, a torch or
+                // glowstone) renders flat together.
+                let ao_enabled = view.ambient_occlusion_at(x, y, z);
                 for quad in quads {
                     if let Some(cf) = quad.cullface {
                         let nrm = face_of_direction(cf).normal();
@@ -549,15 +579,21 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
                     // Per *quad*, not per block: each face carries the light of
                     // the cell it opens into (see `face_light_at`).
                     let light = view.face_light_at(x, y, z, quad.direction);
-                    let face = face_of_direction(quad.direction);
-                    let face_n = face.normal();
-                    let np = [
-                        x as i32 + face_n[0],
-                        y as i32 + face_n[1],
-                        z as i32 + face_n[2],
-                    ];
-                    let corners = [0, 1, 2, 3]
-                        .map(|i| quad_corner_sample(view, np, face, quad.positions[i], light));
+                    let corners = if ao_enabled {
+                        let face = face_of_direction(quad.direction);
+                        let face_n = face.normal();
+                        let np = [
+                            x as i32 + face_n[0],
+                            y as i32 + face_n[1],
+                            z as i32 + face_n[2],
+                        ];
+                        [0, 1, 2, 3]
+                            .map(|i| quad_corner_sample(view, np, face, quad.positions[i], light))
+                    } else {
+                        // `tesselateFlat`: uniform light, no per-corner AO — the
+                        // same fallback the fluid path uses.
+                        [(1.0, light); 4]
+                    };
                     emit_baked_quad(&mut mesh, quad, [x as f32, y as f32, z as f32], corners);
                 }
             }
@@ -1325,6 +1361,73 @@ mod tests {
         // corner reads the neighbours' raw (dark) value and comes out dim.
         let (_, dim) = quad_corner_sample(&view, [8, 9, 8], Face::PosY, [0.0, 1.0, 0.0], 0x20);
         assert!(dim >> 4 <= 2, "below-threshold centre must not substitute, got {dim:#04x}");
+    }
+
+    #[test]
+    fn ambient_occlusion_at_false_flattens_ao_through_mesh_models() {
+        // A block at (8,8,8) with a single Up-face quad and a real occluder at
+        // its `-X` edge neighbour (7,9,8) — the same occluder placement
+        // `ao_matches_vanillas_one_occluder_ratio_and_leaves_the_far_corner_bright`
+        // uses directly on `quad_corner_sample`. Here `ambient_occlusion_at`
+        // reports `false`, so per vanilla's `tesselateFlat` fallback
+        // `mesh_models` must skip corner sampling entirely and emit every
+        // vertex at full AO despite the occluder being real.
+        struct OccluderAoDisabled;
+        impl ModelSectionView for OccluderAoDisabled {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                static QUAD: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+                if (x, y, z) == (8, 8, 8) {
+                    QUAD.get_or_init(|| vec![cube_face(Direction::Up, None)])
+                } else {
+                    &[]
+                }
+            }
+            fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+                [x, y, z] == [7, 9, 8]
+            }
+            fn ambient_occlusion_at(&self, _x: usize, _y: usize, _z: usize) -> bool {
+                false
+            }
+        }
+
+        let mesh = mesh_models(&OccluderAoDisabled);
+        assert_eq!(mesh.quad_count(), 1);
+        assert!(
+            mesh.vertices.iter().all(|v| (v.ao - 1.0).abs() < 1e-6),
+            "ambient_occlusion_at() = false must flatten every corner's AO factor to 1.0 \
+             (folded with the constant Up-face shade, also 1.0) even though a real occluder \
+             is present — got {:?}",
+            mesh.vertices.iter().map(|v| v.ao).collect::<Vec<_>>()
+        );
+
+        // Executed negative control: the identical occluder with the trait's
+        // *default* `ambient_occlusion_at` (`true`) must actually darken every
+        // vertex — proving the flat result above is caused by the flag being
+        // `false`, not by this occluder placement being inert for some other
+        // reason (e.g. a mistaken coordinate).
+        struct OccluderAoEnabled;
+        impl ModelSectionView for OccluderAoEnabled {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                static QUAD: std::sync::OnceLock<Vec<BakedQuad>> = std::sync::OnceLock::new();
+                if (x, y, z) == (8, 8, 8) {
+                    QUAD.get_or_init(|| vec![cube_face(Direction::Up, None)])
+                } else {
+                    &[]
+                }
+            }
+            fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
+                [x, y, z] == [7, 9, 8]
+            }
+        }
+        let control = mesh_models(&OccluderAoEnabled);
+        assert!(
+            control.vertices.iter().all(|v| v.ao < 0.99),
+            "control premise violated: with AO enabled (the trait default) this same \
+             occluder must darken every vertex (they share one degenerate all-zero \
+             position, so all four sample the same corner), or the flattened result above \
+             proves nothing. Got {:?}",
+            control.vertices.iter().map(|v| v.ao).collect::<Vec<_>>()
+        );
     }
 
     #[test]
