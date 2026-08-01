@@ -208,6 +208,11 @@ pub struct FluidSprites {
     pub still: SpriteUv,
     /// The `*_flow` sprite (flowing surfaces, side faces).
     pub flow: SpriteUv,
+    /// The `block/water_overlay` sprite, for side faces against a
+    /// `HalfTransparentBlock`/`LeavesBlock` neighbour. `None` for lava, which
+    /// has no overlay material in vanilla (`FluidStateModelSet.LAVA_MODEL`
+    /// passes `null`).
+    pub overlay: Option<SpriteUv>,
 }
 
 /// Maps a fluid block's `level` property to its [`FluidState`], matching vanilla
@@ -282,6 +287,85 @@ fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<
         }
         _ => None,
     }
+}
+
+/// Blocks whose class extends vanilla `HalfTransparentBlock` in 26.2 (glass,
+/// stained glass, tinted glass, ice, blue ice, frosted ice, honey, slime), plus
+/// every `LeavesBlock`. `FluidRenderer.tesselate` checks
+/// `relativeBlock instanceof HalfTransparentBlock || relativeBlock instanceof
+/// LeavesBlock` to decide whether a fluid side face touching this neighbour
+/// uses the `water_overlay` material instead of `*_flow`, and to suppress the
+/// side face's back copy (`addBackFace = !isOverlay`).
+///
+/// Neither the render layer nor the baked geometry can stand in for this: a
+/// `slime_block`/`honey_block` sprite is fully opaque (they'd land on the
+/// `Solid` layer, indistinguishable from any ordinary block by alpha), and
+/// `LeavesBlock` renders `Cutout`, not `Translucent`, so no alpha-derived rule
+/// separates "is this class" from "is this some other cutout/translucent
+/// block". This is the same situation `UNCONDITIONAL_WATER_BLOCKS` already
+/// documents — the fact lives in a class hierarchy Java expresses and no data
+/// report carries — so it is a name list scanned from the decompiled 26.2
+/// `Blocks.java` (`TransparentBlock::new`, `StainedGlassBlock::new` × 16
+/// `DyeColor`s, `HalfTransparentBlock::new`, `IceBlock::new`,
+/// `FrostedIceBlock::new`, `HoneyBlock::new`, `SlimeBlock::new`,
+/// `TintedGlassBlock::new`), not guessed.
+///
+/// Deliberately **excludes** `copper_grate` and its weathering/waxed variants,
+/// which also construct a `HalfTransparentBlock` subclass
+/// (`WaterloggedTransparentBlock`) — a niche waterlogged block where getting
+/// the overlay wrong is low-stakes, scoped out to keep this list to blocks
+/// actually named in `docs/fluid-rendering.md`'s gap report plus their obvious
+/// siblings (every glass colour, both ice variants).
+const FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS: &[&str] = &[
+    "glass",
+    "tinted_glass",
+    "ice",
+    "blue_ice",
+    "frosted_ice",
+    "honey_block",
+    "slime_block",
+    "white_stained_glass",
+    "orange_stained_glass",
+    "magenta_stained_glass",
+    "light_blue_stained_glass",
+    "yellow_stained_glass",
+    "lime_stained_glass",
+    "pink_stained_glass",
+    "gray_stained_glass",
+    "light_gray_stained_glass",
+    "cyan_stained_glass",
+    "purple_stained_glass",
+    "blue_stained_glass",
+    "brown_stained_glass",
+    "green_stained_glass",
+    "red_stained_glass",
+    "black_stained_glass",
+];
+
+/// Every `LeavesBlock` in 26.2, scanned the same way — `Blocks.java`'s eleven
+/// `register(..., p -> new {Tinted,Untinted}ParticleLeavesBlock(...), ...)` /
+/// `MangroveLeavesBlock` calls.
+const FLUID_OVERLAY_LEAVES_BLOCKS: &[&str] = &[
+    "oak_leaves",
+    "spruce_leaves",
+    "birch_leaves",
+    "jungle_leaves",
+    "acacia_leaves",
+    "cherry_leaves",
+    "dark_oak_leaves",
+    "pale_oak_leaves",
+    "mangrove_leaves",
+    "azalea_leaves",
+    "flowering_azalea_leaves",
+];
+
+/// Whether a fluid touching this block (by `block_path`) should use the
+/// `water_overlay` material instead of `*_flow`. See
+/// [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`].
+#[must_use]
+fn is_fluid_overlay_neighbor(block_path: &str) -> bool {
+    FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS.contains(&block_path)
+        || FLUID_OVERLAY_LEAVES_BLOCKS.contains(&block_path)
 }
 
 /// The number of progressive crack-overlay stages (`destroy_stage_0..=9`),
@@ -890,6 +974,12 @@ pub struct BlockModels {
     /// Per-state fluid classification (`None` for non-fluids). Parallel to
     /// `models`; a state can be *both* a model (a waterlogged stair) and a fluid.
     fluids: Vec<Option<FluidCell>>,
+    /// Per-state: whether this block is a vanilla `HalfTransparentBlock` or
+    /// `LeavesBlock` — the class `FluidRenderer.tesselate` checks on a fluid's
+    /// horizontal neighbour to swap in the `water_overlay` material and drop
+    /// the side face's back copy. Parallel to `models`. See
+    /// [`is_fluid_overlay_neighbor`].
+    fluid_overlay: Vec<bool>,
     /// Resolved still/flow UVs for water and lava, from the stitched atlas.
     water_sprites: FluidSprites,
     lava_sprites: FluidSprites,
@@ -970,6 +1060,7 @@ impl BlockModels {
         let count = registry.state_count();
         let mut models = Vec::with_capacity(count as usize);
         let mut fluids = Vec::with_capacity(count as usize);
+        let mut fluid_overlay = Vec::with_capacity(count as usize);
         for id in 0..count {
             let resolved = registry.resolve(id);
             let sm = match baker.bake_state(registry, id, &FirstWeight) {
@@ -1016,6 +1107,7 @@ impl BlockModels {
 
             let fluid = resolved.and_then(|r| classify_fluid(r.block.path(), r.properties));
             fluids.push(fluid);
+            fluid_overlay.push(resolved.is_some_and(|r| is_fluid_overlay_neighbor(r.block.path())));
         }
 
         // Item geometry, baked against the same atlas and interning through the
@@ -1145,6 +1237,7 @@ impl BlockModels {
             models,
             empty: StateModel::empty(),
             fluids,
+            fluid_overlay,
             water_sprites,
             lava_sprites,
             tint_palette: palette.colors().to_vec(),
@@ -1362,7 +1455,8 @@ impl BlockModels {
         self.fluids.get(state_id as usize).copied().flatten()
     }
 
-    /// The still + flow sprite UVs for a fluid kind, into [`atlas`](Self::atlas).
+    /// The still + flow (+ overlay, for water) sprite UVs for a fluid kind, into
+    /// [`atlas`](Self::atlas).
     #[must_use]
     pub fn fluid_sprites(&self, kind: FluidKind) -> FluidSprites {
         match kind {
@@ -1370,16 +1464,41 @@ impl BlockModels {
             FluidKind::Lava => self.lava_sprites,
         }
     }
+
+    /// Whether `state_id` is a vanilla `HalfTransparentBlock`/`LeavesBlock` — a
+    /// fluid neighbour that should use the `water_overlay` material. See
+    /// [`is_fluid_overlay_neighbor`].
+    #[must_use]
+    pub fn fluid_overlay(&self, state_id: u32) -> bool {
+        self.fluid_overlay
+            .get(state_id as usize)
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
-/// Resolve a fluid's still/flow sprite UV rects (first animation frame) from the
-/// stitched atlas. Falls back to a zero rect if the texture is missing, which
-/// bakes the fluid with a degenerate UV rather than aborting the world.
+/// The `block/water_overlay` texture location — vanilla's
+/// `FluidStateModelSet.WATER_MODEL`'s third `Material`. No blockstate or item
+/// model references it, so it needs the same explicit atlas seeding as the
+/// still/flow textures (see `build_complete_atlas`).
+fn water_overlay_location() -> ResourceLocation {
+    "minecraft:block/water_overlay"
+        .parse()
+        .expect("valid water_overlay location")
+}
+
+/// Resolve a fluid's still/flow (+ overlay, for water) sprite UV rects (first
+/// animation frame) from the stitched atlas. Falls back to a zero rect if a
+/// texture is missing, which bakes the fluid with a degenerate UV rather than
+/// aborting the world.
 fn resolve_fluid_sprites(atlas: &Atlas, kind: FluidKind) -> FluidSprites {
     let [still_loc, flow_loc] = fluid_texture_locations(kind);
     FluidSprites {
         still: sprite_uv(atlas, &still_loc),
         flow: sprite_uv(atlas, &flow_loc),
+        // Only water has an overlay material in vanilla (`LAVA_MODEL`'s third
+        // constructor argument is `null`).
+        overlay: matches!(kind, FluidKind::Water).then(|| sprite_uv(atlas, &water_overlay_location())),
     }
 }
 
@@ -1483,6 +1602,9 @@ fn build_complete_atlas(
             let _ = builder.load(manager, &loc);
         }
     }
+    // `water_overlay` likewise: referenced by no blockstate or item model (it's
+    // wired up in Java as `FluidStateModelSet.WATER_MODEL`'s third `Material`).
+    let _ = builder.load(manager, &water_overlay_location());
     // Crack-overlay stages are likewise referenced by no block model; add them
     // so the mining crack pass can sample them from this same atlas.
     for stage in 0..CRACK_STAGE_COUNT {
