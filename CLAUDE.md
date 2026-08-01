@@ -72,8 +72,23 @@ Oracles (not part of repo state — recreate them):
   **Never `git add -A`. Never `git reset --hard`, `git checkout .`, `git stash`, or `git clean`
   (in any form, including `-n`-then-`-f`).** A blanket stage has clobbered in-flight work three
   times and destroyed a `lib.rs` edit once.
-- **`git clean` is the worst of these, because it destroys what nothing can recover.** The others
-  discard *modifications* to tracked files, which at least existed in a commit once.
+- **Never rewrite a shared file wholesale — edit the lines you mean.** This is a *fourth* way to
+  clobber, and no git command is involved, so none of the rules above catch it: writing a full new
+  copy of a file silently discards every concurrent edit in it, and the loser finds out only when
+  their own change stops existing. An agent overwrote `sim.rs` this way and destroyed three edits
+  another agent had already made there; that agent recovered by re-routing its work through
+  `resources.rs` and `app.rs`, but nothing warned either of them. `sim.rs`, `app.rs`, `gpu.rs` and
+  `docs/README.md` are the usual victims because everyone needs a line in them. Prefer a targeted
+  edit over a rewrite, and **re-read a shared file immediately before writing to it** — not at the
+  start of your task, which may be an hour of other agents' commits ago.
+- **When a shared file already holds someone else's work, stage your hunks, not the file.**
+  `git add -p`, or `git diff -- <file> | …` filtered and applied with `git apply --cached`, then
+  read `git diff --cached` to confirm the commit contains no foreign lines. This is the working
+  practice that let one agent commit into `gpu.rs`, `gpu/stats.rs`, `resources.rs` and
+  `docs/README.md` while three other agents held in-flight edits in all four.
+- **`git clean` is the worst of the git-level mistakes, because it destroys what nothing can
+  recover.** The others discard *modifications* to tracked files, which at least existed in a commit
+  once.
   `git clean` deletes **untracked** files — which in this repo means whole new crates, new
   `docs/*.md`, new oracle dumps and new test files, none of which are in any commit or reflog.
   It has already cost real work: an agent ran it while others were mid-flight and destroyed
