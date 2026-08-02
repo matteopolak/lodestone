@@ -271,34 +271,7 @@ fn upload_plain_texture(
 // Shared "position + baked colour" shader, used by the disc and star passes.
 // ---------------------------------------------------------------------------
 
-const PASSTHROUGH_COLOR_WGSL: &str = r"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
-) -> VsOut {
-    var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-";
+const PASSTHROUGH_COLOR_WGSL: &str = include_str!("shaders/sky_passthrough_color.wgsl");
 
 /// The sky disc: a per-**fragment** horizon-to-zenith gradient, ported from
 /// `assets/minecraft/shaders/core/sky.fsh` + `include/fog.glsl`.
@@ -312,131 +285,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// term is provably dead for this geometry and is therefore absent below.
 ///
 /// No double quotes anywhere in here, including comments — see the module docs.
-const SKY_DISC_WGSL: &str = r"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
+const SKY_DISC_WGSL: &str = include_str!("shaders/sky_disc.wgsl");
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+const CELESTIAL_WGSL: &str = include_str!("shaders/sky_celestial.wgsl");
 
-// `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s default, in blocks. Kept in
-// step with `crate::sky::SKY_FOG_END_DISTANCE` by a unit test rather than by a
-// comment.
-const SKY_FOG_END: f32 = 512.0;
-
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
-    @location(1) fog_color: vec4<f32>,
-    @location(2) local_pos: vec3<f32>,
-};
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) color: vec4<f32>,
-    @location(2) fog_color: vec4<f32>,
-) -> VsOut {
-    var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.color = color;
-    out.fog_color = fog_color;
-    out.local_pos = position;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // `linear_fog_value(sphericalVertexDistance, 0.0, FogSkyEnd)` — the 0.0
-    // start means this is a plain normalised distance, so the disc centre (16
-    // blocks up) is essentially pure sky colour and its rim (512 blocks out)
-    // is pure fog colour.
-    let fog_value = clamp(length(in.local_pos) / SKY_FOG_END, 0.0, 1.0);
-    // `apply_fog`: mix weighted by the fog colour's own alpha, and the
-    // fragment keeps the sky colour's alpha rather than the fog colour's.
-    let rgb = mix(in.color.rgb, in.fog_color.rgb, fog_value * in.fog_color.a);
-    return vec4<f32>(rgb, in.color.a);
-}
-";
-
-const CELESTIAL_WGSL: &str = r"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var atlas_tex: texture_2d<f32>;
-@group(1) @binding(1) var atlas_smp: sampler;
-
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-) -> VsOut {
-    var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.uv = uv;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let color = textureSample(atlas_tex, atlas_smp, in.uv);
-    // Sun/moon sprites are circular cutouts on a transparent square; anything
-    // this translucent is the cutout, not a dim rim, so it is dropped rather
-    // than blended (matches vanilla's own hard-edged celestial sprites).
-    if color.a < 0.05 {
-        discard;
-    }
-    return color;
-}
-";
-
-const CLOUD_WGSL: &str = r"
-struct Camera {
-    view_proj: mat4x4<f32>,
-};
-
-@group(0) @binding(0) var<uniform> camera: Camera;
-@group(1) @binding(0) var cloud_tex: texture_2d<f32>;
-@group(1) @binding(1) var cloud_smp: sampler;
-
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(
-    @location(0) position: vec3<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-) -> VsOut {
-    var out: VsOut;
-    out.clip = camera.view_proj * vec4<f32>(position, 1.0);
-    out.uv = uv;
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let sampled = textureSample(cloud_tex, cloud_smp, in.uv);
-    // `CloudRenderer.isCellEmpty`: alpha under 10/255 is an empty cell in
-    // `clouds.png` — discarding it here is what turns one flat textured quad
-    // into the right cloud silhouette with no CPU-side cell meshing.
-    if sampled.a < 0.04 {
-        discard;
-    }
-    return vec4<f32>(sampled.rgb * in.color.rgb, in.color.a);
-}
-";
+const CLOUD_WGSL: &str = include_str!("shaders/sky_cloud.wgsl");
 
 // ---------------------------------------------------------------------------
 // Pipelines
