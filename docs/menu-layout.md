@@ -202,13 +202,20 @@ If that equality ever stops holding, the rect table fails and names the button.
   defaulted to a no-op because vanilla's equivalent is the `child instanceof
   Layout` test in `Layout.arrangeElements`, and a leaf's arrange is a no-op either
   way.
-- **`HeaderAndFooterLayout` has no screen consumer yet**, and that is a knowing
-  exception to this repo's island rule (it is #55/#396's, being the base of
-  `OptionsSubScreen` and therefore of every settings sub-screen). Its gates are
-  arithmetic-only. Do not point it at `Screen::Settings` or `Screen::ServerList`
-  as they stand — those use this shell's own centred row stack, so converting them
-  is a deliberate *visual* change, which is a different piece of work from this
-  one.
+- **`HeaderAndFooterLayout` now has a screen consumer, and it needed no changes.**
+  It landed here with none — a knowing exception to this repo's island rule — and
+  #397's `Screen::WorldSelect` is what closed that: `world_select_layout` builds
+  vanilla's `SelectWorldScreen(this, 8+9+8+20+4, 60)` with all three bands and its
+  rects reach pixels. See [`world-select.md`](./world-select.md). One thing that
+  port surfaced and this note did not say: this is the **only canvas-dependent
+  container here** (it pins the footer to `screen.height` and centres both bands in
+  `screen.width`), so unlike the title column and the pause grid its arranged rects
+  are not reusable at another size — a consumer must either re-arrange per canvas
+  or, as #397 does, convert them to `Origin`-relative offsets *and gate that the
+  offsets really are canvas-invariant*. It is still true that you should not point
+  it at `Screen::Settings` or `Screen::ServerList` as they stand (that is #55/#396's
+  work): those use this shell's own centred row stack, so converting them is a
+  deliberate *visual* change.
 - **`EqualSpacingLayout` and `CommonLayouts` are not ported.** One user each in
   the whole client tree; porting them now would be an island.
 - **Do not arrange a container screen with any of this.** Zero of `screens/

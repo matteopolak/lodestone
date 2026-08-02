@@ -777,6 +777,375 @@ pub fn death_slot(button: super::nav::DeathButton) -> Slot {
     }
 }
 
+// -- vanilla's `SelectWorldScreen` metrics (issue #397) ----------------------
+//
+// Same rule as the block above: every number is transcribed from
+// `.cache/mc/26.2/client-src`, with the file and line named, in logical GUI
+// pixels.
+
+/// The header band, spelled out as `8 + 9 + 8 + 20 + 4` in the constructor
+/// (`SelectWorldScreen.java:31`) and left unreduced here for the reason it is
+/// unreduced there: the parts *are* the layout — 8 px of slack above and below,
+/// the 9 px title `StringWidget`, the 20 px search box, and the 4 px
+/// `LinearLayout` spacing between the two.
+const WORLD_SELECT_HEADER_H: f32 = 8.0 + 9.0 + 8.0 + 20.0 + 4.0;
+/// The footer band (`SelectWorldScreen.java:31`). Two 20 px button rows 4 px
+/// apart measure 44, so the band carries 16 px of slack, which the footer
+/// `FrameLayout`'s inherited `align(0.5, 0.5)` splits 8/8.
+const WORLD_SELECT_FOOTER_H: f32 = 60.0;
+/// `LinearLayout.vertical().spacing(4)` in the header and `.rowSpacing(4)` in
+/// the footer grid (`SelectWorldScreen.java:46,82`) — the same 4 either way.
+const WORLD_SELECT_SPACING: i32 = 4;
+/// `new GridLayout().columnSpacing(8)` (`SelectWorldScreen.java:82`).
+const WORLD_SELECT_COLUMN_SPACING: i32 = 8;
+/// `footer.createRowHelper(4)` (`SelectWorldScreen.java:84`).
+const WORLD_SELECT_FOOTER_COLUMNS: usize = 4;
+/// The search box's declared size — `new EditBox(font, this.width / 2 - 100, 22,
+/// 200, 20, …)` (`SelectWorldScreen.java:55`). **The `x` and `y` in that call
+/// are dead**: the header `LinearLayout` overwrites both when it arranges, which
+/// is why the box lands at y `21` rather than the 22 written there.
+const WORLD_SELECT_SEARCH_W: f32 = 200.0;
+/// `.width(71)` on Edit / Delete / Re-Create / Back
+/// (`SelectWorldScreen.java:91,96,103,106`). Play and Create take
+/// `Button.DEFAULT_WIDTH` instead ([`widget::DEFAULT_WIDTH`]) and each spans two
+/// of the four columns.
+const WORLD_SELECT_SMALL_BTN_W: f32 = 71.0;
+/// A `StringWidget`'s height: `StringWidget(message, font)` delegates to
+/// `this(0, 0, font.width(...), 9, ...)` (`StringWidget.java:18-20`).
+const STRING_WIDGET_H: f32 = 9.0;
+/// `WorldSelectionList.getRowWidth()` (`WorldSelectionList.java:247-249`) — a
+/// 270 px override of `AbstractSelectionList`'s own 220 (`:389-391`).
+const WORLD_LIST_ROW_W: f32 = 270.0;
+/// The list's `itemHeight`: the last argument of
+/// `super(minecraft, width, height, 0, 36)` (`WorldSelectionList.java:112`).
+const WORLD_LIST_ITEM_H: f32 = 36.0;
+/// `AbstractSelectionList.Entry.CONTENT_PADDING` (`:436`). Every `getContentX`/
+/// `getContentY` insets the entry rect by 2 and `getContentWidth`/
+/// `getContentHeight` by 4 (`:477-495`), so a 36 px row has a **32** px content
+/// box — which is exactly the world icon's 32×32 (`WorldListEntry.ICON_SIZE`,
+/// `:400`).
+const LIST_CONTENT_PADDING: f32 = 2.0;
+/// `getFirstEntryY() = getY() + 2` (`AbstractSelectionList.java:104-106`): the
+/// gap above the first row. Not [`LIST_CONTENT_PADDING`], even though it is also
+/// 2 — they are different expressions and only one of them scales with a row.
+const WORLD_LIST_FIRST_ENTRY_Y: f32 = 2.0;
+
+/// The canvas [`world_select_block`] arranges its tree at.
+///
+/// [`layout::HeaderAndFooterLayout`] is the first container here that is
+/// **canvas-dependent** — it pins the footer to `screen.height` and centres both
+/// bands in `screen.width` — so unlike [`title_block`] and [`pause_block`] its
+/// arranged rects are not directly reusable at another size. What *is*
+/// canvas-independent is every rect once it is expressed relative to the right
+/// [`Origin`]: the header column measures 200 wide and the footer grid 308
+/// whatever the screen is, and the content band always begins at the header
+/// height (see [`WorldSelectBlock::at`]). The slots are therefore derived once
+/// here and asserted invariant at three different canvases by
+/// `the_world_select_slots_do_not_depend_on_the_reference_canvas` — which is the
+/// only thing standing between this and a screen that is correct at 854×480 and
+/// wrong everywhere else.
+const WORLD_SELECT_REF_CANVAS: (f32, f32) = (854.0, 480.0);
+
+/// Vanilla's `SelectWorldScreen.init` (`SelectWorldScreen.java:44-107`) as a
+/// real [`layout::HeaderAndFooterLayout`], arranged for a `width`×`height`
+/// canvas.
+///
+/// Three things about it are worth knowing before changing it:
+///
+/// - **The title cell is zero-width on purpose.** Vanilla's
+///   `StringWidget(this.title, this.font)` is `font.width(title)` wide, and this
+///   shell has no font at arrange time. It does not matter: the cell is
+///   `alignHorizontallyCenter`ed in the 200 px column, so a `w`-wide title lands
+///   at `colX + (200 - w) / 2` and its *centre* is `colX + 100` for every `w`
+///   short of 200. A zero-width cell puts the leaf rect exactly on that centre,
+///   which is what [`world_select_title_label`] draws from — so the arranged
+///   position is the real one rather than an approximation of it.
+/// - **The list is a [`layout::SpacerElement`], not a widget.** It has to take
+///   part in the measurement, because `HeaderAndFooterLayout`'s content clamp
+///   reads the content frame's *height* (`min(headerHeight + 30, screenHeight -
+///   footerHeight - contentHeight)`), and vanilla sizes the list to
+///   `layout.getContentHeight()` exactly (`:68`) — which is what makes the clamp
+///   pick the header height. A spacer's `visit_widgets` is a no-op, so it is
+///   measured and never drawn, which is also true of vanilla's list here: it is
+///   an `AbstractWidget` but not one this shell has ported.
+/// - **`SharedConstants.DEBUG_WORLD_RECREATE` is a system-property debug flag**
+///   (`SharedConstants.java:119`), false in any shipped client, so the sub-header
+///   holds the search box alone (`:50-53`).
+fn world_select_layout(width: f32, height: f32) -> layout::HeaderAndFooterLayout {
+    let cell = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
+        Box::new(Widget::button(0.0, 0.0, w, h, ""))
+    };
+    let mut root = layout::HeaderAndFooterLayout::with_heights(
+        width,
+        height,
+        WORLD_SELECT_HEADER_H,
+        WORLD_SELECT_FOOTER_H,
+    );
+
+    // `LinearLayout header = this.layout.addToHeader(LinearLayout.vertical().spacing(4));`
+    // `header.defaultCellSetting().alignHorizontallyCenter();` (`:46-47`)
+    let mut header = layout::LinearLayout::vertical().spacing(WORLD_SELECT_SPACING);
+    {
+        let baseline = header.default_cell_setting();
+        *baseline = baseline.align_horizontally_center();
+    }
+    header.add_child(Box::new(Widget::new(
+        0.0,
+        0.0,
+        0.0,
+        STRING_WIDGET_H,
+        "Select World",
+    )));
+    let mut sub_header = layout::LinearLayout::horizontal().spacing(WORLD_SELECT_SPACING);
+    sub_header.add_child(cell(WORLD_SELECT_SEARCH_W, WIDGET_H));
+    header.add_child(Box::new(sub_header));
+    root.add_to_header(Box::new(header));
+
+    // The list, sized to the content band exactly as `:67-68` does.
+    let content_height = root.content_height();
+    root.add_to_contents(Box::new(layout::SpacerElement::new(width, content_height)));
+
+    // `GridLayout footer = this.layout.addToFooter(new GridLayout().columnSpacing(8).rowSpacing(4));`
+    // `footer.defaultCellSetting().alignHorizontallyCenter();` (`:82-84`)
+    let mut footer = layout::GridLayout::new()
+        .column_spacing(WORLD_SELECT_COLUMN_SPACING)
+        .row_spacing(WORLD_SELECT_SPACING);
+    {
+        let baseline = footer.default_cell_setting();
+        *baseline = baseline.align_horizontally_center();
+    }
+    let mut helper = footer.create_row_helper(WORLD_SELECT_FOOTER_COLUMNS);
+    // Row 1: Play and Create, `Button.DEFAULT_WIDTH` each, two columns each
+    // (`:85-88`). Their 150 px is what sets all four column widths: a two-column
+    // span of 150 with an 8 px gutter splits 71/71 through `Divisor`, and the
+    // four 71 px buttons below can then only *match* it.
+    for _ in 0..2 {
+        helper.add_spanning(cell(widget::DEFAULT_WIDTH, WIDGET_H), 2);
+    }
+    // Row 2: Edit, Delete, Re-Create, Back — one column each (`:89-106`).
+    for _ in 0..4 {
+        helper.add_child(cell(WORLD_SELECT_SMALL_BTN_W, WIDGET_H));
+    }
+    drop(helper);
+    root.add_to_footer(Box::new(footer));
+
+    root.arrange_elements();
+    root
+}
+
+/// One arranged world-select screen: the header's leaf rects, the footer's, and
+/// where the content band starts.
+///
+/// Split by band rather than flattened into one `Vec` the way [`MenuBlock`] is,
+/// because the two bands are anchored to *different* [`Origin`]s — the header to
+/// the top of the screen and the footer to the bottom — so a flat list of
+/// absolute rects could not be converted to canvas-independent offsets.
+#[derive(Debug)]
+struct WorldSelectBlock {
+    /// The header column's leaves, in insertion order: the title cell, then the
+    /// search box.
+    header: Vec<(f32, f32, f32, f32)>,
+    /// The footer grid's leaves, in [`super::world_select::WORLD_SELECT_BUTTONS`]'
+    /// order.
+    footer: Vec<(f32, f32, f32, f32)>,
+    /// The content frame's top, i.e. `list.getY()`.
+    content_top: f32,
+    /// The canvas this was arranged at, so the band offsets can be made relative
+    /// to it.
+    canvas: (f32, f32),
+}
+
+impl WorldSelectBlock {
+    /// Arrange the tree at `width`×`height` and read its leaves back.
+    ///
+    /// The leaf counts are asserted rather than trusted, for [`MenuBlock::of`]'s
+    /// reason: a tree that no longer describes the screen must fail loudly
+    /// instead of silently shifting every rect by one.
+    fn at(width: f32, height: f32) -> Self {
+        let root = world_select_layout(width, height);
+        let header = layout::widget_rects(root.header());
+        let footer = layout::widget_rects(root.footer());
+        assert_eq!(
+            header.len(),
+            2,
+            "the world-select header has {} leaves, the screen has 2 (title, search)",
+            header.len()
+        );
+        assert_eq!(
+            footer.len(),
+            super::world_select::WORLD_SELECT_BUTTONS.len(),
+            "the world-select footer has {} leaves, the screen has {}",
+            footer.len(),
+            super::world_select::WORLD_SELECT_BUTTONS.len()
+        );
+        Self {
+            header,
+            footer,
+            content_top: root.contents().y(),
+            canvas: (width, height),
+        }
+    }
+
+    /// A header leaf as a slot measured from [`Origin::ScreenTop`].
+    fn header_slot(&self, index: usize) -> Slot {
+        let (x, y, w, h) = self.header[index];
+        Slot {
+            origin: Origin::ScreenTop,
+            dx: x - self.canvas.0 * 0.5,
+            dy: y,
+            w,
+            h,
+        }
+    }
+
+    /// A footer leaf as a slot measured from [`Origin::ScreenBottom`]. Its `dy`
+    /// is negative — the footer is pinned to the bottom edge.
+    fn footer_slot(&self, index: usize) -> Slot {
+        let (x, y, w, h) = self.footer[index];
+        Slot {
+            origin: Origin::ScreenBottom,
+            dx: x - self.canvas.0 * 0.5,
+            dy: y - self.canvas.1,
+            w,
+            h,
+        }
+    }
+}
+
+/// The world-select screen, arranged once at [`WORLD_SELECT_REF_CANVAS`]. See
+/// [`title_block`] on why arranging once is safe, and
+/// [`WORLD_SELECT_REF_CANVAS`] on the extra condition that applies here.
+fn world_select_block() -> &'static WorldSelectBlock {
+    static BLOCK: std::sync::OnceLock<WorldSelectBlock> = std::sync::OnceLock::new();
+    BLOCK.get_or_init(|| {
+        WorldSelectBlock::at(WORLD_SELECT_REF_CANVAS.0, WORLD_SELECT_REF_CANVAS.1)
+    })
+}
+
+/// The search box's rect, read out of the arranged header.
+#[must_use]
+pub fn world_select_search_slot() -> Slot {
+    world_select_block().header_slot(1)
+}
+
+/// Vanilla's rect for one footer button, read out of the arranged grid.
+///
+/// Exhaustive rather than an `as usize`, for [`title_slot`]'s reason: a new
+/// variant must be a compile error, not a silent off-by-one across every rect.
+#[must_use]
+pub fn world_select_slot(button: super::world_select::WorldSelectButton) -> Slot {
+    use super::world_select::WorldSelectButton as B;
+    let index = match button {
+        B::Play => 0,
+        B::Create => 1,
+        B::Edit => 2,
+        B::Delete => 3,
+        B::ReCreate => 4,
+        B::Back => 5,
+    };
+    world_select_block().footer_slot(index)
+}
+
+/// The title `StringWidget`'s label, positioned from the arranged header's own
+/// title cell.
+///
+/// `Align::Centre` because the cell is zero-width and therefore *is* the text's
+/// centre — see [`world_select_layout`]. `StringWidget.visitLines` draws at
+/// `y + (height - 9) / 2`, which is `y` for a 9 px widget
+/// (`StringWidget.java:64`), so the cell's `y` is the text's top.
+#[must_use]
+pub fn world_select_title_label() -> MenuLabel {
+    let slot = world_select_block().header_slot(0);
+    MenuLabel {
+        text: super::world_select::WORLD_SELECT_TITLE.to_string(),
+        origin: slot.origin,
+        dx: slot.dx,
+        dy: slot.dy,
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }
+}
+
+/// The top of world-list row `index`, in logical pixels.
+///
+/// `getFirstEntryY() + index * itemHeight` with no scroll term, because
+/// `scrollAmount` is 0 for a list that cannot overflow its band — which is the
+/// only list this screen has (see [`super::world_select`]). Canvas-independent:
+/// `list.getY()` is the content band's top, which
+/// `HeaderAndFooterLayout.arrangeElements` clamps to exactly the header height
+/// whenever the content is sized to `getContentHeight()`.
+#[must_use]
+pub fn world_list_row_top(index: usize) -> f32 {
+    world_select_block().content_top + WORLD_LIST_FIRST_ENTRY_Y + index as f32 * WORLD_LIST_ITEM_H
+}
+
+/// The left edge of every world-list row: `getRowLeft()`, which is
+/// `getX() + this.width / 2 - getRowWidth() / 2` with `getX() == 0`
+/// (`AbstractSelectionList.java:372-374`). The `floor` is Java's integer
+/// division of an odd canvas width, and it is the reason this takes a width
+/// rather than being folded into a slot.
+#[must_use]
+pub fn world_list_row_left(width: f32) -> f32 {
+    (width * 0.5).floor() - (WORLD_LIST_ROW_W * 0.5).floor()
+}
+
+/// The rect of world-list row `index` at a `width`-wide canvas.
+#[must_use]
+pub fn world_list_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    (
+        world_list_row_left(width),
+        world_list_row_top(index),
+        WORLD_LIST_ROW_W,
+        WORLD_LIST_ITEM_H,
+    )
+}
+
+/// A row's *content* rect — the entry rect inset by
+/// [`LIST_CONTENT_PADDING`]/twice it (`AbstractSelectionList.java:477-495`).
+/// This is where a `WorldListEntry` puts its 32×32 icon and, at
+/// `x + 32 + 3`, its three text lines (`WorldSelectionList.java:494-502,569-571`).
+#[must_use]
+pub fn world_list_row_content_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
+    let (x, y, w, h) = world_list_row_rect(index, width);
+    (
+        x + LIST_CONTENT_PADDING,
+        y + LIST_CONTENT_PADDING,
+        w - 2.0 * LIST_CONTENT_PADDING,
+        h - 2.0 * LIST_CONTENT_PADDING,
+    )
+}
+
+/// The one entry the list actually has: vanilla's `NoWorldsEntry` geometry
+/// carrying [`super::world_select::NO_WORLDS_MESSAGE`].
+///
+/// `NoWorldsEntry.extractContent` centres a `StringWidget` in the entry's
+/// content box — `setPosition(getContentXMiddle() - width / 2, getContentYMiddle()
+/// - height / 2)` (`WorldSelectionList.java:392-396`) — and a `StringWidget`'s
+/// own draw then adds `(height - 9) / 2`, which is 0 for its 9 px height. So the
+/// text's top is `contentYMiddle - 4`, and the `4` is Java's `9 / 2`, not 4.5.
+///
+/// `contentXMiddle` is `getContentX() + getContentWidth() / 2` =
+/// `rowLeft + 2 + 133`, and `rowLeft` is `floor(w / 2) - 135`, so the two 133/135
+/// halves cancel and the centre is `floor(w / 2)` — the screen's own centre,
+/// which is why this is an [`Origin::ScreenTop`] label with `dx: 0`.
+#[must_use]
+pub fn world_select_no_worlds_label() -> MenuLabel {
+    // The `x` and `w` of the content rect are discarded — the label is centred on
+    // the screen for the reason above — so the width passed here is arbitrary.
+    // Reading the rect anyway, instead of restating `row_top + 2`, is
+    // `CLAUDE.md`'s "derive layout from the same expression the draw uses".
+    let (_, content_y, _, content_h) = world_list_row_content_rect(0, 0.0);
+    MenuLabel {
+        text: super::world_select::NO_WORLDS_MESSAGE.to_string(),
+        origin: Origin::ScreenTop,
+        dx: 0.0,
+        dy: content_y + (content_h * 0.5).floor() - (STRING_WIDGET_H * 0.5).floor(),
+        align: Align::Centre,
+        colour: LABEL,
+        scale: 1.0,
+    }
+}
 /// Horizontal alignment of a [`MenuLabel`] about its anchored x.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -879,7 +1248,26 @@ pub struct MenuFrame<'a> {
     /// The rows, top to bottom.
     pub rows: Vec<MenuRow>,
     /// Index of the highlighted row. Out-of-range highlights nothing.
+    ///
+    /// On a screen with a single row cursor this is both "the keyboard is here"
+    /// and "the mouse is here", which is why [`draw_widget`] feeds it to
+    /// `Widget::focused`. On a screen with real focus
+    /// ([`super::Screen::WorldSelect`]) it is the **focused** row only, and
+    /// [`Self::hovered`] carries the other fact.
     pub selected: usize,
+    /// The row the cursor is over, when that is a different question from
+    /// [`Self::selected`].
+    ///
+    /// `None` on every screen with a row cursor, which is every screen except
+    /// [`super::Screen::WorldSelect`] — so nothing about the existing screens'
+    /// pixels changes. Vanilla's sprite argument is `isHoveredOrFocused()`
+    /// (`AbstractButton.java:43-53`), the `||` of the two, and
+    /// [`Widget::is_hovered_or_focused`] is where that join lives; this field is
+    /// only how the second operand reaches it. See
+    /// [`super::world_select::WorldSelectNav::hovered`] for the bug that made the
+    /// split necessary — one flag would let a mouse-over steal the keyboard out
+    /// of a text field.
+    pub hovered: Option<usize>,
     /// Key-hint lines drawn at the bottom.
     pub footer: Vec<String>,
     /// A message above the footer, drawn in the failure colour.
@@ -992,6 +1380,7 @@ pub fn owns_frame(screen: super::Screen) -> bool {
         Screen::MainMenu
             | Screen::ServerList
             | Screen::ServerEdit
+            | Screen::WorldSelect
             | Screen::Settings
             | Screen::Accounts
             | Screen::Error
@@ -1531,6 +1920,55 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
+        // Vanilla's `SelectWorldScreen` (issue #397): the title, the search box,
+        // the six footer buttons — **five of them present and disabled**, Create
+        // New World among them — and the one list row the list actually has. See
+        // `super::world_select` for what is disabled and why, and
+        // `world_select_slot` for the geometry.
+        Screen::WorldSelect => {
+            use super::world_select::WORLD_SELECT_BUTTONS;
+            let ws = nav.world_select();
+            let mut rows = Vec::with_capacity(1 + WORLD_SELECT_BUTTONS.len());
+            rows.push(MenuRow {
+                // Not drawn: `draw_edit_box` reads the widget. Populated for the
+                // same reason the edit form's is — the frame-shape tests read it.
+                label: ws.search().value().to_string(),
+                enabled: true,
+                field: true,
+                edit: Some(ws.search().clone()),
+                slot: Some(world_select_search_slot()),
+                ..Default::default()
+            });
+            for button in WORLD_SELECT_BUTTONS {
+                rows.push(MenuRow {
+                    label: button.label().to_string(),
+                    // The **widget's** live flag, not `WorldSelectButton::enabled`
+                    // — see `WorldSelectNav::is_active` on why asking the enum here
+                    // would be a second source of truth.
+                    enabled: ws.is_active(button.row()),
+                    slot: Some(world_select_slot(button)),
+                    ..Default::default()
+                });
+            }
+            Some(MenuFrame {
+                rows,
+                // The *focused* row. `usize::MAX` when nothing is focused, which
+                // highlights nothing (see `MenuFrame::selected`) — rather than
+                // `0`, which would light the search field up whenever focus was
+                // cleared.
+                selected: ws.focused_row().unwrap_or(usize::MAX),
+                hovered: ws.hovered(),
+                vanilla: true,
+                labels: vec![
+                    world_select_title_label(),
+                    // The empty-list state, drawn rather than implied: without it
+                    // "no worlds" and "the list failed to draw" are the same
+                    // picture.
+                    world_select_no_worlds_label(),
+                ],
+                ..Default::default()
+            })
+        }
         Screen::Settings => {
             let scale = nav.gui_scale();
             let label = if scale == crate::config::AUTO_GUI_SCALE {
@@ -1868,7 +2306,28 @@ pub fn build(
 
     for (i, row) in frame.rows.iter().enumerate() {
         if row.slot.is_some() {
-            draw_widget(&mut b, &frame.rows, i, width, height, i == frame.selected);
+            // A vanilla-positioned row can be a **text field** rather than a
+            // button: `Screen::WorldSelect`'s search box is placed by the header
+            // layout's arithmetic like every other widget on that screen, and
+            // drawn as an `EditBox`. Checked before `draw_widget` because the two
+            // draws are mutually exclusive — a field is not a button with text in
+            // it, and `EditBox` has its own sprite set and its own predicate (see
+            // `draw_edit_box`).
+            if let Some(edit) = row.edit.as_ref() {
+                if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
+                    draw_edit_box(&mut b, edit, x, y, w, h);
+                }
+                continue;
+            }
+            draw_widget(
+                &mut b,
+                &frame.rows,
+                i,
+                width,
+                height,
+                i == frame.selected,
+                frame.hovered == Some(i),
+            );
             continue;
         }
         let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) else {
@@ -2013,19 +2472,22 @@ fn draw_widget(
     width: f32,
     height: f32,
     selected: bool,
+    hovered: bool,
 ) {
     let Some(row) = rows.get(i) else { return };
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
         return;
     };
-    // One widget, carrying this row's state. `focused` takes `selected`, and
-    // `hovered` is left false, because these screens still have a *single* row
-    // cursor that both the keyboard and `MenuNav::hover` move — there is no
-    // second fact to record. #395 split the two flags on `Widget` for the
-    // screens that do have real focus (`Screen::ServerEdit`'s fields), and
-    // vanilla's sprite argument is `isHoveredOrFocused()`, so either flag alone
-    // still selects `widget/button_highlighted` here. That `||` lives in
-    // `Widget::is_hovered_or_focused`; do not re-derive it in this function.
+    // One widget, carrying this row's state. `focused` takes `selected`; on the
+    // title screen, the pause menu, the death screen and the account screen
+    // `hovered` is always `false`, because those still have a *single* row cursor
+    // that both the keyboard and `MenuNav::hover` move — there is no second fact
+    // to record. #395 split the two flags on `Widget` for the screens that do have
+    // real focus (`Screen::ServerEdit`'s fields), and #397's `Screen::WorldSelect`
+    // is the first screen to carry *both* through a frame, via
+    // `MenuFrame::hovered`. Vanilla's sprite argument is `isHoveredOrFocused()`,
+    // and that `||` lives in `Widget::is_hovered_or_focused`; do not re-derive it
+    // in this function.
     //
     // Built per frame, so the message is copied per frame. That is the same cost
     // the row itself already pays — `frame_for` and `pause_frame` both rebuild
@@ -2035,6 +2497,7 @@ fn draw_widget(
     let mut widget = Widget::button(x, y, w, h, row.label.as_str());
     widget.active = row.enabled;
     widget.focused = selected;
+    widget.hovered = hovered;
     widget.icon = row.icon;
     // `AbstractWidget.extractRenderState` wraps everything in `if (this.visible)`
     // (`AbstractWidget.java:56-62`). No row sets this yet; the guard is here so
@@ -2051,16 +2514,20 @@ fn draw_widget(
         Some(sprite) if b.has_sprite(sprite) => b.sprite(sprite, x, y, w, h, LABEL),
         _ => {
             // Jar-less fallback: the flat fills the menu has always used, so the
-            // layout is still legible and still testable without a pack.
+            // layout is still legible and still testable without a pack. The
+            // predicate is the widget's `||`, not `focused` alone, so the fallback
+            // cannot disagree with the sprite path above about which button is
+            // lit — identical for every screen with a row cursor, since `hovered`
+            // is false there.
             let fill = if !widget.active {
                 ROW_OFF
-            } else if widget.focused {
+            } else if widget.is_hovered_or_focused() {
                 ROW_SEL
             } else {
                 ROW_BG
             };
             b.rect(x, y, w, h, fill);
-            if widget.focused {
+            if widget.is_hovered_or_focused() {
                 b.outline(x, y, w, h, 1.0, FG);
             }
         }
@@ -2882,6 +3349,7 @@ mod tests {
             Screen::MainMenu,
             Screen::ServerList,
             Screen::ServerEdit,
+            Screen::WorldSelect,
             Screen::Settings,
             Screen::Accounts,
             Screen::Connecting,
@@ -2900,6 +3368,7 @@ mod tests {
                     ui.open_server_list();
                     ui.open_server_edit();
                 }
+                Screen::WorldSelect => ui.open_world_select(),
                 Screen::Settings => ui.open_settings(),
                 Screen::Accounts => ui.open_accounts(),
                 Screen::Connecting => ui.begin(SessionKind::Multiplayer),
@@ -4753,6 +5222,571 @@ mod tests {
         assert!(
             v.len() >= STRIDE * 6,
             "an empty menu must still emit the background"
+        );
+    }
+
+
+    // -- world select (issue #397) --------------------------------------------
+
+    /// A nav and a `UiState` sitting on the world-select screen, reached the way
+    /// a player reaches it: by activating the title screen's Singleplayer button.
+    ///
+    /// That is the anti-island premise for this whole screen — if the button no
+    /// longer opens it, every test below fails at this assertion rather than
+    /// quietly testing a screen nothing can reach.
+    fn world_select_nav(tag: &str) -> (MenuNav, UiState) {
+        let mut nav = test_nav(tag);
+        let mut ui = UiState::new();
+        assert_eq!(
+            nav.main_button(),
+            crate::menu::nav::MainButton::Singleplayer,
+            "premise: Singleplayer is the initially selected title-screen button"
+        );
+        let action = nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(action, crate::menu::nav::MenuAction::None);
+        assert_eq!(
+            ui.screen(),
+            Screen::WorldSelect,
+            "the title screen's Singleplayer button must open the world list"
+        );
+        (nav, ui)
+    }
+
+    fn world_select_frame(nav: &MenuNav, ui: &UiState) -> MenuFrame<'static> {
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        frame_for(ui, nav, &statuses, &mut fav).expect("the world list owns its frame")
+    }
+
+    /// Vanilla's own rects for `SelectWorldScreen`, hand-derived from the Java at
+    /// 854×480 rather than read back out of the layout — `CLAUDE.md`'s rule that
+    /// an expected value must originate outside the code under test.
+    ///
+    /// The derivation, which is what a future reader has to be able to check:
+    ///
+    /// - The header column is `LinearLayout.vertical().spacing(4)` holding a 9 px
+    ///   `StringWidget` and a nested 200×20 row, so it measures 200×33 and the
+    ///   header `FrameLayout` (854×49, `align(0.5, 0.5)`) puts it at
+    ///   `((854-200)/2, (49-33)/2)` = (327, 8). The search box is one spacing plus
+    ///   the title below that: y = 8 + 9 + 4 = **21**, *not* the 22 written at
+    ///   `SelectWorldScreen.java:55`, because the layout overwrites it.
+    /// - The footer's four columns are all 71: Play's 150 px spanning two columns
+    ///   with an 8 px gutter splits `Divisor(142, 2)` = 71/71, and the four 71 px
+    ///   buttons can only match it. So the grid is `4*71 + 3*8` = **308** wide and
+    ///   `20 + 4 + 20` = 44 tall, and the footer frame (854×60, pinned at y 420)
+    ///   puts it at `((854-308)/2, 420 + (60-44)/2)` = (273, 428).
+    /// - Within it: row 1 cells start at 0 and 158 (`71+8+71+8`), row 2 cells at
+    ///   0, 79, 158, 237, and row 2 is 24 px down.
+    /// - The content band's top is `min(headerHeight + 30, height - footerHeight -
+    ///   contentHeight)` = `min(79, 480 - 60 - 371)` = **49**, i.e. flush under the
+    ///   header, because vanilla sizes the list to `getContentHeight()` exactly.
+    /// - The first list row is at `getY() + 2` = 51, 270 wide
+    ///   (`getRowWidth()`), 36 tall, centred: `427 - 135` = 292.
+    #[test]
+    fn the_world_select_rects_are_vanillas_own() {
+        use crate::menu::world_select::WorldSelectButton as B;
+        let expected = [
+            (B::Play, (273.0, 428.0, 150.0, 20.0)),
+            (B::Create, (431.0, 428.0, 150.0, 20.0)),
+            (B::Edit, (273.0, 452.0, 71.0, 20.0)),
+            (B::Delete, (352.0, 452.0, 71.0, 20.0)),
+            (B::ReCreate, (431.0, 452.0, 71.0, 20.0)),
+            (B::Back, (510.0, 452.0, 71.0, 20.0)),
+        ];
+        for (button, want) in expected {
+            assert_eq!(
+                world_select_slot(button).resolve(V_W, V_H),
+                want,
+                "{button:?} is not where vanilla puts it"
+            );
+        }
+        // The footer's 8 px gutter, which is the pause screen's and not the title
+        // screen's 4 — the same conflation `the_title_screen_rects_are_vanillas_own`
+        // pins from the other side.
+        let (ex, _, ew, _) = world_select_slot(B::Edit).resolve(V_W, V_H);
+        let (dx, ..) = world_select_slot(B::Delete).resolve(V_W, V_H);
+        assert_eq!(dx - (ex + ew), 8.0, "footer column gutter");
+
+        assert_eq!(
+            world_select_search_slot().resolve(V_W, V_H),
+            (327.0, 21.0, 200.0, 20.0),
+            "the search box is placed by the layout, not by its own constructor"
+        );
+        let title = world_select_title_label();
+        assert_eq!(
+            (title.origin.anchor(V_W, V_H).0 + title.dx, title.dy),
+            (427.0, 8.0),
+            "the title is centred at the top of the header band"
+        );
+        assert_eq!(title.align, Align::Centre);
+
+        assert_eq!(world_list_row_rect(0, V_W), (292.0, 51.0, 270.0, 36.0));
+        assert_eq!(
+            world_list_row_rect(1, V_W),
+            (292.0, 87.0, 270.0, 36.0),
+            "rows stack by itemHeight with no gap"
+        );
+        assert_eq!(
+            world_list_row_content_rect(0, V_W),
+            (294.0, 53.0, 266.0, 32.0),
+            "CONTENT_PADDING insets the entry by 2, and 36 - 4 is the icon's 32"
+        );
+    }
+
+    /// The slots must be the same at every canvas, or the screen is right at one
+    /// size and wrong everywhere else.
+    ///
+    /// This is the condition `WORLD_SELECT_REF_CANVAS` rests on, and the only
+    /// thing that makes arranging a *canvas-dependent* container once legitimate.
+    /// 320×240 is the real floor `config::calculate_gui_scale` can produce; the
+    /// widths are even, because an odd logical width truncates in vanilla's
+    /// integer centring where `Origin`'s anchor does not — the same half-pixel
+    /// `title_slot` has always had.
+    #[test]
+    fn the_world_select_slots_do_not_depend_on_the_reference_canvas() {
+        for (w, h) in [(320.0f32, 240.0f32), (854.0, 480.0), (1920.0, 1080.0)] {
+            let block = WorldSelectBlock::at(w, h);
+            for i in 0..2 {
+                assert_eq!(
+                    block.header_slot(i),
+                    world_select_block().header_slot(i),
+                    "header slot {i} moved at {w}x{h}"
+                );
+            }
+            for i in 0..crate::menu::world_select::WORLD_SELECT_BUTTONS.len() {
+                assert_eq!(
+                    block.footer_slot(i),
+                    world_select_block().footer_slot(i),
+                    "footer slot {i} moved at {w}x{h}"
+                );
+            }
+            assert_eq!(
+                block.content_top,
+                world_select_block().content_top,
+                "the content band moved at {w}x{h}"
+            );
+        }
+    }
+
+    /// The frame is the screen vanilla draws: seven widgets in vanilla's order,
+    /// five of them present-and-disabled, at the rects the layout placed them.
+    #[test]
+    fn the_world_select_frame_is_the_screen_vanilla_draws() {
+        use crate::menu::world_select::{SEARCH_FIELD, WORLD_SELECT_BUTTONS, WorldSelectButton};
+        let (nav, ui) = world_select_nav("ws-frame");
+        let f = world_select_frame(&nav, &ui);
+
+        assert!(f.vanilla, "it reproduces one of vanilla's own screens");
+        assert!(!f.logo, "the logo is the title screen's");
+        assert_eq!(f.rows.len(), 1 + WORLD_SELECT_BUTTONS.len());
+
+        // Row 0 is the search field, and it carries a real `EditBox` — the row
+        // indices are `world_select`'s focus ids, so this is also the guard that
+        // `app.rs`'s hit-test and the focus layer agree about what row 0 is.
+        assert!(
+            f.rows[SEARCH_FIELD].field && f.rows[SEARCH_FIELD].edit.is_some(),
+            "row 0 must be the search box"
+        );
+        assert_eq!(
+            f.selected, SEARCH_FIELD,
+            "setInitialFocus puts the keyboard in the search box"
+        );
+        assert_eq!(f.hovered, None, "nothing is hovered before the mouse moves");
+
+        // The six footer buttons, in vanilla's order, with vanilla's labels.
+        let labels: Vec<&str> = f.rows[1..].iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Play Selected World",
+                "Create New World",
+                "Edit",
+                "Delete",
+                "Re-Create",
+                "Back",
+            ]
+        );
+        // Five disabled, one enabled — the headline of #397. Create New World is
+        // *present* and inactive, which is what makes the footer's shape vanilla's.
+        let enabled: Vec<&str> = f.rows[1..]
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(enabled, vec!["Back"]);
+        assert!(
+            !f.rows[WorldSelectButton::Create.row()].enabled,
+            "Create New World must be present and disabled (issue #190)"
+        );
+
+        // Every row's rect is the slot the layout placed it in, through the same
+        // `row_rect` `app.rs` hit-tests with.
+        assert_eq!(
+            row_rect(&f.rows, SEARCH_FIELD, V_W, V_H),
+            Some(world_select_search_slot().resolve(V_W, V_H))
+        );
+        for button in WORLD_SELECT_BUTTONS {
+            assert_eq!(
+                row_rect(&f.rows, button.row(), V_W, V_H),
+                Some(world_select_slot(button).resolve(V_W, V_H)),
+                "{button:?}'s row is not at its slot"
+            );
+        }
+
+        // The two free-standing strings: the title, and the empty-list message.
+        let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec![
+                crate::menu::world_select::WORLD_SELECT_TITLE,
+                crate::menu::world_select::NO_WORLDS_MESSAGE,
+            ]
+        );
+    }
+
+    /// Every world-select button draws the sprite the widget layer picks, at the
+    /// rect the layout placed it in.
+    ///
+    /// The same gate `every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks`
+    /// makes for the other two screens, and for the same reason: without it
+    /// `world_select_slot` and `WorldSelectButton::enabled` could both be correct
+    /// and reach zero pixels. The `enabled` flags come from the **real frame**, so
+    /// this cannot drift from what the screen actually says.
+    #[test]
+    fn every_world_select_button_draws_the_sprite_the_widget_layer_picks() {
+        use crate::menu::world_select::WORLD_SELECT_BUTTONS;
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let (nav, ui) = world_select_nav("ws-sprites");
+        let frame = world_select_frame(&nav, &ui);
+
+        // The premise: the screen really does carry a mix, or "the disabled
+        // sprite was chosen" is never exercised.
+        assert!(
+            frame.rows[1..].iter().any(|r| r.enabled) && frame.rows[1..].iter().any(|r| !r.enabled),
+            "this screen no longer has both an enabled and a disabled button"
+        );
+        // And the rects are really distinct, or a widget stuck at one position
+        // could still pass.
+        let distinct: std::collections::BTreeSet<(i32, i32)> = WORLD_SELECT_BUTTONS
+            .iter()
+            .map(|b| {
+                let (x, y, ..) = world_select_slot(*b).resolve(V_W, V_H);
+                (x as i32, y as i32)
+            })
+            .collect();
+        assert_eq!(distinct.len(), WORLD_SELECT_BUTTONS.len());
+
+        for button in WORLD_SELECT_BUTTONS {
+            let row = frame.rows[button.row()].clone();
+            let enabled = row.enabled;
+            for focused in [false, true] {
+                let mut f = frame_with(vec![row.clone()], if focused { 0 } else { 99 });
+                f.vanilla = true;
+                let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+
+                let expected = widget::BUTTON_SPRITES.get(enabled, focused);
+                let (min, max) = sprite_uv_bounds(&atlas, expected);
+                assert!(
+                    all_uvs_within(&sprite, min, max),
+                    "{button:?} (enabled={enabled}, focused={focused}) did not sample \
+                     {expected}, which is what WidgetSprites::get selects"
+                );
+                // Per-case control: flipping `active` must move the sample off
+                // this region. For the five disabled buttons this is the #397
+                // assertion run in reverse — an enabled Create New World must
+                // *not* sample `widget/button_disabled`.
+                let flipped = widget::BUTTON_SPRITES.get(!enabled, focused);
+                if flipped != expected {
+                    let (fmin, fmax) = sprite_uv_bounds(&atlas, flipped);
+                    assert!(
+                        !all_uvs_within(&sprite, fmin, fmax),
+                        "the detector cannot tell {expected} from {flipped}"
+                    );
+                }
+
+                let drawn = sprite_dest_bounds(&sprite, V_W, V_H);
+                let want = world_select_slot(button).resolve(V_W, V_H);
+                let same = [
+                    (drawn.0, want.0),
+                    (drawn.1, want.1),
+                    (drawn.2, want.2),
+                    (drawn.3, want.3),
+                ]
+                .iter()
+                .all(|(a, b)| (a - b).abs() < 0.01);
+                assert!(
+                    same,
+                    "{button:?} (enabled={enabled}, focused={focused}) drew at {drawn:?}, \
+                     not at {want:?} where the layout placed it"
+                );
+            }
+        }
+    }
+
+    /// A disabled world-select button's label is vanilla's grey, and it is that
+    /// exact value.
+    ///
+    /// Predicted, not asserted as a direction — `CLAUDE.md`'s *magnitude*
+    /// species. The expectation comes from `AbstractWidget.java:318`'s
+    /// `-6250336` unpacked by `widget::argb_to_rgba`, and the enabled button
+    /// beside it is the control that says the measurement can tell them apart.
+    #[test]
+    fn a_disabled_world_select_label_lands_on_vanillas_grey() {
+        use crate::menu::world_select::WorldSelectButton as B;
+        let (nav, ui) = world_select_nav("ws-grey");
+        let frame = world_select_frame(&nav, &ui);
+        let grey = widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB);
+        assert_eq!(grey, widget::INACTIVE_LABEL);
+
+        for (button, want, name) in [
+            (B::Create, grey, "disabled"),
+            (B::Back, widget::ACTIVE_LABEL, "enabled"),
+        ] {
+            let row = frame.rows[button.row()].clone();
+            let rect = world_select_slot(button).resolve(V_W, V_H);
+            let mut f = frame_with(vec![row], 99);
+            f.vanilla = true;
+            let colour = build(&f, None, None, V_W, V_H).colour;
+            assert!(
+                coverage_of(&colour, V_W, V_H, rect, want) > 0.0,
+                "{button:?}'s {name} label did not reach {want:?} inside {rect:?}"
+            );
+            // The control: the *other* colour must not appear in the same rect,
+            // or "the label is grey" is satisfied by a frame containing both.
+            let other = if want == grey {
+                widget::ACTIVE_LABEL
+            } else {
+                grey
+            };
+            assert_eq!(
+                coverage_of(&colour, V_W, V_H, rect, other),
+                0.0,
+                "{button:?} drew {other:?} as well, so the colour is not a discriminator"
+            );
+        }
+    }
+
+    /// The empty list draws its message, inside row 0's own content rect.
+    ///
+    /// This is the assertion that keeps "there are no worlds" distinguishable
+    /// from "the list failed to draw" — without it the two are the same picture,
+    /// which is exactly the absence-needs-a-control rule. The band is the row's
+    /// content rect from `world_list_row_content_rect`, the same expression the
+    /// label's position is derived from, and the failure output is a bounding box
+    /// rather than a fraction.
+    ///
+    /// Two controls, both executed: the band *below* the message must be empty
+    /// (so this is not measuring a frame that paints everywhere), and the same
+    /// band on the **title screen** must be empty too (so it is not measuring
+    /// something every menu draws there).
+    #[test]
+    fn the_empty_world_list_draws_its_message_inside_row_zeros_content_rect() {
+        let (nav, ui) = world_select_nav("ws-empty");
+        let frame = world_select_frame(&nav, &ui);
+        let colour = geometry(&frame, V_W, V_H);
+
+        let band = world_list_row_content_rect(0, V_W);
+        let inside = band_coverage(&colour, V_W, V_H, band);
+        assert!(
+            inside.count > 0,
+            "the empty-list message reached no pixels inside {band:?}"
+        );
+        let bounds = inside.bounds.expect("a non-empty band has bounds");
+        // It is a line of text, not a full-height fill: the message is 9 px of
+        // glyphs centred in a 32 px box, so its vertical extent must be well
+        // short of the band's.
+        assert!(
+            bounds.3 - bounds.1 < band.3 * 0.75,
+            "what drew in {band:?} spans {:?} vertically — that is a fill, not a line of text",
+            (bounds.1, bounds.3)
+        );
+        // And it is centred, so it must straddle the screen's own centre line.
+        assert!(
+            bounds.0 < V_W * 0.5 && bounds.2 > V_W * 0.5,
+            "the message is not centred: bounds {bounds:?}"
+        );
+
+        // -- control 1: the row below it is empty ----------------------------
+        let empty_band = world_list_row_content_rect(1, V_W);
+        assert_eq!(
+            band_coverage(&colour, V_W, V_H, empty_band).count,
+            0,
+            "something drew in row 1 as well, so the band is not a discriminator: {:?}",
+            band_coverage(&colour, V_W, V_H, empty_band).bounds
+        );
+
+        // -- control 2: the same band on the title screen is empty -----------
+        // What else already paints here? On the title screen, nothing: the logo
+        // ends at y 94 and the button column starts at 168, and row 0's content
+        // rect is y 53..85. If that ever stops being true this fires, which is
+        // the point.
+        let title_nav = test_nav("ws-empty-control");
+        let title_ui = UiState::new();
+        assert_eq!(title_ui.screen(), Screen::MainMenu, "the control is the title");
+        let statuses = StatusCache::with_probe(unavailable_probe());
+        let mut fav = FaviconCache::new();
+        let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
+        let title_colour = geometry(&title, V_W, V_H);
+        assert_eq!(
+            band_coverage(&title_colour, V_W, V_H, band).count,
+            0,
+            "the title screen already paints in {band:?}, so control 1 measures nothing: {:?}",
+            band_coverage(&title_colour, V_W, V_H, band).bounds
+        );
+    }
+
+    /// The empty-list message fits the row it is centred in.
+    ///
+    /// Vanilla's `NoWorldsEntry` gives its `StringWidget` no `maxWidth`
+    /// (`WorldSelectionList.java:382-384`), so nothing clips it and a longer
+    /// string would overhang the row. Measured with [`text_px`], the same
+    /// fixed-advance measure the jar-less draw uses — the real vanilla font is
+    /// narrower, so this is the conservative direction.
+    #[test]
+    fn the_empty_world_list_message_fits_the_row_it_is_centred_in() {
+        let (.., content_w, _) = world_list_row_content_rect(0, V_W);
+        let measured = text_px(crate::menu::world_select::NO_WORLDS_MESSAGE, 1.0);
+        assert!(
+            measured <= content_w,
+            "the empty-list message measures {measured} px in a {content_w} px row"
+        );
+    }
+
+    /// Hover and focus are two facts on this screen, and both reach the draw.
+    ///
+    /// The bug this rules out is concrete: with one flag, moving the mouse over
+    /// the footer would pull the keyboard out of the search field. So the
+    /// assertion is that hovering a button changes what *that button* draws while
+    /// leaving the focused row alone.
+    #[test]
+    fn hovering_a_world_select_button_lights_it_without_moving_focus() {
+        use crate::menu::world_select::{SEARCH_FIELD, WorldSelectButton as B};
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let (mut nav, mut ui) = world_select_nav("ws-hover");
+        nav.hover(&ui, B::Back.row());
+        let frame = world_select_frame(&nav, &ui);
+        assert_eq!(frame.hovered, Some(B::Back.row()));
+        assert_eq!(
+            frame.selected, SEARCH_FIELD,
+            "hovering must not move keyboard focus"
+        );
+
+        // Vanilla's sprite argument is `isHoveredOrFocused()`, so a hovered
+        // *enabled* button draws `widget/button_highlighted`.
+        let row = frame.rows[B::Back.row()].clone();
+        let draw = |hovered: Option<usize>| {
+            let mut f = frame_with(vec![row.clone()], 99);
+            f.vanilla = true;
+            f.hovered = hovered;
+            build(&f, Some(&atlas), None, V_W, V_H).sprite
+        };
+        let (hi_min, hi_max) = sprite_uv_bounds(&atlas, widget::BUTTON_SPRITES.enabled_focused);
+        assert!(
+            all_uvs_within(&draw(Some(0)), hi_min, hi_max),
+            "a hovered enabled button must sample widget/button_highlighted"
+        );
+        // The control: unhovered and unfocused, it must not.
+        assert!(
+            !all_uvs_within(&draw(None), hi_min, hi_max),
+            "the detector cannot tell the highlighted sprite apart"
+        );
+
+        // A **disabled** hovered button still draws the disabled sprite —
+        // `WidgetSprites`' three-argument collapse, the single rule a hand-rolled
+        // highlight gets wrong.
+        let create = frame.rows[B::Create.row()].clone();
+        let mut f = frame_with(vec![create], 99);
+        f.vanilla = true;
+        f.hovered = Some(0);
+        let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+        let (off_min, off_max) = sprite_uv_bounds(&atlas, widget::BUTTON_SPRITES.disabled);
+        assert!(
+            all_uvs_within(&sprite, off_min, off_max),
+            "a hovered DISABLED Create New World must still sample widget/button_disabled"
+        );
+
+        // And the click that hover would have preceded does nothing on it, which
+        // is the other half of "present but disabled".
+        let before = ui.screen();
+        assert_eq!(
+            nav.click(&mut ui, B::Create.row()),
+            crate::menu::nav::MenuAction::None
+        );
+        assert_eq!(ui.screen(), before, "clicking Create must not open anything");
+    }
+
+    /// The search box draws as a **text field**, not as a button — a slotted row
+    /// carrying an `EditBox` takes `draw_edit_box`'s path and not
+    /// `draw_widget`'s.
+    ///
+    /// The discriminator is the synthetic pack itself: `button_pack()` carries
+    /// `widget/button*` and no `widget/text_field*`, so a field falls back to its
+    /// flat fill and emits **no sprite quads at all** where a button emits nine.
+    /// The control is the same row drawn as a button, watched emitting them.
+    #[test]
+    fn the_search_box_draws_as_a_field_inside_its_own_slot() {
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let (mut nav, mut ui) = world_select_nav("ws-search");
+        for ch in "abc".chars() {
+            nav.key(&mut ui, MenuKey::Char(ch));
+        }
+        let frame = world_select_frame(&nav, &ui);
+        let row = frame.rows[0].clone();
+        assert_eq!(
+            row.edit.as_ref().map(|e| e.value().to_string()),
+            Some("abc".to_string()),
+            "typing on this screen goes into the search box"
+        );
+
+        let (fx, fy, fw, fh) = world_select_search_slot().resolve(V_W, V_H);
+        let mut f = frame_with(vec![row.clone()], 0);
+        f.vanilla = true;
+        let drawn = build(&f, Some(&atlas), None, V_W, V_H);
+        assert!(
+            drawn.sprite.is_empty(),
+            "the field sampled a button sprite, so it took draw_widget's path"
+        );
+        // Its background is the field fill, at the slot's own rect.
+        assert!(
+            coverage_of(&drawn.colour, V_W, V_H, (fx, fy, fw, fh), FIELD_BG) > 0.5,
+            "the search box's fill did not reach {:?}",
+            (fx, fy, fw, fh)
+        );
+
+        // -- control ---------------------------------------------------------
+        // The same row without its `EditBox` is a button, and it must emit the
+        // sprite quads the assertion above requires to be absent.
+        let mut as_button = row.clone();
+        as_button.edit = None;
+        as_button.field = false;
+        let mut g = frame_with(vec![as_button], 0);
+        g.vanilla = true;
+        let button_drawn = build(&g, Some(&atlas), None, V_W, V_H);
+        assert!(
+            !button_drawn.sprite.is_empty(),
+            "a button drew no sprites either, so the discriminator measures nothing"
+        );
+
+        // The typed text lands inside the box's own text band — every bound asked
+        // of a clone repositioned into the slot, exactly as `draw_edit_box` does,
+        // rather than restated.
+        let mut probe = row.edit.clone().expect("a live box");
+        probe.widget.x = fx;
+        probe.widget.y = fy;
+        probe.widget.width = fw;
+        probe.widget.height = fh;
+        let state = probe.draw_state(None);
+        let band = (fx, state.text_y, fw, GLYPH_H as f32 * TEXT_SCALE);
+        let inside = band_coverage(&drawn.colour, V_W, V_H, band);
+        assert!(
+            inside.count > 0,
+            "the typed text reached no pixels inside the box's own band {band:?}"
+        );
+        assert!(
+            inside.bounds.is_some_and(|b| b.0 >= state.before_x - 0.01),
+            "text drew left of the box's own text_x {}: bounds {:?}",
+            state.before_x,
+            inside.bounds
         );
     }
 
