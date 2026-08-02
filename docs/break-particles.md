@@ -25,19 +25,49 @@ see `particles.rs`'s module docs.
 
 ## How it works
 
-### The two emit sites, and why only one of them matters live
+### The emit sites
+
+| site | file | when |
+|---|---|---|
+| `Sim::break_block` | `crates/lodestone-shell/src/sim.rs` | demo world only — the offline direct edit |
+| `NetUpdate::BlockDestroyed` | `crates/lodestone-shell/src/sim.rs` | live, server-reported break (`LevelEvent` **2001**) |
+| `drive_mining`'s burst | `crates/lodestone-shell/src/interact.rs` | live, **our own** break — local prediction |
+| `Particles::breaking_block` | `crates/lodestone-shell/src/interact.rs` | live, one chip per mining hit |
+
+The third row is the one two bugs have lived in. The player's own break **never** reaches
+2001: server-side it is `ServerPlayerGameMode.destroyBlock` → `Level.removeBlock`, a plain
+block-state write with no `levelEvent` call, while 2001 lives on the *separate*
+`Level.destroyBlock` method that cascades, fire and explosions go through — which is why
+"the block I punched threw nothing, the one that popped next to it threw debris" was the
+original report (#360). So the burst for our own break has to be predicted locally, exactly
+as vanilla's client does.
+
+**Key that prediction on destruction, not on a packet (#387).** Vanilla's client has one
+destroy funnel, `MultiPlayerGameMode.destroyBlock(pos)`, and **four** call sites reach it:
+the two creative branches, `startDestroyBlock`'s instant-break branch
+(`getDestroyProgress(..) >= 1.0F`), and `continueDestroyBlock`'s progress-reached-`1.0`
+branch. The effect hangs off the funnel:
 
 ```
-crates/lodestone-shell/src/sim.rs:2444   Sim::break_block          — DEMO WORLD ONLY
-crates/lodestone-shell/src/sim.rs:3034   NetUpdate::BlockDestroyed — the live path
-crates/lodestone-shell/src/interact.rs:395  Particles::breaking_block — per mining hit
+MultiPlayerGameMode.destroyBlock(pos)
+  └─ Block.playerWillDestroy
+       └─ Block.spawnDestroyParticles
+            └─ level.levelEvent(player, 2001, pos, Block.getId(state))
+                 └─ ClientLevel.levelEvent → LevelEventHandler case 2001
+                      └─ addDestroyBlockEffect + break sound
 ```
 
-`Sim::break_block` is the offline demo world's direct edit. On a live server the dig is
-routed through the server, so the *only* destroy-burst emitter is
-`NetUpdate::BlockDestroyed`, fed by `LevelEvent` **2001**
-(`PARTICLES_DESTROY_BLOCK`). There is no local prediction of a destroy burst on a live
-server, for the punched block or for a cascaded one.
+(The `player` argument is why the server's own `playerWillDestroy` does not double it:
+`ServerLevel` broadcasts a `levelEvent` to every nearby player *except* that one.)
+
+#360 shipped keyed on `BlockActionKind::StopDestroy` instead, which is one of those four
+branches rather than the funnel — and the one an **instant break never takes**.
+`Mining::start`'s instant branch emits `StartDestroy` and nothing else, because the block
+is already gone, so grass, saplings and flowers threw no debris at all while stone did.
+The fix is `Mining::take_destroyed()` in `crates/lodestone-game/src/mining.rs`: a one-call
+latch set by *both* destroy branches, which `drive_mining` reads. Adding a third way for
+the predictor to destroy a block now needs a line in `mining.rs`, not a new special case at
+the emit site.
 
 2001's `data` field is a **block-state id** (`Block.getId(blockState)` on the server,
 `Block.stateById(data)` in vanilla's `LevelEventHandler`). It is the authoritative signal
@@ -195,6 +225,12 @@ a gate can prove the table is populated rather than trusting that it is.
   grid from the block's **outline** shape (not its collision shape — `short_grass` has an
   outline and no collision) and the shell does not carry outline geometry per state yet.
   Vanilla would throw 32 fragments for a slab and 12-ish for a torch; we throw 64.
+- **Our own break throws no debris for some class of block** → this is #387's shape. Check
+  `Mining::take_destroyed` in `crates/lodestone-game/src/mining.rs`, not `drive_mining`:
+  the emit is keyed on the latch, so a destroy path that forgets to set it is silent. Do
+  **not** re-derive the moment from the queued `ClientAction`s — the serverbound packets do
+  not identify it (a one-shot break's last word is `StartDestroy`), and that is precisely
+  the bug that keying introduced.
 
 ### Gotchas
 
@@ -237,6 +273,9 @@ None at runtime. Everything is baked from the resource pack at startup:
 | `lodestone-shell` `tests/break_particle_tint.rs` | the real vanilla atlas: cascading blocks' debris is tinted, untinted blocks are untouched, and a census of every tinted `(block, tint)` pair | `client.jar` + `blocks.json` |
 | `lodestone-v770` `tests/live_destroy_block_event.rs` | 2001's `data` really is the cascaded block's state id, hand-decoded from captured server bytes | flat creative oracle (`:25570`, RCON `:25571`) |
 | `lodestone-shell` `tests/break_particles_pixels.rs` | that debris reaches the framebuffer at all | GPU adapter |
+| `lodestone-shell` `tests/mining_destroy_burst.rs::a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes` | the progressive path bursts, through the real predictor and the real particle sink (#360) | nothing |
+| `lodestone-shell` `tests/mining_destroy_burst.rs::an_instant_break_throws_a_debris_burst_on_its_very_first_tick` | a **one-shot** block bursts on tick 0 with no `StopDestroy` anywhere (#387) | nothing |
+| `lodestone-game` `mining::tests::destruction_is_latched_on_both_break_paths_and_only_those` | `take_destroyed` fires on both destroy branches, on neither a mid-dig tick nor an abort, and is consumed by the read | nothing |
 | `lodestone-shell` `tests/sheet_particle_atlas_pixels.rs` | that a flame particle is textured from the **particle sheet**, by colour, against the pre-fix wiring as control (issue #45) | GPU adapter + `client.jar` |
 | `lodestone-shell` `particles::tests::an_instances_atlas_selector_distinguishes_a_sheet_sprite_from_a_block_sprite` | a resolved rect carries the atlas it belongs to, both ways | nothing |
 
@@ -247,6 +286,18 @@ control that merely *would* fire is not evidence. Note it divides the tint out o
 channel, not per channel: `redstone_wire[power=0]`'s tint is `[0.3, 0.0, 0.0]`, and a
 per-channel division reconstructs a red control instead of the grey one the pre-fix code
 actually produced.
+
+`mining_destroy_burst.rs`'s two tests are each other's control. The instant-break gate
+asserts no `StopDestroy` was queued on the tick it bursts — an absence — and the *same*
+`stop_destroy_queued` function is required to answer `true` on the progressive gate's
+finishing tick, so the detector is proven live in the same binary. Its fixture is
+**derived** from `lodestone_data::hardness`, not asserted against it: `instant_break_fixture`
+looks `minecraft:short_grass` up in the block-state census, feeds the census hardness to the
+fake `VersionAdapter`, and refuses to return unless `BreakInputs::ticks_to_break()` — the
+predictor's own formula — answers `Some(0)`. That is the *precondition* guard: a fixture
+with a real `destroySpeed` would silently become a second copy of the progressive test.
+Census values at 26.2: `short_grass` is state **2248**, hardness **0.0**,
+`requires_correct_tool` **false**.
 
 **`break_particles_pixels.rs` could not have caught this**, and that is the interesting
 part. It is an exemplary pixel gate with a tight paired control — and it renders the

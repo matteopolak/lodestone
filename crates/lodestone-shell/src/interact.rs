@@ -465,14 +465,30 @@ pub fn drive_mining(
             .breaking_block(hit.block, id_value, [1.0; 3], particle_face(face));
     }
     // Issue #360: the debris burst at the moment a block actually breaks.
+    // Issue #387: keyed on **destruction**, not on the `StopDestroy` packet.
     //
     // This is the local **prediction** half of vanilla's
-    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java:114-141`):
+    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java:113-145`):
     // it clears the block and throws the destroy-effect debris synchronously
-    // on the acting client, without waiting for a server round trip.
-    // `StopDestroy` is this predictor's equivalent moment — `mining.rs`'s
-    // `continue_` emits it the tick its own progress reaches `1.0`, driven by
-    // the version's real per-state hardness (see this function's own docs).
+    // on the acting client, without waiting for a server round trip. The
+    // effect hangs off that method, not off any packet — `destroyBlock` calls
+    // `Block.playerWillDestroy` → `spawnDestroyParticles` →
+    // `level.levelEvent(player, 2001, pos, id)`, and on `ClientLevel` that
+    // dispatches **locally** into `LevelEventHandler`'s `case 2001`
+    // (`addDestroyBlockEffect` + the break sound). The `player` argument is why
+    // the server's copy of the same call does not double it: `ServerLevel`
+    // broadcasts a `levelEvent` to everyone *except* that player.
+    //
+    // This originally scanned `actions` for `BlockActionKind::StopDestroy`,
+    // which is one of the four ways vanilla reaches `destroyBlock` rather than
+    // the funnel itself — and it is the one an **instant break never takes**.
+    // `Mining::start`'s `progress_per_tick() >= 1.0` branch emits
+    // `StartDestroy` and nothing more, because the block is already gone, so
+    // grass, saplings and flowers threw no debris at all while stone did
+    // (issue #387, reported from play). `Mining::take_destroyed` is the funnel:
+    // both `start`'s instant-break branch and `continue_`'s progress-reached-1.0
+    // branch latch it, so keying on it removes the class instead of
+    // special-casing one-shot blocks.
     //
     // Before this, the **only** burst trigger anywhere in the shell was the
     // server-driven `NetUpdate::BlockDestroyed` arm (`Sim::step`'s live-update
@@ -501,20 +517,34 @@ pub fn drive_mining(
     // wrongly-predicted client-side block edit either — and is no worse here
     // than it already is for the progressive mining chips a few lines above,
     // which predict exactly as eagerly.
-    if actions.iter().any(|a| {
-        matches!(
-            a,
-            ClientAction::BlockAction {
-                action: lodestone_model::BlockActionKind::StopDestroy,
-                ..
-            }
-        )
-    }) {
+    //
+    // # Known divergence: a one-shot break can burst more than once
+    //
+    // Vanilla's guard against re-breaking the same cell is the *local* block
+    // edit `destroyBlock` performs (`level.setBlock(pos, .., 11)`), after which
+    // its own `oldState.isAir()` early-return fires. This shell predicts no
+    // block edit, so between the `StartDestroy` going out and the server's
+    // `BLOCK_UPDATE` coming back, `net.block_at(pos)` still reports the plant
+    // and a held button re-latches a destruction each tick. The progressive
+    // path is shielded from this by `Mining`'s 5-tick `destroyDelay`; vanilla
+    // deliberately sets no such delay on the survival instant-break branch,
+    // relying on the local edit instead. Bounded by the round trip (one or two
+    // ticks) and self-limiting — `Sim::update_target` stops reporting a hit once
+    // the cell is air, which aborts the dig — so it reads as a slightly heavier
+    // puff rather than a stream. Predicting the block edit is the real fix and
+    // is the same missing piece the mispredicted-break gap above names.
+    if mining.0.take_destroyed().is_some() {
         // Full-cube shape and untinted white, for the same reason as the
         // mining-chip particle a few lines up: the shell does not carry a
         // block's outline shape, and `destroy_block` itself resolves the
         // real per-state tint (see its own docs) — `[1.0; 3]` is the
         // multiplier, not a placeholder colour.
+        //
+        // `hit.block`/`id_value` rather than the latched position: they are the
+        // same cell (`pos` is built from `hit.block` above and is what both
+        // predictor entry points were handed), and taking both the position and
+        // the state id from the one `net.block_at` lookup keeps them from ever
+        // describing different blocks.
         particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
     }
     queue.0.extend(actions);
