@@ -55,17 +55,25 @@
 //! we do claim a known pack the elision starts immediately and a wrong guess
 //! here would desynchronise the *whole* packet, not just one field.
 //!
-//! # Scope: two registries are parsed, the other 28 are counted
+//! # Scope: what is parsed, and what is only counted
 //!
-//! [`ClientRegistries`] keeps typed [`DimensionType`]s and the ordered
-//! `world_clock` names, and for every other registry keeps only the ordered
-//! **names** — which is the id ↔ name mapping, the part that is universally
-//! useful and costs a `Vec<String>`. Their NBT payloads are **dropped**, not
-//! retained: `minecraft:biome` alone is ~60 entries of deep compounds and
-//! nothing in this client reads it yet. When something does (damage types for
+//! [`ClientRegistries`] keeps typed [`DimensionType`]s, the ordered
+//! `world_clock` names, and one attribute off each biome
+//! ([`ClientRegistries::biome_sky_colors`]). For every other registry it keeps
+//! only the ordered **names** — the id ↔ name mapping, the part that is
+//! universally useful and costs a `Vec<String>`. Their NBT payloads are
+//! **dropped**, not retained. When something does read one (damage types for
 //! `EntityDamaged`, chat types, trim patterns), it parses out of this same
 //! decode — add a typed arm beside [`DimensionType`], do not grow a generic
 //! `Nbt` cache.
+//!
+//! The biome arm is deliberately *one field*, not a `Biome` record: the whole
+//! registry is ~66 entries of deep compounds (climate settings, mob spawns,
+//! carvers) and the sky disc reads exactly one string out of it. It is lifted
+//! here rather than reconstructed from our jar because the server is
+//! authoritative — a data pack can reorder the registry, rename a biome, or
+//! change its colour, and shipping the value at the holder id is correct for
+//! all three.
 
 use std::collections::HashMap;
 
@@ -263,6 +271,18 @@ pub struct ClientRegistries {
     /// compounds (`WorldClock` is `record WorldClock()`), so the name *is* the
     /// whole content.
     world_clocks: Vec<String>,
+    /// `minecraft:worldgen/biome` sky colours, in registry order: index `i` is
+    /// holder id `i`, which is the integer a chunk's biome palette stores.
+    ///
+    /// `None` where the biome declares no `minecraft:visual/sky_color` (the ten
+    /// Nether and End biomes) or where the entry was elided/unparseable — and,
+    /// exactly as for [`Self::dimension_types`], a `None` **holds its place** so
+    /// the indices around it stay correct.
+    ///
+    /// The *names* of these entries still live in [`Self::other`] like every
+    /// other unmodelled registry; only this one attribute is lifted out, because
+    /// only this one has a consumer (the sky disc's tint, issue #96).
+    biome_sky_colors: Vec<Option<u32>>,
     /// Ordered entry names for every other synchronized registry, keyed by
     /// registry id. Names only — see this module's scope note.
     other: HashMap<String, Vec<String>>,
@@ -273,6 +293,12 @@ impl ClientRegistries {
     pub const DIMENSION_TYPE: &'static str = "minecraft:dimension_type";
     /// Registry id of the world-clock registry.
     pub const WORLD_CLOCK: &'static str = "minecraft:world_clock";
+    /// Registry id of the biome registry.
+    ///
+    /// **`minecraft:worldgen/biome`, not `minecraft:biome`** — `Registries.BIOME`'s
+    /// key carries the `worldgen/` prefix, and a lookup by the guessed short name
+    /// silently finds nothing. See this module's header.
+    pub const BIOME: &'static str = "minecraft:worldgen/biome";
 
     /// Folds one decoded `registry_data` packet in.
     ///
@@ -300,6 +326,13 @@ impl ClientRegistries {
                 self.world_clocks = data.entries.into_iter().map(|entry| entry.id).collect();
             }
             _ => {
+                if data.registry == Self::BIOME {
+                    self.biome_sky_colors = data
+                        .entries
+                        .iter()
+                        .map(|entry| entry.data.as_ref().and_then(biome_sky_color))
+                        .collect();
+                }
                 self.other.insert(
                     data.registry,
                     data.entries.into_iter().map(|entry| entry.id).collect(),
@@ -360,6 +393,29 @@ impl ClientRegistries {
         }
     }
 
+    /// Every biome's `minecraft:visual/sky_color` in registry order, packed
+    /// `0x00RR_GGBB` in **sRGB bytes** (the space vanilla's `ARGB.multiply`
+    /// works in — never linearise before the day/night multiply, see
+    /// `lodestone_render::SkyFrame`).
+    ///
+    /// Index `i` is holder id `i`, which is exactly the integer a chunk
+    /// section's biome palette stores, so a consumer indexes this with
+    /// `ChunkSection::biome_at_block`'s return value and nothing else. Empty
+    /// before any `registry_data` arrives.
+    ///
+    /// # Why the colour travels and the name does not
+    ///
+    /// This is the whole reason the biome registry is worth a typed arm: the
+    /// server is authoritative about it. A data pack may reorder the registry,
+    /// rename a biome, or change its sky colour, and every one of those is
+    /// carried correctly by shipping the *value* at the holder id. A
+    /// name → colour table built from our jar would be wrong on all three, and
+    /// would have to be re-derived every version.
+    #[must_use]
+    pub fn biome_sky_colors(&self) -> &[Option<u32>] {
+        &self.biome_sky_colors
+    }
+
     /// Number of dimension types received.
     #[must_use]
     pub fn dimension_type_count(&self) -> usize {
@@ -384,6 +440,61 @@ impl ClientRegistries {
         );
         out
     }
+}
+
+/// Reads `attributes."minecraft:visual/sky_color"` out of one biome entry's
+/// network NBT, as packed `0x00RR_GGBB`.
+///
+/// `None` — never an error — when the biome simply does not declare one. 56 of
+/// 26.2's 66 biomes do; the ten that do not are exactly the Nether and End
+/// biomes, whose dimensions draw no sky disc at all, so an absent value is
+/// ordinary data rather than a malformed entry.
+///
+/// # The tag is a string, and there are two shapes of it
+///
+/// `EnvironmentAttributes.SKY_COLOR` is `AttributeTypes.RGB_COLOR`, whose value
+/// codec is `ExtraCodecs.STRING_RGB_COLOR` —
+/// `withAlternative(hexColor(6), RGB_COLOR_CODEC)`. Vanilla *encodes* through
+/// the first alternative, so what actually arrives is the NBT string
+/// `"#78a7ff"`, not an int; the int form is accepted anyway because it is a
+/// legal alternative a data pack may author.
+///
+/// The second shape is the modifier form. `EnvironmentAttributeMap.Entry` is
+/// `Codec.either(valueCodec, fullCodec)`: a plain `override` collapses to the
+/// bare value, but any other modifier serialises as
+/// `{ modifier: "…", argument: <value> }`. No vanilla biome uses a modifier for
+/// `sky_color` (`swamp`'s `water_fog_end_distance` is the shape's only vanilla
+/// user), but a data pack may, and reading the bare tag alone would silently
+/// return `None` for it.
+fn biome_sky_color(value: &Nbt) -> Option<u32> {
+    let Nbt::Compound(fields) = value else {
+        return None;
+    };
+    let Nbt::Compound(attributes) = field(fields, "attributes")? else {
+        return None;
+    };
+    match field(attributes, "minecraft:visual/sky_color")? {
+        Nbt::String(hex) => parse_hex_rgb(hex),
+        // `ARGB::opaque` puts `0xFF` in the top byte; the palette is RGB only.
+        Nbt::Int(packed) => Some((*packed as u32) & 0x00FF_FFFF),
+        Nbt::Compound(entry) => match field(entry, "argument")? {
+            Nbt::String(hex) => parse_hex_rgb(hex),
+            Nbt::Int(packed) => Some((*packed as u32) & 0x00FF_FFFF),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Parses vanilla's `hexColor(6)` form: a leading `#` and exactly six hex
+/// digits. Both requirements are vanilla's own (`ExtraCodecs.hexColor`), so
+/// anything else is a value we should decline rather than guess at.
+fn parse_hex_rgb(text: &str) -> Option<u32> {
+    let digits = text.strip_prefix('#')?;
+    if digits.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(digits, 16).ok()
 }
 
 fn field<'a>(fields: &'a [(String, Nbt)], name: &str) -> Option<&'a Nbt> {

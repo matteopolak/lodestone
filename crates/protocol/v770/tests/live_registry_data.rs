@@ -395,6 +395,224 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
     assert!(resolved.has_skylight);
 }
 
+/// The biome sky colours the server itself sent, checked entry by entry against
+/// Mojang's own biome JSONs (issue #96's fourth box).
+///
+/// Joins the same oracle as the gate above and reads
+/// `minecraft:worldgen/biome` — **not** `minecraft:biome`; `Registries.BIOME`'s
+/// key carries the `worldgen/` prefix, and a lookup by the short name silently
+/// finds nothing.
+///
+/// # Why this is the authoritative gate for the whole feature
+///
+/// Every hop after this one is plumbing, but *this* is where a wrong belief
+/// would be invisible: the NBT shape is three guesses deep
+/// (`attributes` → an attribute-id key → `Either<value, {modifier, argument}>`),
+/// and a hermetic fixture built with our own encoder would confirm all three
+/// guesses at once whether or not any of them is right. So the bytes are the
+/// server's and the expected values are Mojang's, and neither comes from this
+/// tree.
+///
+/// # No fixture is checked in for this registry
+///
+/// Unlike `dimension_type`/`world_clock`, the biome payload is tens of
+/// kilobytes of deep compounds. Committing it as reviewable hex would add a
+/// six-figure-byte text file whose diff nobody can read, to prove a claim about
+/// one string per entry. The hermetic sibling
+/// (`tests/registry_data.rs::biome_sky_colours_resolve_by_holder_id`) covers the
+/// id-space mapping off a small synthetic registry, and *this* test is what
+/// pins the wire shape.
+#[tokio::test]
+#[ignore = "requires the flat creative 26.2 oracle on 127.0.0.1:25570"]
+async fn biome_sky_colours_from_a_real_server_match_mojangs_own_biome_files() {
+    let server = ServerAddress {
+        host: "127.0.0.1".into(),
+        port: 25570,
+    };
+    let profile = LoginProfile {
+        username: unique_username(),
+        uuid: Uuid::new_v4(),
+    };
+    let adapter = V770Adapter::new();
+
+    let mut conn = match Connection::connect(SERVER_ADDR).await {
+        Ok(conn) => conn,
+        Err(err) => panic!("could not reach {SERVER_ADDR}: {err}. {REPAIR}"),
+    };
+    let mut state = ConnectionState::Handshaking;
+    for directive in adapter.begin_login(&profile, &server).expect("begin login") {
+        apply(&mut conn, &mut state, directive).await;
+    }
+
+    let mut registries = ClientRegistries::default();
+    let mut biome_names: Vec<String> = Vec::new();
+    let mut biome_payload_bytes = 0usize;
+    let mut emitted: Option<Vec<Option<u32>>> = None;
+    let overall = Duration::from_secs(60);
+
+    let outcome = tokio::time::timeout(overall, async {
+        loop {
+            let (packet_id, payload) = match conn.read_packet().await {
+                Ok(Some(p)) => p,
+                Ok(None) => return false,
+                Err(err) => panic!("read error: {err}"),
+            };
+            if state == ConnectionState::Configuration
+                && packet_id == configuration::clientbound::REGISTRY_DATA
+            {
+                let mut reader = Reader::new(&payload);
+                let data = RegistryData::decode(&mut reader, CTX)
+                    .expect("a real registry_data payload must decode");
+                reader
+                    .ensure_empty()
+                    .unwrap_or_else(|err| panic!("{} left {err}", data.registry));
+                if data.registry == ClientRegistries::BIOME {
+                    biome_payload_bytes = payload.len();
+                    biome_names = data.entries.iter().map(|e| e.id.clone()).collect();
+                }
+                registries.apply(data);
+            }
+            let directives =
+                match adapter.handle_packet(&mut World::new(), state, packet_id, &payload) {
+                    Ok(directives) => directives,
+                    Err(err) => panic!("adapter rejected packet {packet_id} in {state:?}: {err}"),
+                };
+            for directive in directives {
+                // The event the whole plumbing chain hangs off. Captured here so
+                // this gate also proves the adapter *emits* what it decoded —
+                // a correct decode that never leaves the adapter's mutex is the
+                // island this box sat behind for two sessions.
+                if let Directive::Emit(ClientEvent::BiomeVisuals { sky_colors }) = &directive {
+                    emitted = Some(sky_colors.clone());
+                }
+                apply(&mut conn, &mut state, directive).await;
+            }
+            if emitted.is_some() {
+                return true;
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        outcome,
+        Ok(true),
+        "never saw a ClientEvent::BiomeVisuals within {overall:?}"
+    );
+
+    let decoded = registries.biome_sky_colors();
+    println!(
+        "minecraft:worldgen/biome: {} entries, {biome_payload_bytes} payload bytes, \
+         {} with a sky_color",
+        biome_names.len(),
+        decoded.iter().filter(|c| c.is_some()).count()
+    );
+    assert!(
+        !biome_names.is_empty(),
+        "the server must send minecraft:worldgen/biome during Configuration \
+         (registries seen: {:?})",
+        registries.summary().iter().map(|(r, _)| r).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        decoded.len(),
+        biome_names.len(),
+        "one colour slot per entry — a dropped entry would shift every later holder id"
+    );
+
+    // Entry by entry against Mojang's own file for that entry. Parsed at test
+    // time, never transcribed: a transcription is a second copy of the thing
+    // under test.
+    let mut checked = 0usize;
+    let mut with_colour = 0usize;
+    let mut without: Vec<&str> = Vec::new();
+    for (holder_id, name) in biome_names.iter().enumerate() {
+        let short = name
+            .strip_prefix("minecraft:")
+            .expect("the oracle runs no data packs, so every biome is namespaced minecraft:");
+        let expected = mojang_biome_sky_color(short);
+        assert_eq!(
+            decoded[holder_id], expected,
+            "{name} (holder {holder_id}): decoded {:?} but Mojang's own \
+             worldgen/biome/{short}.json says {expected:?}",
+            decoded[holder_id]
+        );
+        checked += 1;
+        if expected.is_some() {
+            with_colour += 1;
+        } else {
+            without.push(short);
+        }
+    }
+    without.sort_unstable();
+    println!("checked {checked} biomes; {with_colour} declare a sky_color");
+    println!("without a sky_color ({}): {without:?}", without.len());
+
+    // The premise that makes the equality above meaningful: if *no* biome
+    // declared a colour, every assertion would be `None == None` and this gate
+    // would be vacuous in the world species — the flaw would be in the input
+    // data and unreadable from the source.
+    assert!(
+        with_colour > 40,
+        "only {with_colour} of {checked} biomes carried a sky_color; the assertions above \
+         are then almost all None == None and prove nothing about the parse"
+    );
+    let distinct: std::collections::BTreeSet<u32> = decoded.iter().flatten().copied().collect();
+    println!("{} distinct sky colours", distinct.len());
+    assert!(
+        distinct.len() > 5,
+        "only {} distinct colours decoded — a parse that returned one constant for every \
+         biome would look like this",
+        distinct.len()
+    );
+
+    // And the adapter must have emitted exactly what it decoded.
+    assert_eq!(
+        emitted.as_deref(),
+        Some(decoded),
+        "ClientEvent::BiomeVisuals must carry the decoded table unchanged and in registry \
+         order — this is the seam the feature was blocked on"
+    );
+}
+
+/// `minecraft:visual/sky_color` as Mojang's own biome file declares it, packed
+/// `0x00RR_GGBB`, or `None` where the file declares none.
+///
+/// In 26.2 the key lives under `attributes` as a **hex string** (`"#78a7ff"`);
+/// the pre-26.2 `effects.sky_color` integer form is gone. Both are read here so
+/// a wrong assumption about which one the jar uses shows up as a mismatch
+/// against the wire rather than as a silent `None`.
+fn mojang_biome_sky_color(short_name: &str) -> Option<u32> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../..")
+        .join(".cache/mc/26.2/client-src/data/minecraft/worldgen/biome")
+        .join(format!("{short_name}.json"));
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "could not read Mojang's own {} ({err}) — this gate's expected values come from \
+             the decompiled jar's data files, so the 26.2 cache must be present",
+            path.display()
+        )
+    });
+    let json: serde_json::Value = serde_json::from_str(&text).expect("Mojang biome json parses");
+    let attribute = json
+        .get("attributes")
+        .and_then(|a| a.get("minecraft:visual/sky_color"));
+    let legacy = json.get("effects").and_then(|e| e.get("sky_color"));
+    match attribute.or(legacy) {
+        None => None,
+        Some(serde_json::Value::String(hex)) => {
+            let digits = hex
+                .strip_prefix('#')
+                .unwrap_or_else(|| panic!("{short_name}: sky_color {hex} has no leading #"));
+            Some(u32::from_str_radix(digits, 16).expect("six hex digits"))
+        }
+        Some(serde_json::Value::Number(n)) => {
+            Some((n.as_i64().expect("integer sky_color") as u32) & 0x00FF_FFFF)
+        }
+        Some(other) => panic!("{short_name}: unexpected sky_color shape {other}"),
+    }
+}
+
 /// The control for the gate above: with **no** `registry_data` folded in, every
 /// lookup the adapter depends on must report "unknown" rather than a
 /// plausible-looking default. Without this, the assertions above could be
@@ -406,4 +624,8 @@ fn an_empty_registry_store_resolves_nothing() {
     assert!(registries.dimension_type(0).is_none());
     assert!(registries.dimension_type_by_name("minecraft:overworld").is_none());
     assert!(registries.world_clock_id("minecraft:overworld").is_none());
+    // #96: an empty biome table must read as "no biome registry", which the
+    // shell renders as its dimension default. An empty *table* and a table of
+    // `None`s mean the same thing to a consumer, and neither is a colour.
+    assert!(registries.biome_sky_colors().is_empty());
 }

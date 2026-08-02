@@ -26,8 +26,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::session::{
-    ServerAlive, ServerDimension, ServerDimensionType, ServerEntityId, ServerGameMode,
-    SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList, Vitals, Xp,
+    ServerAlive, ServerBiomeSkyColors, ServerDimension, ServerDimensionType, ServerEntityId,
+    ServerGameMode, SessionBossBars, SessionMenus, SessionScoreboard, SessionTabList, Vitals, Xp,
 };
 use lodestone_ecs::{ChunkWorld, EcsHandle, WorldTime};
 use lodestone_game::bossbar::BossBarSet;
@@ -110,6 +110,20 @@ pub struct PlayerSnapshot {
     /// consumer must state its own fallback; see
     /// `lodestone_shell::mesher::sky_default_for_dimension`.
     pub dimension_type: Option<DimensionTypeInfo>,
+    /// Every biome's `minecraft:visual/sky_color` as the server declared it in
+    /// the Configuration `registry_data` (issue #96), **indexed by biome holder
+    /// id** and packed `0x00RR_GGBB` in sRGB bytes. Read from
+    /// [`ServerBiomeSkyColors`].
+    ///
+    /// Empty before login and on a server that sent no biome registry. `None` at
+    /// an index means that biome declares no sky colour (the Nether and End
+    /// biomes). Index it with `ChunkSection::biome_at_block`'s return value —
+    /// that integer *is* the holder id, and no other mapping is involved.
+    ///
+    /// This is the whole table rather than the standing biome's colour because
+    /// the standing biome changes as the player walks and nothing on the network
+    /// announces it: the lookup has to happen where the camera is.
+    pub biome_sky_colors: Arc<[Option<u32>]>,
     /// Whether the player is alive. Set `false` by [`ClientEvent::Death`] and
     /// restored when health becomes positive again after a respawn.
     pub alive: bool,
@@ -140,6 +154,7 @@ impl Default for PlayerSnapshot {
             game_mode: None,
             dimension: None,
             dimension_type: None,
+            biome_sky_colors: Arc::from([] as [Option<u32>; 0]),
             alive: true,
             health_known: false,
             xp_progress: 0.0,
@@ -608,6 +623,12 @@ impl SharedState {
             dimension_type: world
                 .get::<ServerDimensionType>(self.session)
                 .and_then(|d| d.0.clone()),
+            // A refcount bump, not a copy of the table — see
+            // [`ServerBiomeSkyColors`]. Absent component reads as "no biome
+            // registry", which the shell renders as its dimension default.
+            biome_sky_colors: world
+                .get::<ServerBiomeSkyColors>(self.session)
+                .map_or_else(|| Arc::from([] as [Option<u32>; 0]), |c| Arc::clone(&c.0)),
             // Absent component reads as *alive*, matching `ServerAlive::default`:
             // a client nobody has told otherwise is not dead.
             alive: world

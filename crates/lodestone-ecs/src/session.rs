@@ -328,6 +328,26 @@ pub struct ServerDimension(pub Option<DimensionId>);
 #[derive(Component, Debug, Clone, Default, PartialEq)]
 pub struct ServerDimensionType(pub Option<DimensionTypeInfo>);
 
+/// Every biome's `minecraft:visual/sky_color` as the server declared it in the
+/// Configuration `registry_data`, **indexed by biome holder id** (issue #96).
+///
+/// Packed `0x00RR_GGBB` in sRGB bytes; `None` at a holder id whose biome
+/// declares no sky colour (the Nether and End biomes) or whose entry did not
+/// parse. Empty before login and on any server that sent no biome registry —
+/// which reads as "tint nothing", the honest fallback, never as a plausible
+/// overworld blue.
+///
+/// # Why an `Arc`, and why the whole table rather than one colour
+///
+/// The table is read once per frame by the shell, which resolves the *standing*
+/// biome from the chunk section under the camera — a value that changes as the
+/// player walks and which nothing on the network announces. So the lookup has to
+/// happen at the camera, and the table has to be there for it. `Arc` because
+/// `PlayerSnapshot` clones it every frame and this is ~66 entries; the clone is a
+/// refcount bump.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct ServerBiomeSkyColors(pub std::sync::Arc<[Option<u32>]>);
+
 /// Whether the **server** considers the local player alive.
 ///
 /// Defaults to `true`: a client that has not been told otherwise is alive, and a
@@ -401,6 +421,12 @@ pub fn handles_event(event: &ClientEvent) -> bool {
             // reaches zero pixels — the island `CLAUDE.md` §1 names, three times
             // over.
             | ClientEvent::DimensionTypeChanged { .. }
+            // `BiomeVisuals` (#96), folded by `apply_local_player_state` into
+            // [`ServerBiomeSkyColors`]. Session-scoped registry data, so it
+            // belongs here and **not** in `ingest::handles_event` — that switch
+            // is per-entity ECS state, and guessing it is how two events landed
+            // in the wrong router earlier in this issue's life.
+            | ClientEvent::BiomeVisuals { .. }
             // `AbilitiesChanged` (#191). **This arm is the whole wiring.** The
             // decode has been correct and tested since v770 landed; without this
             // line `SharedState::apply` routes the event to the dead legacy scalar
@@ -463,7 +489,8 @@ pub fn apply_menus(batch: Res<IngestBatch>, mut menus: Query<&mut SessionMenus>)
 
 /// `IngestSet::Apply`: the local player's own server-reported state →
 /// [`Vitals`], [`Xp`], [`ServerEntityId`], [`ServerGameMode`],
-/// [`ServerDimension`], [`ServerDimensionType`], [`ServerAlive`], [`Abilities`].
+/// [`ServerDimension`], [`ServerDimensionType`], [`ServerBiomeSkyColors`],
+/// [`ServerAlive`], [`Abilities`].
 ///
 /// # Why this is one system over five event families and not five systems
 ///
@@ -490,6 +517,7 @@ pub fn apply_local_player_state(
             &mut ServerGameMode,
             &mut ServerDimension,
             &mut ServerDimensionType,
+            &mut ServerBiomeSkyColors,
             &mut ServerAlive,
             &mut Abilities,
         ),
@@ -504,6 +532,7 @@ pub fn apply_local_player_state(
             mut game_mode,
             mut dimension,
             mut dimension_type,
+            mut biome_sky_colors,
             mut alive,
             mut abilities,
         ) in &mut players
@@ -522,6 +551,13 @@ pub fn apply_local_player_state(
                     ..
                 } => {
                     dimension_type.0 = info.clone();
+                }
+                // Issue #96. Assigned unconditionally for the same reason the
+                // arm above is: an empty table must **clear** the previous one.
+                // A server switch that sends a registry set without biomes has
+                // to stop tinting, not keep painting the last world's sky.
+                ClientEvent::BiomeVisuals { sky_colors } => {
+                    biome_sky_colors.0 = sky_colors.as_slice().into();
                 }
                 ClientEvent::Login {
                     entity_id,
@@ -623,6 +659,7 @@ pub fn insert_session_components(world: &mut World, entity: bevy_ecs::entity::En
             ServerGameMode::default(),
             ServerDimension::default(),
             ServerDimensionType::default(),
+            ServerBiomeSkyColors::default(),
             ServerAlive::default(),
             Abilities::default(),
         ));
@@ -1360,6 +1397,110 @@ mod tests {
         };
         assert!(handles_event(&mode));
         assert!(!crate::ingest::handles_event(&mode));
+    }
+
+    /// #96's routing control, the fifth instance of the same pair.
+    ///
+    /// The per-biome sky tint was blocked for two sessions on exactly one missing
+    /// link: the decoded colours never crossed the version-free seam. Once they
+    /// do, the next place they can vanish is this switch — `SharedState::apply`
+    /// forwards only what `ingest::handles_event` or [`handles_event`] lists, and
+    /// an event neither claims falls through to the dead legacy scalar fallback.
+    /// Registry data is a session-scoped scalar, so `ingest` must **not** claim
+    /// it; guessing `ingest` for a session fact has misrouted work twice.
+    #[test]
+    fn biome_visuals_is_claimed_by_this_module_and_not_by_ingest() {
+        let event = ClientEvent::BiomeVisuals {
+            sky_colors: vec![Some(0x0078_a7ff), None],
+        };
+        assert!(
+            handles_event(&event),
+            "without this arm the biome registry is decoded into nothing at all and the \
+             sky tint reaches zero pixels"
+        );
+        assert!(
+            !crate::ingest::handles_event(&event),
+            "biome registry data is a session scalar, not per-entity ingest"
+        );
+    }
+
+    /// Issue #96: the biome sky-colour table must reach
+    /// [`ServerBiomeSkyColors`] **through the schedule**, keep its holder-id
+    /// indexing, and be *replaced* rather than merged.
+    ///
+    /// The pre-login assertion is the control: it proves the component starts
+    /// empty and is genuinely written, rather than having happened to hold the
+    /// expected value all along.
+    #[test]
+    fn a_net_ingest_run_folds_the_biome_sky_colours_and_a_resend_replaces_them() {
+        let (mut app, entity) = session_app();
+        assert!(
+            app.world()
+                .get::<ServerBiomeSkyColors>(entity)
+                .unwrap()
+                .0
+                .is_empty(),
+            "pre-login there is no biome table — not a defaulted overworld blue"
+        );
+
+        // Real 26.2 values at deliberately non-trivial holder ids: a colourless
+        // entry first, so an implementation that skipped `None`s would shift
+        // every later colour by one and still look plausible on screen.
+        fold(
+            &mut app,
+            ClientEvent::BiomeVisuals {
+                sky_colors: vec![None, Some(0x00b9_b9b9), Some(0x006e_b1ff)],
+            },
+        );
+        let folded = app
+            .world()
+            .get::<ServerBiomeSkyColors>(entity)
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(
+            &*folded,
+            [None, Some(0x00b9_b9b9), Some(0x006e_b1ff)],
+            "the fold must reach the component with holder ids intact"
+        );
+
+        // Re-entering configuration resends the registries. Appending would put
+        // the new table's biomes at holder ids 3.. while the stale ones kept
+        // answering 0.., which is the same failure `ClientRegistries::apply`
+        // guards against one layer down.
+        fold(
+            &mut app,
+            ClientEvent::BiomeVisuals {
+                sky_colors: vec![Some(0x0085_9dff)],
+            },
+        );
+        assert_eq!(
+            &*app
+                .world()
+                .get::<ServerBiomeSkyColors>(entity)
+                .unwrap()
+                .0
+                .clone(),
+            [Some(0x0085_9dff)],
+            "a resent registry replaces the table"
+        );
+
+        // And an empty table clears it: a server switch that sends no biome
+        // registry has to stop tinting, not keep painting the last world's sky.
+        fold(
+            &mut app,
+            ClientEvent::BiomeVisuals {
+                sky_colors: Vec::new(),
+            },
+        );
+        assert!(
+            app.world()
+                .get::<ServerBiomeSkyColors>(entity)
+                .unwrap()
+                .0
+                .is_empty(),
+            "an empty table must clear, not preserve"
+        );
     }
 
     /// The fold itself, **through the schedule** rather than by calling the system

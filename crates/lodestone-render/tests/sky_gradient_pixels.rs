@@ -959,3 +959,380 @@ fn control_disabled_void_fog_leaves_the_world_bottom_bright() {
     );
     assert!(dark < 2.0, "premise: void fog on is black here, got {dark:.1}");
 }
+
+// ---------------------------------------------------------------------------
+// 4. Per-biome sky tint — the fourth and last box on #96
+// ---------------------------------------------------------------------------
+
+/// Real 26.2 biome sky colours, as sRGB bytes.
+///
+/// These are **inputs**, never expected outputs, exactly like [`DAY_SKY`]: this
+/// gate asks whether a distinct `sky_color` reaches distinct disc pixels at the
+/// right value, and the value's *authority* is a different gate.
+/// `lodestone-v770`'s `registry_data`/`live_registry_data` tests are what check
+/// our decode against Mojang's own
+/// `client-src/data/minecraft/worldgen/biome/*.json`, parsed at test time.
+///
+/// # Why these three and not the obvious pair
+///
+/// The overworld spread is genuinely slight — 56 of 66 biomes declare
+/// `minecraft:visual/sky_color` and they hold only **16 distinct values**, blue
+/// pinned at `0xff`. Two consequences drive the choice here:
+///
+/// * `plains` and `swamp` are **byte-identical** at `#78a7ff`. "Plains versus
+///   swamp" is the discriminator this feature looks like it wants, and it is
+///   vacuous *by construction*: it would pass unchanged against the hardcoded
+///   constant the feature exists to replace. That is `CLAUDE.md`'s **world**
+///   species of vacuous test, where the flaw is in the input data and cannot be
+///   found by reading the test. It is not merely avoided here — it is run, as
+///   [`control_plains_and_swamp_cannot_discriminate`], so the trap is a measured
+///   fact in the record rather than a warning in a comment.
+/// * `pale_garden` (`#b9b9b9`, a desaturated grey) is the one dramatic outlier,
+///   and grey-versus-blue is a difference no plausible sky constant can fake.
+///   But a gate that only ever separates grey from blue does not prove the path
+///   *resolves* a colour, only that it is not colour-blind — so `desert` versus
+///   `frozen_peaks` (ΔR 23, ΔG 20, ΔB 0) is measured too.
+const PALE_GARDEN_SRGB: [u8; 3] = [0xb9, 0xb9, 0xb9];
+const DESERT_SRGB: [u8; 3] = [0x6e, 0xb1, 0xff];
+const FROZEN_PEAKS_SRGB: [u8; 3] = [0x85, 0x9d, 0xff];
+const PLAINS_SRGB: [u8; 3] = [0x78, 0xa7, 0xff];
+const SWAMP_SRGB: [u8; 3] = [0x78, 0xa7, 0xff];
+
+/// sRGB bytes → linear, the transfer the shell applies to a decoded biome colour
+/// before it reaches [`SkyFrame::day_sky_color`]
+/// (`lodestone_render::fog::srgb_u8_to_linear`).
+fn linear(srgb: [u8; 3]) -> [f32; 3] {
+    lodestone_render::fog::srgb_u8_to_linear(srgb)
+}
+
+/// Renders the disc with `sky` at its centre and the shared [`DAY_FOG`] at its
+/// rim, and returns the frame plus the per-pixel gradient verdict against that
+/// same pair.
+fn tinted(ctx: &GpuContext, camera: &Camera, sky: [f32; 3]) -> (Vec<u8>, usize, usize, String) {
+    let frame = SkyFrame::new(6_000, sky).with_fog_color(DAY_FOG);
+    let pixels = render(ctx, camera, &frame);
+    let (_, _, checked, bad, bbox) = gradient_error(&pixels, camera, sky, DAY_FOG, 3);
+    (pixels, checked, bad, bbox)
+}
+
+/// Pixels on the disc where two frames differ by more than `tolerance` on any
+/// channel, with **where** — a bounding box and the worst pixel, never a bare
+/// percentage (`CLAUDE.md`: make failure output say where).
+///
+/// Restricted to pixels the *disc* paints. Off the disc the destination is the
+/// pass's own black clear, which is identical in both frames and would dilute
+/// any count with pixels that could not possibly carry a tint.
+fn disc_difference(
+    a: &[u8],
+    b: &[u8],
+    camera: &Camera,
+    tolerance: u8,
+) -> (usize, usize, u8, String) {
+    let mut differing = 0usize;
+    let mut checked = 0usize;
+    let mut worst = 0u8;
+    let mut worst_report = "no pixels checked".to_string();
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for y in 0..H {
+        for x in 0..W {
+            if expected_fog_value(camera, x, y).is_none() {
+                continue;
+            }
+            checked += 1;
+            let (pa, pb) = (px(a, x, y), px(b, x, y));
+            let delta = (0..3).map(|i| pa[i].abs_diff(pb[i])).max().unwrap_or(0);
+            if delta > tolerance {
+                differing += 1;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            if delta > worst {
+                worst = delta;
+                worst_report = format!("({x},{y}) {pa:?} vs {pb:?} delta {delta}");
+            }
+        }
+    }
+    let where_ = if differing == 0 {
+        format!("no differing pixels (worst delta {worst}: {worst_report})")
+    } else {
+        format!(
+            "{differing} of {checked} disc px differ, bbox x{x0}..{x1} y{y0}..{y1}, \
+             worst {worst_report}"
+        )
+    };
+    (differing, checked, worst, where_)
+}
+
+/// The affirmative gate: two different biome sky colours must produce two
+/// different discs, **each matching its own colour per pixel** — and the
+/// difference must be attributable to the tint, which the same-colour control
+/// below is what establishes.
+///
+/// Asserting per-pixel agreement (not merely "the frames differ") is what makes
+/// this a statement about the *value* rather than about the wiring. A frame that
+/// tinted by some arbitrary factor, or that tinted the horizon end as well as
+/// the centre, would differ from its neighbour just as much and fail here.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn a_biome_sky_colour_reaches_the_disc_and_a_different_one_changes_it() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+
+    let (grey, grey_checked, grey_bad, grey_bbox) = tinted(&ctx, &camera, linear(PALE_GARDEN_SRGB));
+    let (blue, blue_checked, blue_bad, blue_bbox) = tinted(&ctx, &camera, linear(DESERT_SRGB));
+
+    eprintln!("=== #96 per-biome sky tint: pale_garden #b9b9b9 vs desert #6eb1ff ===");
+    eprintln!("pale_garden: {grey_checked} disc px, {grey_bad} outside tolerance — {grey_bbox}");
+    eprintln!("desert:      {blue_checked} disc px, {blue_bad} outside tolerance — {blue_bbox}");
+
+    assert!(
+        grey_checked > 4_000 && blue_checked > 4_000,
+        "only {grey_checked}/{blue_checked} px landed on the disc — the geometry moved and \
+         this gate is measuring almost nothing"
+    );
+    assert_eq!(
+        grey_bad, 0,
+        "the pale_garden disc does not match its own colour per pixel: {grey_bbox}"
+    );
+    assert_eq!(
+        blue_bad, 0,
+        "the desert disc does not match its own colour per pixel: {blue_bbox}"
+    );
+
+    let (differing, checked, worst, where_) = disc_difference(&grey, &blue, &camera, 3);
+    eprintln!("gross pair: {where_}");
+    assert!(
+        differing * 2 > checked,
+        "a grey sky and a blue sky must differ over most of the disc, not {differing} of \
+         {checked} px — {where_}"
+    );
+    assert!(
+        worst > 40,
+        "worst per-channel difference between #b9b9b9 and #6eb1ff was only {worst}; the tint \
+         is reaching pixels far too weakly to be the colour itself"
+    );
+}
+
+/// The **slight** pair, so the gate above cannot be satisfied by anything that
+/// merely notices grey is not blue.
+///
+/// `desert #6eb1ff` against `frozen_peaks #859dff` is 23/20/0 in sRGB bytes —
+/// two real neighbouring overworld values. If a path resolved a biome to some
+/// coarse bucket (per dimension, per "is it the outlier", per temperature class)
+/// it would pass the gross gate and fail here.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn a_slight_difference_between_two_real_biomes_still_reaches_pixels() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+
+    let (desert, _, desert_bad, desert_bbox) = tinted(&ctx, &camera, linear(DESERT_SRGB));
+    let (peaks, _, peaks_bad, peaks_bbox) = tinted(&ctx, &camera, linear(FROZEN_PEAKS_SRGB));
+    assert_eq!(desert_bad, 0, "desert disc: {desert_bbox}");
+    assert_eq!(peaks_bad, 0, "frozen_peaks disc: {peaks_bbox}");
+
+    let (differing, checked, worst, where_) = disc_difference(&desert, &peaks, &camera, 3);
+    eprintln!("=== #96 per-biome sky tint: desert #6eb1ff vs frozen_peaks #859dff ===");
+    eprintln!("slight pair: {where_}");
+
+    // The tolerance is 3/255 and the *input* difference is 23 sRGB bytes at the
+    // disc centre, tapering to 0 at the fully-fogged rim — so a majority, not
+    // all, of the disc is expected to clear it. What matters is that a
+    // 23-byte difference is resolved at all.
+    assert!(
+        differing * 3 > checked,
+        "two neighbouring real biome colours must still separate over much of the disc, \
+         not {differing} of {checked} px — {where_}"
+    );
+    assert!(
+        worst > 8,
+        "worst per-channel difference between #6eb1ff and #859dff was {worst}; a path that \
+         resolved biomes into coarse buckets would look exactly like this"
+    );
+}
+
+/// **Control, EXECUTED.** The same colour twice.
+///
+/// Without this, "the two frames differ" says nothing: it could be readback
+/// noise, a nondeterministic clear, or two draws of an animated pass. This must
+/// report **zero** differing pixels, which is what licenses attributing every
+/// difference above to the colour that was changed.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn control_the_same_biome_colour_twice_differs_nowhere() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+    let (a, _, _, _) = tinted(&ctx, &camera, linear(DESERT_SRGB));
+    let (b, _, _, _) = tinted(&ctx, &camera, linear(DESERT_SRGB));
+    let (differing, checked, worst, where_) = disc_difference(&a, &b, &camera, 0);
+    eprintln!("=== #96 per-biome sky tint: same-colour control ===");
+    eprintln!("{where_}");
+    assert_eq!(
+        differing, 0,
+        "two identical frames differ in {differing} of {checked} px (worst {worst}) — the \
+         differences the gates above measure cannot be attributed to the tint: {where_}"
+    );
+}
+
+/// **Control, EXECUTED — and the point of it is that it *passes* while proving a
+/// gate we did not write would have been worthless.**
+///
+/// `plains` and `swamp` are byte-identical at `#78a7ff`. A "plains versus swamp"
+/// discriminator — the obvious pick, and the one this box was originally briefed
+/// with — therefore reports **zero** differing pixels no matter how correct or
+/// how broken the biome path is. It would have passed against the hardcoded sky
+/// constant this feature replaces, and against a stub returning `None`.
+///
+/// `CLAUDE.md`'s vacuous-test table calls this the **world** species: the flaw
+/// lives in the input data, the test source is exemplary, and reading the test
+/// cannot find it. Recording the zero here is the cheapest possible inoculation
+/// against someone "simplifying" the gates above back onto that pair.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn control_plains_and_swamp_cannot_discriminate() {
+    assert_eq!(
+        PLAINS_SRGB, SWAMP_SRGB,
+        "the premise of this control is that 26.2 gives plains and swamp the same \
+         sky_color; if that changed, this control is no longer the vacuity demonstration \
+         it claims to be and the affirmative gates should be re-read"
+    );
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+    let (plains, _, _, _) = tinted(&ctx, &camera, linear(PLAINS_SRGB));
+    let (swamp, _, _, _) = tinted(&ctx, &camera, linear(SWAMP_SRGB));
+    let (differing, checked, _, where_) = disc_difference(&plains, &swamp, &camera, 0);
+    eprintln!("=== #96 per-biome sky tint: the vacuous pair, measured ===");
+    eprintln!("plains vs swamp (#78a7ff both): {where_}");
+    assert_eq!(
+        differing, 0,
+        "plains and swamp declare the same colour, so a gate built on them must be unable \
+         to see anything: {differing} of {checked} px — {where_}"
+    );
+}
+
+/// The tint must **compose** with the fogged-disc gradient rather than replace
+/// it: swapping the biome colour moves each pixel by exactly `(1 - t)` of the
+/// colour change, where `t` is that pixel's own fog factor. Full effect at the
+/// disc centre, fading to nothing where the disc is pure fog.
+///
+/// This is the discriminator against the most plausible wrong implementation —
+/// tinting the *fog* end as well as the centre, or replacing the whole disc
+/// colour. Both differ from their neighbour just as much as the correct one
+/// does, so neither is visible to a gate that only counts differing pixels; both
+/// break the `(1 - t)` law immediately.
+///
+/// # The premise I first wrote here was false, and asserting it is what found out
+///
+/// The first version bucketed pixels into "centre" (`t < 0.15`) and "fogged rim"
+/// (`t > 0.97`) and asserted the rim did not move. The rim bucket came back
+/// **empty — 0 of 28142 px** — so the assertion was measuring nothing while
+/// looking rigorous. The cause is not the camera: `expected_fog_value` caps the
+/// disc at `0.9 ×` the nine-gon's inradius (deliberately, so a pixel between the
+/// inscribed polygon and the circumscribed circle is never asserted on), and
+/// `hypot(0.9 · 512 · cos 22.5°, 16) / 512 = 0.832` is therefore the largest fog
+/// value any pixel this helper admits can have. `0.97` was a restated constant,
+/// not a number derived from the frame — exactly what `CLAUDE.md` says to stop
+/// doing, and the reason it says to derive layout from the same expression the
+/// draw uses. The rewrite predicts every pixel from its own `t` and reports the
+/// range it actually saw, so it cannot be satisfied by an empty bucket.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_tint_composes_with_the_fog_ramp_by_one_minus_t() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+    let (grey, _, _, _) = tinted(&ctx, &camera, linear(PALE_GARDEN_SRGB));
+    let (blue, _, _, _) = tinted(&ctx, &camera, linear(DESERT_SRGB));
+    let (sky_a, sky_b) = (linear(PALE_GARDEN_SRGB), linear(DESERT_SRGB));
+
+    let mut checked = 0usize;
+    let mut bad = 0usize;
+    let mut worst_err = 0u8;
+    let mut worst_report = "no pixels checked".to_string();
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    let (mut t_min, mut t_max) = (1.0f32, 0.0f32);
+    // The two ends of the observed range, so the printed evidence shows the decay
+    // rather than only asserting it.
+    let (mut lo_t, mut lo_delta) = (1.0f32, 0u8);
+    let (mut hi_t, mut hi_delta) = (0.0f32, 0u8);
+
+    for y in 0..H {
+        for x in 0..W {
+            let Some(t) = expected_fog_value(&camera, x, y) else {
+                continue;
+            };
+            checked += 1;
+            t_min = t_min.min(t);
+            t_max = t_max.max(t);
+            let (pa, pb) = (px(&grey, x, y), px(&blue, x, y));
+            let observed = (0..3).map(|i| pa[i].abs_diff(pb[i])).max().unwrap_or(0);
+            // `mix(sky, fog, t)` differs between the two frames only through
+            // `sky`, and by exactly `(1 - t)` of it. Computed in the same linear
+            // space the shader writes, then quantised the way the target does.
+            let predicted = (0..3)
+                .map(|i| {
+                    let a = (sky_a[i] + (DAY_FOG[i] - sky_a[i]) * t).clamp(0.0, 1.0) * 255.0;
+                    let b = (sky_b[i] + (DAY_FOG[i] - sky_b[i]) * t).clamp(0.0, 1.0) * 255.0;
+                    (a.round() as i32 - b.round() as i32).unsigned_abs() as u8
+                })
+                .max()
+                .unwrap_or(0);
+            let err = observed.abs_diff(predicted);
+            if err > 2 {
+                bad += 1;
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            if err > worst_err {
+                worst_err = err;
+                worst_report =
+                    format!("({x},{y}) t={t:.3} predicted {predicted} observed {observed}");
+            }
+            if t < lo_t {
+                lo_t = t;
+                lo_delta = observed;
+            }
+            if t > hi_t {
+                hi_t = t;
+                hi_delta = observed;
+            }
+        }
+    }
+
+    eprintln!("=== #96 per-biome sky tint: composition with the fog ramp ===");
+    eprintln!("checked {checked} disc px, fog value {t_min:.3}..{t_max:.3}");
+    eprintln!("nearest the centre (t={lo_t:.3}): delta {lo_delta}");
+    eprintln!("nearest the rim    (t={hi_t:.3}): delta {hi_delta}");
+    eprintln!("worst error vs the (1-t) prediction: {worst_err} — {worst_report}");
+    if bad > 0 {
+        eprintln!("{bad} px outside tolerance, bbox x{x0}..{x1} y{y0}..{y1}");
+    }
+
+    assert!(
+        checked > 4_000,
+        "only {checked} px on the disc; this gate is measuring almost nothing"
+    );
+    // The premise, stated in terms of the frame rather than a constant: the
+    // observed range has to be wide enough for a decay to be visible in it at
+    // all. `0.832` is this helper's structural ceiling, so the assertion is
+    // against *most* of the range, not against 1.0.
+    assert!(
+        t_max - t_min > 0.5,
+        "premise: the frame spans fog values {t_min:.3}..{t_max:.3}, too narrow for the \
+         (1-t) decay to be distinguishable from a flat offset"
+    );
+    assert_eq!(
+        bad, 0,
+        "the tint does not compose with the fog ramp as (1-t). worst {worst_err}: \
+         {worst_report}\n{bad} px outside tolerance, bbox x{x0}..{x1} y{y0}..{y1}"
+    );
+    assert!(
+        hi_delta * 2 < lo_delta,
+        "the tint's effect must visibly fade toward the fogged rim: delta {lo_delta} at \
+         t={lo_t:.3} versus {hi_delta} at t={hi_t:.3}. If those are close, the fog end is \
+         being tinted too and the gradient is flattened"
+    );
+}

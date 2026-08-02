@@ -222,6 +222,9 @@ fn distant_fragment_is_pulled_to_the_fog_colour() {
     // end, so it should read as the fog colour (pure green).
     let settings = FogSettings {
         color: [0.0, 1.0, 0.0],
+        // No sky pass in this gate; the sky colour is inert here and tracks the
+        // fog colour, which is what every `FogSettings` constructor defaults to.
+        sky_color: [0.0, 1.0, 0.0],
         start: 100.0,
         end: 500.0,
     };

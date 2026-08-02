@@ -180,3 +180,207 @@ fn without_registry_data_nothing_resolves() {
     assert!(registries.world_clock_id("minecraft:overworld").is_none());
     assert_eq!(registries.dimension_type_count(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Biome sky colours (issue #96)
+// ---------------------------------------------------------------------------
+
+/// The **holder-id mapping** for biome sky colours, and the elision rule that
+/// protects it.
+///
+/// Scope note, deliberately narrow: the *wire shape* of a biome entry is pinned
+/// by `tests/live_registry_data.rs`'s
+/// `biome_sky_colours_from_a_real_server_match_mojangs_own_biome_files`, which
+/// reads the server's own bytes and checks every entry against Mojang's own
+/// `worldgen/biome/*.json`. It cannot be pinned here: the biome payload is tens
+/// of kilobytes of deep compounds, too large to check in as reviewable hex, and
+/// a compound built with our own `Nbt` writer would confirm our own guess about
+/// the shape either way (`CLAUDE.md`, evidence standards).
+///
+/// What *is* provable hermetically is the part a wrong answer silently ruins:
+/// that index `i` is holder id `i` even when entries around it carry no colour.
+/// A chunk's biome palette stores bare integers, so an off-by-one here paints
+/// every biome with its neighbour's sky and looks entirely plausible.
+#[test]
+fn biome_sky_colours_resolve_by_holder_id() {
+    use lodestone_core::Nbt;
+    use lodestone_v770::packets::registry::PackedRegistryEntry;
+
+    /// One biome entry shaped the way the wire carries it: an `attributes`
+    /// compound keyed by attribute id, whose value for a plain `override` is the
+    /// bare hex string (`EnvironmentAttributeMap.Entry`'s `Codec.either` left
+    /// branch).
+    fn biome(id: &str, sky: Option<&str>) -> PackedRegistryEntry {
+        let mut attributes = vec![(
+            "minecraft:gameplay/increased_fire_burnout".to_owned(),
+            Nbt::Byte(1),
+        )];
+        if let Some(sky) = sky {
+            attributes.push((
+                "minecraft:visual/sky_color".to_owned(),
+                Nbt::String(sky.to_owned()),
+            ));
+        }
+        PackedRegistryEntry {
+            id: id.to_owned(),
+            data: Some(Nbt::Compound(vec![
+                ("has_precipitation".to_owned(), Nbt::Byte(1)),
+                ("temperature".to_owned(), Nbt::Float(0.8)),
+                ("attributes".to_owned(), Nbt::Compound(attributes)),
+            ])),
+        }
+    }
+
+    let mut registries = ClientRegistries::default();
+    registries.apply(RegistryData {
+        registry: ClientRegistries::BIOME.to_owned(),
+        entries: vec![
+            // Holder 0: an entry with no colour at all (the Nether/End shape).
+            biome("minecraft:nether_wastes", None),
+            // Holder 1: the outlier grey.
+            biome("minecraft:pale_garden", Some("#b9b9b9")),
+            // Holder 2: an entry whose NBT is elided entirely.
+            PackedRegistryEntry {
+                id: "mypack:elided".to_owned(),
+                data: None,
+            },
+            // Holder 3: a slight neighbour of holder 4, so the table is not
+            // separable by "is it the grey one".
+            biome("minecraft:desert", Some("#6eb1ff")),
+            biome("minecraft:frozen_peaks", Some("#859dff")),
+        ],
+    });
+
+    let colors = registries.biome_sky_colors();
+    assert_eq!(
+        colors,
+        [
+            None,
+            Some(0x00b9_b9b9),
+            None,
+            Some(0x006e_b1ff),
+            Some(0x0085_9dff),
+        ],
+        "index i must be holder id i, with the two colourless entries holding their places"
+    );
+
+    // The names still come out of the generic `entry_names` path — lifting one
+    // attribute out must not cost the id -> name map every other registry has.
+    assert_eq!(
+        registries
+            .entry_names(ClientRegistries::BIOME)
+            .expect("biome names are still recorded")
+            .len(),
+        5
+    );
+
+    // A resent registry replaces rather than appends, exactly as for the other
+    // two: `start_configuration` re-sends the whole set, and appending would put
+    // the second copy's biomes at holder ids 5.. while the stale ones kept
+    // answering 0...
+    registries.apply(RegistryData {
+        registry: ClientRegistries::BIOME.to_owned(),
+        entries: vec![biome("minecraft:plains", Some("#78a7ff"))],
+    });
+    assert_eq!(registries.biome_sky_colors(), [Some(0x0078_a7ff)]);
+}
+
+/// The modifier form of an attribute entry, which no vanilla biome uses for
+/// `sky_color` and a data pack may.
+///
+/// `EnvironmentAttributeMap.Entry::createCodec` is
+/// `Codec.either(valueCodec, fullCodec)`: a plain `override` collapses to the
+/// bare value, anything else serialises as `{ modifier, argument }`. Reading only
+/// the bare tag would return `None` here — a silently untinted sky rather than a
+/// visible failure, which is the direction this repo keeps getting burned in.
+#[test]
+fn a_modifier_wrapped_sky_color_is_still_read() {
+    use lodestone_core::Nbt;
+    use lodestone_v770::packets::registry::PackedRegistryEntry;
+
+    let mut registries = ClientRegistries::default();
+    registries.apply(RegistryData {
+        registry: ClientRegistries::BIOME.to_owned(),
+        entries: vec![PackedRegistryEntry {
+            id: "mypack:tinted".to_owned(),
+            data: Some(Nbt::Compound(vec![(
+                "attributes".to_owned(),
+                Nbt::Compound(vec![(
+                    "minecraft:visual/sky_color".to_owned(),
+                    Nbt::Compound(vec![
+                        ("modifier".to_owned(), Nbt::String("override".to_owned())),
+                        ("argument".to_owned(), Nbt::String("#123456".to_owned())),
+                    ]),
+                )]),
+            )])),
+        }],
+    });
+    assert_eq!(registries.biome_sky_colors(), [Some(0x0012_3456)]);
+}
+
+/// **Control.** A malformed or unexpected `sky_color` must read as `None` — the
+/// "the server has not told us" fallback every hop in #96's chain uses — and
+/// must not disconnect, default to a plausible blue, or shift the id space.
+#[test]
+fn an_unusable_sky_color_reads_as_absent_rather_than_as_a_default() {
+    use lodestone_core::Nbt;
+    use lodestone_v770::packets::registry::PackedRegistryEntry;
+
+    let cases: [(&str, Nbt); 4] = [
+        // Missing the leading `#` vanilla's own `hexColor` requires.
+        ("no hash", Nbt::String("78a7ff".to_owned())),
+        // Wrong digit count (the ARGB 8-digit form, which `RGB_COLOR` is not).
+        ("eight digits", Nbt::String("#ff78a7ff".to_owned())),
+        ("not hex", Nbt::String("#zzzzzz".to_owned())),
+        ("wrong tag", Nbt::Float(1.0)),
+    ];
+    for (label, value) in cases {
+        let mut registries = ClientRegistries::default();
+        registries.apply(RegistryData {
+            registry: ClientRegistries::BIOME.to_owned(),
+            entries: vec![PackedRegistryEntry {
+                id: "mypack:broken".to_owned(),
+                data: Some(Nbt::Compound(vec![(
+                    "attributes".to_owned(),
+                    Nbt::Compound(vec![("minecraft:visual/sky_color".to_owned(), value)]),
+                )])),
+            }],
+        });
+        assert_eq!(
+            registries.biome_sky_colors(),
+            [None],
+            "{label}: an unusable value must read as absent, keeping its slot"
+        );
+    }
+}
+
+/// **Control.** `minecraft:biome` — the name this lookup is *tempting* to use —
+/// must yield nothing, because the registry actually arrives as
+/// `minecraft:worldgen/biome`. If a future refactor matched the short name, the
+/// affirmative tests above would keep passing off their own literal and the live
+/// path would silently tint nothing.
+#[test]
+fn the_short_registry_name_is_not_the_biome_registry() {
+    use lodestone_core::Nbt;
+    use lodestone_v770::packets::registry::PackedRegistryEntry;
+
+    assert_eq!(ClientRegistries::BIOME, "minecraft:worldgen/biome");
+    let mut registries = ClientRegistries::default();
+    registries.apply(RegistryData {
+        registry: "minecraft:biome".to_owned(),
+        entries: vec![PackedRegistryEntry {
+            id: "minecraft:plains".to_owned(),
+            data: Some(Nbt::Compound(vec![(
+                "attributes".to_owned(),
+                Nbt::Compound(vec![(
+                    "minecraft:visual/sky_color".to_owned(),
+                    Nbt::String("#78a7ff".to_owned()),
+                )]),
+            )])),
+        }],
+    });
+    assert!(
+        registries.biome_sky_colors().is_empty(),
+        "a registry called minecraft:biome is not the biome registry in 26.2"
+    );
+}

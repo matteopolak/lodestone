@@ -1855,4 +1855,34 @@ pub enum ClientEvent {
         /// The resolved dimension type, or `None` — see above.
         dimension_type: Option<DimensionTypeInfo>,
     },
+    /// The per-biome visual attributes the server declared in the Configuration
+    /// `registry_data` (issue #96), **indexed by biome holder id**.
+    ///
+    /// Emitted alongside [`Self::Login`], for the same reason and in the same
+    /// position as [`Self::DimensionTypeChanged`]: re-entering Configuration
+    /// resends the whole registry set and is always followed by a fresh `Login`,
+    /// so `Login` is the one point at which the registries are known to be
+    /// complete and current.
+    ///
+    /// # Why this carries colours and not names
+    ///
+    /// The biome registry is a **data-pack** registry: a pack can reorder it,
+    /// rename an entry, or change a colour, so nothing about the mapping can be
+    /// hardcoded and every hop has to be resolved off what the server sent. The
+    /// obvious shape — ship the ordered names, look the colour up in a table
+    /// derived from our jar — is wrong on all three counts *and* needs a table
+    /// re-derived every version. Shipping the value at the holder id needs no
+    /// table at all, and the consumer indexes it with exactly the integer a
+    /// chunk section's biome palette already stores.
+    BiomeVisuals {
+        /// Each biome's `minecraft:visual/sky_color`, packed `0x00RR_GGBB` in
+        /// **sRGB bytes**, at its holder id.
+        ///
+        /// `None` where the biome declares none — 10 of 26.2's 66, exactly the
+        /// Nether and End biomes, whose dimensions draw no sky disc — or where
+        /// the entry could not be parsed. A `None` still occupies its index: the
+        /// position *is* the holder id, so dropping one would shift every later
+        /// biome's colour by a slot.
+        sky_colors: Vec<Option<u32>>,
+    },
 }

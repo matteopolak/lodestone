@@ -15,15 +15,36 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Linear distance-fog parameters, in world units from the eye.
+/// Linear distance-fog parameters, in world units from the eye — plus the sky
+/// colour they are set alongside.
 ///
 /// `color` is the colour distant geometry fades to (sky colour above water,
 /// biome water colour when submerged). Fog is *off* when `end <= start`
 /// (a degenerate range), which callers use to disable fog without a branch.
+///
+/// # Why the sky colour lives in a struct named for fog
+///
+/// Because in vanilla they are one record and they must not be settable apart.
+/// `EnvironmentAttributes` carries `visual/fog_color` and `visual/sky_color`
+/// side by side, `FogRenderer.computeFogColor` blends them, and the sky disc's
+/// horizon *is* its fog end (`sky.fsh` fogs the flat disc, so the gradient runs
+/// from `sky_color` at the centre to `color` at the rim). Two setters that can
+/// be called independently is exactly how the horizon has previously banded in
+/// a colour the sky never is — see `RenderState::set_clear_color`'s doc. One
+/// struct, set in one call, cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FogSettings {
-    /// Linear RGB colour distant geometry fades to.
+    /// Linear RGB colour distant geometry fades to. This is also the **horizon
+    /// end** of the sky disc's gradient.
     pub color: [f32; 3],
+    /// Linear RGB colour at the **centre** of the sky disc, before the
+    /// `SKY_COLOR` day/night track multiplies it.
+    ///
+    /// Vanilla's `minecraft:visual/sky_color`: per-biome in the overworld
+    /// (issue #96), and every constructor here defaults it to `color`, which is
+    /// the pre-#96 behaviour — one flat colour for both ends of the gradient,
+    /// distinguished only by the two day/night tracks.
+    pub sky_color: [f32; 3],
     /// Distance from the eye at which fog begins (factor 0).
     pub start: f32,
     /// Distance from the eye at which fog is full (factor 1).
@@ -36,8 +57,39 @@ impl FogSettings {
     pub const fn disabled() -> Self {
         Self {
             color: [0.0, 0.0, 0.0],
+            sky_color: [0.0, 0.0, 0.0],
             start: 0.0,
             end: 0.0,
+        }
+    }
+
+    /// The same settings with a different sky-disc centre colour — the
+    /// per-biome `minecraft:visual/sky_color` (issue #96).
+    ///
+    /// The fog colour is deliberately left alone: the biome's own
+    /// `visual/fog_color` is a separate attribute this client does not decode
+    /// yet, and painting the horizon with the *sky* colour would flatten the
+    /// gradient the sky pass exists to draw.
+    #[must_use]
+    pub fn with_sky_color(mut self, sky_color: [f32; 3]) -> Self {
+        self.sky_color = sky_color;
+        self
+    }
+
+    /// [`with_sky_color`](Self::with_sky_color) when the standing biome declared
+    /// one, and a **no-op** on `None`.
+    ///
+    /// `None` is the single meaning "the server has not told us" that every hop
+    /// in issue #96's chain uses — pre-login, a server that sent no biome
+    /// registry, an unstreamed column, or one of the ten Nether/End biomes that
+    /// declare no `sky_color`. Each falls back to whatever colour the caller
+    /// already computed for the dimension, and never to a plausible-looking
+    /// overworld blue (the explicit-fallback shape issue #34 was filed over).
+    #[must_use]
+    pub fn with_biome_sky_color(self, sky_color: Option<[f32; 3]>) -> Self {
+        match sky_color {
+            Some(sky_color) => self.with_sky_color(sky_color),
+            None => self,
         }
     }
 
@@ -49,7 +101,12 @@ impl FogSettings {
     pub fn for_view_distance(color: [f32; 3], view_distance: f32, start_fraction: f32) -> Self {
         let end = view_distance.max(0.0);
         let start = end * start_fraction.clamp(0.0, 1.0);
-        Self { color, start, end }
+        Self {
+            color,
+            sky_color: color,
+            start,
+            end,
+        }
     }
 
     /// Dense, near, red-tinted Nether fog.
@@ -78,6 +135,7 @@ impl FogSettings {
         let start = 10.0_f32.min(end);
         Self {
             color: srgb_u8_to_linear(NETHER_FOG_SRGB),
+            sky_color: srgb_u8_to_linear(NETHER_FOG_SRGB),
             start,
             end,
         }
