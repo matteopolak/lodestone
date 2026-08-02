@@ -2877,6 +2877,104 @@ impl Sim {
             }
             _ => fog_for_render_distance(self.config.render_distance),
         }
+        .with_biome_sky_color(self.biome_sky_color())
+    }
+
+    /// The standing biome's `minecraft:visual/sky_color` in **linear** RGB, or
+    /// `None` when there is nothing better than the dimension default to draw
+    /// (issue #96).
+    ///
+    /// # The chain, and the one hop that is not a lookup
+    ///
+    /// The colour table arrives whole, indexed by biome holder id, on
+    /// `ClientEvent::BiomeVisuals` and reaches here as
+    /// `PlayerSnapshot::biome_sky_colors`. **The biome itself is not on the
+    /// network at all** — it lives in the chunk section's biome palette, so this
+    /// is the hop that has to happen at the camera every frame, and it is the
+    /// reason the whole table travels rather than one resolved colour.
+    ///
+    /// # Why it scans downward for a section
+    ///
+    /// `sections_at` elides an empty section to `None`, and the section holding
+    /// the player's own feet is very often empty — standing on a plain at `y=64`
+    /// puts the eye in section `64..80` while the ground is the last block of
+    /// `48..64`. Sampling only the eye's section would therefore leave the sky
+    /// untinted over open ground, which is precisely where a sky is visible.
+    /// Biomes are all but columnar (one cell is 4×4×4 blocks, and vanilla's own
+    /// biome sources vary far more horizontally than vertically), so the first
+    /// present section at or below the eye is the right answer, not an
+    /// approximation worth a second mechanism.
+    ///
+    /// The `None`s are all deliberate and all mean the same thing: *the server
+    /// has not told us*. Pre-login, a server that sent no biome registry, a
+    /// column that has not streamed in, a biome with no `sky_color` (the ten
+    /// Nether/End biomes) — each falls back to the dimension colour the caller
+    /// already computed, which is the same explicit-fallback shape #34 was filed
+    /// over. Never a plausible-looking overworld blue.
+    #[must_use]
+    fn biome_sky_color(&self) -> Option<[f32; 3]> {
+        let net = self.net.as_ref()?;
+        let table = net.shared_handle().get()?.player().biome_sky_colors;
+        if table.is_empty() {
+            return None;
+        }
+        let dims = net.world_dimensions()?;
+        let section_count = dims.section_count();
+        if section_count == 0 {
+            return None;
+        }
+
+        let position = self.player().position;
+        let block_x = position.x.floor() as i32;
+        let block_y = position.y.floor() as i32;
+        let block_z = position.z.floor() as i32;
+        let chunk = lodestone_client::ChunkPos {
+            x: block_x.div_euclid(16),
+            z: block_z.div_euclid(16),
+        };
+        let base_si = dims.min_y.div_euclid(16);
+        let eye_si = block_y.div_euclid(16) - base_si;
+        // Clamp rather than reject: an eye above the build limit still stands in
+        // a biome, and the topmost section is the one that holds it.
+        let top = eye_si.clamp(
+            0,
+            i32::try_from(section_count).unwrap_or(0).saturating_sub(1),
+        );
+
+        // Top-down: one lock acquisition for the whole column, then the highest
+        // present section at or below the eye.
+        let requests: Vec<(lodestone_client::ChunkPos, usize)> = (0..=top)
+            .rev()
+            .map(|si| (chunk, usize::try_from(si).unwrap_or(0)))
+            .collect();
+        let (section, si) = net
+            .sections_at(&requests)
+            .into_iter()
+            .zip(requests.iter().map(|(_, si)| *si))
+            .find_map(|(section, si)| section.map(|s| (s, si)))?;
+
+        // The sampled `y` is the eye's own within its section, or the top of
+        // whichever lower section answered.
+        let local_y = if si == usize::try_from(top).unwrap_or(0) {
+            block_y.rem_euclid(16) as usize
+        } else {
+            15
+        };
+        let biome = section.biome_at_block(
+            block_x.rem_euclid(16) as usize,
+            local_y,
+            block_z.rem_euclid(16) as usize,
+        );
+        let packed = (*table.get(usize::try_from(biome).ok()?)?)?;
+        // sRGB bytes → linear, exactly as `FogSettings::nether`/`the_end` do with
+        // their own hex constants. The *day/night* multiply stays in gamma space
+        // inside the sky pass (`SkyFrame`); this is only the transfer function
+        // for the base colour, which every colour handed to the renderer gets.
+        Some(lodestone_render::fog::srgb_u8_to_linear([
+            ((packed >> 16) & 0xFF) as u8,
+            ((packed >> 8) & 0xFF) as u8,
+            (packed & 0xFF) as u8,
+        ]))
     }
 
     /// The progressive-mining crack to draw on the targeted block this frame, or
