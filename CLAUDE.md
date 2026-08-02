@@ -105,6 +105,26 @@ Oracles (not part of repo state — recreate them):
   read `git diff --cached` to confirm the commit contains no foreign lines. This is the working
   practice that let one agent commit into `gpu.rs`, `gpu/stats.rs`, `resources.rs` and
   `docs/README.md` while three other agents held in-flight edits in all four.
+- **A red test in this checkout may be someone else's *deliberate* neuter, and no diff can tell you.**
+  Every control in this file works by breaking something on purpose and watching a test fail — so at
+  any moment another agent's two-minute neuter window looks exactly like a real regression. It
+  happened: one agent reported "two `entity::tests::*projectile*` lib tests are red on committed
+  `main`", and they were the exact pair another agent's `arrow_NEUTERED` experiment produced. `main`
+  was green throughout.
+  **The `git diff HEAD` substitute does not save you here**, which is the part worth internalising,
+  because that substitute is otherwise excellent (see the entry below). The neuter lived in
+  `lodestone-assets` while the failures surfaced in `lodestone-render`, and — more fundamentally —
+  a clean diff and a test run are **two observations at two different moments**. Emptiness at 19:31
+  says nothing about the tree at 19:33.
+  So: before reporting a red `main`, re-run at the **committed sha in an isolated worktree**, which is
+  the only observation that excludes concurrent edits by construction. And when *you* neuter
+  something, keep the window as short as possible and restore by `cp` from a scratchpad backup with an
+  md5 check — never `git checkout`.
+- **Never leave a stale blob in the shared index.** A `docs/README.md` blob sat staged at `7b506a8`
+  while `HEAD` had `3432cb3`; committing the index would have **deleted** a newer agent's index
+  bullet. Refreshing one path with `git reset -- <path>` sets that index entry back to `HEAD` and
+  leaves the working tree untouched, which is the safe cleanup — but the real fix is never staging in
+  the first place (see the pathspec-commit entry).
 - **The index is shared too: never leave work staged.** Hunk-staging (above) stops *you* shipping
   someone else's lines; it does nothing to stop *them* shipping yours. `git add` writes to the one
   index every agent shares, so any other agent's `git commit` in the gap — however narrow — harvests
