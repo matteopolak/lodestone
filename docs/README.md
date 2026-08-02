@@ -36,6 +36,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   `tick_water` — `applyEffectsFromBlocks` runs *after* `travel()`, so it lands on the
   next tick. Also the "doubled for magma" term that the issue described and vanilla
   does not have.
+- [View bobbing, the damage tilt and view lag](./view-bobbing.md) — issue #58: the
+  walk bob landed (state, transform, user option, pixel gate), and the **one
+  blocker** that stopped the other two. `Camera` has three degrees of freedom where
+  a bob matrix has four, so folding the bob into it **drops roll** — measured at
+  2.52 px worst case for the walk bob, which is why that shipped, and fatal for the
+  damage tilt, which is *pure* roll for a frontal hit and is therefore implemented,
+  tested against vanilla, and deliberately left unwired. Also: why the bob goes on
+  `render_camera` and never `camera` (which is the pick ray and the audio
+  listener), that a bounding-box centre is **not** a projected centroid (8.50 px vs
+  6.53, close enough to a nod-free bob's 8.31 to hide it), and that the island
+  control fires exactly one test out of 26.
 - [Creative flight](./creative-flight.md) — issue #191: the server-granted flight the
   client had **no** consumer for (`AbilitiesChanged` was decoded, tested and wired to
   nothing, so the client would free-cam on a server that never granted flight), why
@@ -384,11 +395,6 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   hand-rolls `login::finish_interactive`'s equivalent instead of calling it, and
   exactly which steps are verified versus unverifiable without a real Microsoft
   account.
-- [`/givedebug` client command](./givedebug-command.md) — the testing-only
-  `/givedebug <item> <amount>` chat intercept that composes the server's real
-  `/give @s <item> <amount>` rather than mutating local inventory state, why op
-  is required, and why the oracle scripts now op the interactive player over
-  RCON rather than pre-writing `ops.json`.
 - [The sky pass and the air-bubble row](./sky-and-air-bubbles.md) — two features
   that landed as complete, tested, unreachable modules and then got wired: the
   sky's own pass before the terrain pass and the `Clear`-vs-`Load` handover that

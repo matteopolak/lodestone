@@ -6,17 +6,32 @@ that keeps the server in agreement.
 
 ## What it is
 
-Two things, and separating them is the whole design:
+Two things, and separating them was the whole design:
 
 1. **Creative flight** — `Abilities.flying`. Server-granted, **collides with blocks**, runs
-   vanilla's ordinary `travelInAir` arithmetic with three modifications. This is what #191 added.
+   vanilla's ordinary `travelInAir` arithmetic with three modifications. This is what #191 added,
+   and it is the only flight the client has now.
 2. **Free-fly / noclip** — `lodestone_ecs::player::Flying`. A *developer* camera: local, no
-   collision, `position += dir * speed` with no velocity or drag. It predates #191 and is
-   **kept, unchanged, as a separate affordance**.
+   collision, `position += dir * speed` with no velocity or drag. It predated #191, which
+   deliberately kept it as a separate affordance — and **issue #382 then deleted the way in.**
 
-They are not the same mode and must not be conflated. `Flying`'s own doc comment carries the
-comparison table; the short version is that using `Flying` to implement creative flight would
-noclip where vanilla collides *and* run arithmetic the server's movement check would correct.
+### #382: the free-cam has no route from the shell any more
+
+The user's call, and it supersedes #191's decision to keep it: *"delete all of the nonstandard
+debug things we added. we can accomplish that stuff with the real cheat commands."* Between #191's
+real double-tap-space flight and `/gamemode creative`, the free-cam was redundant twice over, and
+it was squatting on `F` — vanilla's `key.swapOffhand` — which blocked #378.
+
+Deleted: `InputAction::ToggleFly` / `key.lodestone.toggleFly`, its `resolve_key` arm and
+`KeyOutcome::ToggleFly`, `Sim::flying`/`Sim::toggle_fly`, and the F3 overlay's `MODE FLY/WALK`
+readout. **Not** deleted: `lodestone_ecs::player::Flying` itself and `fly_step`. That is a
+deliberate stop, not an oversight — `lodestone-ecs` was held by another agent at the time, and
+`interact.rs`'s `send_sprint_command` still reads the component. The component now has no writer,
+so `fly_step` is unreachable in practice; removing it is a follow-up.
+
+The two modes were never the same and must not be conflated. Using `Flying` to implement creative
+flight would noclip where vanilla collides *and* run arithmetic the server's movement check would
+correct.
 
 ## The bug this closed first
 

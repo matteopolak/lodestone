@@ -388,6 +388,7 @@ impl EntityRenderer {
 /// stands between the placeholder and a recognisable mob skin. The `wgpu`
 /// texture is kept alive by the returned view (and, in turn, the bind group),
 /// so it is not returned separately.
+///
 /// `pub(super)` so the block-entity pass (`gpu/block_entities.rs`) can share it:
 /// the `Rgba8UnormSrgb` choice below is the load-bearing part and a second copy
 /// would be free to get it wrong, at +48% brightness on every chest pixel.

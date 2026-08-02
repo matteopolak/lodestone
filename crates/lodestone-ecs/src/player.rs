@@ -208,11 +208,23 @@ pub struct PrevPosition(pub Vec3d);
 /// Whether the **developer free-fly (noclip) camera** is active instead of
 /// physics-walk.
 ///
+/// # Nothing writes this any more (issue #382)
+///
+/// The only writer was `lodestone-shell`'s `Sim::toggle_fly`, driven by a
+/// Lodestone-only `key.lodestone.toggleFly` on `F`. Both were deleted: #191
+/// landed real creative flight (double-tap space, server-gated, collision on),
+/// `/gamemode creative` is the route in, and the binding was squatting on
+/// vanilla's `key.swapOffhand`. So this stays `false` for the whole session, and
+/// [`fly_step`] is unreachable in practice — deleting both is a follow-up rather
+/// than part of #382, which stopped at the shell boundary. `interact.rs`'s
+/// `send_sprint_command` still reads the component. See
+/// `docs/creative-flight.md`.
+///
 /// # This is not creative flight, and the two are deliberately separate
 ///
 /// | | `Flying` (this) | [`Abilities::flying`](crate::session::Abilities::flying) |
 /// |---|---|---|
-/// | authority | local, a debug key | the **server** (`player_abilities`) |
+/// | authority | local, and now unreachable — see above | the **server** (`player_abilities`) |
 /// | collision | **off** (noclip) | **on** — vanilla creative flight collides |
 /// | arithmetic | `position += dir * speed`, no velocity, no drag | vanilla `travelInAir` + the `0.6` Y overwrite |
 /// | runs physics | no — [`fly_step`] replaces the whole tick | yes, `lodestone_physics::tick` |
@@ -222,8 +234,8 @@ pub struct PrevPosition(pub Vec3d);
 /// be wrong in both directions: it would noclip where vanilla collides, and it
 /// would run non-vanilla arithmetic that the server's movement check would
 /// eventually correct. Conflating them is specifically what issue #191 was told
-/// not to do; keeping this as a distinct developer affordance is the deliberate
-/// choice, and `docs/creative-flight.md` records it.
+/// not to do. #191 kept this as a distinct developer affordance on purpose; #382
+/// then removed the way in, which is a different decision from merging the two.
 ///
 /// The name is kept (rather than renamed to `NoClip`) only because
 /// `lodestone-shell`'s `sim.rs` and `interact.rs` both read it and that file is

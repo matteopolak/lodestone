@@ -11,7 +11,9 @@
 //! server — which places them on its real ground — repeatedly teleports them back
 //! up. The result the director observed live was `pos` drifting `66.0 → 65.9 →
 //! 64.0` and then oscillating: a rubber-band loop between the shell's fall and the
-//! server's correction. Free-fly hid it; `mode=walk` exposes it.
+//! server's correction. The free-fly camera hid it, because it replaced the whole
+//! physics tick; walking physics — now the only mode, since #382 deleted the
+//! free-fly toggle — exposes it.
 //!
 //! ## Why the existing gates missed it
 //!
