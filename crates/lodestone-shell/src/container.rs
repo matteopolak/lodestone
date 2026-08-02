@@ -2487,58 +2487,12 @@ impl ContainerRenderer {
     }
 }
 
-const CONTAINER_WGSL: &str = r"
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VsOut {
-    var out: VsOut;
-    out.clip = vec4<f32>(pos, 0.0, 1.0);
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return in.color;
-}
-";
+const CONTAINER_WGSL: &str = include_str!("shaders/container.wgsl");
 
 /// A plain textured quad shader for [`ContainerBackground`]'s atlas — the same
 /// shape as `menu/render.rs`'s `MENU_SPRITE_WGSL`, restated here rather than
 /// shared because that one is `menu`'s own module-private constant.
-const CONTAINER_BG_WGSL: &str = r"
-struct VsOut {
-    @builtin(position) clip: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-@group(0) @binding(0) var atlas_tex: texture_2d<f32>;
-@group(0) @binding(1) var atlas_smp: sampler;
-
-@vertex
-fn vs_main(
-    @location(0) pos: vec2<f32>,
-    @location(1) uv: vec2<f32>,
-    @location(2) color: vec4<f32>,
-) -> VsOut {
-    var out: VsOut;
-    out.clip = vec4<f32>(pos, 0.0, 1.0);
-    out.uv = uv;
-    out.color = color;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let texel = textureSample(atlas_tex, atlas_smp, in.uv);
-    return texel * in.color;
-}
-";
+const CONTAINER_BG_WGSL: &str = include_str!("shaders/container_bg.wgsl");
 
 #[cfg(test)]
 mod tests {
