@@ -885,6 +885,15 @@ pub struct MenuNav {
     /// session is in — and the quadrant actions must then simply not fire, rather
     /// than behaving as if the cursor were at `(0, 0)`.
     menu_cursor: Option<(f32, f32, f32, f32)>,
+    /// The settings tree's own cursor — which of the eight pages is showing,
+    /// where the cursor is on it, and how far its `OptionsList` is scrolled
+    /// (issue #55). See [`super::options::SettingsNav`].
+    ///
+    /// Held here rather than in [`UiState`] because it is *navigation state*,
+    /// like [`Self::main`] and [`Self::paused`]: `Screen::Settings` is one screen
+    /// however deep the page stack is, and `UiState` models legal screen edges
+    /// only.
+    settings: crate::menu::options::SettingsNav,
 }
 
 impl Default for MenuNav {
@@ -949,6 +958,7 @@ impl MenuNav {
             world_select: crate::menu::world_select::WorldSelectNav::new(),
             list_button: None,
             menu_cursor: None,
+            settings: crate::menu::options::SettingsNav::new(),
         }
     }
 
@@ -978,6 +988,24 @@ impl MenuNav {
     #[must_use]
     pub fn options_save_error(&self) -> Option<&str> {
         self.options_save_error.as_deref()
+    }
+
+    /// The persisted options, whole.
+    ///
+    /// The settings tree needs *all* of them to label its live rows, and adding
+    /// a third `fn <name>()` per option as [`Self::gui_scale`] and
+    /// [`Self::view_bobbing`] did would grow one accessor per option forever.
+    /// Those two stay because `app.rs` reads them by name on the hot path.
+    #[must_use]
+    pub fn options(&self) -> &Options {
+        &self.options
+    }
+
+    /// The settings tree's cursor (issue #55) — which page, which control, how
+    /// far scrolled. See [`super::options::SettingsNav`].
+    #[must_use]
+    pub fn settings(&self) -> &crate::menu::options::SettingsNav {
+        &self.settings
     }
 
     /// The highlighted main-menu button.
@@ -1125,6 +1153,12 @@ impl MenuNav {
             // focus, not a highlight index — because the row indices and
             // `EditForm`'s focus ids are the same numbers (see [`NAME_FIELD`]).
             Screen::ServerEdit => self.form.focus_row(row),
+            // The settings tree now *has* a cursor (issue #55), so hover moves
+            // it — this arm's absence is what let #391 happen, because a screen
+            // with no hover arm had to route a click through `Enter`. Row indices
+            // are indices into `SettingsNav::visible`, which is also what
+            // `render::frame_for` builds its rows from.
+            Screen::Settings => self.settings.hover_row(row),
             _ => {}
         }
     }
@@ -1137,27 +1171,34 @@ impl MenuNav {
     /// `app.rs` used to inline. The **settings** screen is the exception, and it
     /// is the exception that was issue #391.
     ///
-    /// That screen deliberately has no cursor — each control owns its own key
-    /// instead ([`MenuNav::key_settings`]), so [`MenuNav::hover`] has no
-    /// `Screen::Settings` arm and a click could not move a highlight even in
-    /// principle. The old translation therefore turned a click on *any* row into
-    /// `MenuKey::Enter`, and on this screen `Enter` means
-    /// [`MenuNav::toggle_view_bobbing`] unconditionally. So clicking the **GUI
-    /// SCALE** row — row 0, the one `render.rs` marks `selected`, the natural
-    /// thing to click — silently turned View Bobbing off and persisted it.
+    /// That screen used to have no cursor at all — each control owned its own
+    /// key instead — so [`MenuNav::hover`] had no `Screen::Settings` arm and a
+    /// click could not move a highlight even in principle. The old translation
+    /// therefore turned a click on *any* row into `MenuKey::Enter`, and on that
+    /// screen `Enter` meant "toggle View Bobbing" unconditionally. So clicking
+    /// the **GUI SCALE** row — row 0, the one `render.rs` marked `selected`, the
+    /// natural thing to click — silently turned View Bobbing off and persisted
+    /// it.
     ///
     /// That is the whole of #391: the reporter's `options.json` carried
     /// `"view_bobbing": false`, written six minutes before the report, and every
     /// hop of the render chain underneath it was working. The bug was never in
     /// the bob; it was a mouse that did the opposite of the label under it.
     ///
+    /// Issue #55 gave that screen 135 controls and a real cursor, which removes
+    /// the *cause* rather than patching the symptom: a click now resolves its row
+    /// to that row's own [`super::options::Control`] and acts on it, and there is
+    /// no shared per-screen meaning of `Enter` left to mis-apply.
+    ///
     /// # The row indices are a coupling, and it is guarded
     ///
-    /// `0` and `1` here mean whatever `menu::render::frame_for` puts in
-    /// `Screen::Settings`'s `rows`, which is a different file.
-    /// `the_settings_rows_are_in_the_order_click_assumes` asserts the two agree,
-    /// so reordering that vector fails a test here instead of silently rebinding
-    /// the mouse to the wrong control.
+    /// A row index here means whatever `menu::render::frame_for` put in
+    /// `Screen::Settings`'s `rows`, which is a different file — and, since #55,
+    /// depends on which page is showing and how far it is scrolled.
+    /// `options::tests::the_settings_rows_are_in_the_order_click_assumes` walks
+    /// every page at every scroll position and asserts the two agree, so a table
+    /// edit fails a test instead of silently rebinding the mouse to the wrong
+    /// control.
     pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
         // The edit form is the second screen where "hover then Enter" is wrong,
         // and #395 is what makes it visible. `ContainerEventHandler.mouseClicked`
@@ -1180,15 +1221,12 @@ impl MenuNav {
             return Self::apply_world_select(ui, outcome);
         }
         if ui.screen() == Screen::Settings {
-            match row {
-                0 => self.cycle_gui_scale(1),
-                1 => self.toggle_view_bobbing(),
-                // A click that hit-tested onto a row this screen does not have
-                // must do nothing at all, rather than fall through to the
-                // keyboard path and toggle whatever `Enter` happens to mean.
-                _ => {}
-            }
-            return MenuAction::None;
+            // A click that hit-tested onto a row this page does not have does
+            // nothing at all (`SettingsNav::click_row` returns `None` for an
+            // out-of-range row), rather than falling through to the keyboard
+            // path — which is the other half of #391's fix.
+            let outcome = self.settings.click_row(row);
+            return self.apply_settings(ui, outcome);
         }
         // The fourth (#396). A click on a *row* here is
         // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
@@ -1397,6 +1435,10 @@ impl MenuNav {
                         MenuAction::Reprobe(None)
                     }
                     MainButton::Options => {
+                        // Vanilla builds a **new** `OptionsScreen` every time
+                        // (`TitleScreen.java`'s `setScreen(new OptionsScreen(…))`),
+                        // so re-entering Options never resumes three pages deep.
+                        self.settings.reset();
                         ui.open_settings();
                         MenuAction::None
                     }
@@ -1568,36 +1610,67 @@ impl MenuNav {
         }
     }
 
-    /// The settings screen still has no row highlight: each control owns its own
-    /// key. Up/Down step the GUI scale, Enter toggles View Bobbing.
+    /// The settings tree (issue #55). Up/Down move the cursor, Enter activates
+    /// what it is on, Escape unwinds one page.
     ///
-    /// Enter briefly meant nothing at all: it used to flip the `unlock_framerate`
-    /// debug knob, #382 deleted that row, and #58 put a **real** vanilla option
-    /// (`options.viewBobbing`) in its place. Giving the second control its own key
-    /// rather than adding a cursor is still deliberate — a cursor would change
-    /// what Up/Down *mean* here, and the GUI-scale binding is what every existing
-    /// test on this screen asserts. When a third control lands, that is the point
-    /// to introduce a real highlight (and vanilla's own `OptionsScreen` list) and
-    /// re-point those tests once, on purpose.
+    /// **This is the re-pointing the previous version of this comment predicted.**
+    /// It used to say: the screen has no row highlight, each control owns its own
+    /// key (Up/Down stepped the GUI scale, Enter toggled View Bobbing), and "when
+    /// a third control lands, that is the point to introduce a real highlight and
+    /// vanilla's own `OptionsScreen` list and re-point those tests once, on
+    /// purpose." A hundred and thirty-third control landed; this is that.
+    ///
+    /// So Up/Down no longer change a value — they move a cursor, like every other
+    /// screen in this shell — and the GUI scale is cycled by pressing Enter on
+    /// **its own row**, which is vanilla's `CycleButton.onPress`. The tests that
+    /// asserted the old binding were rewritten rather than deleted: the behaviour
+    /// they protected (a scale that cycles and reaches `options.json`) is still
+    /// asserted, through the new path.
     fn key_settings(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
-        match key {
+        let outcome = match key {
             MenuKey::Up => {
+                self.settings.step(false);
+                return MenuAction::None;
+            }
+            MenuKey::Down => {
+                self.settings.step(true);
+                return MenuAction::None;
+            }
+            MenuKey::Enter => self.settings.enter(),
+            MenuKey::Escape => self.settings.escape(),
+            _ => return MenuAction::None,
+        };
+        self.apply_settings(ui, outcome)
+    }
+
+    /// The two things a [`super::options::SettingsOutcome`] can ask of the shell.
+    ///
+    /// The mutation lives here rather than in [`super::options`] because this is
+    /// what owns the [`Options`] and the file it is written to — and because the
+    /// **eager persistence** rule is a `MenuNav` rule (see the module docs): a
+    /// setting that only saved on exit is the setting a crash loses.
+    fn apply_settings(
+        &mut self,
+        ui: &mut UiState,
+        outcome: crate::menu::options::SettingsOutcome,
+    ) -> MenuAction {
+        use crate::menu::options::{LiveOption, SettingsOutcome};
+        match outcome {
+            SettingsOutcome::None => MenuAction::None,
+            // The root page's Done, or Escape from it. `close_settings` is what
+            // knows whether that means the title screen or the pause menu.
+            SettingsOutcome::Close => {
+                ui.close_settings();
+                MenuAction::None
+            }
+            SettingsOutcome::Cycle(LiveOption::GuiScale) => {
                 self.cycle_gui_scale(1);
                 MenuAction::None
             }
-            MenuKey::Down => {
-                self.cycle_gui_scale(-1);
-                MenuAction::None
-            }
-            MenuKey::Enter => {
+            SettingsOutcome::Cycle(LiveOption::ViewBobbing) => {
                 self.toggle_view_bobbing();
                 MenuAction::None
             }
-            MenuKey::Escape => {
-                ui.on_escape();
-                MenuAction::None
-            }
-            _ => MenuAction::None,
         }
     }
 
@@ -1647,6 +1720,9 @@ impl MenuNav {
                         MenuAction::None
                     }
                     PauseButton::Options => {
+                        // See `MainButton::Options` — a fresh screen, not a
+                        // resumed one.
+                        self.settings.reset();
                         ui.open_settings_from_pause();
                         MenuAction::None
                     }
@@ -2420,16 +2496,81 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Settings);
     }
 
+    /// Drives the settings cursor onto the control `pred` picks out, using only
+    /// keys a player has, and returns its **visible row index** — the number
+    /// `app.rs`'s hit-test reports for that row.
+    ///
+    /// Deliberately not a shortcut into [`crate::menu::options::SettingsNav`]'s
+    /// private fields: reaching a row by pressing Down is what proves the row is
+    /// reachable, which is the property issue #55 turns on (117 of 135 controls
+    /// are inactive, so a cursor that skipped them would leave most of the tree
+    /// invisible).
+    fn settings_row(
+        nav: &mut MenuNav,
+        ui: &mut UiState,
+        pred: impl Fn(&crate::menu::options::Cell) -> bool,
+    ) -> usize {
+        let page = nav.settings().page();
+        let controls = crate::menu::options::all_controls(page);
+        let target = controls
+            .iter()
+            .position(|c| pred(c))
+            .expect("no such control on this page");
+        for _ in 0..=controls.len() {
+            if nav.settings().cursor() == target {
+                break;
+            }
+            nav.key(ui, MenuKey::Down);
+        }
+        assert_eq!(
+            nav.settings().cursor(),
+            target,
+            "Down must reach every control on {page:?}"
+        );
+        nav.settings()
+            .selected_row()
+            .expect("the cursor must be inside the visible window")
+    }
+
+    /// Walks the root page's nav button for `page` and enters it.
+    fn open_settings_page(
+        nav: &mut MenuNav,
+        ui: &mut UiState,
+        page: crate::menu::options::SettingsPage,
+    ) {
+        use crate::menu::options::Cell;
+        settings_row(nav, ui, |c| {
+            matches!(c, Cell::Nav { page: Some(p), .. } if *p == page)
+        });
+        nav.key(ui, MenuKey::Enter);
+        assert_eq!(nav.settings().page(), page);
+    }
+
+    /// Matches the `OptionInstance` whose `Options.java` accessor is `name`.
+    fn is_option(name: &str) -> impl Fn(&crate::menu::options::Cell) -> bool + '_ {
+        move |c| matches!(c, crate::menu::options::Cell::Option(s) if s.accessor == name)
+    }
+
     #[test]
-    fn settings_up_down_cycles_the_gui_scale_and_persists_through_a_real_file() {
+    fn enter_on_the_gui_scale_row_cycles_it_and_persists_through_a_real_file() {
+        // This is the re-pointed `settings_up_down_cycles_the_gui_scale…`. The
+        // *behaviour* it protected — a scale that cycles, wraps and reaches
+        // `options.json` immediately rather than at exit — is unchanged; what
+        // moved is the key. Up/Down are a cursor now, and the cycle is Enter on
+        // the row, which is `CycleButton.onPress`.
         let (mut nav, path) = nav("settings-cycle");
         let mut ui = UiState::new();
         ui.open_settings();
         assert_eq!(nav.gui_scale(), 0, "starts at auto");
 
-        nav.key(&mut ui, MenuKey::Up);
+        // GUI Scale lives on the Video screen in vanilla, under the Display
+        // header — not on the root, which is why this walks two levels.
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        settings_row(&mut nav, &mut ui, is_option("guiScale"));
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert_eq!(nav.gui_scale(), 1);
-        nav.key(&mut ui, MenuKey::Up);
+        nav.key(&mut ui, MenuKey::Enter);
         assert_eq!(nav.gui_scale(), 2);
         assert_eq!(nav.options_save_error(), None);
 
@@ -2440,40 +2581,45 @@ mod tests {
             2
         );
 
-        nav.key(&mut ui, MenuKey::Down);
-        assert_eq!(nav.gui_scale(), 1, "down steps back");
-
-        // Down from auto wraps to the top, and up from the top wraps back to
-        // auto — this is what makes the control a *cycle*, not a clamp.
-        // `nav` is shadowed by the `MenuNav` local above (functions and
-        // locals share Rust's value namespace), so reach the helper through
-        // its module path instead of renaming the well-established `nav`
-        // binding used throughout this test.
-        let (mut wrap_nav, _) = self::nav("settings-cycle-wrap");
-        let mut wrap_ui = UiState::new();
-        wrap_ui.open_settings();
-        assert_eq!(wrap_nav.gui_scale(), 0);
-        wrap_nav.key(&mut wrap_ui, MenuKey::Down);
+        // And it is a *cycle*, not a clamp: counting up to the ceiling and then
+        // pressing once more lands back on auto. Six more presses from 2 reaches
+        // `MAX_MANUAL_GUI_SCALE`, so the range is exclusive — an inclusive one
+        // would overshoot by one and land on auto here instead of below.
+        for _ in 2..crate::config::MAX_MANUAL_GUI_SCALE {
+            nav.key(&mut ui, MenuKey::Enter);
+        }
         assert_eq!(
-            wrap_nav.gui_scale(),
+            nav.gui_scale(),
             crate::config::MAX_MANUAL_GUI_SCALE,
-            "down from auto wraps to the top"
+            "counted up to the ceiling"
         );
-        wrap_nav.key(&mut wrap_ui, MenuKey::Up);
-        assert_eq!(wrap_nav.gui_scale(), 0, "up from the top wraps back to auto");
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(nav.gui_scale(), 0, "and wraps back to auto");
+        assert_eq!(
+            ui.screen(),
+            Screen::Settings,
+            "cycling an option must not leave the screen"
+        );
     }
 
     #[test]
-    fn settings_enter_toggles_view_bobbing_without_disturbing_the_scale() {
-        // Enter meant nothing between #382 (which deleted the `unlock_framerate`
-        // debug row from it) and #58 (which put vanilla's real
-        // `options.viewBobbing` there).
+    fn enter_on_the_view_bobbing_row_toggles_it_and_touches_nothing_else() {
+        // Vanilla puts `bobView` on the **Accessibility** screen in 26.2, not on
+        // Video — which is worth asserting, because "View Bobbing is a video
+        // setting" is the intuitive and wrong answer.
         let (mut nav, path) = nav("settings-view-bobbing");
         let mut ui = UiState::new();
         ui.open_settings();
         let options_path = path.parent().unwrap().join("options.json");
 
-        assert!(nav.view_bobbing(), "vanilla's default is ON, unlike a debug knob");
+        open_settings_page(
+            &mut nav,
+            &mut ui,
+            crate::menu::options::SettingsPage::Accessibility,
+        );
+        settings_row(&mut nav, &mut ui, is_option("bobView"));
+
+        assert!(nav.view_bobbing(), "vanilla's default is ON");
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert!(!nav.view_bobbing());
         // On disk immediately, same rule as the scale.
@@ -2482,17 +2628,18 @@ mod tests {
         nav.key(&mut ui, MenuKey::Enter);
         assert!(nav.view_bobbing(), "Enter is a toggle, not a latch");
         assert!(crate::config::Options::load_from(&options_path).view_bobbing);
+        assert_eq!(nav.gui_scale(), 0, "and must not reach the other live option");
 
-        // The two controls share a screen and no cursor, so the thing that can
-        // actually go wrong is one key reaching the other's setting.
-        nav.key(&mut ui, MenuKey::Up);
-        nav.key(&mut ui, MenuKey::Up);
-        assert_eq!(nav.gui_scale(), 2);
-        assert!(nav.view_bobbing(), "Up must not touch the toggle");
+        // The control that matters now that the cursor is shared: moving it onto
+        // the *neighbouring* row and pressing Enter must not toggle the bob. Its
+        // left-hand neighbour is `notificationDisplayTime`, which we do not
+        // honour, so Enter there is a no-op.
+        settings_row(&mut nav, &mut ui, is_option("notificationDisplayTime"));
         nav.key(&mut ui, MenuKey::Enter);
-        assert!(!nav.view_bobbing());
-        assert_eq!(nav.gui_scale(), 2, "Enter must not touch the scale");
-        assert_eq!(ui.screen(), Screen::Settings, "and must not leave the screen");
+        assert!(
+            nav.view_bobbing(),
+            "Enter on an inactive row must do nothing at all"
+        );
         assert_eq!(nav.options_save_error(), None);
     }
 
@@ -2500,18 +2647,19 @@ mod tests {
     /// landed on, not on whatever `MenuKey::Enter` means there.
     ///
     /// This is the whole bug. `app.rs` translated every menu click into
-    /// `hover(row)` + `Enter`, which is right on the four screens that have a row
-    /// cursor and wrong here, where there is none and `Enter` is hard-wired to
-    /// View Bobbing. So a click on the GUI SCALE row — row 0, the one drawn
-    /// `selected` — turned the option off and wrote it to disk. Nothing about
-    /// the bob itself was broken; the reporter's `options.json` simply said
-    /// `false`.
+    /// `hover(row)` + `Enter`, which is right on the screens that have a row
+    /// cursor and was wrong here, where there was none and `Enter` was hard-wired
+    /// to View Bobbing. So a click on the GUI SCALE row — row 0, the one drawn
+    /// `selected` — turned the option off and wrote it to disk. Nothing about the
+    /// bob itself was broken; the reporter's `options.json` simply said `false`.
     ///
-    /// The assertion that matters is the **negative** one, so it is paired with
-    /// a control: clicking row 1 *must* toggle, or "row 0 does not toggle" would
-    /// pass just as well on a `click` that did nothing at all.
+    /// #55 removed the cause rather than the symptom: the screen has a real
+    /// cursor and every row resolves to its own control. The assertion that
+    /// matters is still the **negative** one, so it is still paired with a
+    /// control — clicking the scale's row must cycle it, or "the click did not
+    /// toggle the bob" would pass just as well on a `click` that did nothing.
     #[test]
-    fn clicking_the_gui_scale_row_cycles_the_scale_and_leaves_view_bobbing_alone() {
+    fn clicking_a_settings_row_acts_on_that_row_and_no_other() {
         let (mut nav, path) = self::nav("settings-click-rows");
         let mut ui = UiState::new();
         ui.open_settings();
@@ -2520,43 +2668,62 @@ mod tests {
         assert!(nav.view_bobbing(), "precondition: the default is ON");
         assert_eq!(nav.gui_scale(), 0, "precondition: the scale starts at auto");
 
-        // Row 0 is GUI SCALE. Before #391 this arrived as `Enter`.
-        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let scale = settings_row(&mut nav, &mut ui, is_option("guiScale"));
+        // Its own row cycles the scale…
+        assert_eq!(nav.click(&mut ui, scale), MenuAction::None);
+        assert_eq!(nav.gui_scale(), 1, "the clicked row must do its own job");
         assert!(
             nav.view_bobbing(),
-            "a click on the GUI SCALE row must not touch View Bobbing"
+            "and must not touch a setting on another screen entirely"
         );
         assert!(
-            !options_path.exists()
-                || crate::config::Options::load_from(&options_path).view_bobbing,
-            "and must not persist it off either — that is what survived the restart"
+            crate::config::Options::load_from(&options_path).view_bobbing,
+            "nor persist it off — that is what survived the restart in #391"
         );
-        assert_eq!(nav.gui_scale(), 1, "it must do its own row's job instead");
 
-        // Control: the toggle is still reachable by mouse, so the assertion
-        // above is row-awareness and not a dead `click`.
-        assert_eq!(nav.click(&mut ui, 1), MenuAction::None);
-        assert!(!nav.view_bobbing(), "control: row 1 is the toggle");
-        assert_eq!(nav.gui_scale(), 1, "and it must not touch the scale");
-        assert!(!crate::config::Options::load_from(&options_path).view_bobbing);
+        // …and the row beside it, which we do not honour, does nothing.
+        let inert = settings_row(&mut nav, &mut ui, is_option("inactivityFpsLimit"));
+        assert_ne!(inert, scale, "premise: they are different rows");
+        assert_eq!(nav.click(&mut ui, inert), MenuAction::None);
+        assert_eq!(
+            nav.gui_scale(),
+            1,
+            "an inactive row must not fall through to whatever Enter means"
+        );
+
+        // Control: the *active* row is still reachable by mouse, so the negative
+        // assertion above is row-awareness and not a dead `click`.
+        assert_eq!(nav.click(&mut ui, scale), MenuAction::None);
+        assert_eq!(nav.gui_scale(), 2);
 
         // A hit-test that lands past the last row must do nothing rather than
         // fall through to the keyboard path.
-        assert_eq!(nav.click(&mut ui, 7), MenuAction::None);
-        assert!(!nav.view_bobbing());
-        assert_eq!(nav.gui_scale(), 1);
+        let past = nav.settings().visible().len() + 3;
+        assert_eq!(nav.click(&mut ui, past), MenuAction::None);
+        assert_eq!(nav.gui_scale(), 2);
+        assert!(nav.view_bobbing());
         assert_eq!(ui.screen(), Screen::Settings);
     }
 
-    /// [`MenuNav::click`]'s `0`/`1` are indices into a `rows` vector built in
-    /// `menu::render`, a different file with no compile-time link to them.
-    /// Reordering that vector would silently rebind the mouse to the wrong
-    /// control — which is exactly the failure #391 was.
+    /// A settings row index is an index into a `rows` vector built in
+    /// `menu::render`, a different file with no compile-time link to it — and
+    /// since #55 it also depends on which page is showing and how far it is
+    /// scrolled. If the two disagree the mouse acts on the wrong control, which
+    /// is exactly the failure #391 was.
+    ///
+    /// `options::tests::the_settings_rows_are_in_the_order_click_assumes` sweeps
+    /// every page at every scroll position against `settings_frame` directly;
+    /// this one checks the same agreement through the **real** `frame_for`, which
+    /// is the path `app.rs` uses.
     #[test]
     fn the_settings_rows_are_in_the_order_click_assumes() {
         let (mut nav, _) = self::nav("settings-row-order");
         let mut ui = UiState::new();
         ui.open_settings();
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        let scale = settings_row(&mut nav, &mut ui, is_option("guiScale"));
+
         let mut favicons = crate::menu::render::FaviconCache::new();
         let frame = crate::menu::render::frame_for(
             &ui,
@@ -2565,19 +2732,24 @@ mod tests {
             &mut favicons,
         )
         .expect("the settings screen owns its frame");
-        assert_eq!(frame.rows.len(), 2, "click() knows about exactly two rows");
-        assert!(
-            frame.rows[0].label.starts_with("GUI SCALE"),
-            "row 0 must be the scale, got {:?}",
-            frame.rows[0].label
+        let visible = nav.settings().visible();
+        assert_eq!(
+            frame.rows.len(),
+            visible.len(),
+            "the frame and the control list must agree in length"
         );
-        assert!(
-            frame.rows[1].label.starts_with("VIEW BOBBING"),
-            "row 1 must be the toggle, got {:?}",
-            frame.rows[1].label
-        );
-        // And the label tracks the value, so a click's effect is visible.
-        nav.click(&mut ui, 1);
+        for (row, control) in visible.iter().enumerate() {
+            assert_eq!(
+                frame.rows[row].label,
+                control.cell.label(nav.options()),
+                "row {row}"
+            );
+        }
+        assert_eq!(frame.rows[scale].label, "GUI Scale: Auto");
+        assert_eq!(frame.selected, scale, "and the cursor draws on that row");
+
+        // The label tracks the value, so a click's effect is visible.
+        nav.click(&mut ui, scale);
         let frame = crate::menu::render::frame_for(
             &ui,
             &nav,
@@ -2585,7 +2757,7 @@ mod tests {
             &mut favicons,
         )
         .unwrap();
-        assert_eq!(frame.rows[1].label, "VIEW BOBBING: OFF");
+        assert_eq!(frame.rows[scale].label, "GUI Scale: 1");
     }
 
     /// Issue #397, and the same coupling `the_settings_rows_are_in_the_order_click_assumes`
@@ -2696,7 +2868,9 @@ mod tests {
         );
         let mut ui = UiState::new();
         ui.open_settings();
-        nav.key(&mut ui, MenuKey::Up);
+        open_settings_page(&mut nav, &mut ui, crate::menu::options::SettingsPage::Video);
+        settings_row(&mut nav, &mut ui, is_option("guiScale"));
+        nav.key(&mut ui, MenuKey::Enter);
         assert_eq!(nav.gui_scale(), 1, "the in-memory option still updates");
         let err = nav
             .options_save_error()

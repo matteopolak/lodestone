@@ -36,9 +36,15 @@ pub const AUTO_GUI_SCALE: u32 = 0;
 /// Vanilla clamps the auto-picked (and any manual) scale so the resulting
 /// *scaled* GUI resolution never drops below this many logical pixels wide —
 /// `Window.calculateScale`'s `>= 320` check (`Window.java:452`).
-const MIN_SCALED_WIDTH: u32 = 320;
+pub const MIN_SCALED_WIDTH: u32 = 320;
 /// As [`MIN_SCALED_WIDTH`], vertical — `Window.java:453`'s `>= 240`.
-const MIN_SCALED_HEIGHT: u32 = 240;
+///
+/// Public because it is a **floor on the logical canvas**, not just an input to
+/// [`calculate_gui_scale`]: a screen that has to fit its content into the band
+/// that survives at every scale needs the number, and the settings tree's
+/// visible-list window is derived from it (`menu::options::LIST_WINDOW_PX`)
+/// rather than picked.
+pub const MIN_SCALED_HEIGHT: u32 = 240;
 
 /// Highest `gui_scale` the settings screen will manually cycle to. Vanilla's
 /// own ceiling is effectively unbounded (`Options.MAX_GUI_SCALE_INCLUSIVE` =

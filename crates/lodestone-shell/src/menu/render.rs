@@ -438,6 +438,18 @@ pub enum Origin {
     /// deliberate design), reproduced faithfully rather than "corrected" to
     /// [`Origin::ScreenTop`].
     DeathTitle,
+    /// A widget of the settings tree (issue #55), resolved by
+    /// [`super::options::placement_anchor`].
+    ///
+    /// The only [`Origin`] that carries data, and it has to: a settings row's
+    /// position depends on the page, the entry, **and how far the list is
+    /// scrolled**, none of which anything downstream of [`frame_for`] knows —
+    /// this enum is precisely the seam where a canvas-dependent term gets to
+    /// live, and the scroll rides along with it. The three shapes it covers are
+    /// `OptionsScreen`'s arranged `HeaderAndFooterLayout`, an
+    /// `OptionsSubScreen`'s footer band, and an `OptionsList` row; see
+    /// [`super::options::Placement`].
+    Settings(super::options::Placement),
 }
 
 impl Origin {
@@ -459,6 +471,14 @@ impl Origin {
             Origin::TopRight => (width, 0.0),
             Origin::ScreenBottom => (width * 0.5, height),
             Origin::DeathTitle => (width * 0.25, 0.0),
+            // Unlike every arm above, this one *runs a layout* rather than
+            // evaluating an expression — `OptionsScreen`'s tree cannot be
+            // arranged once per process the way `pause_block` is, because
+            // `HeaderAndFooterLayout` places its content band from the canvas
+            // height. See `super::options::root_widget_rects`.
+            Origin::Settings(placement) => {
+                super::options::placement_anchor(placement, width, height)
+            }
         }
     }
 }
@@ -1588,6 +1608,18 @@ pub struct MenuRow {
     /// from the widget. Without it, the pre-#395 draw applies: the whole label
     /// with a caret parked after it.
     pub field: bool,
+    /// Draw the row's background as vanilla's `AbstractSliderButton` track
+    /// instead of a `Button` (issue #55).
+    ///
+    /// A settings screen's numeric options are sliders and its enums and
+    /// booleans are `CycleButton`s (`OptionInstance.java:127-135`), and the two
+    /// look nothing alike — a slider track has no bevel and no disabled variant.
+    /// A `bool` rather than a value, because **no live option in this client is a
+    /// slider**: `guiScale` is a `ClampingLazyMaxIntRange`, whose
+    /// `createCycleButton()` is `true`, so it is a cycle button. Every slider we
+    /// draw is therefore inactive and has no handle to place; see
+    /// [`super::widget::Widget::slider`].
+    pub slider: bool,
     /// The live [`EditBox`] this row draws — a **clone**, taken per frame from
     /// [`super::nav::EditForm`]'s persistent widgets.
     ///
@@ -2482,45 +2514,19 @@ pub fn frame_for<'a>(
                 ..Default::default()
             })
         }
-        Screen::Settings => {
-            let scale = nav.gui_scale();
-            let label = if scale == crate::config::AUTO_GUI_SCALE {
-                "GUI SCALE: AUTO".to_string()
-            } else {
-                format!("GUI SCALE: {scale}")
-            };
-            Some(MenuFrame {
-                title: "OPTIONS",
-                subtitle: "",
-                rows: vec![
-                    MenuRow {
-                        label,
-                        detail: "UP/DOWN CHANGES IT - AUTO FITS THE WINDOW".to_string(),
-                        enabled: true,
-                        ..Default::default()
-                    },
-                    // Vanilla's View Bobbing (`options.viewBobbing`). `selected:
-                    // 0` below still points at the scale row and this screen has
-                    // no cursor, so being second costs nothing — see
-                    // `MenuNav::key_settings` on why each control owns a key
-                    // rather than sharing a highlight.
-                    MenuRow {
-                        label: format!(
-                            "VIEW BOBBING: {}",
-                            if nav.view_bobbing() { "ON" } else { "OFF" }
-                        ),
-                        detail: "ENTER TOGGLES IT - THE CAMERA MOVES WITH YOUR STRIDE"
-                            .to_string(),
-                        enabled: true,
-                        ..Default::default()
-                    },
-                ],
-                selected: 0,
-                footer: vec!["UP/DOWN SCALE   ENTER VIEW BOBBING   ESC BACK".to_string()],
-                message: nav.options_save_error().map(str::to_string),
-                ..Default::default()
-            })
-        }
+        // Vanilla's whole `OptionsScreen` tree (issue #55). This used to be two
+        // hand-written rows in a centred stack with a key-hint footer; it is now
+        // eight pages of `OptionsList` geometry built from a table, with the
+        // controls this client does not honour drawn inactive. Every decision —
+        // which page, which rows are visible, which are live, where each one
+        // sits — belongs to `super::options`; this arm only supplies the three
+        // things that live outside it.
+        Screen::Settings => Some(super::options::settings_frame(
+            nav.settings(),
+            nav.options(),
+            ui.settings_in_world(),
+            nav.options_save_error(),
+        )),
         // The account list (issue #66). `pump` is called here, on every
         // frame this screen is showing, rather than from an `app.rs` hook —
         // see `accounts.rs`'s module docs on why that module is written to
@@ -3215,7 +3221,15 @@ fn draw_widget(
     // every `MenuRow` with a fresh `label.to_string()` every frame — and a menu
     // screen draws nine of these with no world behind it, so it is not worth a
     // lifetime parameter on `Widget` to avoid.
-    let mut widget = Widget::button(x, y, w, h, row.label.as_str());
+    // A settings slider carries `AbstractSliderButton`'s track instead of
+    // `AbstractButton`'s three `widget/button*` states (issue #55). Which sprite
+    // set a row gets is still the *widget's* decision, not this function's — the
+    // only thing decided here is which kind of widget the row is.
+    let mut widget = if row.slider {
+        Widget::slider(x, y, w, h, row.label.as_str())
+    } else {
+        Widget::button(x, y, w, h, row.label.as_str())
+    };
     widget.active = row.enabled;
     widget.focused = selected;
     widget.hovered = hovered;
@@ -3231,7 +3245,17 @@ fn draw_widget(
     // with `AbstractButton`'s three-argument sprite set: disabled wins over
     // hovered, which is why a greyed-out button under the cursor still looks
     // greyed out. The rule lives in `menu::widget`; this only asks.
-    match widget.background_sprite() {
+    //
+    // A slider asks a *different* question — `AbstractSliderButton.getSprite()`
+    // passes `isActive()` and `isFocused()` alone, so hovering one does not
+    // highlight it (`AbstractSliderButton.java:36-38`). Both predicates live on
+    // `Widget`; neither is re-derived here.
+    let background = if row.slider {
+        widget.slider_background_sprite()
+    } else {
+        widget.background_sprite()
+    };
+    match background {
         Some(sprite) if b.has_sprite(sprite) => b.sprite(sprite, x, y, w, h, LABEL),
         _ => {
             // Jar-less fallback: the flat fills the menu has always used, so the

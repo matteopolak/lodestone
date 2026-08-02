@@ -262,6 +262,50 @@ pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/button_highlighted",
 );
 
+/// `AbstractSliderButton`'s track (`AbstractSliderButton.java:20-21,36-38`),
+/// expressed through the **3**-argument collapse with `enabled` and `disabled`
+/// deliberately equal.
+///
+/// This is a deliberate exception to the module docs' "construct a slider with
+/// [`Widget::new`], not [`Widget::button`]". That rule is about not inventing
+/// `widget/slider_disabled`, which does not exist in the pack (the
+/// `gui/sprites/widget/` listing has `slider`, `slider_highlighted`,
+/// `slider_handle` and `slider_handle_highlighted`, and no `_disabled`
+/// anywhere) — it is not about the track, which vanilla very much does draw.
+///
+/// ## Why the 3-argument form and not the 2-argument one
+///
+/// The 2-argument form reads like the obvious way to say "no disabled art", and
+/// it is **wrong here**. `WidgetSprites::get` treats its two arguments
+/// independently, while vanilla's predicate is a conjunction:
+///
+/// ```text
+/// getSprite() = isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER
+/// ```
+///
+/// So `!isActive()` must give the plain track *whatever* focus did — and
+/// [`WidgetSprites::focusable`] puts the **focused** sprite in
+/// `disabledFocused`, which would light an inactive slider up under the cursor.
+/// [`WidgetSprites::with_disabled`] puts the **disabled** sprite there, which is
+/// exactly the conjunction. The two collapses are not interchangeable and the
+/// difference is only observable on a *disabled, focused* widget.
+///
+/// It is observable here: the settings tree's cursor deliberately stops on
+/// inactive rows (`super::options`' module docs, departure 4), because otherwise
+/// 117 of its 135 controls would be unreachable and unscrollable. So this is not
+/// a theoretical distinction — the first version of this constant used
+/// `focusable` and `a_slider_has_a_track_but_no_disabled_track` caught it
+/// immediately, reporting `widget/slider_highlighted` for a greyed-out slider.
+///
+/// `EditBox` genuinely is the 2-argument form (`EditBox.java:29-31`) and is not
+/// affected, because `nextFocusPath` refuses focus to an inactive widget, so its
+/// disabled-and-focused state does not arise in vanilla.
+pub const SLIDER_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
+    "widget/slider",
+    "widget/slider",
+    "widget/slider_highlighted",
+);
+
 /// Vanilla's `AbstractWidget` (`AbstractWidget.java:28-48`): a menu control's
 /// bounds, message and state.
 ///
@@ -356,6 +400,45 @@ impl Widget {
             sprites: Some(BUTTON_SPRITES),
             ..Self::new(x, y, width, height, message)
         }
+    }
+
+    /// An `AbstractSliderButton`'s track: [`Self::new`] plus
+    /// [`SLIDER_SPRITES`]. Used by every numeric option on the settings tree
+    /// (see [`super::options`]).
+    ///
+    /// The **handle** is not this type's business. Vanilla draws it at
+    /// `x + value * (width - 8)` from the widget's own `value`
+    /// (`AbstractSliderButton.java:66-80`), and a `Widget` holds no value — so a
+    /// screen that has one passes it to the draw. Every slider the settings tree
+    /// renders today is inactive and this client holds no value for any of them,
+    /// which is why nothing draws a handle yet; see `docs/settings-screen.md` on
+    /// why an arbitrary handle position would be a fabricated value rather than a
+    /// cosmetic default.
+    #[must_use]
+    pub fn slider(x: f32, y: f32, width: f32, height: f32, message: impl Into<String>) -> Self {
+        Self {
+            sprites: Some(SLIDER_SPRITES),
+            ..Self::new(x, y, width, height, message)
+        }
+    }
+
+    /// `AbstractSliderButton.getSprite()` (`AbstractSliderButton.java:36-38`):
+    /// `isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER`.
+    ///
+    /// **Both** arguments differ from [`Self::background_sprite`]'s, in the same
+    /// two ways `EditBox`'s do (see [`super::edit_box`]): `isActive()` rather
+    /// than the raw `active` field, and `isFocused()` **alone** — so hovering a
+    /// slider does not highlight it, where hovering a button does. `canChangeValue`
+    /// is vanilla's "the keyboard has taken the slider over" latch, which nothing
+    /// here sets, so it is `false` and drops out.
+    ///
+    /// Unobservable today (every slider we draw is inactive, and
+    /// `get(false, _)` is `widget/slider` either way) and written anyway: the
+    /// note that it *was* unobservable is exactly the kind of claim that goes
+    /// stale the moment one goes live.
+    #[must_use]
+    pub fn slider_background_sprite(&self) -> Option<&'static str> {
+        self.sprites.map(|s| s.get(self.is_active(), self.focused))
     }
 
     /// `AbstractWidget.isActive()` (`AbstractWidget.java:216-218`):
@@ -707,6 +790,72 @@ mod tests {
         assert_eq!(b.background_sprite(), Some("widget/button"));
         b.active = false;
         assert_eq!(b.background_sprite(), Some("widget/button_disabled"));
+    }
+
+    #[test]
+    fn a_slider_has_a_track_but_no_disabled_track() {
+        // `AbstractSliderButton.getSprite()` is a **conjunction** —
+        // `isActive() && isFocused() && !canChangeValue` — so a greyed-out
+        // slider draws the *ordinary* track whatever focus did, and its entire
+        // disabled state is the grey label. This is the assertion that caught
+        // `SLIDER_SPRITES` being built with the 2-argument collapse, which puts
+        // the *focused* sprite in `disabledFocused` and lit an inactive slider up
+        // under the cursor. See [`SLIDER_SPRITES`].
+        let mut s = Widget::slider(0.0, 0.0, 150.0, 20.0, "Render Distance");
+        assert_eq!(s.background_sprite(), Some("widget/slider"));
+        s.focused = true;
+        assert_eq!(s.background_sprite(), Some("widget/slider_highlighted"));
+        s.active = false;
+        assert_eq!(
+            s.background_sprite(),
+            Some("widget/slider"),
+            "there is no `widget/slider_disabled` in the pack, and a *focused* \
+             inactive slider must not fall back to the highlighted one either"
+        );
+        assert_eq!(s.message_colour(), INACTIVE_LABEL);
+        // And the collapse itself, stated so the reason is not only in prose:
+        // the fourth field is the disabled sprite, not the focused one.
+        assert_eq!(SLIDER_SPRITES.disabled_focused, "widget/slider");
+        assert_eq!(
+            WidgetSprites::focusable("widget/slider", "widget/slider_highlighted")
+                .disabled_focused,
+            "widget/slider_highlighted",
+            "control: the 2-argument form is the one that would have been wrong"
+        );
+        // The control: a *button* under the same flags does have disabled art,
+        // so this is not "every widget collapses".
+        let mut b = Widget::button(0.0, 0.0, 150.0, 20.0, "Render Distance");
+        b.focused = true;
+        b.active = false;
+        assert_eq!(b.background_sprite(), Some("widget/button_disabled"));
+
+        // The predicate differs on both arguments, like `EditBox`'s: hover does
+        // not highlight a slider, and `isActive()` gates it rather than the raw
+        // `active` field.
+        let mut h = Widget::slider(0.0, 0.0, 150.0, 20.0, "Sensitivity");
+        h.hovered = true;
+        assert_eq!(
+            h.slider_background_sprite(),
+            Some("widget/slider"),
+            "hovering a slider must not highlight it"
+        );
+        assert_eq!(
+            h.background_sprite(),
+            Some("widget/slider_highlighted"),
+            "and the *button* predicate would — which is why the two exist"
+        );
+        h.hovered = false;
+        h.focused = true;
+        assert_eq!(
+            h.slider_background_sprite(),
+            Some("widget/slider_highlighted")
+        );
+        h.visible = false;
+        assert_eq!(
+            h.slider_background_sprite(),
+            Some("widget/slider"),
+            "`isActive()` is `visible && active`, unlike the button's raw field"
+        );
     }
 
     #[test]

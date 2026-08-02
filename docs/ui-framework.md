@@ -83,7 +83,7 @@ smallest it has ever been.
 | `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
 | `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
 | `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | 4 of 93 options persisted | #55 |
+| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **done for 8 of 13 screens** — `menu/options.rs`, 135 controls, 18 live (2 of 93 options persisted; see below) | #55 |
 | `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
 
 ## What is already done, and must not be re-filed
@@ -235,14 +235,26 @@ Options the informal list in #55 omitted, worth naming so they are not discovere
 
 ### What we persist
 
-`crates/lodestone-shell/src/config.rs` has 12 public fields, four of which are vanilla options:
-`gui_scale:117`, `view_bobbing:136`, `render_distance:269`, `sensitivity:286`. The rest are ours
-(`keybinds:123`, `mode`, `host`, `port`, `protocol`, `connect_in_window`, `address_given`,
-`connect_for`).
+**Two of 93, not four — this section said four and was wrong.** The error is
+`CLAUDE.md` rule 2's shape exactly: it was produced by counting `config.rs`'s public fields, and
+`config.rs` holds **two** structs.
 
-**4 of 93.** That ratio is the argument for building the tree from an option *model* rather than
+- `config::Options` is the *persisted* one (`options.json`) and has three fields: `gui_scale:117`,
+  `keybinds:123`, `view_bobbing:136`. Only two of those are vanilla `OptionInstance`s.
+- `config::Config` is *argv*, and its own doc comment says it is "parsed fresh from argv every run
+  and never written back". `render_distance` and `sensitivity` live **there**, so a settings row that
+  appeared to set either would be fabricated persistence — honoured for the session by accident of
+  the CLI default and lost on restart.
+
+So the live pair is `gui_scale` and `view_bobbing`, and #55 renders `renderDistance` and
+`sensitivity` inactive with the rest. Making them live is real work: a field on `Options`, a JSON
+key, and a consumer in `app.rs` that prefers it over the flag — and `sensitivity` additionally
+cannot be an `f32` without `Options` losing its `Eq`.
+
+**2 of 93.** That ratio is the argument for building the tree from an option *model* rather than
 screen by screen: most rows will be present-and-disabled for a long time, and that is the intended
-end state, not a shortfall.
+end state, not a shortfall. #55 landed 135 controls of which **18** work; see
+[`settings-screen.md`](./settings-screen.md).
 
 ## What already exists on our side
 

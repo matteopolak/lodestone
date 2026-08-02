@@ -6,6 +6,7 @@
 //! | module | what it owns |
 //! |---|---|
 //! | [`nav`] | selection, the add/edit form, what a keypress means |
+//! | [`options`] | the whole settings tree, unsupported controls disabled |
 //! | [`render`] | layout + a self-contained GPU pipeline |
 //! | [`servers`] | the saved server list and its on-disk JSON |
 //! | [`status`] | background status pings and their cache |
@@ -39,6 +40,7 @@ pub mod edit_box;
 pub mod focus;
 pub mod layout;
 pub mod nav;
+pub mod options;
 pub mod render;
 pub mod servers;
 pub mod status;
@@ -88,11 +90,19 @@ pub enum Screen {
     /// [`nav::MainButton::Accounts`]'s docs for why real Minecraft has
     /// nothing equivalent to reproduce.
     Accounts,
-    /// The settings screen (currently just GUI scale). Reached from
-    /// [`Screen::MainMenu`] (the title's Options button) or from
+    /// The settings screen — vanilla's whole `OptionsScreen` tree (issue #55),
+    /// eight pages of it, with every control present and the 117 this client
+    /// does not honour drawn inactive. Which page is showing lives in
+    /// [`options::SettingsNav`], **not** here: the pages are a graph rather than
+    /// screen states (Accessibility links to Controls, which the root also
+    /// links to), and Escape unwinds a history stack instead of a
+    /// [`Screen`] edge.
+    ///
+    /// Reached from [`Screen::MainMenu`] (the title's Options button) or from
     /// [`Screen::Paused`] (the pause menu's Options button, mid-session);
-    /// Escape returns to whichever it was opened from — see
-    /// [`UiState::close_settings`]. Changes persist immediately (see
+    /// Escape from the *root* page returns to whichever it was opened from —
+    /// see [`UiState::close_settings`] and
+    /// [`UiState::settings_in_world`]. Changes persist immediately (see
     /// [`crate::config::Options`]), not on exit.
     Settings,
     /// A session is being established — integrated-server startup and/or the
@@ -503,6 +513,21 @@ impl UiState {
         if self.screen == Screen::Settings {
             self.screen = self.settings_return;
         }
+    }
+
+    /// Whether the settings screen was opened **from inside a world**, i.e. from
+    /// the pause menu rather than the title.
+    ///
+    /// This is vanilla's `inWorld` flag on `OptionsScreen`
+    /// (`OptionsScreen.java:41-47`), and it picks between two mutually exclusive
+    /// buttons in the root screen's header: `options.worldOptions.button` when a
+    /// level is loaded, `options.online` when not (`:56-66`). It reads
+    /// [`Self::settings_return`], which is already the exact fact — see
+    /// [`open_settings_from_pause`](Self::open_settings_from_pause) — so this is
+    /// an accessor and not a second piece of state to keep in step.
+    #[must_use]
+    pub fn settings_in_world(&self) -> bool {
+        self.settings_return == Screen::Paused
     }
 
     // -- input-driven transitions ----------------------------------------
