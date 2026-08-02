@@ -89,13 +89,29 @@
 //! - **[`GridLayout::default_cell_setting`] is the live baseline;
 //!   [`GridLayout::new_cell_settings`] is a copy of it**
 //!   (`GridLayout.java:152-158`). Mutating the former changes what
-//!   every *subsequent* cell inherits. Vanilla also *aliases* it — `RowHelper`'s
-//!   short `addChild` forms pass the live object itself (`GridLayout.java:202`),
-//!   so a late mutation would retroactively move already-added children. Ours are
-//!   `Copy`, so a child snapshots its settings when added. That is the one
-//!   deliberate deviation in this file; it fails in the safe direction, and no
-//!   vanilla screen mutates the baseline after its first `addChild` (checked
-//!   across the 57 layout-using screens).
+//!   every *subsequent* cell inherits. Ours are `Copy`, so a child snapshots its
+//!   settings when added; vanilla can also *alias* the live object into a cell, so
+//!   a late mutation there would move already-added children. That is the one
+//!   deliberate deviation in this file, and it is unobservable across the whole
+//!   client — grepped, not assumed, because the first version of this note claimed
+//!   something false:
+//!
+//!   The aliasing is reachable through **exactly one** path: `RowHelper`'s short
+//!   `addChild` forms, which pass `defaultCellSetting()` itself
+//!   (`GridLayout.java:202`). Every other `addChild` — `GridLayout`'s,
+//!   `LinearLayout`'s, `FrameLayout`'s, `EqualSpacingLayout`'s — passes a
+//!   `copy()`. Of the ~75 `defaultCellSetting`/`defaultChildLayoutSetting` call
+//!   sites in the client, the only one on a `RowHelper` is
+//!   `RealmsResetWorldScreen.java:158`, and it runs before that helper's first
+//!   add.
+//!
+//!   One screen *does* mutate a live baseline mid-build — `DisconnectedScreen`
+//!   sets `padding(10)`, adds the title and reason, then sets `padding(2)` for the
+//!   buttons that follow (`:44-47`) — and it is a `LinearLayout`, whose `addChild`
+//!   copies, so the first two children keep padding 10 in vanilla exactly as they
+//!   do here. "No screen mutates the baseline after an add" would have been the
+//!   wrong claim; "no screen mutates a baseline that was aliased into a cell" is
+//!   the true one.
 //! - **`arrange_elements` lives on [`LayoutElement`] with a no-op default**,
 //!   where vanilla puts it on `Layout` and tests `child instanceof Layout` in the
 //!   default body (`Layout.java:14-20`). Behaviourally identical — a leaf's

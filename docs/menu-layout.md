@@ -165,11 +165,24 @@ If that equality ever stops holding, the rect table fails and names the button.
   layouts are `int`-only and the truncations are load-bearing.
 - **`default_cell_setting()` is the live baseline; `new_cell_settings()` is a
   copy of it.** Mutating the former changes what every *subsequent* cell
-  inherits. Ours are `Copy`, so a child snapshots its settings when added, where
-  vanilla aliases the live object into cells added by `RowHelper`'s short forms
-  (`GridLayout.java:202`) and a late mutation would move them retroactively. That
-  is the one deliberate deviation; it fails in the safe direction, and no vanilla
-  screen mutates the baseline after its first `addChild`.
+  inherits. Ours are `Copy`, so a child snapshots its settings when added; vanilla
+  can also alias the live object into a cell, and a late mutation there would move
+  already-added children. That is the one deliberate deviation, and it is
+  unobservable across the whole client — but only for a reason narrower than the
+  obvious one, so it was grepped rather than assumed (the first version of this
+  note claimed something false):
+  - The aliasing has exactly one path: `RowHelper`'s short `addChild` forms, which
+    pass `defaultCellSetting()` itself (`GridLayout.java:202`). Every other
+    `addChild` passes a `copy()`.
+  - Of the ~75 `defaultCellSetting`/`defaultChildLayoutSetting` call sites in the
+    client, the only one on a `RowHelper` is `RealmsResetWorldScreen.java:158`,
+    and it runs before that helper's first add.
+  - One screen *does* mutate a live baseline mid-build: `DisconnectedScreen` sets
+    `padding(10)`, adds the title and reason, then sets `padding(2)` for the
+    buttons after (`:44-47`). It is a `LinearLayout`, whose `addChild` copies, so
+    its first two children keep padding 10 in vanilla exactly as they do here.
+  So "no screen mutates the baseline after an add" is the **wrong** claim, and
+  "no screen mutates a baseline that was aliased into a cell" is the right one.
 - **`add_child` returns nothing**, where vanilla hands the child back so the
   screen can keep a reference *and* the layout can own it. Read results back with
   `visit_widgets`, whose order is insertion order in vanilla too. This is the one
