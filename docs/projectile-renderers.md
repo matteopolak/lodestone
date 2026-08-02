@@ -288,10 +288,23 @@ trident         rect x232..408 y241..271   drawn x234..406 y242..269  1424 px
 
 **Assertion 1 alone is not sufficient, and that is measured, not assumed.** With
 `projectile_pitch_offset_deg("arrow")` neutered to `None` — arrows back on the mob
-placement — assertion 1 still passed (416 px inside its rect, nothing outside),
-because a wrongly-placed arrow is still an arrow inside its own AABB. Assertions 2
-and 3 both failed, and the wrongly-placed arrow drew at `y88..134` instead of
-`y240..272` — 1.5 blocks *high*, confirming the sign.
+placement — assertion 1 **still passed**:
+
+```
+arrow           rect x238..274 y84..144    drawn x246..265 y94..130    320 px in-rect, 0 out
+spectral_arrow  rect x238..274 y84..144    drawn x246..265 y94..130    302 px in-rect, 0 out
+```
+
+The reason it passed is the reason the rect is derived rather than hardcoded, turned
+against itself: `projected_rect` comes from the *instance's own* AABB, so it moved
+1.5 blocks up along with the wrongly-placed arrow — `y84..144` where the correct
+build has `y240..272` — and the arrow filled it perfectly. A wrongly-placed arrow is
+still an arrow inside its own AABB. Assertions 2 and 3 both failed.
+
+(The `320` there and the `416` above are **not** a coverage difference: that
+experiment predates assertion 1 moving to `WIDE_FRAMING` for the trident's sake, so
+the two numbers are at different camera distances. The comparable pair is
+`320 px in / 0 out` versus `416 px in / 0 out` — both clean passes.)
 
 Two more controls, both watched failing:
 
