@@ -445,11 +445,18 @@ impl RenderState {
         }
     }
 
-    /// Replace the distance-fog settings (colour + range). The shell drives this
-    /// from its configured render distance and the eye-in-fluid state: a
-    /// sky-coloured fog sized to the render distance normally, a short
+    /// Replace the distance-fog settings (colour + range) **and the sky disc's
+    /// centre colour**, which travel together in [`FogSettings`]. The shell
+    /// drives this from its configured render distance and the eye-in-fluid
+    /// state: a sky-coloured fog sized to the render distance normally, a short
     /// biome-coloured water fog when submerged. Pass [`FogSettings::disabled`]
     /// to turn fog off.
+    ///
+    /// `FogSettings::sky_color` is what the sky pass paints the disc centre with
+    /// (issue #96's per-biome tint). It is in the same struct rather than behind
+    /// its own setter precisely so a caller cannot update one and forget the
+    /// other — see [`FogSettings`]' doc and
+    /// [`set_clear_color`](Self::set_clear_color) below.
     pub fn set_fog(&mut self, fog: FogSettings) {
         self.fog = fog;
     }
@@ -1311,11 +1318,16 @@ impl RenderState {
         // sky draws touch), so the block pass below must switch from its own
         // `Clear` to a `Load` — clearing twice would just discard the sky.
         stats.sky_drawn = if let Some(sky) = &self.sky {
-            let day_sky_color = [
-                self.clear.r as f32,
-                self.clear.g as f32,
-                self.clear.b as f32,
-            ];
+            // The disc's *centre* colour is `self.fog.sky_color`, not
+            // `self.clear`. Those two were the same value until #96's biome tint:
+            // the shell sets the clear colour from `FogSettings::color`, so
+            // reading the clear here made the disc centre and the horizon
+            // structurally identical and a per-biome tint had nowhere to enter.
+            // `sky_color` defaults to `color` in every `FogSettings`
+            // constructor, so a caller that never tints is byte-identical to the
+            // old behaviour — and the two colours travel in one struct so they
+            // cannot be set out of step (see `FogSettings`' own doc).
+            let day_sky_color = self.fog.sky_color;
             // The horizon end of the sky dome's gradient is the *fog* colour,
             // not a second sky constant — `self.fog.color` is already whatever
             // `set_fog` last computed for this dimension/submersion state, and
