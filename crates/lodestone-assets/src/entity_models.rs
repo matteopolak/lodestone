@@ -4892,6 +4892,152 @@ pub fn mooshroom_model() -> EntityModelDef {
     cow_model()
 }
 
+// ============================================================================
+// Projectiles: rigs whose renderer is **not** a `LivingEntityRenderer`
+// ============================================================================
+//
+// Every other entry in this file is placed by `LivingEntityRenderer`'s pose
+// stack, which flips Y (`scale(-1, -1, 1)`) and lifts by `1.501` blocks. The
+// two entries below are not: `ArrowRenderer` and `ThrownTridentRenderer` both
+// `extend EntityRenderer` directly (`ArrowRenderer.java:14`,
+// `ThrownTridentRenderer.java:17`), which applies **neither** — read out of
+// `EntityRenderer.java`, which contains no `scale(` call at all, against
+// `LivingEntityRenderer.java:83-87`, which has both. So these meshes are
+// authored in the *world* orientation (+Y up), not the Y-down mob orientation,
+// and `lodestone_render::entity::projectile_model_matrix` places them.
+//
+// The consequence for the geometry here: **the long axis is not Y.** An arrow's
+// shaft runs along `+X` (the `cross` box spans `x ∈ [-12, +4]` texels, tip at
+// high X), which is why vanilla rotates pitch about `Axis.ZP` and not `XP`. A
+// trident's pole runs along `−Y` (spikes at negative Y below a pole spanning
+// `y ∈ [+2, +27]`), which is why `ThrownTridentRenderer` adds `+90°` to the
+// pitch: that offset is what turns the pole's axis into the arrow's. Both end
+// up pointing along the entity's velocity; see `docs/projectile-renderers.md`.
+
+/// `ArrowModel.createBodyLayer()` — the rig `ArrowRenderer` bakes, shared by
+/// `arrow`, `spectral_arrow` and the tipped-arrow variant. Sheet 32×32.
+///
+/// Three boxes, **two of which are zero-extent planes**, which is the one thing
+/// about this mesh that is unlike every mob above:
+///
+/// * `back`, the fletching: `addBox(0, -2.5, -2.5, 0, 5, 5)` — zero *width*, so
+///   only the WEST and EAST faces have area and the other four collapse.
+/// * `cross`, the shaft-and-head: `addBox(-12, -2, 0, 16, 4, 0, NONE, 1.0, 0.8)`
+///   — zero *depth*, so only NORTH and SOUTH have area. It is instantiated twice,
+///   at `xRot = π/4` and `3π/4`, forming the X-section a real arrow's fletching
+///   makes when you look down the shaft.
+///
+/// [`crate::entity::bake_entity`] emits all six faces of every box regardless, so
+/// this bakes 18 quads of which 6 are degenerate. That is deliberate and matches
+/// vanilla (`ModelPart.Cube` does the same); the degenerate ones rasterise no
+/// fragments, and the corpus tests that walk UVs skip them explicitly via
+/// `quad_is_degenerate`.
+///
+/// Two scale factors, both real and both easy to lose:
+///
+/// * The **whole mesh** is `0.9×`. `LayerDefinition.create(mesh.transformed(pose
+///   -> pose.scaled(0.9F)), 32, 32)` looks like it scales every part, but
+///   `PartDefinition.transformed` applies the function to *its own* pose and
+///   copies its children untouched (`PartDefinition.java:95-99`) — so it is the
+///   **root** pose that carries the 0.9, and children inherit it through the
+///   transform chain. Modelled here as a root [`PartPose::scale`], which is
+///   exactly that.
+/// * `back` is a further `0.8×` (`PartPose.withScale(0.8F)`), so the fletching
+///   ends up at `0.72×`.
+///
+/// `ArrowModel.setupAnim` also adds a `zRot` wobble from `state.shake` for the
+/// seven ticks after an arrow sticks in a block. Not modelled: `shakeTime` is not
+/// on this side of the wire (it is neither entity metadata nor a packet field —
+/// vanilla sets it client-side from the `IN_GROUND` metadata *transition*), so
+/// there is no input to drive it. A stuck arrow therefore rests still instead of
+/// quivering.
+pub fn arrow_model() -> EntityModelDef {
+    let cross = || {
+        let mut c = cube([-12.0, -2.0, 0.0], [16.0, 4.0, 0.0], [0.0, 0.0]);
+        // `addBox(..., CubeDeformation.NONE, xTexScale = 1.0, yTexScale = 0.8)`.
+        // The V divisor becomes `32 * 0.8 = 25.6`, which stretches the box's
+        // 4 texels of height across 5 rows of the sheet — the shaft strip is 5
+        // pixels tall in `arrow.png`, not 4.
+        c.tex_scale = [1.0, 0.8];
+        c
+    };
+    let root = PartDef::new(PartPose {
+        scale: [0.9, 0.9, 0.9],
+        ..PartPose::ZERO
+    })
+    .with_child(
+        "back",
+        PartDef::new(PartPose {
+            x: -11.0,
+            y: 0.0,
+            z: 0.0,
+            x_rot: PI / 4.0,
+            y_rot: 0.0,
+            z_rot: 0.0,
+            scale: [0.8, 0.8, 0.8],
+        })
+        .with_cube(cube([0.0, -2.5, -2.5], [0.0, 5.0, 5.0], [0.0, 0.0])),
+    )
+    .with_child(
+        "cross_1",
+        PartDef::new(PartPose::rotation(PI / 4.0, 0.0, 0.0)).with_cube(cross()),
+    )
+    .with_child(
+        "cross_2",
+        PartDef::new(PartPose::rotation(PI * 3.0 / 4.0, 0.0, 0.0)).with_cube(cross()),
+    );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root,
+    }
+}
+
+/// `TridentModel.createLayer()` — the rig `ThrownTridentRenderer` bakes. Sheet
+/// 32×32, five solid boxes, no zero-extent planes and no mesh-wide scale.
+///
+/// A `pole` spanning `y ∈ [+2, +27]` with four children hanging off it: the
+/// `base` crossguard at `y ∈ [0, 2]`, and three spikes at *negative* Y
+/// (`middle_spike` `y ∈ [-4, 0]`, `left_spike`/`right_spike` `y ∈ [-3, +1]`).
+/// The tip is therefore at **−Y**, the opposite end from where a mob model puts
+/// its head, and `right_spike` is `left_spike` mirrored (vanilla calls
+/// `.mirror()` on the same texel offset, which flips both the X extent and the
+/// winding — [`crate::entity::CubeDef::mirrored`] is that).
+///
+/// Vanilla draws a second `entityGlint` pass over this mesh when
+/// `ThrownTrident.isFoil()`. Not modelled: enchantment glint needs its own render
+/// type (a scrolling additive layer), which nothing in this engine has, and
+/// `isFoil` is not decoded on this side of the wire either.
+pub fn trident_model() -> EntityModelDef {
+    let pole = PartDef::new(PartPose::ZERO)
+        .with_cube(cube([-0.5, 2.0, -0.5], [1.0, 25.0, 1.0], [0.0, 6.0]))
+        .with_child(
+            "base",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-1.5, 0.0, -0.5], [3.0, 2.0, 1.0], [4.0, 0.0])),
+        )
+        .with_child(
+            "left_spike",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-2.5, -3.0, -0.5], [1.0, 4.0, 1.0], [4.0, 3.0])),
+        )
+        .with_child(
+            "middle_spike",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([-0.5, -4.0, -0.5], [1.0, 4.0, 1.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "right_spike",
+            PartDef::new(PartPose::ZERO)
+                .with_cube(cube([1.5, -3.0, -0.5], [1.0, 4.0, 1.0], [4.0, 3.0]).mirrored()),
+        );
+    EntityModelDef {
+        texture_width: 32,
+        texture_height: 32,
+        root: PartDef::new(PartPose::ZERO).with_child("pole", pole),
+    }
+}
+
 fn mooshroom_color_texture(v: EntityVariant) -> &'static str {
     match v {
         EntityVariant::Mooshroom(MooshroomColor::Red) => "entity/cow/mooshroom_red",
@@ -5400,6 +5546,31 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
                 select: mooshroom_color_texture,
             },
             build: mooshroom_model,
+        },
+        // ---- projectiles: placed by `projectile_model_matrix`, not by
+        // `entity_model_matrix` (see the "Projectiles" section above) ----
+        EntityModelEntry {
+            name: "arrow",
+            // `TippableArrowRenderer.NORMAL_ARROW_LOCATION`. The tipped sheet
+            // (`arrow_tipped`) is a second, potion-colour-driven texture chosen
+            // by `state.isTipped`; that bit is not decoded here, so an
+            // arrow-of-harming draws as a plain arrow rather than as a wrongly
+            // *tinted* one.
+            texture: EntityTexture::Fixed("entity/projectiles/arrow"),
+            build: arrow_model,
+        },
+        EntityModelEntry {
+            name: "spectral_arrow",
+            // `SpectralArrowRenderer.SPECTRAL_ARROW_LOCATION`. Same rig, own
+            // sheet — a sibling of `arrow`, not a variant of it, because vanilla
+            // picks it by *renderer class* rather than by entity state.
+            texture: EntityTexture::Fixed("entity/projectiles/arrow_spectral"),
+            build: arrow_model,
+        },
+        EntityModelEntry {
+            name: "trident",
+            texture: EntityTexture::Fixed("entity/trident/trident"),
+            build: trident_model,
         },
     ]
 }

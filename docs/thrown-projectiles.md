@@ -11,7 +11,9 @@ Before this landed, **no projectile of any kind rendered**: `entity_models.rs` h
 no corpus entry for any of them, so `model_for_type` missed and nothing was drawn
 while the entities were tracked, interpolated and counted perfectly.
 
-Arrows, tridents and the other seven projectile shapes are **still missing** — see
+Arrows, spectral arrows and tridents have since landed on their own path (issue
+#380) — see [`projectile-renderers.md`](./projectile-renderers.md). The other
+projectile shapes are **still missing**; see
 [What is deliberately not here](#what-is-deliberately-not-here).
 
 ## How it works
@@ -144,13 +146,19 @@ against the billboard's 3788).
 
 ## What is deliberately not here
 
-- **Arrows, spectral arrows and tridents.** `ArrowRenderer` /
-  `ThrownTridentRenderer` draw a real 3-D mesh (four-quad shaft plus fletching)
-  oriented by `atan2` of the entity's **velocity** — `yRot` from x/z, `xRot` from
-  y and the horizontal distance — *not* by a transmitted rotation, plus the
-  `shakeTime` wobble on impact. `EntityDraw` carries no velocity, so this needs a
-  data change as well as a mesh, and the mesh belongs in `entity_models.rs`. It is
-  not a variant of this path and should not be bolted onto it.
+- **Arrows, spectral arrows and tridents.** Still not *here* — but they now exist,
+  on their own path: see [`projectile-renderers.md`](./projectile-renderers.md).
+  `ArrowRenderer` / `ThrownTridentRenderer` draw a real 3-D mesh oriented by
+  `atan2` of the entity's **velocity**, which is not a variant of this path and
+  should not be bolted onto it.
+
+  This entry used to say "`EntityDraw` carries no velocity, so this needs a data
+  change as well as a mesh". True premise, wrong conclusion, and it cost the next
+  agent a design: the *server* runs the same `atan2` (`AbstractArrow.tick`,
+  `Projectile.shoot`) and broadcasts the result as ordinary entity rotation, so
+  `EntityDraw::{yaw, pitch}` already **are** the velocity-derived angles. No data
+  change was needed — only a different placement matrix. The `shakeTime` wobble is
+  genuinely unreachable (see the other doc).
 - **`wind_charge` and `breeze_wind_charge` are not thrown items**, though they read
   like they should be. Both use `WindChargeRenderer`, a real cuboid model, and
   `AbstractWindCharge.getItem()` returns `ItemStack.EMPTY` — there is no item
@@ -169,9 +177,12 @@ one by guessing fails a test rather than shipping a wrong billboard.
 - **Adding a `ThrownItemRenderer` type** is one row in `thrown_item_for`'s table
   plus one row in the gate's expected list. Check the entity's `getDefaultItem()`
   in `.cache/mc/26.2/src`, not the entity name.
-- **Adding a *different* renderer shape** (an arrow) does **not** go here.
+- **Adding a *different* renderer shape** does **not** go here.
   `prepare_item_geometry` dispatches on `thrown_item_for` returning `Some`; a
-  velocity-oriented mesh needs its own branch and its own corpus model.
+  velocity-oriented mesh needs its own corpus model and its own placement — which is
+  exactly what arrows got in
+  [`projectile-renderers.md`](./projectile-renderers.md), through
+  `EntityModelSet::resolve_posed` rather than through this path at all.
 - **The wire's stack does not reach a projectile yet** — one predicate at
   `entities.rs:790`, described under
   [Which item id actually gets drawn](#which-item-id-actually-gets-drawn). Harmless

@@ -776,3 +776,383 @@ fn sheep_wool_tint_matches_vanilla_color_lerper() {
     let unique: std::collections::HashSet<_> = expected.iter().collect();
     assert_eq!(unique.len(), 16, "dye table has duplicate entries");
 }
+
+// ============================================================================
+// Projectile rigs (issue #380)
+// ============================================================================
+
+/// The arrow's box unwrap, computed independently from vanilla's
+/// `ModelPart.Cube` texel formula rather than from our own baker.
+///
+/// The interesting part is the `cross` box's **non-unit `texScale`**:
+/// `addBox(-12, -2, 0, 16, 4, 0, CubeDeformation.NONE, 1.0F, 0.8F)` divides `v`
+/// by `32 * 0.8 = 25.6` instead of `32`, which is why the shaft strip in
+/// `arrow.png` is 5 pixels tall for a 4-texel-tall box. Nothing else in the
+/// corpus exercises `texScale`, so if this is wrong nothing else catches it.
+///
+/// Hand-derived NORTH face of `cross` (`d = 0`, `w = 16`, `h = 4`, `texOffs
+/// (0, 0)`): `u1 = 0 + 0 = 0`, `u2 = 0 + 16 = 16`, `v1 = 0 + 0 = 0`,
+/// `v2 = 0 + 4 = 4`. Normalised: `u ∈ [0, 16/32] = [0, 0.5]`,
+/// `v ∈ [0, 4/25.6] = [0, 0.15625]`.
+#[test]
+fn arrow_cross_north_uv_matches_hand_derived_vanilla_unwrap() {
+    use lodestone_assets::entity_models::arrow_model;
+
+    let model = arrow_model();
+    assert_eq!((model.texture_width, model.texture_height), (32, 32));
+    let quads = bake_entity(&model);
+    // 3 boxes × 6 faces. Six of the eighteen are degenerate (the flat boxes'
+    // collapsed sides) — that is vanilla's own behaviour, not a bug here.
+    assert_eq!(quads.len(), 18, "arrow should bake 3 boxes = 18 quads");
+    let degenerate = quads
+        .iter()
+        .filter(|q| quad_is_degenerate(&q.positions))
+        .count();
+    // The zero-width fletching plane keeps WEST and EAST and collapses the other
+    // four; each zero-depth shaft plane keeps NORTH and SOUTH and collapses four.
+    // 4 + 4 + 4 = 12, leaving 6 real quads for the whole arrow.
+    assert_eq!(
+        degenerate, 12,
+        "expected exactly 12 degenerate faces (4 from the zero-width fletching \
+         plane, 4 from each of the two zero-depth shaft planes)"
+    );
+
+    let north: Vec<_> = quads
+        .iter()
+        .filter(|q| q.direction == Direction::North && !quad_is_degenerate(&q.positions))
+        .collect();
+    assert_eq!(
+        north.len(),
+        2,
+        "both shaft planes contribute one real NORTH face"
+    );
+    for q in &north {
+        let us: Vec<f32> = q.uvs.iter().map(|uv| uv[0]).collect();
+        let vs: Vec<f32> = q.uvs.iter().map(|uv| uv[1]).collect();
+        let (umin, umax) = (
+            us.iter().copied().fold(f32::MAX, f32::min),
+            us.iter().copied().fold(f32::MIN, f32::max),
+        );
+        let (vmin, vmax) = (
+            vs.iter().copied().fold(f32::MAX, f32::min),
+            vs.iter().copied().fold(f32::MIN, f32::max),
+        );
+        assert!(
+            (umin - 0.0).abs() < 1e-6 && (umax - 0.5).abs() < 1e-6,
+            "cross NORTH u span {umin}..{umax}, want 0.0..0.5"
+        );
+        assert!(
+            (vmin - 0.0).abs() < 1e-6 && (vmax - 0.15625).abs() < 1e-6,
+            "cross NORTH v span {vmin}..{vmax}, want 0.0..0.15625 — a `texScale` of \
+             1.0 instead of 0.8 gives 0.125 here, which looks plausible and crops \
+             the shaft"
+        );
+    }
+}
+
+/// The mesh-wide `0.9×` and the fletching's extra `0.8×` both reach the geometry.
+///
+/// `LayerDefinition.create(mesh.transformed(pose -> pose.scaled(0.9F)), 32, 32)`
+/// reads as "scale every part", but `PartDefinition.transformed` applies the
+/// function to *its own* pose and copies children untouched
+/// (`PartDefinition.java:95-99`), so it is the **root** pose that carries the
+/// 0.9. Modelling it as a per-part 0.9 on each of the three children instead would
+/// look identical for `cross_1`/`cross_2` and put the fletching in the wrong place,
+/// because `back`'s pivot at `x = -11` would then not be scaled by it.
+#[test]
+fn arrow_carries_both_vanilla_scale_factors() {
+    use lodestone_assets::entity_models::arrow_model;
+
+    let parts = bake_entity_parts(&arrow_model());
+    let by_name = |n: &str| {
+        parts
+            .iter()
+            .find(|p| p.name == n)
+            .unwrap_or_else(|| panic!("arrow has no part {n}"))
+    };
+    assert_eq!(by_name("").rest.scale, [0.9, 0.9, 0.9], "root mesh scale");
+    assert_eq!(by_name("back").rest.scale, [0.8, 0.8, 0.8], "fletching scale");
+    assert_eq!(by_name("back").rest.x, -11.0);
+    assert_eq!(by_name("cross_1").rest.scale, [1.0, 1.0, 1.0]);
+
+    // The composed effect, which is what actually reaches a vertex: the shaft runs
+    // from x = -12 to +4 texels, so 16 texels = 1.0 block unscaled and 0.9 blocks
+    // at the mesh scale. `MODEL_FEET_OFFSET`-style constants aside, this is the one
+    // number a player would notice being wrong.
+    let quads = bake_entity(&arrow_model());
+    let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+    for q in &quads {
+        for p in q.positions {
+            lo = lo.min(p[0]);
+            hi = hi.max(p[0]);
+        }
+    }
+    let length = hi - lo;
+    assert!(
+        (length - 0.9).abs() < 1e-4,
+        "arrow spans {length} blocks along its shaft, want 0.9 (16 texels × 0.9)"
+    );
+}
+
+/// The `0.9×` really is a **root** scale, not three per-part ones: it must move
+/// the fletching's pivot too.
+///
+/// `back`'s pivot is `x = -11` texels. Under a root scale the baked fletching sits
+/// at `-11/16 × 0.9 = -0.61875` blocks; under a per-part scale it would sit at
+/// `-11/16 = -0.6875` — 1.1 texels further back, sticking out past the end of the
+/// shaft. Small, plausible, and wrong; and no UV or quad-count test can see it.
+#[test]
+fn the_arrow_mesh_scale_moves_the_fletching_pivot_too() {
+    use lodestone_assets::entity_models::arrow_model;
+
+    let parts = bake_entity_parts(&arrow_model());
+    let root = parts.iter().find(|p| p.name.is_empty()).expect("root part");
+    let back = parts.iter().find(|p| p.name == "back").expect("back part");
+    let chain = Affine::of_pose(&root.rest).compose(&Affine::of_pose(&back.rest));
+    let pivot = chain.apply([0.0, 0.0, 0.0]);
+    assert!(
+        (pivot[0] - (-11.0 / 16.0 * 0.9)).abs() < 1e-6,
+        "fletching pivot at x={}, want {} (a per-part 0.9 would give {})",
+        pivot[0],
+        -11.0 / 16.0 * 0.9,
+        -11.0 / 16.0
+    );
+}
+
+/// One posed, **non-degenerate** vertex: `(position, uv)` as fixed-point integers
+/// so two floating-point paths that agree mathematically compare equal.
+type PosedVertex = [i64; 5];
+
+/// Applies each part's transform chain and returns the posed vertices **per part**,
+/// with degenerate (zero-area) quads dropped.
+///
+/// Degenerate faces are dropped because they never rasterise, and their UVs come
+/// from a collapsed unwrap that carries no meaning — including them made the first
+/// draft of `a_y_flip_of_the_arrow_rig_moves_no_geometry` compare noise.
+///
+/// `flip_y` inserts a `scale(1, -1, 1)` between the placement and the model, which
+/// is what reusing `LivingEntityRenderer`'s flip would do to a rig authored `+Y`
+/// up.
+fn posed_parts(model: &EntityModelDef, flip_y: bool) -> Vec<(String, Vec<PosedVertex>)> {
+    let sign = if flip_y { -1.0 } else { 1.0 };
+    let flip = Affine {
+        m: [[1.0, 0.0, 0.0], [0.0, sign, 0.0], [0.0, 0.0, 1.0]],
+        t: [0.0, 0.0, 0.0],
+    };
+    let parts = bake_entity_parts(model);
+    // Pre-order with parent index < own index, so one forward pass composes.
+    let mut chains: Vec<Affine> = Vec::with_capacity(parts.len());
+    let mut out = Vec::new();
+    for part in &parts {
+        let local = Affine::of_pose(&part.rest);
+        let chain = match part.parent {
+            Some(p) => chains[p].compose(&local),
+            None => flip.compose(&local),
+        };
+        chains.push(chain);
+        let mut verts = Vec::new();
+        for q in &part.quads {
+            if quad_is_degenerate(&q.positions) {
+                continue;
+            }
+            for (p, uv) in q.positions.iter().zip(q.uvs) {
+                let w = chain.apply(*p);
+                verts.push([
+                    (w[0] * 4096.0).round() as i64,
+                    (w[1] * 4096.0).round() as i64,
+                    (w[2] * 4096.0).round() as i64,
+                    (uv[0] * 65536.0).round() as i64,
+                    (uv[1] * 65536.0).round() as i64,
+                ]);
+            }
+        }
+        verts.sort_unstable();
+        out.push((part.name.clone(), verts));
+    }
+    out
+}
+
+/// Every posed vertex of a rig, whole-rig, sorted.
+fn posed_all(model: &EntityModelDef, flip_y: bool) -> Vec<PosedVertex> {
+    let mut v: Vec<PosedVertex> = posed_parts(model, flip_y)
+        .into_iter()
+        .flat_map(|(_, verts)| verts)
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// **A Y flip of the arrow rig moves no geometry**, and moves no UV except on the
+/// fletching plane, where it permutes the four corners of a patch that is
+/// (separately, against the real jar) a 4-fold-symmetric plus sign.
+///
+/// # Why this test exists rather than a Y-flip pixel gate
+///
+/// Issue #380 specified a two-direction long-axis pixel test and warned, correctly,
+/// that such a test cannot catch a wrong `scale(1, -1, 1)`, since `ArrowModel` is
+/// symmetric under `y → −y`. The conclusion drawn from that — "so resolving the
+/// flip needs a texel comparison against a captured vanilla frame, or a live
+/// oracle" — does not follow, and this test is why. The flip is **not observable at
+/// all** on this rig, so no frame and no oracle could settle it: a vanilla frame
+/// and a Y-flipped frame are the same frame.
+///
+/// Three separate facts, and they are separate:
+///
+/// 1. **No position moves, anywhere in the rig.** `cross_1` (`xRot = π/4`) and
+///    `cross_2` (`3π/4`) each span a plane through the shaft axis, and `y → −y`
+///    maps each onto the other's plane; the cube's `y ∈ [-2, +2]` extent is
+///    symmetric about the pivot, so the swap is exact. `back` is a 45°-rotated
+///    square, which is symmetric under `y → −y` outright. So the **silhouette** is
+///    identical from every angle — this is the fact the long-axis gate could not
+///    have caught, now proved rather than assumed.
+///
+/// 2. **The two shaft planes' `(position, uv)` pairs are identical too**, because
+///    they are built from the *same* `CubeListBuilder` and therefore carry
+///    identical UVs: the parts exchange places vertex-for-vertex *and*
+///    texel-for-texel. This is the important half, because the shaft box is the one
+///    that samples the arrowhead — the only genuinely Y-asymmetric region of
+///    `arrow.png` (rows 1 and 3 differ: `D`/`C` at 193/226 grey against `E`/`E` at
+///    158).
+///
+/// 3. **The fletching plane keeps its four UV corners but reassigns them**, by a
+///    reflection across a diagonal of its 5×5 patch. That residual is closed by
+///    `real_jar.rs`'s `arrow_fletching_patch_is_fully_symmetric`, which checks the
+///    patch in Mojang's own PNG: it is a plus sign, invariant under both diagonal
+///    reflections, so the reassignment samples the same texel at every corner. That
+///    part *is* texture-dependent, which is exactly why it is asserted against the
+///    jar rather than argued here.
+///
+/// The one thing the flip does change is triangle **winding**. That is invisible
+/// only because `EntityPipeline` sets `cull_mode: None` and its shader takes
+/// `abs(dot(n, light_dir))`. **Turning on back-face culling would make the flip
+/// observable again**, and would need a real oracle at that point.
+///
+/// The trident is the **control** throughout: its rig is genuinely asymmetric in Y
+/// (tip at negative `Y`, pole at positive), so the same comparisons must find
+/// differences. Without it, a `posed_parts` that returned nothing would make every
+/// assertion above pass vacuously.
+#[test]
+fn a_y_flip_of_the_arrow_rig_moves_no_geometry() {
+    use lodestone_assets::entity_models::{arrow_model, trident_model};
+
+    // --- the control first, so a broken detector cannot reach the real assertion
+    let t_plain = posed_all(&trident_model(), false);
+    let t_flipped = posed_all(&trident_model(), true);
+    assert_eq!(
+        t_plain.len(),
+        5 * 6 * 4,
+        "control: the trident's five solid boxes should contribute 30 real quads"
+    );
+    assert_ne!(
+        t_plain, t_flipped,
+        "control failed: the trident rig is asymmetric in Y, so a Y flip must change \
+         its posed vertices. If it does not, `posed_parts` is not measuring what the \
+         assertions below claim and they are vacuous."
+    );
+    // And specifically its *positions*, not merely its UVs — otherwise the
+    // position-only comparison below has no proven detector either.
+    let t_pos = |v: &[PosedVertex]| {
+        let mut p: Vec<[i64; 3]> = v.iter().map(|q| [q[0], q[1], q[2]]).collect();
+        p.sort_unstable();
+        p.dedup();
+        p
+    };
+    assert_ne!(
+        t_pos(&t_plain),
+        t_pos(&t_flipped),
+        "control failed: a Y flip must move the trident's positions"
+    );
+
+    // --- (1) no position moves
+    let plain = posed_all(&arrow_model(), false);
+    let flipped = posed_all(&arrow_model(), true);
+    assert_eq!(
+        plain.len(),
+        6 * 4,
+        "the arrow has 6 real quads (2 fletching faces + 2 per shaft plane)"
+    );
+    assert_eq!(
+        t_pos(&plain),
+        t_pos(&flipped),
+        "a Y flip moved the arrow's geometry, so the silhouette is NOT flip-invariant \
+         and #380's long-axis gate would after all catch a flip. If this fires the \
+         doc comment above is wrong."
+    );
+
+    // --- (2) the shaft planes are identical, texels included
+    let by_name = |flip: bool| -> std::collections::HashMap<String, Vec<PosedVertex>> {
+        posed_parts(&arrow_model(), flip).into_iter().collect()
+    };
+    let (a, b) = (by_name(false), by_name(true));
+    let mut shaft_plain: Vec<PosedVertex> = Vec::new();
+    let mut shaft_flipped: Vec<PosedVertex> = Vec::new();
+    for part in ["cross_1", "cross_2"] {
+        shaft_plain.extend(a[part].iter().copied());
+        shaft_flipped.extend(b[part].iter().copied());
+    }
+    shaft_plain.sort_unstable();
+    shaft_flipped.sort_unstable();
+    assert_eq!(
+        shaft_plain.len(),
+        2 * 2 * 4,
+        "two shaft planes, two real faces each"
+    );
+    assert_eq!(
+        shaft_plain, shaft_flipped,
+        "a Y flip changed which texel lands where on the arrow's shaft/head. That is \
+         the one region of `arrow.png` with real Y asymmetry (the arrowhead), so if \
+         this fires the flip IS observable and needs a pixel gate or a live oracle."
+    );
+
+    // --- (3) the fletching keeps its UV corner set, only reassigning them
+    let uv_set = |v: &[PosedVertex]| {
+        let mut u: Vec<[i64; 2]> = v.iter().map(|q| [q[3], q[4]]).collect();
+        u.sort_unstable();
+        u.dedup();
+        u
+    };
+    assert_eq!(
+        uv_set(&a["back"]),
+        uv_set(&b["back"]),
+        "the fletching plane's UV corners changed as a set, not just in assignment — \
+         the residual is then not a corner permutation and `real_jar.rs`'s patch-\
+         symmetry check does not close it"
+    );
+    assert_ne!(
+        a["back"], b["back"],
+        "the fletching's (position, uv) pairing is expected to CHANGE under the flip \
+         (a diagonal reflection of its patch). If it does not, fact (3) in the doc \
+         comment above is describing something that is not happening, and the \
+         real-jar patch-symmetry check it points at is dead weight."
+    );
+}
+
+/// The trident rig's own structure, since it does **not** fall out of the arrow
+/// work: five solid boxes, a mirrored right spike, and a tip at negative `Y`.
+///
+/// That last fact is what `projectile_pitch_offset_deg("trident") == 90.0` exists
+/// for, so it is pinned here rather than left implicit in the render crate.
+#[test]
+fn the_trident_rig_points_along_negative_y() {
+    use lodestone_assets::entity_models::trident_model;
+
+    let model = trident_model();
+    assert_eq!((model.texture_width, model.texture_height), (32, 32));
+    let quads = bake_entity(&model);
+    assert_eq!(quads.len(), 5 * 6, "pole, base, and three spikes");
+
+    let (mut min_y, mut max_y) = (f32::MAX, f32::MIN);
+    for q in &quads {
+        for p in q.positions {
+            min_y = min_y.min(p[1]);
+            max_y = max_y.max(p[1]);
+        }
+    }
+    // Spikes at -4 texels, pole top at +27 texels, in blocks.
+    assert!((min_y - (-4.0 / 16.0)).abs() < 1e-6, "min y {min_y}");
+    assert!((max_y - (27.0 / 16.0)).abs() < 1e-6, "max y {max_y}");
+    assert!(
+        max_y > -min_y,
+        "the long end must be the +Y one: the tip is the short end at {min_y}"
+    );
+}

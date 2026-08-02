@@ -2533,3 +2533,123 @@ fn item_atlas_whole_corpus_coverage() {
         report.items
     );
 }
+
+/// **The last unproved step in issue #380's Y-flip question**, checked against
+/// Mojang's own PNG rather than argued.
+///
+/// `entity_models.rs`'s `a_y_flip_of_the_arrow_rig_moves_no_geometry` proves that a
+/// `scale(1, -1, 1)` on the arrow rig moves no vertex and changes no UV on the two
+/// shaft planes. It leaves exactly one residual: the fletching plane (`back`)
+/// keeps its four UV corners but **reassigns** them, by a reflection across a
+/// diagonal of its 5×5 patch. Whether that is visible depends on the texture, not
+/// on the geometry, so it is settled here.
+///
+/// `back` is `addBox(0, -2.5, -2.5, 0, 5, 5)` at `texOffs(0, 0)` on a 32×32 sheet,
+/// whose two real faces (WEST, EAST) unwrap to texels `x ∈ [0, 5)` and `x ∈ [5, 10)`
+/// at `y ∈ [5, 10)`. Both patches are a **plus sign** — a bright pixel column and
+/// row through the centre — which is invariant under the whole dihedral group, so
+/// every corner reassignment samples the same texel and the flip changes no pixel.
+///
+/// Asserted as invariance under *both* diagonals (transpose and anti-transpose),
+/// which together generate all eight symmetries, so this covers whichever
+/// permutation the flip happens to induce rather than only the one derived by hand.
+///
+/// The **control** is a second 5×5 patch from the same sheet — the arrowhead at
+/// `x ∈ [11, 16)`, `y ∈ [0, 5)`, which is the one genuinely asymmetric region of
+/// `arrow.png` and the reason a flip would have mattered at all. It must fail the
+/// same check. Without it, "the patch is symmetric" is also what a comparison that
+/// reads the same pixel twice reports.
+#[test]
+#[ignore = "requires a fetched vanilla client.jar"]
+fn arrow_fletching_patch_is_fully_symmetric() {
+    use lodestone_assets::Image;
+
+    let manager = manager();
+    /// A `size × size` patch at `(x0, y0)`, as RGBA rows.
+    fn patch(img: &Image, x0: u32, y0: u32, size: u32) -> Vec<Vec<[u8; 4]>> {
+        (0..size)
+            .map(|j| {
+                (0..size)
+                    .map(|i| {
+                        let o = (((y0 + j) * img.width + (x0 + i)) * 4) as usize;
+                        [
+                            img.rgba[o],
+                            img.rgba[o + 1],
+                            img.rgba[o + 2],
+                            img.rgba[o + 3],
+                        ]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+    /// `(transpose-symmetric, anti-transpose-symmetric)`.
+    fn symmetries(p: &[Vec<[u8; 4]>]) -> (bool, bool) {
+        let n = p.len();
+        let mut transpose = true;
+        let mut anti = true;
+        for j in 0..n {
+            for i in 0..n {
+                if p[j][i] != p[i][j] {
+                    transpose = false;
+                }
+                if p[j][i] != p[n - 1 - i][n - 1 - j] {
+                    anti = false;
+                }
+            }
+        }
+        (transpose, anti)
+    }
+
+    for sheet in [
+        "assets/minecraft/textures/entity/projectiles/arrow.png",
+        "assets/minecraft/textures/entity/projectiles/arrow_spectral.png",
+        "assets/minecraft/textures/entity/projectiles/arrow_tipped.png",
+    ] {
+        let bytes = manager
+            .read(sheet)
+            .unwrap_or_else(|| panic!("{sheet} missing from client.jar"));
+        let img = Image::decode_png(&bytes).unwrap_or_else(|e| panic!("decode {sheet}: {e}"));
+        assert_eq!(
+            (img.width, img.height),
+            (32, 32),
+            "{sheet} is not the 32x32 sheet `ArrowModel` declares"
+        );
+
+        // The two faces of the fletching plane.
+        for (label, x0) in [("WEST", 0u32), ("EAST", 5)] {
+            let p = patch(&img, x0, 5, 5);
+            let (transpose, anti) = symmetries(&p);
+            assert!(
+                transpose && anti,
+                "{sheet} fletching patch ({label}, x{x0}..{} y5..10) is not fully \
+                 symmetric (transpose={transpose}, anti={anti}). The arrow rig's \
+                 Y-flip invariance depends on it — see \
+                 `a_y_flip_of_the_arrow_rig_moves_no_geometry`. If this fires, a Y \
+                 flip IS observable on the fletching and #380 needs a texel gate.",
+                x0 + 5
+            );
+            // Non-vacuity for *this* patch specifically: an all-transparent or
+            // uniform 5x5 would satisfy both symmetries trivially.
+            let distinct: std::collections::BTreeSet<_> =
+                p.iter().flatten().copied().collect();
+            assert!(
+                distinct.len() >= 3,
+                "{sheet} fletching patch ({label}) has only {} distinct colours, so \
+                 its symmetry says nothing",
+                distinct.len()
+            );
+        }
+
+        // The control: the arrowhead, the one Y-asymmetric region of the sheet.
+        let head = patch(&img, 11, 0, 5);
+        let (t, a) = symmetries(&head);
+        assert!(
+            !t && !a,
+            "control failed: the arrowhead patch (x11..16 y0..5) of {sheet} reports \
+             transpose={t} anti={a}, i.e. symmetric. It is the region whose rows 1 \
+             and 3 differ, so if the detector calls it symmetric it would call \
+             anything symmetric and the fletching assertion above proves nothing."
+        );
+    }
+}

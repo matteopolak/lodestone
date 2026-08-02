@@ -125,6 +125,19 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   the view matrix instead of written out (three stacked conventions, wrong three
   times by hand), the three non-uniform columns of the registration table, and why
   wind charges and arrows are deliberately not here.
+- [Projectile renderers](./projectile-renderers.md) — arrow, spectral arrow and
+  trident (issue #380): the `ArrowRenderer`/`ThrownTridentRenderer` rigs, and why
+  they need a placement of their own. `ArrowRenderer extends EntityRenderer`, so it
+  gets **neither** the mob path's Y flip nor its 1.501 lift — and that lift is
+  applied *before* the flip, so reusing the mob matrix draws an arrow 1.5 blocks
+  **high**, not low, which is the direction both the issue and the first draft of
+  the test got wrong. Also: the orientation needed no velocity plumbing after all,
+  because the *server* runs the same `atan2` and broadcasts the result as ordinary
+  rotation; why pitch is about `Z` and the trident's `+90°` unifies the two rigs;
+  the only corpus use of `texScale`; and the proof that a wrong **Y flip** changes
+  no pixel on this rig at all, so #380's prescribed texel gate or live oracle was
+  not needed — with the trident rig and the arrowhead texture patch as the two
+  controls.
 - [First-person held item](./first-person-held-item.md) — vanilla's arm-**or**-item
   fork: the `applyItemArmTransform` chain and how its constants differ from the bare
   arm's by just enough to look like rounding, the `Ry(45)/Ry(-45)` cancellation that
