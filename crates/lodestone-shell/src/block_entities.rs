@@ -10,6 +10,7 @@
 //! level_chunk_with_light ─► BlockEntity::decode_list  ─► LoadedChunk.block_entities
 //! block_update           ─► World::sync_block_entity  ─┤   (create / keep /
 //! section_blocks_update  ─► World::sync_block_entity  ─┤    replace / remove)
+//! local placement        ─► World::sync_block_entity  ─┤
 //! block_entity_data      ─► World::set_block_entity   ─┘
 //!                                                      │  ← nothing in the shell
 //!                                                      │    read this field: zero
@@ -17,6 +18,11 @@
 //!                                                      ▼
 //!                                          chest_spawns() ─► gpu/block_entities.rs
 //! ```
+//!
+//! The fourth row is the client's own right-click prediction
+//! ([`crate::sim::write_predicted_block`], issue #381) and it is **not** a packet:
+//! it is what stops a placed chest from being a hole for one server round trip.
+//! See `docs/block-placement-prediction.md`.
 //!
 //! # There are **four** creation routes, not two (issue #374)
 //!
@@ -35,6 +41,12 @@
 //! [`lodestone_data::block_entity_types`]. Its **removal** half matters as much
 //! as its creation half: without it, breaking a chest would leave a stale record
 //! and this module would keep drawing a chest in empty air.
+//!
+//! #374 wired that into the two *packet* arms only, which left the same bug on the
+//! **prediction** side — the client wrote no state at all on a right-click, so a
+//! chest you placed did not exist locally until `BLOCK_UPDATE` came back (issue
+//! #381). [`crate::sim::write_predicted_block`] closes it with the same pair, and
+//! the removal half is what corrects a placement the server refuses.
 //!
 //! # Why the block-entity list is the candidate set, and the block state is the
 //! truth

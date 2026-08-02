@@ -1,5 +1,15 @@
 //! Pixel gate: a chest set through the **block-update path** must reach pixels,
-//! and removing it must make the draw disappear (issue #374).
+//! and removing it must make the draw disappear (issue #374) — and the same must
+//! hold for a chest the client **predicts locally**, with no server packet at all,
+//! including when the server then refuses the placement (issue #381).
+//!
+//! Three gates live here, in the order the two issues arrived:
+//!
+//! | gate | route | control |
+//! |---|---|---|
+//! | [`a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed`] | `BLOCK_UPDATE`'s `set_block` + `sync_block_entity` | the state write with no block-entity half, i.e. #374 itself |
+//! | [`a_locally_predicted_chest_reaches_pixels_with_no_server_packet`] | `lodestone::sim::write_predicted_block`, the production prediction | no local write at all, i.e. #381 itself |
+//! | [`a_refused_placement_loses_the_predicted_block_entity`] | predict, then the server's correction | a world that never had a chest |
 //!
 //! # What this gate covers that `chest_block_entity_pixels.rs` does not
 //!
@@ -63,6 +73,9 @@
 
 use lodestone::block_entities::{ChestLids, chest_candidates, chest_spawn};
 use lodestone::gpu::{RenderState, SKY_COLOR};
+use lodestone::sim::{predicted_placement_state, write_predicted_block};
+use lodestone_game::placement::PlacedState;
+use lodestone_model::BlockFace;
 use lodestone_render::{
     BlockEntityMesh, BlockEntityModelSet, Camera, ChestSpawn, ENTITY_FULLBRIGHT, GpuContext,
     HeadlessTarget, RenderTarget,
@@ -504,6 +517,341 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
         "the removed frame must be pixel-identical to a world that never had a \
          chest; it differs at {:?}",
         changed_bbox(&removed_px, &pre_fix_px)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #381: the same thing, reached through the local prediction
+// ---------------------------------------------------------------------------
+
+/// The chest a right-click predicts must reach pixels with **no server packet at
+/// all**, and be pixel-identical to the same chest delivered by `BLOCK_UPDATE`.
+///
+/// The gate above proves the *packet* route. #381 is the other one: `use_item_live`
+/// used to send `use_item_on` and wait, so between the click and the server's reply
+/// there was no local state write, therefore (since #374) no local block-entity
+/// record, therefore a hole where the chest should be. The fix is
+/// [`write_predicted_block`], and this drives **that production function** rather
+/// than re-spelling its two calls — a re-spelling would pass with the prediction
+/// deleted, which is the island `CLAUDE.md`'s first rule is about.
+///
+/// The state it draws is the one the **resolver** picked, not one this file chose:
+/// [`lodestone::sim::predicted_placement_state`] is the same call the click makes.
+/// That matters because "a chest" is not one state — `minecraft:chest` has 24, and
+/// the *lowest id* among them is a **waterlogged** chest (`BooleanProperty` orders
+/// its values `{true, false}`), which would render as a plausible chest while being
+/// the wrong block. So the properties of the resolved state are asserted against
+/// `ChestBlock.getStateForPlacement` before any pixel is measured, and the frame is
+/// then required to be identical to the same state delivered by `BLOCK_UPDATE` —
+/// which proves the two write paths agree, the resolution itself being pinned to
+/// `blocks.json` by `sim.rs`'s `placement_states_resolve_to_the_jar_oracle`.
+///
+/// ```text
+/// cargo test -p lodestone-shell --test placed_chest_block_entity_pixels -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
+    let ctx = gpu();
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let camera = camera();
+    let eye = camera.position;
+
+    // Yaw 0 looks down +Z (south) and a chest faces *away* from the player, so the
+    // geometry a click at this camera resolves is `facing = north`.
+    let chest_state = predicted_placement_state(
+        "minecraft:chest",
+        &PlacedState {
+            facing: Some(BlockFace::North),
+            ..PlacedState::default()
+        },
+    )
+    .expect("the shell must be willing to predict a chest — that is issue #381");
+    let properties = lodestone_data::block_states::properties(chest_state).expect("in census");
+    println!("resolved chest state {chest_state} props {properties:?}");
+    assert_eq!(
+        properties,
+        &[
+            ("facing", "north"),
+            ("type", "single"),
+            ("waterlogged", "false"),
+        ],
+        "the predicted state must be what `ChestBlock.getStateForPlacement` yields: \
+         the requested facing, `single` (no adjacent chest), and not waterlogged \
+         (the target cell is air). Anything else still *draws* a chest, which is why \
+         this is checked here rather than inferred from the pixels."
+    );
+
+    // --- Subject: the local prediction. No packet is decoded anywhere here. ---
+    let (mut predicted_world, pos) = world_with_chunk();
+    let outcome = write_predicted_block(&mut predicted_world, CHEST, chest_state);
+    assert_eq!(
+        outcome,
+        BlockEntitySync::Created,
+        "the prediction must create the record itself; `ChunkAbsent` would mean the \
+         fixture chunk is not loaded and everything below is vacuous"
+    );
+    let predicted_spawns = gather(&predicted_world, pos, eye);
+    assert_eq!(
+        predicted_spawns.len(),
+        1,
+        "the real shell gather must find the predicted chest, got {predicted_spawns:?}"
+    );
+
+    // --- The pre-#381 control: the click sent, nothing written locally. --------
+    // This is not "the write with its second half removed" (that is #374, gated
+    // above) — it is the whole prediction absent, which is what `use_item_live`
+    // did. A world state, so it cannot rot.
+    let (unpredicted_world, unpredicted_pos) = world_with_chunk();
+    let unpredicted_spawns = gather(&unpredicted_world, unpredicted_pos, eye);
+    assert!(
+        unpredicted_spawns.is_empty(),
+        "the control must have no chest at all: {unpredicted_spawns:?}"
+    );
+
+    // --- The authoritative route, for the identity check. ---------------------
+    let (mut updated_world, updated_pos) = world_with_chunk();
+    write_block(&mut updated_world, CHEST, chest_state, true);
+    let updated_spawns = gather(&updated_world, updated_pos, eye);
+    assert_eq!(updated_spawns.len(), 1);
+
+    // --- The rect, from the spawn this gate's own gather produced. ------------
+    let models = BlockEntityModelSet::load();
+    let spawn = predicted_spawns[0];
+    println!("predicted spawn: {spawn:?}");
+    assert_eq!(spawn.pos, CHEST, "the record must be keyed by the block written");
+    let instance = models
+        .resolve_chest(&spawn)
+        .expect("the predicted chest must resolve to a model in the corpus");
+    let mesh = models.get(instance.model).expect("mesh");
+    let chest_rect = posed_screen_rect(mesh, &instance.part_transforms, camera.view_projection());
+    println!("chest rect (from real baked vertices): {chest_rect:?}");
+    assert!(
+        chest_rect.area() > 900,
+        "the chest projects to only {} px — the camera, not the renderer, is wrong: \
+         {chest_rect:?}",
+        chest_rect.area()
+    );
+
+    let mut shoot = |spawns: Vec<ChestSpawn>| -> (Vec<u8>, lodestone::gpu::RenderStats) {
+        let mut state = RenderState::new(device, queue, format, W, H, None);
+        state.set_block_entity_source(move |_eye| spawns.clone());
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+        (target.read_texels(device, queue), stats)
+    };
+    let (predicted_px, predicted_stats) = shoot(predicted_spawns);
+    let (unpredicted_px, unpredicted_stats) = shoot(unpredicted_spawns);
+    let (updated_px, _) = shoot(updated_spawns);
+
+    assert_eq!(
+        predicted_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
+        "expected all {EXPECTED_SHEETS} chest sheets from client.jar"
+    );
+    assert_eq!(predicted_stats.block_entities_drawn, 1);
+    assert_eq!(unpredicted_stats.block_entities_drawn, 0);
+
+    let sky = sky_bytes();
+
+    // The control's premise, measured rather than assumed — the first-person arm
+    // is the thing that has broken this class of control before.
+    let control_in_rect = non_sky_in(&unpredicted_px, chest_rect, sky);
+    assert_eq!(
+        control_in_rect, 0,
+        "the un-predicted control paints {control_in_rect} px inside the chest's own \
+         rect {chest_rect:?} — something *else* draws there, so this gate would be \
+         measuring that. Control's whole non-sky bbox: {:?}",
+        bbox_of(&unpredicted_px, |px| is_non_sky(px, sky))
+    );
+
+    let predicted_in_rect = non_sky_in(&predicted_px, chest_rect, sky);
+    let fill = predicted_in_rect as f64 / chest_rect.area() as f64;
+    println!(
+        "rect {chest_rect:?} area {} — predicted {predicted_in_rect} px ({:.1}%), \
+         control {control_in_rect} px",
+        chest_rect.area(),
+        fill * 100.0
+    );
+    assert!(
+        fill > 0.45,
+        "the predicted chest fills only {:.1}% of its own projected rect \
+         {chest_rect:?} ({predicted_in_rect} of {} px). Subject's non-sky bbox: {:?}",
+        fill * 100.0,
+        chest_rect.area(),
+        bbox_of(&predicted_px, |px| is_non_sky(px, sky))
+    );
+
+    let (changed_rect, changed_count) = changed_bbox(&predicted_px, &unpredicted_px).expect(
+        "the local prediction changed no pixel at all — the chain from \
+         write_predicted_block to the screen is dead",
+    );
+    println!("changed bbox {changed_rect:?} ({changed_count} px)");
+    let allowed = chest_rect.padded(2);
+    assert!(
+        allowed.x0 <= changed_rect.x0
+            && allowed.y0 <= changed_rect.y0
+            && changed_rect.x1 <= allowed.x1
+            && changed_rect.y1 <= allowed.y1,
+        "pixels changed outside the chest's projected rect: changed {changed_rect:?}, \
+         allowed {allowed:?}"
+    );
+
+    // The two write paths must agree pixel for pixel: the prediction is the same
+    // `set_block` + `sync_block_entity` pair the adapter's arm runs, and if the
+    // frames differ then one of them is doing something extra to the record.
+    assert!(
+        changed_bbox(&predicted_px, &updated_px).is_none(),
+        "the predicted chest is not pixel-identical to the same state delivered by \
+         the BLOCK_UPDATE pair — the two write paths disagree. Differs at {:?}",
+        changed_bbox(&predicted_px, &updated_px)
+    );
+}
+
+/// A **refused** placement must lose its predicted block entity, not keep drawing
+/// a chest in empty air.
+///
+/// #381 asks what happens when the server disagrees, and the answer is that no new
+/// mechanism is needed: vanilla's server sends a `ClientboundBlockUpdatePacket` for
+/// **both** the clicked position and the adjacent one after *every* `use_item_on`,
+/// whatever it decided (`ServerGamePacketListenerImpl.java:1397-1398`) — so the
+/// predicted cell is always overwritten within one round trip, and since #374 that
+/// write calls `sync_block_entity`, which removes the record.
+///
+/// This gate is the difference between believing that and knowing it. The record
+/// being removed here was created by the **prediction**, not by a packet, which is
+/// the part that could conceivably have differed: a prediction that stashed its
+/// record somewhere the correction does not reach would pass every test above and
+/// leave a floating chest on every refused placement.
+///
+/// Modelled as the correction arriving for a placement that never happened
+/// server-side, i.e. `air` at the predicted position. The final frame must be
+/// pixel-identical to a world that never had a chest — not merely "mostly empty".
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_refused_placement_loses_the_predicted_block_entity() {
+    let ctx = gpu();
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let camera = camera();
+    let eye = camera.position;
+
+    let chest_state = predicted_placement_state(
+        "minecraft:chest",
+        &PlacedState {
+            facing: Some(BlockFace::North),
+            ..PlacedState::default()
+        },
+    )
+    .expect("the shell must be willing to predict a chest");
+    let air_state = first_state_named("minecraft:air");
+
+    // The optimistic write.
+    let (mut world, pos) = world_with_chunk();
+    assert_eq!(
+        write_predicted_block(&mut world, CHEST, chest_state),
+        BlockEntitySync::Created
+    );
+    let predicted_spawns = gather(&world, pos, eye);
+    assert_eq!(
+        predicted_spawns.len(),
+        1,
+        "the prediction must be visible first, or the removal below proves nothing \
+         — this is the premise of the whole test"
+    );
+
+    // The rect where a stale chest *would* paint, derived from that very spawn
+    // through the same projection the draw uses — measured before the correction,
+    // so it is the real geometry of the thing being removed rather than a
+    // remembered rectangle.
+    let models = BlockEntityModelSet::load();
+    let instance = models
+        .resolve_chest(&predicted_spawns[0])
+        .expect("the predicted chest must resolve to a model in the corpus");
+    let mesh = models.get(instance.model).expect("mesh");
+    let chest_rect = posed_screen_rect(mesh, &instance.part_transforms, camera.view_projection());
+    println!("chest rect (from real baked vertices): {chest_rect:?}");
+    assert!(
+        chest_rect.area() > 900,
+        "the chest projects to only {} px — the camera, not the renderer, is wrong: \
+         {chest_rect:?}",
+        chest_rect.area()
+    );
+
+    // The server's correction, through the adapter's own `BLOCK_UPDATE` pair. The
+    // block-entity type of `air` is `None`, which is what drives the removal; the
+    // assertion names it so a census change that started handing back `Some` here
+    // fails loudly instead of silently keeping the chest.
+    assert_eq!(
+        lodestone_data::block_entity_types::block_entity_type(air_state),
+        None,
+        "air must own no block entity"
+    );
+    assert_eq!(
+        write_block(&mut world, CHEST, air_state, true),
+        Some(BlockEntitySync::Removed),
+        "the correction must drop the record the *prediction* created — if this is \
+         `Kept` or `Absent` the two writers are not sharing one record"
+    );
+    let corrected_spawns = gather(&world, pos, eye);
+    assert!(
+        corrected_spawns.is_empty(),
+        "a refused placement must stop being gathered: {corrected_spawns:?}"
+    );
+
+    // A world that never had a chest, for the pixel identity.
+    let (never, never_pos) = world_with_chunk();
+    let never_spawns = gather(&never, never_pos, eye);
+    assert!(never_spawns.is_empty());
+
+    let mut shoot = |spawns: Vec<ChestSpawn>| -> (Vec<u8>, lodestone::gpu::RenderStats) {
+        let mut state = RenderState::new(device, queue, format, W, H, None);
+        state.set_block_entity_source(move |_eye| spawns.clone());
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+        (target.read_texels(device, queue), stats)
+    };
+    let (predicted_px, predicted_stats) = shoot(predicted_spawns);
+    let (corrected_px, corrected_stats) = shoot(corrected_spawns);
+    let (never_px, never_stats) = shoot(never_spawns);
+
+    // The premise in *pixels*, not just in spawns: the chest really did paint here
+    // before the correction. Without this, "no chest is drawn afterwards" is
+    // satisfiable by never having drawn one.
+    assert_eq!(
+        predicted_stats.block_entity_sheets_loaded, EXPECTED_SHEETS,
+        "expected all {EXPECTED_SHEETS} chest sheets from client.jar — without them \
+         'no chest drew' is satisfied by a renderer that cannot draw one"
+    );
+    assert_eq!(predicted_stats.block_entities_drawn, 1);
+    assert_eq!(corrected_stats.block_entities_drawn, 0);
+    assert_eq!(never_stats.block_entities_drawn, 0);
+
+    let sky = sky_bytes();
+    let predicted_in_rect = non_sky_in(&predicted_px, chest_rect, sky);
+    assert!(
+        predicted_in_rect as f64 / chest_rect.area() as f64 > 0.45,
+        "the predicted chest only paints {predicted_in_rect} px in {chest_rect:?}, so \
+         its removal below would prove nothing. Non-sky bbox: {:?}",
+        bbox_of(&predicted_px, |px| is_non_sky(px, sky))
+    );
+    let stale = non_sky_in(&corrected_px, chest_rect, sky);
+    assert_eq!(
+        stale, 0,
+        "after the refusal the chest still paints {stale} px in {chest_rect:?} — a \
+         stale predicted record is drawing a chest in empty air. Non-sky bbox of the \
+         corrected frame: {:?}",
+        bbox_of(&corrected_px, |px| is_non_sky(px, sky))
+    );
+    assert!(
+        changed_bbox(&corrected_px, &never_px).is_none(),
+        "the corrected frame must be pixel-identical to a world that never had a \
+         chest; it differs at {:?}",
+        changed_bbox(&corrected_px, &never_px)
     );
 }
 
