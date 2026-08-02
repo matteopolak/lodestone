@@ -514,3 +514,9 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   constraints that travel with the code rather than staying behind: the
   4-bind-group floor, and why the WGSL shaders were moved by line extraction
   instead of retyped.
+- [Shaders](./shaders.md) — every WGSL shader now lives in `src/shaders/*.wgsl` and
+  is pulled in with `include_str!`, which deletes the double-quote trap rather than
+  documenting it; the `wgsl_valid` test that runs all 22 through naga with no GPU
+  (a broken shader used to reach `main` with every `cargo check` green), the
+  measured truth that a `"` in a WGSL *comment* is now simply inert, and the five
+  byte-identical duplicates left unmerged on purpose.

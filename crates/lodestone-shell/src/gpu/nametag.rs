@@ -387,10 +387,7 @@ impl NameTagRenderer {
     pub(super) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-nametag-shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/nametag.wgsl")
-                .into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/nametag.wgsl").into()),
         });
 
         // One `view_proj` uniform, nothing else — same shape as

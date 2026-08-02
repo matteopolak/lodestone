@@ -28,12 +28,14 @@
 //! for a background layer. See [`SkyRenderer::render`] for the exact pass
 //! sequencing a caller must follow.
 //!
-//! # No double quotes in these shaders, ever
+//! # The shaders are files, not string literals
 //!
-//! Shaders live in Rust `r"..."` raw strings; a literal `"` ends the string
-//! early and the compiler then parses the remaining WGSL as Rust source,
-//! producing errors that point at English words. Every comment below uses
-//! backticks instead, on purpose.
+//! `src/shaders/sky_{disc,celestial,cloud,passthrough_color}.wgsl`, pulled in
+//! with `include_str!`. They used to be Rust `r"..."` raw strings, where a
+//! literal double quote — even inside a WGSL comment — ended the string early
+//! and rustc then parsed the remaining WGSL and English prose as Rust,
+//! producing errors that pointed at ordinary words. That trap is gone rather
+//! than documented; write comments here normally. See `docs/shaders.md`.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
@@ -283,8 +285,6 @@ const PASSTHROUGH_COLOR_WGSL: &str = include_str!("shaders/sky_passthrough_color
 /// and takes the `length` here instead. See `crate::sky::SKY_FOG_END_DISTANCE`
 /// for the full derivation, including why vanilla's second (cylindrical) fog
 /// term is provably dead for this geometry and is therefore absent below.
-///
-/// No double quotes anywhere in here, including comments — see the module docs.
 const SKY_DISC_WGSL: &str = include_str!("shaders/sky_disc.wgsl");
 
 const CELESTIAL_WGSL: &str = include_str!("shaders/sky_celestial.wgsl");
