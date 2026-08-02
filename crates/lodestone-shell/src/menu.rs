@@ -155,6 +155,46 @@ pub enum Screen {
     Error,
 }
 
+impl Screen {
+    /// Every variant, in declaration order.
+    ///
+    /// Exists so a test that has to walk *all* screens iterates the enum instead
+    /// of restating a count.
+    /// `render::tests::owns_frame_agrees_with_frame_for_on_every_screen` asserted
+    /// a literal `12` and went red the moment [`Screen::WorldSelect`] landed
+    /// (#397) — which is `CLAUDE.md`'s staleness class, in the one place it is
+    /// most annoying: a test that is *about* completeness, made incomplete by the
+    /// thing it was meant to notice.
+    ///
+    /// **What keeps this complete.** The length is written next to the list, so
+    /// adding an entry without bumping `13` (or bumping it without adding one) is
+    /// a compile error; `screen_all_lists_each_variant_once` rules out the
+    /// copy-paste that keeps the length right and silently drops a screen.
+    ///
+    /// **What does not.** Rust cannot enumerate an enum's variants without a
+    /// derive macro, so a variant added to `Screen` and *not* added here is
+    /// caught only by the exhaustive `match` inside whatever loop consumes this —
+    /// which forces an arm to be written, but cannot force the array entry. That
+    /// residue is real; it is stated rather than papered over. If a third
+    /// consumer ever needs this, a derive is the fix, not another hand-written
+    /// list.
+    pub const ALL: [Screen; 13] = [
+        Screen::MainMenu,
+        Screen::ServerList,
+        Screen::ServerEdit,
+        Screen::WorldSelect,
+        Screen::Accounts,
+        Screen::Settings,
+        Screen::Connecting,
+        Screen::Playing,
+        Screen::Chat,
+        Screen::Container,
+        Screen::Paused,
+        Screen::Death,
+        Screen::Error,
+    ];
+}
+
 /// The shell's top-level UI state. One instance lives in the app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiState {
@@ -983,6 +1023,34 @@ mod tests {
         let mut ui = UiState::new();
         ui.open_server_edit();
         assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    /// [`Screen::ALL`]'s length is checked by the compiler; what it cannot check
+    /// is a copy-pasted line that keeps the length right and lists one variant
+    /// twice, dropping another screen from every walk that iterates it.
+    #[test]
+    fn screen_all_lists_each_variant_once() {
+        for (i, a) in Screen::ALL.iter().enumerate() {
+            for b in &Screen::ALL[i + 1..] {
+                assert_ne!(a, b, "Screen::ALL lists {a:?} twice");
+            }
+        }
+        // And the screens this file's own `is_menu` set names must all be in it,
+        // which is the cheapest available check that the list is not merely
+        // internally consistent.
+        for screen in [
+            Screen::MainMenu,
+            Screen::ServerList,
+            Screen::ServerEdit,
+            Screen::WorldSelect,
+            Screen::Settings,
+            Screen::Accounts,
+        ] {
+            assert!(
+                Screen::ALL.contains(&screen),
+                "{screen:?} is a menu screen missing from Screen::ALL"
+            );
+        }
     }
 
     /// Issue #397. The world list opens only from the title and unwinds back to

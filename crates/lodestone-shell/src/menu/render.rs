@@ -4090,21 +4090,13 @@ mod tests {
         let statuses = StatusCache::with_probe(unavailable_probe());
 
         let mut reached = 0;
-        for screen in [
-            Screen::MainMenu,
-            Screen::ServerList,
-            Screen::ServerEdit,
-            Screen::WorldSelect,
-            Screen::Settings,
-            Screen::Accounts,
-            Screen::Connecting,
-            Screen::Playing,
-            Screen::Chat,
-            Screen::Container,
-            Screen::Paused,
-            Screen::Death,
-            Screen::Error,
-        ] {
+        // `Screen::ALL`, not a list restated here: this loop's own copy was a
+        // 12-entry literal plus an `assert_eq!(reached, 12)`, and #397's
+        // `WorldSelect` made both stale at once — a completeness test defeated by
+        // the very thing it exists to notice. The `match` below stays exhaustive,
+        // which is what forces a new variant to be given a way to be *reached*;
+        // `Screen::ALL`'s own docs say what that does and does not guarantee.
+        for screen in Screen::ALL {
             let mut ui = UiState::new();
             match screen {
                 Screen::MainMenu => {}
@@ -4168,7 +4160,15 @@ mod tests {
                 );
             }
         }
-        assert_eq!(reached, 12, "a screen was added without being covered here");
+        // Derived, not restated. This no longer catches "a screen was added"
+        // (`Screen::ALL` is what does, as far as anything can) — what it still
+        // catches is this loop silently skipping one, e.g. a `continue` added to
+        // the reach-the-screen `match` above.
+        assert_eq!(
+            reached,
+            Screen::ALL.len(),
+            "the loop skipped a screen it was handed"
+        );
         let _ = &mut nav;
     }
 
@@ -7164,14 +7164,21 @@ mod tests {
     fn the_search_box_draws_as_a_field_inside_its_own_slot() {
         let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
         let (mut nav, mut ui) = world_select_nav("ws-search");
-        for ch in "abc".chars() {
+        // Upper-case, and `M` first, on purpose: the jar-less font's `M` is
+        // `0b10001` in all seven rows (`hud/font.rs:97`), so its leftmost lit
+        // column sits exactly on the box's `text_x`. That is what lets the x
+        // assertion below be an equality rather than a bound — a glyph whose
+        // column 0 is blank (`A`, `C`) would put the leftmost vertex a pixel or
+        // two right of `text_x` and make the same test unable to tell a 2 px
+        // error from a correct draw.
+        for ch in "MC".chars() {
             nav.key(&mut ui, MenuKey::Char(ch));
         }
         let frame = world_select_frame(&nav, &ui);
         let row = frame.rows[0].clone();
         assert_eq!(
             row.edit.as_ref().map(|e| e.value().to_string()),
-            Some("abc".to_string()),
+            Some("MC".to_string()),
             "typing on this screen goes into the search box"
         );
 
@@ -7213,17 +7220,70 @@ mod tests {
         probe.widget.width = fw;
         probe.widget.height = fh;
         let state = probe.draw_state(None);
+        // The band spans the box's **whole** width, deliberately: the question is
+        // where the text starts, so a band that begins at `text_x` would clip the
+        // very error it is looking for and pass on a draw 4 px to the left.
+        //
+        // That makes the *focus outline* the thing to be careful about, and it is
+        // what this gate got wrong on its first run. `band_coverage` counts
+        // **vertices**, not covered area, and the jar-less outline's bottom bar
+        // spans the full field width at `y + h - 2` — inside a `glyph_h`-tall
+        // band vertically, with its only vertices at the box's own `x` and
+        // `x + width`. So on a focused box the leftmost vertex in this band is the
+        // box's edge, not the text's, and the gate accused the draw of painting
+        // 4 px left of `text_x` when the draw was right and the 4 px was
+        // `BORDER_INSET` in the gate's own reasoning. (#395's `EditBox` gate dodges
+        // this by insetting its band to `text_x`/`inner_width`; that is the right
+        // answer for measuring *what* drew and the wrong one for measuring
+        // *where* it started.)
+        //
+        // So: measure the text on an **unfocused** clone — no outline, no caret,
+        // nothing in the box but glyphs — and use the focused draw as the control
+        // that this band really can see ink at the box's edge.
         let band = (fx, state.text_y, fw, GLYPH_H as f32 * TEXT_SCALE);
-        let inside = band_coverage(&drawn.colour, V_W, V_H, band);
+        let mut unfocused = row.clone();
+        if let Some(e) = unfocused.edit.as_mut() {
+            e.widget.focused = false;
+        }
+        let mut u = frame_with(vec![unfocused], 99);
+        u.vanilla = true;
+        let quiet = build(&u, Some(&atlas), None, V_W, V_H).colour;
+        let inside = band_coverage(&quiet, V_W, V_H, band);
         assert!(
             inside.count > 0,
             "the typed text reached no pixels inside the box's own band {band:?}"
         );
+        let bounds = inside.bounds.expect("a non-empty band has bounds");
         assert!(
-            inside.bounds.is_some_and(|b| b.0 >= state.before_x - 0.01),
-            "text drew left of the box's own text_x {}: bounds {:?}",
-            state.before_x,
-            inside.bounds
+            (bounds.0 - state.before_x).abs() < 0.01,
+            "the text starts at {} where the box's own text_x is {} — a draw using \
+             the row's PAD of 6, or the box's own x, fails here; bounds {bounds:?}",
+            bounds.0,
+            state.before_x
+        );
+        assert!(
+            bounds.2 <= fx + fw + 0.01,
+            "the text overran the box's right edge: bounds {bounds:?}"
+        );
+
+        // -- control ---------------------------------------------------------
+        // The focused draw puts the outline's bottom bar in the same band, with a
+        // corner vertex on the box's own `x`. So the band demonstrably *can* see
+        // ink `BORDER_INSET` left of `text_x` — which is exactly the error the
+        // assertion above denies, and without this the equality could be passing
+        // because the band is blind to that column.
+        let lit = band_coverage(&drawn.colour, V_W, V_H, band)
+            .bounds
+            .expect("a focused field paints its outline");
+        assert!(
+            (lit.0 - fx).abs() < 0.01,
+            "the control did not reach the box's edge, so the assertion above is \
+             not measuring what it claims: bounds {lit:?}"
+        );
+        assert!(
+            state.before_x - fx > 0.0,
+            "premise: text_x is inset from the box's x, or the two measurements \
+             above cannot disagree"
         );
     }
 
