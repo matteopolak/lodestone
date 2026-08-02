@@ -40,6 +40,17 @@ cargo run --release                       # launch the game
   "a red test" in `lodestone-v770` was really **three red binaries and 14 failing tests**, masked
   because `serverbound_change_game_mode` sorts first. **Use `--no-fail-fast` when assessing crate
   health.**
+- **A targeted `--test <binary>` run is a *narrower* filter than `-p` fail-fast, and it hides the
+  same class of thing.** Adding a `ClientEvent` variant changes the directive **sequence**, not just
+  the type, and every choreography test that asserts an exact `vec![Directive…]` is a silent caller
+  of it. `ClientEvent::BiomeVisuals` (#96) was tested with
+  `cargo test -p lodestone-v770 --test registry_data`, which passes, and broke
+  `join_flow::full_login_sequence_produces_expected_directives`, which was never run — `main` was red
+  for one commit. **No `cargo check` can see this**: the break is a runtime `assert_eq!`, so all
+  three required checks stayed green, *including at the commit's own sha in a clean detached
+  worktree*, which is otherwise the strongest verification available here. When you add an event or
+  change what an adapter emits, grep for the **packet id**, not for the event, and run the crate with
+  `--no-fail-fast`.
 - **The binary is `lodestone`, not `lodestone-shell`** — the `[[bin]]` name differs from the crate.
 - **`live` is now a default feature, and `cargo run --release` launches the game.** It used to need
   `--features live`, and forgetting it failed *silently*: the client still started, still rendered,
@@ -310,6 +321,15 @@ session, both of which produced a confident wrong conclusion:
   `error: 1 target failed:` — and the grep pattern then cut the target name off. This came within
   one command of a commit on a red tree. **Let cargo write its own output to a file and check its
   real exit status**; filter the file afterwards.
+
+- **zsh does not word-split an unquoted `$var`, so a path list in a variable is *one* argument.**
+  An audit built as `P="a.rs b.rs …"; git diff --numstat -- $P` printed **nothing** and its companion
+  `git diff -- $P | grep -E "<foreign markers>"` printed **none** — both correct answers about an
+  empty diff, because git was handed a single nonexistent path with spaces in it. The check whose
+  entire job was "prove this commit contains no other agent's lines" returned a green by measuring
+  nothing, one command before the commit. Caught only because the empty `numstat` was *also*
+  surprising. **Write the paths out, or `set -- a b c` and use `"$@"`** — and treat an audit that
+  prints nothing as a failure to run, never as a pass.
 
 The general rule: the transform that makes output readable is also the transform that can invent a
 green. When a conclusion depends on what was *not* in the output, re-run without the filter.
