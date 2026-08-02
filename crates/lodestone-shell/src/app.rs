@@ -1613,7 +1613,7 @@ impl WindowApp {
         // surface restores the render-distance sky fog.
         let desired_fog = self.sim.fog_settings();
         if self.applied_fog != Some(desired_fog) {
-            render.set_fog(desired_fog);
+            render.set_fog(desired_fog, self.config.render_distance);
             // The clear colour must never disagree with the fog colour it is
             // set alongside — see `RenderState::set_clear_color`'s doc and
             // `docs/dimension-visuals.md`'s wiring note. Piggybacking on the
@@ -1955,7 +1955,7 @@ impl ApplicationHandler for WindowApp {
         );
         // Size the sky fog to our real render distance so terrain fades into the
         // sky where chunks actually stop, not at the render crate's 8-chunk default.
-        render.set_fog(sky_fog(self.config.render_distance));
+        render.set_fog(sky_fog(self.config.render_distance), self.config.render_distance);
         // Upload the stitched particle sheet the emitter already resolves its
         // flame/smoke/crit UVs against (issue #45). `load_particle_atlas` is
         // memoised, so this is the **same** `ParticleAtlas` object `Sim` built
@@ -2556,7 +2556,7 @@ fn run_headless(config: Config) -> anyhow::Result<()> {
     // at the call site rather than hidden in a mode check.)
     let mut sim = Sim::with_demo_world(config);
     let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
-    render.set_fog(sky_fog(render_distance));
+    render.set_fog(sky_fog(render_distance), render_distance);
 
     // Mesh everything and upload.
     let meshes = sim.drain_all_meshes();

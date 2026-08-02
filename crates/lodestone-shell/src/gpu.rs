@@ -200,6 +200,10 @@ pub struct RenderState {
     /// fog sized for the default render distance; drive it from the real render
     /// distance / eye-in-fluid state via [`RenderState::set_fog`].
     fog: FogSettings,
+    /// The player's render distance in chunks, set with [`RenderState::set_fog`]
+    /// because the sky disc's gradient end is clamped to it (#399). Defaults to
+    /// [`DEFAULT_RENDER_DISTANCE_CHUNKS`] alongside `fog`.
+    render_distance_chunks: u32,
     /// How each mob's world light is sampled. Full-bright until the shell wires
     /// a real world in via [`RenderState::set_entity_light_source`].
     entity_light: EntityLightSource,
@@ -478,6 +482,7 @@ impl RenderState {
             // a screen in a test that builds a `RenderState` and never calls
             // `set_fog`.
             fog: FogSettings::for_render_distance(SKY_COLOR, DEFAULT_RENDER_DISTANCE_CHUNKS),
+            render_distance_chunks: DEFAULT_RENDER_DISTANCE_CHUNKS,
         }
     }
 
@@ -493,8 +498,18 @@ impl RenderState {
     /// its own setter precisely so a caller cannot update one and forget the
     /// other — see [`FogSettings`]' doc and
     /// [`set_clear_color`](Self::set_clear_color) below.
-    pub fn set_fog(&mut self, fog: FogSettings) {
+    /// `render_distance_chunks` rides along for the same reason `sky_color` is in
+    /// the struct: the sky disc's gradient end is `min(render_distance, the
+    /// attribute)` (`AtmosphericFogEnvironment.java:73`), so it is a *second*
+    /// consumer of the same number the fog band already needs. #399 shipped the
+    /// gradient clamp with `SkyFrame` defaulting to the old constant 512 and this
+    /// call site still passing it — the mechanism landed and reached zero pixels.
+    /// Taking it as a parameter rather than adding a `set_render_distance` next
+    /// door makes that unrepresentable: you cannot set fog without saying what
+    /// distance it is for.
+    pub fn set_fog(&mut self, fog: FogSettings, render_distance_chunks: u32) {
         self.fog = fog;
+        self.render_distance_chunks = render_distance_chunks;
     }
 
     /// Replace the frame's clear colour — the colour drawn where nothing else
@@ -1378,6 +1393,7 @@ impl RenderState {
                 day_sky_color,
             )
             .with_fog_color(self.fog.color)
+            .with_render_distance(self.render_distance_chunks)
             .with_void_fog(lodestone_render::fog::VoidFog::OVERWORLD);
             sky.render(device, queue, &mut encoder, view, camera, &frame);
             true
