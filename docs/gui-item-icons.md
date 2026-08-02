@@ -176,6 +176,59 @@ just relative to the slot. Keep it this way once a real `gui_scale` lands —
 scaling every one of these sizes uniformly is exactly what keeps the count
 proportioned correctly relative to the icon without a special case.
 
+#### The anchor is two constants, not two derivations (issue #384)
+
+`COUNT_RIGHT = 17.0` / `COUNT_TOP = 9.0`, both times `scale`, straight off
+`GuiGraphicsExtractor.itemCount` (`:947-952`, identical in
+`SpectatorGui.java:79`):
+
+```java
+this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);
+```
+
+Note **`19 - 2 = 17`** — one pixel *past* the 16 px icon's right edge, so this is
+deliberately not `size`.
+
+The code used to say `x + size - width` and `y + size - LINE_HEIGHT * scale`, and
+**the derivation was the defect rather than the off-by-one**: both drift when the
+cell size or the font's line height changes, and they agree with vanilla at no
+glyph height at all. `LINE_HEIGHT` is 9, so the top came out `y + 16 - 9 = y + 7`
+against vanilla's `y + 9`.
+
+Two things worth knowing before touching this again:
+
+* **`f.width` is not the painted width.** It sums advances, exactly like vanilla's
+  `Font.width`, so the last glyph's ink ends one pixel short of it, and the shadow
+  pass at `+1, +1` then reaches one pixel past. Measured: a count of `7` inks
+  `local x11..16 y9..16` from an anchor whose right edge is x17. Assert the ink
+  box against a one-pixel window, not an exact column — and never assert the
+  anchor instead, because a player sees ink.
+* **The reported symptom was half right and the horizontal half was backwards.**
+  The play report was "lower and further left". Lower is real and measured: the fix
+  moves the ink down 2 px (`y7..14` → `y9..16`). *Further left* is not what vanilla
+  does — the old anchor was already one pixel left of vanilla's, and matching
+  vanilla moves the number one pixel **right** (`x10..15` → `x11..16`). Vanilla is
+  the reference, so it moved right. If the number still reads as too far right in
+  play, the cause is downstream of this anchor and needs measuring separately.
+
+Gate: `tests/stack_count_anchor_pixels.rs`. It differences a count-`7` and a
+count-`64` frame against a count-**1** frame (vanilla draws no number at
+`getCount() == 1`, so the icon, well, panel and dim all cancel) and reports an ink
+**bounding box in slot-local pixels**, scanned over the cell grown by 8 px so a
+count drawn outside the slot is seen rather than clipped. Two counts, because a
+single digit cannot distinguish right alignment from a fixed left edge — the
+second control below is that exact case.
+
+Both controls watched failing:
+
+| control | result |
+| --- | --- |
+| the old derived anchors | `7` → `x10..15 y7..14`, `64` → `x4..15 y7..14`; four failures, right edge and top both wrong |
+| right alignment dropped (fixed left edge) | `7` → `x11..16 y9..16`, **still perfectly correct**; `64` → `x11..22`, running 6 px outside the cell |
+
+That second row is the reason the gate measures two counts. A one-digit gate would
+have passed it.
+
 The middle pass exists *because of the depth attachment*: a render pass's
 attachments are fixed for its lifetime, and only the item models need depth.
 
