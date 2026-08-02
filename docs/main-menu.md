@@ -94,6 +94,29 @@ all of them vanilla's:
   disconnected you. `nav::a_disabled_button_is_hoverable_but_cannot_be_activated`
   gates exactly that, with the enabled case as its positive control.
 
+### hover-then-Enter is only correct on a screen that *has* a cursor
+
+`app.rs` routes clicks through `MenuNav::click`, not through `hover` + `Enter`
+directly. The pair above is still exactly what `click` does on the four screens
+with a row cursor; the indirection exists because of the one screen without one.
+
+**Settings has no cursor by design** — each control owns a key instead
+(`key_settings`: Up/Down the GUI scale, Enter View Bobbing), which is why
+`MenuNav::hover` has no `Screen::Settings` arm. So the old translation turned a
+click on *any* row into `Enter`, and on that screen `Enter` means
+`toggle_view_bobbing()` unconditionally: clicking the **GUI SCALE** row silently
+turned View Bobbing off and persisted it. That is issue #391, reported as "view
+bobbing does nothing in game" with the whole render chain verified working —
+see [`view-bobbing.md`](./view-bobbing.md#configuration).
+
+`MenuNav::click` dispatches by row on that screen and falls back to
+hover-then-Enter everywhere else. The row indices are a cross-file coupling to
+the `rows` vector in `render.rs`, so
+`nav::the_settings_rows_are_in_the_order_click_assumes` reads the labels back out
+of `frame_for` rather than trusting them. **A new screen without a row cursor
+needs its own arm in `click`; inheriting the fallback is how this bug happens
+again.**
+
 ### Buttons are real nine-slice sprites
 
 `widget/button`, `widget/button_highlighted` and `widget/button_disabled` are

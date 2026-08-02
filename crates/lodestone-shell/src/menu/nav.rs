@@ -691,6 +691,51 @@ impl MenuNav {
         }
     }
 
+    /// A left-click that landed on row `row` of the current screen.
+    ///
+    /// # Why this is not just `hover` then `Enter`
+    ///
+    /// That *is* what it does for every screen with a row cursor, and it is what
+    /// `app.rs` used to inline. The **settings** screen is the exception, and it
+    /// is the exception that was issue #391.
+    ///
+    /// That screen deliberately has no cursor — each control owns its own key
+    /// instead ([`MenuNav::key_settings`]), so [`MenuNav::hover`] has no
+    /// `Screen::Settings` arm and a click could not move a highlight even in
+    /// principle. The old translation therefore turned a click on *any* row into
+    /// `MenuKey::Enter`, and on this screen `Enter` means
+    /// [`MenuNav::toggle_view_bobbing`] unconditionally. So clicking the **GUI
+    /// SCALE** row — row 0, the one `render.rs` marks `selected`, the natural
+    /// thing to click — silently turned View Bobbing off and persisted it.
+    ///
+    /// That is the whole of #391: the reporter's `options.json` carried
+    /// `"view_bobbing": false`, written six minutes before the report, and every
+    /// hop of the render chain underneath it was working. The bug was never in
+    /// the bob; it was a mouse that did the opposite of the label under it.
+    ///
+    /// # The row indices are a coupling, and it is guarded
+    ///
+    /// `0` and `1` here mean whatever `menu::render::frame_for` puts in
+    /// `Screen::Settings`'s `rows`, which is a different file.
+    /// `the_settings_rows_are_in_the_order_click_assumes` asserts the two agree,
+    /// so reordering that vector fails a test here instead of silently rebinding
+    /// the mouse to the wrong control.
+    pub fn click(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if ui.screen() == Screen::Settings {
+            match row {
+                0 => self.cycle_gui_scale(1),
+                1 => self.toggle_view_bobbing(),
+                // A click that hit-tested onto a row this screen does not have
+                // must do nothing at all, rather than fall through to the
+                // keyboard path and toggle whatever `Enter` happens to mean.
+                _ => {}
+            }
+            return MenuAction::None;
+        }
+        self.hover(ui, row);
+        self.key(ui, MenuKey::Enter)
+    }
+
     /// Handles one key for the current screen, mutating `ui` for navigation and
     /// returning the action the app must perform.
     pub fn key(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
@@ -1593,6 +1638,98 @@ mod tests {
         assert_eq!(nav.gui_scale(), 2, "Enter must not touch the scale");
         assert_eq!(ui.screen(), Screen::Settings, "and must not leave the screen");
         assert_eq!(nav.options_save_error(), None);
+    }
+
+    /// Issue #391. A **click** on the settings screen must act on the row it
+    /// landed on, not on whatever `MenuKey::Enter` means there.
+    ///
+    /// This is the whole bug. `app.rs` translated every menu click into
+    /// `hover(row)` + `Enter`, which is right on the four screens that have a row
+    /// cursor and wrong here, where there is none and `Enter` is hard-wired to
+    /// View Bobbing. So a click on the GUI SCALE row — row 0, the one drawn
+    /// `selected` — turned the option off and wrote it to disk. Nothing about
+    /// the bob itself was broken; the reporter's `options.json` simply said
+    /// `false`.
+    ///
+    /// The assertion that matters is the **negative** one, so it is paired with
+    /// a control: clicking row 1 *must* toggle, or "row 0 does not toggle" would
+    /// pass just as well on a `click` that did nothing at all.
+    #[test]
+    fn clicking_the_gui_scale_row_cycles_the_scale_and_leaves_view_bobbing_alone() {
+        let (mut nav, path) = self::nav("settings-click-rows");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let options_path = path.parent().unwrap().join("options.json");
+
+        assert!(nav.view_bobbing(), "precondition: the default is ON");
+        assert_eq!(nav.gui_scale(), 0, "precondition: the scale starts at auto");
+
+        // Row 0 is GUI SCALE. Before #391 this arrived as `Enter`.
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert!(
+            nav.view_bobbing(),
+            "a click on the GUI SCALE row must not touch View Bobbing"
+        );
+        assert!(
+            !options_path.exists()
+                || crate::config::Options::load_from(&options_path).view_bobbing,
+            "and must not persist it off either — that is what survived the restart"
+        );
+        assert_eq!(nav.gui_scale(), 1, "it must do its own row's job instead");
+
+        // Control: the toggle is still reachable by mouse, so the assertion
+        // above is row-awareness and not a dead `click`.
+        assert_eq!(nav.click(&mut ui, 1), MenuAction::None);
+        assert!(!nav.view_bobbing(), "control: row 1 is the toggle");
+        assert_eq!(nav.gui_scale(), 1, "and it must not touch the scale");
+        assert!(!crate::config::Options::load_from(&options_path).view_bobbing);
+
+        // A hit-test that lands past the last row must do nothing rather than
+        // fall through to the keyboard path.
+        assert_eq!(nav.click(&mut ui, 7), MenuAction::None);
+        assert!(!nav.view_bobbing());
+        assert_eq!(nav.gui_scale(), 1);
+        assert_eq!(ui.screen(), Screen::Settings);
+    }
+
+    /// [`MenuNav::click`]'s `0`/`1` are indices into a `rows` vector built in
+    /// `menu::render`, a different file with no compile-time link to them.
+    /// Reordering that vector would silently rebind the mouse to the wrong
+    /// control — which is exactly the failure #391 was.
+    #[test]
+    fn the_settings_rows_are_in_the_order_click_assumes() {
+        let (mut nav, _) = self::nav("settings-row-order");
+        let mut ui = UiState::new();
+        ui.open_settings();
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::new(),
+            &mut favicons,
+        )
+        .expect("the settings screen owns its frame");
+        assert_eq!(frame.rows.len(), 2, "click() knows about exactly two rows");
+        assert!(
+            frame.rows[0].label.starts_with("GUI SCALE"),
+            "row 0 must be the scale, got {:?}",
+            frame.rows[0].label
+        );
+        assert!(
+            frame.rows[1].label.starts_with("VIEW BOBBING"),
+            "row 1 must be the toggle, got {:?}",
+            frame.rows[1].label
+        );
+        // And the label tracks the value, so a click's effect is visible.
+        nav.click(&mut ui, 1);
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::new(),
+            &mut favicons,
+        )
+        .unwrap();
+        assert_eq!(frame.rows[1].label, "VIEW BOBBING: OFF");
     }
 
     #[test]

@@ -7648,6 +7648,205 @@ mod tests {
         );
     }
 
+    /// Issue #391's gate: the walk bob must reach the projection **at vanilla's
+    /// own magnitude, on vanilla's own axes**, driven by a real walking `Sim`.
+    ///
+    /// # Why the existing gates could not have caught a wrong amplitude
+    ///
+    /// Every other bob gate *supplies its own* `BobFrame`: the unit tests and
+    /// `tests/view_bob_pixels.rs` hand `ViewBob::tick`/`bobbed_camera` numbers
+    /// they chose, so they prove the arithmetic and can say nothing about whether
+    /// `Sim` feeds it realistic ones. That is `CLAUDE.md`'s *world* species —
+    /// the flaw would live in the input data and be invisible in the test source.
+    /// So step 1 here pins the **inputs** against vanilla's own walk speed,
+    /// measured from the player's position and not read back out of the bob.
+    ///
+    /// # Why the far point is the discriminator
+    ///
+    /// The bob is a translation *and* two rotations. A point at infinity is
+    /// unaffected by translation, so its screen displacement is the **nod alone**
+    /// — a nod-free bob moves it exactly `0.0` px. That is the separation
+    /// `docs/view-bobbing.md` records the chest-bbox pixel gate cannot make (its
+    /// +8.50 px is within 0.2 px of the +8.31 a nod-free bob gives). Conversely
+    /// the far point's *horizontal* displacement must stay at zero: the sway is a
+    /// translation and cannot move infinity, and the roll is deliberately dropped
+    /// by the fold, so any yaw leaking out of `bobbed_camera` shows up here.
+    ///
+    /// The near point then carries the translation, and the two axes are
+    /// distinguishable by *shape* as well as size: the dip is rectified
+    /// (`-|cos|`, one-way) while the sway is a full sine (both ways). A gate that
+    /// only asked "did the frame change" passes on a bob with the wrong
+    /// amplitude, the wrong phase or the wrong axis; every number below is
+    /// predicted from `GameRenderer.bobView`'s constants before it is measured.
+    #[test]
+    fn the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis() {
+        /// Vanilla's walking speed, blocks per tick: `4.317 m/s / 20`.
+        const WALK_BLOCKS_PER_TICK: f32 = 0.2159;
+        /// `AbstractClientPlayer.updateBob`'s `Math.min(0.1F, ...)` ceiling,
+        /// which a walking player saturates.
+        const BOB_CEILING: f32 = 0.1;
+        /// The nominal viewport the pixel predictions below are stated for.
+        const VIEW_W: f32 = 1920.0;
+        const VIEW_H: f32 = 1080.0;
+        const ASPECT: f32 = VIEW_W / VIEW_H;
+
+        let mut sim = Sim::new(test_config());
+        // The corridor is a precondition, not decoration — see
+        // `walking_accumulates_a_real_bob_that_only_the_render_camera_sees`.
+        // Longer than that one's because this walks for ~5 s.
+        let feet_y = sim.player().position.y.floor() as i32;
+        for dz in -60..=1 {
+            for dx in -1..=1 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                sim.set_block_world([dx, feet_y, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+            }
+        }
+        for _ in 0..20 {
+            sim.step(1.0 / 20.0);
+        }
+        assert!(sim.player().on_ground, "precondition: standing before the walk");
+
+        // --- 1. The inputs. Vanilla's walk speed, vanilla's ceiling. ---------
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        for _ in 0..30 {
+            sim.step(1.0 / 20.0);
+        }
+        let before = sim.player().position;
+        let phase_before = sim.bob_frame().walk_phase;
+        sim.step(1.0 / 20.0);
+        let moved = ((sim.player().position.x - before.x) as f32)
+            .hypot((sim.player().position.z - before.z) as f32);
+        assert!(
+            (moved - WALK_BLOCKS_PER_TICK).abs() < 2e-3,
+            "precondition: the player must be walking at vanilla's real speed, \
+             not some fixture crawl — {moved:.5} blocks/tick against \
+             {WALK_BLOCKS_PER_TICK}"
+        );
+        let settled = sim.bob_frame();
+        assert!(
+            (settled.bob - BOB_CEILING).abs() < 1e-4,
+            "a walking player saturates `min(0.1, speed)`; got {}",
+            settled.bob
+        );
+        // `LocalPlayer.move`: `addWalkedDistance(length(dx, dz) * 0.6)`, negated
+        // by `getBackwardsInterpolatedWalkDistance`. Compared against `moved`,
+        // which came from the position and not from the bob.
+        let advance = phase_before - settled.walk_phase;
+        assert!(
+            (advance - moved * 0.6).abs() < 2e-4,
+            "the stride phase must advance by exactly 0.6x the distance actually \
+             travelled: {advance:.6} against {:.6}",
+            moved * 0.6
+        );
+
+        // --- 2. The pixels, sampled at frame rate rather than tick rate. -----
+        // 60 fps so the partial-tick interpolation is exercised and the sampling
+        // lands within 0.07 rad of the nod's peak, which is what lets the
+        // magnitude assertion below be tight.
+        let screen = |c: &Camera, w: glam::Vec3| {
+            let clip = c.view_projection() * w.extend(1.0);
+            (
+                (1.0 + clip.x / clip.w) * 0.5 * VIEW_W,
+                (1.0 - clip.y / clip.w) * 0.5 * VIEW_H,
+            )
+        };
+        let (mut far_dy_lo, mut far_dy_hi) = (f32::MAX, f32::MIN);
+        let (mut far_dx_lo, mut far_dx_hi) = (f32::MAX, f32::MIN);
+        let (mut near_dx_lo, mut near_dx_hi) = (f32::MAX, f32::MIN);
+        let (mut near_dy_lo, mut near_dy_hi) = (f32::MAX, f32::MIN);
+        for _ in 0..90 {
+            sim.step(1.0 / 60.0);
+            let cam = sim.camera(ASPECT);
+            let bobbed = sim.render_camera(ASPECT);
+            // **Both probes sit on `cam.forward()`, not on `-Z`.** They differ
+            // only in distance, so the far one is the near one with the
+            // translation's parallax divided away.
+            //
+            // Deriving the direction from the same expression the draw uses is
+            // load-bearing, per `CLAUDE.md` — the offline spawn pitch is `10`,
+            // not `0`, and a probe placed naively down `-Z` sits 10 deg above the
+            // view centre. A pitch change of `t` moves a point at angle `a` by
+            // `sec^2(a)/tan(fov/2)`, so that probe read **6.93 px** where the
+            // on-axis prediction is 6.73: a 3% error, in the direction that looks
+            // like the bob being slightly too strong. Chasing it as a code defect
+            // is exactly the trap of restating a constant instead of deriving it.
+            let far = cam.position + cam.forward() * 4096.0;
+            let near = cam.position + cam.forward() * 3.0;
+            for (p, dx_lo, dx_hi, dy_lo, dy_hi) in [
+                (far, &mut far_dx_lo, &mut far_dx_hi, &mut far_dy_lo, &mut far_dy_hi),
+                (near, &mut near_dx_lo, &mut near_dx_hi, &mut near_dy_lo, &mut near_dy_hi),
+            ] {
+                let (bx, by) = screen(&bobbed, p);
+                let (sx, sy) = screen(&cam, p);
+                *dx_lo = dx_lo.min(bx - sx);
+                *dx_hi = dx_hi.max(bx - sx);
+                *dy_lo = dy_lo.min(by - sy);
+                *dy_hi = dy_hi.max(by - sy);
+            }
+        }
+        let box_of = |dx: (f32, f32), dy: (f32, f32)| {
+            format!("dx [{:.3}, {:.3}] dy [{:.3}, {:.3}] px", dx.0, dx.1, dy.0, dy.1)
+        };
+        let far_box = box_of((far_dx_lo, far_dx_hi), (far_dy_lo, far_dy_hi));
+        let near_box = box_of((near_dx_lo, near_dx_hi), (near_dy_lo, near_dy_hi));
+        // Captured unless `--nocapture`, and the reason every message below
+        // quotes a box rather than a fraction: a single number cannot tell a
+        // too-small bob from one on the wrong axis.
+        println!("bob probe at infinity: {far_box}\nbob probe at 3 blocks: {near_box}");
+
+        // --- 3. The nod, in isolation, against vanilla's constant. -----------
+        // `abs(cos(bd*PI - 0.2) * bob) * 5.0` degrees, peaking at `bob * 5`.
+        // A rotation of `t` about eye-space +X lifts an on-axis point at
+        // infinity to `ndc_y = tan(t) / tan(fov_y / 2)`, i.e. *up* the screen.
+        let nod_peak_deg = BOB_CEILING * 5.0;
+        let nod_peak_px =
+            VIEW_H * 0.5 * nod_peak_deg.to_radians().tan() / 35.0f32.to_radians().tan();
+        assert!(
+            (far_dy_lo + nod_peak_px).abs() < nod_peak_px * 0.015,
+            "the nod must reach the projection at vanilla's full 0.5 deg: expected \
+             a peak of -{nod_peak_px:.3} px on a point at infinity, measured \
+             {far_box}. Zero here is a nod-free bob, which the chest-bbox pixel \
+             gate cannot tell from a correct one."
+        );
+        assert!(
+            far_dy_hi < 0.02,
+            "the nod is rectified (`abs`), so a point at infinity may only ever \
+             move *up*; measured {far_box}"
+        );
+        assert!(
+            far_dx_lo > -0.05 && far_dx_hi < 0.05,
+            "the bob must not yaw: the sway is a pure translation and cannot move \
+             a point at infinity, and the fold drops the roll rather than \
+             smearing it onto yaw. Measured {far_box}"
+        );
+
+        // --- 4. The translation, on the near point, by axis and by shape. ----
+        // Sway: `sin(bd*PI) * bob * 0.5`, so +/-0.05 blocks laterally. At 3
+        // blocks that is `0.05/3` of an eye-space unit, and the horizontal half
+        // angle is `tan(35 deg) * aspect`.
+        let sway_px = VIEW_W * 0.5 * (BOB_CEILING * 0.5 / 3.0)
+            / (35.0f32.to_radians().tan() * ASPECT);
+        assert!(
+            near_dx_hi > sway_px * 0.9 && near_dx_lo < -sway_px * 0.9,
+            "the sway is a full sine and must swing the near point *both* ways by \
+             about {sway_px:.3} px; measured {near_box}"
+        );
+        // Dip: `-abs(cos(bd*PI) * bob)`, so the eye drops up to 0.1 blocks and a
+        // point 3 blocks ahead rises 0.1/3 of a unit *in eye space*, i.e. moves
+        // **down** the screen. Rectified, so it is one-way, and it is opposed by
+        // the nod near the phase where the dip vanishes — hence a floor on the
+        // downward peak rather than a sign assertion.
+        let dip_px = VIEW_H * 0.5 * (BOB_CEILING / 3.0) / 35.0f32.to_radians().tan();
+        assert!(
+            near_dy_hi > (dip_px - nod_peak_px) * 0.9,
+            "the dip must drop the eye a full 0.1 blocks, pushing a point 3 blocks \
+             ahead down by about {:.3} px net of the nod; measured {near_box}",
+            dip_px - nod_peak_px
+        );
+    }
+
     #[test]
     fn an_interior_block_change_dirties_exactly_its_own_section() {
         // Local (8,8,8) touches no section boundary, so a live block update
