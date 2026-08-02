@@ -41,14 +41,14 @@
 //!    shader/mesh property, deliberately independent of *which cell* the light is
 //!    sampled from — the light byte is supplied by the harness, so `fda948f`'s
 //!    sampling rule is `crates/lodestone-shell`'s to gate.
-//! 3. [`unlit_faces_reach_black_with_no_floor`] — the retired ramp's `0.2` floor
-//!    is **gone**, on real baked geometry including the tinted classes, where a
-//!    tint applied outside the light multiply would be the only way to survive it.
 //! 2. [`the_grass_block_side_overlay_survives_the_depth_test`] — a **coplanar
 //!    overlay must win over the element beneath it**. Unrelated to light, found
 //!    while auditing why grass looked wrong, and real: `grass_block` bakes 10
 //!    quads, 4 of them tinted `#overlay` faces sitting at exactly the base
 //!    cube's coordinates. A strict `CompareFunction::Less` rejects all four.
+//! 3. [`unlit_faces_reach_black_with_no_floor`] — the retired ramp's `0.2` floor
+//!    is **gone**, on real baked geometry including the tinted classes, where a
+//!    tint applied outside the light multiply would be the only way to survive it.
 //!
 //! ## The measurement: by location, not by frame average
 //!
