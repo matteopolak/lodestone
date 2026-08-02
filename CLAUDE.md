@@ -120,6 +120,18 @@ Oracles (not part of repo state — recreate them):
   the only observation that excludes concurrent edits by construction. And when *you* neuter
   something, keep the window as short as possible and restore by `cp` from a scratchpad backup with an
   md5 check — never `git checkout`.
+- **The scratchpad directory is shared between agents too, so the md5 check above is load-bearing.**
+  The path is per-*session*, and every agent in a session gets the same one — so a
+  `scratch/probe.rs` or `msg.txt` is exactly as contended as a file in the checkout, with none of the
+  git-level protections and no diff to show you what happened. Observed: an agent wrote two scripts
+  by heredoc and **read back different content than it wrote**, and found a `msg.txt` it had never
+  created already sitting there. That nearly had it classify its hunks against the shared *index*
+  instead of `HEAD`, which is the one mistake that ships another agent's lines.
+  **Use uniquely-named files** (include the issue number or a nonce), write them with the file tools
+  rather than shell heredocs, and re-read anything you are about to reason from. A `#[path]` harness
+  is the common case here: it compiles whatever is on disk at that instant, so a clean run proves
+  nothing about the file you thought you wrote. This is the same "two observations at two different
+  moments" failure as the entry above, one directory over.
 - **Never leave a stale blob in the shared index.** A `docs/README.md` blob sat staged at `7b506a8`
   while `HEAD` had `3432cb3`; committing the index would have **deleted** a newer agent's index
   bullet. Refreshing one path with `git reset -- <path>` sets that index entry back to `HEAD` and
