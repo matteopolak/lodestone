@@ -31,12 +31,24 @@ use sha1::{Digest, Sha1};
 ///
 /// The canonical published vectors use the bare username as the sole input:
 ///
-/// ```
+/// ```ignore
 /// use lodestone_auth::server_hash;
 ///
 /// assert_eq!(server_hash("Notch", &[], &[]), "4ed1f46bbe04bc756bcb17c0c7ce3e4632f06a48");
 /// assert_eq!(server_hash("jeb_", &[], &[]), "-7c9d5b0044c130109a5d7b5fb5c317c02b4e28c1");
 /// ```
+///
+/// `ignore` rather than a live doctest, and the reason is linkage rather than the
+/// example being wrong: a doctest links the **whole** crate, which pulls `rustls`
+/// in through the Microsoft OAuth path, and `cargo test --workspace` then fails
+/// with `crate rustls required to be available in rlib format, but was not found
+/// in this form`. It was the only failure in an otherwise clean 383-binary,
+/// 3862-test workspace run, and it is invisible to all three `cargo check`
+/// variants because none of them compile doctests.
+///
+/// Nothing is lost by not running it: **both vectors are asserted as real unit
+/// tests below** (`notch_matches_the_published_vector` and the `jeb_` negative-hash
+/// case), which link only the lib and do run. This block exists for the reader.
 #[must_use]
 pub fn server_hash(server_id: &str, shared_secret: &[u8], public_key_der: &[u8]) -> String {
     let mut hasher = Sha1::new();
