@@ -363,15 +363,24 @@ fn full_login_sequence_produces_expected_directives() {
                 &hex(GAME_LOGIN_HEX),
             )
             .unwrap(),
-        // Two directives since issue #288: the dimension **type** resolved against
-        // the ingested `registry_data`, then `Login`. `dimension_type: None`
-        // because this flow feeds only a `world_clock` registry above — the
-        // holder id must report as unresolved rather than defaulting to the
-        // overworld.
+        // Three directives, in this order, and the order is load-bearing: a
+        // consumer folding them sees the dimension's geometry and the biome
+        // colour table *before* the `Login` that makes a session out of them.
+        //
+        // `dimension_type: None` (issue #288) and `sky_colors: []` (issue #96)
+        // for the same reason: this flow feeds only a `world_clock` registry
+        // above, so neither the dimension-type holder id nor the biome registry
+        // resolves. Both must report as **unresolved** rather than defaulting to
+        // the overworld — an empty biome table means "the server sent no biome
+        // registry", which the shell renders as its dimension colour, never as a
+        // plausible-looking overworld blue.
         vec![
             Directive::Emit(ClientEvent::DimensionTypeChanged {
                 holder_id: 0,
                 dimension_type: None,
+            }),
+            Directive::Emit(ClientEvent::BiomeVisuals {
+                sky_colors: Vec::new(),
             }),
             Directive::Emit(ClientEvent::Login {
                 entity_id: 1,
