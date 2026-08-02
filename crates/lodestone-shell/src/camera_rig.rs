@@ -313,6 +313,368 @@ impl EyeHeightSmoother {
     }
 }
 
+// ---------------------------------------------------------------------------
+// View bobbing (issue #58)
+// ---------------------------------------------------------------------------
+
+/// Vanilla's `hurtDuration`, set alongside `hurtTime` by both
+/// `LivingEntity.animateHurt` (`LivingEntity.java:1873-1876`) and
+/// `handleDamageEvent` (`:2044-2049`). Ten ticks — half a second.
+pub const HURT_DURATION_TICKS: f32 = 10.0;
+
+/// The walk-bob state vanilla spreads across `ClientAvatarState` and
+/// `LocalPlayer`, gathered into one per-camera value (issue #58).
+///
+/// # What this is, and the four fields that are really two pairs
+///
+/// Everything here is a `current`/`previous` twin read back with the frame's
+/// partial-tick alpha, exactly like [`EyeHeightSmoother`] above and for the same
+/// reason: the update rule runs at the fixed 20 Hz tick, and a frame between two
+/// ticks must interpolate rather than re-run it.
+///
+/// * `walk_dist`/`walk_dist_o` — `ClientAvatarState.walkDist`/`walkDistO`. The
+///   **phase** of the bob: total horizontal distance walked, scaled by `0.6`
+///   (`LocalPlayer.move`, `LocalPlayer.java:989`:
+///   `addWalkedDistance(Mth.length(deltaX, deltaZ) * 0.6F)` — note it is the
+///   distance actually *moved*, post-collision, not the intended delta).
+/// * `bob`/`bob_o` — `ClientAvatarState.bob`/`bobO`. The **amplitude**, an
+///   exponential ease toward `min(0.1, horizontal speed)`
+///   (`AbstractClientPlayer.updateBob`, `ClientAvatarState.updateBob`):
+///   `bob += (target - bob) * 0.4`, and the target is a flat `0.0` unless the
+///   player is on the ground and neither dead nor swimming. That gate is why the
+///   bob fades out in mid-air instead of snapping.
+///
+/// The `0.1` ceiling is the reason the bob does not grow without bound while
+/// sprinting: vanilla's sprint speed exceeds it, so amplitude saturates and only
+/// the phase speeds up.
+///
+/// # `hurt_time`/`hurt_dir` are not interpolated the same way
+///
+/// They have no `previous` twin because vanilla does not keep one: `Camera.setup`
+/// (`Camera.java:135-137`) reads `hurtTime - partialTicks` and `hurtDir` raw. The
+/// subtraction is what smooths the flash out, and it is also why
+/// [`BobFrame::hurt_roll_degrees`] must tolerate a *negative* `hurt` — vanilla's
+/// `bobHurt` returns early on `hurt < 0.0F`, which is the ordinary case in the
+/// frames just after the countdown reaches zero.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewBob {
+    walk_dist: f32,
+    walk_dist_o: f32,
+    bob: f32,
+    bob_o: f32,
+    hurt_time: u32,
+    hurt_dir_degrees: f32,
+}
+
+impl ViewBob {
+    /// A camera that has not moved yet — no phase, no amplitude, no hurt.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One fixed physics tick.
+    ///
+    /// `moved_horizontal` is the distance the feet actually travelled this tick
+    /// in the XZ plane (post-collision — a player walking into a wall does not
+    /// bob). `speed_horizontal` is the horizontal speed vanilla's `updateBob`
+    /// reads off `getDeltaMovement()`.
+    ///
+    /// # Order matters and is vanilla's, not the readable one
+    ///
+    /// `AbstractClientPlayer.tick` saves `walkDistO = walkDist` **before**
+    /// `super.tick()` runs the movement, and `aiStep` calls `updateBob()`
+    /// **before** `super.aiStep()` — so within one tick the amplitude is eased
+    /// first and the phase advanced second. Doing it the other way round shifts
+    /// the bob by one tick against the stride, which is a phase error rather
+    /// than an amplitude one and therefore does not show up as "too much bob".
+    pub fn tick(
+        &mut self,
+        moved_horizontal: f32,
+        speed_horizontal: f32,
+        on_ground: bool,
+        dead: bool,
+        swimming: bool,
+    ) {
+        // 1. `ClientAvatarState.tick`: the phase's previous value, saved before
+        //    this tick's movement is added to it.
+        self.walk_dist_o = self.walk_dist;
+        // 2. `AbstractClientPlayer.updateBob` -> `ClientAvatarState.updateBob`.
+        let target = if on_ground && !dead && !swimming {
+            speed_horizontal.min(0.1)
+        } else {
+            0.0
+        };
+        self.bob_o = self.bob;
+        self.bob += (target - self.bob) * 0.4;
+        // 3. `LocalPlayer.move` -> `addWalkedDistance`.
+        self.walk_dist += moved_horizontal * 0.6;
+        // 4. `LivingEntity.tick`'s countdown, saturating at zero — the same
+        //    rule `lodestone_ecs::ingest::tick_hurt_time` applies to remote
+        //    entities.
+        self.hurt_time = self.hurt_time.saturating_sub(1);
+    }
+
+    /// A damage report: `LivingEntity.animateHurt(yaw)` (`:1873-1876`), which
+    /// resets the countdown to [`HURT_DURATION_TICKS`] and records the direction
+    /// the hit came from. `yaw_degrees` is the wire value from
+    /// `ClientboundHurtAnimationPacket`.
+    pub fn hurt(&mut self, yaw_degrees: f32) {
+        self.hurt_time = HURT_DURATION_TICKS as u32;
+        self.hurt_dir_degrees = yaw_degrees;
+    }
+
+    /// The frame's interpolated bob, for the partial-tick fraction `alpha`.
+    #[must_use]
+    pub fn frame(&self, alpha: f32) -> BobFrame {
+        // `ClientAvatarState.getBackwardsInterpolatedWalkDistance`:
+        //     float wda = walkDist - walkDistO;
+        //     return -(walkDist + wda * partialTicks);
+        // Note this is **not** `Mth.lerp` — it extrapolates *forward* from the
+        // current value and then negates, so it runs slightly ahead of the
+        // interpolated position rather than between the two ticks. The sibling
+        // `getInterpolatedWalkDistance` is the lerp, and nothing in `bobView`
+        // uses it. Reading the lerp here instead would be a plausible-looking
+        // half-tick phase error.
+        let wda = self.walk_dist - self.walk_dist_o;
+        BobFrame {
+            walk_phase: -(self.walk_dist + wda * alpha),
+            bob: self.bob_o + (self.bob - self.bob_o) * alpha,
+            // `Camera.setup`: `hurtTime - cameraEntityPartialTicks`.
+            hurt: self.hurt_time as f32 - alpha,
+            hurt_dir_degrees: self.hurt_dir_degrees,
+        }
+    }
+}
+
+/// One frame's worth of interpolated bob input — what vanilla puts on
+/// `CameraRenderState.entityRenderState` for `GameRenderer.bobView`/`bobHurt` to
+/// read (`Camera.java:135-152`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct BobFrame {
+    /// `backwardsInterpolatedWalkDistance`. **Already negated** by
+    /// [`ViewBob::frame`], matching vanilla, so every use below is a bare
+    /// `walk_phase * PI` with no sign of its own.
+    pub walk_phase: f32,
+    /// The interpolated amplitude, `0.0..=0.1`.
+    pub bob: f32,
+    /// `hurtTime - partialTicks`. Negative means no flash — see
+    /// [`Self::hurt_roll_degrees`].
+    pub hurt: f32,
+    /// `hurtDir`, in degrees.
+    pub hurt_dir_degrees: f32,
+}
+
+impl BobFrame {
+    /// `GameRenderer.bobView`'s eye-space translation
+    /// (`GameRenderer.java:323-327`), as `(x, y, z)`:
+    ///
+    /// ```java
+    /// poseStack.translate(
+    ///    Mth.sin(bd * (float) Math.PI) * bob * 0.5F,
+    ///    -Math.abs(Mth.cos(bd * (float) Math.PI) * bob),
+    ///    0.0F
+    /// );
+    /// ```
+    ///
+    /// The `abs` on Y is the whole character of the walk bob: the sway is a full
+    /// sine (left, right, left) but the dip is **rectified**, so the eye drops
+    /// twice per stride cycle — once per footfall — instead of rising above its
+    /// resting height on alternate steps. Dropping the `abs` halves the apparent
+    /// cadence and is not visible as an error in a still frame.
+    #[must_use]
+    pub fn view_translation(&self) -> Vec3 {
+        let phase = self.walk_phase * std::f32::consts::PI;
+        Vec3::new(
+            phase.sin() * self.bob * 0.5,
+            -(phase.cos() * self.bob).abs(),
+            0.0,
+        )
+    }
+
+    /// `bobView`'s Z rotation in degrees (`GameRenderer.java:328`):
+    /// `sin(bd * PI) * bob * 3.0`. A **roll**, in phase with the sway.
+    #[must_use]
+    pub fn view_roll_degrees(&self) -> f32 {
+        (self.walk_phase * std::f32::consts::PI).sin() * self.bob * 3.0
+    }
+
+    /// `bobView`'s X rotation in degrees (`GameRenderer.java:329`):
+    /// `abs(cos(bd * PI - 0.2) * bob) * 5.0`.
+    ///
+    /// **The `- 0.2` is inside the cosine and is in radians, not a multiple of
+    /// PI** — `Mth.cos(backwardsInterpolatedWalkDistance * (float) Math.PI - 0.2F)`.
+    /// It is a small phase lead that makes the nod peak just before the dip
+    /// bottoms out. Folding it in as `(bd - 0.2) * PI` would be a 36° phase
+    /// error and would still look like a nod.
+    ///
+    /// Rectified like the dip, so it is always a nod in one direction.
+    #[must_use]
+    pub fn view_nod_degrees(&self) -> f32 {
+        let phase = self.walk_phase * std::f32::consts::PI - 0.2;
+        (phase.cos() * self.bob).abs() * 5.0
+    }
+
+    /// `GameRenderer.bobHurt`'s tilt magnitude in degrees
+    /// (`GameRenderer.java:305-315`), before it is swung onto the damage
+    /// direction:
+    ///
+    /// ```java
+    /// if (hurt < 0.0F) { return; }
+    /// hurt /= hurtDuration;
+    /// hurt = Mth.sin(hurt * hurt * hurt * hurt * (float) Math.PI);
+    /// ...
+    /// float tiltAmount = (float)(-hurt * 14.0 * damageTiltStrength);
+    /// ```
+    ///
+    /// The quartic inside the sine is doing real work: `sin(t⁴ · π)` stays near
+    /// zero for most of the window and then spikes, so the tilt is a sharp jolt
+    /// at the moment of the hit rather than a slow lean. `sin(t · π)` would be a
+    /// smooth arc over the whole half-second and would read as nausea.
+    ///
+    /// `damage_tilt_strength` is vanilla's accessibility option
+    /// (`Options.java:876-883`, default `1.0`); pass `1.0` for the default.
+    #[must_use]
+    pub fn hurt_roll_degrees(&self, damage_tilt_strength: f32) -> f32 {
+        if self.hurt < 0.0 {
+            return 0.0;
+        }
+        let t = self.hurt / HURT_DURATION_TICKS;
+        let shaped = (t * t * t * t * std::f32::consts::PI).sin();
+        -shaped * 14.0 * damage_tilt_strength
+    }
+
+    /// The full eye-space bob transform: `bobHurt` then `bobView`, pushed onto
+    /// one pose stack in that order (`GameRenderer.java:534-536`), which is
+    /// `Hurt * View` as a matrix product.
+    ///
+    /// # Why this is a *projection* post-multiply in vanilla, and what that means here
+    ///
+    /// `GameRenderer.renderLevel` does `projectionMatrix.mul(bobStack.last().pose())`
+    /// — the bob lands **between** the projection and the view, so it acts on
+    /// **eye-space** coordinates. Our eye space is the same as vanilla's (`+X`
+    /// right, `+Y` up, forward `-Z`: `Camera.FORWARDS` is `(0, 0, -1)` and
+    /// `glam::camera::rh::view::look_to_mat4` produces the same basis), so every
+    /// constant above transcribes with **no sign flip**. The `[0,1]`-vs-reversed-Z
+    /// depth difference `CLAUDE.md` warns about lives entirely inside the
+    /// projection matrix, which sits to the *left* of this one in `P · B · V` and
+    /// therefore cannot affect it.
+    ///
+    /// Nothing in the shell multiplies this into a projection today —
+    /// [`bobbed_camera`] folds it into the [`Camera`] instead, because
+    /// `Camera::view_projection` is what the GPU layer reads and it is built from
+    /// fields. This method exists as the **reference** that fold is tested
+    /// against; see [`bobbed_camera`]'s docs for what that costs.
+    #[must_use]
+    pub fn eye_transform(&self, damage_tilt_strength: f32) -> glam::Mat4 {
+        use glam::Mat4;
+        // bobHurt: Ry(-d) * Rz(tilt) * Ry(d) — a rotation by `tilt` about the
+        // eye-space +Z axis swung `d` degrees about +Y, so a hit from straight
+        // ahead (`d == 0`) is pure roll and a hit from the side is pure nod.
+        let d = self.hurt_dir_degrees.to_radians();
+        let tilt = self.hurt_roll_degrees(damage_tilt_strength).to_radians();
+        let hurt = Mat4::from_rotation_y(-d) * Mat4::from_rotation_z(tilt) * Mat4::from_rotation_y(d);
+        // bobView: T * Rz * Rx.
+        let view = Mat4::from_translation(self.view_translation())
+            * Mat4::from_rotation_z(self.view_roll_degrees().to_radians())
+            * Mat4::from_rotation_x(self.view_nod_degrees().to_radians());
+        hurt * view
+    }
+}
+
+/// Fold a [`BobFrame`] into a [`Camera`], so the bob reaches pixels through the
+/// *existing* `Camera::view_projection` rather than needing a second matrix seam.
+///
+/// # What this models exactly, and the one thing it drops
+///
+/// A bob matrix `B` applied in eye space gives a combined view matrix `B · V`,
+/// and *any* such matrix is still a camera — it has a position and an
+/// orientation. This function recovers them mechanically: it builds `B · V`,
+/// inverts it, and reads the camera origin and forward direction straight back
+/// out. Nothing here picks a sign by hand, which is deliberate — `CLAUDE.md`
+/// records shipping an inside-out block because a polarity was asserted rather
+/// than derived, and a camera transform is exactly that shape of hazard.
+///
+/// What it cannot carry is **roll**. [`Camera`] has `position`, `yaw` and
+/// `pitch`, and `view_matrix` hardcodes `Vec3::Y` as up, so a decomposed
+/// orientation has two degrees of freedom where `B · V` has three. Concretely:
+///
+/// | bob term | magnitude | carried? |
+/// |---|---|---|
+/// | `bobView` translate (sway + dip) | ≤ `0.05` blocks | yes, exactly |
+/// | `bobView` nod (`Axis.XP`) | ≤ `0.5°` | yes, exactly |
+/// | `bobView` roll (`Axis.ZP`) | ≤ `0.3°` | **no** |
+/// | `bobHurt` tilt (`Axis.ZP`, swung by `hurtDir`) | ≤ `14°` | only the component that lands on the nod axis |
+///
+/// **This is a divergence, recorded rather than hidden.** Carrying roll needs one
+/// more field on [`Camera`] (or a `Mat4` hook on `view_projection`), and every
+/// full `Camera { .. }` struct literal in the workspace — 48 of them across ~40
+/// files, six inside `lodestone-shell/src/gpu.rs` and one in
+/// `lodestone-render/src/entity.rs` — would have to change with it. See
+/// `docs/view-bobbing.md`. The two roll terms are very different in size, which
+/// is why the walk bob is worth landing without it (`0.3°` is below noticing) and
+/// the damage tilt is not (`14°` is the whole effect).
+///
+/// `damage_tilt_strength` is vanilla's accessibility option; pass `1.0` for the
+/// default and `0.0` to disable the hurt tilt entirely.
+#[must_use]
+pub fn bobbed_camera(cam: Camera, frame: BobFrame, damage_tilt_strength: f32) -> Camera {
+    // An inert frame returns the camera **bit-identically**, not merely close.
+    // Without this the matrix round-trip below perturbs the position by ~1e-5
+    // even with an identity bob, which is enough to make "bobbing off is a
+    // no-op" and "standing still does not bob" un-assertable — and those are
+    // exactly the preconditions every gate downstream leans on. It is also the
+    // common case: standing still, and every frame with the option off.
+    if frame.bob == 0.0 && frame.hurt_roll_degrees(damage_tilt_strength) == 0.0 {
+        return cam;
+    }
+    let bobbed_view = frame.eye_transform(damage_tilt_strength) * cam.view_matrix();
+    let Some(inv) = invertible(bobbed_view) else {
+        // A degenerate view is not something a bob can produce, but returning
+        // the unbobbed camera is the only safe answer if one ever appears —
+        // never a NaN camera, which would blank the frame rather than mis-bob it.
+        return cam;
+    };
+    // The camera origin is whatever world point maps to the eye-space origin,
+    // and the camera forward is whatever world direction maps to eye-space
+    // `-Z` (`Camera::forward`'s own definition of forward).
+    let position = inv.project_point3(Vec3::ZERO);
+    let forward = inv.transform_vector3(Vec3::new(0.0, 0.0, -1.0)).normalize();
+    let (yaw, pitch) = yaw_pitch_from_forward(forward);
+    Camera {
+        position,
+        yaw,
+        pitch,
+        ..cam
+    }
+}
+
+fn invertible(m: glam::Mat4) -> Option<glam::Mat4> {
+    if m.determinant().abs() < 1e-12 {
+        return None;
+    }
+    let inv = m.inverse();
+    if inv.to_cols_array().iter().all(|v| v.is_finite()) {
+        Some(inv)
+    } else {
+        None
+    }
+}
+
+/// The inverse of [`Camera::forward`]: given a unit world direction, the
+/// `(yaw, pitch)` in degrees that [`Camera`] would need to look along it.
+///
+/// `Camera::forward` is `(-sin(yaw)cos(pitch), -sin(pitch), cos(yaw)cos(pitch))`,
+/// so this is `pitch = asin(-y)` and `yaw = atan2(-x, z)`. Derived from that one
+/// expression rather than from a convention, and round-tripped in the tests
+/// against `Camera::forward` itself so the two cannot drift.
+#[must_use]
+pub fn yaw_pitch_from_forward(forward: Vec3) -> (f32, f32) {
+    let pitch = (-forward.y).clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = (-forward.x).atan2(forward.z).to_degrees();
+    (yaw, pitch)
+}
+
 /// Construct the render camera for the given player state, **eye height above
 /// the feet**, viewport aspect, and render distance (in chunks).
 ///
@@ -399,6 +761,509 @@ mod tests {
         assert!(mid < 1.62, "eased toward swimming");
         s.tick(1.62);
         assert!(s.lerp(1.0) > mid, "eases back up, not stuck low");
+    }
+
+    // --- ViewBob: the walk bob's phase, amplitude and hurt tilt. ------------
+
+    /// Vanilla's own numbers, computed by hand from the source rather than from
+    /// this implementation: a player walking at `0.13` blocks/tick (a little
+    /// over the `0.1` ceiling) on the ground.
+    #[test]
+    fn the_amplitude_eases_by_four_tenths_toward_a_ceiling_of_a_tenth() {
+        let mut b = ViewBob::new();
+        // `updateBob`: target = min(0.1, 0.13) = 0.1, so bob += (0.1 - 0) * 0.4.
+        b.tick(0.13, 0.13, true, false, false);
+        assert!(
+            (b.frame(1.0).bob - 0.04).abs() < 1e-6,
+            "one tick reaches 0.04, got {}",
+            b.frame(1.0).bob
+        );
+        assert!(
+            (b.frame(0.0).bob - 0.0).abs() < 1e-6,
+            "partial 0 still reads the pre-tick amplitude"
+        );
+        // Twenty ticks: converged, and *never* past the ceiling however fast the
+        // player runs. This is the reason sprinting speeds the bob up rather than
+        // making it wilder.
+        for _ in 0..20 {
+            b.tick(0.5, 0.5, true, false, false);
+        }
+        let settled = b.frame(1.0).bob;
+        assert!(
+            (settled - 0.1).abs() < 1e-4,
+            "converges to the 0.1 ceiling, got {settled}"
+        );
+        assert!(settled <= 0.1 + 1e-6, "must never exceed it: {settled}");
+    }
+
+    #[test]
+    fn leaving_the_ground_fades_the_bob_out_rather_than_cutting_it() {
+        let mut b = ViewBob::new();
+        for _ in 0..20 {
+            b.tick(0.13, 0.13, true, false, false);
+        }
+        let walking = b.frame(1.0).bob;
+        assert!(walking > 0.09);
+        // Airborne: the target is a flat 0.0, so the same 0.4 ease runs the other
+        // way. A *cut* would read 0.0 on the very first airborne tick.
+        b.tick(0.13, 0.13, false, false, false);
+        let first_air = b.frame(1.0).bob;
+        assert!(
+            first_air < walking && first_air > 0.0,
+            "eases toward zero rather than snapping: {walking} -> {first_air}"
+        );
+        // Swimming and death use the same flat-zero target.
+        let mut swim = ViewBob::new();
+        for _ in 0..20 {
+            swim.tick(0.13, 0.13, true, false, false);
+        }
+        swim.tick(0.13, 0.13, true, false, true);
+        assert!(swim.frame(1.0).bob < walking, "swimming suppresses it too");
+        let mut dead = ViewBob::new();
+        for _ in 0..20 {
+            dead.tick(0.13, 0.13, true, false, false);
+        }
+        dead.tick(0.13, 0.13, true, true, false);
+        assert!(dead.frame(1.0).bob < walking, "and so does being dead");
+    }
+
+    #[test]
+    fn the_phase_accumulates_six_tenths_of_the_distance_actually_moved() {
+        let mut b = ViewBob::new();
+        b.tick(1.0, 0.13, true, false, false);
+        // `addWalkedDistance(length * 0.6)`, then negated by
+        // `getBackwardsInterpolatedWalkDistance`.
+        assert!(
+            (b.frame(1.0).walk_phase - -(0.6 + 0.6)).abs() < 1e-6,
+            "partial 1 extrapolates a further (walkDist - walkDistO): got {}",
+            b.frame(1.0).walk_phase
+        );
+        assert!(
+            (b.frame(0.0).walk_phase - -0.6).abs() < 1e-6,
+            "partial 0 is the bare current value"
+        );
+        // Walking into a wall moves nothing, so the phase must not advance —
+        // it is the distance *moved*, not the distance asked for.
+        let before = b.frame(0.0).walk_phase;
+        b.tick(0.0, 0.13, true, false, false);
+        assert!(
+            (b.frame(0.0).walk_phase - before).abs() < 1e-6,
+            "a blocked step must not advance the stride"
+        );
+    }
+
+    #[test]
+    fn the_dip_is_rectified_but_the_sway_is_not() {
+        // Two half-strides apart: the sway must reverse sign, the dip must not.
+        // This is the `Math.abs` on the Y term, and the defect it guards against
+        // (dropping the abs) halves the apparent cadence rather than changing the
+        // amplitude — invisible in a still frame.
+        let a = BobFrame {
+            walk_phase: -0.5,
+            bob: 0.1,
+            ..BobFrame::default()
+        };
+        let b = BobFrame {
+            walk_phase: -1.5,
+            bob: 0.1,
+            ..BobFrame::default()
+        };
+        assert!(a.view_translation().x * b.view_translation().x < 0.0, "sway alternates");
+        assert!(a.view_translation().y <= 0.0 && b.view_translation().y <= 0.0);
+        // And the dip's peak is a full `bob`, at whole-number phase.
+        let peak = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.1,
+            ..BobFrame::default()
+        };
+        assert!((peak.view_translation().y - -0.1).abs() < 1e-6);
+        assert!(peak.view_translation().x.abs() < 1e-6, "no sway at the dip's bottom");
+    }
+
+    #[test]
+    fn the_nods_phase_offset_is_zero_point_two_radians_not_zero_point_two_pi() {
+        // `Mth.cos(bd * (float) Math.PI - 0.2F)`. Getting this wrong is a 36°
+        // phase error that still looks like a nod, so it is pinned against the
+        // hand-evaluated value rather than against a restatement of the code.
+        let f = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.1,
+            ..BobFrame::default()
+        };
+        // cos(-0.2) = 0.980067; * 0.1 * 5.0 = 0.4900335 degrees.
+        assert!(
+            (f.view_nod_degrees() - 0.490_033_5).abs() < 1e-5,
+            "got {}",
+            f.view_nod_degrees()
+        );
+        // The wrong reading, `(bd - 0.2) * PI`, would give cos(-0.2 * PI) =
+        // 0.809017 -> 0.4045 degrees. Materially different, and this asserts we
+        // are not there.
+        assert!(
+            (f.view_nod_degrees() - 0.404_508_5).abs() > 1e-3,
+            "control: the (bd - 0.2) * PI misreading must not satisfy the above"
+        );
+    }
+
+    #[test]
+    fn the_hurt_tilt_is_a_quartic_spike_and_is_silent_once_the_countdown_lapses() {
+        let mut b = ViewBob::new();
+        b.hurt(0.0);
+        // At the instant of the hit `hurt == 10 - 0 == 10`, so t == 1 and
+        // sin(1 * PI) == 0: vanilla's tilt *starts* at zero, spikes, and returns.
+        let at_hit = b.frame(0.0).hurt_roll_degrees(1.0);
+        assert!(at_hit.abs() < 1e-4, "starts at zero, got {at_hit}");
+        // Walk the countdown down and find the peak.
+        let mut peak: f32 = 0.0;
+        let mut peak_tick = 0;
+        for tick in 0..=10 {
+            let m = b.frame(0.0).hurt_roll_degrees(1.0).abs();
+            if m > peak {
+                peak = m;
+                peak_tick = tick;
+            }
+            b.tick(0.0, 0.0, true, false, false);
+        }
+        assert!(
+            (peak - 14.0).abs() < 1.5,
+            "the peak is near the full 14 degrees, got {peak}"
+        );
+        // A quartic spike peaks *late* in the countdown (i.e. soon after the
+        // hit), not at the midpoint a plain sine would give. t = 0.7 -> t^4 =
+        // 0.24, so the peak sits around hurtTime 8.
+        assert!(
+            peak_tick <= 3,
+            "sin(t^4 PI) spikes early in the window; a plain sin(t PI) would peak \
+             at tick 5. got tick {peak_tick}"
+        );
+        // Lapsed: `hurt` goes negative and `bobHurt` returns before touching the
+        // pose at all.
+        for _ in 0..5 {
+            b.tick(0.0, 0.0, true, false, false);
+        }
+        assert!(b.frame(0.5).hurt < 0.0, "the countdown has gone negative");
+        assert_eq!(b.frame(0.5).hurt_roll_degrees(1.0), 0.0);
+        // The accessibility option scales it, and zero disables it.
+        let mut c = ViewBob::new();
+        c.hurt(0.0);
+        c.tick(0.0, 0.0, true, false, false);
+        c.tick(0.0, 0.0, true, false, false);
+        let full = c.frame(0.0).hurt_roll_degrees(1.0);
+        assert!(full.abs() > 1.0, "precondition: there is a tilt to scale");
+        assert!((c.frame(0.0).hurt_roll_degrees(0.5) - full * 0.5).abs() < 1e-5);
+        assert_eq!(c.frame(0.0).hurt_roll_degrees(0.0), 0.0);
+    }
+
+    // --- The fold into Camera, and what it drops. --------------------------
+
+    fn walking_camera() -> Camera {
+        Camera {
+            position: Vec3::new(8.5, 65.62, -12.25),
+            yaw: 37.0,
+            pitch: -8.0,
+            ..Camera::default()
+        }
+    }
+
+    #[test]
+    fn yaw_pitch_round_trips_through_cameras_own_forward() {
+        // `yaw_pitch_from_forward` must be the exact inverse of
+        // `Camera::forward`, because that is the only thing making the
+        // decomposition in `bobbed_camera` derivation-free. Checked against
+        // `Camera::forward` itself, never against a restated convention.
+        for yaw in [-179.0f32, -90.0, -1.0, 0.0, 37.0, 90.0, 178.0] {
+            for pitch in [-89.0f32, -45.0, -8.0, 0.0, 8.0, 45.0, 89.0] {
+                let cam = Camera { yaw, pitch, ..Camera::default() };
+                let (y, p) = yaw_pitch_from_forward(cam.forward());
+                assert!((p - pitch).abs() < 1e-3, "pitch {pitch} -> {p}");
+                assert!((y - yaw).abs() < 1e-3, "yaw {yaw} -> {y}");
+            }
+        }
+    }
+
+    /// The load-bearing one: the folded camera must agree with vanilla's literal
+    /// `P · B · V` for every term `Camera` can express.
+    ///
+    /// This is what stops a sign from being *asserted*. `BobFrame::eye_transform`
+    /// is a direct transcription of `GameRenderer.bobView`, and the fold is a
+    /// mechanical decomposition of it — so if either the transcription or the
+    /// decomposition has a polarity backwards, the two disagree here rather than
+    /// both looking plausible in a screenshot.
+    #[test]
+    fn the_folded_camera_reproduces_vanillas_own_bob_matrix() {
+        let cam = walking_camera();
+        // Roll set to zero by construction (`walk_phase` at the dip's bottom and
+        // no hurt), which is the regime the fold is exact in. The non-zero-roll
+        // case is measured by the next test rather than glossed.
+        let frame = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.1,
+            hurt: -1.0,
+            hurt_dir_degrees: 0.0,
+        };
+        assert!(
+            frame.view_roll_degrees().abs() < 1e-6,
+            "precondition: this frame has no roll to lose"
+        );
+        assert!(
+            frame.view_nod_degrees() > 0.1,
+            "precondition: but it does have a nod, or this proves nothing"
+        );
+        assert!(
+            frame.view_translation().length() > 0.05,
+            "precondition: and a translation"
+        );
+
+        let reference = cam.projection_matrix() * frame.eye_transform(1.0) * cam.view_matrix();
+        let folded = bobbed_camera(cam, frame, 1.0).view_projection();
+
+        // Compared by where world points *land in clip space*, not element by
+        // element: two matrices differing by a harmless scale would pass an
+        // element comparison in one direction and fail it in the other, and it
+        // is the projected position that reaches a pixel.
+        for p in [
+            Vec3::new(8.5, 65.0, 0.0),
+            Vec3::new(20.0, 70.0, 30.0),
+            Vec3::new(-4.0, 60.0, -40.0),
+            Vec3::new(8.5, 100.0, -12.0),
+        ] {
+            let a = reference * p.extend(1.0);
+            let b = folded * p.extend(1.0);
+            let (a, b) = (a.truncate() / a.w, b.truncate() / b.w);
+            assert!(
+                (a - b).length() < 1e-4,
+                "world {p} lands at {a} under vanilla's matrix and {b} under the \
+                 folded camera"
+            );
+        }
+
+        // -- negative control --------------------------------------------
+        // The comparison is sensitive: the *unbobbed* camera does not satisfy it.
+        let unbobbed = cam.view_projection();
+        let p = Vec3::new(20.0, 70.0, 30.0);
+        let a = reference * p.extend(1.0);
+        let c = unbobbed * p.extend(1.0);
+        let (a, c) = (a.truncate() / a.w, c.truncate() / c.w);
+        assert!(
+            (a - c).length() > 1e-3,
+            "control failed: the bob is too small for this comparison to see, so \
+             agreement above would prove nothing. delta {}",
+            (a - c).length()
+        );
+    }
+
+    /// The divergence, measured rather than described.
+    ///
+    /// `Camera` cannot carry roll, so a frame with roll in it *must* disagree
+    /// with vanilla — and the point of this test is to pin **how much**, so the
+    /// cost of the missing field is a number in the record rather than a shrug.
+    #[test]
+    fn the_dropped_roll_is_the_only_disagreement_and_it_is_small_for_the_walk_bob() {
+        let cam = walking_camera();
+        // Peak sway: `sin(phase * PI) == 1`, so the roll is at its maximum
+        // `bob * 3.0` degrees = 0.3 degrees at the 0.1 amplitude ceiling.
+        let frame = BobFrame {
+            walk_phase: -0.5,
+            bob: 0.1,
+            hurt: -1.0,
+            hurt_dir_degrees: 0.0,
+        };
+        assert!(
+            (frame.view_roll_degrees().abs() - 0.3).abs() < 1e-4,
+            "precondition: this is the worst case, {} degrees",
+            frame.view_roll_degrees()
+        );
+
+        let reference = cam.projection_matrix() * frame.eye_transform(1.0) * cam.view_matrix();
+        let folded = bobbed_camera(cam, frame, 1.0).view_projection();
+
+        // Screen-space residual on a 1920x1080 view, in pixels — the honest
+        // unit, since a roll's error grows with distance from the screen centre
+        // and an NDC number hides that.
+        //
+        // **Only samples that actually land on screen count.** The first version
+        // of this test used four hand-picked world points and reported 27.9 px,
+        // which looked like a real cost and was not: a 0.3 degree roll can only
+        // displace a point by `radius * tan(0.3 deg)`, so 27.9 px implies a
+        // radius of ~5300 px — i.e. the sample was far outside the frustum,
+        // where "pixels" is a meaningless unit. Points are generated along the
+        // camera's own view direction here and filtered by `|ndc| <= 1`, so what
+        // is measured is what a player could see.
+        let mut worst_px = 0.0f32;
+        let mut on_screen = 0;
+        let f = cam.forward();
+        let right = f.cross(Vec3::Y).normalize();
+        let up = right.cross(f).normalize();
+        for dist in [4.0f32, 12.0, 40.0] {
+            for (sx, sy) in [(0.0f32, 0.0f32), (0.5, 0.3), (-0.6, -0.4), (0.9, 0.9)] {
+                // A spread proportional to distance keeps the sample inside the
+                // frustum at every depth rather than only the nearest.
+                let p = cam.position + f * dist + right * (sx * dist * 0.6) + up * (sy * dist * 0.35);
+                let a = reference * p.extend(1.0);
+                let b = folded * p.extend(1.0);
+                if a.w <= 0.0 {
+                    continue;
+                }
+                let (a, b) = (a.truncate() / a.w, b.truncate() / b.w);
+                if a.x.abs() > 1.0 || a.y.abs() > 1.0 {
+                    continue;
+                }
+                on_screen += 1;
+                let px = ((a.x - b.x) * 960.0).hypot((a.y - b.y) * 540.0);
+                worst_px = worst_px.max(px);
+            }
+        }
+        assert!(
+            on_screen >= 6,
+            "precondition: this measures nothing if the samples are off screen \
+             ({on_screen} landed on screen)"
+        );
+        println!(
+            "dropped-roll residual at 1920x1080: {worst_px:.2} px worst of \
+             {on_screen} on-screen samples"
+        );
+        // `radius * tan(0.3 deg)` at the far corner of a 1920x1080 frame is
+        // `hypot(960, 540) * 0.00524 = 5.8 px`, so anything under ~6 is the
+        // geometry working out and anything much over it means the fold is
+        // losing more than the roll.
+        assert!(
+            worst_px < 6.5,
+            "a 0.3 degree roll cannot displace an on-screen point by more than \
+             ~5.8 px; {worst_px:.2} means the fold is dropping something else too"
+        );
+        // And it is genuinely non-zero — this test would be vacuous if the roll
+        // were somehow being carried after all, in which case the divergence
+        // note in `bobbed_camera`'s docs would be the stale thing.
+        assert!(
+            worst_px > 0.05,
+            "control failed: no residual at all, so `Camera` is carrying roll and \
+             the recorded divergence is wrong"
+        );
+    }
+
+    #[test]
+    fn a_still_player_gets_no_bob_at_all() {
+        // The precondition every bob gate depends on, and the one that makes
+        // "the frame changed" a meaningful assertion elsewhere: standing still
+        // must be bit-identical to no bob.
+        let cam = walking_camera();
+        let mut b = ViewBob::new();
+        for _ in 0..40 {
+            b.tick(0.0, 0.0, true, false, false);
+        }
+        let frame = b.frame(0.5);
+        assert_eq!(frame.bob, 0.0, "amplitude decayed to exactly zero");
+        assert_eq!(frame.walk_phase, 0.0, "and the phase never advanced");
+        assert_eq!(bobbed_camera(cam, frame, 1.0).position, cam.position);
+        assert_eq!(bobbed_camera(cam, frame, 1.0).pitch, cam.pitch);
+    }
+
+    /// The magnitude check, at the exact camera and world point
+    /// `tests/view_bob_pixels.rs` renders — and the one assertion that can tell a
+    /// **present** nod from a missing one.
+    ///
+    /// This exists because the pixel gate's metric could not. That gate measures
+    /// the chest's pixel *bounding box*, whose centre carries a systematic bias
+    /// against the projected centroid: under a camera pitch change the near and
+    /// far faces of a 3-D box move by different amounts, so the silhouette's
+    /// extremes do not shift like its centre. Measured, it reports `+8.50 px`
+    /// where the centroid moves `+6.54`, which is close enough to the
+    /// `+8.31` a **nod-free** bob would give that the pixel tolerance cannot
+    /// separate them — the *magnitude* species `CLAUDE.md` names, found by
+    /// predicting the number and then looking at it rather than by reading the
+    /// test.
+    ///
+    /// So the discriminating assertion lives here, on the projected point, where
+    /// it can be exact.
+    #[test]
+    fn the_nod_reaches_the_projection_and_is_worth_one_point_eight_pixels() {
+        let cam = Camera {
+            position: Vec3::new(0.5, 0.45, 2.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+            aspect: 320.0 / 240.0,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+        // The dip's bottom at the 0.1 amplitude ceiling: translate `(0, -0.1, 0)`,
+        // no roll, nod `0.4900335` degrees.
+        let dip = BobFrame {
+            walk_phase: 0.0,
+            bob: 0.1,
+            hurt: -1.0,
+            hurt_dir_degrees: 0.0,
+        };
+        // The chest's centre in `view_bob_pixels.rs`: block [0,0,4], a chest model
+        // 14/16 tall, so `(0.5, 0.4375, 4.5)` — 2.5 blocks in front of the eye.
+        let p = Vec3::new(0.5, 0.4375, 4.5);
+        // Screen y on a 240-tall viewport, growing downward.
+        let screen_y = |m: glam::Mat4| {
+            let c = m * p.extend(1.0);
+            (0.5 - c.y / c.w * 0.5) * 240.0
+        };
+
+        let plain = screen_y(cam.view_projection());
+        let vanilla = screen_y(cam.projection_matrix() * dip.eye_transform(1.0) * cam.view_matrix());
+        let folded = screen_y(bobbed_camera(cam, dip, 0.0).view_projection());
+        let translate_only = screen_y(
+            cam.projection_matrix()
+                * glam::Mat4::from_translation(dip.view_translation())
+                * cam.view_matrix(),
+        );
+
+        // Hand-computed, from vanilla's constants and the pinhole geometry, with
+        // the arithmetic written out so the expected value does not originate in
+        // the code under test:
+        //
+        //   focal length in pixels  f = (240/2) / tan(30 deg) = 207.85
+        //   translate term          f * (0.1 / 2.5)           = +8.31 px  (down)
+        //   nod term                f * tan(0.4900335 deg)    = -1.78 px  (up)
+        //   net                                               = +6.53 px
+        assert!(
+            (translate_only - plain - 8.31).abs() < 0.05,
+            "the translate alone must move it +8.31 px, got {:+.3}",
+            translate_only - plain
+        );
+        assert!(
+            (vanilla - plain - 6.53).abs() < 0.05,
+            "vanilla's own matrix must net +6.53 px, got {:+.3}",
+            vanilla - plain
+        );
+        // The load-bearing one: the fold agrees with vanilla to well inside the
+        // 1.78 px the nod is worth, so a dropped or inverted nod cannot pass.
+        assert!(
+            (folded - vanilla).abs() < 0.01,
+            "the folded camera must reproduce vanilla exactly here: vanilla \
+             {:+.3}, folded {:+.3}",
+            vanilla - plain,
+            folded - plain
+        );
+        // -- the two controls this discriminates ---------------------------
+        assert!(
+            (folded - translate_only).abs() > 1.5,
+            "control failed: the nod is worth less than 1.5 px here, so agreement \
+             above cannot distinguish a missing nod from a present one"
+        );
+        let inverted = plain + 8.31 + 1.78;
+        assert!(
+            (folded - inverted).abs() > 1.5,
+            "control failed: an inverted nod would land at {inverted:.3} and the \
+             fold is at {folded:.3}, which is not far enough apart to matter"
+        );
+        // And the fold really does carry it as pitch, in the direction that moves
+        // the scene *up*. Read, not asserted as a polarity: the sign is whatever
+        // agreement with vanilla above requires.
+        let bobbed = bobbed_camera(cam, dip, 0.0);
+        println!(
+            "folded camera: pitch {:+.5} deg (was {:+.1}), position {:?}",
+            bobbed.pitch, cam.pitch, bobbed.position
+        );
+        assert!(
+            (bobbed.pitch - dip.view_nod_degrees()).abs() < 1e-3,
+            "the nod lands on pitch as +{:.5} deg",
+            dip.view_nod_degrees()
+        );
     }
 
     #[test]
