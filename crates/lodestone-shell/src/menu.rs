@@ -34,6 +34,7 @@
 //! [`crate::app`]'s staged launcher).
 
 pub mod accounts;
+pub mod layout;
 pub mod nav;
 pub mod render;
 pub mod servers;

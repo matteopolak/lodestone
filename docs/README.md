@@ -232,6 +232,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   jar settles — the sprite argument is `isHoveredOrFocused()` and not
   `isFocused()`, the two `WidgetSprites::get` arguments are different predicates,
   and `EditBox` does route through the record.
+- [Menu layout containers](./menu-layout.md) — the second child (#394):
+  `GridLayout`, `LinearLayout`, `FrameLayout`, `HeaderAndFooterLayout` and
+  `Divisor`, with the title column and the pause grid now **arranged** instead of
+  tabulated and their hand-derived rects kept as the no-move gate. Also why
+  `setX` truncates where `setY` rounds, why the alignment model is padding-aware
+  rather than a naive centre, which of vanilla's two two-phase timings this
+  follows and why (`PauseScreen`'s — nothing here survives a frame to be
+  repositioned), and the measured reason the title screen's hand arithmetic is
+  numerically a `LinearLayout` even though vanilla uses no layout class for it.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the
