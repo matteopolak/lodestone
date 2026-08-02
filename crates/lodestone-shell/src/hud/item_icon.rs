@@ -80,7 +80,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use glam::Mat4;
-use lodestone_assets::font::metrics as font_metrics;
+// `font::metrics` used to be imported here for `LINE_HEIGHT`, which the stack
+// count's vertical anchor was derived from. Issue #384 replaced that derivation
+// with vanilla's own constant (`COUNT_TOP`), so nothing in this module needs the
+// font's metrics any more — see `COUNT_RIGHT`'s doc comment for why a derived
+// anchor was the defect rather than the off-by-one.
 use lodestone_assets::{DisplaySlot, DisplayTransform, IconPart, ItemAtlas, ResourceLocation};
 use lodestone_render::{
     BlockEntityModelSet, BlockModels, CHEST_SINGLE, CameraUniform, ChestHalf, ChestMaterial,
