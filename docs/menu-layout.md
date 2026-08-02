@@ -107,6 +107,12 @@ When #395 gives widgets persistent focus, `OptionsSubScreen`'s order becomes the
 right one for screens that own state, and this note is the reason the choice was
 not arbitrary.
 
+**#395 landed and that is what happened.** `Screen::ServerEdit`'s two `EditBox`es
+hold a caret, a selection and a scroll offset, so they cannot be rebuilt per frame;
+`render::build`'s `draw_edit_box` therefore *repositions* them — on a per-frame
+clone, because `frame_for` takes `&MenuNav` — instead of arranging a fresh tree.
+See [`menu-focus.md`](./menu-focus.md).
+
 ## What consumes it
 
 `menu/render.rs`:

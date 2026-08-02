@@ -49,16 +49,26 @@
 //!
 //! - **Add state to [`Widget`], not to a screen.** The point of the type is that
 //!   the third screen does not write the blit a third time.
-//! - **`focused` here carries vanilla's `isHoveredOrFocused()`, not
+//! - **The sprite's second argument is `isHoveredOrFocused()`, not
 //!   `isFocused()`.** This is worth reading twice, because both #393's body and
 //!   `docs/ui-framework.md` say `isFocused()` and the jar disagrees:
 //!   `AbstractButton.extractDefaultSprite` passes
 //!   `SPRITES.get(this.active, … this.isHoveredOrFocused())`
 //!   (`AbstractButton.java:43-53`), and `isHoveredOrFocused()` is
-//!   `isHovered() || isFocused()` (`AbstractWidget.java:211-213`). The shell has
-//!   one row cursor that *both* the keyboard and [`super::nav::MenuNav::hover`]
-//!   move, so one flag is the faithful model — but if #395 ever splits hover from
-//!   focus, this field is the join point and it must stay an `||`.
+//!   `isHovered() || isFocused()` (`AbstractWidget.java:211-213`).
+//!
+//!   #393 carried both facts in one `focused` field, because the shell had a
+//!   single row cursor that the keyboard *and* [`super::nav::MenuNav::hover`]
+//!   moved. **#395 split them**: [`super::focus::FocusSet`] owns real keyboard
+//!   focus, so [`Widget::hovered`] is now its own field and
+//!   [`Widget::is_hovered_or_focused`] is the join. Keep it an `||`. Dropping
+//!   either side compiles, passes every existing test that sets only `focused`,
+//!   and changes how every button in the client highlights.
+//!
+//!   [`super::edit_box::EditBox`] does **not** share this: `EditBox.java:407`
+//!   passes `isFocused()` alone, so hovering a text field does not draw its
+//!   highlighted sprite. The `||` belongs to the button, not to the widget
+//!   contract.
 //! - **The two `get` arguments are not the same predicate.** `AbstractButton`
 //!   passes the raw `active` field, while `EditBox.java:407` passes
 //!   `isActive()` (i.e. `visible && active`). [`Widget::background_sprite`]
@@ -279,9 +289,21 @@ pub struct Widget {
     /// Whether the widget is drawn at all. `AbstractWidget.extractRenderState`
     /// wraps everything in `if (this.visible)` (`AbstractWidget.java:56-62`).
     pub visible: bool,
-    /// Vanilla's `isHoveredOrFocused()`, collapsed to one flag — see the module
-    /// docs on why, and on what #395 must preserve if it splits them.
+    /// `AbstractWidget.focused` — **keyboard** focus alone
+    /// (`AbstractWidget.java:211-218`).
+    ///
+    /// This used to carry `isHoveredOrFocused()`, because the shell had one row
+    /// cursor that both the keyboard and the mouse moved. #395 split them:
+    /// [`super::focus::FocusSet`] owns real focus, so hover is now a separate
+    /// fact and [`Self::hovered`] holds it. The sprite predicate joins the two
+    /// with `||` — see [`Self::is_hovered_or_focused`], which is the one place
+    /// that must not pick a side.
     pub focused: bool,
+    /// `AbstractWidget.isHovered`, set from **geometry alone** every frame
+    /// (`AbstractWidget.java:56-62`) and never consulted about `active` — which
+    /// is why a greyed-out button under the cursor still looks greyed out rather
+    /// than vanishing.
+    pub hovered: bool,
     /// The background sprite set, or `None` for a widget with no sprite
     /// background of its own (the `Checkbox`/`EditBox`/slider family).
     pub sprites: Option<WidgetSprites>,
@@ -304,6 +326,7 @@ impl Default for Widget {
             active: true,
             visible: true,
             focused: false,
+            hovered: false,
             sprites: None,
             icon: None,
         }
@@ -384,16 +407,37 @@ impl Widget {
         self.is_active() && !self.focused
     }
 
+    /// `AbstractWidget.isHoveredOrFocused()` (`AbstractWidget.java:211-213`):
+    /// `isHovered() || isFocused()`.
+    ///
+    /// **The `||` is the whole point of this method existing.** #393 collapsed
+    /// hover and focus into one flag because the shell had a single row cursor;
+    /// #395 split them, and this is the exact join where picking one of the two
+    /// would silently change every button's highlight — a focused-but-unhovered
+    /// button would stop lighting up, or a hovered-but-unfocused one would.
+    /// Neither shows up in a `cargo check`.
+    #[must_use]
+    pub fn is_hovered_or_focused(&self) -> bool {
+        self.hovered || self.focused
+    }
+
     /// The background sprite id, or `None` when this widget has no sprite
     /// background.
     ///
     /// `AbstractButton.extractDefaultSprite` (`AbstractButton.java:43-53`):
     /// `SPRITES.get(this.active, this.isHoveredOrFocused())`. Note the first
     /// argument is the raw `active` field, not `isActive()` — see the module
-    /// docs.
+    /// docs — and the second is [`Self::is_hovered_or_focused`], **not**
+    /// [`Self::focused`].
+    ///
+    /// `EditBox` differs on *both* arguments: `EditBox.java:407` is
+    /// `SPRITES.get(this.isActive(), this.isFocused())` — hover does not
+    /// highlight a text field, only focus does. That is
+    /// [`super::edit_box::EditBox::background_sprite`], deliberately not this.
     #[must_use]
     pub fn background_sprite(&self) -> Option<&'static str> {
-        self.sprites.map(|s| s.get(self.active, self.focused))
+        self.sprites
+            .map(|s| s.get(self.active, self.is_hovered_or_focused()))
     }
 
     /// The label colour: [`ACTIVE_LABEL`] or, when inactive, [`INACTIVE_LABEL`].
@@ -680,6 +724,51 @@ mod tests {
         focused.focused = true;
         assert!(!focused.takes_focus());
         assert!(focused.is_active(), "but it is still active and clickable");
+    }
+
+    #[test]
+    fn the_sprite_predicate_is_hovered_or_focused_and_stays_an_or() {
+        // #395 split hover from focus. This is the join: `AbstractButton` passes
+        // `isHoveredOrFocused()`, so *either* alone must light the button up and
+        // the two must be independently observable — which is the thing a port
+        // that quietly picks one side still compiles through.
+        let mut w = Widget::button(0.0, 0.0, 200.0, 20.0, "Singleplayer");
+        assert!(!w.is_hovered_or_focused());
+        assert_eq!(w.background_sprite(), Some("widget/button"));
+
+        w.focused = true;
+        assert!(w.is_hovered_or_focused(), "keyboard focus alone");
+        assert_eq!(w.background_sprite(), Some("widget/button_highlighted"));
+
+        w.focused = false;
+        w.hovered = true;
+        assert!(w.is_hovered_or_focused(), "hover alone");
+        assert_eq!(
+            w.background_sprite(),
+            Some("widget/button_highlighted"),
+            "a hovered-but-unfocused button highlights; dropping `hovered` from \
+             the join would silently stop that and break no test that only sets \
+             `focused`"
+        );
+
+        // Both, and then the disabled override: `WidgetSprites`'s 3-argument
+        // form puts the *disabled* sprite in `disabledFocused`, so hover and
+        // focus together still lose to `active = false`.
+        w.focused = true;
+        assert_eq!(w.background_sprite(), Some("widget/button_highlighted"));
+        w.active = false;
+        assert_eq!(w.background_sprite(), Some("widget/button_disabled"));
+
+        // Focus and hover are genuinely separate facts now: `takes_focus` reads
+        // only `focused`, so hovering a widget must not make Tab skip it.
+        let mut h = Widget::button(0.0, 0.0, 200.0, 20.0, "Multiplayer");
+        h.hovered = true;
+        assert!(
+            h.takes_focus(),
+            "hover is not focus — `nextFocusPath` keys on `isFocused()` alone"
+        );
+        h.focused = true;
+        assert!(!h.takes_focus());
     }
 
     #[test]

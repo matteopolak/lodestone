@@ -241,6 +241,18 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   follows and why (`PauseScreen`'s — nothing here survives a frame to be
   repositioned), and the measured reason the title screen's hand arithmetic is
   numerically a `LinearLayout` even though vanilla uses no layout class for it.
+- [Menu focus and `EditBox`](./menu-focus.md) — the third child (#395): focus,
+  Tab/arrow traversal, `ContainerEventHandler` dispatch and the three child
+  registries, plus `EditBox` wired into `Screen::ServerEdit`'s address fields. Also
+  why a focused text field swallows the arrow keys purely from
+  `Screen.keyPressed`'s **ordering** rather than any rule, that Tab's wrap is a
+  `clearFocus()`-then-retry in `Screen` and **not** in `handleTabNavigation` (so
+  arrows do not wrap at all), that arrow navigation has a *second* "vaguely in
+  direction" pass without which focus dies at the end of a column, the first menu
+  widgets in this shell that **outlive a frame** and what that cost, and the
+  correction #393's own correction needs: `EditBox` passes `isFocused()` where
+  `AbstractButton` passes `isHoveredOrFocused()`, so hovering a text field must
+  *not* highlight it.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the

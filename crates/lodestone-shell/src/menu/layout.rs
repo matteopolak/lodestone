@@ -62,6 +62,13 @@
 //! order becomes the right one for screens that own state — which is the reason
 //! this choice is written down rather than assumed.
 //!
+//! **#395 landed and that is what happened**, for the one screen that owns state:
+//! [`super::edit_box::EditBox`] holds a caret, a selection and a scroll offset, so
+//! `Screen::ServerEdit`'s fields cannot be rebuilt per frame and
+//! [`super::render`]'s `draw_edit_box` *repositions* them instead. Nothing in this
+//! file changed — the title and pause trees still have nothing to reposition — but
+//! the sentence above is no longer hypothetical. See `docs/menu-focus.md`.
+//!
 //! ## How to change it
 //!
 //! - **`GridLayout`'s row and column counts are *derived*, not declared.** They

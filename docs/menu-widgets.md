@@ -120,6 +120,14 @@ subtly wrong.
    keyboard and `MenuNav::hover`, so one flag is the faithful model and the shipped
    behaviour was already right — but a #395 that splits hover from focus must join
    them with an `||` here, not drop one.
+
+   **#395 did split them**, and this is now the state of it: `Widget::hovered` is
+   its own field, `Widget::focused` is keyboard focus alone, and
+   `Widget::is_hovered_or_focused` is the `||`. Two things follow —
+   `Widget::takes_focus` reads `focused` only (hover is not focus, so hovering a
+   widget must not make Tab skip it), and `EditBox` does **not** share the
+   predicate: `EditBox.java:407` passes `isFocused()`, so hovering a text field
+   draws its plain sprite. See [`menu-focus.md`](./menu-focus.md).
 2. **The two `get` arguments are not the same predicate.** `AbstractButton` passes
    the raw `active` field; `EditBox.java:407` passes `isActive()` (i.e.
    `visible && active`). `WithInactiveMessage.getMessage()` also keys on `active`
@@ -141,6 +149,11 @@ hover tooltip, so a `tooltip` field would reach zero pixels. It lands with the
 screen-level input layer (#395), which is what knows how long the cursor has
 rested. Adding the field now would be an island; `CLAUDE.md`'s dominant defect
 class, sixteen confirmed.
+
+**#395 landed and it is still deferred**, for the same reason narrowed: that layer
+turned out to see clicks and keypresses, not hover *dwell time*, so it does not
+know how long the cursor has rested either. See
+[`menu-focus.md`](./menu-focus.md)'s deliberate-gaps list.
 
 ## How it is proved
 
