@@ -212,10 +212,13 @@ If that equality ever stops holding, the rect table fails and names the button.
   `screen.width`), so unlike the title column and the pause grid its arranged rects
   are not reusable at another size — a consumer must either re-arrange per canvas
   or, as #397 does, convert them to `Origin`-relative offsets *and gate that the
-  offsets really are canvas-invariant*. It is still true that you should not point
-  it at `Screen::Settings` or `Screen::ServerList` as they stand (that is #55/#396's
-  work): those use this shell's own centred row stack, so converting them is a
-  deliberate *visual* change.
+  offsets really are canvas-invariant*. **#55 is the second consumer and it took the
+  other route**: `options::root_widget_rects` re-arranges the whole tree per
+  resolution and reads `widget_rects` out of it, precisely because the content band
+  is canvas-dependent and there is nothing to cache — see
+  [`settings-screen.md`](./settings-screen.md). `Screen::ServerList` is still on this
+  shell's own centred row stack, so pointing this at it is a deliberate *visual*
+  change and #396's work.
 - **`EqualSpacingLayout` and `CommonLayouts` are not ported.** One user each in
   the whole client tree; porting them now would be an island.
 - **Do not arrange a container screen with any of this.** Zero of `screens/

@@ -1,0 +1,322 @@
+# The settings tree, with unsupported controls disabled
+
+## What it is
+
+`crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as
+a **table plus arithmetic**: eight pages, **135 controls**, of which **18 work
+and 117 are present and greyed out**. Reached from the title screen's Options
+button and from the pause menu's, on `Screen::Settings`.
+
+This is issue #55, the settings branch of the menu-framework epic #392.
+[`ui-framework.md`](./ui-framework.md) is the plan of record;
+[`menu-widgets.md`](./menu-widgets.md) (#393) is the leaf,
+[`menu-layout.md`](./menu-layout.md) (#394) the containers,
+[`menu-focus.md`](./menu-focus.md) (#395) the input layer.
+
+**The disabled majority is the deliverable.** A greyed row in vanilla's own
+position makes the gap between this client and vanilla *visible*; a missing row
+silently changes the screen's shape and the gap becomes something you have to
+already know about. Vanilla disables its own controls for exactly this reason —
+the narrator button (`OptionsSubScreen.java:43-46`), the anisotropy slider
+(`VideoSettingsScreen.java:166-167`), telemetry (`OptionsScreen.java:88-92`) — so
+this is copying an idiom rather than inventing one.
+
+## How it works
+
+### One mechanism, not thirteen screens
+
+`Options.java` declares 94 `OptionInstance` fields with 93 accessors, and every
+settings sub-screen is the same three lines: a `HeaderAndFooterLayout`, an
+`OptionsList`, and an `addOptions()` that calls `addBig` / `addSmall` /
+`addHeader`. So a settings screen is a **list of options**, and the census is the
+call sites — which is why the whole tree here is `static` tables of `Entry` and
+`Cell` rather than 135 hand-placed widgets. Adding a screen is adding a `static`.
+
+| type | vanilla |
+|---|---|
+| `Entry::Header` / `Big` / `Small` | `OptionsList.addHeader` / `addBig` / `addSmall` |
+| `Cell::Option(OptionSpec)` | an `OptionInstance` through `createButton` |
+| `Cell::Nav` | a `Button` that calls `setScreen` |
+| `Cell::Act` | `Done`, the accessibility guide link, Credits |
+| `Placement` | *where* a widget is, resolved at draw time |
+
+### The eight pages, and the five that are not here
+
+| page | controls | vanilla |
+|---|---|---|
+| Root | 13 | `OptionsScreen` — the only page that is **not** an `OptionsSubScreen` |
+| Video | 32 | `VideoSettingsScreen`, three headers |
+| Accessibility | 27 | `AccessibilityOptionsScreen`, two footer buttons |
+| Chat | 19 | `ChatOptionsScreen` |
+| Sound | 17 | `SoundOptionsScreen` |
+| Controls | 10 | `controls/ControlsScreen` |
+| Skin | 9 | `SkinCustomizationScreen` |
+| Mouse | 8 | `MouseSettingsScreen` |
+
+Counts include each page's own footer, which is how #55's census counted the
+root's Done.
+
+Five vanilla screens are **not built**, and each is reachable as a
+present-and-inactive nav button so the parent screen's shape stays honest. The
+reason is uniform: every one of them needs a *different list widget*, not more
+options.
+
+| screen | why not |
+|---|---|
+| `KeyBindsScreen` | `KeyBindsList`, not `OptionsList`: `getRowWidth()` 340, two widgets per row (a 150 px bind button plus a 20 px per-row Reset), and a live key-capture mode. That is #15. |
+| `LanguageSelectScreen` | a scrolling `ObjectSelectionList` of languages, and this client loads exactly one language table. `FontOptionsScreen`'s two options hang off it and are unreachable without it. |
+| `PackSelectionScreen` | two drag-between `ObjectSelectionList`s over a `PackRepository`. |
+| `TelemetryInfoScreen` | prose and external links; no options at all. |
+| `OnlineOptionsScreen` | seven Realms/Xbox controls with nothing behind any of them. |
+
+Building a second and third selection-list type in the same change is where this
+stops being one mechanism. #396 and #397 are landing that shape concurrently.
+
+### What is actually live — and a correction to the census
+
+**Two options**, not four:
+
+| option | page | field |
+|---|---|---|
+| `guiScale` | Video, under *Display* | `config::Options::gui_scale` |
+| `bobView` | Accessibility | `config::Options::view_bobbing` |
+
+Plus eight `Done` buttons and eight working nav buttons: 18 live, 117 inactive.
+
+#55's census comment and `ui-framework.md` both say **"4 of 93"**, listing
+`render_distance` and `sensitivity` alongside those two. That is wrong, and it is
+wrong in the way `CLAUDE.md`'s rule 2 describes — it was written by counting
+`config.rs`'s public fields and it counted **two structs**:
+
+- `config::Options` is the *persisted* struct (`options.json`). It has three
+  fields: `gui_scale`, `keybinds`, `view_bobbing`. Only two are vanilla
+  `OptionInstance`s.
+- `config::Config` is *argv*, "parsed fresh from argv every run and never written
+  back" in its own doc comment. `render_distance` and `sensitivity` live there.
+
+So a Render Distance or Sensitivity row that appeared to work would be fabricated
+persistence: the value would be honoured for the rest of the session by accident
+of the CLI default and lost on restart. Both are rendered inactive. Making them
+live is real work — a field on `Options`, a JSON key, and a consumer in `app.rs`
+that prefers it over the flag — and `sensitivity` additionally cannot be an `f32`
+without dropping `Options`' `Eq`.
+
+### Geometry: `OptionsList`, transcribed
+
+Row positions come from four vanilla expressions and nothing else:
+
+```text
+list.updateSize(width, layout)  -> position (0, layout.getHeaderHeight())
+getFirstEntryY()               -> list.getY() + 2
+entry y                        -> firstEntryY + sum(previous entry heights)
+Entry.getContentY()            -> entry.y + 2
+Entry.extractContent x         -> screen.width / 2 - 155 + column * 160
+```
+
+Entry heights are the list's `itemHeight` of 25, except a header, which is
+`paddingTop + 9 + 4` where `paddingTop` is **0 for the first entry in the list
+and 18 after** (`OptionsList.java:56-60`). That first-header case is why
+`entry_height` takes an index rather than being a method on `Entry`.
+
+The root page is different: it has no list. Its header is a vertical
+`LinearLayout` (title + a horizontal FOV/Online pair) in a 61 px band, its
+content a 2×5 `GridLayout` of 150 px nav buttons, its footer a 200 px Done. That
+tree is **built and arranged for real** — `root_widget_rects` is
+`HeaderAndFooterLayout`'s first production consumer (#394 landed it with
+arithmetic-only gates and a note saying no screen used it yet).
+
+### Where a row's rect comes from
+
+`render::frame_for` runs **before the canvas is known**, so every
+canvas-dependent term has to live behind an `Origin`. `Origin::Settings` is the
+only variant that carries data, and it has to: a row's position depends on the
+page, the entry, *and how far the list is scrolled*.
+
+```text
+MenuRow.slot = Slot { origin: Origin::Settings(Placement), dx: 0, dy: 0, w, h }
+Origin::anchor(w, h) -> options::placement_anchor(placement, w, h)
+```
+
+`row_rect` is still the single definition of where a row is, which is why the
+draw, the mouse hover and `app.rs`'s hit-test cannot drift apart.
+
+Unlike `Origin::PauseGrid`, this one **runs a layout** rather than evaluating an
+expression against a cached arrangement: `HeaderAndFooterLayout` places its
+content band from the canvas *height*, so there is no canvas-independent
+arrangement to cache. It is ~15 small boxes per resolution on a screen with no
+world behind it.
+
+### Sliders draw a different widget
+
+`OptionInstance.createButton` dispatches on the `ValueSet`: a `CycleableValueSet`
+gets a `CycleButton` (an `AbstractButton`, so `widget/button*`), a
+`SliderableValueSet` gets an `OptionInstanceSliderButton` (an
+`AbstractSliderButton`, so `widget/slider*`). `MenuRow::slider` carries that, and
+`widget::SLIDER_SPRITES` is the sprite set.
+
+**`guiScale` is a cycle button, not a slider**, and getting this backwards would
+draw a slider track under the one option on the Video page that works: its
+`ValueSet` is a `ClampingLazyMaxIntRange`, whose `createCycleButton()` returns
+`true` (`OptionInstance.java:213-216`). So no live option in this client is a
+slider, which is why `MenuRow::slider` is a `bool` and not a value.
+
+## The four deliberate departures from vanilla
+
+Each is a judgement call rather than a shortcut, so each is written down with what
+the alternative would have cost.
+
+**1. An inactive option shows its caption alone.** Vanilla shows
+`genericValueLabel(caption, value)` — `"%s: %s"` (`Options.java:1974-1976`). We
+hold no value for an option we do not honour, and printing one would be the
+fabricated persistence this issue exists to avoid: a row reading
+`Entity Shadows: ON` beside a client that draws no shadows is a lie a screenshot
+cannot tell from a working feature. The two live options *do* use
+`genericValueLabel`.
+
+**2. An inactive slider draws its track and no handle.** The handle's position
+*is* the value (`AbstractSliderButton.extractWidgetRenderState`), so putting one
+at 0 is departure 1 in pixels instead of text. This is the one place where the
+absence of a component is the honest render; it is not "disabled art", which
+`menu-widgets.md` correctly forbids for this widget family. `Widget::slider`'s
+doc says where the handle goes when a slider does go live.
+
+**3. The scroll snaps to whole entries, and the visible window is a fixed pixel
+budget.** `AbstractSelectionList` scrolls continuously and scissors the band;
+this menu pipeline has no scissor, so a row that overran the band would paint over
+the footer. `LIST_WINDOW_PX` is therefore derived from the **shortest** content
+band any `gui_scale` can produce (`config::MIN_SCALED_HEIGHT`, vanilla's
+`Window.java:453`), which makes it correct at every canvas and *conservative* at
+large ones — seven 25 px rows where vanilla would show eleven or twelve.
+`menu/accounts.rs`'s `VISIBLE_ROWS` is the existing precedent for the same trade.
+This is the departure most worth revisiting: a scissor in the menu pipeline, or a
+`&mut MenuNav` in `frame_for`, would delete it.
+
+**4. Up/Down move the cursor over *every* control, including inactive ones.**
+`AbstractWidget.nextFocusPath` returns `null` when `!isActive()`
+(`AbstractWidget.java:152-158`), and `MenuNav`'s `step_enabled` skips inactive
+rows on the title and pause screens. On a screen whose *content* is the inactive
+majority, skipping them would leave 117 of 135 controls unreachable **and
+unscrollable** — i.e. invisible, which defeats the whole issue. The vanilla
+predicate still governs *activation*: Enter on an inactive row does nothing, and
+`WidgetSprites::get(false, true)` keeps it drawing `widget/button_disabled` under
+the cursor exactly as vanilla does.
+
+## How to change it
+
+- **Adding a control is a table edit.** `static VIDEO`, `static CHAT`, … in
+  `options.rs`, in vanilla's own array order — `addSmall` walks an array two at a
+  time (`OptionsList.java:37-42`), so the two columns of a row are *consecutive
+  entries of vanilla's array* and the last is alone when the count is odd. Reorder
+  a table and `the_per_screen_control_counts_are_the_censused_ones` plus
+  `the_settings_rows_are_in_the_order_click_assumes` are what catch it.
+- **Making an option live is three edits and one of them is not here.** A
+  `LiveOption` variant, `live: Some(..)` on the spec, an arm in
+  `SettingsNav::activate`'s caller (`MenuNav::apply_settings`) — and a **consumer**
+  that actually honours the field. Without the fourth, the row is an island: it
+  will cycle, persist and change nothing on screen.
+- **Never label an option you do not honour with a value.** See departure 1. The
+  test that holds the line is
+  `an_inactive_option_shows_its_caption_and_a_live_one_shows_its_value`, which
+  asserts both directions.
+- **A page's control order is one index space**, shared by the keyboard cursor,
+  the mouse hover, `app.rs`'s hit-test and `SettingsNav::activate` — exactly as
+  `MAIN_BUTTONS`' order is on the title screen. If you add a widget that is drawn
+  but not focusable (a header `StringWidget` is one), it must reach the frame as a
+  `MenuLabel` and **not** enter `controls()`, or every row index after it is wrong.
+- **Escape unwinds a history stack, not a `parent()`.** The tree is a *graph*:
+  Accessibility links to Controls, which the root also links to. "Where did I come
+  from" is history.
+- **`SettingsNav::reset()` on every entry to the screen.** Vanilla builds a new
+  `OptionsScreen` each time, so re-entering Options must not resume three pages
+  deep. `MenuNav`'s two `PauseButton::Options`/`MainButton::Options` arms call it.
+
+## How it is proved
+
+`options.rs`'s own tests, each with the vanilla line cited and, where an absence
+is claimed, a control:
+
+- **The census**, per screen and in total, against #55's `addBig`/`addSmall`
+  call-site counts — an expected value from outside the code under test.
+- **The live/inactive ratio**, asserted as an exact list of `LiveOption`s, so
+  quietly enabling a row has to say so here. Its control is `renderDistance`,
+  which must report itself inactive while `guiScale` reports live through the same
+  predicate.
+- **Label composition**, both directions: `genericValueLabel` for a live row,
+  caption alone for an inactive one.
+- **`guiScale` is not a slider**, with `renderDistance` as the control.
+- **Header heights**, both branches of the first-entry `paddingTop` rule, with the
+  two asserted *unequal* so an implementation that ignored the index fails.
+- **Row geometry** against hand-derived numbers (`480 / 2 - 155 = 85`, the
+  `+160` column, `33 + 2 + 2 = 37`), plus Java integer division on an odd width.
+- **The visible window never overruns the footer at
+  `MIN_SCALED_HEIGHT`** — swept over every page at every scroll position, with an
+  executed control: the first entry the window *rejects* must be one that genuinely
+  would not have fitted.
+- **Scrolling reaches every entry on the longest page**, by stepping the cursor
+  through all 32 of Video's controls and requiring the union of the windows to be
+  every entry. This is departure 4's anti-island gate: it is what would fail if the
+  cursor skipped inactive rows.
+- **`the_settings_rows_are_in_the_order_click_assumes`**, swept over every page at
+  every scroll position: the frame's rows and the control list must agree in
+  length, label, `enabled` **and placement**. This is #391's guard.
+- **`a_click_acts_on_the_row_it_landed_on_and_nothing_else`** is #391's shape
+  directly: click GUI Scale and it cycles; click its inactive left-hand neighbour
+  and *nothing happens*; click past the end of the frame and nothing happens.
+- **`hover_and_the_cursor_agree_on_every_visible_row`** — hovering row *n* must
+  select row *n*, for every row of every page at every scroll position.
+- **The root layout** against hand-derived rects for all fourteen widgets, and
+  the content band's `Math.min` clamp asserted on both sides (a canvas with room
+  and one without).
+- **`every_placement_resolves_to_a_rect_on_screen`** is the anti-island assertion
+  at this layer: a `Placement` whose index ran past its arranged tree resolves to
+  an off-canvas sentinel, so it fails here rather than drawing nothing and looking
+  like a table that was never wired.
+
+`nav.rs` re-checks the two that cross a file boundary through the **real**
+`frame_for`, which is the path `app.rs` uses, and the four rewritten
+settings tests drive the tree with nothing but the keys a player has — reaching
+GUI Scale by pressing Down is what proves the row is reachable at all.
+
+`widget.rs`'s `a_slider_has_a_track_but_no_disabled_track` earned its place: the
+first version of `SLIDER_SPRITES` used the 2-argument collapse, which puts the
+*focused* sprite in `disabledFocused`, and it reported
+`widget/slider_highlighted` for a greyed-out slider under the cursor. Vanilla's
+predicate is a **conjunction** (`isActive() && isFocused() && !canChangeValue`),
+which is the 3-argument collapse with `enabled == disabled`. The two collapses
+are not interchangeable, and the difference is only observable on a
+disabled-and-focused widget — a state vanilla never reaches, because
+`nextFocusPath` refuses focus to an inactive widget, and this shell reaches on
+purpose (departure 4).
+
+## Configuration
+
+- `crates/lodestone-shell/src/config.rs` — `Options` (`options.json`): the two
+  live settings. `MIN_SCALED_HEIGHT` is public because `LIST_WINDOW_PX` is derived
+  from it.
+- `crates/lodestone-shell/src/resources.rs` — `load_menu_gui_atlas()` supplies
+  `widget/button*` and `widget/slider*`. Without a pack the rows fall back to flat
+  fills, which is what the jar-less and headless paths see.
+
+## Dependencies
+
+- `menu/layout.rs` — `HeaderAndFooterLayout` (first production consumer),
+  `GridLayout`, `LinearLayout`, `LayoutSettings`, `widget_rects`, `ipx`.
+- `menu/widget.rs` — `Widget`, `WidgetSprites`, `BUTTON_SPRITES`,
+  `SLIDER_SPRITES`, the grey `-6250336`.
+- `menu/render.rs` — `Origin::Settings`, `MenuRow::slider`, `draw_widget`.
+- `menu/nav.rs` — `MenuNav::settings`, `key_settings`, `apply_settings`, and the
+  eager persistence rule.
+- The 26.2 jar at `.cache/mc/26.2/{client-src,client.jar}` — behavioural reference
+  only, and `assets/minecraft/lang/en_us.json` for every caption verbatim.
+
+## See also
+
+- [Menu UI framework](./ui-framework.md) — the epic's plan and the census.
+- [Menu widgets](./menu-widgets.md) — the disabled path, and the slider sprite
+  correction above.
+- [Menu layout containers](./menu-layout.md) — `HeaderAndFooterLayout`.
+- [Main menu](./main-menu.md), [Pause menu](./pause-menu.md) — the two entry
+  points.
+- [View bobbing](./view-bobbing.md) — one of the two live options, and #391.
+- [Keybindings](./keybindings.md) — what a real Key Binds screen (#15) would
+  drive.

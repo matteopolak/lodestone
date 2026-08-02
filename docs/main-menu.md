@@ -100,22 +100,31 @@ all of them vanilla's:
 directly. The pair above is still exactly what `click` does on the four screens
 with a row cursor; the indirection exists because of the one screen without one.
 
-**Settings has no cursor by design** — each control owns a key instead
-(`key_settings`: Up/Down the GUI scale, Enter View Bobbing), which is why
-`MenuNav::hover` has no `Screen::Settings` arm. So the old translation turned a
-click on *any* row into `Enter`, and on that screen `Enter` means
-`toggle_view_bobbing()` unconditionally: clicking the **GUI SCALE** row silently
-turned View Bobbing off and persisted it. That is issue #391, reported as "view
-bobbing does nothing in game" with the whole render chain verified working —
-see [`view-bobbing.md`](./view-bobbing.md#configuration).
+**Settings used to have no cursor by design** — each control owned a key instead
+(`key_settings`: Up/Down the GUI scale, Enter View Bobbing), so `MenuNav::hover`
+had no `Screen::Settings` arm. The old translation therefore turned a click on
+*any* row into `Enter`, and on that screen `Enter` meant `toggle_view_bobbing()`
+unconditionally: clicking the **GUI SCALE** row silently turned View Bobbing off
+and persisted it. That is issue #391, reported as "view bobbing does nothing in
+game" with the whole render chain verified working — see
+[`view-bobbing.md`](./view-bobbing.md#configuration).
 
-`MenuNav::click` dispatches by row on that screen and falls back to
-hover-then-Enter everywhere else. The row indices are a cross-file coupling to
-the `rows` vector in `render.rs`, so
-`nav::the_settings_rows_are_in_the_order_click_assumes` reads the labels back out
-of `frame_for` rather than trusting them. **A new screen without a row cursor
-needs its own arm in `click`; inheriting the fallback is how this bug happens
-again.**
+**#55 removed the cause rather than the symptom.** That screen is now vanilla's
+whole eight-page `OptionsScreen` tree with 135 controls and a real cursor
+([`settings-screen.md`](./settings-screen.md)), so it has a `hover` arm like every
+other screen and there is no single per-screen meaning of `Enter` left to
+mis-apply: `MenuNav::click` resolves a row to *that row's own control* and acts on
+it. Row indices are still a cross-file coupling to a `rows` vector built in
+`render.rs` — and now also depend on which page is showing and how far it is
+scrolled — so `options::the_settings_rows_are_in_the_order_click_assumes` sweeps
+every page at every scroll position, and `nav`'s version of the same name checks
+it once more through the real `frame_for`.
+
+**The rule that produced #391 is unchanged and still the one that matters: a
+screen whose click means something other than "activate the highlighted row"
+needs its own arm in `click`.** Inheriting the hover-then-Enter fallback is how
+this bug happens again — it has now happened three times (settings, the
+`ServerEdit` fields, the world list).
 
 ### Buttons are real nine-slice sprites
 

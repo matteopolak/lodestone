@@ -290,6 +290,24 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   favicon's join / move-up / move-down quadrants can be both drawn and clicked from
   one definition, and why Refresh needed a verb of its own (`refresh` skips every
   row that already has a result, so the button would have done nothing).
+- [The settings tree](./settings-screen.md) — the sixth child (#55) and
+  `HeaderAndFooterLayout`'s **first production** consumer: vanilla's whole
+  `OptionsScreen` tree over eight pages, **135 controls of which 18 work and 117
+  are present and greyed out**, which is the deliverable rather than a shortfall.
+  Also `OptionsList`'s geometry transcribed (the 310/150/160/25 metrics, and the
+  header whose `paddingTop` is 0 for the first entry and 18 after), the five vanilla
+  screens deliberately not built because each needs a *different* list widget, the
+  four departures each written down with what the alternative would have cost — no
+  value on a row we do not honour, no handle on a slider we hold no value for, a
+  scroll window derived from `MIN_SCALED_HEIGHT` because this pipeline has no
+  scissor, and a cursor that deliberately stops on inactive rows — plus two jar
+  findings that each nearly shipped something wrong: `guiScale` is a **cycle
+  button**, not a slider (`ClampingLazyMaxIntRange.createCycleButton()` is `true`),
+  and `AbstractSliderButton`'s sprite predicate is a *conjunction*, so
+  `SLIDER_SPRITES` needs the 3-argument `WidgetSprites` collapse and the obvious
+  2-argument one lights a greyed-out slider up under the cursor. It also corrects
+  this repo's own census: we persist **2 of 93** options, not 4 — `render_distance`
+  and `sensitivity` are argv, not `options.json`.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the

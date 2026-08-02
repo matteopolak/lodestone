@@ -2229,13 +2229,16 @@ impl ApplicationHandler for WindowApp {
                     // must not confirm whatever happens to be highlighted.
                     //
                     // `MenuNav::click` and not `hover` + `MenuKey::Enter`: that
-                    // pair is still what happens on every screen with a row
-                    // cursor, but it is wrong on the settings screen, which has
-                    // no cursor and gives each control its own key. There, a
-                    // click on the GUI SCALE row used to arrive as `Enter` and
-                    // therefore as "toggle View Bobbing" — issue #391, where the
-                    // whole bob chain was working and the option had been
-                    // silently persisted off by a click on an unrelated row.
+                    // pair is still what happens on every screen with a single
+                    // row cursor and a single meaning of Enter, and it was wrong
+                    // on the settings screen, which had no cursor and gave each
+                    // control its own key. There, a click on the GUI SCALE row
+                    // arrived as `Enter` and therefore as "toggle View Bobbing" —
+                    // issue #391, where the whole bob chain was working and the
+                    // option had been silently persisted off by a click on an
+                    // unrelated row. Issue #55 gave that screen 135 controls and
+                    // a real cursor, so a click now resolves its row to that
+                    // row's own control; `MenuNav::click`'s doc has the history.
                     if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
                         let action = self.nav.click(&mut self.ui, row);
                         self.apply_menu_action(action);

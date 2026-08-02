@@ -173,28 +173,33 @@ pose. `entity.rs:1702-1703` already names the mechanism.
 `Options::view_bobbing` in
 [`config.rs`](../crates/lodestone-shell/src/config.rs), persisted to
 `options.json`, **default on** (vanilla's `options.viewBobbing`,
-`Options.java:600`). `OPTIONS` → `VIEW BOBBING`, Enter toggles it, and a click on
-that row toggles it too.
+`Options.java:600`).
+
+**Where the row lives moved with #55.** It is now on vanilla's own screen for it:
+`Options...` → `Accessibility Settings...` → `View Bobbing`, paired with
+`Notification Time` — **not** on Video, which is the intuitive and wrong answer.
+Enter on that row toggles it, a click on it toggles it, and it is one of only
+**two** live options in a tree of 135 (see
+[`settings-screen.md`](./settings-screen.md)).
 
 **A click used to toggle it from the *other* row, which is issue #391.** The
-settings screen has no row cursor on purpose — each control owns a key
-(`key_settings`: Up/Down the scale, Enter the toggle), so `MenuNav::hover` has no
+settings screen had no row cursor on purpose — each control owned a key
+(`key_settings`: Up/Down the scale, Enter the toggle), so `MenuNav::hover` had no
 `Screen::Settings` arm at all. `app.rs`'s click handler translated a click into
-`hover(row)` + `MenuKey::Enter`, which is correct on the four screens that *do*
-have a cursor and, here, meant every click was "toggle View Bobbing" no matter
-which row it landed on. The natural thing to click — GUI SCALE, row 0, the row
-`render.rs` marks `selected` — silently turned the option off and wrote it to
-disk, and the render chain underneath was working the whole time.
+`hover(row)` + `MenuKey::Enter`, which is correct on the screens that *do* have a
+cursor and, here, meant every click was "toggle View Bobbing" no matter which row
+it landed on. The natural thing to click — GUI SCALE, row 0, the row `render.rs`
+marked `selected` — silently turned the option off and wrote it to disk, and the
+render chain underneath was working the whole time.
 
-Clicks now go through `MenuNav::click`, which dispatches by row on this screen
-(0 → cycle the scale, 1 → toggle bobbing) and falls back to hover-then-Enter
-everywhere else. Two gates:
-`nav::clicking_the_gui_scale_row_cycles_the_scale_and_leaves_view_bobbing_alone`
-(the negative assertion, with a click on row 1 as its control) and
-`nav::the_settings_rows_are_in_the_order_click_assumes`, which reads the row
-labels back out of `menu::render::frame_for` — the `0`/`1` are indices into a
-vector built in a different file, and reordering it would silently rebind the
-mouse to the wrong control again.
+#55 removed the cause: the screen has a real cursor and every row resolves to its
+own control, so there is no shared per-screen meaning of `Enter` left to
+mis-apply. The gates were re-pointed rather than deleted —
+`nav::clicking_a_settings_row_acts_on_that_row_and_no_other` is still the negative
+assertion with an active row as its control, and
+`options::the_settings_rows_are_in_the_order_click_assumes` sweeps every page at
+every scroll position, because a row index is an index into a vector built in a
+different file and reordering it would silently rebind the mouse again.
 
 **A persisted `false` cannot be told from a deliberate choice**, so nothing
 auto-heals it: anyone who hit this has to turn the option back on once (or delete
