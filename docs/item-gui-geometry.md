@@ -119,8 +119,10 @@ towards the viewer are **up, east and north** — which is why a furnace (whose
 * **Positions are transformed, not offset** — the emitted vertices are already in
   GUI pixel space.
 * **Light is fixed** at `GUI_ITEM_LIGHT = 0xF0` (sky 15, block 0), so the shader's
-  `0.2 + 0.8 * max(sky, block)` evaluates to exactly `1.0`. A GUI item is
-  full-bright regardless of where the player is standing.
+  light term evaluates to exactly `1.0` — `get_brightness(1)` is `1` and
+  `notGamma(1)` is `1`, see [light-ramp.md](./light-ramp.md). A GUI item is
+  full-bright regardless of where the player is standing, and that exactness is
+  why replacing the old linear ramp left every GUI item gate byte-identical.
 * **`gui_light` rides in the `ao` slot**: `Side` keeps the per-face directional
   constants (`face_shade`, shared with the world path), `Front` flattens every
   face to `1.0`.

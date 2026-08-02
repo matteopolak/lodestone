@@ -191,7 +191,9 @@ is uniformly lit by the block it stands in. That is why light rides the
 *instance* buffer (`EntityInstanceRaw::light`, shader location 8) and not the
 vertex buffer: the vertex buffer is shared by every instance of a model type and
 could only ever say one thing for all of them. The shader turns the packed byte
-into terrain's own `light_term = 0.2 + 0.8 * max(sky, block)`, floor included.
+into terrain's own light term — vanilla's `lightmap.fsh` curve, see
+[light-ramp.md](./light-ramp.md). (This used to read "floor included"; the
+retired ramp's `0.2` floor is gone, so an unlit mob is now black.)
 
 Before this existed every mob rendered full-bright. Measured against terrain
 through both real pipelines with the same mid-grey texel (byte 128):
@@ -506,7 +508,9 @@ scaling the *sky* half of the lightmap by `Level.getSkyDarken(partialTick)`.
 `lodestone_render::entity::sky_darken_for_time_of_day` is that curve
 (`1.0` at noon, `0.24` at midnight, including `LightTexture`'s `* 0.95 + 0.05`
 lift), and the entity shader applies it as
-`light_term = 0.2 + 0.8 * max(sky * sky_darken, block)`.
+`max(get_brightness(sky) * sky_darken, get_brightness(block))`, then mixes
+`notGamma` in — see [light-ramp.md](./light-ramp.md). Note the order: the curve
+is applied to the raw level and `sky_darken` scales the *result*.
 
 Three gotchas, each of which produces a plausible-looking wrong build:
 

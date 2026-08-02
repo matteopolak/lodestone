@@ -49,11 +49,13 @@ transcribe this exactly, including vanilla's slightly surprising
 far-corner-first UV assignment in `buildQuad` (see the code comment there —
 it is checkable against the source line, not renamed for clarity).
 
-`brightness` is vanilla's `Lightmap.getBrightness`, a per-dimension
-gamma-corrected curve table this codebase has not ported. `underwater_brightness`
-approximates it by reusing the **same** `0.2 + 0.8 * max(sky, block)` floor
-the block shader's `light_term` already applies to packed light
-(`model_pipeline.rs`), rather than inventing a second curve shape. `packed_light`
+`brightness` is vanilla's `Lightmap.getBrightness`, which **is** now ported:
+`underwater_brightness` delegates to `lodestone_render::light::light_term`, the
+same function the terrain shaders mirror (see [light-ramp.md](./light-ramp.md)),
+rather than inventing a second curve shape. It used to approximate it with a local
+`0.2 + 0.8 * max(sky, block)` ramp; the consequence of dropping that ramp's `0.2`
+floor is that a fully dark cell now tints **black** rather than at 20%. It passes
+`sky_darken = 1.0`, because this pass has no clock — the same gap it has for fog. `packed_light`
 comes from `RenderState::entity_light` (`self.entity_light.sample(camera.position)`
 in `render_inner`) — the same per-frame sampler the entity pass already
 uses, at the camera's eye position rather than a mob's feet.

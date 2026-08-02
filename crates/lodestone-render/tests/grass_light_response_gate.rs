@@ -33,13 +33,17 @@
 //! true, plus one genuine defect the same investigation turned up.
 //!
 //! 1. [`tinted_surfaces_respond_to_sky_light_exactly_as_stone_does`] — the
-//!    **light multiply reaches the tinted population at all**. The model shader
-//!    folds sky/block light into `shade` as `0.2 + 0.8 * max(sky, block)`; if a
-//!    tinted or cutout quad bypassed that term it would render at its daylight
-//!    value regardless of the hour, which is the reported symptom stated as a
-//!    measurement. This is a shader/mesh property, deliberately independent of
-//!    *which cell* the light is sampled from — the light byte is supplied by the
-//!    harness, so `fda948f`'s sampling rule is `crates/lodestone-shell`'s to gate.
+//!    **light multiply reaches the tinted population at all**, *and* does so on
+//!    vanilla's curve. The model shader folds sky/block light into `shade` via
+//!    `lightmap.fsh`'s `get_brightness` plus `notGamma`; if a tinted or cutout
+//!    quad bypassed that term it would render at its daylight value regardless of
+//!    the hour, which is the reported symptom stated as a measurement. This is a
+//!    shader/mesh property, deliberately independent of *which cell* the light is
+//!    sampled from — the light byte is supplied by the harness, so `fda948f`'s
+//!    sampling rule is `crates/lodestone-shell`'s to gate.
+//! 3. [`unlit_faces_reach_black_with_no_floor`] — the retired ramp's `0.2` floor
+//!    is **gone**, on real baked geometry including the tinted classes, where a
+//!    tint applied outside the light multiply would be the only way to survive it.
 //! 2. [`the_grass_block_side_overlay_survives_the_depth_test`] — a **coplanar
 //!    overlay must win over the element beneath it**. Unrelated to light, found
 //!    while auditing why grass looked wrong, and real: `grass_block` bakes 10
@@ -52,7 +56,7 @@
 //! stone top (untinted control, the surface the player says is correct), a
 //! `grass_block` top (tinted, `shade` 1.0), an `oak_leaves` top (tinted,
 //! different palette slot), and a `short_grass` blade (tinted, `shade: false`,
-//! no `cullface`). Each is rendered twice, at sky 15 and sky 0. Averaging them
+//! no `cullface`). Each is rendered twice, at sky 15 and sky 7. Averaging them
 //! into one number would merge exactly the populations the report distinguishes.
 //!
 //! Geometry, UVs, tint indices, the stitched atlas and the palette are all the
@@ -62,15 +66,25 @@
 //! A synthetic quad would be the *world* species of vacuous test: it could not
 //! exercise the tint palette, the cutout alpha, or `shade: false`.
 //!
-//! ## The two predictions, named
+//! ## The three predictions, named
 //!
-//! [`RATIO_LIGHT_APPLIED`] (`0.2`) is what a correct build produces: sky 0 gives
-//! `light_term = 0.2`, sky 15 gives `1.0`, and both multiplies land in gamma
-//! space, so the displayed sRGB byte ratio *is* the light-term ratio.
+//! [`RATIO_LIGHT_APPLIED`] (`0.363`) is what a correct build produces at sky 7
+//! against sky 15, re-derived from `lightmap.fsh`; [`RATIO_OLD_RAMP`] (`0.573`)
+//! is what the retired `0.2 + 0.8 * l` ramp produced for the same pair; and
 //! [`RATIO_LIGHT_IGNORED`] (`1.0`) is what the reported bug would produce for the
-//! tinted classes. They are 5× apart, so the acceptance band cannot admit both —
-//! the failure mode of an "is it darker?" assertion, which passes under any
-//! build that darkens at all.
+//! tinted classes. Both multiplies land in gamma space against an sRGB target, so
+//! the displayed byte ratio *is* the light-term ratio. The acceptance band cannot
+//! admit more than one of the three, and that exclusion is **asserted** in the
+//! test body — which is what an "is it darker?" assertion cannot do, since it
+//! passes under any build that darkens at all.
+//!
+//! The second measurement point is sky **7**, not sky 0, and that choice is the
+//! whole reason this file changed when the curve landed: vanilla's
+//! `get_brightness(0)` is exactly `0`, so a sky-0 frame is *black* and every
+//! ratio taken against it is `0.000` under any build that darkens at all —
+//! including one that draws nothing. The interior of the curve is the only place
+//! two candidate curves can be distinguished, because they meet exactly at both
+//! endpoints.
 //!
 //! ## Negative control
 //!
@@ -101,28 +115,52 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Packed light byte for a face open to full daylight: sky `15`, block `0`. The
-/// model shader's `0.2 + 0.8 * max(sky, block)` evaluates to `1.0`.
+/// model shader's light term evaluates to exactly `1.0` — `get_brightness(1)` is
+/// `1` and `notGamma(1)` is `1`, so this endpoint is unmoved by the curve change.
 const SKY_FULL: u8 = 0xF0;
-/// Packed light byte for a face in total darkness: sky `0`, block `0`. The same
-/// expression evaluates to the shader's dark floor, `0.2`.
+/// Packed light byte for a **dim** face: sky `7`, block `0`. This, not total
+/// darkness, is the second measurement point, because vanilla's curve takes
+/// light 0 to exactly `0.0` — a black frame, against which every ratio is
+/// degenerate and satisfied by a build that draws nothing.
+/// [`unlit_faces_reach_black_with_no_floor`] is where light 0 is asserted.
+const SKY_DIM: u8 = 0x70;
+/// Packed light byte for a face in total darkness: sky `0`, block `0`. Vanilla's
+/// `get_brightness(0)` is `0`, so this renders black; the retired
+/// `0.2 + 0.8 * l` ramp floored it at `0.2`.
 const SKY_NONE: u8 = 0x00;
 
-/// **The correct build's prediction.** `light_term(SKY_NONE) / light_term(SKY_FULL)`
-/// `= 0.2 / 1.0`. Because the shader's light multiply happens in gamma space
-/// (`srgb_to_linear(linear_to_srgb(tex) * tint * shade)`) and the target is an
-/// sRGB surface, the transfer functions cancel and the *displayed byte* ratio is
-/// the light-term ratio itself — no `^1/2.4` softening.
-const RATIO_LIGHT_APPLIED: f32 = 0.2;
+/// **The correct build's prediction**, `light_term(SKY_DIM) / light_term(SKY_FULL)`,
+/// re-derived from `assets/minecraft/shaders/core/lightmap.fsh` in the real 26.2
+/// `client.jar` rather than from this crate's output:
+///
+/// ```text
+/// get_brightness(7/15) = (7/15) / (4 - 3 * 7/15) = 0.179487
+/// notGamma(c)          = 1 - (1 - c)^4            (grey: no division by max)
+/// mix(c, notGamma(c), BrightnessFactor = 0.5)     = 0.363117
+/// ```
+///
+/// against a full-light denominator of exactly `1.0`. Because the shader's light
+/// multiply happens in gamma space (`srgb_to_linear(linear_to_srgb(tex) * tint *
+/// shade)`) and the target is an sRGB surface, the transfer functions cancel and
+/// the *displayed byte* ratio is the light-term ratio itself — no `^1/2.4`
+/// softening.
+const RATIO_LIGHT_APPLIED: f32 = 0.363_12;
+
+/// **The retired linear ramp's prediction** for the same pair:
+/// `(0.2 + 0.8 * 7/15) / 1.0 = 0.573333`. The band must exclude this, or the gate
+/// cannot tell vanilla's curve from the ramp it replaced.
+const RATIO_OLD_RAMP: f32 = 0.573_33;
 
 /// **The reported bug's prediction.** If the light term never reaches a class of
-/// quads, that class renders at its daylight value at every hour, so the sky-0
+/// quads, that class renders at its daylight value at every hour, so the dim
 /// frame equals the sky-15 frame and the ratio is `1.0`.
 const RATIO_LIGHT_IGNORED: f32 = 1.0;
 
 /// Acceptance band around [`RATIO_LIGHT_APPLIED`]. Deliberately narrow relative
-/// to the 0.8 gap between the two predictions: any band that admitted
-/// [`RATIO_LIGHT_IGNORED`] would be the *assertion* species of vacuous test.
-const BAND: std::ops::RangeInclusive<f32> = 0.17..=0.24;
+/// to the gaps to *both* wrong predictions: any band that admitted
+/// [`RATIO_OLD_RAMP`] or [`RATIO_LIGHT_IGNORED`] would be the *assertion* species
+/// of vacuous test, and both exclusions are asserted below rather than described.
+const BAND: std::ops::RangeInclusive<f32> = 0.345..=0.382;
 
 struct Gpu {
     device: wgpu::Device,
@@ -418,7 +456,7 @@ impl Population {
     }
     fn report(&self) -> String {
         format!(
-            "{:<24} dir={:<6?} shade_flag={:<5} tint={:<8} sky15={:>3?} sky0={:>3?} ratio={:.3}",
+            "{:<24} dir={:<6?} shade_flag={:<5} tint={:<8} sky15={:>3?} sky7={:>3?} ratio={:.3}",
             self.label,
             self.direction,
             self.shade_flag,
@@ -492,7 +530,7 @@ fn tinted_surfaces_respond_to_sky_light_exactly_as_stone_does() {
             shade_flag: quad.shade,
             direction: quad.direction,
             bright: render_center(&gpu, &models, &quad, SKY_FULL),
-            dark: render_center(&gpu, &models, &quad, SKY_NONE),
+            dark: render_center(&gpu, &models, &quad, SKY_DIM),
         });
     }
 
@@ -500,15 +538,24 @@ fn tinted_surfaces_respond_to_sky_light_exactly_as_stone_does() {
     for p in &pops {
         println!("  {}", p.report());
     }
-    println!("  correct-build prediction (light applied) = {RATIO_LIGHT_APPLIED:.3}");
+    println!("  correct-build prediction (vanilla curve) = {RATIO_LIGHT_APPLIED:.3}");
+    println!("  retired linear ramp                     = {RATIO_OLD_RAMP:.3}");
     println!("  reported-bug prediction (light ignored)  = {RATIO_LIGHT_IGNORED:.3}");
     println!(
         "  negative control: `light_response_predicate_rejects_a_light_ignoring_build` runs this \
-         same predicate over a render whose sky-0 frame is drawn at sky 15, observes ratio ~\
+         same predicate over a render whose dim frame is drawn at sky 15, observes ratio ~\
          {RATIO_LIGHT_IGNORED:.3}, and asserts the predicate rejects it."
     );
 
-    // Anti-vacuity first: the control population must genuinely respond, or an
+    // The band must reject *both* wrong hypotheses. Executed, not described.
+    assert!(
+        !responds_to_light(RATIO_OLD_RAMP) && !responds_to_light(RATIO_LIGHT_IGNORED),
+        "the band {BAND:?} admits a wrong prediction ({RATIO_OLD_RAMP:.3} for the retired \
+         `0.2 + 0.8 * l` ramp, {RATIO_LIGHT_IGNORED:.3} for a light-ignoring build), so this \
+         gate cannot tell which curve is installed"
+    );
+
+    // Anti-vacuity next: the control population must genuinely respond, or an
     // all-broken build would satisfy every "grass matches stone" comparison.
     let stone = &pops[0];
     assert!(
@@ -523,8 +570,9 @@ fn tinted_surfaces_respond_to_sky_light_exactly_as_stone_does() {
             responds_to_light(p.ratio()),
             "{} must darken with sky light by {RATIO_LIGHT_APPLIED:.3}, got {:.3}. A value near \
              {RATIO_LIGHT_IGNORED:.3} is the reported defect: this population renders at its \
-             daylight value at every hour. Note the band {BAND:?} admits only one of the two \
-             predictions — an 'it got darker' assertion would pass under both",
+             daylight value at every hour; a value near {RATIO_OLD_RAMP:.3} means the retired \
+             linear ramp is back. Note the band {BAND:?} admits only one of the three \
+             predictions — an 'it got darker' assertion would pass under all of them",
             p.label,
             p.ratio()
         );
@@ -662,6 +710,71 @@ fn the_grass_block_side_overlay_survives_the_depth_test() {
         gr(overlay_c),
         gr(base_c)
     );
+}
+
+/// **The `0.2` floor is gone, on real baked geometry.** Issue #386 named that
+/// floor as the mechanism: a hard 20% minimum that no darkening could go below,
+/// where vanilla's `get_brightness(0)` is `0`. Asserted here on the same four
+/// populations, because a tinted quad is the interesting case — the tint is a
+/// *multiply*, so a nonzero tint times a zero light term must still be black, and
+/// a build that applied the tint outside the light multiply would show up here
+/// and nowhere else.
+///
+/// The control is the sky-15 frame of the same quad: it must be far from black,
+/// or "the dark frame is black" would be satisfied by a quad that never drew.
+#[test]
+#[ignore = "requires a GPU adapter and a fetched vanilla client.jar; run explicitly"]
+fn unlit_faces_reach_black_with_no_floor() {
+    let Some(gpu) = setup() else {
+        panic!("grass_light_response_gate: no GPU adapter; see the sibling test's message.");
+    };
+    let (models, reg) = build_models();
+
+    let cases: [(&'static str, &str, &[(&str, &str)]); 4] = [
+        ("stone (control, untinted)", "minecraft:stone", &[]),
+        (
+            "grass_block top (tinted)",
+            "minecraft:grass_block",
+            &[("snowy", "false")],
+        ),
+        ("oak_leaves (tinted)", "minecraft:oak_leaves", &[]),
+        ("short_grass blade (tinted)", "minecraft:short_grass", &[]),
+    ];
+
+    println!("=== NO LIGHT FLOOR (light 0 must be black, not 0.2 of daylight) ===");
+    for (label, block, props) in cases {
+        let state = find_state(reg.as_ref(), block, props)
+            .unwrap_or_else(|| panic!("no state for {block} {props:?}"));
+        let quad = representative(&models, state).clone();
+        let bright = render_center(&gpu, &models, &quad, SKY_FULL);
+        let unlit = render_center(&gpu, &models, &quad, SKY_NONE);
+        println!(
+            "  {label:<26} sky15={bright:>3?} light0={unlit:>3?}  (retired ramp would give ~{:?})",
+            (
+                (f32::from(bright.0) * 0.2).round() as u8,
+                (f32::from(bright.1) * 0.2).round() as u8,
+                (f32::from(bright.2) * 0.2).round() as u8,
+            )
+        );
+
+        // Deliberately a low bar: `oak_leaves` is the darkest of the four (its own
+        // texture is already dark green *and* it takes a biome tint, measured
+        // around luma 50 at full light), so a threshold tuned to stone would fail
+        // on a correct build. All this control has to establish is that the quad
+        // drew something visible.
+        assert!(
+            luma(bright) > 20.0,
+            "{label}: control's premise is false — the sky-15 frame is nearly black \
+             ({bright:?}), so the assertion below would pass under a build that draws nothing"
+        );
+        assert!(
+            unlit.0 <= 1 && unlit.1 <= 1 && unlit.2 <= 1,
+            "{label}: a face at light 0 must render pure black — vanilla's \
+             `get_brightness(0)` is 0 — but it read {unlit:?} against a daylight {bright:?}. \
+             A value near 20% of daylight is the retired ramp's `0.2` floor, which is the \
+             mechanism issue #386 named"
+        );
+    }
 }
 
 /// **The negative control, executed.** Render the same real grass quad twice at

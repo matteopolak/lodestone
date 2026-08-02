@@ -103,6 +103,13 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   for those pinned the factor to a **session constant** (permanent noon: the
   reported "fullbright world" and "daytime mobs", one root cause), why breaking a
   block appeared to fix it, and why two green shader gates could not see any of it.
+- [The light ramp](./light-ramp.md) — vanilla's lightmap curve (`level / (4 - 3·level)`
+  plus `notGamma` at the default gamma), which replaced a linear `0.2 + 0.8·level`
+  ramp with a 20% floor (issues #383, #386). Includes the two wrong numbers the
+  record carried about it — the curve composed with `sky_darken` in the wrong order,
+  and `notGamma` omitted entirely, which together turned "14% too dark at midnight"
+  into "5.36× too bright" — why every full-bright gate in the tree was byte-identical
+  afterwards, and why a ratio measured against light 0 is now degenerate.
 - [Block entity renderers](./block-entity-renderers.md) — the cuboid rigs whose
   block model does not describe them (issue #23; chest landed, eleven types not).
   A 26.2 chest has **no block model at all** — `block/chest.json` declares only a

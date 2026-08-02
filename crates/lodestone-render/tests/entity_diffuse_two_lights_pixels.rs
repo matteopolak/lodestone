@@ -93,7 +93,9 @@ const TEXEL: u8 = 128;
 
 /// `sky = 15, block = 0`. With the sky-darken lane at its unset sentinel (which
 /// the shader reads as full daylight) the vertex shader's `light_term` is exactly
-/// `0.2 + 0.8 * 1.0 = 1.0`, so the displayed byte isolates **diffuse**.
+/// `1.0` — `get_brightness(1)` is `1` and `notGamma(1)` is `1`, so vanilla's curve
+/// pins this endpoint just as the retired linear ramp did — and the displayed byte
+/// isolates **diffuse**.
 const LIGHT_FULL: u8 = 15 << 4;
 
 /// Background. Nothing else in these frames is this colour, which is what

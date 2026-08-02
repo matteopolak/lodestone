@@ -44,9 +44,9 @@
 //!
 //! `entity_light` is pinned to `sky=15, block=0` — an outdoors, fully
 //! sky-lit position with no nearby torch — because a saturated block channel
-//! (`ENTITY_FULLBRIGHT`'s default `sky=15, block=15`) would make
-//! `max(sky * sky_darken, block)` return `block` regardless of `sky_darken`,
-//! hiding the exact defect this gate exists to catch.
+//! (`ENTITY_FULLBRIGHT`'s default `sky=15, block=15`) would make the shader's
+//! `max(brightness(sky) * sky_darken, brightness(block))` return the block half
+//! regardless of `sky_darken`, hiding the exact defect this gate exists to catch.
 //!
 //! For each branch: render at noon (`sky_darken = 1.0`) and at midnight
 //! (`sky_darken = 0.24`, vanilla's own floor), and assert the mean channel
@@ -186,13 +186,20 @@ fn the_first_person_arm_dims_with_the_world_at_night() {
          (noon={noon_px}, midnight={midnight_px}); near-zero means the whole hand path is \
          broken, not just its lighting"
     );
-    // `light_term` goes from 0.2+0.8*1.0=1.0 at noon to 0.2+0.8*0.24=0.392 at
-    // midnight for a sky-lit, no-block-light sample — a real, large ratio.
-    // The floor here is deliberately generous (any real, non-trivial gap)
-    // rather than tight: the synthetic placeholder texture's own hue and the
-    // gamma round-trip both affect the exact numbers, and this gate is about
-    // *whether* the arm responds to time of day, not the precise curve
-    // (`sky_darken_for_time_of_day`'s own hermetic tests already cover that).
+    // Re-derived from `lightmap.fsh`: at sky 15 / block 0 the light term is
+    // exactly `1.0` at noon, and at midnight `get_brightness(1) * SkyFactor` is
+    // `0.24`, which `mix(c, notGamma(c), 0.5)` lifts to `0.4532`. (Under the
+    // retired `0.2 + 0.8 * l` ramp it was `0.392` — the direction is the same,
+    // which is why this gate did not move when the curve landed.)
+    //
+    // The floor here is deliberately generous (any real, non-trivial gap) rather
+    // than tight: the synthetic placeholder texture's own hue and the gamma
+    // round-trip both affect the exact numbers, and this gate is about *whether*
+    // the arm responds to time of day, not the precise curve. The magnitude of
+    // the curve itself is gated at pixels by `entity_night_pixels`'
+    // `a_sky_lit_mob_is_darker_at_midnight_than_at_noon`, which predicts 0.4532
+    // and rejects both 0.392 and 1.000 — so this loose threshold is not the only
+    // thing standing behind the number.
     assert!(
         noon_mean - midnight_mean > 15.0,
         "the arm at midnight ({midnight_mean:.2}) is not meaningfully darker than at noon \
@@ -271,6 +278,11 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
          (noon={noon_px}, midnight={midnight_px}); near-zero means the whole held-item path \
          is broken, not just its lighting"
     );
+    // Direction-and-margin only, for the same reason as the arm branch above: the
+    // target here is a plain `Rgba8Unorm`, so the shader's gamma-space shade
+    // multiply is *not* proportional to the readback byte and the exact ratio is
+    // not predictable from the light term alone. `entity_night_pixels` gates the
+    // magnitude on an sRGB target, where it is.
     assert!(
         noon_mean - midnight_mean > 15.0,
         "the held item at midnight ({midnight_mean:.2}) is not meaningfully darker than at \

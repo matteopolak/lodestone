@@ -127,8 +127,10 @@ states** carry a tint on a complete 26.2 pack.
 ### Shading and the fragment shader
 
 `Particles::extract` maps the quarter-window's sprite-local UVs into absolute atlas UVs,
-then multiplies the colour by the terrain shader's own light term, `0.2 + 0.8 *
-max(sky, block)`. The fragment shader is `texel * colour`, discarding `a < 0.02`. Both
+then multiplies the colour by the terrain shader's own light term — vanilla's
+`lightmap.fsh` curve, via `lodestone_render::light_term_from_levels` (see
+[light-ramp.md](./light-ramp.md)); note a particle does not yet dim at night,
+because `Particles` has no clock to pass as `sky_darken`. The fragment shader is `texel * colour`, discarding `a < 0.02`. Both
 atlas and colour target are sRGB, so the multiply happens in **linear** space — unlike
 block tint and face shade, which vanilla multiplies in gamma space (see `CLAUDE.md`).
 

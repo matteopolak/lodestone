@@ -200,8 +200,10 @@ impl ModelSectionView for OneOccluderAoFlat {
 /// Renders `view` through the real [`mesh_models`] + [`ModelPipeline`] and
 /// reads back the whole `W x H` frame's red channel (the texture is neutral
 /// white and untinted, so R == G == B and R alone is a faithful `shade =
-/// ao * light_term` proxy; `light_term` is pinned to `1.0` by the default
-/// full-bright `corner_light_at`/`light_at`, so only `ao` can move the byte).
+/// ao * light_term` proxy; `light_term` is pinned to exactly `1.0` by the default
+/// full-bright `corner_light_at`/`light_at` — vanilla's curve reaches `1.0` at
+/// full light just as the retired linear ramp did — so only `ao` can move the
+/// byte).
 fn render_frame(gpu: &Gpu, view: &dyn ModelSectionView) -> Vec<u8> {
     let device = &gpu.device;
     let queue = &gpu.queue;

@@ -34,11 +34,12 @@
 //!
 //! 1. **World light**, one packed sky/block byte per *instance*. Vanilla samples
 //!    the lightmap once per entity at its block position, so a mob is uniformly
-//!    lit by the block it stands in; this shader reproduces terrain's
-//!    `light_term = 0.2 + 0.8 * max(sky, block)` from that byte. Without it a
-//!    mob renders full-bright and out-shines the terrain around it by up to an
-//!    order of magnitude at night — the reported "mobs are super bright, blocks
-//!    are dark" defect, in which nothing was wrong with the blocks.
+//!    lit by the block it stands in; this shader reproduces terrain's light term
+//!    (vanilla's `lightmap.fsh` curve — see [`crate::light`]) from that byte.
+//!    Without it a mob renders full-bright and out-shines the terrain around it
+//!    by up to an order of magnitude at night — the reported "mobs are super
+//!    bright, blocks are dark" defect, in which nothing was wrong with the
+//!    blocks.
 //! 2. **Direction.** [`ModelVertex`] carries no normal, so the fragment shader
 //!    reconstructs a face normal from screen-space derivatives of the
 //!    interpolated world position (`-cross(dpdx, dpdy)`, negated to point at the
