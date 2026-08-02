@@ -69,19 +69,30 @@
 //!    that test doing its job, and #378's off-hand half was correctly reverted
 //!    rather than forced past it.
 //!
-//!    **The binding is currently half a feature, deliberately.** Vanilla's `F`
-//!    means two different things depending on what is on screen:
+//!    **Vanilla's `F` means two different things depending on what is on
+//!    screen, and both halves now work.** They are separate mechanisms, not one
+//!    mechanism with a flag — conflating them is the trap issue #385 was filed
+//!    against:
 //!
-//!    * **container half — implemented.** `ContainerInput::SWAP` with button `40`
-//!      against the hovered slot (`AbstractContainerScreen.java:506-522`),
-//!      reached through `app.rs`'s `KeyOutcome::ContainerSwap` exactly like the
-//!      number keys `1`–`9`. `Click::offhand_swap` and `do_swap`'s `button == 40`
-//!      arm were already in place and tested; this binding is what finally
-//!      reaches them.
-//!    * **gameplay half — not implemented.** With no screen open, vanilla sends
-//!      `ServerboundPlayerActionPacket SWAP_ITEM_WITH_OFFHAND`. This client does
-//!      not send that action at all, so pressing `F` in the world does nothing
-//!      today. That is issue #378's remaining half.
+//!    * **container half** (#378 part 3 / #382). `ContainerInput::SWAP` with
+//!      button `40` against the hovered slot
+//!      (`AbstractContainerScreen.java:506-522`), reached through `app.rs`'s
+//!      `KeyOutcome::ContainerSwap` exactly like the number keys `1`–`9`.
+//!      `Click::offhand_swap` and `do_swap`'s `button == 40` arm were already in
+//!      place and tested; this binding is what finally reached them.
+//!    * **gameplay half** (#385). With no screen open, vanilla sends a bare
+//!      `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND`
+//!      (`Minecraft.java:1900-1905`) — **no slot, no hit test, no container**.
+//!      Reached through `KeyOutcome::SwapOffhand`, guarded on
+//!      `!player.isSpectator()` and sent with no local prediction, because
+//!      vanilla performs none either (the server does the exchange:
+//!      `ServerGamePacketListenerImpl.java:1294-1300`).
+//!
+//!    The two arms also ask in **different orders relative to the number keys**,
+//!    which is not an inconsistency: `checkHotbarKeyPressed` asks the off-hand
+//!    key first, `Minecraft.handleKeybinds` asks the hotbar keys first
+//!    (`:1873` vs `:1900`). It only shows if someone rebinds the off-hand key
+//!    onto a digit.
 //!
 //! ## Physical keys, and what that costs on non-QWERTY layouts
 //!
@@ -210,12 +221,12 @@ pub enum InputAction {
     Inventory,
     /// Vanilla's `key.swapOffhand` (`Options.java:663`).
     ///
-    /// **Only its container half is implemented** — a `ContainerInput::SWAP`
-    /// with button `40` against the hovered slot, which is what `app.rs`'s
-    /// container arm routes it to. Pressed with no screen open it does nothing,
-    /// because the serverbound `SWAP_ITEM_WITH_OFFHAND` action this client
-    /// would need does not exist yet (issue #378's remaining half). See the
-    /// module docs.
+    /// **Both halves are implemented, and they are two different mechanisms.**
+    /// With a screen open it is a `ContainerInput::SWAP` with button `40` against
+    /// the hovered slot; with no screen open it is a bare
+    /// `ServerboundPlayerAction`/`SWAP_ITEM_WITH_OFFHAND` carrying no slot at all
+    /// (issue #385). `app.rs`'s `resolve_key` routes the two from different arms
+    /// — see [`crate::app::KeyOutcome::SwapOffhand`] and the module docs.
     SwapOffhand,
     Hotbar1,
     Hotbar2,

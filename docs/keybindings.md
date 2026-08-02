@@ -127,19 +127,54 @@ actually dispatches are in the table today, which is why vanilla mappings we do
 not implement (`key.drop`, `key.pickItem`, `key.screenshot`) are absent rather
 than listed and dead.
 
-`key.swapOffhand` is the one **partial** entry, and it is worth knowing why it is
-allowed to be. Vanilla's `F` means two different things depending on what is on
-screen: a `ContainerInput::SWAP` against the hovered slot with a container open,
-and a serverbound `SWAP_ITEM_WITH_OFFHAND` without one. The container half is
-implemented and reached; the gameplay half is not (#378's remainder), so pressing
-`F` in the world does nothing. That is not an island — the binding *does* reach a
-pixel on the screen it matters most on — but it is half a feature, and
-`app::tests::the_offhand_key_swaps_with_slot_forty_while_a_container_is_open`
-asserts the absent half explicitly so landing it has to change that line on
-purpose.
-
 If the new action is a movement one, also add it to `movement()` so it reaches
 `lodestone-controller`.
+
+### One action, two mechanisms: `key.swapOffhand` (issues #382, #385)
+
+`key.swapOffhand` was the table's one **partial** entry until #385 closed it, and
+it is the reason step 4 above says "a branch" rather than "the branch": vanilla's
+`F` means two genuinely different things depending on what is on screen, and they
+share nothing but the key.
+
+| context | mechanism | our route |
+|---|---|---|
+| screen open, slot hovered | container click, `ClickType.SWAP`, button `40` (`AbstractContainerScreen.java:506-522`) | `KeyOutcome::ContainerSwap { button: 40 }` → `Click::offhand_swap` |
+| no screen, normal play | `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND` (`Minecraft.java:1900-1905`) | `KeyOutcome::SwapOffhand` → `ClientAction::SwapItemWithOffhand` |
+
+The gameplay one carries **no slot**. There is nothing to hit-test, because the
+server does the exchange itself
+(`ServerGamePacketListenerImpl.java:1294-1300`). Reusing `ContainerSwap` for it
+would hit-test a screen that is not open, resolve nothing, and silently return —
+a dead key that looks wired. `app::tests` asserts the two outcomes are
+`assert_ne!` distinct for exactly that reason.
+
+**No local prediction, and that is vanilla parity rather than a shortcut.**
+`handleKeybinds`' entire client half is the `send`; there is no `Inventory`
+mutation and no animation. Contrast issue #381's block placement, where vanilla
+*does* predict and not predicting is the divergence — the direction of the
+argument is opposite, so do not generalise one to the other.
+
+**The one guard is `!player.isSpectator()`**, applied at the driver's `match` arm
+rather than in `resolve_key`, because it is session state and `resolve_key` only
+knows about keys — the same split `ContainerSwap`'s empty-cursor and
+hovered-slot guards use.
+
+**The two arms ask in different orders relative to the number keys**, and that is
+each context's own source rather than an inconsistency:
+`checkHotbarKeyPressed` asks the off-hand key first;
+`Minecraft.handleKeybinds` asks `keyHotbarSlots` at `:1873` and
+`keySwapOffhand` at `:1900`. Only visible if someone rebinds the off-hand key
+onto a digit.
+
+**What the protocol layer contributed: nothing, and that was worth checking.**
+`ClientAction::SwapItemWithOffhand` and its v770 encoder already existed, tested
+byte-exact — so this was a wiring job, not the island `#304` ("12 serverbound
+packets we cannot encode") would have made it. `cargo xtask connectedness`
+reports `serverbound encoded 53/69` with `player_action` among the 53, and is
+**silent on this issue either way**: it measures packet coverage, and the gap was
+one missing `else if` two layers above the wire. A tool that cannot see the
+defect class is not evidence about it.
 
 ### Wiring the Controls menu
 
@@ -227,6 +262,16 @@ To capture a rebind, take the `KeyCode` from a `KeyEvent`'s `physical_key` or th
   A `HashMap` here would have rippled outward for no benefit at 26 entries.
 - **`Hotbar1` is slot `0`.** The off-by-one lives only in
   `InputAction::hotbar_slot`.
+- **`window_event`'s effects `match` is covered by the compiler and by nothing
+  else.** Measured while closing #385: no test in this crate constructs a
+  `WindowApp` (it needs a window, a surface and a GPU), so every arm in that
+  match — `Attack`, `Use`, `SelectSlot`, `SwapOffhand`, all of them — is unit-
+  tested only up to `resolve_key` on one side and the method it calls on the
+  other. **Deleting** an arm fails to compile, which is why `KeyOutcome` is a
+  closed enum and the match is exhaustive; replacing one with `=> {}` would not
+  be caught by anything. When adding an action, make the effect a *named method
+  or function* the arm merely calls (see `offhand_swap_action`), so the part
+  worth testing sits somewhere a test can reach it.
 
 ## Dependencies
 

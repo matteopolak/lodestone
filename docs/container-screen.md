@@ -412,10 +412,17 @@ key swaps with slot `40` rather than that number's slot.
 `app::tests::the_offhand_key_swaps_with_slot_forty_while_a_container_is_open` is
 the gate.
 
-The separate *gameplay* hand-swap — a `ServerboundPlayerActionPacket
-SWAP_ITEM_WITH_OFFHAND` with no screen open — is still not sent at all, so `F` in
-the world does nothing. That is #378's remaining half, and the gate above asserts
-its absence explicitly so landing it has to change that line on purpose.
+The separate *gameplay* hand-swap — a `ServerboundPlayerActionPacket`
+`SWAP_ITEM_WITH_OFFHAND` with no screen open — **landed under issue #385** and is
+a different mechanism, not this one with a flag: it names no slot, does no hit
+test and is not a container click at all. See
+[`keybindings.md`](./keybindings.md#one-action-two-mechanisms-keyswapoffhand-issues-382-385).
+The gate above now asserts the two outcomes are distinct rather than asserting the
+gameplay half absent.
+
+(This paragraph used to point at "#378's remaining half". #378 was closed, which
+made that a dangling reference — the staleness class `CLAUDE.md` rule 2 is about.
+It is #385.)
 
 ## How to change it
 

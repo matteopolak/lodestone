@@ -239,6 +239,27 @@ pub(crate) enum KeyOutcome {
     /// with these keys before (it swallowed them), so a miss is not a
     /// regression.
     ContainerSwap { button: i32 },
+    /// `key.swapOffhand` pressed with **no screen open** (issue #385).
+    ///
+    /// A different mechanism from [`Self::ContainerSwap`], not a variation on
+    /// it, and conflating the two is the trap this issue exists to avoid.
+    /// Vanilla has two entirely separate code paths for the same physical key:
+    ///
+    /// | context | mechanism |
+    /// |---|---|
+    /// | screen open, slot hovered | container click, `ClickType.SWAP`, button `40` |
+    /// | no screen, normal play | `ServerboundPlayerActionPacket` / `SWAP_ITEM_WITH_OFFHAND` |
+    ///
+    /// The gameplay one carries **no slot**: it is a bare action, and the server
+    /// exchanges main hand for off hand itself
+    /// (`ServerGamePacketListenerImpl.java:1294-1300`). So this variant carries
+    /// no payload — there is nothing to hit-test and nothing to address, which
+    /// is exactly what distinguishes it from `ContainerSwap`.
+    ///
+    /// Vanilla's one guard is `!player.isSpectator()`
+    /// (`Minecraft.java:1900-1905`). That is session state rather than key state,
+    /// so like `ContainerSwap`'s two guards it lives at the driver's `match` arm.
+    SwapOffhand,
     /// Begin (`true`) or end (`false`) a dig.
     Attack(bool),
     Use,
@@ -351,6 +372,19 @@ pub(crate) fn resolve_key(
         && gate.gameplay
     {
         Some(KeyOutcome::SelectSlot(slot))
+    } else if binds.is(InputAction::SwapOffhand, code) && pressed && gate.gameplay {
+        // Issue #385: the *gameplay* half of `key.swapOffhand`. The container
+        // half is up in the `gate.container_open` arm and is a different
+        // mechanism — see [`KeyOutcome::SwapOffhand`].
+        //
+        // **Placed after the hotbar keys, unlike the container arm, and that
+        // asymmetry is vanilla's own.** `Minecraft.handleKeybinds` asks
+        // `keyHotbarSlots` at `:1873` and `keySwapOffhand` at `:1900`;
+        // `AbstractContainerScreen.checkHotbarKeyPressed` asks the off-hand key
+        // *first*. Both orders only matter once someone rebinds the off-hand key
+        // onto a number key, and matching each context's own source is cheaper
+        // than picking one and being wrong in half the cases.
+        Some(KeyOutcome::SwapOffhand)
     } else if binds.is(InputAction::Attack, code) && gate.gameplay {
         // Only reachable once `key.attack` has been rebound off its default
         // mouse button; the mouse path is what fires out of the box. Both edges
@@ -366,6 +400,60 @@ pub(crate) fn resolve_key(
     } else {
         None
     }
+}
+
+/// The action a gameplay off-hand-key press should send, or `None` (issue #385).
+///
+/// Split out of the driver so the *decision* — which is entirely "is this player
+/// a spectator" — is a pure function a test can drive.
+/// `WindowApp::send_offhand_swap` is the few lines that read the game mode and
+/// push the result, and they are the part no test in this crate can reach (see
+/// `docs/keybindings.md`'s gotcha on the effects `match`).
+///
+/// # No local prediction, and that is the vanilla behaviour rather than a shortcut
+///
+/// `Minecraft.handleKeybinds` (`Minecraft.java:1900-1905`) is the entire client
+/// half of this feature:
+///
+/// ```text
+/// while (this.options.keySwapOffhand.consumeClick()) {
+///    if (!this.player.isSpectator()) {
+///       this.getConnection().send(new ServerboundPlayerActionPacket(
+///          Action.SWAP_ITEM_WITH_OFFHAND, BlockPos.ZERO, Direction.DOWN));
+///    }
+/// }
+/// ```
+///
+/// No `Inventory` mutation, no animation, no prediction. The swap happens
+/// **server-side only** (`ServerGamePacketListenerImpl.java:1294-1300` does the
+/// three-way exchange plus `stopUsingItem`), and the client learns the result
+/// from the ordinary inventory-sync packets that follow.
+///
+/// This is why issue #385's round-trip worry does not apply here the way it does
+/// to #381's block placement: vanilla *does* predict a placement, so not
+/// predicting one is a divergence; vanilla does **not** predict this, so adding a
+/// local swap would be the divergence. Two consequences if you are tempted
+/// anyway: our prediction would have to guess `stopUsingItem`'s effect on an
+/// in-progress bow draw or eat, and a creative-mode client whose server refuses
+/// the swap would show a phantom exchange that only the next full inventory sync
+/// corrects.
+///
+/// # The one guard
+///
+/// `!player.isSpectator()`. A spectator has no inventory to swap and vanilla
+/// declines to send at all — so the packet never reaches a server that would
+/// silently drop it (the server re-checks, `:1295`). Reading the mode as
+/// `Option` and treating unknown as *not* a spectator matches the rest of the
+/// shell: before login there is no mode, and refusing input until one arrives
+/// would be a worse default than sending a packet no server is listening for.
+#[must_use]
+pub(crate) fn offhand_swap_action(
+    game_mode: Option<lodestone_client::GameMode>,
+) -> Option<lodestone_model::ClientAction> {
+    if game_mode == Some(lodestone_client::GameMode::Spectator) {
+        return None;
+    }
+    Some(lodestone_model::ClientAction::SwapItemWithOffhand)
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,10 +1203,9 @@ impl WindowApp {
         let hit = hit_test_with_scale(&menu, self.nav.gui_scale(), w, h, self.cursor.0, self.cursor.1);
         let MenuHit::Slot(index) = hit else { return };
         // Vanilla's `40` is the off-hand button and `do_swap`'s `button == 40` arm
-        // already handles it, but nothing currently *produces* a `40` here — the
-        // off-hand binding is blocked on the default-key collision above. The
-        // branch is written anyway: it is the one line the binding needs, so the
-        // eventual change does not have to reach into two files.
+        // handles it. Since #382 freed `F` the off-hand binding does reach here;
+        // note this is the **container** route only — the no-screen route is
+        // `send_offhand_swap` below, a different packet entirely (#385).
         let click = if button == OFFHAND_SWAP_BUTTON {
             Click::offhand_swap(index)
         } else if let Ok(hotbar) = u8::try_from(button) {
@@ -1127,6 +1214,24 @@ impl WindowApp {
             return;
         };
         self.send_menu_click(click);
+    }
+
+    /// The off-hand key pressed in normal gameplay (issue #385).
+    ///
+    /// Thin by design: everything decidable is in [`offhand_swap_action`], which
+    /// takes the game mode rather than reading it off `self`, so the whole
+    /// decision is testable without a window, a GPU or a live `Sim`.
+    fn send_offhand_swap(&self) {
+        let Some(net) = self.sim.net() else { return };
+        // Same read the fire/underwater overlay pass uses for `spectator`.
+        let game_mode = net
+            .shared_handle()
+            .get()
+            .cloned()
+            .and_then(|handle| handle.game_mode());
+        if let Some(action) = offhand_swap_action(game_mode) {
+            net.send_action(action);
+        }
     }
 
     /// Translate one winit key event into a [`MenuKey`], or `None` if the menu
@@ -2358,6 +2463,13 @@ impl ApplicationHandler for WindowApp {
                     Some(KeyOutcome::ContainerSwap { button }) => {
                         self.send_container_swap(button);
                     }
+                    // The *other* off-hand route (#385): no screen, no slot, a
+                    // bare `ServerboundPlayerAction`. Sent straight through
+                    // `NetClient` rather than queued into `ActionQueue`, which is
+                    // the sanctioned shape for a per-frame input-driven action —
+                    // see `interact.rs`' module doc on why `end_attack`,
+                    // `use_item_live` and `send_chat` do the same.
+                    Some(KeyOutcome::SwapOffhand) => self.send_offhand_swap(),
                     Some(KeyOutcome::Attack(true)) => self.sim.begin_attack(),
                     Some(KeyOutcome::Attack(false)) => self.sim.end_attack(),
                     Some(KeyOutcome::Use) => self.sim.use_item(),
@@ -3231,17 +3343,108 @@ mod tests {
         );
         // 2. A release is not a swap — vanilla acts on `keyPressed` only.
         assert_eq!(resolve(gate, KeyCode::KeyF, false), None);
-        // 3. **The gameplay half is deliberately absent.** With no screen open
-        //    `F` does nothing, because the serverbound
-        //    `SWAP_ITEM_WITH_OFFHAND` action does not exist yet (#378's
-        //    remainder). Asserted rather than left unsaid so that landing it
-        //    has to come here and change this line on purpose — and so the
-        //    swallow test above is honest about why it skips `F`.
+        // 3. **The gameplay half is a different outcome, not the same one.**
+        //    This line used to assert `None` with a note saying that landing
+        //    #378's gameplay half should come here and change it on purpose.
+        //    Issue #385 is that landing, and this is the change: with no screen
+        //    open the key must resolve to the *bare action*, never to a
+        //    `ContainerSwap` — a resolver that reused `ContainerSwap` here would
+        //    hit-test a slot that does not exist and silently do nothing.
         assert_eq!(
             resolve(playing(), KeyCode::KeyF, true),
+            Some(KeyOutcome::SwapOffhand),
+            "with no screen open the off-hand key is a ServerboundPlayerAction, \
+             not a container click (#385)"
+        );
+        assert_ne!(
+            resolve(playing(), KeyCode::KeyF, true),
+            resolve(gate, KeyCode::KeyF, true),
+            "the two routes must not collapse into one outcome — that is the \
+             conflation #385 exists to prevent"
+        );
+    }
+
+    /// Issue #385, the gameplay half: `F` in the world **reaches the wire** as
+    /// `ClientAction::SwapItemWithOffhand`.
+    ///
+    /// Two hops, both asserted, because either alone is satisfiable by a dead
+    /// chain: `resolve_key` producing the outcome proves nothing about the
+    /// driver, and a `NetClient` that accepts an action proves nothing about the
+    /// keybind. The `match` arm between them is the piece a compiler *cannot*
+    /// check — an arm that resolved and then did nothing would be exactly the
+    /// island `CLAUDE.md` §1 names.
+    ///
+    /// What this deliberately does not assert is the **bytes**. Those are pinned
+    /// where they belong, against the jar's own declared layout, in
+    /// `crates/protocol/v770/tests/interaction_actions.rs`
+    /// (`swap_item_with_offhand_is_byte_exact_against_the_jars_enum_order`) —
+    /// asserting them again here off our own encoder would be
+    /// `decode(encode(x))` with extra steps.
+    #[test]
+    fn the_offhand_key_in_the_world_sends_the_swap_action_to_the_wire() {
+        assert_eq!(
+            resolve(playing(), KeyCode::KeyF, true),
+            Some(KeyOutcome::SwapOffhand),
+            "hop 1: the keybind must resolve"
+        );
+
+        // Hop 2: the driver's arm. `offhand_swap_action` is what it calls; the
+        // loopback below is what proves an accepted action is observable.
+        let (net, actions) = NetClient::loopback();
+        let action = offhand_swap_action(Some(lodestone_client::GameMode::Survival))
+            .expect("a survival player may swap");
+        net.send_action(action);
+        assert_eq!(
+            actions.try_recv(),
+            Ok(lodestone_model::ClientAction::SwapItemWithOffhand),
+            "hop 2: the action must reach the outbound channel"
+        );
+        assert!(
+            actions.try_recv().is_err(),
+            "exactly one action per press — a doubled send would swap twice and \
+             land back where it started, which looks identical to doing nothing"
+        );
+    }
+
+    /// **The spectator control**, and the one guard vanilla actually applies
+    /// (`Minecraft.java:1901`, re-checked server-side at
+    /// `ServerGamePacketListenerImpl.java:1295`).
+    ///
+    /// Watched failing: with the `Spectator` arm removed,
+    /// `offhand_swap_action(Spectator)` returns the action and the first
+    /// assertion below reports `Some(SwapItemWithOffhand)`.
+    ///
+    /// The other three modes are the positive control. Without them this passes
+    /// just as well against a function that returns `None` unconditionally — i.e.
+    /// against the feature not existing at all, which is the state this issue
+    /// found.
+    #[test]
+    fn a_spectator_does_not_send_the_offhand_swap_and_everyone_else_does() {
+        use lodestone_client::GameMode;
+        assert_eq!(
+            offhand_swap_action(Some(GameMode::Spectator)),
             None,
-            "the world-side off-hand swap is not implemented; if this now \
-             resolves, #378's gameplay half landed and this test should assert it"
+            "a spectator has no inventory to swap; vanilla declines to send"
+        );
+        for mode in [
+            GameMode::Survival,
+            GameMode::Creative,
+            GameMode::Adventure,
+        ] {
+            assert_eq!(
+                offhand_swap_action(Some(mode)),
+                Some(lodestone_model::ClientAction::SwapItemWithOffhand),
+                "{mode:?} must still swap — otherwise the guard above is \
+                 indistinguishable from the feature being absent"
+            );
+        }
+        // Before login there is no mode. Sending is the better default: refusing
+        // input until a mode arrives would make the key dead during the join
+        // window, and the server re-checks anyway.
+        assert_eq!(
+            offhand_swap_action(None),
+            Some(lodestone_model::ClientAction::SwapItemWithOffhand),
+            "an unknown game mode must not read as spectator"
         );
     }
 
