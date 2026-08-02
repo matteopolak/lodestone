@@ -117,6 +117,72 @@ fn item_actions_map_to_player_action_with_zeroed_target() {
     }
 }
 
+/// Issue #385's protocol half, pinned as a **literal** rather than as one row of
+/// the loop above.
+///
+/// The gameplay off-hand swap is now reachable from a keypress
+/// (`lodestone_shell::app`'s `the_offhand_key_in_the_world_sends_the_swap_action_to_the_wire`),
+/// so what these eleven bytes mean stopped being academic. The expected value
+/// comes from the jar's own declarations, not from our encoder:
+///
+/// * **Ordinal 6.** `ServerboundPlayerActionPacket.Action` declares, in order,
+///   `START_DESTROY_BLOCK, ABORT_DESTROY_BLOCK, STOP_DESTROY_BLOCK,
+///   DROP_ALL_ITEMS, DROP_ITEM, RELEASE_USE_ITEM, SWAP_ITEM_WITH_OFFHAND, STAB`
+///   (`ServerboundPlayerActionPacket.java:68-78`), and `writeEnum` writes the
+///   ordinal as a VarInt.
+/// * **Field order.** `write` is `writeEnum(action)`, `writeBlockPos(pos)`,
+///   `writeByte(direction.get3DDataValue())`, `writeVarInt(sequence)`
+///   (`:37-42`).
+/// * **The zeros.** The sender passes `BlockPos.ZERO, Direction.DOWN`
+///   (`Minecraft.java:1903`); `Direction.DOWN`'s `data3d` is `0`
+///   (`Direction.java:33`); and the three-argument constructor defaults
+///   `sequence` to `0` (`:26-28`).
+/// * **Packet id 41.** `generated/reports/packets.json`'s
+///   `minecraft:player_action`.
+///
+/// The neighbour assertions are the discriminator, and they are the point of
+/// writing this separately: an enum transcribed one short or one long puts
+/// `RELEASE_USE_ITEM` or `STAB` on the wire, both of which encode to a
+/// perfectly well-formed packet the server acts on. That is the same failure
+/// shape as a metadata index off by one — a clean parse of the wrong field.
+#[test]
+fn swap_item_with_offhand_is_byte_exact_against_the_jars_enum_order() {
+    let (id, bytes) = encode(&ClientAction::SwapItemWithOffhand);
+    assert_eq!(id, 41, "minecraft:player_action's protocol_id");
+    assert_eq!(id, play::serverbound::PLAYER_ACTION);
+    assert_eq!(
+        bytes,
+        vec![
+            0x06, // VarInt SWAP_ITEM_WITH_OFFHAND
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // BlockPos.ZERO
+            0x00, // Direction.DOWN.get3DDataValue()
+            0x00, // VarInt sequence
+        ],
+        "the eleven bytes vanilla's own keybind handler sends"
+    );
+
+    // The discriminator. Each neighbour must differ in exactly the first byte,
+    // which is what proves the assertion above is pinning the *ordinal* and not
+    // merely the shape of a zeroed player-action packet.
+    for neighbour in [
+        ClientAction::ReleaseUseItem, // 5 — one short
+        ClientAction::Stab,           // 7 — one long
+        ClientAction::DropSelectedItem,
+        ClientAction::DropSelectedItemStack,
+    ] {
+        let (_, other) = encode(&neighbour);
+        assert_ne!(
+            other, bytes,
+            "{neighbour:?} must not encode identically to the off-hand swap"
+        );
+        assert_eq!(
+            other[1..],
+            bytes[1..],
+            "{neighbour:?} should differ from the swap in the action byte alone"
+        );
+    }
+}
+
 #[test]
 fn use_item_on_is_byte_exact() {
     let (id, bytes) = encode(&ClientAction::UseItemOn {
