@@ -99,7 +99,7 @@ use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
 use lodestone_render::block::DepthBuffer;
 use lodestone_render::camera::Camera;
 use lodestone_render::entity::{
-    EntityInstance, EntityModelSet, entity_texture_candidates, plan_entities,
+    EntityInstance, EntityMesh, EntityModelSet, entity_texture_candidates, plan_entities,
 };
 use lodestone_render::entity_anim::AnimInput;
 use lodestone_render::entity_pipeline::{EntityPipeline, GpuEntityModel, upload_instances};
@@ -444,8 +444,6 @@ fn render(
     readback.unmap();
     out
 }
-
-use lodestone_render::entity::EntityMesh;
 
 /// Anything that is not the clear colour. The sheets in play are magenta and
 /// vanilla's greys/browns, none of which is within 8 of [`CLEAR`]'s blue, so this
