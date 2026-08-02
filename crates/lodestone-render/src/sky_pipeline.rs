@@ -811,41 +811,44 @@ pub struct SkyFrame {
     /// gradient before the `SKY_COLOR` track's day/night multiplier.
     ///
     /// In vanilla this is the standing biome's `minecraft:visual/sky_color`, and
-    /// callers still pass a flat sky constant instead — per-biome tint is the one
-    /// open item on #96.
+    /// **it is now that** on a live server: the shell resolves the biome under
+    /// the camera and passes its colour through
+    /// [`crate::fog::FogSettings::sky_color`]. `#96` is closed.
     ///
-    /// # The reason recorded here was stale; the real gap is one seam further on
+    /// A caller with no biome to offer passes the same colour as
+    /// [`day_fog_color`](Self::day_fog_color), which every `FogSettings`
+    /// constructor does by default — one flat colour for both ends of the
+    /// gradient, distinguished only by the two day/night tracks. That is the
+    /// pre-#96 behaviour and it is byte-identical to it.
     ///
-    /// This doc used to say biome ids "arrive as datapack-registry indices in the
-    /// configuration-phase `registry_data` packet, **which this client does not
-    /// decode**". That was true when written and is false now: #288 landed the
-    /// `registry_data` ingest, and `lodestone_v770::packets::registry` decodes the
-    /// biome registry — under `minecraft:worldgen/biome`, *not* `minecraft:biome`
-    /// — keeping its entry names in registry order, so index `i` is holder id `i`.
-    /// It is reachable as `ClientRegistries::entry_names`.
+    /// # Two blockers were recorded here and both were stale; keep the shape
     ///
-    /// Both *ends* of the chain are in fact built. What is missing is the join:
+    /// This doc has now been wrong twice about why the tint was impossible, and
+    /// both times it read as perfectly sound:
     ///
-    /// * **Biome id at the camera: wired.** The chunk decoder fills the biome
-    ///   container (`PaletteKind::biomes()`), `ChunkSection::biome_at_block`
-    ///   floors a block coordinate into its 4×4×4 cell, and `World::section` is
-    ///   public — the shell already calls it to mesh.
-    /// * **Biome id → name: does not cross the version-free seam.**
-    ///   `entry_names` has no caller outside its own crate's unit tests, and
-    ///   neither `ClientEvent::Login` nor `ClientEvent::DimensionTypeChanged`
-    ///   carries the names, so the ordered `Vec<String>` stays locked inside the
-    ///   adapter's `Mutex<ClientRegistries>`. Nothing in `lodestone-model`,
-    ///   `-ecs`, `-client` or `-shell` can turn a biome id into a name, and the
-    ///   ids cannot be hardcoded — a data pack reorders the registry, which is
-    ///   why #288's own doc says never to assume a holder id.
+    /// 1. It said biome ids "arrive as datapack-registry indices in the
+    ///    configuration-phase `registry_data` packet, **which this client does
+    ///    not decode**". True when written; #288 landed that ingest within the
+    ///    hour.
+    /// 2. It then said the decoded **names** had no caller across the
+    ///    version-free seam, and that the fix was to carry them on `Login` and
+    ///    look the colour up in a jar-derived table — "four edits". The missing
+    ///    link was real. The patch was not: `Login` is constructed at 17 sites
+    ///    across four protocol families, and this struct's `day_sky_color` was
+    ///    fed from `RenderState::clear`, which the shell sets from
+    ///    `FogSettings::color` — so the disc centre and the horizon were *the
+    ///    same value by construction* and no protocol work upstream could have
+    ///    created somewhere for a tint to enter.
     ///
-    /// So the smallest patch is plumbing, not protocol: carry the ordered names
-    /// on `Login` beside `dimension_type`, land them in a resource next to
-    /// `ServerDimensionType`, surface them on the client snapshot, and resolve
-    /// name → colour at the `SkyFrame` call site. See
-    /// `docs/sky-and-air-bubbles.md`.
+    /// What landed instead: **the colours travel, not the names.** The server
+    /// elides nothing (we claim no known packs), so every biome entry arrives
+    /// with its full NBT; `ClientRegistries::biome_sky_colors()` lifts one
+    /// attribute out, indexed by holder id, and `ClientEvent::BiomeVisuals`
+    /// carries the table. No name → colour table exists anywhere, which is what
+    /// makes a data pack that reorders the registry, renames a biome or changes a
+    /// colour all come out right. See `docs/sky-and-air-bubbles.md`.
     ///
-    /// # A warning for whoever gates it: pick the two biomes from the data
+    /// # A warning for whoever changes the gates: pick the two biomes from the data
     ///
     /// Of 66 biome files in
     /// `.cache/mc/26.2/client-src/data/minecraft/worldgen/biome`, 56 declare
@@ -856,6 +859,13 @@ pub struct SkyFrame {
     /// spread is genuinely slight (`#6eb1ff` desert/savanna through `#859dff`
     /// frozen peaks; blue is a constant `0xff`). The one dramatic outlier is
     /// `pale_garden` at **`#b9b9b9`**, a desaturated grey.
+    ///
+    /// That survey is now confirmed against the wire — `live_registry_data.rs`
+    /// checks all 66 of a real server's entries against Mojang's own files — and
+    /// the gates in `tests/sky_gradient_pixels.rs` use `pale_garden` vs `desert`
+    /// for the gross case and `desert` vs `frozen_peaks` for the slight one.
+    /// `control_plains_and_swamp_cannot_discriminate` **asserts** the vacuous
+    /// pair's zero, so that trap is a measured fact rather than this warning.
     pub day_sky_color: [f32; 3],
     /// The **linear** RGB base fog colour at noon: the horizon end of the
     /// disc's gradient, before the `FOG_COLOR` track's multiplier. Pass the
