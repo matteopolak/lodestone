@@ -192,6 +192,22 @@ impl ServerList {
         (index < self.entries.len()).then(|| self.entries.remove(index))
     }
 
+    /// Exchanges two entries, returning whether it applied.
+    ///
+    /// This is vanilla's `ServerList.swap` (`client/multiplayer/ServerList.java`),
+    /// which is what the list row's move-up/move-down icons call
+    /// (`ServerSelectionList.java:485-488`). Both indices must be in range: a
+    /// partially-applied reorder would silently drop an entry, and the caller is
+    /// a mouse hit-test, so out-of-range is a routing bug rather than something
+    /// to clamp into a different reorder than the player asked for.
+    pub fn swap(&mut self, a: usize, b: usize) -> bool {
+        if a >= self.entries.len() || b >= self.entries.len() {
+            return false;
+        }
+        self.entries.swap(a, b);
+        true
+    }
+
     // -- persistence ------------------------------------------------------
 
     /// Serialises the list to the on-disk JSON form.
@@ -350,6 +366,26 @@ mod tests {
         // Out-of-range operations are refused rather than panicking.
         assert!(!list.update(9, ServerEntry::new("x", "h", None)));
         assert!(list.remove(9).is_none());
+    }
+
+    #[test]
+    fn swapping_reorders_and_refuses_to_go_out_of_range() {
+        let mut list = sample();
+        assert!(list.swap(0, 1));
+        assert_eq!(list.get(0).unwrap().name, "Local");
+        assert_eq!(list.get(1).unwrap().name, "Home");
+        // An out-of-range index must leave the list *untouched*, not partially
+        // reordered — the caller is a mouse hit-test.
+        let before = list.clone();
+        assert!(!list.swap(1, 9));
+        assert!(!list.swap(9, 1));
+        assert_eq!(list, before);
+        // Same index twice is a no-op that still reports success, matching
+        // `Collections.swap`.
+        assert!(list.swap(1, 1));
+        assert_eq!(list, before);
+        // And it must not resize.
+        assert_eq!(list.len(), 2);
     }
 
     #[test]

@@ -59,6 +59,16 @@ pub struct ServerStatus {
     pub players: String,
     /// Server version name, e.g. `"26.2"`.
     pub version: String,
+    /// The protocol number the server reported, when it reported one.
+    ///
+    /// This is what decides [`ServerState::Incompatible`], so it is not
+    /// cosmetic: vanilla compares `serverData.protocol` with
+    /// `SharedConstants.getCurrentVersion().protocolVersion()` and paints
+    /// `server_list/incompatible` plus the version string in red on any
+    /// mismatch (`ServerSelectionList.java:284-288,344-346`). A server that
+    /// omits `version.protocol` therefore reads as incompatible, in vanilla
+    /// (where the field defaults to `0`) and here (where it is `None`) alike.
+    pub protocol: Option<i32>,
     /// Favicon PNG bytes, when the server sent a usable one.
     pub favicon_png: Option<Vec<u8>>,
     /// Ping round-trip, in milliseconds.
@@ -102,6 +112,149 @@ impl StatusSlot {
     pub fn is_pending(&self) -> bool {
         matches!(self, StatusSlot::Pending)
     }
+
+    /// Vanilla's `ServerData.State` for this slot, given the protocol *we*
+    /// speak.
+    ///
+    /// The mapping is one-to-one except at the top: vanilla has a distinct
+    /// `INITIAL` state that exists for exactly one frame (`extractContent`
+    /// flips it to `PINGING` the first time it draws a row,
+    /// `ServerSelectionList.java:269-271`), and [`StatusSlot::Idle`] is the
+    /// same "no probe has been started" fact.
+    #[must_use]
+    pub fn state(&self, our_protocol: i32) -> ServerState {
+        match self {
+            StatusSlot::Idle => ServerState::Initial,
+            StatusSlot::Pending => ServerState::Pinging,
+            StatusSlot::Failed(_) => ServerState::Unreachable,
+            StatusSlot::Ok(s) => {
+                if s.protocol == Some(our_protocol) {
+                    ServerState::Successful
+                } else {
+                    ServerState::Incompatible
+                }
+            }
+        }
+    }
+}
+
+/// Vanilla's `ServerData.State` — which of the five presentations a row is in.
+///
+/// Kept as its own enum rather than folded into [`StatusSlot`] because the
+/// *transport* result (answered / failed / in flight) and the *presentation*
+/// state are different questions: one answered probe splits into
+/// [`Self::Successful`] and [`Self::Incompatible`] depending on a protocol
+/// number, and that comparison needs a value [`StatusSlot`] does not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    /// Never probed. Vanilla's `INITIAL`.
+    Initial,
+    /// A probe is in flight.
+    Pinging,
+    /// Answered, and speaking our protocol.
+    Successful,
+    /// Answered, but speaking a different protocol.
+    Incompatible,
+    /// Did not answer.
+    Unreachable,
+}
+
+/// `server_list/ping_1` … `ping_5`, weakest signal first — the order the
+/// latency buckets in [`ping_sprite`] index into.
+pub const PING_SPRITES: [&str; 5] = [
+    "server_list/ping_1",
+    "server_list/ping_2",
+    "server_list/ping_3",
+    "server_list/ping_4",
+    "server_list/ping_5",
+];
+
+/// `server_list/pinging_1` … `pinging_5`, the animation frames
+/// [`pinging_sprite`] cycles through.
+pub const PINGING_SPRITES: [&str; 5] = [
+    "server_list/pinging_1",
+    "server_list/pinging_2",
+    "server_list/pinging_3",
+    "server_list/pinging_4",
+    "server_list/pinging_5",
+];
+
+/// What the MOTD column says while a probe is in flight.
+///
+/// `multiplayer.status.pinging`'s `en_us` string, and it goes in the **MOTD**
+/// slot rather than the status one because that is what vanilla does:
+/// `ServerStatusPinger.pingServer` assigns `data.motd = translatable(
+/// "multiplayer.status.pinging")` and blanks `data.status`
+/// (`ServerStatusPinger.java:65`).
+pub const PINGING_MOTD: &str = "Pinging...";
+
+/// `ServerSelectionList.INCOMPATIBLE_SPRITE`.
+pub const INCOMPATIBLE_SPRITE: &str = "server_list/incompatible";
+/// `ServerSelectionList.UNREACHABLE_SPRITE`.
+pub const UNREACHABLE_SPRITE: &str = "server_list/unreachable";
+
+/// The signal-strength sprite for a round-trip time, from
+/// `ServerSelectionList.refreshStatus`'s `SUCCESSFUL` arm (`:417-427`).
+///
+/// The buckets are `< 150`, `< 300`, `< 600`, `< 1000`, else — and note they
+/// run *downward*: a fast server gets `ping_5` (five bars) and a slow one
+/// `ping_1`. `None` becomes `0`, because vanilla's `serverData.ping` is a
+/// primitive `long` that is simply still zero when a status arrived without a
+/// measured round trip.
+#[must_use]
+pub fn ping_sprite(ping_ms: Option<u64>) -> &'static str {
+    let ping = ping_ms.unwrap_or(0);
+    if ping < 150 {
+        PING_SPRITES[4]
+    } else if ping < 300 {
+        PING_SPRITES[3]
+    } else if ping < 600 {
+        PING_SPRITES[2]
+    } else if ping < 1000 {
+        PING_SPRITES[1]
+    } else {
+        PING_SPRITES[0]
+    }
+}
+
+/// The animated pinging sprite for row `index` at `millis`, from
+/// `ServerSelectionList.extractContent` (`:315-327`).
+///
+/// `(millis / 100 + index * 2) & 7` gives 0..=7 and the `if idx > 4 { idx = 8 -
+/// idx }` fold turns that into a **ping-pong** over 0..=4 rather than a sawtooth
+/// — 5 becomes 3, 6 becomes 2, 7 becomes 1 — so the bars sweep up and back down
+/// instead of snapping. The `index * 2` term is what makes two adjacent rows
+/// animate out of phase.
+#[must_use]
+pub fn pinging_sprite(millis: u64, index: usize) -> &'static str {
+    let phase = (millis / 100).wrapping_add((index as u64).wrapping_mul(2)) & 7;
+    let mut idx = usize::try_from(phase).unwrap_or(0);
+    if idx > 4 {
+        idx = 8 - idx;
+    }
+    PINGING_SPRITES[idx]
+}
+
+/// The status sprite a row draws, for every state.
+///
+/// `Initial` is `ping_1` rather than a pinging frame because that is what
+/// `refreshStatus` sets for both `INITIAL` and `PINGING` (`:402-406`); the
+/// animation in `extractContent` then *overrides* it, but only once the state
+/// has actually moved to `PINGING`.
+#[must_use]
+pub fn status_sprite(
+    state: ServerState,
+    ping_ms: Option<u64>,
+    millis: u64,
+    index: usize,
+) -> &'static str {
+    match state {
+        ServerState::Initial => PING_SPRITES[0],
+        ServerState::Pinging => pinging_sprite(millis, index),
+        ServerState::Successful => ping_sprite(ping_ms),
+        ServerState::Incompatible => INCOMPATIBLE_SPRITE,
+        ServerState::Unreachable => UNREACHABLE_SPRITE,
+    }
 }
 
 /// A blocking status probe. Runs on a background thread, never the frame thread.
@@ -138,6 +291,7 @@ pub fn net_probe(protocol: i32) -> Probe {
             motd: s.motd,
             players,
             version: s.version.unwrap_or_default(),
+            protocol: s.protocol,
             favicon_png: s.favicon_png,
             latency_ms: s.latency_ms,
         })
@@ -160,6 +314,8 @@ pub struct StatusCache {
     tx: Sender<(String, Result<ServerStatus, String>)>,
     rx: Receiver<(String, Result<ServerStatus, String>)>,
     probe: Probe,
+    /// When this cache was built, i.e. the zero of [`Self::millis`].
+    started: std::time::Instant,
 }
 
 impl std::fmt::Debug for StatusCache {
@@ -197,7 +353,22 @@ impl StatusCache {
             tx,
             rx,
             probe,
+            started: std::time::Instant::now(),
         }
+    }
+
+    /// Milliseconds since this cache was built — the clock
+    /// [`pinging_sprite`]'s animation runs on.
+    ///
+    /// Vanilla reads `Util.getMillis()`, a process-wide monotonic clock. The
+    /// origin does not matter (the animation is `& 7` of a tenth-of-a-second
+    /// counter, so any offset only changes which frame a row starts on), and
+    /// hanging it off the cache keeps the clock out of `render::frame_for`'s
+    /// signature: the frame builder already takes a `&StatusCache`, so nothing
+    /// in `app.rs` has to change to make a row animate.
+    #[must_use]
+    pub fn millis(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     /// Installs the real probe. See the module docs for the implementation.
@@ -227,6 +398,21 @@ impl StatusCache {
                 continue;
             }
             self.spawn(key, entry.clone());
+        }
+    }
+
+    /// Discards every cached result for `entries` and probes them all again —
+    /// what the player asked for with F5 or the Refresh button (#396).
+    ///
+    /// Not the same as [`Self::refresh`], and the difference is the whole reason
+    /// this exists: that one *skips* any address it already has a result for, so
+    /// using it for a refresh would leave every row exactly as it was. Vanilla
+    /// gets the same effect by discarding the screen and rebuilding it with a
+    /// fresh `ServerList`, whose entries all start in `State.INITIAL`
+    /// (`JoinMultiplayerScreen.java:167-169`).
+    pub fn refresh_all(&mut self, entries: &[ServerEntry]) {
+        for entry in entries {
+            self.refresh_one(entry);
         }
     }
 
@@ -466,5 +652,161 @@ mod tests {
         let mut cache = StatusCache::new();
         assert_eq!(cache.pump(), 0, "no probes started");
         assert!(cache.is_empty());
+    }
+
+    /// The buckets are `< 150 / < 300 / < 600 / < 1000 / else`
+    /// (`ServerSelectionList.java:417-427`), and they run *downward*: five bars
+    /// for a fast server. The boundary values are the point — a `<=` instead of
+    /// a `<` moves every one of them by a millisecond, which no "a ping bar
+    /// drew" assertion can see.
+    #[test]
+    fn the_latency_buckets_are_vanillas_own_and_run_downward() {
+        assert_eq!(ping_sprite(Some(0)), "server_list/ping_5");
+        assert_eq!(ping_sprite(Some(149)), "server_list/ping_5");
+        assert_eq!(ping_sprite(Some(150)), "server_list/ping_4");
+        assert_eq!(ping_sprite(Some(299)), "server_list/ping_4");
+        assert_eq!(ping_sprite(Some(300)), "server_list/ping_3");
+        assert_eq!(ping_sprite(Some(599)), "server_list/ping_3");
+        assert_eq!(ping_sprite(Some(600)), "server_list/ping_2");
+        assert_eq!(ping_sprite(Some(999)), "server_list/ping_2");
+        assert_eq!(ping_sprite(Some(1000)), "server_list/ping_1");
+        assert_eq!(ping_sprite(Some(30_000)), "server_list/ping_1");
+        // `serverData.ping` is a primitive `long`, so "no measurement" is 0 in
+        // vanilla and reads as the fastest bucket. Reproduced, not corrected.
+        assert_eq!(ping_sprite(None), "server_list/ping_5");
+    }
+
+    /// `(millis / 100 + index * 2) & 7` folded with `if idx > 4 { idx = 8 - idx }`
+    /// (`:316-326`). The fold is what makes it a ping-pong rather than a
+    /// sawtooth, and the `index * 2` is what puts adjacent rows out of phase —
+    /// both asserted, because dropping either still animates.
+    #[test]
+    fn the_pinging_animation_ping_pongs_and_is_out_of_phase_per_row() {
+        // One full period of eight tenths of a second, row 0.
+        let frames: Vec<&str> = (0..8).map(|i| pinging_sprite(i * 100, 0)).collect();
+        assert_eq!(
+            frames,
+            vec![
+                "server_list/pinging_1",
+                "server_list/pinging_2",
+                "server_list/pinging_3",
+                "server_list/pinging_4",
+                "server_list/pinging_5",
+                "server_list/pinging_4",
+                "server_list/pinging_3",
+                "server_list/pinging_2",
+            ],
+            "the fold must mirror frames 5..7 back down, not wrap to 6/7/8"
+        );
+        // It is a cycle: the ninth tenth is the first again.
+        assert_eq!(pinging_sprite(800, 0), pinging_sprite(0, 0));
+        // Row 1 is two frames ahead of row 0 at the same instant, so a list
+        // never shows one flat wall of identical bars.
+        assert_eq!(pinging_sprite(0, 1), pinging_sprite(200, 0));
+        assert_ne!(pinging_sprite(0, 1), pinging_sprite(0, 0));
+        // Sub-100ms jitter must not move it: the clock is tenths of a second.
+        assert_eq!(pinging_sprite(99, 0), pinging_sprite(0, 0));
+        // And it must not panic or wrap oddly for a long-running process or a
+        // long list.
+        assert!(PINGING_SPRITES.contains(&pinging_sprite(u64::MAX, usize::MAX)));
+    }
+
+    /// The four presentations resolve to **four distinct** sprites, which is the
+    /// assertion a "something drew a ping bar" gate cannot make.
+    #[test]
+    fn each_state_resolves_to_its_own_sprite() {
+        let ok = |protocol: Option<i32>, latency: Option<u64>| {
+            StatusSlot::Ok(Box::new(ServerStatus {
+                protocol,
+                latency_ms: latency,
+                ..Default::default()
+            }))
+        };
+        let good = ok(Some(STATUS_PROTOCOL), Some(10));
+        let old = ok(Some(STATUS_PROTOCOL - 1), Some(10));
+        let vague = ok(None, Some(10));
+
+        assert_eq!(good.state(STATUS_PROTOCOL), ServerState::Successful);
+        assert_eq!(old.state(STATUS_PROTOCOL), ServerState::Incompatible);
+        assert_eq!(
+            vague.state(STATUS_PROTOCOL),
+            ServerState::Incompatible,
+            "vanilla's `serverData.protocol` defaults to 0, so an absent \
+             protocol is a mismatch there too"
+        );
+        assert_eq!(StatusSlot::Idle.state(STATUS_PROTOCOL), ServerState::Initial);
+        assert_eq!(
+            StatusSlot::Pending.state(STATUS_PROTOCOL),
+            ServerState::Pinging
+        );
+        assert_eq!(
+            StatusSlot::Failed("no".into()).state(STATUS_PROTOCOL),
+            ServerState::Unreachable
+        );
+
+        let sprite = |slot: &StatusSlot, latency| {
+            status_sprite(slot.state(STATUS_PROTOCOL), latency, 0, 0)
+        };
+        let reachable = sprite(&good, Some(10));
+        let incompatible = sprite(&old, Some(10));
+        let unreachable = sprite(&StatusSlot::Failed("no".into()), None);
+        let pending = sprite(&StatusSlot::Pending, None);
+        let mut all = vec![reachable, incompatible, unreachable, pending];
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 4, "two states share a sprite: {all:?}");
+        assert_eq!(reachable, "server_list/ping_5");
+        assert_eq!(incompatible, INCOMPATIBLE_SPRITE);
+        assert_eq!(unreachable, UNREACHABLE_SPRITE);
+        assert_eq!(pending, "server_list/pinging_1");
+        // `refreshStatus` gives INITIAL a *static* `ping_1`, not an animation
+        // frame — the animation only starts once the state is PINGING (`:402-406`
+        // vs `:315-327`).
+        assert_eq!(sprite(&StatusSlot::Idle, None), "server_list/ping_1");
+    }
+
+    /// Every sprite id this module can name must exist in the pack, or a row
+    /// silently draws nothing where its status belongs. The names are checked
+    /// against the shape `GuiAtlas` keys on (`server_list/<name>`, no
+    /// namespace, no extension) rather than against the atlas itself, which
+    /// needs the jar.
+    #[test]
+    fn every_status_sprite_id_is_a_server_list_sprite() {
+        let all = PING_SPRITES
+            .iter()
+            .chain(PINGING_SPRITES.iter())
+            .chain([&INCOMPATIBLE_SPRITE, &UNREACHABLE_SPRITE]);
+        let mut n = 0;
+        for id in all {
+            assert!(id.starts_with("server_list/"), "{id}");
+            assert!(!id.ends_with(".png"), "{id}");
+            assert!(!id.contains(':'), "{id}");
+            n += 1;
+        }
+        assert_eq!(n, 12, "PING_SPRITES + PINGING_SPRITES + the two states");
+    }
+
+    /// The animation needs a clock, and a clock that never advances is a frozen
+    /// icon. This asserts the cache's own is monotonic and real.
+    #[test]
+    fn the_cache_carries_a_clock_for_the_animation() {
+        let cache = StatusCache::with_probe(unavailable_probe());
+        let first = cache.millis();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let second = cache.millis();
+        assert!(second >= first, "the clock went backwards: {first} -> {second}");
+        assert!(
+            second >= 100,
+            "120ms of sleep must move a tenth-of-a-second clock: {second}"
+        );
+        // And a tenth of a second must move the sprite, or the clock is wired to
+        // nothing. Asserted on a *fixed* pair rather than on `second`: the
+        // animation is a cycle, so a sleep that overslept to 800 ms would land
+        // back on frame 0 and make a correct implementation look frozen.
+        assert_ne!(
+            pinging_sprite(0, 0),
+            pinging_sprite(100, 0),
+            "control: 100ms is one animation frame"
+        );
     }
 }

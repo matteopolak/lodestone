@@ -380,8 +380,40 @@ pub const TITLE_TEXTURES: &[(&str, &str)] = &[
     ),
 ];
 
-/// As [`load_gui_atlas`], plus the [`TITLE_TEXTURES`] the title screen draws —
-/// the atlas the **menu** renderer binds.
+/// The server list's fallback favicon —
+/// `ServerSelectionList`'s `FaviconTexture.MISSING_ICON`, blitted at 32×32 for
+/// any row whose server sent no usable icon.
+///
+/// Loose, like [`TITLE_TEXTURES`]: it lives at `textures/misc/`, so
+/// [`load_gui_atlas`]'s `gui/sprites/**` glob structurally cannot see it. Not a
+/// gap to "fix" by widening that glob — see this module's note at
+/// [`load_gui_atlas`] and `container.rs`'s deliberate workaround.
+pub const UNKNOWN_SERVER_TEXTURE: (&str, &str) = (
+    "misc/unknown_server",
+    "assets/minecraft/textures/misc/unknown_server.png",
+);
+
+/// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
+/// [`UNKNOWN_SERVER_TEXTURE`].
+///
+/// A superset rather than an addition to [`TITLE_TEXTURES`], because that
+/// constant means "what `LogoRenderer` blits by path" and the server list's
+/// fallback icon is not that. The `assert!` below is a compile-time guard: this
+/// list spells the title pair out by index, so a third title texture would
+/// otherwise be dropped from the menu atlas silently.
+pub const MENU_TEXTURES: &[(&str, &str)] = &[
+    TITLE_TEXTURES[0],
+    TITLE_TEXTURES[1],
+    UNKNOWN_SERVER_TEXTURE,
+];
+
+const _: () = assert!(
+    TITLE_TEXTURES.len() == 2,
+    "MENU_TEXTURES spells the title textures out by index"
+);
+
+/// As [`load_gui_atlas`], plus the [`MENU_TEXTURES`] the title screen and the
+/// server list draw — the atlas the **menu** renderer binds.
 ///
 /// Deliberately a second stitch rather than extras bolted onto
 /// [`load_gui_atlas`]: that atlas is the HUD's, its sprite set is pinned by the
@@ -396,7 +428,7 @@ pub const TITLE_TEXTURES: &[(&str, &str)] = &[
 pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let root = asset_root()?;
     let manager = open_client_jar(&root)?;
-    match GuiAtlas::build_with_extras(&manager, TITLE_TEXTURES) {
+    match GuiAtlas::build_with_extras(&manager, MENU_TEXTURES) {
         Ok(atlas) => {
             tracing::info!(
                 target: "assets",

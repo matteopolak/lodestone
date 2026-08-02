@@ -33,6 +33,7 @@
 use super::edit_box::EditBox;
 use super::focus::{self, FocusChildren, FocusSet, FocusTarget, KeyEvent, KeyOutcome};
 use super::servers::{MAX_NAME_CHARS, ServerEntry, ServerList, servers_path};
+use super::widget;
 use super::{Screen, SessionKind, UiState};
 use crate::config::{MAX_MANUAL_GUI_SCALE, Options};
 
@@ -58,6 +59,13 @@ pub enum MenuKey {
     Backspace,
     /// Delete the highlighted server (list only).
     Delete,
+    /// **F5** — refresh the multiplayer list (#396).
+    ///
+    /// Its own variant rather than a reuse of `Char('r')`, because it is a
+    /// *function* key: on [`Screen::ServerEdit`] a `Char` is text, and mapping F5
+    /// onto one would type an `r` into the address field. `focus::KEY_F5` is the
+    /// GLFW code `JoinMultiplayerScreen.keyPressed` tests for (`:234`).
+    Refresh,
     /// A printable character: a command on the list, text in the form.
     Char(char),
 }
@@ -87,6 +95,16 @@ pub enum MenuAction {
     /// [`MenuAction::Reprobe`] so the app does not start a probe for an address
     /// that is no longer in the list.
     Forget(ServerEntry),
+    /// The player asked for a **refresh** — F5 or the Refresh button (#396).
+    ///
+    /// Distinct from [`MenuAction::Reprobe`]`(None)`, and the distinction is
+    /// load-bearing rather than tidy: `Reprobe(None)` means "make sure every row
+    /// has been probed", which `StatusCache::refresh` answers by *skipping* every
+    /// address it already has a result for. A refresh that skipped every row is a
+    /// button that does nothing. This one discards the cached results first — which
+    /// is also what vanilla does, by throwing the whole screen away and building a
+    /// new one with a fresh `ServerList` (`JoinMultiplayerScreen.java:167-169`).
+    RefreshList,
     /// The pause menu's "Quit to Title" was activated, or (issue #103) the
     /// death screen's "Title Screen" button was: [`UiState`] has already moved
     /// to [`Screen::MainMenu`] (see [`UiState::quit_to_title`]); the app must
@@ -659,6 +677,120 @@ impl PauseButton {
     }
 }
 
+/// The multiplayer screen's title — `multiplayer.title`'s `en_us` string
+/// (`JoinMultiplayerScreen.java:43`), which
+/// `HeaderAndFooterLayout.addTitleHeader` centres in the header band.
+pub const SERVER_LIST_TITLE: &str = "Play Multiplayer";
+
+/// `JoinMultiplayerScreen`'s seven footer buttons (#396), in the order they are
+/// added to the two footer rows (`JoinMultiplayerScreen.java:68-125`) — which is
+/// also the order [`super::render::server_list_footer_slot`] reads out of the
+/// arranged layout, and the order the rows appear in after the server entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerListButton {
+    /// `selectServer.select` — join the selected server. Inactive with nothing
+    /// selected.
+    Select,
+    /// `selectServer.direct` — connect to an address without saving it.
+    ///
+    /// **Present and inactive.** It opens `DirectJoinServerScreen`, a second
+    /// address form this shell does not have; the add form
+    /// ([`Screen::ServerEdit`]) is the affordance it would duplicate, minus the
+    /// "do not save it" part. Greyed out rather than omitted, which is this
+    /// repo's rule for a vanilla control it cannot honour yet — see
+    /// `docs/menu-widgets.md`.
+    Direct,
+    /// `selectServer.add` — open the add form.
+    Add,
+    /// `selectServer.edit` — open the edit form for the selection.
+    Edit,
+    /// `selectServer.delete` — remove the selection.
+    Delete,
+    /// `selectServer.refresh` — re-ping every row.
+    Refresh,
+    /// `gui.back` — leave the screen.
+    Back,
+}
+
+/// Every multiplayer footer button, in vanilla's own order. As with
+/// [`MAIN_BUTTONS`], the indices are one index space — here offset by the number
+/// of server rows above them, which is what
+/// [`MenuNav::click`]/[`MenuNav::hover`] translate.
+pub const SERVER_LIST_BUTTONS: [ServerListButton; 7] = [
+    ServerListButton::Select,
+    ServerListButton::Direct,
+    ServerListButton::Add,
+    ServerListButton::Edit,
+    ServerListButton::Delete,
+    ServerListButton::Refresh,
+    ServerListButton::Back,
+];
+
+impl ServerListButton {
+    /// Vanilla's `en_us.json` strings verbatim.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ServerListButton::Select => "Join Server",
+            ServerListButton::Direct => "Direct Connection",
+            ServerListButton::Add => "Add Server",
+            ServerListButton::Edit => "Edit",
+            ServerListButton::Delete => "Delete",
+            ServerListButton::Refresh => "Refresh",
+            ServerListButton::Back => "Back",
+        }
+    }
+
+    /// Vanilla's declared width: 100 for the top row, 74 for the lower one
+    /// (`JoinMultiplayerScreen.java:28-29,73,89,108,123-125`).
+    ///
+    /// The **draw** does not read this — [`super::render::server_list_footer_slot`]
+    /// returns the width the arranged layout produced, which is the number that
+    /// reaches pixels. It is here so a test can assert the two agree, which is
+    /// what would catch a footer built with the rows swapped.
+    #[must_use]
+    pub fn width(self) -> f32 {
+        match self {
+            ServerListButton::Select | ServerListButton::Direct | ServerListButton::Add => 100.0,
+            ServerListButton::Edit
+            | ServerListButton::Delete
+            | ServerListButton::Refresh
+            | ServerListButton::Back => 74.0,
+        }
+    }
+
+    /// `JoinMultiplayerScreen.onSelectedChange` (`:246-257`): Join, Edit and
+    /// Delete all start `false`, a selection enables Join, and only an
+    /// `OnlineServerEntry` also enables Edit and Delete.
+    ///
+    /// **Two deviations, both because this shell's list is narrower than
+    /// vanilla's, not because the rule was simplified:**
+    ///
+    /// - Vanilla's selection starts as **null** even with a non-empty list, so
+    ///   the three buttons are inactive until the player clicks or arrows onto a
+    ///   row. This shell has a keyboard row cursor that always points at a row
+    ///   when there is one (that is what `MenuNav::server_index` is), and no
+    ///   "nothing selected" state to model — so `has_selection` is
+    ///   `!list.is_empty()`. The disabled path is therefore reached by an *empty*
+    ///   list rather than by a fresh one.
+    /// - Vanilla's Edit/Delete are inactive for a **LAN** entry, which is neither
+    ///   editable nor deletable. There is no LAN discovery here
+    ///   (`LanServerDetection` has no port), so every row is the equivalent of an
+    ///   `OnlineServerEntry` and the two conditions collapse into one. If LAN
+    ///   rows ever land, this is the function that has to split them apart again.
+    #[must_use]
+    pub fn enabled(self, has_selection: bool) -> bool {
+        match self {
+            ServerListButton::Select | ServerListButton::Edit | ServerListButton::Delete => {
+                has_selection
+            }
+            // Nothing to point at; see the variant's own doc.
+            ServerListButton::Direct => false,
+            ServerListButton::Add | ServerListButton::Refresh | ServerListButton::Back => true,
+        }
+    }
+}
+
 /// The death screen's two widgets (issue #103), vanilla's
 /// `DeathScreen.init` (`DeathScreen.java:42-60`). Both live; unlike
 /// [`MainButton`]/[`PauseButton`] there is nothing present-and-disabled here
@@ -733,6 +865,26 @@ pub struct MenuNav {
     /// [`EditForm`]'s reason: it owns real [`EditBox`] state (a caret, a
     /// selection, a scroll offset) that cannot be rebuilt per frame.
     world_select: crate::menu::world_select::WorldSelectNav,
+    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any (#396).
+    ///
+    /// Separate from [`Self::server`] because the two are different cursors that
+    /// are visible at once: the selected *server* keeps its outline while a footer
+    /// button under the mouse draws highlighted.
+    list_button: Option<usize>,
+    /// The last known mouse position in **logical** pixels, and the canvas it was
+    /// measured in (#396).
+    ///
+    /// `app.rs` already resolves the cursor to a logical position inside
+    /// `menu_row_at`; this is where it records it, so the *menu* can answer
+    /// position questions a row index cannot. There is exactly one such question
+    /// so far and it is vanilla's: which quadrant of a server row's 32 px favicon
+    /// the cursor is in decides whether a click joins, moves the row up, or moves
+    /// it down (`ServerSelectionList.java:490-515`).
+    ///
+    /// `None` until the first `CursorMoved`, which is the state a keyboard-only
+    /// session is in — and the quadrant actions must then simply not fire, rather
+    /// than behaving as if the cursor were at `(0, 0)`.
+    menu_cursor: Option<(f32, f32, f32, f32)>,
 }
 
 impl Default for MenuNav {
@@ -795,6 +947,8 @@ impl MenuNav {
             options_save_error: None,
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
             world_select: crate::menu::world_select::WorldSelectNav::new(),
+            list_button: None,
+            menu_cursor: None,
         }
     }
 
@@ -842,6 +996,52 @@ impl MenuNav {
     #[must_use]
     pub fn server_index(&self) -> usize {
         self.server
+    }
+
+    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any (#396).
+    #[must_use]
+    pub fn list_button(&self) -> Option<usize> {
+        self.list_button
+    }
+
+    /// Records the mouse position in logical pixels, and the canvas it was
+    /// measured in (#396).
+    ///
+    /// Called from `app.rs`'s `menu_row_at`, which already computes both — so it
+    /// runs before every hover *and* every click, and needs no new plumbing at the
+    /// click site. See [`Self::menu_cursor`] for why a row index is not enough.
+    pub fn set_menu_cursor(&mut self, x: f32, y: f32, canvas_width: f32, canvas_height: f32) {
+        self.menu_cursor = Some((x, y, canvas_width, canvas_height));
+    }
+
+    /// The last known logical mouse position, for a frame builder that needs the
+    /// position itself rather than a row index — see [`MenuNav::set_menu_cursor`]
+    /// and [`super::render::MenuFrame::cursor`].
+    #[must_use]
+    pub fn menu_cursor(&self) -> Option<(f32, f32)> {
+        self.menu_cursor.map(|(x, y, _, _)| (x, y))
+    }
+
+    /// The cursor's position **relative to the favicon** of list row `row`, or
+    /// `None` when there is no cursor yet or it is outside that row.
+    ///
+    /// This is `relX`/`relY` in `OnlineServerEntry.mouseClicked` — `event.x() -
+    /// getContentX()` (`ServerSelectionList.java:492-493`) — and it is derived
+    /// through [`super::render::server_row_content_rect`], the same expression the
+    /// draw uses, rather than restating the row geometry here. That is what keeps
+    /// the highlighted quadrant and the quadrant that acts from drifting apart.
+    /// Returns `(rel_x, rel_y, size)`, so the caller passes the same `size` the
+    /// draw blits at rather than restating vanilla's 32.
+    #[must_use]
+    fn entry_icon_cursor(&self, row: usize) -> Option<(f32, f32, f32)> {
+        let (x, y, canvas_w, canvas_h) = self.menu_cursor?;
+        // A canvas is only known once a frame has been hit-tested; a zero one
+        // would put every row at the same place.
+        if canvas_w <= 0.0 || canvas_h <= 0.0 {
+            return None;
+        }
+        let (ix, iy, iw, _) = super::render::server_entry_icon_rect(row, canvas_w);
+        Some((x - ix, y - iy, iw))
     }
 
     /// The highlighted pause-menu button.
@@ -908,7 +1108,11 @@ impl MenuNav {
     pub fn hover(&mut self, ui: &UiState, row: usize) {
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
-            Screen::ServerList if row < self.list.len() => self.server = row,
+            // Two cursors on one screen (#396): the rows below `list.len()` are
+            // server entries and move the *selection*; the seven above them are
+            // footer buttons and move a separate button highlight, which is what
+            // lets a selected server stay outlined while a button lights up.
+            Screen::ServerList => self.hover_list(row),
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
             Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
             Screen::Accounts => self.accounts.hover(row),
@@ -986,8 +1190,130 @@ impl MenuNav {
             }
             return MenuAction::None;
         }
+        // The fourth (#396). A click on a *row* here is
+        // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
+        // quadrants act — while a click above the rows is one of seven buttons.
+        // Routing it as `hover` + `Enter` would join a server on any click on its
+        // row, which vanilla reserves for the join icon and the double-click.
+        if ui.screen() == Screen::ServerList {
+            return self.click_list(ui, row);
+        }
         self.hover(ui, row);
         self.key(ui, MenuKey::Enter)
+    }
+
+    /// [`Self::hover`]'s multiplayer arm: a server row moves the selection, a
+    /// footer row moves the button highlight.
+    fn hover_list(&mut self, row: usize) {
+        if row < self.list.len() {
+            self.server = row;
+            self.list_button = None;
+        } else if row - self.list.len() < SERVER_LIST_BUTTONS.len() {
+            self.list_button = Some(row - self.list.len());
+        }
+    }
+
+    /// [`Self::click`]'s multiplayer arm (#396).
+    ///
+    /// The row half is `OnlineServerEntry.mouseClicked`
+    /// (`ServerSelectionList.java:490-515`) in vanilla's own order: the join
+    /// quadrant first, then the two move quadrants with their index guards, and
+    /// **selection last** — a plain click selects and does not join.
+    ///
+    /// The one piece of vanilla's ordering that is missing is the double-click
+    /// (`if (doubleClick) this.join()`), because `app.rs` reports one click at a
+    /// time with no interval. Joining is still one click away on the icon's right
+    /// half, and one keypress away with Enter or the Join Server button.
+    fn click_list(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
+        if row < self.list.len() {
+            self.server = row;
+            self.list_button = None;
+            let Some((rx, ry, size)) = self.entry_icon_cursor(row) else {
+                return MenuAction::None;
+            };
+            if widget::over_right_half(rx, ry, size) {
+                return match self.list.get(row) {
+                    Some(entry) => {
+                        let entry = entry.clone();
+                        ui.begin(SessionKind::Multiplayer);
+                        MenuAction::Connect(entry)
+                    }
+                    None => MenuAction::None,
+                };
+            }
+            if row > 0 && widget::over_top_left_quarter(rx, ry, size) {
+                return self.swap_rows(row, row - 1);
+            }
+            if row + 1 < self.list.len() && widget::over_bottom_left_quarter(rx, ry, size) {
+                return self.swap_rows(row, row + 1);
+            }
+            return MenuAction::None;
+        }
+        let Some(button) = SERVER_LIST_BUTTONS.get(row - self.list.len()).copied() else {
+            return MenuAction::None;
+        };
+        self.list_button = Some(row - self.list.len());
+        // `AbstractWidget.mouseClicked` returns false for an inactive widget, so
+        // an inactive button swallows the click — the same rule `key_main` applies
+        // to a disabled title-screen button.
+        if !button.enabled(!self.list.is_empty()) {
+            return MenuAction::None;
+        }
+        self.activate_list_button(ui, button)
+    }
+
+    /// Reorders the list and persists it — vanilla's
+    /// `OnlineServerEntry.swap`, which is `servers.swap` then `servers.save`
+    /// (`ServerSelectionList.java:485-488`, `:434-436`).
+    ///
+    /// The selection **follows the row**, matching vanilla's
+    /// `scrollToEntry(children.get(newIndex))`: the entry the player grabbed stays
+    /// the selected one, so a second click on the same arrow keeps moving it.
+    fn swap_rows(&mut self, from: usize, to: usize) -> MenuAction {
+        if !self.list.swap(from, to) {
+            return MenuAction::None;
+        }
+        self.server = to;
+        self.persist();
+        MenuAction::None
+    }
+
+    /// What one footer button does. Each one is the mouse's route to something the
+    /// keyboard can already do, except Direct Connection, which is inactive.
+    fn activate_list_button(&mut self, ui: &mut UiState, button: ServerListButton) -> MenuAction {
+        match button {
+            ServerListButton::Select => match self.list.get(self.server) {
+                Some(entry) => {
+                    let entry = entry.clone();
+                    ui.begin(SessionKind::Multiplayer);
+                    MenuAction::Connect(entry)
+                }
+                None => MenuAction::None,
+            },
+            ServerListButton::Add => {
+                self.form = EditForm::adding();
+                ui.open_server_edit();
+                MenuAction::None
+            }
+            ServerListButton::Edit => match self.list.get(self.server) {
+                Some(entry) => {
+                    self.form = EditForm::editing(self.server, entry);
+                    ui.open_server_edit();
+                    MenuAction::None
+                }
+                None => MenuAction::None,
+            },
+            ServerListButton::Delete => self.delete_selected(),
+            ServerListButton::Refresh => MenuAction::RefreshList,
+            ServerListButton::Back => {
+                ui.on_escape();
+                MenuAction::None
+            }
+            // Inactive, so `click_list` has already returned; spelled out rather
+            // than `_` so making it active without giving it an action is a
+            // compile error instead of a dead button.
+            ServerListButton::Direct => MenuAction::None,
+        }
     }
 
     /// Handles one key for the current screen, mutating `ui` for navigation and
@@ -1129,6 +1455,10 @@ impl MenuNav {
                 ui.on_escape();
                 MenuAction::None
             }
+            // F5, `JoinMultiplayerScreen.keyPressed`'s `event.key() == 294`
+            // (`:231-239`). Every row, not the selected one: vanilla's refresh
+            // replaces the whole screen.
+            MenuKey::Refresh => MenuAction::RefreshList,
             MenuKey::Char(c) => match c.to_ascii_lowercase() {
                 'a' => {
                     self.form = EditForm::adding();
@@ -2685,5 +3015,270 @@ mod tests {
         assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
         assert_eq!(ui.screen(), Screen::Death);
         assert!(!ui.quit_requested());
+    }
+
+    // -- the multiplayer list's footer and row actions (#396) -----------------
+
+    /// A nav on the multiplayer screen with `n` saved servers, and a canvas
+    /// recorded so the position-dependent paths are reachable.
+    fn listing(tag: &str, n: usize) -> (MenuNav, UiState, std::path::PathBuf) {
+        let (mut nav, path) = self::nav(tag);
+        let mut ui = UiState::new();
+        ui.open_server_list();
+        for i in 0..n {
+            nav.key(&mut ui, MenuKey::Char('a'));
+            type_str(&mut nav, &mut ui, &format!("S{i}"));
+            nav.key(&mut ui, MenuKey::Tab);
+            type_str(&mut nav, &mut ui, &format!("h{i}.example"));
+            nav.key(&mut ui, MenuKey::Enter);
+        }
+        assert_eq!(ui.screen(), Screen::ServerList, "premise: the list is up");
+        assert_eq!(nav.list().len(), n);
+        (nav, ui, path)
+    }
+
+    /// Puts the cursor at `(x, y)` logical pixels on an 854×480 canvas, the way
+    /// `app.rs`'s `menu_row_at` does.
+    fn point_at(nav: &mut MenuNav, x: f32, y: f32) {
+        nav.set_menu_cursor(x, y, 854.0, 480.0);
+    }
+
+    /// The centre of a quadrant of row `row`'s favicon, in logical pixels.
+    fn icon_point(row: usize, fx: f32, fy: f32) -> (f32, f32) {
+        let (ix, iy, iw, ih) = crate::menu::render::server_entry_icon_rect(row, 854.0);
+        (ix + iw * fx, iy + ih * fy)
+    }
+
+    /// The row indices `click_list` derives from `list.len()` are the ones
+    /// `render::server_list_frame` builds, in the order it builds them. Same guard
+    /// shape as `the_settings_rows_are_in_the_order_click_assumes`, and the same
+    /// #391 bug it protects against: nothing in the compiler links the two files.
+    #[test]
+    fn the_server_list_rows_are_in_the_order_click_assumes() {
+        let (nav, ui, _) = listing("list-row-order", 2);
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::with_probe(
+                crate::menu::status::unavailable_probe(),
+            ),
+            &mut favicons,
+        )
+        .expect("the multiplayer screen owns its frame");
+
+        assert_eq!(frame.rows.len(), 2 + SERVER_LIST_BUTTONS.len());
+        for (i, entry) in nav.list().entries().iter().enumerate() {
+            assert_eq!(frame.rows[i].label, entry.name, "row {i} is not entry {i}");
+            assert!(frame.rows[i].entry.is_some(), "row {i} must be a list entry");
+        }
+        for (i, button) in SERVER_LIST_BUTTONS.iter().enumerate() {
+            let row = &frame.rows[2 + i];
+            assert_eq!(row.label, button.label(), "footer row {i} is not {button:?}");
+            assert!(
+                row.entry.is_none() && row.slot.is_some(),
+                "a footer row is a slotted button, not a list entry"
+            );
+        }
+    }
+
+    /// A click on a row **selects**; only the favicon's right half joins. That is
+    /// `OnlineServerEntry.mouseClicked`'s order (`ServerSelectionList.java:490-515`),
+    /// and it is also the `MenuNav::click` hazard #395 recorded from the other side:
+    /// translating a click into `Enter` here would connect on any click on any row.
+    #[test]
+    fn a_click_selects_a_row_and_only_the_join_icon_connects() {
+        let (mut nav, mut ui, _) = listing("list-click", 2);
+
+        // The row body: selection moves, nothing else happens.
+        let (bx, by) = icon_point(1, 3.0, 0.5); // well to the right of the icon
+        point_at(&mut nav, bx, by);
+        assert_eq!(nav.click(&mut ui, 1), MenuAction::None, "a row click selects");
+        assert_eq!(nav.server_index(), 1);
+        assert_eq!(ui.screen(), Screen::ServerList, "and does not connect");
+
+        // The icon's right half joins, and it is the *selected* row that goes.
+        let (jx, jy) = icon_point(0, 0.75, 0.5);
+        point_at(&mut nav, jx, jy);
+        match nav.click(&mut ui, 0) {
+            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            other => panic!("the join icon must connect, got {other:?}"),
+        }
+        assert_eq!(nav.server_index(), 0, "and it selects the row it joined");
+        assert_eq!(ui.screen(), Screen::Connecting);
+
+        // With no cursor recorded at all — a click that arrived before any mouse
+        // movement, and every keyboard-only path — the quadrants must not fire.
+        let (mut nav, mut ui, _) = listing("list-click-nocursor", 2);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::ServerList, "no cursor, no join");
+    }
+
+    /// The move quadrants reorder the list, persist it, and carry the selection
+    /// with the row — and each is refused at the end it cannot move toward.
+    #[test]
+    fn the_move_quadrants_reorder_the_list_and_persist_it() {
+        let (mut nav, mut ui, path) = listing("list-move", 3);
+        let names = |nav: &MenuNav| -> Vec<String> {
+            nav.list().entries().iter().map(|e| e.name.clone()).collect()
+        };
+        assert_eq!(names(&nav), ["S0", "S1", "S2"]);
+
+        // Row 2's top-left quadrant moves it up.
+        let (ux, uy) = icon_point(2, 0.25, 0.25);
+        point_at(&mut nav, ux, uy);
+        assert_eq!(nav.click(&mut ui, 2), MenuAction::None);
+        assert_eq!(names(&nav), ["S0", "S2", "S1"]);
+        assert_eq!(nav.server_index(), 1, "the selection follows the row");
+        // Persisted immediately, like every other list mutation here.
+        assert_eq!(
+            ServerList::load_from(&path)
+                .entries()
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>(),
+            ["S0", "S2", "S1"],
+            "a reorder must survive a restart"
+        );
+
+        // Row 0's bottom-left quadrant moves it down.
+        let (dx, dy) = icon_point(0, 0.25, 0.75);
+        point_at(&mut nav, dx, dy);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(names(&nav), ["S2", "S0", "S1"]);
+        assert_eq!(nav.server_index(), 1);
+
+        // The guards: row 0 cannot move up, the last row cannot move down. Both
+        // must leave the list *untouched* rather than clamping into some other
+        // reorder — and the control is that the opposite quadrant on the same row
+        // still works, which the two clicks above already showed.
+        let before = names(&nav);
+        let (ux, uy) = icon_point(0, 0.25, 0.25);
+        point_at(&mut nav, ux, uy);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(names(&nav), before, "row 0 has nowhere to move up to");
+        let last = nav.list().len() - 1;
+        let (dx, dy) = icon_point(last, 0.25, 0.75);
+        point_at(&mut nav, dx, dy);
+        assert_eq!(nav.click(&mut ui, last), MenuAction::None);
+        assert_eq!(names(&nav), before, "the last row has nowhere to move down to");
+    }
+
+    /// Each footer button does what its label says, and the two that cannot are
+    /// refused. The indices are `list.len() + button`, which is what
+    /// `the_server_list_rows_are_in_the_order_click_assumes` pins to the frame.
+    #[test]
+    fn the_footer_buttons_do_what_their_labels_say() {
+        let button_row = |nav: &MenuNav, b: ServerListButton| {
+            nav.list().len()
+                + SERVER_LIST_BUTTONS
+                    .iter()
+                    .position(|x| *x == b)
+                    .expect("in the table")
+        };
+
+        // Add opens the form; Back leaves the screen.
+        let (mut nav, mut ui, _) = listing("list-buttons", 1);
+        let row = button_row(&nav, ServerListButton::Add);
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert!(nav.form().editing.is_none(), "Add is a fresh form");
+        ui.on_escape();
+
+        let row = button_row(&nav, ServerListButton::Edit);
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::ServerEdit);
+        assert_eq!(nav.form().editing, Some(0), "Edit carries the selection");
+        ui.on_escape();
+
+        let row = button_row(&nav, ServerListButton::Select);
+        match nav.click(&mut ui, row) {
+            MenuAction::Connect(entry) => assert_eq!(entry.host, "h0.example"),
+            other => panic!("Join Server must connect, got {other:?}"),
+        }
+        assert_eq!(ui.screen(), Screen::Connecting);
+
+        // Refresh re-pings everything. Not `Reprobe(None)`, which would skip every
+        // row that already has a result and make the button do nothing.
+        let (mut nav, mut ui, _) = listing("list-refresh", 1);
+        let row = button_row(&nav, ServerListButton::Refresh);
+        assert_eq!(nav.click(&mut ui, row), MenuAction::RefreshList);
+        assert_eq!(ui.screen(), Screen::ServerList, "and stays on the screen");
+
+        // Delete removes the row and asks the app to forget its cached status.
+        let row = button_row(&nav, ServerListButton::Delete);
+        match nav.click(&mut ui, row) {
+            MenuAction::Forget(gone) => assert_eq!(gone.host, "h0.example"),
+            other => panic!("Delete must forget the row's status, got {other:?}"),
+        }
+        assert!(nav.list().is_empty(), "Delete must remove the row");
+
+        // With the list now empty, the three conditional buttons are inactive and
+        // a click on one must do **nothing** — vanilla's inactive
+        // `AbstractWidget.mouseClicked` returns false.
+        for b in [
+            ServerListButton::Select,
+            ServerListButton::Edit,
+            ServerListButton::Delete,
+            ServerListButton::Direct,
+        ] {
+            let row = button_row(&nav, b);
+            assert_eq!(nav.click(&mut ui, row), MenuAction::None, "{b:?}");
+            assert_eq!(ui.screen(), Screen::ServerList, "{b:?} must not navigate");
+        }
+        // Control: Add is active on the same empty list, so the four assertions
+        // above measure `enabled` and not a dead `click`.
+        let row = button_row(&nav, ServerListButton::Add);
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::ServerEdit, "Add is still active");
+        ui.on_escape();
+
+        let row = button_row(&nav, ServerListButton::Back);
+        assert_eq!(nav.click(&mut ui, row), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::MainMenu, "Back leaves the screen");
+    }
+
+    /// F5 refreshes, and hovering the footer moves a **second** cursor rather than
+    /// the selection — which is what lets a selected row stay outlined while a
+    /// button under the mouse highlights.
+    #[test]
+    fn f5_refreshes_and_hovering_the_footer_leaves_the_selection_alone() {
+        let (mut nav, mut ui, _) = listing("list-f5", 2);
+        nav.hover(&ui, 1);
+        assert_eq!(nav.server_index(), 1);
+        assert_eq!(nav.list_button(), None, "a row hover clears the button cursor");
+
+        assert_eq!(nav.key(&mut ui, MenuKey::Refresh), MenuAction::RefreshList);
+        assert_eq!(ui.screen(), Screen::ServerList);
+
+        // Hovering a footer button.
+        nav.hover(&ui, 2 + 3); // the fourth button, Edit
+        assert_eq!(nav.list_button(), Some(3));
+        assert_eq!(
+            nav.server_index(),
+            1,
+            "hovering a button must not move the selected server"
+        );
+        // Back onto a row clears it again.
+        nav.hover(&ui, 0);
+        assert_eq!(nav.list_button(), None);
+        assert_eq!(nav.server_index(), 0);
+        // A row index past every button is ignored rather than clamped.
+        nav.hover(&ui, 99);
+        assert_eq!(nav.list_button(), None);
+        assert_eq!(nav.server_index(), 0);
+    }
+
+    /// F5 must not reach the edit form as text — the trap `MenuKey::Refresh`
+    /// exists to avoid. Typing `r` there is a real keystroke; F5 is not.
+    #[test]
+    fn f5_is_not_text_in_the_edit_form() {
+        let (mut nav, mut ui, _) = listing("list-f5-form", 0);
+        nav.key(&mut ui, MenuKey::Char('a'));
+        assert_eq!(ui.screen(), Screen::ServerEdit, "premise: the form is open");
+        type_str(&mut nav, &mut ui, "home");
+        nav.key(&mut ui, MenuKey::Refresh);
+        assert_eq!(nav.form().name(), "home", "F5 must not type anything");
+        assert_eq!(ui.screen(), Screen::ServerEdit, "and must not navigate");
     }
 }
