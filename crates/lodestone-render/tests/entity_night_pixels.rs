@@ -394,23 +394,29 @@ fn readback(
 /// **not** read back from this crate. For a sky-15, block-0 mob:
 ///
 /// * **correct** (`NIGHT_RATIO`): `get_brightness(15/15)` is `1.0`; `SkyFactor` at
-///   midnight is `0.24`, so the combined value is `0.24`; then `lightmap.fsh`'s
+///   midnight is `0.24`, so the sky contribution is `0.24`; `AmbientColor` seeds the
+///   accumulator with the overworld's `0x0A0A0A` = `0.039216`
+///   (`DimensionTypes.java:36`), giving a combined `0.279216`; then `lightmap.fsh`'s
 ///   last line mixes `notGamma` in at the default `BrightnessFactor` of `0.5`,
-///   and for a grey value `notGamma(c) == 1 - (1-c)^4`, giving
-///   `0.24 + (0.66638 - 0.24) * 0.5` = **0.45319**. Noon is exactly `1.0`, so
-///   that is the ratio.
+///   and for a grey value `notGamma(c) == 1 - (1-c)^4`, giving **0.50465**. Noon is
+///   exactly `1.0` — the ambient term clamps away up there — so that is the ratio.
+/// * **`AmbientColor` dropped** (`AMBIENT_FREE_RATIO`): the same chain believing the
+///   overworld's ambient is black, which is what this gate first asserted:
+///   **0.45319**. It is the closest wrong answer, `0.05` away, and it sets how wide
+///   the band can be.
 /// * **the retired linear ramp** (`OLD_RAMP_RATIO`): `0.2 + 0.8 * 0.24` =
 ///   **0.392**. This is what shipped before the curve landed, and the band must
 ///   exclude it or this gate cannot see the change.
 /// * **the original shipped bug** (`BUG_RATIO`): no time-of-day term at all, so
 ///   both frames render at `1.0` — a ratio of exactly **1.000**.
 ///
-/// The band is tight enough to admit only the first: it excludes the retired
-/// ramp by 0.04 and the no-term bug by more than a factor of two.
-const NIGHT_RATIO: f32 = 0.453_19;
+/// The band admits only the first, and every exclusion is asserted in the test body
+/// rather than described here.
+const NIGHT_RATIO: f32 = 0.504_65;
+const AMBIENT_FREE_RATIO: f32 = 0.453_19;
 const OLD_RAMP_RATIO: f32 = 0.392;
 const BUG_RATIO: f32 = 1.000;
-const BAND: std::ops::RangeInclusive<f32> = 0.435..=0.472;
+const BAND: std::ops::RangeInclusive<f32> = 0.482..=0.528;
 
 fn gpu_or_fail() -> Gpu {
     setup().unwrap_or_else(|| {
@@ -450,6 +456,7 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
     println!("mob mean, sky 15, midnight   = {night:.1} over {night_px}px");
     println!("measured ratio               = {ratio:.3}");
     println!("correct prediction           = {NIGHT_RATIO:.3} (lightmap.fsh, gamma 0.5)");
+    println!("ambient-dropped control      = {AMBIENT_FREE_RATIO:.3} (AmbientColor believed black)");
     println!("retired-linear-ramp control  = {OLD_RAMP_RATIO:.3} (0.2 + 0.8 * 0.24)");
     println!("shipped-bug control          = {BUG_RATIO:.3}");
     println!("negative control (same input) = {control_ratio:.3}, in band = {}", BAND.contains(&control_ratio));
@@ -470,6 +477,15 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
     // curve change — asserted rather than described, so a widened band is caught
     // here and not by a player.
     assert!(
+        BAND.contains(&NIGHT_RATIO)
+            && !BAND.contains(&AMBIENT_FREE_RATIO)
+            && !BAND.contains(&OLD_RAMP_RATIO)
+            && !BAND.contains(&BUG_RATIO),
+        "the band {BAND:?} must admit {NIGHT_RATIO:.3} and reject {AMBIENT_FREE_RATIO:.3} \
+         (AmbientColor dropped), {OLD_RAMP_RATIO:.3} (retired ramp) and {BUG_RATIO:.3} \
+         (no time-of-day term)"
+    );
+    assert!(
         !BAND.contains(&OLD_RAMP_RATIO),
         "the band {BAND:?} accepts the retired linear ramp's {OLD_RAMP_RATIO:.3}, so it cannot \
          distinguish vanilla's curve from `0.2 + 0.8 * l`"
@@ -477,7 +493,9 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
     assert!(
         BAND.contains(&ratio),
         "a sky-lit mob at midnight must render near {NIGHT_RATIO:.3} of its noon brightness, got \
-         {ratio:.3} (noon {day:.1}, midnight {night:.1}). A ratio near {OLD_RAMP_RATIO:.3} means \
+         {ratio:.3} (noon {day:.1}, midnight {night:.1}). A ratio near \
+         {AMBIENT_FREE_RATIO:.3} means `AmbientColor` was dropped; a ratio near \
+         {OLD_RAMP_RATIO:.3} means \
          the retired `0.2 + 0.8 * l` ramp is back; a ratio near {BUG_RATIO:.3} means there is \
          still no time-of-day term and mobs are full-bright at night."
     );

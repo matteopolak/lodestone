@@ -68,6 +68,15 @@ fn not_gamma_grey(c: f32) -> f32 {
 // brightness setting yet; 0.0 is vanilla's `Moody`, 1.0 its `Bright`.
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
+// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the overworld, which
+// `DimensionTypes.java:36` sets to -16119286 == 0x0A0A0A -- grey 10/255, *not*
+// black. `lightmap.fsh` seeds its accumulator with it (`color =
+// max(AmbientColor, nightVisionColor)`) before adding either light half, so an
+// unlit surface is not pure black in vanilla: it reads 0.0935 after the
+// `not_gamma` mix. Grey, so it stays a scalar here; the Nether's 0x302821 and
+// the End's 0x3F473F are not, and are part of the per-dimension colour pass.
+const AMBIENT_LIGHT: f32 = 0.039215688;
+
 // One lightmap texel, as a scalar: `lightmap.fsh`'s whole main(), minus the
 // ambient colour (black in the overworld) and with `max` still standing in for
 // vanilla's additive sky+block combine (#383's third divergence -- doing it
@@ -82,7 +91,7 @@ const BRIGHTNESS_FACTOR: f32 = 0.5;
 fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
     let sky = light_brightness(sky_level) * sky_darken();
     let block = light_brightness(block_level);
-    let c = clamp(max(sky, block), 0.0, 1.0);
+    let c = clamp(AMBIENT_LIGHT + max(sky, block), 0.0, 1.0);
     return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 }
 

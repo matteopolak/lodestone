@@ -59,12 +59,18 @@ Three things to notice, each of which the written record got wrong at some point
    `maxScaled / maxComponent` where `maxScaled = 1 - (1 - maxComponent)^4`; with all
    three components equal that is exactly `1 - (1 - c)^4`, and the division
    disappears (so does vanilla's `0.0 / 0.0` at the darkest texel). Ours is grey
-   because the overworld's `SKY_LIGHT_COLOR` is white (`-1`) and its
-   `AMBIENT_LIGHT_COLOR` is black (`-16777216`).
+   because the overworld's `AMBIENT_LIGHT_COLOR` is grey and its `SKY_LIGHT_COLOR`
+   is white **in daylight** — but see [Two later corrections](#two-later-corrections),
+   because neither of those is the whole story and the second one is why this has to
+   become a colour.
+4. **`AmbientColor` seeds the accumulator** before either light half is added, and
+   the overworld's is `0x0A0A0A`, not black. So an unlit surface is `0.0935`, not
+   `0.0`.
 
-The endpoints are **exact**: `get_brightness(1) = 1` and `notGamma(1) = 1`, so full
-light is `1.0`; `get_brightness(0) = 0` and `notGamma(0) = 0`, so no light is `0.0`.
-That exactness at `1.0` is why most of the tree was unmoved by this change.
+The **top** endpoint is exact: `get_brightness(1) = 1`, `notGamma(1) = 1`, and the
+ambient term clamps away, so full light is `1.0`. That exactness at `1.0` is why most
+of the tree was unmoved by this change. The bottom endpoint is *not* zero — it is
+the ambient floor.
 
 ## What was wrong, and by how much
 
@@ -75,7 +81,8 @@ arithmetically checkable at the time and neither looked wrong on inspection.
 | --- | --- |
 | retired ramp `0.2 + 0.8 * l` | 0.3920 |
 | #386's spec: curve applied **after** `sky_darken`, no `notGamma` | 0.0732 |
-| vanilla per `lightmap.fsh`: curve **before**, `notGamma` at gamma 0.5 | **0.4532** |
+| curve **before**, `notGamma` at gamma 0.5, `AmbientColor` dropped | 0.4532 |
+| vanilla per `lightmap.fsh`, with `AmbientColor` | **0.5047** |
 
 So **night was never "5.36x too bright"**. At full skylight the retired ramp was
 about 14% too *dark*. #386's figure came from composing the curve with `sky_darken`
@@ -86,18 +93,57 @@ The ramp was still wrong, and wrong in the direction #383 measured — the error
 lives in the **middle** of the range rather than at midnight, because the two curves
 meet exactly at both endpoints:
 
-| level | retired ramp | vanilla (curve + `notGamma`) | ratio |
-| --- | --- | --- | --- |
-| 15/15 | 1.000 | 1.000 | 1.00 |
-| 12/15 | 0.840 | 0.719 | 1.17 |
-| 8/15 | 0.627 | 0.428 | 1.46 |
-| 7/15 | 0.573 | 0.363 | 1.58 |
-| 4/15 | 0.413 | 0.189 | 2.19 |
-| 0 | **0.200** | **0.000** | infinite |
+| level | retired ramp | vanilla | ambient dropped | ratio (ramp/vanilla) |
+| --- | --- | --- | --- | --- |
+| 15/15 | 1.000 | 1.000 | 1.000 | 1.00 |
+| 12/15 | 0.840 | 0.747 | 0.719 | 1.12 |
+| 8/15 | 0.627 | 0.482 | 0.428 | 1.30 |
+| 7/15 | 0.573 | 0.423 | 0.363 | 1.35 |
+| 4/15 | 0.413 | 0.265 | 0.189 | 1.56 |
+| 0 | **0.200** | **0.0935** | 0.000 | 2.14 |
 
 The last row is the mechanism #386 named and the one part of its diagnosis that was
-exactly right: a hard 20% floor that no darkening could go below. Vanilla has no
-floor. Unlit surfaces are now black.
+exactly right: a hard 20% floor that no darkening could go below. Vanilla's floor is
+`0.0935` — real, but less than half as high.
+
+Note how the third column converges on the second as light rises: at sky 12 the
+ambient term is worth only `0.028`. That is precisely why dropping it survived every
+daylight gate in the tree, and why the acceptance bands in
+`entity_light_pixels` and `grass_light_response_gate` had to be narrowed to `±0.017`
+when it was restored — the ambient-free hypothesis is the closest wrong answer either
+gate has ever had to reject.
+
+## How to change it
+
+## Two later corrections
+
+Both were stated confidently in the first version of `light.rs` and this doc, and both
+are false. Neither looked wrong on inspection; both were found by decoding the raw
+`ARGB` ints instead of trusting the prose beside them.
+
+**1. `AmbientColor` is not black in the overworld.** `DimensionTypes.java:36` sets
+`AMBIENT_LIGHT_COLOR` to `-16119286`, which is `0xFF0A0A0A` — grey `10/255`. The claim
+that "adding it is a no-op" was wrong, and dropping it made every unlit surface `0.000`
+instead of `0.0935`: an overshoot past vanilla committed in the course of fixing an
+overshoot the other way. Caves and unlit faces rendered absolutely black. Now modelled
+as `light::AMBIENT_LIGHT`, added into the combine before the clamp, and the tables above
+are the corrected ones.
+
+It is grey in the overworld, which is the only reason the light term is still a scalar.
+The Nether's `0x302821` and the End's `0x3F473F` are not.
+
+**2. `SKY_LIGHT_COLOR` is not constant white — it is keyframed, and blue at night.**
+`Timelines.java:72` animates it: `-1` (white) at ticks 730 and 11270, then
+`NIGHT_SKY_LIGHT_COLOR` at 13140 and 22860. And that constant
+(`Timelines.java:30`) is `ARGB.colorFromFloat(1.0F, 0.48F, 0.48F, 1.0F)` — red and green
+fall to **48%** while blue holds at **100%**.
+
+So vanilla's night light is not merely dimmer than day, it is a different *hue*. This is
+the direct cause of the player report "at night the shadow is supposed to be a different
+colour", and it is the remaining reason the light term has to become a `vec3`, alongside
+the warm `BLOCK_LIGHT_TINT` of `-10100` = `(1.000, 0.847, 0.549)`. The grey
+specialisation of `notGamma` is a daylight-only convenience and stops being right the day
+either colour lands. Tracked as [#383]'s third divergence.
 
 ## How to change it
 
@@ -124,15 +170,22 @@ Two consequences worth knowing before touching anything downstream:
 * **The `0.0` sky-darken sentinel matters more than it did.** All three shaders read
   a `fog_end_enabled.z` of `<= 0.0` as full daylight, because every caller builds the
   uniform from a `FogUniform` that zeroes the lane. Taking it literally used to pin
-  surfaces at the `0.2` floor; now it renders them pure **black**.
+  surfaces at the `0.2` floor.
   `entity_night_pixels::the_unset_lane_renders_identically_to_explicit_noon` is the
   gate.
-* **Ratio gates against light 0 are now degenerate.** A sky-0 frame is black, so
-  `dark / bright` is `0.000` under any build that darkens at all — including one that
-  draws nothing. Two gates had to move their second measurement point into the
-  interior of the curve for this reason (`entity_light_pixels`,
-  `grass_light_response_gate`), and each grew a separate assertion that light 0 really
-  does reach black.
+* **Bands must be tight enough to reject the ambient-free hypothesis.** It sits only
+  `0.05`–`0.06` from the correct value at every interior level — far closer than the
+  retired ramp ever was — and it converges further as light rises (`0.028` at sky 12).
+  Every band in the gates below was narrowed to roughly `±0.017` when `AmbientColor` was
+  restored. A band inherited from the ramp-versus-curve era is wide enough to accept a
+  build that drops ambient entirely, which is exactly how that regression shipped
+  green.
+* **Ratio gates against light 0 are usable again.** While ambient was dropped, a sky-0
+  frame was black, so `dark / bright` was `0.000` under any build that darkens at all —
+  including one that draws nothing, i.e. vacuous in the *world* sense. Vanilla's real
+  `0.0935` floor restores light 0 as a discriminating measurement point, and both
+  `entity_light_pixels` and `grass_light_response_gate` now assert a *band* on that
+  ratio rather than "is it black".
 
 ## Configuration
 
@@ -148,14 +201,14 @@ Nothing else. No flags, no env vars.
 
 | gate | what it pins | what it structurally cannot see |
 | --- | --- | --- |
-| `lodestone-render` `light.rs` unit tests | the curve's shape at 0, 4/15, 7/15, 8/15, 12/15, 0.8, 1.0 and midnight, each against the retired ramp *and* #386's table; monotonicity and range over all 256 packed bytes at both plateaus | pixels — this is the closed loop, and on its own it proves only that the mirror agrees with itself |
-| `entity_night_pixels::a_sky_lit_mob_is_darker_at_midnight_than_at_noon` | **the midnight magnitude at pixels**: 0.4532, with a band that rejects 0.392 and 1.000, asserted rather than described | which curve terrain uses |
-| `entity_light_pixels::a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight` | the sky-7 magnitude, 0.36312, band rejecting 0.57333 and 1.0 | the clock |
-| `entity_light_pixels::the_light_floor_is_gone` | light 0 renders pure black on a mob, with the sunlit frame as the control | terrain |
-| `grass_light_response_gate::tinted_surfaces_respond_to_sky_light_exactly_as_stone_does` | the same 0.36312 on **real baked geometry** through `mesh_models`, for four populations including the tinted and cutout classes | entities |
-| `grass_light_response_gate::unlit_faces_reach_black_with_no_floor` | light 0 is black even where a tint multiplies — a tint applied outside the light multiply would survive nowhere else | anything about the interior of the curve |
-| `screen_effects` unit tests | the underwater overlay tints on the same curve, at 8/15 and at both endpoints | that the overlay reaches the screen (that is `screen_overlay_pixels.rs`) |
-| `particles::light_term_matches_the_terrain_shader` | break particles shade on the same curve at block 8, and reach 0 unlit | that particles dim at night — they do not; `Particles` has no clock |
+| `lodestone-render` `light.rs` unit tests | the curve's shape at 0, 4/15, 7/15, 8/15, 12/15, 0.8, 1.0 and midnight, each against the retired ramp, #386's table *and* the ambient-free chain; that ambient is **added** rather than another `max` candidate; monotonicity and range over all 256 packed bytes at both plateaus | pixels — this is the closed loop, and on its own it proves only that the mirror agrees with itself |
+| `entity_night_pixels::a_sky_lit_mob_is_darker_at_midnight_than_at_noon` | **the midnight magnitude at pixels**: 0.50465, with a band that rejects 0.45319 (ambient dropped), 0.392 (retired ramp) and 1.000, asserted rather than described | which curve terrain uses |
+| `entity_light_pixels::a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight` | the sky-7 magnitude, 0.42307, band rejecting 0.36312, 0.57333 and 1.0 | the clock |
+| `entity_light_pixels::the_light_floor_is_vanillas_ambient_and_not_the_retired_ramps` | light 0 renders at 0.0935 of daylight on a mob — a band rejecting both 0.2 and 0.0 — with the sunlit frame and the silhouette count as controls | terrain |
+| `grass_light_response_gate::tinted_surfaces_respond_to_sky_light_exactly_as_stone_does` | the same 0.42307 on **real baked geometry** through `mesh_models`, for four populations including the tinted and cutout classes | entities |
+| `grass_light_response_gate::unlit_faces_reach_vanillas_ambient_floor_and_not_the_retired_ramps` | light 0 is the **same fraction** (0.0935) of daylight in every channel even where a tint multiplies — a tint applied outside the light multiply would read near 1.0 and survive nowhere else | anything about the interior of the curve |
+| `screen_effects` unit tests | the underwater overlay tints on the same curve, at 8/15 and at both endpoints, each against the ambient-free value as well as the ramp | that the overlay reaches the screen (that is `screen_overlay_pixels.rs`) |
+| `particles::light_term_matches_the_terrain_shader` | break particles shade on the same curve at block 8, and reach the 0.0935 ambient floor unlit | that particles dim at night — they do not; `Particles` has no clock |
 | `sky_light_factor_timeline.rs` | `sky_darken_for_time_of_day` against a JVM dump at all 24000 ticks | the ramp — it never touches it, and did not change |
 
 Unmoved by this change, and worth stating because it is the reason the blast radius

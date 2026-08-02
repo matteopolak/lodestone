@@ -1213,33 +1213,52 @@ mod tests {
         let base = p.instances[0].colour[0];
         assert!(base > 0.0, "a black particle makes the ratio meaningless");
 
-        // Block light 0, sky light 0. `get_brightness(0)` is 0 and `notGamma(0)`
-        // is 0, so an unlit particle is now *black*; the retired ramp floored it
-        // at 0.2, which is the floor issue #386 named as the mechanism.
+        // Block light 0, sky light 0. `get_brightness(0)` is 0, but vanilla seeds
+        // the accumulator with `AmbientColor` — `0x0A0A0A` in the overworld, per
+        // `DimensionTypes.java:36` — so an unlit particle is not black either: it
+        // reads 0.0935 once `notGamma` is mixed in. The retired ramp floored it at
+        // 0.2, which is still the floor issue #386 named; the correct replacement
+        // is a *smaller* floor, not none.
+        //
+        // This is also why the ratio below is worth asserting at all. Against a
+        // pure-black expectation, `dark / base` is 0.000 under any build that
+        // darkens — including one that draws nothing at all — so the assertion
+        // would have been vacuous in the sense CLAUDE.md calls the *world*
+        // species. A non-zero floor makes it discriminating again.
+        let ambient = 10.0_f32 / 255.0;
+        let floor = ambient + ((1.0 - (1.0 - ambient).powi(4)) - ambient) * 0.5;
+        assert!((floor - 0.093_545).abs() < 1e-5, "hypothesis drifted: {floor}");
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(0));
         let dark = p.instances[0].colour[0];
         assert!(
-            (dark / base).abs() < 1e-5,
-            "unlit particle shade {} must be 0.0 — vanilla's curve has no floor, and the \
-             retired ramp's 0.2 is exactly what this asserts is gone",
+            (dark / base - floor).abs() < 1e-5,
+            "unlit particle shade {} must be vanilla's ambient floor {floor} — not pure \
+             black, and not the retired ramp's 0.2",
             dark / base
         );
 
-        // The interior of the curve, which is the only place the two hypotheses
-        // differ. Block light 8: `get_brightness(8/15) = 0.2222`, and mixing
-        // `notGamma` in at 0.5 gives 0.4281. The retired ramp gave 0.6267.
+        // The interior of the curve, which is where the hypotheses differ most.
+        // Block light 8: `get_brightness(8/15) = 0.2222`, plus ambient `10/255`,
+        // and mixing `notGamma` in at 0.5 gives 0.4819. Dropping ambient gives
+        // 0.4281 and the retired ramp 0.6267.
         let level: f32 = 8.0 / 15.0;
         let curved = level / (4.0 - 3.0 * level);
-        let vanilla = curved + ((1.0 - (1.0 - curved).powi(4)) - curved) * 0.5;
+        let mix = |c: f32| c + ((1.0 - (1.0 - c).powi(4)) - c) * 0.5;
+        let vanilla = mix(curved + ambient);
+        let ambient_free = mix(curved);
         let retired_ramp = 0.2 + 0.8 * level;
-        assert!((vanilla - 0.428_136).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!((vanilla - 0.481_948).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!(
+            (ambient_free - 0.428_136).abs() < 1e-5,
+            "hypothesis drifted: {ambient_free}"
+        );
         assert!((retired_ramp - 0.626_667).abs() < 1e-5, "hypothesis drifted: {retired_ramp}");
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(8 << 4));
         let mid = p.instances[0].colour[0] / base;
         assert!(
             (mid - vanilla).abs() < 1e-5,
-            "block light 8 must shade at vanilla's {vanilla}, not the retired ramp's \
-             {retired_ramp}; got {mid}"
+            "block light 8 must shade at vanilla's {vanilla} — not the retired ramp's \
+             {retired_ramp} and not the ambient-free {ambient_free}; got {mid}"
         );
 
         // Sky-only and block-only must agree: the shader takes the max, so a
