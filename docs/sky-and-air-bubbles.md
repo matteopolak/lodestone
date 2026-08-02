@@ -283,20 +283,49 @@ fragColor = apply_fog(ColorModulator, sphericalVertexDistance, cylindricalVertex
                       0.0, FogSkyEnd, FogSkyEnd, FogSkyEnd, FogColor);
 ```
 
-which with `include/fog.glsl` is `mix(sky_color, fog_color, clamp(dist/512, 0, 1))`.
-`512` is `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s default. The disc sits at
-`y = 16` with radius `512`, so its centre is at distance 16 (factor 0.031, pure
-sky) and its rim at 512 (factor 1.0, pure fog). **That radial ramp is the
-gradient**, and it is why the horizon end of the dome must be the *fog* colour —
-`RenderState::render_inner` passes `self.fog.color`, not a second sky constant.
+which with `include/fog.glsl` is `mix(sky_color, fog_color, clamp(dist/skyEnd, 0, 1))`.
+The disc sits at `y = 16` with radius `512`, so at `skyEnd = 512` its centre is at
+distance 16 (factor 0.031, pure sky) and its rim at 512 (factor 1.0, pure fog).
+**That radial ramp is the gradient**, and it is why the horizon end of the dome
+must be the *fog* colour — `RenderState::render_inner` passes `self.fog.color`,
+not a second sky constant.
+
+### `skyEnd` is the render distance, not 512 (#399)
+
+`512` is only `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s **registered
+default**. Vanilla clamps it to the render distance before the shader sees it:
+
+```java
+fog.skyEnd = Math.min(renderDistance, camera.attributeProbe().getValue(EnvironmentAttributes.SKY_FOG_END_DISTANCE, partialTicks));
+```
+
+`AtmosphericFogEnvironment.java:73`, where `renderDistance` is
+`renderDistanceInChunks * 16` — **blocks** (`FogRenderer.java:185`, passed at
+`:193`). So RD 8 → 128, RD 16 → 256, RD 32 → 512, and the clamp only binds at 32
+and above. Shipping the constant meant the gradient was correct at exactly one
+render distance and 4x too long at the client default.
+
+The clamp is `sky::sky_fog_end_for_render_distance`. It reaches the GPU as
+`SkyFrame::sky_fog_end` → `SkyDiscVertex::fog_end` → `sky_disc.wgsl`'s
+`@location(3)`, identical on all ten fan vertices — an attribute rather than a
+uniform for the same reason the two colours are, so the pass stays at one bind
+group (`sky_pipeline.rs`'s module docs on the 4-group floor). `SkyFrame::new`
+leaves it at the 512 default, so **a call site that knows the render distance and
+does not call `with_render_distance` silently reinstates #399**; there is one such
+site left, `RenderState::render_inner` in `lodestone-shell/src/gpu.rs`.
+
+Note what does *not* change: the disc's geometry stays 512 blocks across
+(`SKY_DISC_RADIUS`), and the horizon end stays the fog colour. A shorter `skyEnd`
+saturates the outer part of the same disc rather than shrinking it.
 
 Two consequences worth writing down:
 
 - The gradient is geometrically compressed into a few degrees above the horizon.
-  A ray only reaches the fully-fogged rim at `atan(16/512) = 1.79°` of elevation
-  and is at half fog by `3.6°`. That is not a bug and it is why the gate uses a
-  30° vertical FOV rather than 90° — at 90° most pixels sit in the flat
-  near-zenith regime and exercise almost none of the ramp.
+  At `skyEnd = 512` a ray only reaches the fully-fogged rim at
+  `atan(16/512) = 1.79°` of elevation and is at half fog by `3.6°`; at RD 8's
+  `skyEnd = 128` those become `7.2°` and `14.5°`. That is not a bug and it is why
+  the gate uses a 30° vertical FOV rather than 90° — at 90° most pixels sit in the
+  flat near-zenith regime and exercise almost none of the ramp.
 - **The banding in #96's title is vanilla's own**, from computing the factor in
   `sky.vsh` — once per vertex, over ten vertices and eight triangles hundreds of
   blocks wide. `SKY_DISC_WGSL` interpolates the camera-relative *position* and
@@ -581,9 +610,10 @@ broken wraparound, easing or rounding. Controls, executed:
 `crates/lodestone-render/tests/sky_gradient_pixels.rs` — pixel gates, measured on
 this machine:
 
-| gate | subject | control(s), EXECUTED |
+| gate | subject | control(s) — EXECUTED unless the cell says otherwise |
 |---|---|---|
 | gradient | **0** of 28142 disc px outside a 3/255 tolerance; worst error 1 | fog == sky (the pre-#96 flat disc): **28142** bad; per-vertex fog factor: **16062** bad |
+| **gradient end vs render distance (#399)** | **NOT RUN — no measurement yet.** Asserts at RD 8 (`skyEnd` 128) *and* RD 32 (`skyEnd` 512): each frame 0 px outside a tolerance of `3 · 512/skyEnd`, i.e. 12 near and 3 far | **NOT EXECUTED.** Each row cross-checks against the *other* distance's expectation and requires >25% of the disc to disagree with worst > 40/255; plus `control_a_constant_512_block_fog_end_is_wrong_at_render_distance_8`, which reproduces the pre-fix constant through the shipped pipeline |
 | sunrise band | 9408 of 30880 disc px warm, bbox `y82..120`, mean elevation **7.5°** against the disc region's 18.6° | noon (band alpha `0x00`): **0** warm; camera turned 180°: **0** warm |
 | void fog | eye `+32` → mean byte 135.3; eye `-48` → 7.5; eye `-64` → 0.0. Measured midpoint ratio **0.0552** vs gamma-space prediction **0.0554** | `VoidFog::DISABLED` at the same eye height `-64`: 135.3 |
 | **biome tint, gross** | `pale_garden #b9b9b9` vs `desert #6eb1ff`: **28142 of 28142** disc px differ, worst per-channel delta **115**; each frame **0** px outside the 3/255 gradient tolerance against *its own* colour | same colour twice: **0** differ · **`plains` vs `swamp` (byte-identical `#78a7ff`): 0 differ** — the vacuous pair, asserted rather than avoided |
@@ -613,6 +643,17 @@ Four things about those gates are worth keeping:
 per-vertex frame's worst per-channel error is only `8/255`, so an assertion on
 the worst error read as "no banding". Its *count* is 16062 pixels against the
 shipped path's 0.
+
+**The #399 row asserts at two render distances, and that is not belt-and-braces.**
+The defect was that `skyEnd` did not vary with render distance *at all*, so a gate
+at a single distance is satisfied by any constant that happens to match there —
+and 32 chunks is precisely the distance at which the shipped constant `512` was
+right. One row would have passed on the bug. The cross-check (each frame must
+**fail** the other distance's expectation) is what turns "there is a gradient" into
+"the gradient is this long", which is `CLAUDE.md`'s *magnitude* species. Its
+tolerance is derived rather than shared: a geometric residual in the gate's own
+inverted ray enters the fog value divided by `skyEnd`, so the same residual is 4x
+larger at RD 8 than at RD 32.
 
 **The gates derive their geometry from the matrix the draw uploads.** Expected
 fog values come from inverting `Camera::sky_view_projection` and intersecting the
