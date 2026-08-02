@@ -7,6 +7,12 @@
 //!    around a target section into an owned, `Send` [`SectionSnapshot`]. The
 //!    neighbourhood is 27, not 6, because ambient occlusion and smooth light
 //!    read diagonal neighbours across section edges *and* corners.
+//!
+//!    Because it is 27 and not 6, **a snapshot taken before its neighbours
+//!    arrived is wrong in more ways than a missing face** — see [`Neighbour`] and
+//!    [`SnapshotOutcome`] for the typed distinction between "air, and air is the
+//!    truth" and "air, and air is a guess", and why the second one defers the
+//!    build instead of baking it (issue #389).
 //! 2. On worker threads, [`mesh_snapshot`] turns a snapshot into a
 //!    [`lodestone_render::Mesh`] with no access to the live world at all.
 //!
@@ -67,27 +73,87 @@ impl SectionKey {
     }
 }
 
+/// Whether the columns a world is meshed from are **all there already** or are
+/// still arriving.
+///
+/// This is the fact that decides what an *absent* horizontal neighbour column
+/// means, and nothing downstream of [`snapshot_section_in`] can derive it: an
+/// empty slot looks identical either way. Getting it wrong in the `Streaming`
+/// direction is issue #389 (a seam baked against air that never heals); getting
+/// it wrong in the `Complete` direction would blank the outer ring of a world
+/// whose outer ring is genuinely final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnSource {
+    /// Every column that will ever exist already does — the offline demo world
+    /// (`crate::worldgen::generate` emits its whole radius up front) and
+    /// hermetic fixtures. An absent neighbour column is the edge of the world,
+    /// so air across that seam is the **truth** and meshing against it is
+    /// correct and final.
+    Complete,
+    /// Columns stream in from a server, in an order nothing here controls. An
+    /// absent neighbour column has simply not arrived; air across that seam is a
+    /// **guess**, and the wrong one often enough to be the whole of issue #389.
+    Streaming,
+}
+
+/// Why one slot of a 27-section neighbourhood holds no section.
+///
+/// The two cases are the point of this type. Before it they were one `Option`
+/// resolving to the same all-air stand-in, and that conflation is what made
+/// #389 invisible: a chunk seam meshed against a not-yet-loaded neighbour is
+/// indistinguishable, at the call site, from one meshed against the edge of the
+/// world — so the wrong one was silently treated as final.
+#[derive(Debug, Clone)]
+pub enum Neighbour {
+    /// A real section, held as a clone of the handle
+    /// [`lodestone_world::World::section`] already hands back — i.e. a refcount
+    /// bump, never a copy of the section's palette data. This used to be an
+    /// owned `ChunkSection`, deep-cloning every populated neighbour (its
+    /// paletted-container `Vec`s included) on every snapshot regardless of
+    /// whether the world ever edits it — which is exactly the cost
+    /// `Arc<ChunkSection>` and copy-on-write exist to avoid: see
+    /// `docs/chunk-world-resource.md` on "never hold the chunk read lock across
+    /// a mesh" for the same rule applied one layer up. An edit to a section this
+    /// snapshot still references forks *there*, on write, only if a write
+    /// actually happens — not unconditionally, here, on read.
+    Present(Arc<ChunkSection>),
+    /// No section, and **air is the truth**: above the build ceiling, below the
+    /// bedrock floor, an all-air section elided inside a column that *has*
+    /// arrived, or any absent column in a [`ColumnSource::Complete`] world.
+    /// Meshing against this is correct and needs no revisiting.
+    Air,
+    /// No section **yet**: the column has not arrived from the server. Air here
+    /// is a guess. A snapshot holding any of these is
+    /// [`SnapshotOutcome::Deferred`] rather than `Ready`.
+    Unloaded,
+}
+
+impl Neighbour {
+    /// The section to mesh against, resolving both absent cases to the shared
+    /// all-air stand-in so the mesher sees lit air rather than an unlit void.
+    ///
+    /// A [`SnapshotOutcome::Ready`] snapshot holds no [`Neighbour::Unloaded`],
+    /// so on the render path this only ever resolves [`Neighbour::Air`].
+    fn section(&self) -> &ChunkSection {
+        match self {
+            Neighbour::Present(s) => s.as_ref(),
+            Neighbour::Air | Neighbour::Unloaded => air_section_static(),
+        }
+    }
+}
+
 /// An owned, `Send` copy of the 27-section neighbourhood around one section.
 ///
 /// Index `[dx+1][dy+1][dz+1]` for `dx,dy,dz ∈ {-1,0,1}`; the centre is `[1][1][1]`.
-/// Missing neighbours (edge of world, above/below the column) are all-air
-/// sections so the mesher still sees lit air there rather than an unlit void.
+/// Missing neighbours are all-air sections so the mesher still sees lit air there
+/// rather than an unlit void — but *why* a neighbour is missing is recorded per
+/// slot in [`Neighbour`], because the two reasons are not interchangeable.
 #[derive(Debug)]
 pub struct SectionSnapshot {
     /// Which section this is.
     pub key: SectionKey,
-    /// One `Arc` per neighbour, each a clone of the handle
-    /// [`lodestone_world::World::section`] already hands back — i.e. a
-    /// refcount bump, never a copy of the section's palette data. This used
-    /// to store owned `ChunkSection`s, deep-cloning every populated neighbour
-    /// (its paletted-container `Vec`s included) on every snapshot regardless
-    /// of whether the world ever edits it — which is exactly the cost
-    /// `Arc<ChunkSection>` and copy-on-write exist to avoid: see
-    /// `docs/chunk-world-resource.md` on "never hold the chunk read lock
-    /// across a mesh" for the same rule applied one layer up. An edit to a
-    /// section this snapshot still references now forks *there*, on write,
-    /// only if a write actually happens — not unconditionally, here, on read.
-    sections: Vec<Arc<ChunkSection>>,
+    /// One slot per neighbour, `[dx+1][dy+1][dz+1]`.
+    sections: Vec<Neighbour>,
     /// Per-neighbour light, indexed identically to `sections`
     /// (`[dx+1][dy+1][dz+1]`). `None` where the neighbour column or light
     /// section is absent (edge of world / below the world). Those slots fall
@@ -106,7 +172,21 @@ pub struct SectionSnapshot {
 impl SectionSnapshot {
     fn at(&self, dx: i32, dy: i32, dz: i32) -> &ChunkSection {
         let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-        self.sections[i].as_ref()
+        self.sections[i].section()
+    }
+
+    /// How many of the 27 slots are [`Neighbour::Unloaded`] — i.e. how much of
+    /// this neighbourhood is a guess rather than a reading.
+    ///
+    /// Zero for every snapshot the render path meshes; non-zero is exactly the
+    /// [`SnapshotOutcome::Deferred`] condition. Public so a gate can assert the
+    /// distinction is really being made rather than take it on trust.
+    #[must_use]
+    pub fn unloaded_neighbours(&self) -> usize {
+        self.sections
+            .iter()
+            .filter(|n| matches!(n, Neighbour::Unloaded))
+            .count()
     }
 
     fn light_at(&self, dx: i32, dy: i32, dz: i32) -> Option<&SectionLightData> {
@@ -150,30 +230,87 @@ fn air_section() -> ChunkSection {
     )
 }
 
-/// A process-wide shared handle to one all-air section, for the "absent
-/// neighbour" slots [`snapshot_section_in`] fills a 27-neighbourhood with.
+/// A process-wide shared all-air section, for the absent slots of a
+/// 27-neighbourhood — what [`Neighbour::section`] hands the mesher for
+/// [`Neighbour::Air`] and [`Neighbour::Unloaded`].
 ///
-/// `air_section()` is already cheap to construct (its `PalettedContainer`s
-/// are `Storage::Single`, so building one allocates nothing), but a missing
-/// neighbour is common — every section at the edge of a loaded 3×3 column
-/// footprint has one — and there is no reason for even the small `Arc` box
-/// allocation to happen per slot when every slot's content is identical.
-/// Cloning this `Arc` is a refcount bump.
-fn air_section_arc() -> Arc<ChunkSection> {
+/// `air_section()` is already cheap to construct (its `PalettedContainer`s are
+/// `Storage::Single`, so building one allocates nothing), but a missing neighbour
+/// is common — every section at the edge of a loaded 3×3 column footprint has one
+/// — and there is no reason for even the small `Arc` box allocation to happen per
+/// slot when every slot's content is identical. Borrowing costs nothing at all:
+/// since the absent cases became variants rather than a stand-in `Arc`, no
+/// refcount is touched either.
+fn air_section_static() -> &'static ChunkSection {
     static AIR: OnceLock<Arc<ChunkSection>> = OnceLock::new();
-    AIR.get_or_init(|| Arc::new(air_section())).clone()
+    AIR.get_or_init(|| Arc::new(air_section()))
 }
 
 /// Clone the 27-section neighbourhood around `key` out of the world, if the
 /// centre section actually holds geometry. Returns `None` when the centre is
 /// absent or entirely air (nothing to mesh).
 ///
-/// The unbounded-height, overworld-sky form of [`snapshot_section_in`]. Kept as
-/// its own entry point because `crate::gpu`'s hermetic mesh gates call it with
-/// nothing but a world and a key.
+/// The unbounded-height, overworld-sky, [`ColumnSource::Complete`] form of
+/// [`snapshot_section_in`]. Kept as its own entry point because `crate::gpu`'s
+/// hermetic mesh gates and the offline demo world call it with nothing but a
+/// world and a key — and for both of those the world really is complete, so the
+/// outcome is never [`SnapshotOutcome::Deferred`] and an `Option` says
+/// everything there is to say.
 #[must_use]
 pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapshot> {
-    snapshot_section_in(world, key, None, SkyDefault::Full)
+    snapshot_section_in(world, key, None, SkyDefault::Full, ColumnSource::Complete).ready()
+}
+
+/// What [`snapshot_section_in`] found: geometry to mesh now, nothing to mesh, or
+/// geometry that must **not** be meshed yet.
+///
+/// The third arm is issue #389. A section whose horizontal neighbourhood is
+/// incomplete can be meshed — the code will happily do it — but every face on
+/// the incomplete seam is decided against air the neighbour has not had a chance
+/// to contradict. For water that is a full-height translucent side quad on each
+/// side of the seam, drawn twice with no depth conflict to give it away; for
+/// everything else it is wrong ambient occlusion, wrong smooth-light corners and
+/// stray uncalled faces. Vanilla refuses the same build for the same reason —
+/// `LevelExtractor` only compiles a never-compiled section when
+/// `SectionUpdateTracker.hasAllNeighbors` reports all eight horizontal
+/// neighbour columns loaded.
+#[derive(Debug)]
+pub enum SnapshotOutcome {
+    /// The centre holds geometry and the whole neighbourhood is known. Mesh it.
+    Ready(SectionSnapshot),
+    /// Nothing to draw: the centre section is absent, out of the column's
+    /// vertical range, or entirely air. Any geometry already on the GPU for this
+    /// key is stale and should be removed.
+    Empty,
+    /// The centre holds geometry, but at least one of the eight horizontal
+    /// neighbour columns has not arrived. The snapshot is carried anyway so a
+    /// caller that has *already* put this section on screen can rebuild it
+    /// rather than blink it out — vanilla's `sectionMesh != UNCOMPILED` escape
+    /// hatch, and the reason a chunk unloading at the far edge of the view does
+    /// not punch a hole in the ring beside it.
+    Deferred(SectionSnapshot),
+}
+
+impl SnapshotOutcome {
+    /// The snapshot only when it is safe to mesh now.
+    #[must_use]
+    pub fn ready(self) -> Option<SectionSnapshot> {
+        match self {
+            SnapshotOutcome::Ready(snap) => Some(snap),
+            SnapshotOutcome::Empty | SnapshotOutcome::Deferred(_) => None,
+        }
+    }
+
+    /// The snapshot whether or not its neighbourhood is complete — for
+    /// diagnostics and gates that want to *measure* the incomplete mesh rather
+    /// than render it. Never use this to feed the screen.
+    #[must_use]
+    pub fn any(self) -> Option<SectionSnapshot> {
+        match self {
+            SnapshotOutcome::Ready(snap) | SnapshotOutcome::Deferred(snap) => Some(snap),
+            SnapshotOutcome::Empty => None,
+        }
+    }
 }
 
 /// Clone the 27-section neighbourhood around `key` out of `world`.
@@ -196,6 +333,10 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
 /// * `sky_default` — how an *absent* sky sample resolves, which depends on the
 ///   connected dimension's `has_skylight` and cannot be read off the store. See
 ///   [`sky_default_for_dimension`].
+/// * `columns` — whether an absent *horizontal neighbour column* is the edge of
+///   the world or a chunk still in flight. See [`ColumnSource`]; this is the
+///   third session fact, added for issue #389, and it is the one the store
+///   provably cannot answer (an absent column looks the same either way).
 ///
 /// # One behaviour change, stated because it is not a refactor
 ///
@@ -215,7 +356,8 @@ pub fn snapshot_section_in(
     key: SectionKey,
     section_count: Option<usize>,
     sky_default: SkyDefault,
-) -> Option<SectionSnapshot> {
+    columns: ColumnSource,
+) -> SnapshotOutcome {
     // A section index is in range when it is inside the column at all. `None`
     // leaves the top open, which is what the offline world wants: its columns
     // carry their own height and an out-of-range lookup yields nothing anyway.
@@ -225,21 +367,30 @@ pub fn snapshot_section_in(
     // Check the centre before the 26 neighbour lookups: scheduling a mesh for a
     // section with no geometry is the work this early return exists to skip.
     if !in_range(key.si as i32) {
-        return None;
+        return SnapshotOutcome::Empty;
     }
-    let centre = world.section(ChunkPos::new(key.cx, key.cz), key.si)?;
+    let Some(centre) = world.section(ChunkPos::new(key.cx, key.cz), key.si) else {
+        return SnapshotOutcome::Empty;
+    };
     if is_all_air(&centre) {
-        return None;
+        return SnapshotOutcome::Empty;
     }
 
     // Pre-sized and index-assigned rather than push()ed in `(dx, dy, dz)`
     // order, so the loop below can be reordered to `(dx, dz, dy)` — grouping
     // the three `dy` neighbours that share one `pos` — without disturbing the
     // `[dx+1][dy+1][dz+1]` layout `SectionSnapshot::at`/`light_at` index into.
-    // Every slot defaults to shared air (see `air_section_arc`); a present,
-    // in-range section or light overwrites it below.
-    let mut sections: Vec<Arc<ChunkSection>> = vec![air_section_arc(); 27];
+    // Every slot defaults to `Neighbour::Air` — empty, and empty is the truth
+    // (see `air_section_static` for the section it resolves to); a present,
+    // in-range section or light overwrites it below, and a slot belonging to a
+    // column still in flight is downgraded to `Neighbour::Unloaded`.
+    let mut sections: Vec<Neighbour> = vec![Neighbour::Air; 27];
     let mut lights: Vec<Option<SectionLightData>> = vec![None; 27];
+    // Set by any column that has not arrived. The centre column is present by
+    // construction (checked above), so this can only be raised by one of the
+    // eight horizontal neighbours — the same eight vanilla's
+    // `SectionUpdateTracker.hasAllNeighbors` checks.
+    let mut awaiting_columns = false;
     for dx in -1..=1 {
         for dz in -1..=1 {
             let pos = ChunkPos::new(key.cx + dx, key.cz + dz);
@@ -249,19 +400,28 @@ pub fn snapshot_section_in(
             // independently, once each per `dy`, for up to 27 + 27 = 54
             // probes per `snapshot_section_in` call. This is 9.
             let chunk = world.get(pos);
+            // Air across this seam is a *guess* only when the column itself is
+            // missing **and** columns are still arriving. An elided all-air
+            // section inside a column that has arrived is a reading, not a
+            // guess: the chunk decoder elides exactly the sections that are
+            // genuinely empty.
+            let awaiting = chunk.is_none() && columns == ColumnSource::Streaming;
+            awaiting_columns |= awaiting;
             for dy in -1..=1 {
                 let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
                 let si = key.si as i32 + dy;
 
                 // `ChunkColumn::section_arc` hands back a clone of the
                 // section's `Arc` — a refcount bump, not a copy of its
-                // palette data (see `SectionSnapshot::sections`'s docs). An
-                // absent or elided neighbour keeps this slot's default: lit
-                // air rather than an unlit void.
+                // palette data (see `Neighbour::Present`'s docs). An absent or
+                // elided neighbour keeps this slot's default: lit air rather
+                // than an unlit void, tagged with why it is empty.
                 if in_range(si)
                     && let Some(section) = chunk.and_then(|c| c.column.section_arc(si as usize))
                 {
-                    sections[i] = section;
+                    sections[i] = Neighbour::Present(section);
+                } else if awaiting {
+                    sections[i] = Neighbour::Unloaded;
                 }
 
                 // Light is LIGHT-section indexed: block section `si` reads
@@ -284,12 +444,17 @@ pub fn snapshot_section_in(
         }
     }
 
-    Some(SectionSnapshot {
+    let snapshot = SectionSnapshot {
         key,
         sections,
         lights,
         sky_default,
-    })
+    };
+    if awaiting_columns {
+        SnapshotOutcome::Deferred(snapshot)
+    } else {
+        SnapshotOutcome::Ready(snapshot)
+    }
 }
 
 /// Build a [`SectionSnapshot`] for `key` from the **live client world**.
@@ -309,8 +474,11 @@ pub fn snapshot_section_in(
 /// `tests/live_world_mesh.rs` drives the live mesh straight off a `NetClient`,
 /// and that file is not this stage's to change.
 ///
-/// Returns `None` before login (no client handle published yet), and `None` when
-/// the centre section holds no geometry, exactly like [`snapshot_section`].
+/// Returns [`SnapshotOutcome::Empty`] before login (no client handle published
+/// yet) and when the centre section holds no geometry. A live world is
+/// [`ColumnSource::Streaming`] by definition, so this *can* return
+/// [`SnapshotOutcome::Deferred`] — the caller decides whether an incomplete
+/// neighbourhood is good enough for what it is doing.
 ///
 /// The returned snapshot's [`SkyDefault`] follows the **connected dimension** —
 /// see [`sky_default_for_dimension`], which carries the End-vs-Nether
@@ -320,9 +488,11 @@ pub fn snapshot_section_live(
     net: &NetClient,
     key: SectionKey,
     section_count: usize,
-) -> Option<SectionSnapshot> {
+) -> SnapshotOutcome {
     let handle = net.shared_handle();
-    let handle = handle.get()?;
+    let Some(handle) = handle.get() else {
+        return SnapshotOutcome::Empty;
+    };
     // `WorldDimensions` carries only `min_y`/`height`, not dimension identity, so
     // the sky policy reads the connected dimension off the player snapshot — the
     // cheapest place this crate can reach it without growing that struct. Since
@@ -332,7 +502,13 @@ pub fn snapshot_section_live(
     let sky_default =
         sky_default_for_dimension(player.dimension.as_ref(), player.dimension_type.as_ref());
     let store = handle.chunk_world();
-    snapshot_section_in(&store.read(), key, Some(section_count), sky_default)
+    snapshot_section_in(
+        &store.read(),
+        key,
+        Some(section_count),
+        sky_default,
+        ColumnSource::Streaming,
+    )
 }
 
 /// Resolves the [`SkyDefault`] a *missing* neighbour sky sample should use for
@@ -739,8 +915,13 @@ impl FluidSectionView for SnapshotFluidView<'_> {
 /// Mesh a snapshot's fluid cells into water (translucent) and lava (opaque,
 /// full-bright) geometry. Runs alongside [`mesh_snapshot_models`]; the block path
 /// emits no quads for fluid cells, so the two never double-render.
+///
+/// Public so a gate can measure the **live** fluid path rather than
+/// `mesh_simple`, which has no fluid path at all — `docs/fluid-rendering.md`'s
+/// "there are two meshers" gotcha, and the reason the #389 seam gate exists in
+/// two halves.
 #[must_use]
-fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
+pub fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
     let view = SnapshotFluidView {
         snapshot,
         models,
@@ -828,6 +1009,7 @@ pub struct MeshScheduler {
     result_rx: Mutex<Receiver<Meshed>>,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
+    column_source: ColumnSource,
 }
 
 impl MeshScheduler {
@@ -837,8 +1019,29 @@ impl MeshScheduler {
     /// [`ShellClassifier::Vanilla`] pool meshes the live server's vanilla world.
     /// The atlas behind the vanilla variant is `Arc`-shared, so a per-worker
     /// clone is a refcount bump.
+    ///
+    /// # The classifier also fixes the [`ColumnSource`]
+    ///
+    /// The id space and the *provenance* of the columns are the same choice made
+    /// twice: `ShellClassifier::is_vanilla`'s own docs state the invariant — "the
+    /// session meshes the live world only under this variant and the demo world
+    /// only under `Demo`" — and `Sim::build` holds it with a `debug_assert!`.
+    /// Deriving it here rather than taking a fourth argument keeps the two from
+    /// ever being set inconsistently, which is the failure this would otherwise
+    /// invite: a `Streaming` demo world blanks its outer ring forever, a
+    /// `Complete` live world is issue #389 unfixed.
+    ///
+    /// The one non-obvious case is the fallback session — vanilla assets failed
+    /// to load, so a live connection meshes under `Demo`. `Complete` is still
+    /// right there, because `MeshPolicy::id_spaces_agree` is `false` and
+    /// [`TerrainMesh::mesh_column`] meshes nothing at all.
     #[must_use]
     pub fn new(worker_count: usize, classifier: ShellClassifier) -> Self {
+        let column_source = if classifier.is_vanilla() {
+            ColumnSource::Streaming
+        } else {
+            ColumnSource::Complete
+        };
         let worker_count = worker_count.max(1);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (result_tx, result_rx) = mpsc::channel::<Meshed>();
@@ -896,7 +1099,15 @@ impl MeshScheduler {
             result_rx: Mutex::new(result_rx),
             workers,
             pending: 0,
+            column_source,
         }
+    }
+
+    /// Whether the world this pool meshes has all its columns already. See
+    /// [`MeshScheduler::new`] for why the classifier decides this.
+    #[must_use]
+    pub fn column_source(&self) -> ColumnSource {
+        self.column_source
     }
 
     /// Queue a snapshot for meshing.
@@ -1034,6 +1245,20 @@ pub struct TerrainMesh {
     /// instead of a play-test archaeology session. Should stay `0` in a healthy
     /// session.
     pub drops: u64,
+    /// Whether an absent neighbour column means "edge of the world" or "not here
+    /// yet", taken from the worker pool's classifier — see
+    /// [`MeshScheduler::new`].
+    pub column_source: ColumnSource,
+    /// How many times a section's **first** build was held back because a
+    /// horizontal neighbour column had not arrived (issue #389).
+    ///
+    /// Expected to be non-zero and rising during chunk streaming — every column
+    /// on the frontier defers until the ring beyond it lands — and to stop rising
+    /// once the player stops moving. A count that keeps climbing while nothing
+    /// loads means the dirty-propagation half ([`Self::mark_neighbours_dirty`])
+    /// has stopped re-driving deferred sections, which would show as terrain
+    /// missing rather than terrain wrong.
+    pub deferred: u64,
     /// The session facts meshing cannot read off the store.
     pub policy: MeshPolicy,
 }
@@ -1043,12 +1268,55 @@ impl TerrainMesh {
     #[must_use]
     pub fn new(scheduler: MeshScheduler) -> Self {
         Self {
+            column_source: scheduler.column_source(),
             scheduler,
             dirty_columns: BTreeSet::new(),
             pending_removals: Vec::new(),
             uploaded_sections: HashSet::new(),
             drops: 0,
+            deferred: 0,
             policy: MeshPolicy::default(),
+        }
+    }
+
+    /// Route one section's snapshot outcome: submit it, drop its stale geometry,
+    /// or hold it back. Returns whether anything was submitted.
+    ///
+    /// **Vanilla's rule, and the reason it has two halves.**
+    /// `LevelExtractor.extract` compiles a dirty section when
+    /// `section.sectionMesh.get() != CompiledSectionMesh.UNCOMPILED ||
+    /// sectionUpdateTracker.hasAllNeighbors(level, node)`. The first clause is
+    /// what stops the deferral from being a *regression*: a section already on
+    /// screen rebuilds unconditionally, so a chunk unloading at the far edge of
+    /// the view does not blink out the ring beside it, and a block edit next to
+    /// the frontier still shows. Only a section that has never reached the screen
+    /// waits — and it cannot wait forever, because [`Self::mark_neighbours_dirty`]
+    /// re-drives it the moment the missing column lands.
+    /// [`Self::uploaded_sections`] is our `!= UNCOMPILED`.
+    fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome) -> bool {
+        match outcome {
+            SnapshotOutcome::Ready(snap) => {
+                self.scheduler.submit(snap);
+                true
+            }
+            // A single empty section is routine (sky/void sections have no
+            // geometry): drop it from the GPU, no alarm.
+            SnapshotOutcome::Empty => {
+                self.pending_removals.push(key);
+                false
+            }
+            SnapshotOutcome::Deferred(snap) => {
+                if self.uploaded_sections.contains(&key) {
+                    self.scheduler.submit(snap);
+                    true
+                } else {
+                    // Deliberately *not* a removal: there is nothing on the GPU
+                    // for this key, and queueing one would make the deferral
+                    // look like an unload to the app's drain.
+                    self.deferred = self.deferred.saturating_add(1);
+                    false
+                }
+            }
         }
     }
 
@@ -1085,7 +1353,7 @@ impl TerrainMesh {
         // One lock for the whole column — the snapshots are owned and `Send`, so
         // the guard is dropped before anything is submitted and the world is
         // never locked while meshing.
-        let mut jobs: Vec<Result<SectionSnapshot, SectionKey>> =
+        let mut jobs: Vec<(SectionKey, SnapshotOutcome)> =
             Vec::with_capacity(extent.section_count);
         {
             let world = store.read();
@@ -1096,31 +1364,29 @@ impl TerrainMesh {
                     si,
                     min_y: extent.min_y,
                 };
-                jobs.push(
+                jobs.push((
+                    key,
                     snapshot_section_in(
                         &world,
                         key,
                         Some(extent.section_count),
                         self.policy.sky_default,
-                    )
-                    .ok_or(key),
-                );
+                        self.column_source,
+                    ),
+                ));
             }
         }
 
         let mut meshed_any = false;
-        for job in jobs {
-            match job {
-                Ok(snap) => {
-                    self.scheduler.submit(snap);
-                    meshed_any = true;
-                }
-                // A single empty section is routine (sky/void sections have no
-                // geometry): drop it from the GPU, no alarm.
-                Err(key) => self.pending_removals.push(key),
-            }
+        let mut deferred_any = false;
+        for (key, outcome) in jobs {
+            deferred_any |= matches!(outcome, SnapshotOutcome::Deferred(_));
+            meshed_any |= self.route(key, outcome);
         }
-        if !meshed_any {
+        // A column held back for its neighbourhood is not a drop: it is the
+        // frontier of a streaming load doing exactly what it should, and counting
+        // it would drown the "invisible blocks" alarm in noise on every join.
+        if !meshed_any && !deferred_any {
             self.drops += 1;
             tracing::warn!(
                 cx,
@@ -1133,21 +1399,34 @@ impl TerrainMesh {
 
     /// Re-snapshot and re-schedule exactly one section. A section that snapshots
     /// to nothing is queued for GPU removal rather than left showing stale
-    /// geometry.
+    /// geometry; one whose neighbourhood is incomplete is handled by
+    /// [`Self::route`] (rebuilt if it is already on screen, held back if not).
     pub fn mesh_section(&mut self, store: &ChunkWorld, key: SectionKey, section_count: usize) {
-        let snapshot = {
+        let outcome = {
             let world = store.read();
-            snapshot_section_in(&world, key, Some(section_count), self.policy.sky_default)
+            snapshot_section_in(
+                &world,
+                key,
+                Some(section_count),
+                self.policy.sky_default,
+                self.column_source,
+            )
         };
-        match snapshot {
-            Some(snap) => self.scheduler.submit(snap),
-            None => self.pending_removals.push(key),
-        }
+        self.route(key, outcome);
     }
 
     /// Queue the eight **loaded** horizontal neighbours of `(cx, cz)` for a
     /// boundary re-mesh. The centre is meshed by the caller, immediately, for load
     /// responsiveness; the neighbours coalesce.
+    ///
+    /// This is the same eight columns vanilla's
+    /// `ClientPacketListener.enableChunkLight` dirties on chunk arrival
+    /// (`setSectionRangeDirty(x-1, minSectionY, z-1, x+1, maxSectionY, z+1)` —
+    /// the 3×3 column footprint over the whole vertical range), and it is *also*
+    /// the mechanism that un-defers: a section held back by
+    /// [`SnapshotOutcome::Deferred`] is re-snapshotted here the moment the column
+    /// it was waiting for lands. Without this the deferral would be permanent
+    /// rather than a wait.
     pub fn mark_neighbours_dirty(&mut self, store: &ChunkWorld, cx: i32, cz: i32) {
         for dx in -1..=1 {
             for dz in -1..=1 {
@@ -1198,6 +1477,7 @@ impl TerrainMesh {
         }
         self.dirty_columns.clear();
         self.drops = 0;
+        self.deferred = 0;
         self.pending_removals.extend(self.uploaded_sections.drain());
     }
 }
@@ -1335,6 +1615,368 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // #389: a seam meshed against a not-yet-loaded neighbour
+    // -----------------------------------------------------------------------
+
+    /// Section count and `min_y` for the seam fixture: two sections, content in
+    /// the lower one, so the upper is elided air and the `si == -1` slot is
+    /// genuinely out of the world.
+    const SEAM_SECTIONS: usize = 2;
+
+    /// One fixture column. `water_over` decides, per `(x, z)`, whether section 0
+    /// holds water at every `y` or nothing at all.
+    fn seam_column(water_over: &dyn Fn(usize, usize) -> bool) -> lodestone_world::LoadedChunk {
+        use lodestone_world::{ChunkColumn, ColumnLight, Heightmaps, LoadedChunk};
+
+        let mut column = ChunkColumn::new(
+            0,
+            SEAM_SECTIONS,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            id::AIR,
+            0,
+        );
+        for x in 0..16usize {
+            for z in 0..16usize {
+                if !water_over(x, z) {
+                    continue;
+                }
+                for y in 0..16i32 {
+                    column.set_block(x, y, z, id::WATER);
+                }
+            }
+        }
+        LoadedChunk::new(
+            column,
+            ColumnLight::new(SEAM_SECTIONS),
+            Heightmaps::new(),
+            Vec::new(),
+        )
+    }
+
+    /// Which column plays the part of the east neighbour at `(1, 0)`.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum EastNeighbour {
+        /// Not in the store at all — the chunk that has not arrived.
+        Absent,
+        /// Water for `z >= 8`, nothing for `z < 8`. The half-and-half split is
+        /// what makes the converged answer a *number* rather than zero: a mesher
+        /// that emitted no boundary faces at all would fail the same assertion a
+        /// mesher that emitted all of them fails.
+        HalfWater,
+        /// All air. The **fixture control**: two columns with no shared water
+        /// boundary structurally cannot exercise this bug, and this proves the
+        /// measurement notices.
+        AllAir,
+    }
+
+    /// The world for the seam gate: a 3×3 of all-water columns around `(0, 0)`,
+    /// with `(1, 0)` replaced per `east`.
+    ///
+    /// All nine columns are populated (bar the absent case) so that **the east
+    /// neighbour is the only variable**. With only the subject and its east
+    /// neighbour in the store, seven other columns would be missing and every
+    /// measurement would be `Deferred` — the variable would not be under test.
+    fn seam_world(east: EastNeighbour) -> World {
+        let mut world = World::new();
+        for dx in -1..=1i32 {
+            for dz in -1..=1i32 {
+                if (dx, dz) == (1, 0) {
+                    match east {
+                        EastNeighbour::Absent => continue,
+                        EastNeighbour::HalfWater => {
+                            world.load(
+                                ChunkPos::new(1, 0),
+                                seam_column(&|_x, z| z >= 8),
+                            );
+                        }
+                        EastNeighbour::AllAir => {
+                            // A column that exists but holds nothing. `World::load`
+                            // still makes it *present*, which is the point: the
+                            // deferral is about presence, this control is about
+                            // content.
+                            world.load(ChunkPos::new(1, 0), seam_column(&|_x, _z| false));
+                        }
+                    }
+                    continue;
+                }
+                world.load(ChunkPos::new(dx, dz), seam_column(&|_x, _z| true));
+            }
+        }
+        world
+    }
+
+    /// The subject: section 0 of column `(0, 0)`.
+    fn seam_key() -> SectionKey {
+        SectionKey {
+            cx: 0,
+            cz: 0,
+            si: 0,
+            min_y: 0,
+        }
+    }
+
+    /// Quads lying on the section's **east** boundary plane (`x == 16`) — the
+    /// faces whose existence is decided by the column at `(1, 0)` — reported as
+    /// a count plus the `(z, y)` bounding box they occupy.
+    ///
+    /// A count alone cannot tell a uniformly-wrong seam from a localised one, and
+    /// `CLAUDE.md`'s "measure by location, never by frame average" applies to a
+    /// mesh just as much as to a frame. The box is what turns a failure into a
+    /// diagnosis.
+    fn east_boundary(mesh: &Mesh) -> (usize, String) {
+        use lodestone_render::Face;
+
+        let mut count = 0usize;
+        let (mut z0, mut z1, mut y0, mut y1) = (u32::MAX, 0u32, u32::MAX, 0u32);
+        for quad in mesh.vertices.chunks_exact(4) {
+            let fields: Vec<_> = quad.iter().map(|v| v.unpack()).collect();
+            if !fields
+                .iter()
+                .all(|f| f.pos[0] == 16 && f.normal == Face::PosX)
+            {
+                continue;
+            }
+            count += 1;
+            for f in &fields {
+                z0 = z0.min(f.pos[2]);
+                z1 = z1.max(f.pos[2]);
+                y0 = y0.min(f.pos[1]);
+                y1 = y1.max(f.pos[1]);
+            }
+        }
+        let box_ = if count == 0 {
+            "none".to_string()
+        } else {
+            format!("z {z0}..{z1}, y {y0}..{y1}")
+        };
+        (count, box_)
+    }
+
+    /// Mesh the subject section out of `world`, under `columns`, returning the
+    /// outcome discriminant, the east-boundary count and its bounding box.
+    fn seam_measure(world: &World, columns: ColumnSource) -> (&'static str, usize, String) {
+        let outcome =
+            snapshot_section_in(world, seam_key(), Some(SEAM_SECTIONS), SkyDefault::Full, columns);
+        let label = match &outcome {
+            SnapshotOutcome::Ready(_) => "Ready",
+            SnapshotOutcome::Empty => "Empty",
+            SnapshotOutcome::Deferred(_) => "Deferred",
+        };
+        let snap = outcome.any().expect("the subject section holds water");
+        let (count, box_) = east_boundary(&mesh_snapshot(&snap, &DemoClassifier));
+        (label, count, box_)
+    }
+
+    /// **Anti-vacuity, and the `CLAUDE.md` *world* species specifically.** The
+    /// flaw this gate hunts lives in the input data, so the input data is
+    /// asserted: the subject's east-most cells and the neighbour's west-most
+    /// cells must both be water over the same `(y, z)` range, or nothing below
+    /// can distinguish a fix from a fixture with no seam in it.
+    #[test]
+    fn the_seam_fixture_really_has_water_on_both_sides() {
+        let world = seam_world(EastNeighbour::HalfWater);
+        let subject = world
+            .section(ChunkPos::new(0, 0), 0)
+            .expect("subject section present");
+        let east = world
+            .section(ChunkPos::new(1, 0), 0)
+            .expect("east neighbour present");
+
+        let mut shared = 0usize;
+        let mut subject_only = 0usize;
+        for y in 0..16usize {
+            for z in 0..16usize {
+                let a = subject.get_block(15, y, z) == id::WATER;
+                let b = east.get_block(0, y, z) == id::WATER;
+                assert!(a, "the subject must be water across its whole east face");
+                if b {
+                    shared += 1;
+                } else {
+                    subject_only += 1;
+                }
+            }
+        }
+        assert_eq!(
+            shared, 128,
+            "half the seam must be water-against-water (the faces that should be culled)"
+        );
+        assert_eq!(
+            subject_only, 128,
+            "the other half must be water-against-air (the faces that should survive)"
+        );
+    }
+
+    /// **The convergence gate.** Both halves, and the second one is the
+    /// load-bearing one.
+    ///
+    /// 1. Meshing the subject with its east neighbour **absent** emits more
+    ///    boundary faces than meshing it once the neighbour has arrived — the
+    ///    count *drops*.
+    /// 2. And the count after the neighbour arrives **equals** the count from
+    ///    meshing with the neighbour present from the start. Without this, a
+    ///    mesher that converged on some other wrong answer would pass: "it
+    ///    changed" is not "it is right".
+    #[test]
+    fn a_seam_meshed_without_its_neighbour_converges_on_the_neighbour_present_answer() {
+        // Meshed while the east column is still in flight. `ColumnSource::Complete`
+        // is used here on purpose: it reproduces the pre-#389 code exactly, which
+        // had no other option — this is the *stale* mesh, measured, not described.
+        let (stale_label, stale, stale_box) =
+            seam_measure(&seam_world(EastNeighbour::Absent), ColumnSource::Complete);
+        // The same section re-meshed after the column landed — what
+        // `mark_neighbours_dirty` → `heal_dirty_columns` re-drives.
+        let (healed_label, healed, healed_box) =
+            seam_measure(&seam_world(EastNeighbour::HalfWater), ColumnSource::Streaming);
+        // And the same section meshed once, with the neighbour there all along.
+        let (fresh_label, fresh, fresh_box) =
+            seam_measure(&seam_world(EastNeighbour::HalfWater), ColumnSource::Complete);
+
+        assert_eq!(
+            stale_label, "Ready",
+            "the pre-fix policy must mesh the incomplete neighbourhood — otherwise this \
+             is not the stale case"
+        );
+        assert_eq!(healed_label, "Ready", "a complete neighbourhood meshes");
+        assert_eq!(fresh_label, "Ready", "a complete neighbourhood meshes");
+
+        assert!(
+            healed < stale,
+            "half 1: the boundary face count must DROP once the neighbour arrives — \
+             stale {stale} ({stale_box}) vs healed {healed} ({healed_box})"
+        );
+        assert_eq!(
+            healed, fresh,
+            "half 2 (load-bearing): re-meshing after the neighbour arrives must land on \
+             exactly the from-the-start answer — healed {healed} ({healed_box}) vs fresh \
+             {fresh} ({fresh_box})"
+        );
+        assert_eq!(
+            (stale, healed),
+            (256, 128),
+            "the fixture's arithmetic: 16×16 boundary faces against air, half of them \
+             culled by the neighbour's water — stale box {stale_box}, healed box {healed_box}"
+        );
+        // The neighbour holds water at `z >= 8`, so *those* seam faces are the
+        // ones culled and the survivors are `z < 8` (a quad at cell `z = 7` spans
+        // `z 7..8`, hence the exclusive upper bound). Asserting the box and not
+        // just the count is what makes "128 faces survived" mean "the right 128":
+        // the first version of this assertion had the halves the wrong way round
+        // and the printed box is what said so.
+        assert_eq!(
+            healed_box, "z 0..8, y 0..16",
+            "the surviving faces must be exactly the half with no water across the seam; \
+             a count that matched with the wrong faces surviving would be a different bug"
+        );
+    }
+
+    /// **The fix, at the seam that used to bake it silently.** With the world
+    /// declared `Streaming`, the same absent neighbour that produced a `Ready`
+    /// mesh above produces `Deferred` — and the snapshot says, in the type, how
+    /// much of its neighbourhood is a guess.
+    #[test]
+    fn an_absent_neighbour_column_defers_the_build_and_is_typed_as_unloaded() {
+        let absent = snapshot_section_in(
+            &seam_world(EastNeighbour::Absent),
+            seam_key(),
+            Some(SEAM_SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Streaming,
+        );
+        assert!(
+            matches!(absent, SnapshotOutcome::Deferred(_)),
+            "a missing neighbour column must defer, not mesh"
+        );
+        assert!(
+            absent.ready().is_none(),
+            "`ready()` must refuse a deferred snapshot — this is what keeps the wrong \
+             geometry off the screen"
+        );
+
+        let present = snapshot_section_in(
+            &seam_world(EastNeighbour::HalfWater),
+            seam_key(),
+            Some(SEAM_SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Streaming,
+        );
+        let snap = match present {
+            SnapshotOutcome::Ready(snap) => snap,
+            other => panic!("a complete neighbourhood must be Ready, got {other:?}"),
+        };
+        assert_eq!(
+            snap.unloaded_neighbours(),
+            0,
+            "a Ready snapshot must contain no guessed slot"
+        );
+
+        // The vertical boundary is *not* a guess: `si == -1` is below the world
+        // and section 1 is an elided all-air section inside a column that has
+        // arrived. Both are `Neighbour::Air` — air is the truth there — which is
+        // why a column at the bottom of the world does not defer forever.
+        let deferred = snapshot_section_in(
+            &seam_world(EastNeighbour::Absent),
+            seam_key(),
+            Some(SEAM_SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Streaming,
+        )
+        .any()
+        .expect("subject holds water");
+        assert_eq!(
+            deferred.unloaded_neighbours(),
+            3,
+            "exactly the three dy slots of the one absent column are guesses — not the \
+             six vertical/elided ones, which are genuinely air"
+        );
+    }
+
+    /// **Control 1, executed: a `Complete` world must NOT defer.** The offline
+    /// demo world's outer ring has no neighbours and never will; deferring it
+    /// would trade #389's fake seam for a permanent hole. If this ever starts
+    /// deferring, `Sim::build`'s demo terrain loses its rim.
+    #[test]
+    fn control_a_complete_world_never_defers_an_absent_neighbour() {
+        let outcome = snapshot_section_in(
+            &seam_world(EastNeighbour::Absent),
+            seam_key(),
+            Some(SEAM_SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Complete,
+        );
+        assert!(
+            matches!(outcome, SnapshotOutcome::Ready(_)),
+            "a complete world's edge is the edge: air across it is the truth"
+        );
+        let snap = outcome.ready().expect("Ready");
+        assert_eq!(
+            snap.unloaded_neighbours(),
+            0,
+            "nothing in a complete world is 'not loaded yet'"
+        );
+    }
+
+    /// **Control 2, executed: a fixture with no water across the seam cannot see
+    /// this bug at all.** Same three measurements, same code, an east neighbour
+    /// that is present but empty — and the count does *not* drop. This is the
+    /// `CLAUDE.md` *world* species made to fire: had the real fixture been built
+    /// this way, every assertion above would have passed with the fix reverted.
+    #[test]
+    fn control_a_seamless_fixture_shows_no_convergence() {
+        let (_, stale, stale_box) =
+            seam_measure(&seam_world(EastNeighbour::Absent), ColumnSource::Complete);
+        let (_, healed, healed_box) =
+            seam_measure(&seam_world(EastNeighbour::AllAir), ColumnSource::Streaming);
+        assert_eq!(
+            (stale, healed),
+            (256, 256),
+            "control: an all-air neighbour culls nothing, so arrival changes nothing — \
+             stale {stale_box}, healed {healed_box}. A gate built on this fixture would be \
+             blind to #389."
+        );
+    }
+
     #[test]
     fn split16_maps_signed_probes_to_neighbour_and_local() {
         // In-section coordinates stay in the centre neighbour (offset 0).
@@ -1440,7 +2082,7 @@ mod tests {
                             }
                         }
                     }
-                    sections.push(Arc::new(sec));
+                    sections.push(Neighbour::Present(Arc::new(sec)));
                     lights.push(if lights_present {
                         Some(SectionLightData {
                             sky: LightData::Uniform(sky),
@@ -1789,9 +2431,11 @@ mod tests {
             for dy in -1..=1 {
                 for dz in -1..=1 {
                     sections.push(if (dx, dy, dz) == (0, 0, 0) {
-                        Arc::new(centre.clone())
+                        Neighbour::Present(Arc::new(centre.clone()))
                     } else {
-                        air_section_arc()
+                        // `Air`, not `Unloaded`: this fixture's neighbourhood is
+                        // deliberately empty, not deliberately unknown.
+                        Neighbour::Air
                     });
                     // Every slot carries real light, so the absent-neighbour
                     // bridge cannot leak full-bright into this measurement.

@@ -175,6 +175,12 @@ jar's** `grass_block`, not on a hand-written view.
   never in `bake_fluid`. Start at `occludes_at` for the *neighbour*, then at the
   `emit` closure in `mesh_fluids`. Print the neighbour's `StateModel.face_occludes`
   before theorising.
+- **…but if the stray face appears only along *chunk boundaries*, it is not a
+  culling bug at all** → the neighbourhood the mesher was handed was incomplete,
+  so `occludes_at`/`fluid_at` answered for air that had simply not arrived. That
+  is issue #389, it lives in the snapshot rather than in `mesh_fluids`, and it has
+  its own doc: [section mesh invalidation](./section-mesh-invalidation.md). The
+  tell is that it heals when you walk towards it.
 - **Occlusion is wrong for a block** → `face_occlusion` in
   `crates/lodestone-render/src/block_models.rs`. Re-run the census idea from
   "What was measured": enumerate every state, diff old rule against new, and look
