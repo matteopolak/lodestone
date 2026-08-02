@@ -81,8 +81,6 @@ pub struct DebugStats {
     /// Physics ticks per rendered frame since start (fixed-timestep health;
     /// vanilla runs 20 ticks/s, so at 50 FPS this settles near 0.4).
     pub frames_per_tick: f32,
-    /// Whether the shell is in free-fly (noclip) mode rather than physics-walk.
-    pub flying: bool,
     /// The block currently targeted by the view ray, if any.
     pub target: Option<[i32; 3]>,
     /// Entity instances drawn this frame (post-frustum-cull). `0` while
@@ -138,11 +136,7 @@ impl DebugStats {
                 self.pitch
             ),
             format!("FPS {:.0} ({:.2} MS)", self.fps, self.frame_ms),
-            format!(
-                "MODE {} F/T {:.2}",
-                if self.flying { "FLY" } else { "WALK" },
-                self.frames_per_tick
-            ),
+            format!("F/T {:.2}", self.frames_per_tick),
             match self.target {
                 Some([x, y, z]) => format!("TARGET {x} {y} {z}"),
                 None => "TARGET -".to_string(),
@@ -173,12 +167,11 @@ impl DebugStats {
     #[must_use]
     pub fn one_line(&self) -> String {
         format!(
-            "pos=({:.1},{:.1},{:.1}) facing={} mode={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} particles={}/{}+{}unres sections={} quads={} vram={}KB world={}KB rss={}MB {}",
+            "pos=({:.1},{:.1},{:.1}) facing={} f/t={:.2} target={} fps={:.0} frame={:.2}ms chunks={} live_cols={} drops={} entities={} particles={}/{}+{}unres sections={} quads={} vram={}KB world={}KB rss={}MB {}",
             self.position[0],
             self.position[1],
             self.position[2],
             self.facing(),
-            if self.flying { "fly" } else { "walk" },
             self.frames_per_tick,
             match self.target {
                 Some([x, y, z]) => format!("{x},{y},{z}"),

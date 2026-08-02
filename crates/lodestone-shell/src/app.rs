@@ -1363,6 +1363,13 @@ impl WindowApp {
             return;
         }
 
+        // Vanilla's View Bobbing option, pushed down before either draw path
+        // because the toggle lives on a menu screen and should take effect while
+        // that screen is still showing. Polled per frame rather than fired on the
+        // toggle for the same reason the present-mode sync was: `MenuNav` owns the
+        // `Options` and is pure, and `Sim` owns none.
+        self.sim.set_view_bobbing(self.nav.view_bobbing());
+
         // A menu screen owns the whole frame — its pass clears, so there is no
         // world render behind it and none of the HUD state below is built.
         if self.draw_menu() {
