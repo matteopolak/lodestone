@@ -31,7 +31,8 @@ use lodestone_entity::pose::EntityPose;
 use lodestone_game::menu::Menu;
 use lodestone_game::mining::{BreakInputs, Mining};
 use lodestone_game::placement::{
-    OrientationKind, Placement, PlacementWorld, UseOnContext, UseOnDecision,
+    Axis, Half, OrientationKind, Placement, PlacedState, PlacementWorld, UseOnContext,
+    UseOnDecision,
 };
 use lodestone_model::event::EquipmentSlot;
 use lodestone_model::{BlockFace, EntityInteraction, Vec3f};
@@ -40,7 +41,7 @@ use lodestone_physics::{
     CollisionView, EntityDimensions, FluidState, NearbyEntity, PhysicsProfile, PlayerState, Vec3d,
 };
 use lodestone_render::{AnimInput, BlockAtlas, Camera};
-use lodestone_world::{ChunkPos, World};
+use lodestone_world::{BlockEntitySync, ChunkPos, World, WorldSink};
 
 use crate::audio::ShellAudio;
 use crate::blocks::id;
@@ -309,23 +310,597 @@ fn dirty_sections_for_blocks(
     dirty
 }
 
-/// A trivial [`PlacementWorld`] for the live path. The shell cannot classify
-/// blocks (no version-free replaceable/interactable seam is exposed by
-/// `lodestone-model`; see the report), and it does not need to: the server is
-/// authoritative and re-runs the place-vs-interact decision itself, while
-/// [`Placement::use_on`] returns the `use_item_on` action to send in every
-/// branch. The shell sends that action unconditionally and lets the server
-/// decide, so the local classification never changes what goes on the wire.
-struct ServerAuthoritativeWorld;
+// ---------------------------------------------------------------------------
+// Local placement prediction (issue #381)
+//
+// `use_item_live` used to send `use_item_on` and wait: `Placement` is a
+// *decision* machine and nothing wrote the world, so a placed block — a chest
+// especially, since #374 made a state write create its block entity — was a hole
+// for one server round trip. Everything below is what turns that decision into a
+// local write. See `docs/block-placement-prediction.md`.
+// ---------------------------------------------------------------------------
 
-impl PlacementWorld for ServerAuthoritativeWorld {
-    fn is_replaceable(&self, _pos: BlockPos) -> bool {
-        false
+/// The world facts [`Placement::use_on`] asks for, **read once, before the
+/// decision runs** rather than from inside it.
+///
+/// [`PlacementWorld`] is queried re-entrantly by `use_on`, and every answer needs
+/// the chunk store's read lock — while `use_on` itself needs the ECS write guard
+/// (it mutates the [`PlacementPredictor`] resource). Answering live would nest
+/// those two guards, which is the `chunks → World` order `EcsHandle`'s rule 3
+/// exists to forbid. Precomputing keeps the guards disjoint *and* makes the whole
+/// decision hermetically testable, with no `Sim` and no server.
+///
+/// `use_on` asks exactly four questions over two positions:
+/// `is_replaceable(clicked)` (which picks the target), then
+/// `is_replaceable(target)` / `is_obstructed(target)` (legality) and
+/// `is_interactable(clicked)`. Any other position answers conservatively — not
+/// replaceable, not interactable — which can only make the shell predict *less*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlacementFacts {
+    /// The block the ray hit.
+    clicked: BlockPos,
+    /// Where a placement would land: `clicked` itself when it is replaceable,
+    /// otherwise the cell across the hit face. Same rule as
+    /// [`lodestone_game::placement::resolve_target`], evaluated here because it
+    /// needs the same world read.
+    target: BlockPos,
+    clicked_replaceable: bool,
+    clicked_interactable: bool,
+    target_replaceable: bool,
+    target_obstructed: bool,
+}
+
+impl PlacementWorld for PlacementFacts {
+    fn is_replaceable(&self, pos: BlockPos) -> bool {
+        if pos == self.clicked {
+            self.clicked_replaceable
+        } else if pos == self.target {
+            self.target_replaceable
+        } else {
+            false
+        }
     }
 
-    fn is_interactable(&self, _pos: BlockPos) -> bool {
-        false
+    fn is_interactable(&self, pos: BlockPos) -> bool {
+        pos == self.clicked && self.clicked_interactable
     }
+
+    fn is_obstructed(&self, pos: BlockPos) -> bool {
+        pos == self.target && self.target_obstructed
+    }
+}
+
+/// Whether a block state is one the client may place *into*.
+///
+/// Deliberately only the three air blocks, not vanilla's full
+/// `BlockState.canBeReplaced` set (water, lava, tall grass, snow layers, …):
+/// that set is per-block-state registry data no census in this tree carries, and
+/// guessing it would make the shell predict placements the server then refuses.
+/// Narrowing it costs nothing but a *missing* prediction — i.e. today's
+/// behaviour, a one-round-trip wait — for the cases it excludes, and it is what
+/// makes the `waterlogged = false` rule in [`state_for_placement`] exact rather
+/// than assumed.
+fn is_air_state(state: u32) -> bool {
+    matches!(
+        lodestone_data::block_states::block_name(state),
+        Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+    )
+}
+
+/// Name fragments of blocks whose right-click **actuates** them, for the
+/// place-vs-interact question `use_on` asks first.
+///
+/// This is an over-approximation on purpose, and the asymmetry is the whole
+/// design: calling an inert block interactable only *suppresses* a prediction
+/// (the shell falls back to sending and waiting, exactly today's behaviour),
+/// while calling an interactable block inert makes the shell predict a block into
+/// the cell next to the chest you meant to open. So the list errs long, and every
+/// block that owns a block entity is treated as interactable regardless of
+/// whether it appears here — which covers every container in the game through
+/// [`lodestone_data::block_entity_types`]' census rather than through this list.
+///
+/// Vanilla asks `BlockState.useItemOn`/`useWithoutItem` — real per-block
+/// behaviour with no census anywhere in this tree. A mislabelled block costs one
+/// round trip either way, because the server re-sends the block state at *both*
+/// candidate positions after every `use_item_on` (see [`Sim::use_item_live`]).
+const INTERACTABLE_FRAGMENTS: &[&str] = &[
+    "_door",
+    "_trapdoor",
+    "_fence_gate",
+    "_button",
+    "_bed",
+    "_sign",
+    "_shelf",
+    "_head",
+    "_skull",
+    "candle",
+    "cauldron",
+    "anvil",
+    "_pot",
+    "note_block",
+    "lever",
+    "_table",
+    "grindstone",
+    "loom",
+    "stonecutter",
+    "repeater",
+    "comparator",
+    "daylight_detector",
+    "cake",
+    "composter",
+    "respawn_anchor",
+    "dragon_egg",
+    "tnt",
+    "lightning_rod",
+    "bell",
+    "beehive",
+    "bee_nest",
+    "campfire",
+    "redstone",
+    "copper_bulb",
+    "berries",
+    "berry_bush",
+    "cave_vines",
+    "sculk_",
+    "shulker_box",
+];
+
+/// Whether right-clicking this block state actuates it instead of placing.
+fn is_interactable_state(state: u32) -> bool {
+    if lodestone_data::block_entity_types::block_entity_type(state).is_some() {
+        return true;
+    }
+    let Some(name) = lodestone_data::block_states::block_name(state) else {
+        return false;
+    };
+    INTERACTABLE_FRAGMENTS
+        .iter()
+        .any(|fragment| name.contains(fragment))
+}
+
+/// Blocks whose `facing` is `getHorizontalDirection().getOpposite()` — vanilla's
+/// `HorizontalDirectionalBlock` family, i.e. "faces the player".
+///
+/// A hand-written list, and the reason it is a list rather than a derivation:
+/// nothing in the block-state census distinguishes a 4-way `facing` that points
+/// *toward* the player (`StairBlock`, `LadderBlock`, `BedBlock`, `DoorBlock`,
+/// `FaceAttachedHorizontalDirectionalBlock`) from one that points *away*
+/// (`ChestBlock`, `AbstractFurnaceBlock`, `CarvedPumpkinBlock`, …) — the two
+/// have identical property signatures and differ only in Java. There are 293
+/// blocks with a 4-value `facing` in 26.2; a block that is not named here (and is
+/// not a stair) simply does not predict.
+///
+/// Sourced by grepping `getStateForPlacement` for
+/// `getHorizontalDirection().getOpposite()` across
+/// `.cache/mc/26.2/src/net/minecraft/world/level/block/`, then restricted to the
+/// single-cell blocks whose remaining properties [`state_for_placement`] can also
+/// resolve. Namespace-stripped paths.
+const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
+    // `ChestBlock.java:213`, `EnderChestBlock.java:75`.
+    "chest",
+    "trapped_chest",
+    "ender_chest",
+    "copper_chest",
+    "exposed_copper_chest",
+    "weathered_copper_chest",
+    "oxidized_copper_chest",
+    "waxed_copper_chest",
+    "waxed_exposed_copper_chest",
+    "waxed_weathered_copper_chest",
+    "waxed_oxidized_copper_chest",
+    // `AbstractFurnaceBlock.java:53`.
+    "furnace",
+    "blast_furnace",
+    "smoker",
+    // `CarvedPumpkinBlock.java:140`.
+    "carved_pumpkin",
+    "jack_o_lantern",
+    // `BeehiveBlock.java:271`.
+    "beehive",
+    "bee_nest",
+    // One-off `HorizontalDirectionalBlock`s.
+    "end_portal_frame",   // `EndPortalFrameBlock.java:56`
+    "chiseled_bookshelf", // `ChiseledBookShelfBlock.java:172`
+    "lectern",            // `LecternBlock.java:93`
+    "loom",               // `LoomBlock.java:54`
+    "stonecutter",        // `StonecutterBlock.java:45`
+    "vault",              // `VaultBlock.java:99`
+    "repeater",           // `DiodeBlock.java:158`
+    // `GlazedTerracottaBlock.java:28`.
+    "white_glazed_terracotta",
+    "orange_glazed_terracotta",
+    "magenta_glazed_terracotta",
+    "light_blue_glazed_terracotta",
+    "yellow_glazed_terracotta",
+    "lime_glazed_terracotta",
+    "pink_glazed_terracotta",
+    "gray_glazed_terracotta",
+    "light_gray_glazed_terracotta",
+    "cyan_glazed_terracotta",
+    "purple_glazed_terracotta",
+    "blue_glazed_terracotta",
+    "brown_glazed_terracotta",
+    "green_glazed_terracotta",
+    "red_glazed_terracotta",
+    "black_glazed_terracotta",
+];
+
+/// Blocks whose 6-way `facing` is `getNearestLookingDirection().getOpposite()` —
+/// vanilla's `DirectionalBlock` family.
+///
+/// Same reasoning as [`FACING_HORIZONTAL_OPPOSITE`], and likewise a list rather
+/// than "every block with a 6-value `facing`": 41 blocks have one in 26.2, and
+/// several derive it from the *clicked face* instead (`amethyst_cluster`,
+/// `end_rod`, `shulker_box`'s successors), which is a different rule with the same
+/// property signature.
+const FACING_ALL: &[&str] = &[
+    "dispenser",
+    "dropper",
+    "observer",
+    "piston",
+    "sticky_piston",
+    "barrel",
+];
+
+/// The value vanilla's `getStateForPlacement` leaves each **non-geometric**
+/// property at, for every property whose registered default is the *same across
+/// every block that has it*.
+///
+/// # Provenance, and why this is a measurement rather than a guess
+///
+/// Derived from `.cache/mc/26.2/generated/reports/blocks.json` — Mojang's own
+/// generator output, data source #1 — by taking each block's `"default": true`
+/// state and collecting, per property name, the set of values it holds there.
+/// 93 property names appear; **60 of them take one value across all 1,196
+/// blocks** and are listed below. The 17 that do not (`facing`, `axis`, `half`,
+/// `type`, `shape`, `lit`, `waterlogged`, `level`, `mode`, `rotation`, `up`,
+/// `down`, `north`, `south`, `east`, `west`, `bottom`) are either resolved from
+/// geometry by [`OrientationKind`], handled by an explicit rule in
+/// [`state_for_placement`], or a reason to decline the prediction outright.
+///
+/// A further 16 unambiguous names are **deliberately left out** because vanilla
+/// computes them at placement time from geometry or neighbours, so their
+/// registered default is the wrong answer for a *placed* block: `attachment`
+/// (`BellBlock`), `face` (`FaceAttachedHorizontalDirectionalBlock`),
+/// `orientation` (`CrafterBlock`, `JigsawBlock`), `hinge` (`DoorBlock`), `part`
+/// (`BedBlock`), `vertical_direction`/`thickness` (`PointedDripstoneBlock`),
+/// `hanging` (`LanternBlock`), `distance`/`persistent`/`leaves`
+/// (`LeavesBlock` — note `persistent` is set **true** for a player-placed leaf,
+/// so its `false` default would be actively wrong), `instrument`
+/// (`NoteBlock`, read from the block below), `side_chain`, `tip`, `tilt`, `drag`.
+/// Omitting a name makes every block carrying it decline, which is the safe
+/// direction.
+///
+/// Measured coverage of the whole scheme: **721 of 1,196 blocks** resolve to a
+/// state, and every one of those 721 matches the block's own registered default
+/// once the geometry properties are put back — except the 22 aquatic blocks
+/// (corals, coral fans, `sea_pickle`, `conduit`) whose registered default is
+/// `waterlogged = true`. Those are not a divergence in practice: vanilla sets
+/// `waterlogged` from the fluid at the placement position, and
+/// [`is_air_state`] means the shell only ever predicts into a cell with no fluid.
+const NON_GEOMETRIC_DEFAULTS: &[(&str, &str)] = &[
+    ("age", "0"),
+    ("attached", "false"),
+    ("berries", "false"),
+    ("bites", "0"),
+    ("bloom", "false"),
+    ("can_summon", "false"),
+    ("candles", "1"),
+    ("charges", "0"),
+    ("conditional", "false"),
+    ("copper_golem_pose", "standing"),
+    ("cracked", "false"),
+    ("crafting", "false"),
+    ("creaking_heart_state", "uprooted"),
+    ("delay", "1"),
+    ("disarmed", "false"),
+    ("dusted", "0"),
+    ("eggs", "1"),
+    ("enabled", "true"),
+    ("extended", "false"),
+    ("eye", "false"),
+    ("flower_amount", "1"),
+    ("has_book", "false"),
+    ("has_bottle_0", "false"),
+    ("has_bottle_1", "false"),
+    ("has_bottle_2", "false"),
+    ("has_record", "false"),
+    ("hatch", "0"),
+    ("honey_level", "0"),
+    ("hydration", "0"),
+    ("in_wall", "false"),
+    ("inverted", "false"),
+    ("layers", "1"),
+    ("locked", "false"),
+    ("moisture", "0"),
+    ("natural", "false"),
+    ("note", "0"),
+    ("occupied", "false"),
+    ("ominous", "false"),
+    ("open", "false"),
+    ("pickles", "1"),
+    ("potent_sulfur_state", "dry"),
+    ("power", "0"),
+    ("powered", "false"),
+    ("sculk_sensor_phase", "inactive"),
+    ("segment_amount", "1"),
+    ("short", "false"),
+    ("shrieking", "false"),
+    ("signal_fire", "false"),
+    ("slot_0_occupied", "false"),
+    ("slot_1_occupied", "false"),
+    ("slot_2_occupied", "false"),
+    ("slot_3_occupied", "false"),
+    ("slot_4_occupied", "false"),
+    ("slot_5_occupied", "false"),
+    ("snowy", "false"),
+    ("stage", "0"),
+    ("trial_spawner_state", "inactive"),
+    ("triggered", "false"),
+    ("unstable", "false"),
+    ("vault_state", "inactive"),
+];
+
+/// Per-block values for a property whose default is *not* consistent across
+/// blocks, so it cannot live in [`NON_GEOMETRIC_DEFAULTS`].
+///
+/// `lit` splits 48 `false` / 4 `true` over the blocks that have it — a furnace
+/// places unlit, a `redstone_torch` places lit. Rather than pick one and be wrong
+/// for the other, only the named blocks get an answer; everything else with a
+/// `lit` property declines. `(block path, property, value)`, from the same
+/// `blocks.json` default states.
+const BLOCK_PROPERTY_OVERRIDES: &[(&str, &str, &str)] = &[
+    ("furnace", "lit", "false"),
+    ("blast_furnace", "lit", "false"),
+    ("smoker", "lit", "false"),
+];
+
+/// Every 26.2 state of one block, plus the value domain of each of its
+/// properties.
+///
+/// Built by one linear pass over the 32,366-entry state table. That is only
+/// ever run on a right-click, and it is what lets the two functions below work
+/// from the real census instead of a second, hand-maintained table keyed by
+/// block name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockStates {
+    /// This block's state ids, ascending.
+    ids: Vec<u32>,
+    /// `(property name, distinct values)`. Sorted by name, because
+    /// [`lodestone_data::block_states::properties`] hands back sorted pairs.
+    domains: Vec<(&'static str, Vec<&'static str>)>,
+}
+
+impl BlockStates {
+    fn domain(&self, name: &str) -> Option<&[&'static str]> {
+        self.domains
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .map(|(_, values)| values.as_slice())
+    }
+}
+
+/// Collect [`BlockStates`] for `block` (a full identifier, e.g.
+/// `minecraft:chest`), or `None` if no such block exists — which is how a
+/// non-block item (a sword, bread) is recognised: vanilla's `BlockItem` shares
+/// its block's registry name, so "is this item placeable?" is "is there a block
+/// with this name?".
+fn block_states_of(block: &str) -> Option<BlockStates> {
+    let mut ids = Vec::new();
+    let mut domains: Vec<(&'static str, Vec<&'static str>)> = Vec::new();
+    for id in 0..lodestone_data::block_states::STATE_COUNT {
+        if lodestone_data::block_states::block_name(id) != Some(block) {
+            continue;
+        }
+        ids.push(id);
+        for &(name, value) in lodestone_data::block_states::properties(id).unwrap_or(&[]) {
+            match domains.iter_mut().find(|(candidate, _)| *candidate == name) {
+                Some((_, values)) => {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+                None => domains.push((name, vec![value])),
+            }
+        }
+    }
+    (!ids.is_empty()).then_some(BlockStates { ids, domains })
+}
+
+/// Classify how `block` derives its orientation from placement geometry, or
+/// `None` when the census cannot say — in which case the shell does not predict
+/// this item at all.
+///
+/// Everything decidable from the property signature is decided from it; the two
+/// facing families that are *not* (see [`FACING_HORIZONTAL_OPPOSITE`]) come from
+/// a named list. Declining is always safe: it reproduces the pre-#381 behaviour
+/// of sending `use_item_on` and waiting.
+fn orientation_for_placement(block: &str, states: &BlockStates) -> Option<OrientationKind> {
+    let path = block.strip_prefix("minecraft:").unwrap_or(block);
+    // A pillar's axis is the clicked face's axis (`RotatedPillarBlock`). A
+    // 2-value `axis` is `nether_portal`, which is not placed by an item.
+    if let Some(axis) = states.domain("axis") {
+        return (axis.len() == 3).then_some(OrientationKind::Pillar);
+    }
+    // `SlabBlock`'s `type` is `top`/`bottom`/`double`; a chest's is
+    // `single`/`left`/`right`, which is not geometry and is handled as a
+    // non-geometric default instead.
+    if states.domain("type").is_some_and(|d| d.contains(&"double")) {
+        return Some(OrientationKind::Slab);
+    }
+    match states.domain("facing").map(<[&str]>::len) {
+        Some(4) => {
+            if states.domain("half").is_some_and(|d| d.contains(&"bottom"))
+                && states.domain("shape").is_some()
+            {
+                return Some(OrientationKind::Stairs);
+            }
+            FACING_HORIZONTAL_OPPOSITE
+                .contains(&path)
+                .then_some(OrientationKind::FacingHorizontalOpposite)
+        }
+        Some(6) => FACING_ALL
+            .contains(&path)
+            .then_some(OrientationKind::FacingAll),
+        // A 5-value `facing` is a hopper, whose placement rule is its own.
+        Some(_) => None,
+        // No `facing`: orientation-free, as long as nothing else in the
+        // signature says the placement reads geometry we are not modelling
+        // (a rail's `shape`, a door's `half`).
+        None => (states.domain("shape").is_none() && states.domain("half").is_none())
+            .then_some(OrientationKind::Fixed),
+    }
+}
+
+/// The block-state id a predicted placement should write, or `None` when any
+/// property of the block cannot be resolved.
+///
+/// This is a **total** specification, not a best effort: every property the block
+/// has is given a value — from `placed` when [`OrientationKind`] defines it, from
+/// [`BLOCK_PROPERTY_OVERRIDES`] / [`NON_GEOMETRIC_DEFAULTS`] / the two explicit
+/// rules otherwise — and the matching state id is then the *unique* state whose
+/// property set equals it. A partial specification would need the block's
+/// registered default state to fill the rest, and no census in this tree carries
+/// one (`blocks.json`'s `"default": true` flag is not in
+/// [`lodestone_data::block_states`]). That absence is exactly why this function
+/// declines instead of guessing.
+fn state_for_placement(
+    block: &str,
+    states: &BlockStates,
+    orientation: OrientationKind,
+    placed: &PlacedState,
+) -> Option<u32> {
+    let path = block.strip_prefix("minecraft:").unwrap_or(block);
+    let mut wanted: Vec<(&'static str, &'static str)> = Vec::with_capacity(states.domains.len());
+    for (name, domain) in &states.domains {
+        let value = match *name {
+            "facing"
+                if matches!(
+                    orientation,
+                    OrientationKind::FacingAll
+                        | OrientationKind::FacingHorizontal
+                        | OrientationKind::FacingHorizontalOpposite
+                        | OrientationKind::Stairs
+                ) =>
+            {
+                face_property(placed.facing?)
+            }
+            "axis" if orientation == OrientationKind::Pillar => axis_property(placed.axis?),
+            "type" if orientation == OrientationKind::Slab => half_property(placed.half?),
+            "half" if orientation == OrientationKind::Stairs => half_property(placed.half?),
+            // `StairBlock.getStateForPlacement` computes `shape` from the
+            // neighbouring stairs; `straight` is the no-neighbour answer and is
+            // what every one of the 64 stair blocks defaults to. The server
+            // corrects a corner with its own block update.
+            "shape" if orientation == OrientationKind::Stairs => "straight",
+            // Vanilla reads this from the fluid at the placement position
+            // (`SimpleWaterloggedBlock`'s `copyWaterloggedFrom`). We only predict
+            // into air (see `is_air_state`), so `false` is the answer rather than
+            // a default.
+            "waterlogged" => "false",
+            // `ChestBlock.getStateForPlacement` scans for an adjacent chest to
+            // make a double; `single` is the no-neighbour answer, and the server
+            // re-sends the state when a neighbour makes it a double. Keyed on the
+            // value rather than the property name because `type` is also a slab's
+            // (`top`/`bottom`/`double`) and a piston head's (`normal`/`sticky`) —
+            // only the ten chest blocks have a `single`, measured across the 26.2
+            // census.
+            "type" if domain.contains(&"single") => "single",
+            _ => BLOCK_PROPERTY_OVERRIDES
+                .iter()
+                .find(|(candidate, property, _)| *candidate == path && property == name)
+                .map(|&(_, _, value)| value)
+                .or_else(|| {
+                    NON_GEOMETRIC_DEFAULTS
+                        .iter()
+                        .find(|(property, _)| property == name)
+                        .map(|&(_, value)| value)
+                })?,
+        };
+        wanted.push((name, value));
+    }
+    // `domains` is in the census's own sorted-by-name order, so `wanted` is too
+    // and this is a slice comparison rather than a per-property search.
+    states
+        .ids
+        .iter()
+        .copied()
+        .find(|&id| lodestone_data::block_states::properties(id) == Some(wanted.as_slice()))
+}
+
+/// The block-state id a right-click on `block` predicts, given the
+/// geometry-derived [`PlacedState`] [`Placement::use_on`] resolved — or `None`
+/// when the shell declines to predict this block at all.
+///
+/// The whole resolution behind [`Sim::use_item_live`]'s local write, in one
+/// callable place: classify the orientation from the census
+/// ([`orientation_for_placement`]) then specify every property
+/// ([`state_for_placement`]). `pub` so a pixel gate can drive the *same*
+/// resolution a click does instead of choosing a state of its own and proving
+/// nothing about which one the shell would pick.
+#[must_use]
+pub fn predicted_placement_state(block: &str, placed: &PlacedState) -> Option<u32> {
+    let states = block_states_of(block)?;
+    let orientation = orientation_for_placement(block, &states)?;
+    state_for_placement(block, &states, orientation, placed)
+}
+
+/// [`BlockFace`] to the `facing` property value (`Direction.getSerializedName`).
+fn face_property(face: BlockFace) -> &'static str {
+    match face {
+        BlockFace::Down => "down",
+        BlockFace::Up => "up",
+        BlockFace::North => "north",
+        BlockFace::South => "south",
+        BlockFace::West => "west",
+        BlockFace::East => "east",
+    }
+}
+
+/// [`Axis`] to the `axis` property value.
+fn axis_property(axis: Axis) -> &'static str {
+    match axis {
+        Axis::X => "x",
+        Axis::Y => "y",
+        Axis::Z => "z",
+    }
+}
+
+/// [`Half`] to the `half` (stairs) / `type` (slab) property value — the two share
+/// the `top`/`bottom` vocabulary.
+fn half_property(half: Half) -> &'static str {
+    match half {
+        Half::Bottom => "bottom",
+        Half::Top => "top",
+    }
+}
+
+/// Write a locally predicted block state, block entity included.
+///
+/// **This is the local mirror of the v770 adapter's `BLOCK_UPDATE` arm**, and it
+/// is deliberately the same two calls in the same order:
+/// [`WorldSink::set_block`] then [`WorldSink::sync_block_entity`] with the new
+/// state's `BLOCK_ENTITY_TYPE` id. Writing the state alone is issue #374 — a
+/// chest with a state, no record, and zero pixels — and #381 is that same bug
+/// reached through the *prediction* rather than through a packet.
+///
+/// A free function over `&mut dyn WorldSink` rather than a `Sim` method so a test
+/// can drive the production write with a bare [`World`], no GPU and no server.
+/// The `Option<u32>` the world takes comes from [`lodestone_data`]: `lodestone-world`
+/// cannot depend on it (`data → model → world` is a cycle), which is why the
+/// caller resolves the type and the world only applies it.
+pub fn write_predicted_block(
+    world: &mut dyn WorldSink,
+    block: [i32; 3],
+    state: u32,
+) -> BlockEntitySync {
+    world.set_block(block[0], block[1], block[2], state);
+    world.sync_block_entity(
+        block[0],
+        block[1],
+        block[2],
+        lodestone_data::block_entity_types::block_entity_type(state),
+    )
 }
 
 /// Map a raycast hit's outward face normal to the [`BlockFace`] that was struck.
@@ -3216,17 +3791,51 @@ impl Sim {
         }
     }
 
-    /// Lower a live right-click into the server's `use_item_on` action.
+    /// Lower a live right-click into the server's `use_item_on` action **and
+    /// predict the placement locally** (issue #381).
     ///
-    /// The shell does not carry the held item or classify blocks — the server
-    /// is authoritative: it places whatever is in the selected hotbar slot and
-    /// re-runs the interact-vs-place decision itself. [`Placement::use_on`]
-    /// returns the action to send in *every* branch, so the shell sends it
-    /// unconditionally (with a proper prediction sequence) and lets the server
-    /// decide, exactly as vanilla does. Because the server owns the sneak state
-    /// derived from the wire, the crouch input must have been sent (see
+    /// The server stays authoritative: [`Placement::use_on`] returns the action to
+    /// send in *every* branch, so the shell sends it unconditionally (with a
+    /// proper prediction sequence) and lets the server decide, exactly as vanilla
+    /// does. Because the server owns the sneak state derived from the wire, the
+    /// crouch input must have been sent (see
     /// [`send_player_input`](Self::send_player_input)) for a sneak-placement
     /// against a chest/door to suppress the interaction.
+    ///
+    /// # Why the local write exists
+    ///
+    /// This method used to send and wait, so a placed block did not exist
+    /// client-side until the server's `BLOCK_UPDATE` came back — one round trip of
+    /// hole. For a chest that is #374 reached through a different door: the state
+    /// write is what creates the block entity, and with no local state write there
+    /// was no local record and nothing to draw. The prediction now writes through
+    /// [`write_predicted_block`], the same `set_block` + `sync_block_entity` pair
+    /// the adapter's `BLOCK_UPDATE` arm calls.
+    ///
+    /// # What happens when the server refuses
+    ///
+    /// Nothing here has to detect it, because vanilla's server corrects **both**
+    /// candidate positions after *every* `use_item_on`, unconditionally — accepted,
+    /// refused, or actually an interaction
+    /// (`ServerGamePacketListenerImpl.java:1397-1398`):
+    ///
+    /// ```text
+    /// this.send(new ClientboundBlockUpdatePacket(level, pos));
+    /// this.send(new ClientboundBlockUpdatePacket(level, pos.relative(direction)));
+    /// ```
+    ///
+    /// `pos` is `clicked` and `pos.relative(direction)` is the adjacent cell, and a
+    /// prediction can only ever land on one of those two. So a refused placement is
+    /// overwritten by the authoritative state within one round trip — and since
+    /// #374 that path calls `sync_block_entity`, which **removes** the block-entity
+    /// record the prediction created (`BlockEntitySync::Removed`). The removal half
+    /// is not a second mechanism to build; it is the same one, pointing the other
+    /// way. `crates/lodestone-shell/tests/placed_chest_block_entity_pixels.rs`
+    /// gates it rather than assuming it.
+    ///
+    /// A mispredicted placement therefore costs exactly the round trip the hole
+    /// used to cost, which is why every classification below is allowed to err
+    /// toward *not* predicting but never toward predicting something wrong.
     fn use_item_live(&mut self) {
         if self.is_dead() {
             return;
@@ -3241,6 +3850,31 @@ impl Sim {
         // used to re-read the keyboard, which was frame-granular; vanilla is
         // tick-granular here too (`Minecraft.handleKeybinds` runs in the tick).
         let sneaking = self.movement_intent().sneak;
+
+        // Native player-inventory index of the off-hand slot
+        // (`lodestone_game::menu`'s table: hotbar `0..=8`, off-hand `40`).
+        const OFFHAND_NATIVE_INDEX: usize = 40;
+        let menu = self.player_menu();
+        let main = menu
+            .player_native(self.selected_slot())
+            .filter(|stack| !stack.is_empty())
+            .map(|stack| stack.item().clone());
+        // Vanilla's `haveSomethingInOurHands` — *either* hand, and it is what
+        // makes a sneak-click suppress the block's own use.
+        let has_item_in_hand = main.is_some()
+            || menu
+                .player_native(OFFHAND_NATIVE_INDEX)
+                .is_some_and(|stack| !stack.is_empty());
+        // Placeable only when the census can name the block *and* classify how it
+        // orients. Leaving `placing` at `None` otherwise is what makes an
+        // unclassifiable item fall back to send-and-wait rather than write a state
+        // we are not confident in.
+        let placeable = main.as_ref().and_then(|item| {
+            let name = item.to_string();
+            let states = block_states_of(&name)?;
+            let orientation = orientation_for_placement(&name, &states)?;
+            Some((name, states, orientation))
+        });
         let ctx = UseOnContext {
             hand: Hand::Main,
             clicked,
@@ -3249,19 +3883,25 @@ impl Sim {
             inside_block: false,
             rotation: Rotation::new(self.player().yaw, self.player().pitch),
             sneaking,
-            has_item_in_hand: true,
-            placing: None,
-            orientation: OrientationKind::Fixed,
+            has_item_in_hand,
+            placing: placeable.as_ref().and_then(|_| main.clone()),
+            orientation: placeable
+                .as_ref()
+                .map_or(OrientationKind::Fixed, |&(_, _, kind)| kind),
         };
-        let (UseOnDecision::Interact { action }
-        | UseOnDecision::Place { action, .. }
-        | UseOnDecision::Nothing { action }) = self.write(|w| {
+        // Read the world facts before taking the ECS guard `use_on` needs — see
+        // `PlacementFacts` on why the two guards must not nest.
+        let facts = self.placement_facts(clicked, face);
+        let decision = self.write(|w| {
             w.resource_mut::<PlacementPredictor>()
                 .0
-                .use_on(&ctx, &ServerAuthoritativeWorld)
+                .use_on(&ctx, &facts)
         });
+        let (UseOnDecision::Interact { action }
+        | UseOnDecision::Place { action, .. }
+        | UseOnDecision::Nothing { action }) = &decision;
         if let Some(net) = &self.net {
-            net.send_action(action);
+            net.send_action(action.clone());
             net.send_action(ClientAction::SwingArm { hand: Hand::Main });
         }
         // This swing bypasses `ActionQueue` (the two sends above go straight to
@@ -3270,6 +3910,64 @@ impl Sim {
         // Unconditional, not inside the `if let` above: the animation is
         // client-side and does not need a socket.
         self.swing_hand();
+
+        // The prediction. `placeable` is `Some` whenever `use_on` could have
+        // returned `Place` at all (it is what filled `ctx.placing`), so the only
+        // way this declines is `state_for_placement` failing on a property it
+        // cannot resolve.
+        if let (UseOnDecision::Place { prediction, .. }, Some((name, states, orientation))) =
+            (&decision, &placeable)
+        {
+            if let Some(state) = state_for_placement(name, states, *orientation, &prediction.state) {
+                let pos = prediction.pos;
+                self.predict_block([pos.x, pos.y, pos.z], state);
+            }
+        }
+    }
+
+    /// The [`PlacementWorld`] facts for one right-click, read from the
+    /// client-owned world in one go. See [`PlacementFacts`].
+    fn placement_facts(&self, clicked: BlockPos, face: BlockFace) -> PlacementFacts {
+        let state_at = |pos: BlockPos| self.net.as_ref().and_then(|net| net.block_at(pos));
+        let clicked_state = state_at(clicked);
+        let clicked_replaceable = clicked_state.is_some_and(is_air_state);
+        // `resolve_target`'s rule, evaluated here because it is the same read: a
+        // replaceable clicked cell is replaced in place, otherwise the placement
+        // goes to the cell across the hit face.
+        let target = if clicked_replaceable {
+            clicked
+        } else {
+            lodestone_game::placement::offset(clicked, face)
+        };
+        PlacementFacts {
+            clicked,
+            target,
+            clicked_replaceable,
+            clicked_interactable: clicked_state.is_some_and(is_interactable_state),
+            // An unloaded column reads `None` and therefore "not replaceable",
+            // which declines the prediction — the same conservative direction as
+            // every other unknown here.
+            target_replaceable: state_at(target).is_some_and(is_air_state),
+            target_obstructed: self.block_intersects_player([target.x, target.y, target.z]),
+        }
+    }
+
+    /// Apply a locally predicted block state to the one chunk store and re-mesh.
+    ///
+    /// The write itself is [`write_predicted_block`] — state *and* block entity,
+    /// the adapter's `BLOCK_UPDATE` pair — so a predicted chest exists as a
+    /// block-entity record the moment it is placed instead of one round trip
+    /// later.
+    fn predict_block(&mut self, block: [i32; 3], state: u32) -> BlockEntitySync {
+        let store = self.chunk_world();
+        // The chunk guard is taken and dropped before `remesh_around` reaches for
+        // the ECS resource again, so the two are never held together.
+        let outcome = {
+            let mut world = store.write();
+            write_predicted_block(&mut *world, block, state)
+        };
+        self.remesh_around(block);
+        outcome
     }
 
     /// Place [`PLACE_BLOCK`] against the targeted face on the **demo world**, if
@@ -3475,6 +4173,17 @@ impl Sim {
     /// collision clone had to be cleared by hand — a missed clear reading as "I
     /// mined the block but still cannot walk through it". The collision source now
     /// reads the store itself, so the rule is gone rather than merely obeyed.
+    ///
+    /// # Why this does *not* call `sync_block_entity`, unlike every other writer
+    ///
+    /// `value` is a [`crate::blocks::id`] constant — the shell's **own** ten-entry
+    /// demo palette, deliberately unrelated to any protocol's ids (see that
+    /// module's docs). Running it through `lodestone_data`'s 26.2
+    /// `state_id → block_entity_type` census would be a category error: `id::WATER`
+    /// is `5`, and real state `5` is some unrelated 26.2 block that may well own a
+    /// block entity. So the demo world has no block entities, correctly — the
+    /// palette contains nothing that could have one. The live prediction's writer
+    /// is [`write_predicted_block`], which is fed real census state ids.
     fn set_block_world(&mut self, block: [i32; 3], value: u32) -> bool {
         let pos = ChunkPos {
             x: block[0].div_euclid(16),
@@ -3611,6 +4320,66 @@ impl Sim {
         self.terrain_and_world(|store, terrain| terrain.mesh_column(store, cx, cz));
     }
 
+    /// Settle any placement prediction the server has just overwritten.
+    ///
+    /// [`NetUpdate::SectionBlocks`] is the shell's view of `BLOCK_UPDATE` /
+    /// `SECTION_BLOCKS_UPDATE`: the authoritative state has **already** been
+    /// applied to the one store by the adapter, which (since #374) already created
+    /// or removed the block entity with it. So this does not correct the world —
+    /// the world is corrected by construction, including a refused placement whose
+    /// bogus chest record is dropped by that arm's `sync_block_entity` — it only
+    /// clears the prediction from [`Placement`]'s ledger and asks whether the
+    /// server agreed.
+    ///
+    /// Both halves matter. Without the clear the ledger grows without bound for the
+    /// whole session, one entry per right-click, because nothing else drains it (the
+    /// `block_changed_ack` sequence is decoded by the adapter but has no shell
+    /// consumer). Without the answer a refusal is invisible.
+    fn reconcile_predictions(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
+        let pending: Vec<BlockPos> = self.read(|w| {
+            w.resource::<PlacementPredictor>()
+                .0
+                .pending()
+                .iter()
+                .map(|prediction| prediction.pos)
+                .collect()
+        });
+        // The common case by far — one `O(1)` read, and a `/fill` of 4096 cells
+        // does no per-cell work at all.
+        if pending.is_empty() {
+            return;
+        }
+        for &[rel_x, rel_y, rel_z] in blocks {
+            let pos = BlockPos::new(
+                (sx << 4) | i32::from(rel_x),
+                (sy << 4) | i32::from(rel_y),
+                (sz << 4) | i32::from(rel_z),
+            );
+            if !pending.contains(&pos) {
+                continue;
+            }
+            let server_block = self
+                .net
+                .as_ref()
+                .and_then(|net| net.block_at(pos))
+                .and_then(lodestone_data::block_states::block_name)
+                .and_then(|name| name.parse::<lodestone_model::Identifier>().ok());
+            let outcome = self.write(|w| {
+                w.resource_mut::<PlacementPredictor>()
+                    .0
+                    .reconcile(pos, server_block.as_ref())
+            });
+            if outcome.corrected {
+                tracing::debug!(
+                    target: "placement",
+                    "server overrode the predicted block at {:?} with {:?}",
+                    pos,
+                    server_block
+                );
+            }
+        }
+    }
+
     fn poll_net(&mut self) {
         // Collect owned updates first so the immutable borrow of `self.net`
         // ends before the loop — the sound arms need `&mut self.audio` and (for
@@ -3660,6 +4429,7 @@ impl Sim {
                     // re-mesh is ~24 sections × a 27-section snapshot each.
                     // `remesh_around` also handles the boundary case, so a break
                     // at x=15 dirties the neighbouring column's face too.
+                    self.reconcile_predictions(x, y, z, &blocks);
                     self.remesh_changed_blocks(x, y, z, &blocks);
                 }
                 NetUpdate::BlockEvent { pos, b0, b1 } => {
@@ -6519,6 +7289,260 @@ mod tests {
             vec![("Alice the Brave", "7"), ("Bob", "3")],
             "sidebar rows must come from the client's folded Scoreboard state"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Local placement prediction (issue #381)
+    // -----------------------------------------------------------------------
+
+    /// The state ids below are transcribed from
+    /// `.cache/mc/26.2/generated/reports/blocks.json` — Mojang's own generator
+    /// output, data source #1 — and **not** from this code's own resolution, so
+    /// they are an external oracle rather than a round trip through
+    /// `state_for_placement`. Each is the state whose properties vanilla's
+    /// `getStateForPlacement` produces for that block.
+    ///
+    /// A 26.2 data bump shifts every id, and this failing is the point: it says
+    /// the census moved under the resolver, which is exactly when the property
+    /// rules deserve a re-read.
+    mod placement_oracle {
+        /// `chest[type=single,facing=north,waterlogged=false]` — the registered
+        /// default, and what `ChestBlock.getStateForPlacement` yields facing north.
+        pub const CHEST_NORTH: u32 = 3988;
+        /// `chest[type=single,facing=south,waterlogged=false]`.
+        pub const CHEST_SOUTH: u32 = 3994;
+        /// `oak_slab[type=bottom,waterlogged=false]`.
+        pub const OAK_SLAB_BOTTOM: u32 = 13333;
+        /// `oak_slab[type=top,waterlogged=false]`.
+        pub const OAK_SLAB_TOP: u32 = 13331;
+        /// `oak_log[axis=y]`.
+        pub const OAK_LOG_Y: u32 = 137;
+        /// `stone` — the one propertyless case.
+        pub const STONE: u32 = 1;
+    }
+
+    /// The production seam, not a re-spelling of it — [`predicted_placement_state`]
+    /// is what `use_item_live` resolves through and what the pixel gate drives.
+    fn resolve(block: &str, placed: PlacedState) -> Option<u32> {
+        predicted_placement_state(block, &placed)
+    }
+
+    /// The resolver must hit the block's own placement state exactly — including
+    /// the two properties the census cannot default (`waterlogged`, a chest's
+    /// `type`), because "lowest state id for this block" gets **both** wrong:
+    /// `BooleanProperty`'s value order is `{true, false}`, so the lowest chest id
+    /// is a *waterlogged* chest and the lowest slab id is a *top* slab.
+    #[test]
+    fn placement_states_resolve_to_the_jar_oracle() {
+        assert_eq!(
+            resolve(
+                "minecraft:chest",
+                PlacedState {
+                    facing: Some(BlockFace::North),
+                    ..PlacedState::default()
+                }
+            ),
+            Some(placement_oracle::CHEST_NORTH),
+            "a chest facing north must resolve to type=single, waterlogged=false"
+        );
+        assert_eq!(
+            resolve(
+                "minecraft:chest",
+                PlacedState {
+                    facing: Some(BlockFace::South),
+                    ..PlacedState::default()
+                }
+            ),
+            Some(placement_oracle::CHEST_SOUTH),
+            "facing must actually reach the resolved state, not be dropped"
+        );
+        assert_eq!(
+            resolve(
+                "minecraft:oak_slab",
+                PlacedState {
+                    half: Some(Half::Bottom),
+                    ..PlacedState::default()
+                }
+            ),
+            Some(placement_oracle::OAK_SLAB_BOTTOM)
+        );
+        assert_eq!(
+            resolve(
+                "minecraft:oak_slab",
+                PlacedState {
+                    half: Some(Half::Top),
+                    ..PlacedState::default()
+                }
+            ),
+            Some(placement_oracle::OAK_SLAB_TOP),
+            "the slab's half must select type=top, not the block's default"
+        );
+        assert_eq!(
+            resolve(
+                "minecraft:oak_log",
+                PlacedState {
+                    axis: Some(Axis::Y),
+                    ..PlacedState::default()
+                }
+            ),
+            Some(placement_oracle::OAK_LOG_Y)
+        );
+        assert_eq!(
+            resolve("minecraft:stone", PlacedState::default()),
+            Some(placement_oracle::STONE)
+        );
+    }
+
+    /// The declines, and why each one is a decline rather than a guess. Without
+    /// these the resolver would look "complete" while writing states the server
+    /// immediately contradicts.
+    #[test]
+    fn unclassifiable_placements_decline_rather_than_guess() {
+        for (block, why) in [
+            // A 4-way `facing` the census cannot tell from a chest's, and vanilla
+            // points it *toward* the player.
+            ("minecraft:ladder", "FacingHorizontal is not classified"),
+            // Two cells, a hinge and an upper/lower half.
+            ("minecraft:oak_door", "multi-block placement"),
+            // `shape` comes from the neighbouring rails.
+            ("minecraft:rail", "neighbour-derived shape"),
+            // `persistent` is set *true* for a player-placed leaf, so the
+            // registered default would be actively wrong.
+            ("minecraft:oak_leaves", "persistent is placement-derived"),
+            // Not in the horizontal-facing list — and its `mode` has no
+            // consistent default across the blocks that carry one either.
+            ("minecraft:comparator", "unclassified 4-way facing"),
+            // Not a block at all.
+            ("minecraft:diamond_sword", "not a block item"),
+        ] {
+            assert_eq!(
+                resolve(block, PlacedState::default()),
+                None,
+                "{block} must decline ({why}); predicting it would write a state the \
+                 server contradicts one round trip later"
+            );
+        }
+    }
+
+    /// A right-click on a solid cell with a chest in hand must decide `Place` into
+    /// the adjacent air cell, and a right-click on the chest itself must decide
+    /// `Interact` — the branch that keeps the prediction from dropping a ghost
+    /// chest beside the one you meant to open.
+    #[test]
+    fn placement_facts_drive_the_place_versus_interact_decision() {
+        let clicked = BlockPos::new(4, 64, 9);
+        let target = BlockPos::new(4, 65, 9);
+        let solid_ground = PlacementFacts {
+            clicked,
+            target,
+            clicked_replaceable: false,
+            clicked_interactable: false,
+            target_replaceable: true,
+            target_obstructed: false,
+        };
+        let chest = PlacementFacts {
+            clicked_interactable: true,
+            ..solid_ground
+        };
+        let ctx = UseOnContext {
+            hand: Hand::Main,
+            clicked,
+            face: BlockFace::Up,
+            cursor: Vec3f::new(0.5, 1.0, 0.5),
+            inside_block: false,
+            rotation: Rotation::new(0.0, 0.0),
+            sneaking: false,
+            has_item_in_hand: true,
+            placing: Some("minecraft:chest".parse().expect("identifier")),
+            orientation: OrientationKind::FacingHorizontalOpposite,
+        };
+
+        let mut placement = Placement::new();
+        let decision = placement.use_on(&ctx, &solid_ground);
+        let UseOnDecision::Place { prediction, .. } = &decision else {
+            panic!("a chest onto solid ground must place, got {decision:?}");
+        };
+        assert_eq!(prediction.pos, target, "the placement goes into the air cell");
+        assert_eq!(
+            state_for_placement(
+                "minecraft:chest",
+                &block_states_of("minecraft:chest").expect("chest is a block"),
+                OrientationKind::FacingHorizontalOpposite,
+                &prediction.state,
+            ),
+            // Yaw 0 faces +Z (south), and a chest faces *away* from the player.
+            Some(placement_oracle::CHEST_NORTH),
+            "the prediction's geometry must survive into the resolved state"
+        );
+        assert_eq!(placement.pending().len(), 1);
+
+        let mut placement = Placement::new();
+        assert!(
+            matches!(
+                placement.use_on(&ctx, &chest),
+                UseOnDecision::Interact { .. }
+            ),
+            "clicking an interactable block must not predict a placement"
+        );
+        assert!(
+            placement.pending().is_empty(),
+            "an interaction records nothing to reconcile"
+        );
+
+        // Obstruction and an unloaded/solid target both decline, which is what
+        // keeps a prediction from landing inside the player or in a cell we cannot
+        // see.
+        for facts in [
+            PlacementFacts {
+                target_obstructed: true,
+                ..solid_ground
+            },
+            PlacementFacts {
+                target_replaceable: false,
+                ..solid_ground
+            },
+        ] {
+            assert!(
+                matches!(
+                    Placement::new().use_on(&ctx, &facts),
+                    UseOnDecision::Nothing { .. }
+                ),
+                "an illegal target must not predict: {facts:?}"
+            );
+        }
+    }
+
+    /// A container is interactable through the block-entity census, not through
+    /// the name list — that is what makes the list's gaps cost a round trip
+    /// instead of a wrong right-click on a chest.
+    #[test]
+    fn every_container_is_interactable_and_plain_terrain_is_not() {
+        let state = |name: &str| {
+            (0..lodestone_data::block_states::STATE_COUNT)
+                .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+                .unwrap_or_else(|| panic!("{name} is not in the 26.2 census"))
+        };
+        for name in [
+            "minecraft:chest",
+            "minecraft:barrel",
+            "minecraft:furnace",
+            "minecraft:hopper",
+            "minecraft:oak_door",
+            "minecraft:crafting_table",
+        ] {
+            assert!(
+                is_interactable_state(state(name)),
+                "{name} must suppress the placement prediction"
+            );
+        }
+        for name in ["minecraft:stone", "minecraft:dirt", "minecraft:oak_planks"] {
+            assert!(
+                !is_interactable_state(state(name)),
+                "{name} must not suppress it — this is the 95% case"
+            );
+        }
+        assert!(is_air_state(state("minecraft:air")));
+        assert!(!is_air_state(state("minecraft:water")));
     }
 
     #[test]

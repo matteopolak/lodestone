@@ -185,6 +185,15 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
 - [Block-break timing](./block-break-timing.md) — how long a block takes to mine
   and how fast its crack fills: the per-state hardness seam, the two ways to wire
   it that break blocks *too fast*, and the server branch the real numbers change.
+- [Block placement prediction](./block-placement-prediction.md) — writing a placed
+  block locally instead of waiting a round trip for `BLOCK_UPDATE` (issue #381, the
+  prediction half of #374). Covers why the server's *unconditional double*
+  `ClientboundBlockUpdatePacket` after every `use_item_on` means a refused placement
+  needs no rollback mechanism of its own, the `state_id → default state` census that
+  does **not** exist and why "the lowest state id for this block" is a waterlogged
+  chest rather than a chest, the 60 measured non-geometric property defaults plus the
+  16 unambiguous ones deliberately excluded, and why interactability is
+  over-approximated on purpose.
 - [Break particles](./break-particles.md) — the debris a breaking block throws: the
   `#particle` sprite (which is not the texture of any face), the per-state tint that
   vanilla applies with a *different* virtual method from the in-world one, and the
@@ -260,6 +269,17 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   correction #393's own correction needs: `EditBox` passes `isFocused()` where
   `AbstractButton` passes `isHoveredOrFocused()`, so hovering a text field must
   *not* highlight it.
+- [World select, with creation disabled](./world-select.md) — the fifth child
+  (#397) and `HeaderAndFooterLayout`'s first consumer: vanilla's
+  `SelectWorldScreen` with five of its six footer buttons present and greyed,
+  **Create New World among them** (#190 is the screen it would open). Also the
+  hand-derived footer arithmetic and why *Play*'s 150 px is what makes all four
+  columns 71, why the search box lands at y 21 and not the 22 its own constructor
+  says, the gate that a canvas-*dependent* container arranged once is still right
+  at 320×240 and 1920×1080, and the jar finding that contradicts the obvious
+  guess: **vanilla has no empty-list state for this screen** — `NoWorldsEntry` is
+  Realms-only and `SINGLEPLAYER` with no worlds *leaves* for `CreateWorldScreen`,
+  so the empty state here is a deliberate choice rather than a transcription.
 - [Main menu](./main-menu.md) — the screen state machine, the persisted
   multiplayer server list, per-server status pings (MOTD, players, favicon), the
   dependency edge that gave `lodestone-net`'s ping its first consumer, the

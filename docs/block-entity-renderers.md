@@ -112,6 +112,24 @@ the type and the version-specific answer comes from `lodestone_data::block_entit
 walked out of the real jar, because neither `blocks.json` nor `registries.json` carries the
 state→type pairing. See [`lodestone-data-crate.md`](lodestone-data-crate.md).
 
+### Make that **five**, and the fifth is not a packet — issue [#381](https://github.com/matteopolak/lodestone/issues/381)
+
+#374 wired the rule into the two packet arms, which is every route a *server* can create a block
+entity by. It left the route the **client** creates one by, and there the bug survived intact: a
+chest you placed yourself was still a hole, now for exactly one server round trip, because
+`Sim::use_item_live` sent `use_item_on` and wrote nothing locally. Nothing in #374's diagram was
+wrong; the row simply was not there to be wrong, because the prediction did not exist yet.
+
+`crates/lodestone-shell/src/sim.rs`'s `write_predicted_block` is the fifth row, and it is the same
+`set_block` + `sync_block_entity` pair in the same order — the point being that it is not a second
+implementation of the rule. The **removal** half is what corrects a placement the server refuses,
+which needs no new mechanism at all: vanilla's server re-sends the block state at *both* candidate
+positions after every `use_item_on`, whatever it decided
+(`ServerGamePacketListenerImpl.java:1397-1398`). See
+[`block-placement-prediction.md`](block-placement-prediction.md) for the whole pipeline, the
+`default state` census that does not exist, and why "the lowest state id for this block" is a
+waterlogged chest.
+
 `block_entity_data` still creates on a miss, deliberately unlike vanilla: vanilla can afford to drop
 because it has `pendingBlockEntities` to promote from later and we do not, and the two failure modes
 are not symmetric. An orphan record whose block state is not a chest resolves to no material in
@@ -400,6 +418,36 @@ Note that `a_repeated_block_update_keeps_the_nbt_block_entity_data_delivered` pa
 the fix: it guards the `Kept` branch (a re-sent chest state must not wipe contents `block_entity_data`
 delivered — the server re-sends `block_update` for a chest whenever a neighbour makes it a double), not
 #374 itself.
+
+### #381: the prediction half, and its refusal
+
+Two further gates live in the same file, both driving `sim::write_predicted_block` — the production
+write, not a re-spelling of its two calls, since a re-spelling would pass with the prediction deleted:
+
+| gate | subject | control |
+|---|---|---|
+| `a_locally_predicted_chest_reaches_pixels_with_no_server_packet` | `write_predicted_block(chest)`, no packet decoded anywhere | **no local write at all** — #381 itself, as a world state |
+| `a_refused_placement_loses_the_predicted_block_entity` | predict, then the correction (`set_block(air)` + `sync_block_entity(None)`) | a world that never had a chest, required **pixel-identical** |
+
+The first one takes its state from `sim::predicted_placement_state` — the same resolver a click uses —
+and asserts that state's properties are `facing=north, type=single, waterlogged=false` **before**
+measuring any pixel. That order matters: `minecraft:chest` has 24 states and a waterlogged or
+wrong-facing one fills the identical rect, so a gate that chose its own state and then looked at
+pixels could not tell a correct prediction from a plausible one. The state id itself is pinned to
+`blocks.json` by `sim.rs`'s hermetic `placement_states_resolve_to_the_jar_oracle` (`chest` facing
+north is **3988**; note the *lowest* chest id, 3987, is waterlogged — `BooleanProperty` orders its
+values `{true, false}`).
+
+The second gate's premise is asserted first too — the prediction must be gathered as one spawn before
+the removal is measured — because "no chest is drawn" is trivially satisfiable by never having drawn
+one. And `block_entity_type(air) == None` is asserted explicitly, so a census change that started
+handing back `Some` there fails loudly instead of silently keeping the chest.
+
+**Neither gate has been run.** They were written in a session whose verification was batched; the
+author did not execute them and did not watch either control fail. The resolver underneath them *was*
+exercised standalone — copied into a scratchpad with a stand-in census and run under
+`rustc --edition 2024 --test`, where the chest/slab/log/stone resolutions and all four declines pass —
+but that is the pure function, not the gate.
 
 ## What is not built
 
