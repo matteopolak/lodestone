@@ -2032,10 +2032,17 @@ impl RenderState {
         let mut plain: Vec<_> = Vec::new();
         let mut hurt: Vec<_> = Vec::new();
         for e in entities {
+            // `resolve_posed`, not `resolve`, and this is the *only* call site that
+            // needs it (issue #380): the pitch selects the **placement**, and a
+            // projectile placed by the mob matrix draws 1.501 blocks high and
+            // mirrored. For every mob the extra argument changes nothing — a mob's
+            // pitch is head tracking and arrives through `e.anim`, not through the
+            // placement — so the other five `resolve` call sites are deliberately
+            // left alone rather than widened for symmetry.
             let Some(instance) = self
                 .entities
                 .models
-                .resolve(&e.type_path, e.feet, e.yaw, e.scale, &e.anim)
+                .resolve_posed(&e.type_path, e.feet, e.yaw, e.pitch, e.scale, &e.anim)
                 .map(|i| i.with_light(self.entity_light.sample(e.feet)))
             else {
                 continue;

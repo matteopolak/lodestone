@@ -624,6 +624,98 @@ pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
     translate_feet * rotate * flip_scale * lift
 }
 
+/// The extra pitch, in degrees, a projectile rig needs on top of the entity's
+/// own `xRot` — or `None` for a model that is **not** placed by
+/// [`projectile_model_matrix`].
+///
+/// This is the one switch that decides which of the two placements a corpus
+/// model gets, so it is also the thing that would put every arrow 1.5 blocks
+/// underground and mirrored if it returned `None` by mistake. It is keyed on the
+/// *model name*, not the entity type path, because that is what
+/// [`EntityModelSet`] already keys everything else by, and because vanilla's own
+/// distinction is which renderer *class* draws the type:
+///
+/// * `arrow`, `spectral_arrow` — `ArrowRenderer` (via `TippableArrowRenderer` /
+///   `SpectralArrowRenderer`). Pitch about `Axis.ZP` with **no** offset:
+///   `ArrowModel`'s shaft already lies along `+X`.
+/// * `trident` — `ThrownTridentRenderer`, which is `Axis.ZP.rotationDegrees(xRot
+///   + 90)` (`ThrownTridentRenderer.java:31`). `TridentModel`'s pole lies along
+///   `Y` with the spikes at negative `Y`; the `+90°` is exactly what rotates that
+///   axis onto the arrow's `+X`, so one matrix serves both rigs and the whole
+///   difference between them is this number.
+///
+/// Every other model — every mob, the player, and the block-entity rigs — is a
+/// `LivingEntityRenderer` (or a block entity) and returns `None`.
+#[must_use]
+pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
+    match model_name {
+        "arrow" | "spectral_arrow" => Some(0.0),
+        "trident" => Some(90.0),
+        _ => None,
+    }
+}
+
+/// The world placement transform for a **projectile**, matching
+/// `ArrowRenderer.submit`'s pose-stack order (`ArrowRenderer.java:23-25`).
+///
+/// ```text
+///   translate(pos)                       // EntityRenderDispatcher
+///   rotateY(yRot - 90°)                  // ArrowRenderer.submit
+///   rotateZ(xRot + pitch_offset)         // ArrowRenderer.submit — ZP, not XP
+/// ```
+///
+/// # Why this is not [`entity_model_matrix`] with a pitch bolted on
+///
+/// `ArrowRenderer extends EntityRenderer`, **not** `LivingEntityRenderer`
+/// (`ArrowRenderer.java:14`). `EntityRenderer.java` contains no `scale(` call at
+/// all; the `scale(-1, -1, 1)` and the `translate(0, -1.501, 0)` that
+/// [`entity_model_matrix`] carries are both `LivingEntityRenderer.java:85` and
+/// `:87`. So a projectile gets **neither**, and there is consequently no flip
+/// here: the projectile meshes in
+/// [`entity_models`](lodestone_assets::entity_models) are authored `+Y` **up**
+/// rather than in the mob rigs' `Y`-down frame.
+///
+/// Reusing the mob matrix would draw every arrow [`MODEL_FEET_OFFSET`] = 1.501
+/// blocks **above** its reported position, and pointing along a reflected axis.
+/// Note the direction: the lift is applied *before* the `scale(-1, -1, 1)`, so
+/// `-1.501` comes back out as `+1.501` — issue #380's own notes said "below", and
+/// so did the first draft of the test that now pins it
+/// (`reusing_the_mob_matrix_would_lift_an_arrow_and_reverse_it`). Either way it
+/// reads as a texture bug rather than a placement bug, which is why it is worth
+/// the separate function.
+///
+/// # Rotations, and why the axis matters
+///
+/// `pos` is the entity's world position, `yaw_deg` its `yRot` and `pitch_deg` its
+/// `xRot` — both as the server reports them, both derived by vanilla from
+/// `atan2` on the projectile's own velocity (`AbstractArrow.java:243-252`,
+/// `Projectile.shoot`), which is *not* the yaw convention a mob's body uses:
+/// `Projectile.shoot` sets `yRot = atan2(mx, mz)`, so a projectile fired by a
+/// player looking at yaw `Y` carries `yRot = -Y`. `Ry(yRot - 90°)` maps model
+/// `+X` to `(sin yRot, 0, cos yRot)`, which is exactly that motion direction —
+/// the two conventions agree only because both halves are taken from vanilla
+/// together.
+///
+/// Both signs are the **opposite** of a player's, so they were measured against
+/// Mojang's own 26.2 server over RCON rather than only read: `+X` motion gives
+/// `yRot = +90` (a player facing `-X` has yaw `+90`), and *rising* motion gives a
+/// **positive** `xRot` (a player looking up has a *negative* pitch). Nine
+/// direction cases, nine exact matches — see `docs/projectile-renderers.md`,
+/// which also records why the first run of that probe read zero for all nine.
+///
+/// Pitch is a rotation about **`Z`**, not `X`, because the shaft runs along `+X`.
+/// A pitch applied about `X` would spin the arrow about its own axis and leave
+/// the silhouette almost unchanged while every arrow flew level — the "looks
+/// plausible, is wrong" shape this file's module docs warn about for the mob
+/// flip.
+#[must_use]
+pub fn projectile_model_matrix(pos: Vec3, yaw_deg: f32, pitch_deg: f32, scale: f32) -> Mat4 {
+    Mat4::from_translation(pos)
+        * Mat4::from_rotation_y((yaw_deg - 90.0).to_radians())
+        * Mat4::from_rotation_z(pitch_deg.to_radians())
+        * Mat4::from_scale(Vec3::splat(scale))
+}
+
 /// A single entity to render: which model type draws it, its world transform,
 /// and its world-space AABB for frustum culling.
 #[derive(Debug, Clone, PartialEq)]
@@ -675,7 +767,56 @@ impl EntityInstance {
         scale: f32,
         anim: &AnimInput,
     ) -> Self {
-        let transform = entity_model_matrix(feet, yaw_deg, scale);
+        Self::placed(model, mesh, entity_model_matrix(feet, yaw_deg, scale), anim)
+    }
+
+    /// Build an instance for a **projectile** — a model
+    /// [`projectile_pitch_offset_deg`] recognises — at `pos`/`yaw`/`pitch`/`scale`,
+    /// placed by [`projectile_model_matrix`] instead of [`entity_model_matrix`].
+    ///
+    /// Separate constructor rather than a `pitch` argument on [`new`](Self::new)
+    /// because the two placements share no ops at all: no flip, no
+    /// [`MODEL_FEET_OFFSET`] lift, a different yaw term, and a rotation
+    /// [`new`](Self::new) has no concept of. A single function with a "is it a
+    /// projectile" branch inside would read as one placement with an option, when
+    /// it is two placements from two different vanilla classes.
+    ///
+    /// `anim` is accepted (and forwarded) for uniformity, but every projectile rig
+    /// classifies as [`AnimFamily::Static`](crate::entity_anim::AnimFamily::Static)
+    /// — an arrow has no `head`, no legs and no arms — so the pose is its rest pose
+    /// whatever is passed.
+    #[must_use]
+    pub fn new_projectile(
+        model: &'static str,
+        mesh: &EntityMesh,
+        pos: Vec3,
+        yaw_deg: f32,
+        pitch_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+    ) -> Self {
+        Self::placed(
+            model,
+            mesh,
+            projectile_model_matrix(pos, yaw_deg, pitch_deg, scale),
+            anim,
+        )
+    }
+
+    /// The half of instance construction that is placement-independent: pose the
+    /// skeleton, hang the hands off it, and derive the world AABB — all from an
+    /// already-built model→world `transform`.
+    ///
+    /// Shared by [`new`](Self::new) and [`new_projectile`](Self::new_projectile)
+    /// rather than copied, so an arrow's culling box, part matrices and light
+    /// default can never drift from a mob's. The *only* thing the two callers
+    /// disagree about is the matrix.
+    fn placed(
+        model: &'static str,
+        mesh: &EntityMesh,
+        transform: Mat4,
+        anim: &AnimInput,
+    ) -> Self {
         let (aabb_min, aabb_max) = transformed_aabb(&transform, mesh.local_min, mesh.local_max);
         let part_transforms = mesh
             .skeleton
@@ -839,6 +980,14 @@ impl EntityModelSet {
     /// scale) into a renderable [`EntityInstance`], or `None` if its type has no
     /// model yet. This is the type→geometry seam: it consumes only version-free
     /// data (a type path string and world coordinates), never a wire type.
+    ///
+    /// **A projectile resolved through here is drawn level.** This is
+    /// [`resolve_posed`](Self::resolve_posed) with `pitch_deg = 0`, which is the
+    /// right answer for every mob (a mob's pitch is head tracking, and that
+    /// arrives through `anim`, not through the placement) and a flat one for an
+    /// arrow. Callers that have a pitch — the live frame path — should use
+    /// `resolve_posed`; the mesh-only tests and the offline demo that do not have
+    /// nothing to pass and keep working unchanged.
     #[must_use]
     pub fn resolve(
         &self,
@@ -848,9 +997,50 @@ impl EntityModelSet {
         scale: f32,
         anim: &AnimInput,
     ) -> Option<EntityInstance> {
+        self.resolve_posed(type_path, feet, yaw_deg, 0.0, scale, anim)
+    }
+
+    /// [`resolve`](Self::resolve) with the entity's **pitch**, which is what a
+    /// projectile needs and a mob ignores.
+    ///
+    /// The pitch selects the placement, not just a rotation: a model
+    /// [`projectile_pitch_offset_deg`] recognises is placed by
+    /// [`projectile_model_matrix`] (no Y flip, no [`MODEL_FEET_OFFSET`] lift,
+    /// `Ry(yaw − 90°) · Rz(pitch + offset)`), and everything else by
+    /// [`entity_model_matrix`]. Sending an arrow down the mob path draws it 1.501
+    /// blocks **high** and mirrored — see [`projectile_model_matrix`] for the
+    /// direction of that offset, which is not the one it looks like.
+    ///
+    /// `yaw_deg`/`pitch_deg` are the entity's own reported rotation. For a
+    /// projectile those are vanilla's velocity-derived `yRot`/`xRot`
+    /// (`AbstractArrow.java:243-252` recomputes them from `atan2` on
+    /// `deltaMovement` every tick and the server broadcasts the result), *not* a
+    /// body yaw and a head pitch — the two use different conventions and
+    /// [`projectile_model_matrix`] documents the one it expects.
+    #[must_use]
+    pub fn resolve_posed(
+        &self,
+        type_path: &str,
+        feet: Vec3,
+        yaw_deg: f32,
+        pitch_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+    ) -> Option<EntityInstance> {
         let name = canonical_model_name(type_path)?;
         let mesh = self.get(name)?;
-        Some(EntityInstance::new(name, mesh, feet, yaw_deg, scale, anim))
+        Some(match projectile_pitch_offset_deg(name) {
+            Some(offset) => EntityInstance::new_projectile(
+                name,
+                mesh,
+                feet,
+                yaw_deg,
+                pitch_deg + offset,
+                scale,
+                anim,
+            ),
+            None => EntityInstance::new(name, mesh, feet, yaw_deg, scale, anim),
+        })
     }
 
     /// Resolve, frustum-cull and group a set of tracked entities into an
@@ -1717,9 +1907,21 @@ pub struct ThrownItem {
 ///   cuboid model — not an item billboard. There is no `wind_charge` *item*
 ///   sprite to draw either.
 /// * **`arrow`, `spectral_arrow` and `trident` use `ArrowRenderer`/`ThrownTridentRenderer`**,
-///   a 3-D mesh oriented by `atan2` of the entity's **velocity** (not by a
-///   transmitted rotation), which needs a velocity the draw record does not
-///   carry. See `docs/thrown-projectiles.md`.
+///   a 3-D cuboid rig, not an item billboard. Those three are now in the
+///   [`entity_models`](lodestone_assets::entity_models) corpus and are placed by
+///   [`projectile_model_matrix`] rather than by [`entity_model_matrix`]; see
+///   `docs/projectile-renderers.md`. This entry stayed here after they landed
+///   because the fact it records — that they are *not* `ThrownItemRenderer`
+///   entries — is what stops them being added to the table below, which would
+///   draw an item sprite over the mesh.
+///
+///   The note this replaced said the orientation "needs a velocity the draw
+///   record does not carry". That was the wrong conclusion from a true premise:
+///   vanilla derives `yRot`/`xRot` from `atan2` on velocity, but it does so on
+///   the *server* too (`Projectile.shoot`, `AbstractArrow.tick`) and then
+///   broadcasts the result as ordinary entity rotation. The draw record's
+///   existing `yaw`/`pitch` **are** those velocity-derived angles, so no velocity
+///   plumbing was needed.
 ///
 /// `dragon_fireball`, `wither_skull`, `llama_spit`, `shulker_bullet`,
 /// `fishing_bobber`, `firework_rocket` and `end_crystal` all have their own
@@ -2825,10 +3027,250 @@ mod tests {
     fn unknown_entity_type_has_no_model() {
         // Types the corpus genuinely has no mesh for — the renderer skips them
         // rather than substituting something mob-shaped.
-        assert!(model_for_type("arrow").is_none());
+        //
+        // `arrow` used to be the headline entry here (issue #380): the physics was
+        // modelled in `lodestone-entity`, no rig existed, and this assert was the
+        // written record of that gap. It is kept as its **positive** form rather
+        // than deleted, so the gap closing is visible in the diff of the test that
+        // recorded it — and so a corpus edit that silently dropped the rig fails
+        // here rather than only in an `#[ignore]`d pixel gate.
         assert!(model_for_type("experience_orb").is_none());
         assert!(model_for_type("tnt").is_none());
         assert!(model_for_type("").is_none());
+    }
+
+    /// The other side of [`unknown_entity_type_has_no_model`]: the three
+    /// projectiles issue #380 was about now resolve, and resolve to their **own**
+    /// rigs.
+    ///
+    /// `arrow` and `spectral_arrow` deliberately *share* a builder
+    /// (`ArrowRenderer` bakes one `ModelLayers.ARROW` for both), so equal geometry
+    /// is correct there and the sheet is the only thing that must differ — the
+    /// same drowned-vs-zombie shape as `variant_mobs_point_at_their_own_sheet`.
+    /// `trident` is a genuine sibling with its own mesh, so its geometry must
+    /// differ too.
+    #[test]
+    fn projectiles_resolve_to_their_own_rigs_and_sheets() {
+        for ty in ["arrow", "spectral_arrow", "trident"] {
+            let model =
+                model_for_type(ty).unwrap_or_else(|| panic!("{ty} must have a corpus model"));
+            assert_eq!(model.name, ty);
+            assert_eq!(
+                entity_texture_candidates(ty).len(),
+                1,
+                "{ty} should have exactly one sheet (no `_temperate` legacy fallback)"
+            );
+        }
+        assert_eq!(
+            entity_texture_candidates("arrow"),
+            ["assets/minecraft/textures/entity/projectiles/arrow.png"]
+        );
+        assert_eq!(
+            entity_texture_candidates("spectral_arrow"),
+            ["assets/minecraft/textures/entity/projectiles/arrow_spectral.png"]
+        );
+        assert_eq!(
+            entity_texture_candidates("trident"),
+            ["assets/minecraft/textures/entity/trident/trident.png"]
+        );
+        // Same rig, different sheet for the two arrows; a different rig entirely
+        // for the trident.
+        let set = EntityModelSet::load();
+        let arrow = set.get("arrow").expect("arrow mesh");
+        let spectral = set.get("spectral_arrow").expect("spectral_arrow mesh");
+        let trident = set.get("trident").expect("trident mesh");
+        assert_eq!(arrow.vertices.len(), spectral.vertices.len());
+        assert_ne!(
+            arrow.vertices.len(),
+            trident.vertices.len(),
+            "trident must not be sharing the arrow rig"
+        );
+    }
+
+    /// Every projectile in the corpus must be on the projectile placement, and
+    /// **no mob may be**. The switch is one `match`; getting an entry wrong in
+    /// either direction is silent — a mob on the projectile path loses its
+    /// 1.501-block lift, an arrow on the mob path gains one.
+    #[test]
+    fn exactly_the_projectile_models_take_the_projectile_placement() {
+        let mut projectiles = Vec::new();
+        for entry in entity_models() {
+            if projectile_pitch_offset_deg(entry.name).is_some() {
+                projectiles.push(entry.name);
+            }
+        }
+        assert_eq!(projectiles, ["arrow", "spectral_arrow", "trident"]);
+        // A spot-check of the negative direction that names real mobs rather than
+        // relying on the sweep above: these are the two families whose renderer is
+        // most often assumed to be an `EntityRenderer`.
+        for mob in ["pig", "player_wide", "zombie", "boat", "end_crystal"] {
+            assert!(
+                projectile_pitch_offset_deg(mob).is_none(),
+                "{mob} must stay on the LivingEntityRenderer placement"
+            );
+        }
+    }
+
+    /// The placement itself, against hand-derived values rather than against
+    /// [`projectile_model_matrix`]'s own output.
+    ///
+    /// The three things that would each be individually plausible and wrong:
+    /// a `MODEL_FEET_OFFSET` lift, a mirror, and pitch about `X` instead of `Z`.
+    #[test]
+    fn projectile_placement_has_no_lift_no_mirror_and_pitches_about_z() {
+        let pos = Vec3::new(3.0, 64.0, -7.0);
+        let m = projectile_model_matrix(pos, 0.0, 0.0, 1.0);
+        // (a) No lift: the model origin lands exactly on the reported position.
+        let origin = m.transform_point3(Vec3::ZERO);
+        assert!(
+            (origin - pos).length() < 1e-5,
+            "projectile origin {origin} is not the entity position {pos} — a \
+             MODEL_FEET_OFFSET lift has crept in"
+        );
+        // (b) No mirror: determinant of the linear part is positive. The mob
+        // matrix's `scale(-1,-1,1)` is +1 too (two flips cancel), so this is not
+        // the discriminator for the flip — `arrow_pixels` is. It does catch a
+        // single-axis mirror.
+        let det = glam::Mat3::from_mat4(m).determinant();
+        assert!(det > 0.0, "determinant {det} — geometry is mirrored");
+
+        // (c) Pitch is about Z. At yaw 0 the shaft (model +X) must point +Z; at
+        // pitch +45° it must rise. Hand-derived: Ry(-90) maps +X to +Z, and Rz(45)
+        // first sends +X to (cos45, sin45, 0), so the tip ends at
+        // (0, sin45, cos45) — i.e. equal parts up and forward, with **zero** x.
+        let tip = |pitch: f32| {
+            projectile_model_matrix(Vec3::ZERO, 0.0, pitch, 1.0)
+                .transform_point3(Vec3::new(1.0, 0.0, 0.0))
+        };
+        let level = tip(0.0);
+        assert!(
+            (level - Vec3::new(0.0, 0.0, 1.0)).length() < 1e-5,
+            "at yaw 0 / pitch 0 the shaft points {level}, not +Z"
+        );
+        let up = tip(45.0);
+        let root_half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!(
+            (up - Vec3::new(0.0, root_half, root_half)).length() < 1e-5,
+            "at pitch 45 the shaft points {up}, not (0, √½, √½) — a rotation about \
+             X instead of Z spins the arrow about its own axis and leaves this at +Z"
+        );
+
+        // (d) Yaw agrees with the *projectile* convention, which is not the mob
+        // one. `Projectile.shoot` sets yRot = atan2(mx, mz), so the shaft must
+        // point along (sin yaw, 0, cos yaw) — note the **+** sin, where a mob's
+        // facing is (-sin yaw, 0, cos yaw).
+        for yaw in [0.0f32, 37.0, 90.0, 180.0, -125.0] {
+            let dir = projectile_model_matrix(Vec3::ZERO, yaw, 0.0, 1.0)
+                .transform_point3(Vec3::new(1.0, 0.0, 0.0));
+            let want = Vec3::new(
+                yaw.to_radians().sin(),
+                0.0,
+                yaw.to_radians().cos(),
+            );
+            assert!(
+                (dir - want).length() < 1e-5,
+                "yaw {yaw}: shaft points {dir}, want {want}"
+            );
+        }
+
+        // (e) The trident's +90° offset is what puts its own long axis (model -Y)
+        // where the arrow's +X is: both must point the same way for the same
+        // reported rotation.
+        let arrow_dir = projectile_model_matrix(Vec3::ZERO, 20.0, 15.0, 1.0)
+            .transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        let trident_dir = projectile_model_matrix(
+            Vec3::ZERO,
+            20.0,
+            15.0 + projectile_pitch_offset_deg("trident").expect("trident is a projectile"),
+            1.0,
+        )
+        .transform_point3(Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (arrow_dir.normalize() - trident_dir.normalize()).length() < 1e-5,
+            "trident tip {trident_dir} does not point where the arrow tip {arrow_dir} does"
+        );
+    }
+
+    /// The whole point of the separate placement, stated as a delta a reviewer can
+    /// check by eye: a projectile and a mob at the *same* reported position put
+    /// their **model origin** [`MODEL_FEET_OFFSET`] apart in Y, and the arrow's
+    /// tip in the opposite direction along X.
+    ///
+    /// # The sign is the other way round from the obvious guess
+    ///
+    /// Issue #380's investigation note — and this test's own first draft — said
+    /// reusing the mob matrix would draw an arrow "1.5 blocks **low**". It draws
+    /// it 1.5 blocks **high**, and the difference is the mirror, not the lift:
+    /// `entity_model_matrix` is `T(feet) · Ry · S(-1,-1,1) · T(0, -1.501, 0)`, so
+    /// the lift is applied *before* the Y negation and comes back out as
+    /// `feet + 1.501`. That is exactly right for a mob — model space is Y-down and
+    /// the model origin is a humanoid's shoulder line, ~1.5 blocks up — and
+    /// exactly wrong for a rig authored the other way up. The first draft asserted
+    /// `feet - 1.501` and failed at `65.501`; the control's premise was false in
+    /// the safe-looking direction, which is why it is spelled out here rather than
+    /// quietly corrected.
+    #[test]
+    fn reusing_the_mob_matrix_would_lift_an_arrow_and_reverse_it() {
+        let pos = Vec3::new(0.0, 64.0, 0.0);
+        let projectile = projectile_model_matrix(pos, 0.0, 0.0, 1.0).transform_point3(Vec3::ZERO);
+        let mob = entity_model_matrix(pos, 0.0, 1.0).transform_point3(Vec3::ZERO);
+        assert!(
+            (projectile.y - pos.y).abs() < 1e-5,
+            "the projectile placement moved the model origin off the reported \
+             position: {} vs {}",
+            projectile.y,
+            pos.y
+        );
+        assert!(
+            (mob.y - (pos.y + MODEL_FEET_OFFSET)).abs() < 1e-5,
+            "mob model origin at {} — expected feet + {MODEL_FEET_OFFSET}. If this \
+             fires, the control for this test is wrong, not the code under test",
+            mob.y
+        );
+        assert!(
+            mob.y - projectile.y > 1.5,
+            "the two placements differ by only {} blocks in Y",
+            mob.y - projectile.y
+        );
+
+        // The second half of the damage, which the Y offset alone would hide: the
+        // two placements send the arrow's tip (model `+X`) different ways.
+        //
+        // Hand-derived. The projectile linear part is `Ry(yaw - 90)`, which sends
+        // `+X` to `(sin yaw, 0, cos yaw)` — the motion direction. The mob linear
+        // part is `Ry(180 - yaw) · S(-1, -1, 1)`, which sends it to
+        // `(cos yaw, 0, sin yaw)`. Those are **reflections of each other across the
+        // `x = z` diagonal**, not a fixed rotation apart — so they happen to agree
+        // at `yaw = 45°` and are exactly opposed at `135°`. Asserting "the two
+        // point opposite ways" at an arbitrary yaw is therefore a control whose
+        // premise is false a quarter of the time; assert the relation instead, and
+        // then name the yaw where it is worst.
+        for yaw in [0.0f32, 90.0, 135.0, -20.0] {
+            let (s, c) = (yaw.to_radians().sin(), yaw.to_radians().cos());
+            let tip = Vec3::new(1.0, 0.0, 0.0);
+            let good = projectile_model_matrix(Vec3::ZERO, yaw, 0.0, 1.0).transform_point3(tip);
+            let m = entity_model_matrix(Vec3::ZERO, yaw, 1.0);
+            let bad = m.transform_point3(tip) - m.transform_point3(Vec3::ZERO);
+            assert!(
+                (good - Vec3::new(s, 0.0, c)).length() < 1e-5,
+                "yaw {yaw}: projectile tip {good}, want (sin, 0, cos)"
+            );
+            assert!(
+                (bad - Vec3::new(c, 0.0, s)).length() < 1e-5,
+                "yaw {yaw}: mob-placed tip {bad}, want (cos, 0, sin)"
+            );
+        }
+        // The worst case, spelled out: at 135° the mob placement flies the arrow
+        // exactly backwards.
+        let good = projectile_model_matrix(Vec3::ZERO, 135.0, 0.0, 1.0)
+            .transform_point3(Vec3::new(1.0, 0.0, 0.0));
+        let m = entity_model_matrix(Vec3::ZERO, 135.0, 1.0);
+        let bad =
+            m.transform_point3(Vec3::new(1.0, 0.0, 0.0)) - m.transform_point3(Vec3::ZERO);
+        assert!(
+            good.normalize().dot(bad.normalize()) < -0.99,
+            "at yaw 135 the placements should be opposed: {good} vs {bad}"
+        );
     }
 
     #[test]
@@ -2864,7 +3306,14 @@ mod tests {
             ]
         );
         // A name that is not a model resolves to nothing rather than a wrong sheet.
-        assert!(entity_texture_candidates("arrow").is_empty());
+        // This was `"arrow"` until issue #380 landed the `ArrowRenderer` rig; the
+        // assertion is kept (with a name that really is not a corpus entry) rather
+        // than deleted, because "an unknown name yields no sheet" is the property
+        // that stops a typo in the corpus from silently drawing a mob under some
+        // other mob's skin. `arrow`'s own sheet is asserted positively in
+        // `projectiles_resolve_to_their_own_rigs_and_sheets`.
+        assert!(entity_texture_candidates("experience_orb").is_empty());
+        assert!(entity_texture_candidates("").is_empty());
     }
 
     /// The other half of the drowned defect: even with its own mesh, a drowned
