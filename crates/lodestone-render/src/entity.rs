@@ -630,7 +630,9 @@ pub fn entity_model_matrix(feet: Vec3, body_yaw_deg: f32, scale: f32) -> Mat4 {
 ///
 /// This is the one switch that decides which of the two placements a corpus
 /// model gets, so it is also the thing that would put every arrow 1.5 blocks
-/// underground and mirrored if it returned `None` by mistake. It is keyed on the
+/// **above** where it belongs and mirrored if it returned `None` by mistake — see
+/// [`projectile_model_matrix`] for why the offset points *up* and not down, which
+/// is the direction issue #380's own notes had backwards. It is keyed on the
 /// *model name*, not the entity type path, because that is what
 /// [`EntityModelSet`] already keys everything else by, and because vanilla's own
 /// distinction is which renderer *class* draws the type:
