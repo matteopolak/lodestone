@@ -68,6 +68,13 @@ pub enum MenuAction {
     /// Nothing to do; the menu handled it internally.
     None,
     /// Enter the singleplayer world.
+    ///
+    /// **No button produces this any more** (issue #397): the title screen's
+    /// Singleplayer button opens [`Screen::WorldSelect`] instead, which is
+    /// vanilla's own wiring, and that screen's Play Selected World is inactive
+    /// because there is no world to play. The variant and `app.rs`'s arm for it
+    /// stay because they are the seam #287's integrated server lands on — see
+    /// [`super::UiState::open_world_select`].
     Singleplayer,
     /// Connect to this server (the app opens the session and shows Connecting).
     Connect(ServerEntry),
@@ -428,7 +435,10 @@ impl EditForm {
 /// `getHorizontalPosition(i, 3, 20)` (`TitleScreen.java:170-173`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
-    /// Enter the local world.
+    /// Open the singleplayer world list ([`Screen::WorldSelect`], issue #397) —
+    /// vanilla's own behaviour for this button. It used to return
+    /// [`MenuAction::Singleplayer`] and drive `app.rs`'s staged launcher
+    /// directly, which vanilla never does.
     Singleplayer,
     /// Open the server list.
     Multiplayer,
@@ -719,6 +729,10 @@ pub struct MenuNav {
     /// The account list + sign-in flow (issue #66). See
     /// [`crate::menu::accounts`].
     accounts: crate::menu::accounts::AccountsNav,
+    /// The world-select screen's widgets and focus (issue #397). Held here for
+    /// [`EditForm`]'s reason: it owns real [`EditBox`] state (a caret, a
+    /// selection, a scroll offset) that cannot be rebuilt per frame.
+    world_select: crate::menu::world_select::WorldSelectNav,
 }
 
 impl Default for MenuNav {
@@ -780,6 +794,7 @@ impl MenuNav {
             options_path,
             options_save_error: None,
             accounts: crate::menu::accounts::AccountsNav::with_path(profiles_path),
+            world_select: crate::menu::world_select::WorldSelectNav::new(),
         }
     }
 
@@ -871,6 +886,12 @@ impl MenuNav {
         &self.accounts
     }
 
+    /// The world-select screen's widgets and focus (issue #397).
+    #[must_use]
+    pub fn world_select(&self) -> &crate::menu::world_select::WorldSelectNav {
+        &self.world_select
+    }
+
     /// Moves the highlight to row `row` of the current screen, as a mouse hover
     /// would. Out-of-range rows are ignored rather than clamped: the caller
     /// hit-tests against the rendered rects, so "no row here" must not silently
@@ -891,6 +912,11 @@ impl MenuNav {
             Screen::Paused if row < PAUSE_BUTTONS.len() => self.paused = row,
             Screen::Death if row < DEATH_BUTTONS.len() => self.death = row,
             Screen::Accounts => self.accounts.hover(row),
+            // The one screen where hover is **not** the row cursor: it records
+            // hover alone and leaves focus where it is, or dragging the mouse
+            // across the footer would pull the keyboard out of the search field.
+            // See `world_select::WorldSelectNav::hovered`.
+            Screen::WorldSelect => self.world_select.hover(row),
             // `focus_row` *is* `ContainerEventHandler.setFocused(child)` — real
             // focus, not a highlight index — because the row indices and
             // `EditForm`'s focus ids are the same numbers (see [`NAME_FIELD`]).
@@ -941,6 +967,14 @@ impl MenuNav {
             self.form.focus_row(row);
             return MenuAction::None;
         }
+        // The third screen where it is wrong, and the reason the parent issue
+        // insists every cursorless screen gets its own arm (issue #397): here a
+        // click means "focus this field" *or* "press this button", never both,
+        // and a click on one of the five disabled buttons means nothing at all.
+        if ui.screen() == Screen::WorldSelect {
+            let outcome = self.world_select.click_row(row);
+            return Self::apply_world_select(ui, outcome);
+        }
         if ui.screen() == Screen::Settings {
             match row {
                 0 => self.cycle_gui_scale(1),
@@ -963,6 +997,7 @@ impl MenuNav {
             Screen::MainMenu => self.key_main(ui, key),
             Screen::ServerList => self.key_list(ui, key),
             Screen::ServerEdit => self.key_edit(ui, key),
+            Screen::WorldSelect => self.key_world_select(ui, key),
             Screen::Settings => self.key_settings(ui, key),
             Screen::Accounts => self.key_accounts(ui, key),
             // Unlike the other arms above, the pause menu is not an
@@ -1024,7 +1059,12 @@ impl MenuNav {
                     return MenuAction::None;
                 }
                 match button {
-                    MainButton::Singleplayer => MenuAction::Singleplayer,
+                    // Vanilla's `TitleScreen` opens `SelectWorldScreen` here; it
+                    // does not start a world (issue #397).
+                    MainButton::Singleplayer => {
+                        ui.open_world_select();
+                        MenuAction::None
+                    }
                     MainButton::Multiplayer => {
                         ui.open_server_list();
                         self.clamp_server();
@@ -1161,6 +1201,39 @@ impl MenuNav {
                     return MenuAction::Forget(old);
                 }
                 MenuAction::Reprobe(Some(entry))
+            }
+        }
+    }
+
+    /// The world-select screen (issue #397). **Every key goes through
+    /// [`super::world_select::WorldSelectNav::handle_key`]**, which is vanilla's
+    /// `Screen.keyPressed` order, so this arm only decides what "close" means.
+    ///
+    /// Same shape as [`key_edit`](Self::key_edit) and for the same reason: the
+    /// screen holds real focus over a text field and six buttons, so the order —
+    /// Escape, then the focused widget, then Tab and the arrows as navigation —
+    /// is what makes the search box coexist with keyboard traversal rather than
+    /// fight it.
+    fn key_world_select(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
+        let outcome = self.world_select.handle_key(key);
+        Self::apply_world_select(ui, outcome)
+    }
+
+    /// The one thing a [`super::world_select::WorldSelectOutcome`] can ask of the
+    /// screen. An associated function rather than a method because it touches no
+    /// `MenuNav` state — which is also what lets [`Self::click`] call it while
+    /// still holding the outcome of a `&mut self.world_select` call.
+    fn apply_world_select(
+        ui: &mut UiState,
+        outcome: crate::menu::world_select::WorldSelectOutcome,
+    ) -> MenuAction {
+        use crate::menu::world_select::WorldSelectOutcome;
+        match outcome {
+            WorldSelectOutcome::Handled => MenuAction::None,
+            // Vanilla's `onClose()`/Back: `setScreen(this.lastScreen)`, the title.
+            WorldSelectOutcome::Close => {
+                ui.close_world_select();
+                MenuAction::None
             }
         }
     }
@@ -1456,8 +1529,18 @@ mod tests {
         // identically. The test, not `MAIN_BUTTONS`, was wrong.
         let (mut nav, _) = nav("buttons");
         let mut ui = UiState::new();
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Singleplayer);
-        assert_eq!(ui.screen(), Screen::MainMenu, "the app drives the world");
+        // Issue #397: Singleplayer opens the world list — vanilla's own wiring —
+        // where it used to return `MenuAction::Singleplayer` and let `app.rs`
+        // drive its staged launcher. There is no action for the app to take.
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu, "escape unwinds to the title");
+        assert_eq!(
+            nav.main_button(),
+            MainButton::Singleplayer,
+            "and leaves the highlight where it was"
+        );
 
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Multiplayer);
@@ -2173,6 +2256,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame.rows[1].label, "VIEW BOBBING: OFF");
+    }
+
+    /// Issue #397, and the same coupling `the_settings_rows_are_in_the_order_click_assumes`
+    /// guards: [`crate::menu::world_select`]'s focus ids are indices into a `rows`
+    /// vector built in `menu::render`, a different file with no compile-time link
+    /// to them. If that vector is reordered, the mouse acts on the wrong control
+    /// — which is what #391 was.
+    #[test]
+    fn the_world_select_rows_are_in_the_order_click_assumes() {
+        use crate::menu::world_select::{SEARCH_FIELD, WORLD_SELECT_BUTTONS};
+        let (mut nav, _) = self::nav("world-select-row-order");
+        let mut ui = UiState::new();
+        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "Singleplayer opens it");
+        let mut favicons = crate::menu::render::FaviconCache::new();
+        let frame = crate::menu::render::frame_for(
+            &ui,
+            &nav,
+            &crate::menu::status::StatusCache::new(),
+            &mut favicons,
+        )
+        .expect("the world list owns its frame");
+        assert_eq!(frame.rows.len(), 1 + WORLD_SELECT_BUTTONS.len());
+        assert!(
+            frame.rows[SEARCH_FIELD].edit.is_some(),
+            "row {SEARCH_FIELD} must be the search box"
+        );
+        for button in WORLD_SELECT_BUTTONS {
+            assert_eq!(
+                frame.rows[button.row()].label,
+                button.label(),
+                "row {} is not {button:?}",
+                button.row()
+            );
+        }
+    }
+
+    /// A click on the world list does what the label under it says — the third
+    /// screen to need its own `click` arm rather than "hover then Enter".
+    #[test]
+    fn clicking_back_leaves_the_world_list_and_clicking_create_does_nothing() {
+        use crate::menu::world_select::WorldSelectButton as B;
+        let (mut nav, _) = self::nav("world-select-click");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+
+        // The disabled buttons first, so a stray activation would be visible as a
+        // screen change before Back is ever pressed.
+        for button in [B::Play, B::Create, B::Edit, B::Delete, B::ReCreate] {
+            assert_eq!(nav.click(&mut ui, button.row()), MenuAction::None);
+            assert_eq!(
+                ui.screen(),
+                Screen::WorldSelect,
+                "clicking {button:?} must do nothing at all"
+            );
+        }
+        // Clicking the search field must not activate the screen either — the
+        // `ServerEdit` bug one screen over.
+        assert_eq!(
+            nav.click(&mut ui, crate::menu::world_select::SEARCH_FIELD),
+            MenuAction::None
+        );
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+
+        // The control: Back does leave, so the assertions above are about which
+        // row was clicked and not about a `click` that does nothing.
+        assert_eq!(nav.click(&mut ui, B::Back.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(!ui.quit_requested(), "Back is not a quit");
+    }
+
+    /// Typing on the world list goes into the search box, and Escape leaves.
+    #[test]
+    fn the_world_list_search_field_takes_text_and_escape_returns_to_the_title() {
+        let (mut nav, _) = self::nav("world-select-keys");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        type_str(&mut nav, &mut ui, "flat");
+        assert_eq!(nav.world_select().search().value(), "flat");
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert!(!ui.quit_requested(), "escape from the list is not a quit");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! | [`servers`] | the saved server list and its on-disk JSON |
 //! | [`status`] | background status pings and their cache |
 //! | [`widget`] | vanilla's widget contract, and the disabled render path |
+//! | [`world_select`] | the singleplayer world list, with creation disabled |
 //!
 //! The lifecycle is the actual hard part: choosing a session, establishing it,
 //! playing, pausing, and every way it can fail. A menu that can only succeed is
@@ -42,6 +43,7 @@ pub mod render;
 pub mod servers;
 pub mod status;
 pub mod widget;
+pub mod world_select;
 
 /// What the player chose to start from the menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,20 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
+    /// The singleplayer world list (issue #397): vanilla's `SelectWorldScreen`,
+    /// with **world creation present and disabled**. Reached from
+    /// [`Screen::MainMenu`] via [`nav::MainButton::Singleplayer`] — which is
+    /// vanilla's own wiring, where the title screen's Singleplayer button opens
+    /// this screen rather than launching anything; Escape (or the screen's own
+    /// Back button) returns there.
+    ///
+    /// The list itself is **empty**, and deliberately so: there is no
+    /// singleplayer world storage in this client (#287 is the integrated server,
+    /// #190 world creation), so there is nothing to enumerate and a fabricated
+    /// row would read as a working save. See [`world_select`] for what that
+    /// state draws and why vanilla's own empty-list branches could not be
+    /// copied.
+    WorldSelect,
     /// The account list (issue #66): saved Microsoft accounts plus the
     /// always-present offline entry, and the device-code sign-in flow that
     /// adds a new account. Reached from [`Screen::MainMenu`] via
@@ -264,9 +280,16 @@ impl UiState {
             Screen::MainMenu
                 | Screen::ServerList
                 | Screen::ServerEdit
+                | Screen::WorldSelect
                 | Screen::Settings
                 | Screen::Accounts
         )
+    }
+
+    /// Whether the singleplayer world list is showing (issue #397).
+    #[must_use]
+    pub fn is_world_select(&self) -> bool {
+        self.screen == Screen::WorldSelect
     }
 
     /// Whether the account list is showing.
@@ -407,6 +430,33 @@ impl UiState {
         }
     }
 
+    /// Open the singleplayer world list (issue #397). Only from the title
+    /// screen, matching [`open_server_list`](Self::open_server_list)'s
+    /// reasoning: a stray call must never pull the player out of a world.
+    ///
+    /// This is what the title screen's Singleplayer button now does, and it is
+    /// vanilla's own wiring — `TitleScreen`'s Singleplayer button opens
+    /// `SelectWorldScreen`; nothing in vanilla starts a world straight off the
+    /// title. Note the consequence: [`nav::MenuAction::Singleplayer`], and
+    /// therefore `app.rs`'s staged "the integrated server is not wired yet"
+    /// failure, is no longer produced by any button. It becomes reachable again
+    /// when #287 gives the list a world for Play Selected World to open.
+    pub fn open_world_select(&mut self) {
+        if self.screen == Screen::MainMenu {
+            self.screen = Screen::WorldSelect;
+        }
+    }
+
+    /// Back to the title screen from the world list — vanilla's
+    /// `SelectWorldScreen.onClose()`, which is `setScreen(this.lastScreen)`
+    /// (`SelectWorldScreen.java:154-157`), and also what its Back button does
+    /// (`:106`).
+    pub fn close_world_select(&mut self) {
+        if self.screen == Screen::WorldSelect {
+            self.screen = Screen::MainMenu;
+        }
+    }
+
     /// Open the account list. Only from the title screen, matching
     /// [`open_server_list`](Self::open_server_list)'s reasoning: a stray call
     /// must never pull the player out of a world.
@@ -494,6 +544,7 @@ impl UiState {
     /// - Error → back to the menu (dismiss)
     /// - ServerEdit → ServerList (cancel the edit)
     /// - ServerList → MainMenu
+    /// - WorldSelect → MainMenu
     /// - Settings → MainMenu, **or** Paused if that is where it was opened
     ///   from (see [`close_settings`](Self::close_settings))
     /// - MainMenu → request a clean quit (Escape on the title exits)
@@ -511,6 +562,12 @@ impl UiState {
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,
+            // As with `Screen::Accounts` below, `MenuNav::key_world_select`
+            // normally answers Escape before this is reached (it routes every key
+            // through vanilla's `Screen.keyPressed` order, whose Escape branch is
+            // `onClose()`). This arm keeps the match exhaustive and unwinds one
+            // level, which is the same thing.
+            Screen::WorldSelect => self.close_world_select(),
             // In practice `MenuNav::key_accounts` intercepts Escape before
             // `UiState::on_escape` is ever reached from this screen (a
             // sign-in in progress must cancel the flow, not leave the
@@ -857,6 +914,7 @@ mod tests {
             Screen::MainMenu,
             Screen::ServerList,
             Screen::ServerEdit,
+            Screen::WorldSelect,
             Screen::Settings,
             Screen::Accounts,
         ] {
@@ -867,6 +925,7 @@ mod tests {
                     ui.open_server_list();
                     ui.open_server_edit();
                 }
+                Screen::WorldSelect => ui.open_world_select(),
                 Screen::Settings => ui.open_settings(),
                 Screen::Accounts => ui.open_accounts(),
                 _ => {}
@@ -899,6 +958,36 @@ mod tests {
         let mut ui = UiState::new();
         ui.open_server_edit();
         assert_eq!(ui.screen(), Screen::MainMenu);
+    }
+
+    /// Issue #397. The world list opens only from the title and unwinds back to
+    /// it — one level, like every other menu screen.
+    #[test]
+    fn the_world_list_opens_from_the_title_and_unwinds_to_it() {
+        let mut ui = UiState::new();
+        ui.open_world_select();
+        assert_eq!(ui.screen(), Screen::WorldSelect);
+        assert!(ui.is_world_select());
+        assert!(ui.is_menu(), "it is a pre-session menu screen");
+        assert!(!ui.wants_cursor_grab());
+
+        ui.on_escape();
+        assert_eq!(ui.screen(), Screen::MainMenu, "one level, not a quit");
+        assert!(!ui.quit_requested());
+
+        // And a stray call must never pull the player out of a world — the same
+        // guard `the_list_only_opens_from_the_title_screen` makes for the server
+        // list.
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.open_world_select();
+        assert_eq!(ui.screen(), Screen::Playing);
+        ui.pause();
+        ui.open_world_select();
+        assert_eq!(ui.screen(), Screen::Paused);
+        // Nor may `close` resurrect the title from a live session.
+        ui.close_world_select();
+        assert_eq!(ui.screen(), Screen::Paused);
     }
 
     #[test]
