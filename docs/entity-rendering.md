@@ -121,6 +121,70 @@ A mob's final pixel is `texel x diffuse x light_term`, faded toward the fog
 colour by view distance. Three things about that were wrong at once and each is
 independent of the others, so it is worth naming them separately.
 
+**The diffuse term is vanilla's two lights, not one.** `ModelVertex` carries no
+normal, so the fragment shader reconstructs one from screen-space derivatives of
+the interpolated world position and applies
+`assets/minecraft/shaders/include/light.glsl`'s `minecraft_mix_light`:
+
+```wgsl
+let n = -normalize(cross(dpdx(in.world), dpdy(in.world)));
+let light_0 = normalize(vec3<f32>(0.2, 1.0, -0.7));   // Lighting.DIFFUSE_LIGHT_0
+let light_1 = normalize(vec3<f32>(-0.2, 1.0, 0.7));   // Lighting.DIFFUSE_LIGHT_1
+let diffuse = min(1.0, (max(dot(n, light_0), 0.0) + max(dot(n, light_1), 0.0)) * 0.6 + 0.4);
+```
+
+`0.6` is `MINECRAFT_LIGHT_POWER` and `0.4` is `MINECRAFT_AMBIENT_LIGHT`; the two
+vectors are `com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1`, normalised,
+which `Lighting.updateLevel(DEFAULT)` installs for the world. The **first-person
+hand runs under the same entry**: `renderItemInHand` is called from inside
+`renderLevel`, and `GameRenderer`'s only `setupFor(ITEMS_3D)` comes afterwards,
+for the GUI.
+
+Until issue #383 this was **one** light and an `abs()`
+(`0.4 + 0.6 * abs(dot(n, normalize(0.3, 1.0, 0.55)))`), which is wrong in two
+independent ways:
+
+| surface normal | vanilla | one `abs()` light |
+| --- | --- | --- |
+| `+Y` up | 1.0000 | 0.9085 |
+| `-Y` down | 0.4000 | 0.9085 |
+| `±Z` north/south | 0.7396 | 0.6797 |
+| `±X` east/west | 0.4970 | 0.5525 |
+| `(0, 0.466, -0.847)` | 0.9138 | **0.4000** |
+
+* `abs()` lights a face pointing *away* from the light exactly as brightly as one
+  pointing into it, so undersides were 2.3x too bright.
+* One direction has a whole **great circle** of normals perpendicular to it, all
+  pinned at the `0.4` floor. Two near-opposing lights have no such band —
+  `L1 = (-L0.x, L0.y, -L0.z)`, so for any normal exactly one of the two dots is
+  positive and their sum is `0.8085*n.y + |0.1617*n.x - 0.5659*n.z|`; the only
+  dark region is the underside.
+
+Axis-aligned box faces never land on that band, which is why standing mobs looked
+passable and the defect was reported against the *arm*: `first_person_arm_pose`
+rotates it, and 2253 of its 2314 pixels sat at diffuse `0.497` where vanilla puts
+them at `0.877` — measured, byte 64 against byte 112 on a mid-grey sheet.
+
+**The reconstructed normal is negated, and that sign is derived rather than
+asserted.** With a right-handed view matrix NDC y points up while framebuffer y
+points down, so for a plane facing the camera `dpdx` runs along view `+x` and
+`dpdy` along view `-y`; `cross(+x, -y) = -z` points *away* from the eye. Negating
+gives the side being looked at, which for a closed mesh is the outward face — the
+same answer vanilla reaches by computing both signs and letting `gl_FrontFacing`
+choose (`entity.vsh`'s `PER_FACE_LIGHTING` pair). It is also what keeps
+`cull_mode: None` safe: a lone quad is lit from whichever side is visible.
+
+Getting that sign backwards is nearly invisible. `±X` and `±Z` box faces are
+*equal* under a flip (the two lights are mirror images), so a flipped normal only
+shows up as an inverted up/down — and, measured here, **a gate that asserts the
+frame's set of shades matches vanilla's set passes the flip**, because a flip
+permutes that set without changing it. `entity_diffuse_two_lights_pixels.rs`
+therefore binds value to *location*: the topmost band of a box seen from above
+must read vanilla's `1.0`, the bottommost band seen from below must read `0.4`.
+Three controls were watched failing — the shipped one-light shader (12034/12034
+and 2314/2314 pixels on the rival prediction), the sign flip, and dropping the
+second light while keeping `max` (up face 113 where vanilla is 128).
+
 **World light is per instance.** Vanilla samples the lightmap once per entity at
 its block position (`LivingEntityRenderer` -> `Level::getLightColor`), so a mob
 is uniformly lit by the block it stands in. That is why light rides the
