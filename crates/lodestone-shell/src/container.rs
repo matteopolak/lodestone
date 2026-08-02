@@ -29,9 +29,7 @@
 //! was an atlas to draw from, so a jar-less run still shows *something* in an
 //! occupied slot.
 
-use lodestone_game::click::{
-    Click, ContainerInput, can_item_quick_replace, drag_header, drag_type, quick_craft_mask,
-};
+use lodestone_game::click::{Click, ContainerInput, drag_header, drag_type, quick_craft_mask};
 use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{CraftLayout, Menu, MenuKind, OUTSIDE_SLOT};
 use lodestone_game::recipe::RecipeBook;
@@ -134,6 +132,14 @@ pub struct ContainerFrame<'a> {
     /// builds, the pixel gates, `tests/container_screen.rs`) unchanged. See
     /// [`with_recipe_book`](Self::with_recipe_book).
     pub recipe_book: Option<&'a RecipeBook>,
+    /// The in-progress paint-drag, as `(drag type, painted slots)` — exactly
+    /// [`MenuInput::drag_paint`]'s output, which is vanilla's
+    /// `(quickCraftingType, quickCraftSlots)` pair.
+    ///
+    /// `None` (the default) draws no preview, which is what keeps every existing
+    /// caller unchanged. See [`with_drag`](Self::with_drag) for what it draws and
+    /// why the counts cannot disagree with the release.
+    pub drag: Option<(i32, &'a [usize])>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -148,6 +154,7 @@ impl<'a> ContainerFrame<'a> {
             inventory_label: DEFAULT_INVENTORY_LABEL,
             cursor: None,
             recipe_book: None,
+            drag: None,
         }
     }
 
@@ -160,6 +167,7 @@ impl<'a> ContainerFrame<'a> {
             inventory_label: DEFAULT_INVENTORY_LABEL,
             cursor: None,
             recipe_book: None,
+            drag: None,
         }
     }
 
@@ -188,6 +196,27 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_recipe_book(mut self, book: Option<&'a RecipeBook>) -> Self {
         self.recipe_book = book;
+        self
+    }
+
+    /// Attach the in-progress paint-drag so the screen draws vanilla's **live
+    /// preview** (issue #378 part 2): in every painted cell, a 50%-white wash and
+    /// the provisional stack the release would leave there, with a clamped count
+    /// in yellow; and on the cursor, the count it would be left holding.
+    ///
+    /// Pass [`MenuInput::drag_paint`]'s output directly. `None` (the default)
+    /// draws nothing extra.
+    ///
+    /// # The counts come from the release path, not from here
+    ///
+    /// Every number this draws is [`Menu::quick_craft_plan`]'s, the same function
+    /// `finish_quick_craft` distributes with. A preview that disagreed with the
+    /// outcome would be worse than no preview, so the arithmetic is shared rather
+    /// than mirrored — see that method's own doc comment, and
+    /// `docs/container-screen.md`.
+    #[must_use]
+    pub fn with_drag(mut self, drag: Option<(i32, &'a [usize])>) -> Self {
+        self.drag = drag;
         self
     }
 }
@@ -742,11 +771,64 @@ impl ContainerGeometry {
                 b.rect_px(sx, sy, CELL, CELL, [0.32, 0.30, 0.27, 0.86]);
             }
         }
+
+        // The drag preview (issue #378 part 2), resolved once for the whole frame.
+        // `plan` is keyed by menu index below; `remainder` is what the cursor
+        // would keep. Both come out of `Menu::quick_craft_plan` — the release
+        // path's own arithmetic — so the preview cannot show a split the release
+        // would not produce.
+        let drag = drag_preview(menu, frame.drag);
+        // Vanilla's 50%-white wash behind each previewed stack
+        // (`AbstractContainerScreen.java:234`'s `fill(..., -2130706433)` —
+        // `0x80FFFFFF`). Emitted **before** `chrome_floats` so it lands under the
+        // icon it backs; everything past that marker draws over the icon passes.
+        if let Some(preview) = &drag {
+            for slot in &layout.slots {
+                // Vanilla's wash is inside the `if (!done)` arm and gated on
+                // `quickCraftStack`, i.e. on the cell surviving the placeability
+                // check — not on bare membership. So this follows `cell`, not
+                // `paints`, and a painted-but-unfillable cell gets neither wash
+                // nor number.
+                if preview.cell(slot.menu_index).is_some() && !preview.single {
+                    b.rect_px(x + slot.x, y + slot.y, CELL, CELL, [1.0, 1.0, 1.0, 128.0 / 255.0]);
+                }
+            }
+        }
         let chrome_floats = b.verts.len();
 
         for slot in &layout.slots {
             let sx = x + slot.x;
             let sy = y + slot.y;
+            // A painted cell draws the *provisional* stack instead of its real
+            // contents — vanilla replaces `itemStack` in `extractSlot` (`:217`)
+            // rather than drawing a second thing on top.
+            if let Some(preview) = &drag {
+                // `quickCraftSlots.size() == 1` returns from `extractSlot`
+                // (`:203-205`) before anything is drawn — so a one-cell paint
+                // blanks the cell entirely, including whatever was already in it.
+                // Easy to miss, and it is a real visible behaviour: a single-cell
+                // drag is about to degrade to a plain place anyway.
+                if preview.single {
+                    if preview.paints(slot.menu_index) {
+                        continue;
+                    }
+                } else if let Some(cell) = preview.cell(slot.menu_index) {
+                    let mut provisional = preview.source.clone();
+                    provisional.set_count(cell.count);
+                    b.draw_stack_counted(
+                        assets,
+                        &provisional,
+                        sx,
+                        sy,
+                        if cell.clamped {
+                            item_icon::COUNT_INK_CLAMPED
+                        } else {
+                            item_icon::COUNT_INK
+                        },
+                    );
+                    continue;
+                }
+            }
             let Some(stack) = menu.slot_item(slot.menu_index) else {
                 continue;
             };
@@ -825,7 +907,22 @@ impl ContainerGeometry {
             let scale =
                 crate::config::calculate_gui_scale(gui_scale, width, height).max(1) as f32;
             let (cx, cy) = (cx / scale, cy / scale);
-            b.draw_stack(assets, stack, cx - CELL * 0.5, cy - CELL * 0.5);
+            // Mid-drag, vanilla shows the cursor holding what it would be *left*
+            // with, not what it started with: `extractCarriedItem` (`:119-124`)
+            // replaces the stack with `copyWithCount(quickCraftingRemainder)`
+            // whenever more than one cell is painted. `remainder` is derived from
+            // the same plan the cells drew from, so the numbers on screen add up.
+            // A remainder of zero draws nothing (vanilla's `copyWithCount(0)` is
+            // empty, and its yellow "0" decoration is not modelled).
+            match drag.as_ref().filter(|p| !p.single) {
+                Some(preview) if preview.remainder > 0 => {
+                    let mut left = preview.source.clone();
+                    left.set_count(preview.remainder);
+                    b.draw_stack(assets, &left, cx - CELL * 0.5, cy - CELL * 0.5);
+                }
+                Some(_) => {}
+                None => b.draw_stack(assets, stack, cx - CELL * 0.5, cy - CELL * 0.5),
+            }
         }
 
         Self {
@@ -848,6 +945,77 @@ impl ContainerGeometry {
             }),
         }
     }
+}
+
+/// Everything one frame's drag preview needs, resolved once (issue #378 part 2).
+///
+/// Deliberately **not** a recomputation of the split: `cells` is
+/// [`Menu::quick_craft_plan`]'s output verbatim and `remainder` is
+/// [`Menu::quick_craft_remainder`]'s, both of which the release path itself uses.
+#[derive(Debug)]
+struct DragPreview {
+    /// The carried stack the split is measured against — vanilla's `carried` in
+    /// `extractSlot`, and the item the provisional stacks are copies of.
+    source: ItemStack,
+    /// Every slot in the paint set — vanilla's `quickCraftSlots`, which is what
+    /// `extractSlot`'s `contains(slot)` gate tests. Kept separately from
+    /// [`cells`](Self::cells) because the two answer different questions: this is
+    /// "is this cell painted at all", which is what the one-cell blank turns on.
+    painted: Vec<usize>,
+    /// Per painted cell, in paint order, with its provisional count. Cells the
+    /// release would refuse are **absent**, exactly as they are absent from the
+    /// distribution — so a cell that is `painted` but has no entry here draws the
+    /// wash and no number, which is honest rather than a guess.
+    ///
+    /// Vanilla's own preview filter is narrower (`canItemQuickReplace &&
+    /// canDragTo`, `:207`, without `mayPlace` or the count check) and *removes*
+    /// the failing slot from `quickCraftSlots` as a side effect of drawing. Using
+    /// the release path's stricter filter here can only reject more, never fewer,
+    /// so preview-vs-outcome agreement is preserved; and re-deriving the set from
+    /// a draw call is not a thing a builder that runs per frame should do.
+    cells: Vec<lodestone_game::click::QuickCraftCell>,
+    /// What the cursor would be left holding.
+    remainder: i32,
+    /// `quickCraftSlots.size() == 1`. Vanilla's `extractSlot` returns before
+    /// drawing anything in that case (`:203-205`), and `extractCarriedItem` skips
+    /// its remainder substitution (`:119`) — both because a one-cell drag is about
+    /// to be re-dispatched as an ordinary click.
+    single: bool,
+}
+
+impl DragPreview {
+    /// Whether `menu_index` is in the paint set at all.
+    fn paints(&self, menu_index: usize) -> bool {
+        self.painted.contains(&menu_index)
+    }
+
+    /// The provisional contents of `menu_index`, if the release would fill it.
+    fn cell(&self, menu_index: usize) -> Option<&lodestone_game::click::QuickCraftCell> {
+        self.cells.iter().find(|c| c.menu_index == menu_index)
+    }
+}
+
+/// Resolve [`ContainerFrame::drag`] against a menu, or `None` when no drag is
+/// armed, nothing is painted, or the cursor is empty — vanilla gates the whole
+/// preview on `isQuickCrafting && quickCraftSlots.contains(slot) &&
+/// !carried.isEmpty()` (`AbstractContainerScreen.java:202`).
+///
+/// Note the `single` case is still `Some`: it has to be, because it draws
+/// *nothing* in the painted cell rather than falling back to the real contents,
+/// and "draw nothing here" needs the cell to still be recognised as painted.
+fn drag_preview(menu: &Menu, drag: Option<(i32, &[usize])>) -> Option<DragPreview> {
+    let (kind, painted) = drag?;
+    if painted.is_empty() {
+        return None;
+    }
+    let source = menu.carried()?.clone();
+    Some(DragPreview {
+        cells: menu.quick_craft_plan(painted, kind, &source),
+        remainder: menu.quick_craft_remainder(painted, kind, &source),
+        single: painted.len() == 1,
+        painted: painted.to_vec(),
+        source,
+    })
 }
 
 /// Turn a menu slot's stack into the shared per-slot draw record, mirroring what
@@ -1342,16 +1510,13 @@ impl MenuInput {
         let Some(carried) = menu.carried() else {
             return;
         };
-        // `quickCraftingType == 2` (creative stack-per-slot) is the one type that
-        // ignores how many items the cursor holds.
-        let unlimited = button.drag_kind() == drag_type::CLONE;
-        if !unlimited && carried.count() <= slots.len() as i32 {
-            return;
-        }
-        if !can_item_quick_replace(menu.slot_item(i), carried, true) {
-            return;
-        }
-        if !menu.may_place(i, carried) {
+        // All three conditions come from `Menu::can_drag_place_at` — the *same*
+        // function the machine's own `ADD` arm uses — rather than being restated
+        // here. That is what makes the screen's paint set and the machine's
+        // provably identical, which the drag preview depends on: the screen's set
+        // size is the divisor for the previewed split and the machine's is the
+        // divisor for the real distribution. See that method's doc comment.
+        if !menu.can_drag_place_at(i, carried, button.drag_kind(), slots.len() as i32) {
             return;
         }
         if !slots.contains(&i) {
@@ -1645,14 +1810,17 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// One slot's real icon, through the shared pass.
-    fn item_icon(
+    /// One slot's real icon, through the shared pass, with an explicit
+    /// stack-count ink — [`item_icon::COUNT_INK`] for everything except the drag
+    /// preview's clamped counts, which are yellow.
+    fn item_icon_counted(
         &mut self,
         assets: &IconAssets<'_>,
         record: &HotbarSlot,
         x: f32,
         y: f32,
         size: f32,
+        count_ink: [f32; 4],
     ) {
         let (w, h) = (self.w, self.h);
         let mut sink = IconSink {
@@ -1665,7 +1833,17 @@ impl<'a> Builder<'a> {
             model: &mut self.model_verts,
             special: &mut self.special,
         };
-        item_icon::draw_item_icon(&mut sink, assets, (w, h), record, x, y, size, self.font);
+        item_icon::draw_item_icon_counted(
+            &mut sink,
+            assets,
+            (w, h),
+            record,
+            x,
+            y,
+            size,
+            self.font,
+            count_ink,
+        );
     }
 
     /// Draw one occupied cell's contents at `(x, y)`: the real icon when the
@@ -1674,10 +1852,26 @@ impl<'a> Builder<'a> {
     /// stack, so an atlas-less run shows the cursor's stack exactly as it
     /// shows an occupied well.
     fn draw_stack(&mut self, assets: &IconAssets<'_>, stack: &lodestone_game::item::ItemStack, x: f32, y: f32) {
+        self.draw_stack_counted(assets, stack, x, y, item_icon::COUNT_INK);
+    }
+
+    /// As [`draw_stack`](Self::draw_stack), with an explicit stack-count ink. The
+    /// drag preview uses [`item_icon::COUNT_INK_CLAMPED`] (vanilla's yellow) when
+    /// the provisional count hit the destination cell's cap.
+    fn draw_stack_counted(
+        &mut self,
+        assets: &IconAssets<'_>,
+        stack: &lodestone_game::item::ItemStack,
+        x: f32,
+        y: f32,
+        count_ink: [f32; 4],
+    ) {
         match (assets.items, icon_record(stack)) {
             // The real thing: the shared hotbar icon pass, which also draws
             // the stack count and the durability bar.
-            (Some(_), Some(record)) => self.item_icon(assets, &record, x, y, CELL),
+            (Some(_), Some(record)) => {
+                self.item_icon_counted(assets, &record, x, y, CELL, count_ink)
+            }
             // No atlas (or an item id the atlas could never key): the old
             // hash-derived swatch plus a letter, so an occupied cell still
             // reads as occupied on a jar-less run.
@@ -3044,6 +3238,167 @@ mod tests {
             input.drag_paint().map(|(_, s)| s.to_vec()),
             Some(vec![0, 1]),
             "vanilla stops painting once the painted count reaches the cursor's"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #378 part 2: the live drag preview.
+    //
+    // The arithmetic itself is proved in `lodestone-game`'s
+    // `tests/drag_preview_agreement.rs`, which compares the plan against the
+    // real release path. What is proved *here* is the precondition that makes
+    // that comparison mean anything on screen: the set the screen previews and
+    // the set the machine distributes over must be the same set.
+    // ---------------------------------------------------------------------
+
+    /// `Menu::quick_craft_plan`'s divisor is `painted.len()`, and the screen and
+    /// the machine each keep their own paint set — the screen's grown by
+    /// `dragged`, the machine's by the `ADD` packets `release` emits. If they
+    /// ever differed in size, the previewed split would divide by a different
+    /// number than the distribution and every cell would show the wrong count.
+    ///
+    /// They cannot differ, because both call `Menu::can_drag_place_at`. This
+    /// asserts it end to end over a paint that crosses cells of three kinds —
+    /// takeable, refused for item mismatch, refused for `may_place` — rather
+    /// than leaving it as an argument in a doc comment.
+    #[test]
+    fn the_screens_paint_set_and_the_machines_stay_identical() {
+        let stick = |n: i32| ItemStack::new("minecraft:stick".parse().unwrap(), n);
+        let mut menu = Menu::crafting(3, 3);
+        menu.set_carried(Some(stick(8)));
+        // Grid cell 2 holds a different item; the result slot (0) refuses
+        // placement outright. Cells 1, 3 and 4 are takeable.
+        menu.set_slot_item(2, Some(ItemStack::new("minecraft:dirt".parse().unwrap(), 1)));
+        menu.set_slot_item(0, Some(stick(1)));
+
+        let mut input = MenuInput::new();
+        input.press(MenuHit::Slot(1), MenuButton::Left, false, loaded(), false, &menu);
+        for cell in [1usize, 2, 0, 3, 4] {
+            input.dragged(MenuHit::Slot(cell), &menu);
+        }
+        let (kind, screen_set) = input.drag_paint().expect("a drag is armed");
+        let screen_set = screen_set.to_vec();
+        assert_eq!(
+            screen_set,
+            vec![1, 3, 4],
+            "the mismatched cell and the result slot must both be refused, or the \
+             comparison below is between two unfiltered sets and proves nothing"
+        );
+
+        // Now drive the emitted sequence into the machine and read back the set
+        // it accumulated from the ADD packets.
+        let clicks = input.release(MenuHit::Slot(4), MenuButton::Left, false, loaded(), &menu);
+        let mut machine = menu.clone();
+        let ctx = lodestone_game::click::PlayerCtx::survival();
+        let mut machine_set: Vec<usize> = Vec::new();
+        for click in &clicks {
+            // Snapshot the machine's own set just before END consumes it.
+            if click.input == ContainerInput::QuickCraft
+                && lodestone_game::click::quick_craft_header(click.button) == drag_header::END
+            {
+                machine_set = machine.quick_craft_slots().to_vec();
+            }
+            click.apply(&mut machine, ctx);
+        }
+        assert_eq!(
+            machine_set, screen_set,
+            "the screen previews against its own paint set and the machine distributes \
+             over its own; `Menu::can_drag_place_at` is the single predicate that keeps \
+             them equal"
+        );
+
+        // …and the counts the screen would draw are the counts that landed.
+        let source = stick(8);
+        let plan = menu.quick_craft_plan(&screen_set, kind, &source);
+        for cell in &plan {
+            assert_eq!(
+                Some(cell.count),
+                machine.slot_item(cell.menu_index).map(ItemStack::count),
+                "cell {} previewed {} ",
+                cell.menu_index,
+                cell.count
+            );
+        }
+    }
+
+    /// The preview must reach the *geometry*, not merely be computable — the
+    /// island defect this project has hit repeatedly. A frame with a drag armed
+    /// has to emit more colour vertices than the identical frame without one
+    /// (the 50%-white wash plus the provisional stacks' counts), and the pixel
+    /// gate in `tests/container_drag_preview_pixels.rs` then proves *where*.
+    #[test]
+    fn a_painted_drag_changes_the_geometry_it_would_not_otherwise() {
+        let stick = |n: i32| ItemStack::new("minecraft:stick".parse().unwrap(), n);
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stick(9)));
+        let painted = [0usize, 1, 2];
+
+        let plain = ContainerFrame::new(Some(&menu), "Chest");
+        let dragging = ContainerFrame::new(Some(&menu), "Chest").with_drag(Some((
+            drag_type::EVEN,
+            &painted,
+        )));
+        let without = ContainerGeometry::build(&plain, 1280, 720);
+        let with = ContainerGeometry::build(&dragging, 1280, 720);
+        assert!(
+            with.chrome_vertex_count > without.chrome_vertex_count,
+            "the painted-cell wash belongs to the chrome run, under the icon it backs: \
+             {} vs {}",
+            with.chrome_vertex_count,
+            without.chrome_vertex_count
+        );
+        assert!(
+            with.vertex_count() > without.vertex_count(),
+            "and the provisional counts land past the chrome split"
+        );
+
+        // Control: an *empty* paint set is `None`, so nothing changes. Without
+        // this, a `with_drag` that unconditionally emitted something would
+        // satisfy the assertions above.
+        let empty: [usize; 0] = [];
+        let armed_but_unpainted = ContainerFrame::new(Some(&menu), "Chest")
+            .with_drag(Some((drag_type::EVEN, &empty)));
+        assert_eq!(
+            ContainerGeometry::build(&armed_but_unpainted, 1280, 720).vertex_count(),
+            without.vertex_count(),
+            "a drag that has painted nothing draws nothing"
+        );
+    }
+
+    /// Vanilla's `extractSlot` **returns before drawing anything** when exactly
+    /// one cell is painted (`AbstractContainerScreen.java:203-205`), so that cell
+    /// blanks — including whatever it already held. Easy to miss, and visible:
+    /// the drag is about to be re-dispatched as an ordinary click.
+    #[test]
+    fn a_one_cell_paint_blanks_that_cell_rather_than_previewing_it() {
+        let stick = |n: i32| ItemStack::new("minecraft:stick".parse().unwrap(), n);
+        let mut menu = Menu::generic(27);
+        menu.set_carried(Some(stick(9)));
+        menu.set_slot_item(0, Some(stick(5)));
+        let one = [0usize];
+
+        let plain = ContainerFrame::new(Some(&menu), "Chest");
+        let single = ContainerFrame::new(Some(&menu), "Chest")
+            .with_drag(Some((drag_type::EVEN, &one)));
+        let without = ContainerGeometry::build(&plain, 1280, 720);
+        let with = ContainerGeometry::build(&single, 1280, 720);
+        assert!(
+            with.vertex_count() < without.vertex_count(),
+            "the occupied cell's swatch and count must disappear, not gain a wash: \
+             {} vs {}",
+            with.vertex_count(),
+            without.vertex_count()
+        );
+
+        // Control: with a *second* cell painted the same slot draws again, so the
+        // blanking above is the `size() == 1` rule and not "a painted cell never
+        // draws".
+        let two = [0usize, 1];
+        let pair = ContainerFrame::new(Some(&menu), "Chest")
+            .with_drag(Some((drag_type::EVEN, &two)));
+        assert!(
+            ContainerGeometry::build(&pair, 1280, 720).vertex_count() > with.vertex_count(),
+            "a two-cell paint previews both cells"
         );
     }
 

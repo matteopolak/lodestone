@@ -132,6 +132,29 @@ pub struct ClickOutcome {
     pub dropped: Vec<ItemStack>,
 }
 
+/// One painted cell's provisional contents partway through a drag — what the
+/// release would put there, and what is already there.
+///
+/// Produced by [`Menu::quick_craft_plan`], consumed both by the release path and
+/// by the container screen's live preview. See that method for why the two share
+/// this rather than each deriving the split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuickCraftCell {
+    /// The painted menu-slot index.
+    pub menu_index: usize,
+    /// The **total** count the cell would hold on release — the per-slot share
+    /// plus whatever the cell already has, clamped to the cell's cap. Not the
+    /// amount added.
+    pub count: i32,
+    /// What the cell already holds (`0` when empty). `count - existing` is the
+    /// amount this cell takes off the cursor.
+    pub existing: i32,
+    /// Whether [`count`](Self::count) was cut by the cell's cap. Vanilla draws a
+    /// clamped preview count in **yellow** (`AbstractContainerScreen.java:212-215`),
+    /// which is the whole reason this flag is carried out rather than recomputed.
+    pub clamped: bool,
+}
+
 /// A distinct click action, primary (left) or secondary (right).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClickAction {
@@ -543,13 +566,45 @@ impl Menu {
         }
     }
 
-    /// Whether a slot is a legal drag target for the current cursor: empty or
-    /// same-item-with-room, placeable, and the cursor still has more items than
-    /// slots already painted (creative ignores that constraint).
+    /// Whether a slot is a legal drag target for the current cursor, against this
+    /// menu's own live drag state. Thin wrapper over
+    /// [`can_drag_place_at`](Self::can_drag_place_at) — the `ADD` arm's view of it.
     fn can_drag_place(&self, index: usize, carried: &ItemStack) -> bool {
-        let kind = self.quick_craft_type();
-        let painted = self.quick_craft_slots().len() as i32;
-        let enough = kind == drag_type::CLONE || carried.count() > painted;
+        self.can_drag_place_at(
+            index,
+            carried,
+            self.quick_craft_type(),
+            self.quick_craft_slots().len() as i32,
+        )
+    }
+
+    /// Whether a drag of `kind` holding `carried` may **paint** `index` when
+    /// `painted_count` slots are already painted: the cell is empty or holds the
+    /// same item with room, the slot accepts the item, and the cursor still has
+    /// more items than cells painted so far (a creative `CLONE` drag ignores that
+    /// last part).
+    ///
+    /// Vanilla writes these three conditions twice — server-side in `doClick`'s
+    /// `ADD` arm (`AbstractContainerMenu.java:354-357`) and client-side in
+    /// `AbstractContainerScreen.shouldAddSlotToQuickCraft` (`:554-561`) — and it
+    /// matters a great deal that they agree, because **the screen's paint set is
+    /// the divisor for the preview and the menu's is the divisor for the
+    /// distribution** (see [`quick_craft_plan`](Self::quick_craft_plan)). Two
+    /// copies that drifted would show the player a split the release does not
+    /// produce.
+    ///
+    /// So there is one copy, here, and `MenuInput::dragged` in the shell calls it
+    /// rather than restating it. That makes the two sets equal by construction
+    /// instead of by argument.
+    #[must_use]
+    pub fn can_drag_place_at(
+        &self,
+        index: usize,
+        carried: &ItemStack,
+        kind: i32,
+        painted_count: i32,
+    ) -> bool {
+        let enough = kind == drag_type::CLONE || carried.count() > painted_count;
         can_item_quick_replace(self.slot_item(index), carried, true)
             && self.may_place(index, carried)
             && enough
@@ -575,24 +630,17 @@ impl Menu {
             return;
         };
         let kind = self.quick_craft_type();
-        let painted_count = painted.len() as i32;
+        // **The split is computed by `quick_craft_plan`, not here.** The on-screen
+        // preview calls the same function against the same painted set, so a
+        // preview that disagreed with the outcome would have to be a different
+        // *input*, never a different formula. See its doc comment.
+        let plan = self.quick_craft_plan(&painted, kind, &source);
         let mut remaining = source.count();
-
-        for index in painted {
-            let carried = self.carried().cloned();
-            let Some(carried) = carried else { continue };
-            if !self.can_drag_place_end(index, &carried, painted_count) {
-                continue;
-            }
-            let existing = self.slot_item(index).map_or(0, ItemStack::count);
-            let slot_cap = self.effective_max(index, &source);
-            let max_size = source.max_stack_size().min(slot_cap);
-            let give =
-                (quick_craft_place_count(painted_count, kind, &source) + existing).min(max_size);
-            remaining -= give - existing;
+        for cell in plan {
+            remaining -= cell.count - cell.existing;
             let mut placed = source.clone();
-            placed.set_count(give);
-            self.set_slot_item(index, Some(placed));
+            placed.set_count(cell.count);
+            self.set_slot_item(cell.menu_index, Some(placed));
         }
 
         let mut leftover = source;
@@ -600,8 +648,123 @@ impl Menu {
         self.set_carried(crate::item::normalize(leftover));
     }
 
-    fn can_drag_place_end(&self, index: usize, carried: &ItemStack, painted_count: i32) -> bool {
-        let kind = self.quick_craft_type();
+    /// What a drag would put in each painted cell if it were released now.
+    ///
+    /// **This is the single source of the split arithmetic.** Both the release
+    /// path ([`finish_quick_craft`](Self::finish_quick_craft), vanilla
+    /// `AbstractContainerMenu.java:377-390`) and the container screen's live
+    /// preview (vanilla `AbstractContainerScreen.extractSlot`, `:202-222`) go
+    /// through it. Vanilla itself has the formula written out twice, in those two
+    /// places plus a third time in `recalculateQuickCraftRemaining` (`:248-267`);
+    /// keeping one copy here is what makes "the preview equals the outcome" a
+    /// property of the code rather than a thing a test hopes for.
+    ///
+    /// `painted` is the accumulated paint set in paint order, `kind` a
+    /// [`drag_type`], `source` the carried stack. Cells the release would refuse
+    /// ([`can_drag_place_end`](Self::can_drag_place_end)) are **absent** from the
+    /// result rather than present with a zero count, mirroring vanilla's `continue`.
+    ///
+    /// # `painted` must be the *filtered* paint set
+    ///
+    /// `painted.len()` is the divisor for an even split — vanilla's
+    /// `getQuickCraftPlaceCount(this.quickcraftSlots.size(), …)` (`:386`), the size
+    /// of the set that survived `ADD`, not of everything the pointer crossed. A
+    /// caller that passes an unfiltered set divides by too large a number and
+    /// under-previews every cell.
+    ///
+    /// Both real callers satisfy this by construction and it is worth knowing why,
+    /// because the two sets are built in different places:
+    ///
+    /// * the machine's set is grown one `ADD` at a time through
+    ///   [`can_drag_place`](Self::can_drag_place);
+    /// * the screen's set is grown by `MenuInput::dragged` through vanilla's
+    ///   `shouldAddSlotToQuickCraft`.
+    ///
+    /// Those two predicates are the *same three conditions*, evaluated against the
+    /// same menu, over sets grown in the same order — so they stay equal at every
+    /// step by induction, which is what lets the screen preview a drag the machine
+    /// has not been told about yet. `container.rs`'s
+    /// `the_screens_paint_set_and_the_machines_stay_identical` asserts the equality
+    /// rather than leaving it as an argument.
+    ///
+    /// Reading every cell up front is equivalent to vanilla's interleaved loop
+    /// because that loop never mutates what it reads: it re-reads `getCarried()`
+    /// per iteration (`:378`) but only calls `setCarried` *after* the loop
+    /// (`:393`), and the painted set is deduplicated
+    /// ([`push_quick_craft_slot`](Self::push_quick_craft_slot)) so no two
+    /// iterations touch the same slot.
+    #[must_use]
+    pub fn quick_craft_plan(
+        &self,
+        painted: &[usize],
+        kind: i32,
+        source: &ItemStack,
+    ) -> Vec<QuickCraftCell> {
+        let painted_count = painted.len() as i32;
+        painted
+            .iter()
+            .copied()
+            .filter(|&index| self.can_drag_place_end(index, source, painted_count, kind))
+            .map(|index| {
+                let existing = self.slot_item(index).map_or(0, ItemStack::count);
+                let slot_cap = self.effective_max(index, source);
+                let max_size = source.max_stack_size().min(slot_cap);
+                let want = quick_craft_place_count(painted_count, kind, source) + existing;
+                QuickCraftCell {
+                    menu_index: index,
+                    count: want.min(max_size),
+                    existing,
+                    clamped: want > max_size,
+                }
+            })
+            .collect()
+    }
+
+    /// What the cursor would be left holding if the drag painted onto `painted`
+    /// were released now — vanilla's `quickCraftingRemainder`
+    /// (`AbstractContainerScreen.recalculateQuickCraftRemaining`, `:248-267`).
+    ///
+    /// Derived from [`quick_craft_plan`](Self::quick_craft_plan) rather than
+    /// recomputed, for the same reason: vanilla's third copy of the formula lives
+    /// here, and a remainder that disagreed with the per-cell counts would show
+    /// the player a cursor total that does not add up.
+    ///
+    /// Note the `CLONE` short-circuit: a creative stack-per-slot drag leaves the
+    /// cursor at a full stack regardless of what it distributes (`:251-252`), so
+    /// it is not the sum of anything.
+    #[must_use]
+    pub fn quick_craft_remainder(&self, painted: &[usize], kind: i32, source: &ItemStack) -> i32 {
+        if kind == drag_type::CLONE {
+            return source.max_stack_size();
+        }
+        self.quick_craft_plan(painted, kind, source)
+            .iter()
+            .fold(source.count(), |acc, cell| acc - (cell.count - cell.existing))
+    }
+
+    /// Whether the drag's **end** would fill `index`, mirroring
+    /// `AbstractContainerMenu.java:379-383`. Note `>=` here where
+    /// [`can_drag_place`](Self::can_drag_place)'s paint-time check has `>`: at
+    /// paint time the slot is not yet in the set, at end time it is.
+    ///
+    /// `kind` is passed in rather than read from
+    /// [`quick_craft_type`](Self::quick_craft_type), and that is load-bearing for
+    /// the **preview** caller. The screen previews a drag the machine has not
+    /// been told about yet — nothing is sent until the mouse is released — so
+    /// mid-drag the menu's stored type is whatever the *previous* drag left
+    /// (`reset_quick_craft` deliberately does not clear it) or `0` on a fresh
+    /// menu. Reading it here made a creative `CLONE` preview evaluate its
+    /// `enough` arm as `EVEN` and refuse every cell: the plan came back empty
+    /// where the release filled five. Caught by
+    /// `tests/drag_preview_agreement.rs`, which is the whole reason that file
+    /// compares against the real release rather than against a second formula.
+    pub(crate) fn can_drag_place_end(
+        &self,
+        index: usize,
+        carried: &ItemStack,
+        painted_count: i32,
+        kind: i32,
+    ) -> bool {
         let enough = kind == drag_type::CLONE || carried.count() >= painted_count;
         can_item_quick_replace(self.slot_item(index), carried, true)
             && self.may_place(index, carried)

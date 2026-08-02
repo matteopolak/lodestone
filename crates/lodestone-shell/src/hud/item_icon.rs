@@ -232,6 +232,36 @@ pub(crate) fn draw_item_icon(
     size: f32,
     font: Option<&VanillaFont>,
 ) {
+    draw_item_icon_counted(sink, assets, view, slot, x, y, size, font, COUNT_INK);
+}
+
+/// The ink vanilla's `itemDecorations` draws a stack count in: plain white.
+pub(crate) const COUNT_INK: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// `ChatFormatting.YELLOW` — `0xFFFF55`, the colour vanilla's
+/// `AbstractContainerScreen.extractSlot` (`:214`) uses for a drag preview's count
+/// once it has been **clamped** by the destination cell's cap, so the player can
+/// see the split was cut short. See [`draw_item_icon_counted`].
+pub(crate) const COUNT_INK_CLAMPED: [f32; 4] = [1.0, 1.0, 85.0 / 255.0, 1.0];
+
+/// As [`draw_item_icon`], but with an explicit ink for the stack count.
+///
+/// Exists for one caller: the drag preview, which draws a *provisional* count and
+/// needs vanilla's yellow when that count was clamped. Everything else passes
+/// [`COUNT_INK`] through [`draw_item_icon`], so no other call site learns about
+/// this parameter.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn draw_item_icon_counted(
+    sink: &mut IconSink<'_>,
+    assets: &IconAssets<'_>,
+    view: (f32, f32),
+    slot: &ItemIcon,
+    x: f32,
+    y: f32,
+    size: f32,
+    font: Option<&VanillaFont>,
+    count_ink: [f32; 4],
+) {
     let (vw, vh) = view;
     let scale = size / 16.0;
     if let Some(atlas) = assets.items
@@ -327,7 +357,7 @@ pub(crate) fn draw_item_icon(
                 let tw = f.width(&s, scale);
                 let tx = x + size - tw;
                 let ty = y + size - font_metrics::LINE_HEIGHT * scale;
-                f.draw(&mut sink.colour, &s, tx, ty, scale, [1.0, 1.0, 1.0, 1.0]);
+                f.draw(&mut sink.colour, &s, tx, ty, scale, count_ink);
             }
             // Jar-less fallback: the fixed-advance 5x7 debug font, with the
             // same vanilla shadow colour rather than a pure black one.
@@ -335,9 +365,9 @@ pub(crate) fn draw_item_icon(
                 let tw = text_w(&s, scale);
                 let tx = x + size - tw;
                 let ty = y + size - font::GLYPH_H as f32 * scale;
-                let shadow = vanilla_font::shadow_of([1.0, 1.0, 1.0, 1.0]);
+                let shadow = vanilla_font::shadow_of(count_ink);
                 sink.colour.text(&s, tx + scale, ty + scale, scale, shadow);
-                sink.colour.text(&s, tx, ty, scale, [1.0, 1.0, 1.0, 1.0]);
+                sink.colour.text(&s, tx, ty, scale, count_ink);
             }
         }
     }
