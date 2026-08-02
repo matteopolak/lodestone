@@ -162,8 +162,17 @@ const IDX_BABY: u8 = 16;
 // perfectly (`CLAUDE.md`: "two symmetric misunderstandings"), and every sheep
 // pixel gate builds an `EntityDraw` directly, downstream of the wire. The live
 // symptom was silent — a `BOOLEAN` arrives at 17 where a `Byte` arm waits, so no
-// arm matches, `variant` stays `None`, and every sheep in the world renders the
-// type's default colour while the decode reports a clean parse.
+// arm matches, `variant` stays `None`, and the decode reports a clean parse.
+//
+// The player-visible result was **no wool at all**, not a wrong colour. This is
+// worth stating precisely because the first write-up of this fix said "renders the
+// type's default colour", and that is not what the chain does: `variant: None`
+// makes `entities::sheep_wool` return `None` (it matches only
+// `EntityVariant::Dyed`), so `EntityDraw::wool` is `None` and
+// `RenderState::prepare_wool` emits no batch. A bare, wool-less sheep — which is
+// how the user reported it, and the reason the misdescription mattered is that
+// "wrong colour" would have sent the next person looking at the tint table
+// instead of the wire.
 // `every_metadata_index_constant_matches_the_jar_dump` is the anchor that now
 // makes such a count checkable.
 const IDX_SHEEP_WOOL: u8 = 18;
@@ -550,7 +559,7 @@ pub fn read_entity_metadata(
             (IDX_HEALTH, Value::Float(f)) => md.health = Some(f),
             (IDX_BABY, Value::Bool(b)) => md.baby = Some(b),
             // Sheep pack wool colour and the sheared flag into one byte; only a
-            // sheep uses index 17 for a byte, hence the class guard.
+            // sheep uses index 18 for a byte, hence the class guard.
             (IDX_SHEEP_WOOL, Value::Byte(b)) if class == Some(MetadataClass::Sheep) => {
                 md.variant = Some(EntityVariant::Dyed {
                     color: (b as u8) & 0x0F,
@@ -1098,7 +1107,7 @@ mod tests {
         assert_eq!(decoded.metadata.health, Some(7.0));
     }
 
-    /// A sheep's wool byte at index 17 packs colour (low nibble) and the sheared
+    /// A sheep's wool byte at index 18 packs colour (low nibble) and the sheared
     /// flag (bit 4). Only raised when the entity is known to be a sheep.
     #[test]
     fn sheep_wool_byte_raises_dyed_variant() {
@@ -1121,8 +1130,9 @@ mod tests {
         );
     }
 
-    /// The same byte at index 17 with no sheep context (or a different class) must
-    /// NOT be raised — index 17 aliases unrelated byte fields on other mobs.
+    /// The same byte at index 18 with no sheep context (or a different class) must
+    /// NOT be raised — index 18 aliases unrelated byte fields on other mobs
+    /// (`AbstractHorse.DATA_ID_FLAGS` occupies it).
     #[test]
     fn wool_index_without_sheep_class_is_not_raised() {
         let mut bytes = Vec::new();
