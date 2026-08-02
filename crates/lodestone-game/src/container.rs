@@ -129,18 +129,38 @@ pub struct Slot {
     pub kind: SlotKind,
     /// The slot's own maximum stack size before combining with the item's.
     pub max_stack_size: i32,
+    /// The GUI sprite drawn in this slot **while it is empty** — vanilla
+    /// `Slot.getNoItemIcon` (`Slot.java:81-83`), `null` on an ordinary slot.
+    ///
+    /// A bare sprite id relative to `gui/sprites/`, e.g. `container/slot/helmet`,
+    /// which is what `lodestone_render::GuiAtlas` keys on. Version-free: these are
+    /// resource paths, not registry ids, and they have been stable since the
+    /// sprite atlas replaced the old `empty_armor_slot_*` texture constants.
+    ///
+    /// # Why this is a field and not a match on the slot index
+    ///
+    /// Vanilla stores it per slot too — `ArmorSlot` takes it as a constructor
+    /// argument (`ArmorSlot.java:63`) and the off-hand slot overrides the getter
+    /// (`InventoryMenu.java:68-72`) — and the reason is that the family is much
+    /// larger than the player screen's four armour slots. 26.2 ships **36**
+    /// `container/slot/*` sprites: horse armour, llama carpet, saddle, the five
+    /// smithing/brewing ingredient hints, per-tool hints for the smithing table,
+    /// and so on. Keying on "menu slot 5..=8 in the player menu" gets the four
+    /// this client shows today and forfeits every one of those the day a horse or
+    /// brewing menu is added.
+    ///
+    /// The **draw** rule is vanilla's, in `AbstractContainerScreen.extractSlot`
+    /// (`:224-230`): when the slot is empty and active, the icon is blitted 16x16
+    /// at the cell origin and `done = true` — so it *replaces* the item path
+    /// rather than layering beneath it.
+    pub no_item_icon: Option<&'static str>,
 }
 
 impl Slot {
     /// Creates a normal slot with the default cap of 64.
     #[must_use]
     pub fn normal(container: usize, index: usize) -> Self {
-        Self {
-            container,
-            index,
-            kind: SlotKind::Normal,
-            max_stack_size: 64,
-        }
+        Self::of(container, index, SlotKind::Normal)
     }
 
     /// Creates a slot of a given kind with the default cap of 64.
@@ -151,7 +171,15 @@ impl Slot {
             index,
             kind,
             max_stack_size: 64,
+            no_item_icon: None,
         }
+    }
+
+    /// Attach an empty-slot sprite — see [`no_item_icon`](Self::no_item_icon).
+    #[must_use]
+    pub fn with_no_item_icon(mut self, icon: &'static str) -> Self {
+        self.no_item_icon = Some(icon);
+        self
     }
 
     /// Returns whether `stack` may be placed into this slot.

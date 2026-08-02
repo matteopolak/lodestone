@@ -90,6 +90,31 @@ pub const OFFHAND_NATIVE: usize = 40;
 /// Sentinel slot index for a click outside any slot (drop).
 pub const OUTSIDE_SLOT: i32 = -999;
 
+/// The empty-slot sprites the player inventory declares, from
+/// `InventoryMenu.java:29-33`.
+///
+/// **These are the 26.2 identifiers, and they are not what the pre-1.21.2 name
+/// suggests.** `EMPTY_ARMOR_SLOT_HELMET` is the *Java constant's* name; its value
+/// is the sprite path `container/slot/helmet`. There is no `empty_armor_slot_*`
+/// texture anywhere in a 26.2 jar — interrogated, not assumed:
+/// `unzip -l client.jar | grep -i empty` returns nothing under
+/// `gui/sprites/**`. The Rust constant names below keep vanilla's spelling so the
+/// mapping to the decompile is one grep, and the values are the real paths.
+///
+/// Relative to `gui/sprites/`, i.e.
+/// `assets/minecraft/textures/gui/sprites/container/slot/helmet.png`, all 16x16.
+/// See [`crate::container::Slot::no_item_icon`].
+pub const EMPTY_ARMOR_SLOT_HELMET: &str = "container/slot/helmet";
+/// See [`EMPTY_ARMOR_SLOT_HELMET`].
+pub const EMPTY_ARMOR_SLOT_CHESTPLATE: &str = "container/slot/chestplate";
+/// See [`EMPTY_ARMOR_SLOT_HELMET`].
+pub const EMPTY_ARMOR_SLOT_LEGGINGS: &str = "container/slot/leggings";
+/// See [`EMPTY_ARMOR_SLOT_HELMET`].
+pub const EMPTY_ARMOR_SLOT_BOOTS: &str = "container/slot/boots";
+/// See [`EMPTY_ARMOR_SLOT_HELMET`]. The off-hand slot, whose anonymous subclass
+/// overrides `getNoItemIcon` (`InventoryMenu.java:68-72`).
+pub const EMPTY_ARMOR_SLOT_SHIELD: &str = "container/slot/shield";
+
 /// An ordered slot list over backing containers, with a carried cursor stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Menu {
@@ -143,7 +168,13 @@ impl Menu {
         for native in 0..9 {
             slots.push(Slot::normal(0, native)); // 36..=44 hotbar
         }
-        slots.push(Slot::of(0, OFFHAND_NATIVE, SlotKind::Offhand)); // 45 offhand
+        // 45 offhand. Vanilla builds this as a plain `Slot` with an anonymous
+        // subclass overriding `getNoItemIcon` (`InventoryMenu.java:64-73`); the
+        // shield sprite is the whole of that override.
+        slots.push(
+            Slot::of(0, OFFHAND_NATIVE, SlotKind::Offhand)
+                .with_no_item_icon(EMPTY_ARMOR_SLOT_SHIELD),
+        );
         Self {
             kind: MenuKind::Player,
             containers,
@@ -896,6 +927,18 @@ impl Slot {
     fn armor(container: usize, index: usize, eq: EquipmentSlot) -> Self {
         let mut slot = Slot::of(container, index, SlotKind::Armor(eq));
         slot.max_stack_size = 1;
+        // Vanilla's `InventoryMenu.TEXTURE_EMPTY_SLOTS` map (`:34-43`), passed to
+        // `ArmorSlot`'s constructor and returned by its `getNoItemIcon`.
+        slot.no_item_icon = Some(match eq {
+            EquipmentSlot::Head => EMPTY_ARMOR_SLOT_HELMET,
+            EquipmentSlot::Chest => EMPTY_ARMOR_SLOT_CHESTPLATE,
+            EquipmentSlot::Legs => EMPTY_ARMOR_SLOT_LEGGINGS,
+            EquipmentSlot::Feet => EMPTY_ARMOR_SLOT_BOOTS,
+            // Not reachable — `Slot::armor` is only built for the four humanoid
+            // positions — but the off-hand's own sprite is the honest answer if it
+            // ever is.
+            EquipmentSlot::Offhand => EMPTY_ARMOR_SLOT_SHIELD,
+        });
         slot
     }
 }
