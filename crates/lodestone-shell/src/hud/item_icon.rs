@@ -347,24 +347,22 @@ pub(crate) fn draw_item_icon_counted(
     // previous fixed-font fallback instead scaled the digits by an extra 2x
     // on top of that, which is what actually produced the "too big" bug: the
     // count ballooned relative to the icon it sits on, not just relative to
-    // the slot.
+    // the slot. **Do not reintroduce a second multiplier here.**
     if slot.count > 1 {
         let s = slot.count.to_string();
+        let tw = match font {
+            Some(f) => f.width(&s, scale),
+            None => text_w(&s, scale),
+        };
+        let tx = x + COUNT_RIGHT * scale - tw;
+        let ty = y + COUNT_TOP * scale;
         match font {
             // Vanilla text: real glyph widths and vanilla's own 1px / 25%
             // brightness drop shadow, both handled by `VanillaFont::draw`.
-            Some(f) => {
-                let tw = f.width(&s, scale);
-                let tx = x + size - tw;
-                let ty = y + size - font_metrics::LINE_HEIGHT * scale;
-                f.draw(&mut sink.colour, &s, tx, ty, scale, count_ink);
-            }
+            Some(f) => f.draw(&mut sink.colour, &s, tx, ty, scale, count_ink),
             // Jar-less fallback: the fixed-advance 5x7 debug font, with the
             // same vanilla shadow colour rather than a pure black one.
             None => {
-                let tw = text_w(&s, scale);
-                let tx = x + size - tw;
-                let ty = y + size - font::GLYPH_H as f32 * scale;
                 let shadow = vanilla_font::shadow_of(count_ink);
                 sink.colour.text(&s, tx + scale, ty + scale, scale, shadow);
                 sink.colour.text(&s, tx, ty, scale, count_ink);
@@ -372,6 +370,37 @@ pub(crate) fn draw_item_icon_counted(
         }
     }
 }
+
+/// Where a stack count's **right edge** sits, in slot-local GUI pixels
+/// (issue #384).
+///
+/// `GuiGraphicsExtractor.itemCount` (`:947-952`, and identically
+/// `SpectatorGui.java:79`):
+///
+/// ```java
+/// this.text(font, amount, x + 19 - 2 - font.width(amount), y + 6 + 3, -1, true);
+/// ```
+///
+/// so `19 - 2 = 17` — **one pixel past** the 16 px icon's right edge, which is why
+/// this is not `size`.
+///
+/// # Why these are constants and the old code was derived
+///
+/// The previous anchor was `x + size - width` and `y + size - LINE_HEIGHT * scale`.
+/// Both are *derivations*, and that is the actual defect rather than the off-by-one:
+/// they drift whenever the cell size or the font's line height changes, and they
+/// agree with vanilla at no glyph height at all. `LINE_HEIGHT` is 9, so the old
+/// top was `y + 16 - 9 = y + 7` against vanilla's `y + 9` — **2 px high**, which is
+/// the "should sit lower" half of the report. Vanilla's offsets are constants
+/// relative to the slot origin; these are those constants.
+///
+/// Scaled by `scale` (`size / 16.0`) like every other length in this function, so a
+/// non-16 px cell places the count proportionally rather than at a fixed pixel
+/// offset from a differently-sized icon.
+const COUNT_RIGHT: f32 = 17.0;
+/// Where a stack count's **top edge** sits, in slot-local GUI pixels — vanilla's
+/// `y + 6 + 3`. See [`COUNT_RIGHT`].
+const COUNT_TOP: f32 = 9.0;
 
 /// Emit the 3-D isometric mini-block for a **block** item into the `size`×`size`
 /// pixel rect at `(x, y)`.
