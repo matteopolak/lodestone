@@ -9,6 +9,19 @@ deliberately not wired. `xBob`/`yBob` are not started.** The reason for each is
 below — none of them is an oversight, and the blocker for two of the three is the
 same one thing.
 
+> **Issue #391, and the reason it is filed under the menu and not the camera.**
+> "View bobbing does nothing in game" was reported from play with the whole
+> render chain verified hop by hop. It was none of the three camera candidates.
+> The reporter's `options.json` said `"view_bobbing": false`, written six minutes
+> before the report — because `app.rs` translated **every** menu click into
+> `hover(row)` + `MenuKey::Enter`, and on the settings screen `Enter` means
+> `toggle_view_bobbing()` unconditionally. Clicking the **GUI SCALE** row turned
+> View Bobbing off and persisted it. See [Configuration](#configuration).
+>
+> The bob itself was measured correct on the real tick path at the same time, and
+> those numbers are now the gate — see
+> [Gotchas when testing this](#gotchas-when-testing-this).
+
 ## What it is
 
 Three separate mechanisms that a screenshot makes look like one:
@@ -160,7 +173,32 @@ pose. `entity.rs:1702-1703` already names the mechanism.
 `Options::view_bobbing` in
 [`config.rs`](../crates/lodestone-shell/src/config.rs), persisted to
 `options.json`, **default on** (vanilla's `options.viewBobbing`,
-`Options.java:600`). `OPTIONS` → `VIEW BOBBING`, Enter toggles it.
+`Options.java:600`). `OPTIONS` → `VIEW BOBBING`, Enter toggles it, and a click on
+that row toggles it too.
+
+**A click used to toggle it from the *other* row, which is issue #391.** The
+settings screen has no row cursor on purpose — each control owns a key
+(`key_settings`: Up/Down the scale, Enter the toggle), so `MenuNav::hover` has no
+`Screen::Settings` arm at all. `app.rs`'s click handler translated a click into
+`hover(row)` + `MenuKey::Enter`, which is correct on the four screens that *do*
+have a cursor and, here, meant every click was "toggle View Bobbing" no matter
+which row it landed on. The natural thing to click — GUI SCALE, row 0, the row
+`render.rs` marks `selected` — silently turned the option off and wrote it to
+disk, and the render chain underneath was working the whole time.
+
+Clicks now go through `MenuNav::click`, which dispatches by row on this screen
+(0 → cycle the scale, 1 → toggle bobbing) and falls back to hover-then-Enter
+everywhere else. Two gates:
+`nav::clicking_the_gui_scale_row_cycles_the_scale_and_leaves_view_bobbing_alone`
+(the negative assertion, with a click on row 1 as its control) and
+`nav::the_settings_rows_are_in_the_order_click_assumes`, which reads the row
+labels back out of `menu::render::frame_for` — the `0`/`1` are indices into a
+vector built in a different file, and reordering it would silently rebind the
+mouse to the wrong control again.
+
+**A persisted `false` cannot be told from a deliberate choice**, so nothing
+auto-heals it: anyone who hit this has to turn the option back on once (or delete
+the key from `options.json`).
 
 The default direction is the opposite of the deleted `unlock_framerate` debug knob
 and the asymmetry is deliberate: a malformed value must read as **on**, because
@@ -183,6 +221,43 @@ turning bobbing off will still leave the damage tilt once it is wired.
   wrong phase and the wrong axis. `tests/view_bob_pixels.rs` predicts the pixel
   displacement from vanilla's constants and asserts direction *and* magnitude on
   both axes.
+* **Nothing gated the *inputs* until #391, and that is the hole to keep shut.**
+  Every gate above supplies its own `BobFrame`, so all of them prove the
+  arithmetic and none of them can see `Sim` feeding it an unrealistic
+  `moved`/`speed` — `CLAUDE.md`'s *world* species, invisible in the test source.
+  `sim::tests::the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis`
+  closes it: it drives a real walking `Sim` and pins the inputs first
+  (0.2159 blocks/tick, vanilla's own walk speed, measured from the position and
+  not read back out of the bob), then the amplitude (`0.1000`, saturating
+  `min(0.1, speed)`), then the phase advance (exactly `0.6 x moved`).
+
+  Two probes on `cam.forward()`, sampled at 60 fps, then separate the axes —
+  measured against the value predicted from `bobView`'s constants:
+
+  | probe | measured | predicted | what it isolates |
+  |---|---|---|---|
+  | infinity, dy | `-6.711` px | `-6.730` | the **nod** alone: translation cannot move a point at infinity, so a nod-free bob reads exactly `0.0` here |
+  | infinity, dx | `±0.01` px | `0` | that the bob does not **yaw** — the sway is a translation, the roll is dropped |
+  | 3 blocks, dx | `-12.847 .. +12.853` px | `±12.853` | the **sway**, and that it is a full sine (both ways) not a rectified one |
+  | 3 blocks, dy | `+19.158` px | `+18.977` | the **dip**, net of the nod opposing it |
+
+  The far probe's direction comes from `cam.forward()` and not from `-Z` on
+  purpose: the offline spawn pitch is **10°**, and a probe placed down `-Z` sits
+  that far above the view centre, where a pitch change of `t` moves it by
+  `sec²(α)/tan(fov/2)`. That probe read `6.93` px against the on-axis `6.73` — a
+  3% error pointing the wrong way, i.e. looking like a bob that is slightly too
+  strong. Derive the geometry from the camera; do not restate the constant.
+* **Four controls, each failing a different subset.** Run them; do not describe
+  them. A single control here is not enough — `CLAUDE.md`'s "check you neutered
+  *enough*" applies directly, because the bob has four terms and three of them
+  survive any one neuter:
+
+  | control | what fails |
+  |---|---|
+  | `render_camera` takes `BobFrame::default()` | both `Sim` gates; every box collapses to `0.000` |
+  | `view_nod_degrees` returns `0.0` | the infinity probe only; sway still `±12.85`, dip still `25.69` |
+  | the sway term of `view_translation` zeroed | the near-`dx` assertion only; nod still `-6.71`, dip still `19.16` |
+  | the dip term of `view_translation` zeroed | the near-`dy` assertion only; nod and sway both intact |
 * **A bounding-box centre is not a projected centroid.** Under a camera pitch
   change the near and far faces of a 3-D box move differently, so the silhouette's
   extremes do not shift like its centre. Measured: the chest's bbox centre moves
