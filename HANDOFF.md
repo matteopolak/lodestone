@@ -846,36 +846,46 @@ Where minecraft-data is still the practical choice, record why.
 
 ---
 
-## Addendum — one uncommitted line in `app.rs`, deliberately (issue #378 part 2, 2026-08-01)
+## Addendum — CLOSED same day: the drag preview's wiring line (issue #378 part 2, 2026-08-01)
 
-`b3bb4e6` landed the container drag preview complete except for its single live
-wiring line, which is **in the working tree and in no commit**:
+**Closed within the hour, and the progression is the point.** Kept rather than
+deleted because this file's own "staleness is the most common defect here" addendum
+earned its place, and an entry that goes stale in sixty minutes is the cheapest
+possible demonstration.
+
+`b3bb4e6` landed the container drag preview complete except for `app.rs`'s
 
 ```rust
-// crates/lodestone-shell/src/app.rs, in the container draw block
-let container_frame = ContainerFrame::new(container_menu, &container_title)
-    .with_inventory_label(&inventory_label)
-    .with_cursor(Some([self.cursor.0, self.cursor.1]))
-    .with_drag(self.menu_input.drag_paint())   // <- this line
-    .with_recipe_book(self.recipe_book.as_ref());
+.with_drag(self.menu_input.drag_paint())
 ```
 
-Not an oversight and not laziness about a one-liner. At the time, `app.rs` held ~110
-lines of another agent's in-flight #382 work (deleting `key.lodestone.toggleFly`,
-adding `InputAction::SwapOffhand`, removing `sync_present_mode`/`unlock_framerate`),
-and `git commit -F - -- <path>` commits **working-tree** content — so naming `app.rs`
-would have shipped their unfinished change under a drag-preview commit message. The
-same hazard that nearly shipped ~500 foreign lines in `sim.rs`.
+which was in the working tree and in no commit. Not an oversight: `app.rs` held
+~110 lines of another agent's in-flight #382 work, and `git commit -F - -- <path>`
+commits **working-tree** content, so naming `app.rs` would have shipped their
+unfinished change under a drag-preview commit message — the hazard that nearly
+shipped ~500 foreign lines in `sim.rs`. Leaving it made the preview an island; this
+entry existed to say so out loud.
 
-**So the preview is an island until this line is committed**, which is the defect class
-this file exists to catalogue — recorded here rather than left to be discovered.
+**`9df3f9a` (#382) then landed `app.rs` and carried the line along**, which is
+exactly what the entry predicted would happen and asked for. Verified against the
+committed blob, not the working tree:
 
-Whoever lands `app.rs` next: check the line is still there and let it ride along; it
-is four lines including its comment and clearly attributed. If it has been lost, it is
-one line and `MenuInput::drag_paint()` / `ContainerFrame::with_drag` are both public
-and documented. `tests/container_drag_preview_pixels.rs` proves the draw itself works,
-so a re-add needs no new gate — but nothing in the tree today proves the *live* screen
-passes the paint set, and that is exactly the gap.
+```
+$ git show HEAD:crates/lodestone-shell/src/app.rs | grep -c "with_drag(self.menu_input.drag_paint())"
+1
+```
+
+So the preview reaches the live screen and there is nothing outstanding. Two things
+worth taking away:
+
+* **Declining to commit a shared file is a real option** and it worked here — the
+  right move was to write the line, say where it was, and let its file's owner
+  carry it. Deferring beat both alternatives (shipping foreign work, or dropping
+  a wired feature).
+* **Nothing in the tree proves the live call site passes the paint set.**
+  `tests/container_drag_preview_pixels.rs` proves the draw given a paint set;
+  `app.rs`'s one line is asserted by nothing. If the preview ever stops appearing
+  in play while that gate stays green, this line is the first place to look.
 
 ## Addendum — "Islands": subsystems that are correct but not plugged in
 
