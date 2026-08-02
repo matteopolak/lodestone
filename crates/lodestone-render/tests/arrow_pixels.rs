@@ -50,10 +50,14 @@
 //!
 //! With `projectile_pitch_offset_deg("arrow")` deliberately returning `None` — i.e.
 //! arrows back on the mob placement, the wrong answer — assertion 1 **still
-//! passed** (416 px inside its rect, nothing outside), because a wrongly-placed
-//! arrow is still an arrow inside its own AABB. Assertions 2 and 3 both failed. So
-//! "the arrow reaches pixels" is genuinely a weaker claim than "the arrow reaches
-//! the right pixels", and the two extra tests are not belt-and-braces.
+//! passed**: `320 px` inside its rect and `0` outside, at rect `x238..274 y84..144`
+//! where the correct build has `y240..272`. The reason is the reason the rect is
+//! derived rather than hardcoded, turned against itself: it comes from the
+//! *instance's own* AABB, so it rose 1.5 blocks with the wrongly-placed arrow and
+//! the arrow filled it perfectly. Assertions 2 and 3 both failed.
+//!
+//! So "the arrow reaches pixels" is a genuinely weaker claim than "the arrow reaches
+//! the *right* pixels", and the two extra tests are not belt-and-braces.
 //!
 //! # What this gate cannot distinguish, and why that is not a gap
 //!
