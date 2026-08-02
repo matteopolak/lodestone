@@ -39,11 +39,38 @@ fn fog_amount(dist: f32) -> f32 {
 //
 // `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
 // builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would pin every mob at the 0.2 floor everywhere. Vanilla's real
-// range is [0.24, 1.0], so 0.0 is never a legitimate value.
+// literally would render every sky-lit mob pure black. Vanilla's real range is
+// [0.24, 1.0], so 0.0 is never a legitimate value.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
+}
+
+// Vanilla's lightmap, byte-for-byte the model shader's copy -- see `model.wgsl`'s
+// comments and `crate::light`'s module docs for the derivation from
+// `lightmap.fsh`. Duplicated because WGSL has no include. Any drift between the
+// two shows up as mobs that do not belong to the scene they stand in, so these
+// four functions and the Rust mirror change together or not at all.
+fn light_brightness(level: f32) -> f32 {
+    return level / (4.0 - 3.0 * level);
+}
+
+fn not_gamma_grey(c: f32) -> f32 {
+    let inverted = 1.0 - c;
+    return 1.0 - inverted * inverted * inverted * inverted;
+}
+
+const BRIGHTNESS_FACTOR: f32 = 0.5;
+
+// Only the *sky* half is darkened. A torch-lit mob is as bright at midnight as
+// at noon, which is vanilla's behaviour: `lightmap.fsh` scales the sky
+// contribution by `SkyFactor` and leaves the block contribution alone. Get this
+// wrong and every lit interior goes dark at sunset.
+fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
+    let sky = light_brightness(sky_level) * sky_darken();
+    let block = light_brightness(block_level);
+    let c = clamp(max(sky, block), 0.0, 1.0);
+    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 }
 
 // sRGB transfer functions, as in the model shader: vanilla is not colour
@@ -91,20 +118,16 @@ fn vs_main(
 ) -> VsOut {
     let model = mat4x4<f32>(m0, m1, m2, m3);
     let world = model * vec4<f32>(position, 1.0);
-    // Byte-for-byte the model shader's light term, including the 0.2 floor that
-    // keeps unlit surfaces dim rather than pure black. Any drift between the two
-    // shows up as mobs that do not belong to the scene they stand in.
-    // Only the *sky* half is darkened. A torch-lit mob is as bright at midnight
-    // as at noon, which is vanilla's behaviour: `LightTexture` scales the sky
-    // contribution by `skyDarken` and leaves the block contribution alone. Get
-    // this wrong and every lit interior goes dark at sunset.
-    let sky = f32((light >> 4u) & 15u) / 15.0 * sky_darken();
+    // Byte-for-byte the model shader's light term. `sky_darken` is applied inside
+    // `lightmap_term`, to the *curved* sky brightness rather than to the raw
+    // level, because that is the order `lightmap.fsh` uses.
+    let sky = f32((light >> 4u) & 15u) / 15.0;
     let block = f32(light & 15u) / 15.0;
     var out: VsOut;
     out.clip = camera.view_proj * world;
     out.uv = uv;
     out.world = world.xyz;
-    out.light_term = 0.2 + 0.8 * max(sky, block);
+    out.light_term = lightmap_term(sky, block);
     // Unpack bits 0-23 as 0x00RRGGBB. These bytes are *gamma-space* sRGB,
     // exactly as vanilla's vertex colour is, and are multiplied inside the
     // transfer round-trip below rather than in linear light.

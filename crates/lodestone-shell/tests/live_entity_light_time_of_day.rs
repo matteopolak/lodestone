@@ -10,9 +10,11 @@
 //! encodes how much sky reaches a block, not how bright the sky currently is.
 //! Vanilla darkens at night purely client-side, in `LightTexture`, by scaling
 //! the sky contribution by `Level.getSkyDarken(partialTick)`. If that is true,
-//! then `entity_pipeline`'s `light_term = 0.2 + 0.8 * max(sky, block)` is
-//! **1.0 at midnight exactly as at noon**, and no amount of correct sampling or
-//! correct shader plumbing can darken a mob — the input never changes.
+//! then `entity.wgsl`'s light term is **1.0 at midnight exactly as at noon**, and
+//! no amount of correct sampling or correct shader plumbing can darken a mob —
+//! the input never changes. (That was true of the retired `0.2 + 0.8 * max(sky,
+//! block)` ramp and is equally true of vanilla's `lightmap.fsh` curve that
+//! replaced it: both reach exactly `1.0` at full light.)
 //!
 //! This is an assertion of an *absence* (the byte does not change), so it needs
 //! a control proving the detector would have fired. The control is the server's
@@ -40,14 +42,23 @@ const RCON_PASSWORD: &str = "lodestone";
 /// Vanilla 26.2, resolved through the registry by the `live` feature.
 const PROTOCOL: i32 = 776;
 
-/// `entity_pipeline`'s `light_term`, in Rust, from a packed `sky << 4 | block`
-/// byte. Kept character-for-character equivalent to the WGSL in
-/// `crates/lodestone-render/src/entity_pipeline.rs` so what this test prints is
-/// the number the fragment shader multiplies the texel by.
+/// `entity.wgsl`'s `lightmap_term`, in Rust, from a packed `sky << 4 | block`
+/// byte, **with no sky darkening** — that omission is the point of this file, so
+/// what it prints is what the shader would compute if the server's byte were the
+/// only input.
+///
+/// Written out from `assets/minecraft/shaders/core/lightmap.fsh` rather than
+/// calling `lodestone_render::light`, so this stays an independent statement of
+/// what the shader should do: `get_brightness(level) = level / (4 - 3 * level)`,
+/// then `mix(c, notGamma(c), 0.5)` with `notGamma(c) == 1 - (1 - c)^4` for a grey
+/// value. Both terms are exactly `1.0` at full light, which is why the assertion
+/// below is unchanged from when this was `0.2 + 0.8 * max(sky, block)`.
 fn light_term(packed: u8) -> f32 {
-    let sky = f32::from((packed >> 4) & 15) / 15.0;
-    let block = f32::from(packed & 15) / 15.0;
-    0.2 + 0.8 * sky.max(block)
+    let brightness = |level: f32| level / (4.0 - 3.0 * level);
+    let sky = brightness(f32::from((packed >> 4) & 15) / 15.0);
+    let block = brightness(f32::from(packed & 15) / 15.0);
+    let c = sky.max(block).clamp(0.0, 1.0);
+    c + ((1.0 - (1.0 - c).powi(4)) - c) * 0.5
 }
 
 /// Wait until the client has logged in and holds streamed columns plus a server

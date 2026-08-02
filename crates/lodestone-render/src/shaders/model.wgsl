@@ -28,13 +28,62 @@ struct Origin {
 //
 // `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
 // builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would pin all terrain at the 0.2 floor. Vanilla's real range is
+// literally would render all sky-lit terrain pure black. Vanilla's real range is
 // [0.24, 1.0], so 0.0 is never legitimate.
 //
-// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
+// Only the sky half is scaled -- see `lightmap_term` below.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
+}
+
+// Vanilla's lightmap, one axis at a time. Verbatim from `lightmap.fsh` in the
+// real 26.2 client.jar; mirrored in Rust by `crate::light`, whose module docs
+// carry the derivation, the two vanilla terms deliberately left out, and the
+// measured divergence from issue #386's table. `entity.wgsl` and `fluid.wgsl`
+// hold the same three functions -- WGSL has no include, so change all four
+// together.
+//
+//     float get_brightness(float level) { return level / (4.0 - 3.0 * level); }
+//
+// `level` is the raw nibble over 15. Strongly concave: half light is a fifth of
+// the brightness, which is what the retired `0.2 + 0.8 * l` ramp got wrong --
+// not at either endpoint, where the two agree exactly, but everywhere between.
+fn light_brightness(level: f32) -> f32 {
+    return level / (4.0 - 3.0 * level);
+}
+
+// Vanilla's `notGamma`, specialised to a grey value. `lightmap.fsh` scales an
+// RGB triple by `maxScaled / maxComponent`; with all three components equal that
+// collapses to `1 - (1 - c)^4`, with no division (so `c == 0` is 0 rather than
+// vanilla's 0/0). Grey is right while the overworld's `SKY_LIGHT_COLOR` is white
+// and its `AMBIENT_LIGHT_COLOR` black.
+fn not_gamma_grey(c: f32) -> f32 {
+    let inverted = 1.0 - c;
+    return 1.0 - inverted * inverted * inverted * inverted;
+}
+
+// `Options.gamma`'s default (0.5, `Options.java:900`), which `lightmap.fsh`
+// consumes as `BrightnessFactor`. Hardcoded because this client has no
+// brightness setting yet; 0.0 is vanilla's `Moody`, 1.0 its `Bright`.
+const BRIGHTNESS_FACTOR: f32 = 0.5;
+
+// One lightmap texel, as a scalar: `lightmap.fsh`'s whole main(), minus the
+// ambient colour (black in the overworld) and with `max` still standing in for
+// vanilla's additive sky+block combine (#383's third divergence -- doing it
+// faithfully needs a vec3, because `BLOCK_LIGHT_TINT` is not white).
+//
+// The curve is applied to the raw *level* and `sky_darken` multiplies the
+// result, which is the order `lightmap.fsh` uses:
+//
+//     float sky_brightness = get_brightness(sky_level) * lightmapInfo.SkyFactor;
+//
+// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
+fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
+    let sky = light_brightness(sky_level) * sky_darken();
+    let block = light_brightness(block_level);
+    let c = clamp(max(sky, block), 0.0, 1.0);
+    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 }
 
 // The default (plains) tint palette. A quad's tint byte indexes this; slot 255
@@ -117,13 +166,11 @@ fn vs_main(
     let block = f32(light_byte & 15u) / 15.0;
 
     let world = position + origin.section_origin.xyz;
-    // Lift a dark floor so unlit faces read dim rather than pure black.
-    let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
-    out.shade = ao * light_term;
+    out.shade = ao * lightmap_term(sky, block);
     out.tint_idx = packed.y;
     out.anim_idx = packed.z;
     out.world = world;

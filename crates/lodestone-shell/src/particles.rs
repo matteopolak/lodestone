@@ -527,11 +527,19 @@ impl Particles {
                 q.uv[1].mul_add(du, u0),
                 q.uv[3].mul_add(dv, v0),
             ];
-            // Match the model shader exactly: `0.2 + 0.8 * max(sky, block)`.
-            // Vanilla packs block light at bit 4 and sky light at bit 20.
+            // Match the model shader exactly — vanilla's own lightmap curve, via
+            // the one Rust mirror of it (`lodestone_render::light`). A particle
+            // lit on a different curve from the block it came from reads as a
+            // rendering bug in the terrain. Vanilla packs block light at bit 4
+            // and sky light at bit 20.
+            //
+            // `sky_darken` is `1.0` here: `Particles` has no clock, so a particle
+            // does not yet dim at night. That is a *separate* gap from the curve,
+            // and it is the one thing left before particles match terrain at
+            // every hour rather than only at noon.
             let block = ((q.light >> 4) & 15) as f32 / 15.0;
             let sky = ((q.light >> 20) & 15) as f32 / 15.0;
-            let shade = 0.8f32.mul_add(block.max(sky), 0.2);
+            let shade = lodestone_render::light_term_from_levels(sky, block, 1.0);
             self.instances.push(ParticleInstance {
                 centre_size: [q.position[0], q.position[1], q.position[2], q.size],
                 uv,
@@ -1177,9 +1185,16 @@ mod tests {
         }
     }
 
-    /// The light term must match the model shader's `0.2 + 0.8 * max(sky,
-    /// block)`. A particle lit differently from the block it came from reads as
-    /// a rendering bug in the terrain, not in the particle.
+    /// The light term must match the model shader's, which is now vanilla's own
+    /// `lightmap.fsh` curve rather than the retired `0.2 + 0.8 * max(sky,
+    /// block)` ramp. A particle lit differently from the block it came from
+    /// reads as a rendering bug in the terrain, not in the particle.
+    ///
+    /// Every expectation below is written out from `level / (4 - 3 * level)` and
+    /// `notGamma` at vanilla's default gamma of 0.5 — **not** read back from
+    /// `lodestone_render::light`, which is the code under test here. The retired
+    /// ramp's value is computed alongside each one, because the two curves agree
+    /// at both endpoints and a full-bright-only assertion passes on either.
     #[test]
     fn light_term_matches_the_terrain_shader() {
         let rect = [0.0f32, 0.0, 1.0, 1.0];
@@ -1198,13 +1213,33 @@ mod tests {
         let base = p.instances[0].colour[0];
         assert!(base > 0.0, "a black particle makes the ratio meaningless");
 
-        // Block light 0, sky light 0 -> the 0.2 floor.
+        // Block light 0, sky light 0. `get_brightness(0)` is 0 and `notGamma(0)`
+        // is 0, so an unlit particle is now *black*; the retired ramp floored it
+        // at 0.2, which is the floor issue #386 named as the mechanism.
         let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(0));
         let dark = p.instances[0].colour[0];
         assert!(
-            (dark / base - 0.2).abs() < 1e-5,
-            "unlit particle shade {} != the terrain shader's 0.2 floor",
+            (dark / base).abs() < 1e-5,
+            "unlit particle shade {} must be 0.0 — vanilla's curve has no floor, and the \
+             retired ramp's 0.2 is exactly what this asserts is gone",
             dark / base
+        );
+
+        // The interior of the curve, which is the only place the two hypotheses
+        // differ. Block light 8: `get_brightness(8/15) = 0.2222`, and mixing
+        // `notGamma` in at 0.5 gives 0.4281. The retired ramp gave 0.6267.
+        let level: f32 = 8.0 / 15.0;
+        let curved = level / (4.0 - 3.0 * level);
+        let vanilla = curved + ((1.0 - (1.0 - curved).powi(4)) - curved) * 0.5;
+        let retired_ramp = 0.2 + 0.8 * level;
+        assert!((vanilla - 0.428_136).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!((retired_ramp - 0.626_667).abs() < 1e-5, "hypothesis drifted: {retired_ramp}");
+        let _ = p.extract(&Camera::default(), 0.0, &|_, _, _| Some(8 << 4));
+        let mid = p.instances[0].colour[0] / base;
+        assert!(
+            (mid - vanilla).abs() < 1e-5,
+            "block light 8 must shade at vanilla's {vanilla}, not the retired ramp's \
+             {retired_ramp}; got {mid}"
         );
 
         // Sky-only and block-only must agree: the shader takes the max, so a

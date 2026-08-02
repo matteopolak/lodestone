@@ -49,8 +49,18 @@ const TEXEL: u8 = 128;
 
 /// Full sky light (`sky = 15`, `block = 0`) packed as the shader reads it.
 const LIGHT_FULL: u8 = 15 << 4;
-/// No light at all — the `0.2` floor in `light_term`.
+/// No light at all. Under vanilla's curve this is exactly `0.0` — the retired
+/// `0.2 + 0.8 * l` ramp's floor is gone — so a frame at this level is **black**
+/// and every *ratio* taken against it is degenerate. Kept for the census and for
+/// [`the_light_floor_is_gone`], which is the one assertion that wants it.
 const LIGHT_DARK: u8 = 0;
+/// Half-ish sky light (`sky = 7`, `block = 0`), which is where the two candidate
+/// curves actually disagree: vanilla's `get_brightness(7/15)` is `0.17949`, and
+/// mixing `notGamma` in at the default gamma of `0.5` gives `0.36312`, against
+/// the retired ramp's `0.2 + 0.8 * 0.46667 = 0.57333`. Both curves are exactly
+/// `1.0` at [`LIGHT_FULL`] and exactly equal at nothing else, so the interior is
+/// the only place a gate can tell them apart.
+const LIGHT_DIM: u8 = 7 << 4;
 
 /// Sky colour behind the mob; nothing else in the entity frame is this colour,
 /// which is what separates mob pixels from background.
@@ -464,31 +474,47 @@ fn lighting_census_by_location() {
         ("terrain side,  sunlit  ", Direction::East, LIGHT_FULL),
         ("terrain N/S,   sunlit  ", Direction::North, LIGHT_FULL),
         ("terrain bottom,sunlit  ", Direction::Down, LIGHT_FULL),
+        ("terrain top,   dim     ", Direction::Up, LIGHT_DIM),
+        ("terrain side,  dim     ", Direction::East, LIGHT_DIM),
         ("terrain top,   shadow  ", Direction::Up, LIGHT_DARK),
         ("terrain side,  shadow  ", Direction::East, LIGHT_DARK),
     ] {
         println!("{name} -> byte {}", terrain_luma(&gpu, dir, light));
     }
-    for (name, light) in [("mob, sunlit ", LIGHT_FULL), ("mob, shadow ", LIGHT_DARK)] {
+    for (name, light) in [
+        ("mob, sunlit ", LIGHT_FULL),
+        ("mob, dim    ", LIGHT_DIM),
+        ("mob, shadow ", LIGHT_DARK),
+    ] {
         let (lo, hi, mean, area) = mob_stats(&mob_frame(&gpu, light));
         println!("{name} -> min {lo} max {hi} mean {mean:.1} over {area}px");
     }
 }
 
-/// **The gate.** A mob standing in the dark must be measurably darker than the
-/// same mob in sunlight, and must land near terrain's own `light_term` floor —
-/// not merely "somewhat dimmer".
+/// **The gate.** A mob in dim light must be measurably darker than the same mob
+/// in sunlight, and must land on vanilla's own curve — not merely "somewhat
+/// dimmer", and not on the retired linear ramp either.
 ///
-/// # Both predictions, named
+/// # Three predictions, named
 ///
-/// The wrong implementation (the shipped one) ignores world light entirely and
-/// renders a mob at the same brightness at every light level, so its ratio is
-/// exactly [`FULLBRIGHT_RATIO`] = 1.0. The correct implementation applies
-/// terrain's `light_term = 0.2 + 0.8 * max(sky, block)` in gamma space, so a
-/// `light = 0` mob is `0.2 / 1.0` of a `light = 15` one: [`LIT_RATIO`] = 0.2.
-/// The acceptance band excludes 1.0 by a factor of four.
-const LIT_RATIO: f32 = 0.2;
+/// All three are arithmetic on `lightmap.fsh` and `Options.java:900`, written out
+/// below rather than read back from `lodestone_render::light`.
+///
+/// * [`LIT_RATIO`] — the correct one. At [`LIGHT_DIM`] the combined level is
+///   `7/15`, `get_brightness` gives `0.17949`, and `notGamma` mixed in at the
+///   default gamma of `0.5` gives **0.36312**. Full light is exactly `1.0`, so
+///   that is the ratio.
+/// * [`OLD_RAMP_RATIO`] — the retired `0.2 + 0.8 * l` ramp: **0.57333**.
+/// * [`FULLBRIGHT_RATIO`] — the original defect, in which the shader ignored
+///   world light entirely and both frames rendered identically: **1.0**.
+///
+/// The band admits only the first. Note the measurement is a plain byte ratio
+/// because the shade multiply happens in gamma space against an sRGB target, so
+/// the transfer functions cancel.
+const LIT_RATIO: f32 = 0.363_12;
+const OLD_RAMP_RATIO: f32 = 0.573_33;
 const FULLBRIGHT_RATIO: f32 = 1.0;
+const BAND: std::ops::RangeInclusive<f32> = 0.345..=0.382;
 
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly to watch the negative control fire"]
@@ -498,27 +524,83 @@ fn a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight() {
     };
 
     let (_, _, sunlit, _) = mob_stats(&mob_frame(&gpu, LIGHT_FULL));
-    let (_, _, shadow, _) = mob_stats(&mob_frame(&gpu, LIGHT_DARK));
-    let ratio = shadow / sunlit;
+    let (_, _, dim, _) = mob_stats(&mob_frame(&gpu, LIGHT_DIM));
+    let ratio = dim / sunlit;
 
     println!("=== MOB WORLD-LIGHT GATE ===");
     println!("mob mean, sky 15 = {sunlit:.1}");
-    println!("mob mean, light 0 = {shadow:.1}");
-    println!("measured ratio           = {ratio:.3}");
-    println!("lit prediction     (fix) = {LIT_RATIO:.3}");
-    println!("fullbright control (bug) = {FULLBRIGHT_RATIO:.3}");
+    println!("mob mean, sky 7  = {dim:.1}");
+    println!("measured ratio            = {ratio:.3}");
+    println!("vanilla curve       (fix) = {LIT_RATIO:.3}");
+    println!("retired linear ramp       = {OLD_RAMP_RATIO:.3}");
+    println!("fullbright control  (bug) = {FULLBRIGHT_RATIO:.3}");
     println!(
-        "negative control: the shipped entity shader has no world-light term at all — every mob \
-         vertex carries a hardcoded `ENTITY_LIGHT = 15 << 4` and the shader never reads it — so \
-         both frames render identically and this ratio is exactly {FULLBRIGHT_RATIO:.3}, far \
+        "negative control: the shipped entity shader had no world-light term at all — every mob \
+         vertex carried a hardcoded `ENTITY_LIGHT = 15 << 4` and the shader never read it — so \
+         both frames rendered identically and this ratio was exactly {FULLBRIGHT_RATIO:.3}, far \
          outside the band below."
     );
 
+    // Both wrong hypotheses must sit outside the band, asserted rather than
+    // asserted-about: a band wide enough to admit either measures nothing.
     assert!(
-        (0.15..=0.30).contains(&ratio),
-        "a mob at light 0 must render near {LIT_RATIO:.3} of its sunlit brightness (terrain's \
-         0.2 light floor), got {ratio:.3} (sunlit {sunlit:.1}, shadow {shadow:.1}); a ratio near \
-         {FULLBRIGHT_RATIO:.3} means entities are still full-bright, which is the reported defect"
+        !BAND.contains(&OLD_RAMP_RATIO) && !BAND.contains(&FULLBRIGHT_RATIO),
+        "the band {BAND:?} admits a wrong hypothesis ({OLD_RAMP_RATIO:.3} or \
+         {FULLBRIGHT_RATIO:.3}), so this gate cannot see which curve is installed"
+    );
+    assert!(
+        BAND.contains(&ratio),
+        "a mob at sky 7 must render at {LIT_RATIO:.3} of its sunlit brightness (vanilla's \
+         `get_brightness` plus `notGamma`), got {ratio:.3} (sunlit {sunlit:.1}, dim {dim:.1}); \
+         {OLD_RAMP_RATIO:.3} is the retired linear ramp and {FULLBRIGHT_RATIO:.3} means entities \
+         ignore world light entirely"
+    );
+}
+
+/// **The `0.2` floor is gone.** Issue #386 named that floor as the mechanism: a
+/// hard 20% minimum no darkening could go below, where vanilla's
+/// `get_brightness(0)` is `0` and `notGamma(0)` is `0`. So a mob at light 0 must
+/// render **pure black**, not at 20% of daylight.
+///
+/// This is an assertion about an extreme, which is exactly the kind that passes
+/// vacuously if nothing drew — hence the two controls: the sunlit frame must
+/// cover the same silhouette, and it must be far from black.
+#[test]
+#[ignore = "requires a GPU adapter; run explicitly"]
+fn the_light_floor_is_gone() {
+    let Some(gpu) = setup() else {
+        panic!("entity_light_pixels: no GPU adapter; this test is #[ignore]d so a missing one is a failure")
+    };
+
+    let (_, sunlit_max, sunlit, sunlit_px) = mob_stats(&mob_frame(&gpu, LIGHT_FULL));
+    let (_, dark_max, dark, dark_px) = mob_stats(&mob_frame(&gpu, LIGHT_DARK));
+
+    println!("=== THE 0.2 FLOOR IS GONE ===");
+    println!("mob at sky 15: mean {sunlit:.1} max {sunlit_max} over {sunlit_px}px");
+    println!("mob at light 0: mean {dark:.1} max {dark_max} over {dark_px}px");
+    println!(
+        "the retired ramp floored this at 0.2 of daylight, i.e. a mean near {:.1}",
+        sunlit * 0.2
+    );
+
+    // Control: the mob is still there and still drawing, so a black readback is
+    // "the light term is zero" and not "nothing was rasterised".
+    assert!(
+        dark_px > 2000 && (dark_px as i64 - sunlit_px as i64).abs() < 200,
+        "the silhouette must be the same in both frames for this to be a lighting \
+         measurement ({dark_px}px dark vs {sunlit_px}px sunlit)"
+    );
+    assert!(
+        sunlit_max > 60,
+        "control's premise is false: the sunlit frame is nearly black too ({sunlit_max}), so \
+         the assertion below would pass under a build that draws nothing visible"
+    );
+    assert!(
+        dark_max <= 1,
+        "a mob at light 0 must be pure black (vanilla's curve reaches 0.0), but its brightest \
+         pixel is {dark_max} and its mean {dark:.1}. A mean near {:.1} is the retired ramp's \
+         0.2 floor, which is the mechanism issue #386 named",
+        sunlit * 0.2
     );
 }
 
@@ -534,23 +616,35 @@ fn a_mob_does_not_outshine_the_terrain_it_stands_on() {
         panic!("entity_light_pixels: no GPU adapter; this test is #[ignore]d so a missing one is a failure")
     };
 
-    let terrain_dark = f32::from(terrain_luma(&gpu, Direction::Up, LIGHT_DARK));
-    let (_, mob_max, mob_mean, _) = mob_stats(&mob_frame(&gpu, LIGHT_DARK));
+    // Measured at [`LIGHT_DIM`], not at light 0: vanilla's curve takes light 0 to
+    // exactly 0.0, so both populations there are black and `mob <= terrain`
+    // becomes `0 <= 0` — true under every possible build, including one that
+    // draws nothing. The comparison needs a light level at which both sides are
+    // visible, which is what the dim level is for.
+    let terrain_dim = f32::from(terrain_luma(&gpu, Direction::Up, LIGHT_DIM));
+    let (_, mob_max, mob_mean, _) = mob_stats(&mob_frame(&gpu, LIGHT_DIM));
 
-    println!("=== MOB vs TERRAIN AT LIGHT 0 ===");
-    println!("terrain Up face, light 0 = {terrain_dark:.1}");
-    println!("mob mean,        light 0 = {mob_mean:.1} (max {mob_max})");
-    println!("ratio mob/terrain        = {:.2}", mob_mean / terrain_dark);
+    println!("=== MOB vs TERRAIN AT SKY 7 ===");
+    println!("terrain Up face, sky 7 = {terrain_dim:.1}");
+    println!("mob mean,        sky 7 = {mob_mean:.1} (max {mob_max})");
+    println!("ratio mob/terrain      = {:.2}", mob_mean / terrain_dim);
     println!(
         "negative control: before the fix the mob rendered full-bright (mean ~103 for this \
-         texel) against the same terrain byte ~{terrain_dark:.0}, a ratio near 4 — the assertion \
+         texel) against the same terrain byte ~{terrain_dim:.0}, a ratio near 4 — the assertion \
          below caps it at 1.0."
     );
 
+    // Anti-vacuity: both populations must actually be lit, or the inequality is
+    // satisfied by two black frames.
     assert!(
-        mob_mean <= terrain_dark,
-        "a mob at light 0 (mean {mob_mean:.1}) must not be brighter than the brightest terrain \
-         face at the same light level ({terrain_dark:.1}); the mob also carries a directional \
+        terrain_dim > 20.0 && mob_mean > 5.0,
+        "both populations must be visibly lit for this comparison to mean anything \
+         (terrain {terrain_dim:.1}, mob {mob_mean:.1})"
+    );
+    assert!(
+        mob_mean <= terrain_dim,
+        "a mob at sky 7 (mean {mob_mean:.1}) must not be brighter than the brightest terrain \
+         face at the same light level ({terrain_dim:.1}); the mob also carries a directional \
          shade <= 1.0, so equality is the ceiling. A mean several times this bound is the \
          reported 'mobs are super bright' defect"
     );

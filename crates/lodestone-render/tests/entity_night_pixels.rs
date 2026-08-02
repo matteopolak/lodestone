@@ -387,20 +387,30 @@ fn readback(
 
 /// The acceptance band for the sky-lit night/day ratio.
 ///
-/// # Both predictions, named
+/// # Three predictions, named
 ///
-/// `light_term = 0.2 + 0.8 * max(sky * sky_darken, block)`. For a sky-15,
-/// block-0 mob:
+/// Every number here is arithmetic on `assets/minecraft/shaders/core/lightmap.fsh`
+/// from the real 26.2 `client.jar` and on `Options.java:900`'s default gamma —
+/// **not** read back from this crate. For a sky-15, block-0 mob:
 ///
-/// * **correct**: midnight `sky_darken` = 0.24, so `0.2 + 0.8 * 0.24` = `0.392`
-///   against noon's `1.0` — a ratio of **0.392**.
-/// * **the shipped bug**: no time-of-day term at all, so both frames render at
-///   `light_term = 1.0` — a ratio of exactly **1.000**.
+/// * **correct** (`NIGHT_RATIO`): `get_brightness(15/15)` is `1.0`; `SkyFactor` at
+///   midnight is `0.24`, so the combined value is `0.24`; then `lightmap.fsh`'s
+///   last line mixes `notGamma` in at the default `BrightnessFactor` of `0.5`,
+///   and for a grey value `notGamma(c) == 1 - (1-c)^4`, giving
+///   `0.24 + (0.66638 - 0.24) * 0.5` = **0.45319**. Noon is exactly `1.0`, so
+///   that is the ratio.
+/// * **the retired linear ramp** (`OLD_RAMP_RATIO`): `0.2 + 0.8 * 0.24` =
+///   **0.392**. This is what shipped before the curve landed, and the band must
+///   exclude it or this gate cannot see the change.
+/// * **the original shipped bug** (`BUG_RATIO`): no time-of-day term at all, so
+///   both frames render at `1.0` — a ratio of exactly **1.000**.
 ///
-/// The band excludes 1.000 by more than a factor of two.
-const NIGHT_RATIO: f32 = 0.392;
+/// The band is tight enough to admit only the first: it excludes the retired
+/// ramp by 0.04 and the no-term bug by more than a factor of two.
+const NIGHT_RATIO: f32 = 0.453_19;
+const OLD_RAMP_RATIO: f32 = 0.392;
 const BUG_RATIO: f32 = 1.000;
-const BAND: std::ops::RangeInclusive<f32> = 0.33..=0.46;
+const BAND: std::ops::RangeInclusive<f32> = 0.435..=0.472;
 
 fn gpu_or_fail() -> Gpu {
     setup().unwrap_or_else(|| {
@@ -439,7 +449,8 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
     println!("mob mean, sky 15, noon       = {day:.1} over {day_px}px");
     println!("mob mean, sky 15, midnight   = {night:.1} over {night_px}px");
     println!("measured ratio               = {ratio:.3}");
-    println!("correct prediction           = {NIGHT_RATIO:.3}");
+    println!("correct prediction           = {NIGHT_RATIO:.3} (lightmap.fsh, gamma 0.5)");
+    println!("retired-linear-ramp control  = {OLD_RAMP_RATIO:.3} (0.2 + 0.8 * 0.24)");
     println!("shipped-bug control          = {BUG_RATIO:.3}");
     println!("negative control (same input) = {control_ratio:.3}, in band = {}", BAND.contains(&control_ratio));
 
@@ -455,17 +466,27 @@ fn a_sky_lit_mob_is_darker_at_midnight_than_at_noon() {
          cannot distinguish the fix from the bug and the gate is vacuous."
     );
 
+    // The band must reject the retired ramp too, or this gate cannot see the
+    // curve change — asserted rather than described, so a widened band is caught
+    // here and not by a player.
+    assert!(
+        !BAND.contains(&OLD_RAMP_RATIO),
+        "the band {BAND:?} accepts the retired linear ramp's {OLD_RAMP_RATIO:.3}, so it cannot \
+         distinguish vanilla's curve from `0.2 + 0.8 * l`"
+    );
     assert!(
         BAND.contains(&ratio),
         "a sky-lit mob at midnight must render near {NIGHT_RATIO:.3} of its noon brightness, got \
-         {ratio:.3} (noon {day:.1}, midnight {night:.1}). A ratio near {BUG_RATIO:.3} means there \
-         is still no time-of-day term and mobs are full-bright at night — the reported defect."
+         {ratio:.3} (noon {day:.1}, midnight {night:.1}). A ratio near {OLD_RAMP_RATIO:.3} means \
+         the retired `0.2 + 0.8 * l` ramp is back; a ratio near {BUG_RATIO:.3} means there is \
+         still no time-of-day term and mobs are full-bright at night."
     );
 }
 
 /// A **torch-lit** mob must not dim at night. Vanilla scales only the sky half of
-/// the lightmap, so `max(sky * sky_darken, block)` is pinned by `block` here and
-/// the clock cannot touch it.
+/// the lightmap (`get_brightness(sky_level) * SkyFactor`, with the block half
+/// untouched), so the combined value is pinned by `block` here and the clock
+/// cannot reach it.
 ///
 /// Without this, the obvious wrong fix — scaling the whole `light_term` — passes
 /// the gate above and turns every lit cave and every torch-lit room black at
@@ -511,8 +532,9 @@ fn a_torch_lit_mob_is_identical_at_midnight_and_noon() {
 /// **No regression for callers that predate this term.** Every existing path
 /// builds the group-0 uniform from a `FogUniform` that leaves the sky-darken lane
 /// at `0.0`. That must render *byte-identically* to explicit noon, or this change
-/// silently pins every mob in the demo world and in a dozen other gates at the
-/// `0.2` light floor.
+/// silently renders every mob in the demo world and in a dozen other gates pure
+/// black — the old ramp's `0.2` floor at least left them dimly visible, so this
+/// sentinel matters more now than it did.
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly"]
 fn the_unset_lane_renders_identically_to_explicit_noon() {
@@ -542,6 +564,6 @@ fn the_unset_lane_renders_identically_to_explicit_noon() {
         diff, 0,
         "the unset (0.0) sky-darken lane must read as full daylight, but it differs from \
          explicit noon in {diff} pixels ({unset_mean:.1} vs {noon_mean:.1}). Taken literally, \
-         0.0 pins every pre-existing caller's mobs at the 0.2 light floor."
+         0.0 renders every pre-existing caller's sky-lit mobs pure black."
     );
 }

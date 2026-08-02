@@ -152,8 +152,9 @@ again.
 than only the sky half, which blacks out a torchlit hand at night — the exact
 mistake `docs/time-of-day-lighting.md`'s
 `a_torch_lit_mob_is_identical_at_midnight_and_noon` gate exists to catch for
-world mobs. Nothing needed changing here: both shaders already compute
-`light_term = 0.2 + 0.8 * max(sky * sky_darken(), block)`, scaling only the
+world mobs. Nothing needed changing here: both shaders already compute the same
+light term (now vanilla's `lightmap.fsh` curve, see
+[light-ramp.md](./light-ramp.md)), scaling only the
 sky half, and gamma-space multiply
 (`srgb_to_linear(linear_to_srgb(rgb) * shade)`) was likewise already correct
 in both. The bug was purely in which `FogUniform` reached the buffer, not in

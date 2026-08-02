@@ -120,7 +120,8 @@ const AT: glam::Vec3 = glam::Vec3::new(0.5, 1.0, 0.5);
 /// Camera distance from the projectile.
 const CAM_DISTANCE: f32 = 1.0;
 
-/// Full daylight, so the shader's `0.2 + 0.8 * max(sky, block)` is `1.0` and a
+/// Full daylight, so the shader's light term (vanilla's `lightmap.fsh` curve,
+/// via `lodestone_render::light`) is exactly `1.0` at this level, and a
 /// dark frame cannot be mistaken for an empty one.
 const LIGHT: u8 = 0xF0;
 

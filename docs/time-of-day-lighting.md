@@ -7,7 +7,10 @@ half of the lightmap is scaled by. Both the model (terrain/fluid) and entity
 shaders compute
 
 ```wgsl
-light_term = 0.2 + 0.8 * max(sky * sky_darken(), block)
+// `lightmap_term`, identical in model.wgsl / entity.wgsl / fluid.wgsl,
+// mirrored in Rust by `lodestone_render::light` — see light-ramp.md
+let c = clamp(max(light_brightness(sky) * sky_darken(), light_brightness(block)), 0.0, 1.0);
+light_term = mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 ```
 
 so `sky_darken` is the whole of "what time is it?" as far as rendering is
@@ -326,9 +329,10 @@ it. Read from the jar rather than assumed:
   sky and block contributions are computed and tinted independently before
   summing.
 * **Our lighting model is structurally different, not just missing a
-  uniform.** There is no lightmap texture at all — `model_pipeline.rs` and
-  `entity_pipeline.rs` compute one grayscale scalar per vertex,
-  `light_term = 0.2 + 0.8 * max(sky * sky_darken(), block)`, and multiply it
+  uniform.** There is no lightmap texture at all — `model.wgsl` and
+  `entity.wgsl` compute one grayscale scalar per vertex (`lightmap_term`,
+  vanilla's curve applied to each half and `max`ed — see
+  [light-ramp.md](./light-ramp.md)), and multiply it
   uniformly into the sampled texel (`out.shade = ao * light_term`). Block and
   sky already lose their separate identities via `max()` before any tint
   could apply. Porting the tint faithfully — sky tinted, block light not,
@@ -366,21 +370,16 @@ exactly the "changing several consumers" case where a half-wired version
 would be worse than none. Left as a scoped follow-up with the ground-truth
 data (`sky_light_timeline_jvm.txt`'s third column) already captured.
 
-## The ramp is linear where vanilla's is a curve (issue #383, not fixed)
+## The ramp was linear where vanilla's is a curve (issues #383, #386 — fixed)
 
-`light_term`'s `0.2 + 0.8 * level` is a **straight line** in the light level.
-Vanilla's is not. Both `Lightmap.getBrightness` and `shaders/core/lightmap.fsh`
-apply
+The retired `light_term` was `0.2 + 0.8 * level`, a **straight line** in the light
+level. Vanilla's is not. The full derivation, the two errors the record carried
+about it, and the re-derived gate expectations now live in
+[light-ramp.md](./light-ramp.md); the table below is kept because it is what the
+diagnosis of #383's third report was built on, and it is still the correct
+comparison against the *bare* curve.
 
-```glsl
-float get_brightness(float level) { return level / (4.0 - 3.0 * level); }
-```
-
-with `level = raw / 15`, then `lerp(dimensionType.ambientLight(), curvedV, 1.0)`
-— and the overworld's `ambientLight` is `0.0`, so overworld brightness is the
-bare curve. It agrees with our line only at the two endpoints:
-
-| sky level | ours (`0.2 + 0.8 * l`) | vanilla (`l / (4 - 3l)`) |
+| sky level | retired ramp (`0.2 + 0.8 * l`) | bare curve (`l / (4 - 3l)`) |
 | --- | --- | --- |
 | 15 | 1.000 | 1.000 |
 | 14 | 0.947 | 0.778 |
@@ -392,8 +391,11 @@ bare curve. It agrees with our line only at the two endpoints:
 | 4 | 0.413 | 0.083 |
 | 0 | 0.200 | 0.000 |
 
-So **in partial light we are consistently too bright, never too dark** — at sky
-12, the sort of level a tree canopy leaves under it, by 0.84 against 0.50.
+So **in partial light we were consistently too bright, never too dark** — at sky
+12, the sort of level a tree canopy leaves under it, by 0.84 against 0.50. Note
+that `lightmap.fsh` then mixes `notGamma` in at the default gamma, which lifts the
+right-hand column (0.500 becomes 0.719 at sky 12); see light-ramp.md. That does not
+change the sign of the divergence, only its size.
 
 This matters for how #383's third report — *"standing under a tree in daylight
 darkens the arm more than vanilla does"* — was diagnosed. The two hypotheses in
@@ -423,21 +425,19 @@ nearly coincide, which is exactly why the symptom read as *"the tree makes it
 worse"* rather than *"the arm is always dark"*. See
 [entity-rendering.md](./entity-rendering.md).
 
-**Why the ramp is left alone.** It is not an entity defect and must not be fixed
-in one shader: `model_pipeline.rs`, the fluid shader and `entity_pipeline.rs` all
-compute the identical expression on purpose, and `entity_light_pixels` exists
-specifically to catch a mob that stops agreeing with the terrain it stands on.
-Changing the curve changes the brightness of **every** partially-lit surface in
-the game simultaneously and would need every absolute-byte gate in the repo
-re-derived (`entity_light_pixels`, `entity_night_pixels`,
-`grass_light_response_gate`, `model_shade_gamma_gate`, the shell's HUD and
-container item gates). It also interacts with the already-scoped `SKY_LIGHT_COLOR`
-work above, which has to split this same scalar into separate sky and block
-contributions — the curve should be ported in that change, where `max(sky, block)`
-becomes `curve(sky)*skyFactor + curve(block)*1.4` and the two land together, not
-as a third partial step. Also unported and belonging to the same change:
-`BlockFactor = blockLightFlicker + 1.4` (torchlight flickers and exceeds 1.0) and
-`AmbientColor`.
+**How the ramp was eventually fixed.** In all three shaders and the Rust mirrors at
+once, because `model.wgsl`, `fluid.wgsl` and `entity.wgsl` compute the identical
+expression on purpose and `entity_light_pixels` exists specifically to catch a mob
+that stops agreeing with the terrain it stands on. What it cost, which gates moved,
+and which were unmoved because both curves are exactly `1.0` at full light is in
+[light-ramp.md](./light-ramp.md).
+
+Still unported, and belonging to the `SKY_LIGHT_COLOR` change above rather than to
+the curve: the **additive combine** (`curve(sky)*skyFactor + curve(block)*BlockFactor`
+where we still take `max`), `BlockFactor = blockLightFlicker + 1.4` (torchlight
+flickers and exceeds 1.0), and `AmbientColor` (black in the overworld, non-zero in
+the Nether/End). The combine cannot be done without the colour work: `BLOCK_LIGHT_TINT`
+is not white, so an additive combine makes the light term a `vec3`.
 
 ## Gates
 

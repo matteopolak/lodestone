@@ -21,13 +21,36 @@ struct Origin {
 //
 // `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
 // builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
-// literally would pin all terrain at the 0.2 floor. Vanilla's real range is
+// literally would render all sky-lit water pure black. Vanilla's real range is
 // [0.24, 1.0], so 0.0 is never legitimate.
 //
-// Only the sky half is scaled. Block light is a torch: it does not dim at dusk.
+// Only the sky half is scaled -- see `lightmap_term` below.
 fn sky_darken() -> f32 {
     let raw = camera.fog_end_enabled.z;
     return select(raw, 1.0, raw <= 0.0);
+}
+
+// Vanilla's lightmap, byte-for-byte the model shader's copy -- see
+// `model.wgsl`'s comments and `crate::light`'s module docs for the derivation
+// from `lightmap.fsh`. Duplicated because WGSL has no include; water sharing
+// terrain's exact curve is the point, since a fluid surface sits flush against
+// the blocks around it and any drift reads as a seam.
+fn light_brightness(level: f32) -> f32 {
+    return level / (4.0 - 3.0 * level);
+}
+
+fn not_gamma_grey(c: f32) -> f32 {
+    let inverted = 1.0 - c;
+    return 1.0 - inverted * inverted * inverted * inverted;
+}
+
+const BRIGHTNESS_FACTOR: f32 = 0.5;
+
+fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
+    let sky = light_brightness(sky_level) * sky_darken();
+    let block = light_brightness(block_level);
+    let c = clamp(max(sky, block), 0.0, 1.0);
+    return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -94,12 +117,11 @@ fn vs_main(
     let tint_idx = packed.y;
 
     let world = position + origin.section_origin.xyz;
-    let light_term = 0.2 + 0.8 * max(sky * sky_darken(), block);
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
-    out.shade = ao * light_term;
+    out.shade = ao * lightmap_term(sky, block);
     out.tinted = select(0.0, 1.0, tint_idx != 255u);
     out.anim_idx = packed.z;
     out.world = world;

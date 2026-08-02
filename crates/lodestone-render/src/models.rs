@@ -665,9 +665,11 @@ fn emit_baked_quad(mesh: &mut ModelMesh, quad: &BakedQuad, origin: [f32; 3], cor
 }
 
 /// The packed light byte a GUI item vertex carries: sky `15`, block `0`. The
-/// model shader's `0.2 + 0.8 * max(sky, block)` then evaluates to exactly `1.0`,
-/// so a GUI item is full-bright regardless of where the player is standing —
-/// which is what an inventory slot is.
+/// model shader's light term ([`crate::light`]) evaluates to exactly `1.0` at
+/// full light — `get_brightness(1) = 1` and `notGamma(1) = 1` — so a GUI item is
+/// full-bright regardless of where the player is standing, which is what an
+/// inventory slot is. That exactness is also why replacing the old linear ramp
+/// with vanilla's curve left every GUI-item gate byte-identical.
 pub const GUI_ITEM_LIGHT: u8 = 0xF0;
 
 /// Mesh one item's baked geometry into a GUI-ready [`ModelMesh`], posed by
@@ -1476,10 +1478,15 @@ mod tests {
     fn item_vertices_are_full_bright() {
         let m = mesh_item_quads(&full_cube(), Mat4::IDENTITY, GuiLight::Side);
         assert!(m.vertices.iter().all(|v| v.light == GUI_ITEM_LIGHT));
-        // The shader computes 0.2 + 0.8 * max(sky, block); sky 15 makes that 1.0.
+        // The shader runs `max(sky, block)` through vanilla's `lightmap.fsh`
+        // curve; sky 15 makes that exactly 1.0. Written out from the formula, not
+        // read from `crate::light`, so this stays an external anchor.
         let sky = f32::from(GUI_ITEM_LIGHT >> 4) / 15.0;
         let block = f32::from(GUI_ITEM_LIGHT & 0xF) / 15.0;
-        assert!((0.2 + 0.8 * sky.max(block) - 1.0).abs() < 1e-6);
+        let level = sky.max(block);
+        let curved = level / (4.0 - 3.0 * level);
+        let term = curved + ((1.0 - (1.0 - curved).powi(4)) - curved) * 0.5;
+        assert!((term - 1.0).abs() < 1e-6);
     }
 
     #[test]

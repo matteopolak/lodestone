@@ -54,6 +54,7 @@ pub mod fog;
 pub mod frame;
 pub mod gui_atlas;
 pub mod item_render;
+pub mod light;
 pub mod mesh;
 pub mod mesher;
 pub mod model_pipeline;
@@ -132,6 +133,10 @@ pub use gui_atlas::{GuiAtlas, GuiAtlasError, GuiSpriteQuad};
 pub use item_render::{
     GUI_DEPTH_HALF_RANGE, SCALE_LIMIT, TRANSLATION_LIMIT, UNITS_PER_BLOCK, display_matrix,
     gui_item_pose, gui_ortho,
+};
+pub use light::{
+    BRIGHTNESS_FACTOR, apply_brightness_option, brightness, light_term, light_term_from_levels,
+    not_gamma,
 };
 #[doc(no_inline)]
 pub use lodestone_assets::fluid::FluidState;

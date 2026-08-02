@@ -96,22 +96,26 @@ pub const UNDERWATER_TINT_ALPHA: f32 = 0.1;
 /// constant `4.0F` (`uvSize` in `submitWater`).
 pub const UNDERWATER_TILE_COUNT: f32 = 4.0;
 
-/// Vanilla's `Lightmap.getBrightness` is a per-dimension gamma-corrected
-/// curve table this codebase has not ported. This is the same approximation
-/// the block shader already applies to packed light
-/// (`model_pipeline.rs`'s `light_term = 0.2 + 0.8 * max(sky * sky_darken, block)`,
-/// minus the sky-darken factor this pass has no clock for): a floor so a
-/// fully dark cell does not tint pure black, rising linearly with the
-/// brighter of the two channels. Reused rather than invented, so the two
-/// gamma-adjacent quantities in this codebase agree on one curve shape.
+/// The lightmap value the underwater overlay is tinted by — vanilla's own
+/// curve, via [`crate::light::light_term`], so this pass and the terrain behind
+/// it cannot disagree about how bright the water is.
+///
+/// This used to be a local `0.2 + 0.8 * max(sky, block)` approximation with the
+/// comment "`Lightmap.getBrightness` is a per-dimension gamma-corrected curve
+/// table this codebase has not ported". It is ported now (see
+/// [`crate::light`]'s module docs), so the approximation is gone; note the
+/// consequence that a fully dark cell now tints **black** rather than at the
+/// retired `0.2` floor, which is what vanilla does.
+///
+/// `sky_darken` is passed as `1.0`: this pass has no clock, and the overlay is
+/// drawn over an already-darkened scene. Threading the real factor in is the
+/// remaining gap, and it is the same one `ScreenEffectRenderer` has for fog.
 ///
 /// `packed` is `sky << 4 | block`, the same encoding
 /// [`crate::entity`]'s light sampling already uses.
 #[must_use]
 pub fn underwater_brightness(packed_light: u8) -> f32 {
-    let sky = f32::from((packed_light >> 4) & 0x0F) / 15.0;
-    let block = f32::from(packed_light & 0x0F) / 15.0;
-    0.2 + 0.8 * sky.max(block)
+    crate::light::light_term(packed_light, 1.0)
 }
 
 /// Builds the underwater overlay's one NDC quad. `yaw_degrees`/`pitch_degrees`
@@ -552,10 +556,38 @@ impl ScreenEffectRenderer {
 mod tests {
     use super::*;
 
+    /// Re-derived from `lightmap.fsh` rather than from this function's output:
+    /// `get_brightness(0) = 0`, so a fully dark cell reaches **pure black** —
+    /// the retired `0.2` floor was invented here and has no vanilla counterpart.
+    /// `get_brightness(1) = 1` and `notGamma(1) = 1`, so full light is still
+    /// exactly `1.0`, which is why every full-bright overlay gate is unmoved.
     #[test]
-    fn underwater_brightness_floors_at_0_2_and_caps_at_1() {
-        assert!((underwater_brightness(0x00) - 0.2).abs() < 1e-6, "fully dark floors at 0.2");
+    fn underwater_brightness_reaches_black_and_caps_at_1() {
+        assert!(
+            underwater_brightness(0x00).abs() < 1e-6,
+            "a fully dark cell must reach 0.0 (vanilla has no floor), got {}",
+            underwater_brightness(0x00)
+        );
         assert!((underwater_brightness(0xFF) - 1.0).abs() < 1e-6, "fully lit reaches 1.0");
+    }
+
+    /// The interior of the curve, which is where the retired linear ramp was
+    /// wrong. Both hypotheses are written out; the measurement must land on
+    /// vanilla's. `level = 8/15`, `get_brightness = 0.2222`, `notGamma` mixed at
+    /// the default gamma of 0.5 gives `0.4281`; the retired ramp gave `0.6267`.
+    #[test]
+    fn underwater_brightness_follows_vanillas_curve_in_the_interior() {
+        let level: f32 = 8.0 / 15.0;
+        let curved = level / (4.0 - 3.0 * level);
+        let vanilla = curved + ((1.0 - (1.0 - curved).powi(4)) - curved) * 0.5;
+        let retired_ramp = 0.2 + 0.8 * level;
+        assert!((vanilla - 0.428_136).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!((retired_ramp - 0.626_667).abs() < 1e-5, "hypothesis drifted: {retired_ramp}");
+        assert!(
+            (underwater_brightness(0x80) - vanilla).abs() < 1e-5,
+            "sky 8 must tint at vanilla's {vanilla}, not the retired ramp's {retired_ramp}; got {}",
+            underwater_brightness(0x80)
+        );
     }
 
     #[test]

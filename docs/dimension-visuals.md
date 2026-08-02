@@ -172,11 +172,13 @@ regardless of dimension.
   (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/
   LightmapRenderStateExtractor.java`, `Lightmap.java`) where `skyFactor` is a
   *dimension/biome attribute*, not a function of time of day at all — and
-  reasoning from `model_pipeline.rs`'s own `light_term = 0.2 + 0.8 *
-  max(sky * sky_darken(), block)` formula, a `sky_light_factor` of `0.0` would
-  mean the End's sky exposure should contribute **nothing**, leaving every
-  sky-only-lit block at the shader's `0.2` ambient floor regardless of the
-  overworld's current time of day — the *opposite* of "pin to full daylight."
+  reasoning from `model.wgsl`'s own `lightmap_term` (see
+  [light-ramp.md](./light-ramp.md)), a `sky_light_factor` of `0.0` would mean the
+  End's sky exposure should contribute **nothing**, leaving every sky-only-lit
+  block **pure black** regardless of the overworld's current time of day — the
+  *opposite* of "pin to full daylight." (This used to say "at the shader's `0.2`
+  ambient floor"; that floor was vanilla-inauthentic and is gone. The End also
+  wants a non-zero `AmbientColor`, which we do not model — see light-ramp.md.)
 
   This is flagged rather than fixed: it would require either decoding the
   `dimension_type` registry entry (not done anywhere in this client — see
