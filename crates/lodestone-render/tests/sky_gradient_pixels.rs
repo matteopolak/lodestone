@@ -185,6 +185,18 @@ fn ray_through_pixel(camera: &Camera, x: u32, y: u32) -> glam::Vec3 {
 /// would be a gate failing on its own bad premise. Everything inside 90% of the
 /// inradius is unambiguously on the disc.
 fn expected_fog_value(camera: &Camera, x: u32, y: u32) -> Option<f32> {
+    expected_fog_value_at(camera, x, y, SKY_FOG_END_DISTANCE)
+}
+
+/// [`expected_fog_value`] for an explicit `sky_fog_end`, in blocks.
+///
+/// Issue #399 made the fog end a function of the render distance
+/// (`min(renderDistanceInBlocks, 512)`, `AtmosphericFogEnvironment.java:73`), so
+/// the expected value is no longer derivable from the disc's geometry alone. Note
+/// which half of that changed: the *disc* is still 512 blocks across and the
+/// membership test below is unchanged — only the divisor moves, which is why a
+/// shortened render distance saturates the outer disc rather than shrinking it.
+fn expected_fog_value_at(camera: &Camera, x: u32, y: u32, sky_fog_end: f32) -> Option<f32> {
     const DISC_Y: f32 = 16.0;
     let inradius = SKY_DISC_RADIUS * (22.5f32.to_radians()).cos() * 0.9;
     let dir = ray_through_pixel(camera, x, y);
@@ -195,7 +207,7 @@ fn expected_fog_value(camera: &Camera, x: u32, y: u32) -> Option<f32> {
     if hit.x.hypot(hit.z) > inradius {
         return None;
     }
-    Some((hit.length() / SKY_FOG_END_DISTANCE).clamp(0.0, 1.0))
+    Some((hit.length() / sky_fog_end).clamp(0.0, 1.0))
 }
 
 /// `mix(sky, fog, t)` in linear RGB, then quantised the way an `Rgba8Unorm`
@@ -231,6 +243,24 @@ fn gradient_error(
     fog: [f32; 3],
     tolerance: u8,
 ) -> (u8, String, usize, usize, String) {
+    gradient_error_at(pixels, camera, sky, fog, tolerance, SKY_FOG_END_DISTANCE)
+}
+
+/// [`gradient_error`] against a gradient that ends at an explicit `sky_fog_end`
+/// rather than at the attribute's 512-block default (issue #399).
+///
+/// Pointing this at the *wrong* fog end is what makes the two-render-distance
+/// gate below a magnitude measurement instead of a direction one: a frame drawn at
+/// render distance 8 must not merely "have a gradient", it must **fail** the
+/// render-distance-32 expectation.
+fn gradient_error_at(
+    pixels: &[u8],
+    camera: &Camera,
+    sky: [f32; 3],
+    fog: [f32; 3],
+    tolerance: u8,
+    sky_fog_end: f32,
+) -> (u8, String, usize, usize, String) {
     let mut worst = 0u8;
     let mut worst_report = "no pixels checked".to_string();
     let mut checked = 0usize;
@@ -238,7 +268,7 @@ fn gradient_error(
     let mut bad = 0usize;
     for y in 0..H {
         for x in 0..W {
-            let Some(t) = expected_fog_value(camera, x, y) else {
+            let Some(t) = expected_fog_value_at(camera, x, y, sky_fog_end) else {
                 continue;
             };
             checked += 1;
@@ -345,6 +375,187 @@ fn the_horizon_gradient_matches_the_per_pixel_fog_value() {
          most of the range in frame"
     );
     eprintln!("centre column spans fog value {min_t:.3}..{max_t:.3}");
+}
+
+// ---------------------------------------------------------------------------
+// 1b. Issue #399: the gradient's *end* is the render distance, not a constant
+// ---------------------------------------------------------------------------
+
+/// The two render distances this gate asserts at, in chunks, with the fog end each
+/// must produce in blocks.
+///
+/// Both `want_end` values are `Math.min(renderDistanceInChunks * 16, 512)` worked
+/// by hand from `AtmosphericFogEnvironment.java:73` plus
+/// `FogRenderer.java:185`/`:193` — **not** from
+/// `sky_fog_end_for_render_distance`, which is code under test here.
+///
+/// 8 and 32 are the pair that matters. 32 is the *only* render distance at which
+/// the pre-#399 constant `512` was correct, so a gate that asserted there alone
+/// would have passed against the bug; 8 is the client default, where the constant
+/// stretched the ramp by exactly `512 / 128 = 4`.
+const RD_CASES: [(u32, f32); 2] = [(8, 128.0), (32, 512.0)];
+
+/// **Issue #399's gate. Two render distances, because the defect was that the
+/// value did not vary with render distance at all** — asserting at one distance
+/// measures *whether* the disc has a gradient, never *how far* it runs, which is
+/// `CLAUDE.md`'s `magnitude` species.
+///
+/// For each render distance the shipped disc must match the per-pixel fog value
+/// derived from that pixel's own ray **and that distance's** fog end, and — the
+/// half that actually pins the magnitude — it must **badly fail** the *other*
+/// distance's expectation. The second measurement is the control, and it is
+/// intrinsic rather than bolted on: the pre-#399 shader produces the
+/// render-distance-32 frame for both cases, so the `RD 8` row's cross-check is
+/// literally the old behaviour being rejected.
+///
+/// # Why the tolerance is derived rather than shared
+///
+/// Any residual between this gate's hand-inverted ray and the rasteriser's own
+/// interpolation enters as an error in `hit.length()`, and the fragment divides
+/// that by `sky_fog_end` — so the same geometric residual shows up `512/128 = 4x`
+/// larger in the fog value at render distance 8 than at 32. The budget scales with
+/// it (`3` at RD 32, `12` at RD 8) rather than being one flat number that is
+/// either too tight near or too loose far. It is still far below the ~0.75 fog-value
+/// error the constant-512 bug produces over most of the disc.
+///
+/// # Not executed
+///
+/// This gate was **written but not run**: this session was told not to invoke
+/// cargo at all, so verification is batched into one workspace pass afterwards.
+/// The cross-check assertions below are controls that have **not** been watched
+/// firing. Treat the numbers in the doc comments here as derived, not measured.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_horizon_gradient_ends_at_the_render_distance_not_at_a_constant() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+
+    eprintln!("=== #399 gradient-end gate: two render distances ===");
+    for (chunks, want_end) in RD_CASES {
+        // The other row's fog end, i.e. the expectation this frame must fail.
+        let other_end = RD_CASES
+            .iter()
+            .map(|&(_, end)| end)
+            .find(|&end| end != want_end)
+            .expect("RD_CASES must hold two distinct fog ends or the cross-check is vacuous");
+        // See the doc comment: one geometric residual, scaled by 1/sky_fog_end.
+        let tolerance = (3.0 * SKY_FOG_END_DISTANCE / want_end).ceil() as u8;
+
+        // Noon, so the `SKY_COLOR`/`FOG_COLOR` multipliers are both `#ffffff` and
+        // the resolved colours are exactly the frame's inputs.
+        let frame = SkyFrame::new(6_000, DAY_SKY)
+            .with_fog_color(DAY_FOG)
+            .with_render_distance(chunks);
+        assert_eq!(
+            frame.sky_fog_end, want_end,
+            "SkyFrame::with_render_distance({chunks}) produced a fog end of {} where \
+             AtmosphericFogEnvironment.java:73 says min({chunks} * 16, 512) = {want_end}",
+            frame.sky_fog_end
+        );
+        let pixels = render(&ctx, &camera, &frame);
+
+        let (worst, report, checked, bad, bbox) =
+            gradient_error_at(&pixels, &camera, DAY_SKY, DAY_FOG, tolerance, want_end);
+        let (x_worst, x_report, _, x_bad, x_bbox) =
+            gradient_error_at(&pixels, &camera, DAY_SKY, DAY_FOG, tolerance, other_end);
+
+        eprintln!("--- render distance {chunks} chunks: fog end {want_end} blocks (tol {tolerance}) ---");
+        eprintln!("checked {checked} px on the disc; worst {worst}; {bad} outside tolerance");
+        eprintln!("worst pixel: {report}");
+        eprintln!("{bbox}");
+        eprintln!(
+            "cross-check vs the {other_end}-block expectation: worst {x_worst}, {x_bad} bad"
+        );
+        eprintln!("cross-check worst pixel: {x_report}");
+        eprintln!("{x_bbox}");
+
+        assert!(
+            checked > 4_000,
+            "only {checked} pixels landed on the disc at render distance {chunks} — the \
+             camera or the disc geometry moved and this row is measuring almost nothing"
+        );
+        assert_eq!(
+            bad, 0,
+            "at render distance {chunks} the disc does not match a gradient ending at \
+             {want_end} blocks. worst {worst}: {report}\n{bbox}"
+        );
+
+        // The magnitude half. Most of the disc must disagree with the other
+        // distance's ramp: every pixel whose *longer*-ramp fog value is below 1.0
+        // reads differently, which is everything above ~1.8 degrees of elevation.
+        assert!(
+            x_bad * 4 > checked,
+            "control failed to fail at render distance {chunks}: a disc whose gradient \
+             ends at {want_end} blocks must disagree with the {other_end}-block \
+             expectation across most of the disc, but only {x_bad} of {checked} pixels \
+             did (worst {x_worst}). If this ever passes, the fog end is not reaching the \
+             shader and the affirmative assertion above is satisfied by a constant"
+        );
+        assert!(
+            x_worst > 40,
+            "control failed to fail at render distance {chunks}: the wrong-fog-end \
+             expectation was off by at most {x_worst}/255, which is too close to agreement \
+             for the affirmative assertion to be evidence of anything"
+        );
+    }
+}
+
+/// **Control, NOT EXECUTED (no cargo run this session).** The pre-#399 shader: a
+/// disc whose fog end is the hardcoded 512-block attribute default regardless of
+/// render distance.
+///
+/// The gate above would pass on a shipped pass that merely *had* a gradient if
+/// both of its rows happened to be measured against the same end. This renders
+/// the old behaviour explicitly — by asking for render distance 8 and then
+/// **overriding** the fog end back to 512 — and requires the render-distance-8
+/// expectation to reject it. That is the bug, reproduced through the shipped
+/// pipeline, with one input changed.
+///
+/// It also proves the plumbing is live in the direction that matters: if
+/// `SkyFrame::sky_fog_end` were ignored (the island), this control and the RD-8
+/// row of the gate above would produce byte-identical frames and exactly one of
+/// them would have to fail.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn control_a_constant_512_block_fog_end_is_wrong_at_render_distance_8() {
+    let ctx = ctx();
+    let camera = horizon_camera(0.0);
+
+    // `with_sky_fog_end` after `with_render_distance`: ask for RD 8 and then put
+    // the old constant back, so this differs from the gate's first row in exactly
+    // one value.
+    let old = SkyFrame::new(6_000, DAY_SKY)
+        .with_fog_color(DAY_FOG)
+        .with_render_distance(8)
+        .with_sky_fog_end(SKY_FOG_END_DISTANCE);
+    assert_eq!(old.sky_fog_end, SKY_FOG_END_DISTANCE);
+    let pixels = render(&ctx, &camera, &old);
+
+    // Against the constant it came from, it must be right...
+    let (far_worst, far_report, checked, far_bad, _) =
+        gradient_error_at(&pixels, &camera, DAY_SKY, DAY_FOG, 3, SKY_FOG_END_DISTANCE);
+    // ...and against what render distance 8 actually calls for, badly wrong.
+    let (near_worst, near_report, _, near_bad, near_bbox) =
+        gradient_error_at(&pixels, &camera, DAY_SKY, DAY_FOG, 12, 128.0);
+
+    eprintln!("=== #399 gradient-end gate: constant-512 (pre-fix) control ===");
+    eprintln!("checked {checked} px");
+    eprintln!("vs 512-block expectation: worst {far_worst}, {far_bad} bad ({far_report})");
+    eprintln!("vs 128-block expectation: worst {near_worst}, {near_bad} bad ({near_report})");
+    eprintln!("{near_bbox}");
+
+    assert!(checked > 4_000, "control measured almost nothing: {checked} px");
+    assert_eq!(
+        far_bad, 0,
+        "the pass no longer honours an explicit 512-block fog end at all: {far_report}"
+    );
+    assert!(
+        near_bad * 4 > checked,
+        "control failed to fail: the pre-#399 constant must disagree with render \
+         distance 8's real gradient across most of the disc, but only {near_bad} of \
+         {checked} pixels did (worst {near_worst}) — which would mean the gate above \
+         cannot tell the fix from the bug"
+    );
 }
 
 /// **Control, EXECUTED.** Hand the shipped pass a fog colour *equal* to the sky

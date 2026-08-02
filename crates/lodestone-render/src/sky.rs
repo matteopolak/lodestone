@@ -396,9 +396,32 @@ pub fn moon_phase_index_for_time_of_day(time_of_day: i64) -> u8 {
 /// Sky-disc radius in blocks (vanilla `SkyRenderer.SKY_DISC_RADIUS`).
 pub const SKY_DISC_RADIUS: f32 = 512.0;
 
-/// Distance at which the sky disc has faded entirely into the fog colour, in
-/// blocks — `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s default (`512.0`,
-/// `EnvironmentAttributes.java:25-28`).
+/// The **upper bound** on the distance at which the sky disc has faded entirely
+/// into the fog colour, in blocks — `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s
+/// registered default (`512.0`, `EnvironmentAttributes.java:25-28`).
+///
+/// # This is a ceiling, not the value. Use [`sky_fog_end_for_render_distance`]
+///
+/// It was a plain constant here until issue #399, and that was wrong for every
+/// render distance below 32 chunks: vanilla clamps the attribute to the render
+/// distance before the shader ever sees it —
+///
+/// ```java
+/// fog.skyEnd = Math.min(renderDistance, camera.attributeProbe().getValue(EnvironmentAttributes.SKY_FOG_END_DISTANCE, partialTicks));
+/// ```
+///
+/// (`AtmosphericFogEnvironment.java:73`, where `renderDistance` is the
+/// `renderDistanceInBlocks = renderDistanceInChunks * 16` that
+/// `FogRenderer.setupFog` passes in at `FogRenderer.java:185`/`:193` — *blocks*,
+/// not chunks; the `/ 16.0F` at `AtmosphericFogEnvironment.java:44` is a
+/// different, chunk-space use of the same attribute for the fog/sky colour mix
+/// and is not this.)
+///
+/// So this constant is the value only at render distance 32 and above. At the
+/// common default of 8 chunks vanilla's gradient completes at **128** blocks,
+/// and shipping `512` there stretched the whole horizon ramp roughly 4x too far.
+/// The clamp is [`sky_fog_end_for_render_distance`]; the value travels to the
+/// shader on [`crate::SkyFrame::sky_fog_end`].
 ///
 /// # This is where vanilla's horizon-to-zenith gradient comes from
 ///
@@ -412,11 +435,17 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 /// ```
 ///
 /// so with `include/fog.glsl`'s definitions the disc's colour is
-/// `mix(sky_color, fog_color, clamp(dist / SKY_FOG_END_DISTANCE, 0, 1))` where
-/// `dist` is the camera-relative distance of the point being shaded. The disc
-/// sits at `y = 16` with radius `512`, so its centre is at distance `16`
-/// (fog factor `0.031`, essentially pure sky colour) and its rim at `512.25`
-/// (factor `1.0`, pure fog colour). That radial ramp *is* the gradient.
+/// `mix(sky_color, fog_color, clamp(dist / sky_end, 0, 1))` where `dist` is the
+/// camera-relative distance of the point being shaded and `sky_end` is
+/// [`sky_fog_end_for_render_distance`]. The disc sits at `y = 16` with radius
+/// `512`, so at render distance 32 (where `sky_end` is this constant) its centre
+/// is at distance `16` (fog factor `0.031`, essentially pure sky colour) and its
+/// rim at `512.25` (factor `1.0`, pure fog colour). That radial ramp *is* the
+/// gradient — and shortening `sky_end` does not change either endpoint's
+/// *colour*, only how few degrees of elevation the ramp is spread over: at
+/// render distance 8 the disc is already fully fog-coloured everywhere outside
+/// 128 blocks, i.e. below `asin(16/128) = 7.2` degrees of elevation rather than
+/// vanilla-at-RD-32's `1.79`.
 ///
 /// The second `apply_fog` term is provably dead for this geometry and is not
 /// implemented: `total_fog_value` takes the `max` of the spherical ramp and
@@ -438,6 +467,39 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 /// approximation of the radial gradient vanilla is describing, not a departure
 /// from it.
 pub const SKY_FOG_END_DISTANCE: f32 = 512.0;
+
+/// Where the sky disc's gradient actually ends, in blocks, for a render distance
+/// of `render_distance_chunks`: vanilla's
+/// `Math.min(renderDistanceInBlocks, SKY_FOG_END_DISTANCE)`
+/// (`AtmosphericFogEnvironment.java:73`).
+///
+/// Worked values, so the curve is legible without running it: RD 2 → 32; RD 4 →
+/// 64; RD 8 → **128**; RD 16 → 256; RD 32 → 512; RD 48 → 512 (clamped). The
+/// clamp only binds at and above 32 chunks, which is why the pre-#399 constant
+/// `512` looked right to whoever last checked it on a long view distance and was
+/// 4x too long at the client default.
+///
+/// A render distance of 0 chunks yields `0.0`, and a zero fog end is a division
+/// by zero in the ramp; `sky_disc.wgsl` floors the divisor rather than relying on
+/// no caller ever passing it, because the failure mode is a `NaN` whose `clamp`
+/// result is not specified by WGSL — the disc would go an arbitrary colour rather
+/// than the fully-fogged one that is the correct limit.
+#[must_use]
+pub fn sky_fog_end_for_render_distance(render_distance_chunks: u32) -> f32 {
+    sky_fog_end_for_render_distance_blocks(render_distance_chunks as f32 * 16.0)
+}
+
+/// [`sky_fog_end_for_render_distance`] for a view distance already expressed in
+/// **blocks** — vanilla's own parameter, since `FogRenderer.setupFog` converts to
+/// blocks (`renderDistanceInChunks * 16`, `FogRenderer.java:185`) before handing
+/// the value to the fog environment.
+///
+/// Negative inputs are floored at zero; nothing upstream produces one, but the
+/// alternative is propagating a negative divisor into the shader.
+#[must_use]
+pub fn sky_fog_end_for_render_distance_blocks(render_distance_blocks: f32) -> f32 {
+    render_distance_blocks.clamp(0.0, SKY_FOG_END_DISTANCE)
+}
 
 /// Camera-relative sky-disc triangle-fan positions: the centre plus 9
 /// perimeter points across `-180..=180` degrees in 45-degree steps (vanilla
@@ -1012,6 +1074,57 @@ mod tests {
         assert_eq!(moon_phase_index_for_time_of_day(24_000 * 7), 7);
         assert_eq!(moon_phase_index_for_time_of_day(24_000 * 8), 0);
         assert_eq!(moon_phase_index_for_time_of_day(24_000 * 8 + 12_000), 0);
+    }
+
+    /// Issue #399. Every expected value here is `Math.min(chunks * 16, 512)`
+    /// worked by hand from `AtmosphericFogEnvironment.java:73` +
+    /// `FogRenderer.java:185`, never by calling the function under test with a
+    /// rearranged argument.
+    #[test]
+    fn sky_fog_end_is_the_render_distance_clamped_to_the_attribute_default() {
+        assert_eq!(sky_fog_end_for_render_distance(2), 32.0);
+        assert_eq!(sky_fog_end_for_render_distance(4), 64.0);
+        assert_eq!(sky_fog_end_for_render_distance(8), 128.0);
+        assert_eq!(sky_fog_end_for_render_distance(16), 256.0);
+        // 32 chunks is where the clamp starts binding: the only render distance
+        // at which the pre-#399 constant was correct.
+        assert_eq!(sky_fog_end_for_render_distance(32), SKY_FOG_END_DISTANCE);
+        assert_eq!(sky_fog_end_for_render_distance(48), SKY_FOG_END_DISTANCE);
+        assert_eq!(sky_fog_end_for_render_distance(1_000), SKY_FOG_END_DISTANCE);
+    }
+
+    /// The bug this replaced was not "a wrong number" but "a number that did not
+    /// vary", so the property worth pinning is the *variation*, not any single
+    /// value — the `magnitude` species in `CLAUDE.md`'s table. A gate that only
+    /// checked RD 32 would have passed against the old constant.
+    #[test]
+    fn sky_fog_end_actually_varies_with_render_distance_below_the_clamp() {
+        let rd8 = sky_fog_end_for_render_distance(8);
+        let rd32 = sky_fog_end_for_render_distance(32);
+        assert!(
+            (rd32 / rd8 - 4.0).abs() < 1e-6,
+            "RD 32's gradient must end exactly 4x further out than RD 8's \
+             (512 vs 128), got {rd32} vs {rd8}"
+        );
+        assert_ne!(
+            rd8, SKY_FOG_END_DISTANCE,
+            "the clamp is inert: the attribute default is being used at RD 8, \
+             which is #399 unfixed"
+        );
+    }
+
+    /// Zero blocks must not become a `NaN` divisor path's excuse: the Rust side
+    /// reports the honest `0.0` and the shader floors it (see
+    /// `sky_fog_end_for_render_distance`'s doc).
+    #[test]
+    fn sky_fog_end_is_non_negative_and_never_exceeds_the_attribute_default() {
+        assert_eq!(sky_fog_end_for_render_distance(0), 0.0);
+        assert_eq!(sky_fog_end_for_render_distance_blocks(-1.0), 0.0);
+        assert_eq!(sky_fog_end_for_render_distance_blocks(128.0), 128.0);
+        assert_eq!(
+            sky_fog_end_for_render_distance_blocks(4_096.0),
+            SKY_FOG_END_DISTANCE
+        );
     }
 
     #[test]

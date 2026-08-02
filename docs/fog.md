@@ -129,17 +129,27 @@ Both gaps need a wider `FogUniform` **and** an edit inside three shader bodies
    `spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical`; if
    the shaders gain cylindrical distance, that test fails and points here.
 
-3. **The sky disc's own fog end ignores the render distance.** Not strictly this
-   ramp, but found while measuring it and the same class of mistake.
-   `sky::SKY_FOG_END_DISTANCE` is a constant `512.0`, taken from
-   `SKY_FOG_END_DISTANCE`'s *registered default*. Vanilla clamps it:
-   `fog.skyEnd = min(renderDistance, attr)`
-   (`AtmosphericFogEnvironment.java:73`), so at render distance 8 vanilla's
-   horizon gradient completes at **128** blocks, not 512 — a far more compressed
-   ramp than this client draws. The same `skyFogEnd` also feeds
-   `getBaseColor`'s `skyColorMixFactor` (`:44-47`), so the disc's *colour* is
-   render-distance-dependent too. Owned by `sky.rs`/`sky_pipeline.rs`, so #388
-   left it alone.
+3. **The sky disc's colour mix still ignores the render distance** — *not* its
+   gradient end, which #399 fixed. Filed from here because it was found while
+   measuring this ramp and is the same class of mistake.
+
+   What is fixed: `sky::SKY_FOG_END_DISTANCE` was a constant `512.0`, taken from
+   the attribute's *registered default*, where vanilla clamps it —
+   `fog.skyEnd = min(renderDistanceInBlocks, attr)`
+   (`AtmosphericFogEnvironment.java:73`). At render distance 8 vanilla's horizon
+   gradient completes at **128** blocks, not 512, so the ramp was stretched 4x.
+   It is now `sky::sky_fog_end_for_render_distance`, carried per frame on
+   `SkyFrame::sky_fog_end` and per vertex into `sky_disc.wgsl` — see
+   `docs/sky-and-air-bubbles.md`.
+
+   What is not: the same `skyFogEnd` also feeds `getBaseColor`'s
+   `skyColorMixFactor` (`AtmosphericFogEnvironment.java:44-47`), a
+   `1 - pow(clampedLerp(skyFogEnd/32, 0.25, 1), 0.25)` blend of fog colour
+   toward sky colour — so the disc's *colour*, not just its ramp length, is
+   render-distance-dependent in vanilla. Note `:44` divides the attribute by 16
+   and compares against the render distance in **chunks**, which is a different
+   quantity from `:73`'s blocks; reading the two as one expression is how this
+   entry was nearly written backwards.
 
 `FogUniform` has exactly two free lanes today (`eye.w` and `end_enabled.w` —
 `end_enabled.z` is the sky-darken factor), which is enough for an

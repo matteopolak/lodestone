@@ -81,17 +81,19 @@ pub type StarVertex = SkyVertex;
 /// fan's own centre-to-rim alpha ramp pre-multiplied into `color`.
 pub type SunriseVertex = SkyVertex;
 
-/// A sky-disc vertex: camera-relative position plus **both** ends of the
-/// horizon gradient.
+/// A sky-disc vertex: camera-relative position, **both** ends of the horizon
+/// gradient, and the distance the gradient takes to get there.
 ///
 /// The disc carries two colours rather than one because the gradient is
 /// evaluated per fragment (see [`crate::sky::SKY_FOG_END_DISTANCE`] for the vanilla
 /// derivation and why per-fragment rather than vanilla's per-vertex): the
-/// fragment shader needs the sky colour, the fog colour, and the interpolated
-/// camera-relative position, and reads the fade distance from a shader `const`.
-/// Both colours are identical across all ten vertices — they are attributes
-/// rather than a uniform purely to avoid adding a second bind group to a pass
-/// whose whole design note is staying far under the 4-group floor.
+/// fragment shader needs the sky colour, the fog colour, the interpolated
+/// camera-relative position, and the fade distance.
+/// All three non-positional attributes are identical across all ten vertices —
+/// they are attributes rather than a uniform purely to avoid adding a second bind
+/// group to a pass whose whole design note is staying far under the 4-group
+/// floor. `fog_end` joined them for the same reason in issue #399, when it
+/// stopped being a shader `const`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct SkyDiscVertex {
@@ -101,7 +103,24 @@ pub struct SkyDiscVertex {
     pub color: [f32; 4],
     /// The horizon end of the gradient: the fog colour, linear RGBA.
     pub fog_color: [f32; 4],
+    /// Distance in blocks at which the gradient has reached
+    /// [`fog_color`](Self::fog_color) outright — vanilla's `fog.skyEnd`, i.e.
+    /// [`crate::sky::sky_fog_end_for_render_distance`]. Not a constant: see
+    /// [`SkyFrame::sky_fog_end`].
+    pub fog_end: f32,
 }
+
+/// [`SkyDiscVertex`]'s vertex attributes, at module scope rather than inside
+/// [`SkyDiscPipeline::new`] so that
+/// `the_disc_vertex_layout_covers_the_whole_vertex` checks **the array the
+/// pipeline is built from** instead of a copy of it. A copy would agree with
+/// itself while a field added to the struct went unread by the shader.
+const DISC_ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+    0 => Float32x3,
+    1 => Float32x4,
+    2 => Float32x4,
+    3 => Float32,
+];
 
 /// A celestial-billboard (sun or moon) vertex: camera-relative position plus
 /// an atlas UV.
@@ -432,17 +451,12 @@ impl SkyDiscPipeline {
         color_format: wgpu::TextureFormat,
         camera_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        const ATTRS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
-            0 => Float32x3,
-            1 => Float32x4,
-            2 => Float32x4,
-        ];
         let pipeline = build_pipeline(
             device,
             "lodestone-sky-disc-pipeline",
             SKY_DISC_WGSL,
             &[camera_layout],
-            vertex_layout(std::mem::size_of::<SkyDiscVertex>() as u64, &ATTRS),
+            vertex_layout(std::mem::size_of::<SkyDiscVertex>() as u64, &DISC_ATTRS),
             color_format,
             None,
         );
@@ -728,6 +742,27 @@ pub struct SkyFrame {
     /// Where the world bottom is and how far up the void darkening reaches.
     /// [`VoidFog::DISABLED`] to turn it off.
     pub void_fog: VoidFog,
+    /// Distance in blocks over which the disc runs from
+    /// [`day_sky_color`](Self::day_sky_color) to
+    /// [`day_fog_color`](Self::day_fog_color) — vanilla's `fog.skyEnd`.
+    ///
+    /// **This is a function of the player's render distance, not a constant**
+    /// (issue #399). Set it with
+    /// [`with_render_distance`](Self::with_render_distance), which applies
+    /// `AtmosphericFogEnvironment.java:73`'s
+    /// `min(renderDistanceInBlocks, SKY_FOG_END_DISTANCE)`. It is *not* the
+    /// disc's radius, which stays [`crate::sky::SKY_DISC_RADIUS`]: shortening
+    /// this saturates the outer part of the same disc to the fog colour rather
+    /// than shrinking the geometry, so the horizon end stays the fog colour and
+    /// only the number of degrees of elevation the ramp occupies changes.
+    ///
+    /// [`SkyFrame::new`] leaves it at [`crate::sky::SKY_FOG_END_DISTANCE`], which
+    /// is the attribute's registered default and therefore correct at render
+    /// distance 32 and above. A caller that knows the render distance and does not
+    /// say so gets a gradient stretched by `512 / (rd_chunks * 16)`, which at the
+    /// client default of 8 chunks is 4x — the whole of #399. Prefer
+    /// `with_render_distance` at every site that has the number.
+    pub sky_fog_end: f32,
 }
 
 impl SkyFrame {
@@ -741,6 +776,7 @@ impl SkyFrame {
             day_sky_color,
             day_fog_color: day_sky_color,
             void_fog: VoidFog::DISABLED,
+            sky_fog_end: crate::sky::SKY_FOG_END_DISTANCE,
         }
     }
 
@@ -749,6 +785,29 @@ impl SkyFrame {
     #[must_use]
     pub fn with_fog_color(mut self, day_fog_color: [f32; 3]) -> Self {
         self.day_fog_color = day_fog_color;
+        self
+    }
+
+    /// Sets [`sky_fog_end`](Self::sky_fog_end) from the player's render distance
+    /// in chunks, via [`crate::sky::sky_fog_end_for_render_distance`] — the
+    /// builder every caller that knows the render distance should use (issue
+    /// #399).
+    #[must_use]
+    pub fn with_render_distance(mut self, render_distance_chunks: u32) -> Self {
+        self.sky_fog_end = crate::sky::sky_fog_end_for_render_distance(render_distance_chunks);
+        self
+    }
+
+    /// Sets [`sky_fog_end`](Self::sky_fog_end) in blocks directly, already
+    /// clamped to [`crate::sky::SKY_FOG_END_DISTANCE`].
+    ///
+    /// For a caller holding a view distance in blocks rather than chunks (and for
+    /// gates that want to state the distance outright). Prefer
+    /// [`with_render_distance`](Self::with_render_distance) when the chunk count
+    /// is what is actually known, so the `* 16` lives in one place.
+    #[must_use]
+    pub fn with_sky_fog_end(mut self, sky_fog_end_blocks: f32) -> Self {
+        self.sky_fog_end = crate::sky::sky_fog_end_for_render_distance_blocks(sky_fog_end_blocks);
         self
     }
 
@@ -1085,12 +1144,17 @@ impl SkyRenderer {
         // the disc into un-drawn clear colour" edge vanilla's dark disc
         // exists to fix, at the cost of not matching being underground with
         // sky access exactly — see the report for this explicit omission).
+        //
+        // `fog_end` is the same on all ten vertices; the fragment stage divides
+        // by it, so a shortened render distance saturates the outer disc to the
+        // fog colour rather than moving any geometry (issue #399).
         let disc_verts: Vec<SkyDiscVertex> = sky_disc_positions(16.0)
             .into_iter()
             .map(|position| SkyDiscVertex {
                 position,
                 color: sky_color4,
                 fog_color: fog_color4,
+                fog_end: frame.sky_fog_end,
             })
             .collect();
         queue.write_buffer(&self.disc_vbuf, 0, bytemuck::cast_slice(&disc_verts));
@@ -1241,5 +1305,91 @@ impl SkyRenderer {
         pass.set_vertex_buffer(0, self.cloud_vbuf.slice(..));
         pass.set_index_buffer(self.cloud_ibuf.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..6, 0, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #399's anti-island check, and the only one in the tree that needs no
+    /// GPU adapter: the render distance can only reach the disc if the *shader*
+    /// takes it as a vertex input. A `SkyFrame` field, a builder and a vertex
+    /// struct field can all be correct while `sky_disc.wgsl` still divides by its
+    /// old `const`, and every one of those would compile.
+    #[test]
+    fn the_disc_shader_takes_the_fog_end_as_a_vertex_input() {
+        assert!(
+            SKY_DISC_WGSL.contains("@location(3) fog_end: f32"),
+            "sky_disc.wgsl no longer declares the fog end as vertex attribute 3, \
+             so `SkyFrame::sky_fog_end` reaches no pixel"
+        );
+        assert!(
+            SKY_DISC_WGSL.contains("in.fog_end"),
+            "sky_disc.wgsl declares the fog-end attribute but its fragment stage \
+             does not read it — an attribute the ramp ignores"
+        );
+        // Name-independent: any reintroduced 512-block literal, under any
+        // identifier, would shadow the attribute and make the render distance
+        // inert while every Rust-side test above still passed. The shader's own
+        // comments say "512 blocks" and "512-block rim", never "512.0", so this
+        // needle matches only a float literal.
+        assert!(
+            !SKY_DISC_WGSL.contains("512.0"),
+            "sky_disc.wgsl has regained a 512.0 literal — the hardcoded fog end \
+             that #399 replaced. The value must come from the vertex attribute"
+        );
+    }
+
+    /// [`DISC_ATTRS`] must describe the **whole** vertex, because the stride
+    /// passed to `vertex_layout` is `size_of::<SkyDiscVertex>()` while the
+    /// attributes are written by hand: a field added to the struct without a
+    /// matching attribute compiles, uploads, and is simply never read by the
+    /// shader — the exact shape of an island. This is what `Pod` does not check.
+    #[test]
+    fn the_disc_vertex_layout_covers_the_whole_vertex() {
+        // position (12) + color (16) + fog_color (16) + fog_end (4).
+        assert_eq!(std::mem::size_of::<SkyDiscVertex>(), 48);
+        assert_eq!(std::mem::align_of::<SkyDiscVertex>(), 4);
+
+        let last = DISC_ATTRS
+            .last()
+            .expect("the disc vertex has attributes at all");
+        assert_eq!(
+            last.offset + last.format.size(),
+            std::mem::size_of::<SkyDiscVertex>() as u64,
+            "DISC_ATTRS stops at byte {} but the vertex is {} bytes: the trailing \
+             field is uploaded and never read",
+            last.offset + last.format.size(),
+            std::mem::size_of::<SkyDiscVertex>()
+        );
+        // And the locations must be dense from 0, since the shader names them.
+        for (i, attr) in DISC_ATTRS.iter().enumerate() {
+            assert_eq!(attr.shader_location, i as u32);
+        }
+    }
+
+    /// `new` must stay at the attribute's registered default so that the
+    /// pre-#399 behaviour is exactly recoverable, and `with_render_distance` must
+    /// be the thing that changes it.
+    #[test]
+    fn sky_frame_carries_a_render_distance_derived_fog_end() {
+        let default = SkyFrame::new(6_000, [0.2, 0.4, 0.8]);
+        assert_eq!(default.sky_fog_end, crate::sky::SKY_FOG_END_DISTANCE);
+
+        // Hand-derived from `AtmosphericFogEnvironment.java:73`, not from the
+        // helper: min(8 * 16, 512) and min(32 * 16, 512).
+        assert_eq!(default.with_render_distance(8).sky_fog_end, 128.0);
+        assert_eq!(default.with_render_distance(32).sky_fog_end, 512.0);
+        // The builders must not disturb anything else on the frame.
+        let tuned = SkyFrame::new(6_000, [0.2, 0.4, 0.8])
+            .with_fog_color([0.7, 0.6, 0.45])
+            .with_render_distance(8);
+        assert_eq!(tuned.day_fog_color, [0.7, 0.6, 0.45]);
+        assert_eq!(tuned.day_sky_color, [0.2, 0.4, 0.8]);
+        assert_eq!(tuned.time_of_day, 6_000);
+        // And the blocks-space builder clamps rather than trusting its caller.
+        assert_eq!(default.with_sky_fog_end(4_096.0).sky_fog_end, 512.0);
+        assert_eq!(default.with_sky_fog_end(128.0).sky_fog_end, 128.0);
     }
 }
