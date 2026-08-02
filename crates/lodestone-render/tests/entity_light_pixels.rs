@@ -49,17 +49,20 @@ const TEXEL: u8 = 128;
 
 /// Full sky light (`sky = 15`, `block = 0`) packed as the shader reads it.
 const LIGHT_FULL: u8 = 15 << 4;
-/// No light at all. Under vanilla's curve this is exactly `0.0` — the retired
-/// `0.2 + 0.8 * l` ramp's floor is gone — so a frame at this level is **black**
-/// and every *ratio* taken against it is degenerate. Kept for the census and for
-/// [`the_light_floor_is_gone`], which is the one assertion that wants it.
+/// No light at all. `get_brightness(0)` is `0`, but vanilla's `AmbientColor` floor
+/// (`0x0A0A0A` in the overworld) puts this at `0.0935` rather than pure black —
+/// which is what makes a *ratio* against it meaningful. It would have been
+/// degenerate against a zero floor: `0.000` under any darkening build, including
+/// one that draws nothing.
+/// See [`the_light_floor_is_vanillas_ambient_and_not_the_retired_ramps`].
 const LIGHT_DARK: u8 = 0;
-/// Half-ish sky light (`sky = 7`, `block = 0`), which is where the two candidate
-/// curves actually disagree: vanilla's `get_brightness(7/15)` is `0.17949`, and
-/// mixing `notGamma` in at the default gamma of `0.5` gives `0.36312`, against
-/// the retired ramp's `0.2 + 0.8 * 0.46667 = 0.57333`. Both curves are exactly
-/// `1.0` at [`LIGHT_FULL`] and exactly equal at nothing else, so the interior is
-/// the only place a gate can tell them apart.
+/// Half-ish sky light (`sky = 7`, `block = 0`), which is where the candidate
+/// curves actually disagree: vanilla's `get_brightness(7/15)` is `0.17949`, plus
+/// the overworld's `AmbientColor` of `0.03922`, and mixing `notGamma` in at the
+/// default gamma of `0.5` gives `0.42307` — against `0.36312` if `AmbientColor` is
+/// dropped, and the retired ramp's `0.2 + 0.8 * 0.46667 = 0.57333`. Every
+/// candidate is exactly `1.0` at [`LIGHT_FULL`] and equal nowhere else, so the
+/// interior is the only place a gate can tell them apart.
 const LIGHT_DIM: u8 = 7 << 4;
 
 /// Sky colour behind the mob; nothing else in the entity frame is this colour,
@@ -500,21 +503,29 @@ fn lighting_census_by_location() {
 /// All three are arithmetic on `lightmap.fsh` and `Options.java:900`, written out
 /// below rather than read back from `lodestone_render::light`.
 ///
-/// * [`LIT_RATIO`] — the correct one. At [`LIGHT_DIM`] the combined level is
-///   `7/15`, `get_brightness` gives `0.17949`, and `notGamma` mixed in at the
-///   default gamma of `0.5` gives **0.36312**. Full light is exactly `1.0`, so
+/// * [`LIT_RATIO`] — the correct one. At [`LIGHT_DIM`] the level is `7/15`,
+///   `get_brightness` gives `0.17949`, the overworld's `AmbientColor` of `10/255`
+///   adds `0.03922`, and `notGamma` mixed in at the default gamma of `0.5` gives
+///   **0.42307**. Full light is exactly `1.0` (ambient clamps away up there), so
 ///   that is the ratio.
+/// * [`AMBIENT_FREE_RATIO`] — the same chain with `AmbientColor` dropped as a
+///   believed no-op, which is what this file first shipped: **0.36312**.
 /// * [`OLD_RAMP_RATIO`] — the retired `0.2 + 0.8 * l` ramp: **0.57333**.
 /// * [`FULLBRIGHT_RATIO`] — the original defect, in which the shader ignored
 ///   world light entirely and both frames rendered identically: **1.0**.
 ///
-/// The band admits only the first. Note the measurement is a plain byte ratio
-/// because the shade multiply happens in gamma space against an sRGB target, so
-/// the transfer functions cancel.
-const LIT_RATIO: f32 = 0.363_12;
+/// The band admits only the first. It has to be *tight*, because the ambient-free
+/// hypothesis is only `0.06` away — the closest wrong answer this gate has ever
+/// had to separate, and the reason a loose band would have let the dropped
+/// `AmbientColor` through unnoticed.
+///
+/// Note the measurement is a plain byte ratio because the shade multiply happens
+/// in gamma space against an sRGB target, so the transfer functions cancel.
+const LIT_RATIO: f32 = 0.423_07;
+const AMBIENT_FREE_RATIO: f32 = 0.363_12;
 const OLD_RAMP_RATIO: f32 = 0.573_33;
 const FULLBRIGHT_RATIO: f32 = 1.0;
-const BAND: std::ops::RangeInclusive<f32> = 0.345..=0.382;
+const BAND: std::ops::RangeInclusive<f32> = 0.406..=0.440;
 
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly to watch the negative control fire"]
@@ -544,30 +555,42 @@ fn a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight() {
     // Both wrong hypotheses must sit outside the band, asserted rather than
     // asserted-about: a band wide enough to admit either measures nothing.
     assert!(
-        !BAND.contains(&OLD_RAMP_RATIO) && !BAND.contains(&FULLBRIGHT_RATIO),
-        "the band {BAND:?} admits a wrong hypothesis ({OLD_RAMP_RATIO:.3} or \
-         {FULLBRIGHT_RATIO:.3}), so this gate cannot see which curve is installed"
+        BAND.contains(&LIT_RATIO)
+            && !BAND.contains(&AMBIENT_FREE_RATIO)
+            && !BAND.contains(&OLD_RAMP_RATIO)
+            && !BAND.contains(&FULLBRIGHT_RATIO),
+        "the band {BAND:?} must admit {LIT_RATIO:.3} and reject every wrong hypothesis \
+         ({AMBIENT_FREE_RATIO:.3}, {OLD_RAMP_RATIO:.3}, {FULLBRIGHT_RATIO:.3}), or this \
+         gate cannot see which curve is installed"
     );
     assert!(
         BAND.contains(&ratio),
         "a mob at sky 7 must render at {LIT_RATIO:.3} of its sunlit brightness (vanilla's \
-         `get_brightness` plus `notGamma`), got {ratio:.3} (sunlit {sunlit:.1}, dim {dim:.1}); \
-         {OLD_RAMP_RATIO:.3} is the retired linear ramp and {FULLBRIGHT_RATIO:.3} means entities \
-         ignore world light entirely"
+         `get_brightness` plus `AmbientColor` plus `notGamma`), got {ratio:.3} (sunlit \
+         {sunlit:.1}, dim {dim:.1}); {AMBIENT_FREE_RATIO:.3} means `AmbientColor` was \
+         dropped, {OLD_RAMP_RATIO:.3} is the retired linear ramp, and \
+         {FULLBRIGHT_RATIO:.3} means entities ignore world light entirely"
     );
 }
 
-/// **The `0.2` floor is gone.** Issue #386 named that floor as the mechanism: a
-/// hard 20% minimum no darkening could go below, where vanilla's
-/// `get_brightness(0)` is `0` and `notGamma(0)` is `0`. So a mob at light 0 must
-/// render **pure black**, not at 20% of daylight.
+/// **The `0.2` floor is replaced by vanilla's, which is `0.0935` — not zero.**
 ///
-/// This is an assertion about an extreme, which is exactly the kind that passes
-/// vacuously if nothing drew — hence the two controls: the sunlit frame must
-/// cover the same silhouette, and it must be far from black.
+/// Issue #386 named the `0.2` floor as the mechanism and was right, but the first
+/// fix overshot: `get_brightness(0)` is indeed `0`, yet `lightmap.fsh` seeds its
+/// accumulator with `max(AmbientColor, nightVisionColor)` *before* adding either
+/// light half, and the overworld's `AMBIENT_LIGHT_COLOR` is `0x0A0A0A`
+/// (`DimensionTypes.java:36`), not black. After the `notGamma` mix an unlit
+/// surface reads `0.0935`. So a mob at light 0 is *very dark but not black*.
+///
+/// This asserts a **band**, because there are three live hypotheses and a
+/// one-sided assertion cannot separate them: `0.200` is the retired ramp, `0.000`
+/// is ambient dropped, `0.0935` is vanilla. Plus the two controls — the sunlit
+/// frame must cover the same silhouette, and it must be far from black — because
+/// an assertion about a near-black extreme is exactly the kind that passes
+/// vacuously when nothing drew.
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly"]
-fn the_light_floor_is_gone() {
+fn the_light_floor_is_vanillas_ambient_and_not_the_retired_ramps() {
     let Some(gpu) = setup() else {
         panic!("entity_light_pixels: no GPU adapter; this test is #[ignore]d so a missing one is a failure")
     };
@@ -575,12 +598,23 @@ fn the_light_floor_is_gone() {
     let (_, sunlit_max, sunlit, sunlit_px) = mob_stats(&mob_frame(&gpu, LIGHT_FULL));
     let (_, dark_max, dark, dark_px) = mob_stats(&mob_frame(&gpu, LIGHT_DARK));
 
-    println!("=== THE 0.2 FLOOR IS GONE ===");
+    // The three hypotheses, as ratios of the sunlit mean. `shade` multiplies
+    // gamma bytes (vanilla is not colour-managed), so a light-term ratio is a
+    // pixel ratio.
+    const VANILLA_FLOOR: f32 = 0.093_545_4;
+    const RETIRED_RAMP_FLOOR: f32 = 0.2;
+    const AMBIENT_DROPPED: f32 = 0.0;
+    const BAND: std::ops::RangeInclusive<f32> = 0.06..=0.14;
+
+    println!("=== THE LIGHT FLOOR IS VANILLA'S AMBIENT, NOT 0.2 AND NOT 0.0 ===");
     println!("mob at sky 15: mean {sunlit:.1} max {sunlit_max} over {sunlit_px}px");
     println!("mob at light 0: mean {dark:.1} max {dark_max} over {dark_px}px");
     println!(
-        "the retired ramp floored this at 0.2 of daylight, i.e. a mean near {:.1}",
-        sunlit * 0.2
+        "expected mean near {:.1} (vanilla {VANILLA_FLOOR:.4}); {:.1} would be the \
+         retired ramp's {RETIRED_RAMP_FLOOR}, and near 0 would mean AmbientColor was \
+         dropped",
+        sunlit * VANILLA_FLOOR,
+        sunlit * RETIRED_RAMP_FLOOR
     );
 
     // Control: the mob is still there and still drawing, so a black readback is
@@ -595,12 +629,27 @@ fn the_light_floor_is_gone() {
         "control's premise is false: the sunlit frame is nearly black too ({sunlit_max}), so \
          the assertion below would pass under a build that draws nothing visible"
     );
+    // The band must not admit any wrong hypothesis, or this gate cannot see which
+    // floor is installed. Asserted, not described.
     assert!(
-        dark_max <= 1,
-        "a mob at light 0 must be pure black (vanilla's curve reaches 0.0), but its brightest \
-         pixel is {dark_max} and its mean {dark:.1}. A mean near {:.1} is the retired ramp's \
-         0.2 floor, which is the mechanism issue #386 named",
-        sunlit * 0.2
+        !BAND.contains(&RETIRED_RAMP_FLOOR) && !BAND.contains(&AMBIENT_DROPPED),
+        "the band {BAND:?} admits a wrong hypothesis ({RETIRED_RAMP_FLOOR} or \
+         {AMBIENT_DROPPED}), so this gate proves nothing"
+    );
+    assert!(
+        BAND.contains(&VANILLA_FLOOR),
+        "the band {BAND:?} excludes vanilla's own {VANILLA_FLOOR}"
+    );
+
+    let ratio = dark / sunlit;
+    assert!(
+        BAND.contains(&ratio),
+        "a mob at light 0 must render at {VANILLA_FLOOR:.4} of its sunlit brightness — \
+         vanilla's `AmbientColor` floor of 0x0A0A0A after the `notGamma` mix — but the \
+         ratio is {ratio:.4} (sunlit mean {sunlit:.1}, dark mean {dark:.1}, dark max \
+         {dark_max}). {RETIRED_RAMP_FLOOR} is the retired linear ramp; near \
+         {AMBIENT_DROPPED} means AmbientColor was dropped and caves render \
+         absolutely black"
     );
 }
 

@@ -556,36 +556,54 @@ impl ScreenEffectRenderer {
 mod tests {
     use super::*;
 
-    /// Re-derived from `lightmap.fsh` rather than from this function's output:
-    /// `get_brightness(0) = 0`, so a fully dark cell reaches **pure black** —
-    /// the retired `0.2` floor was invented here and has no vanilla counterpart.
-    /// `get_brightness(1) = 1` and `notGamma(1) = 1`, so full light is still
-    /// exactly `1.0`, which is why every full-bright overlay gate is unmoved.
+    /// Re-derived from `lightmap.fsh` rather than from this function's output.
+    ///
+    /// `get_brightness(0) = 0`, but a fully dark cell is **not** pure black:
+    /// vanilla seeds the accumulator with `AmbientColor`, which the overworld sets
+    /// to `0x0A0A0A` (`DimensionTypes.java:36`), giving `0.0935` after the
+    /// `notGamma` mix. This test previously asserted `0.0` on the strength of the
+    /// claim that "vanilla has no floor" — the retired `0.2` floor was indeed
+    /// invented, but the correct replacement was a *smaller* floor, not none.
+    /// `get_brightness(1) = 1` and `notGamma(1) = 1` and the ambient term clamps
+    /// away, so full light is still exactly `1.0` and every full-bright overlay
+    /// gate is unmoved.
     #[test]
-    fn underwater_brightness_reaches_black_and_caps_at_1() {
+    fn underwater_brightness_reaches_the_ambient_floor_and_caps_at_1() {
+        let ambient = 10.0_f32 / 255.0;
+        let expected = ambient + ((1.0 - (1.0 - ambient).powi(4)) - ambient) * 0.5;
+        assert!((expected - 0.093_545).abs() < 1e-5, "hypothesis drifted: {expected}");
         assert!(
-            underwater_brightness(0x00).abs() < 1e-6,
-            "a fully dark cell must reach 0.0 (vanilla has no floor), got {}",
+            (underwater_brightness(0x00) - expected).abs() < 1e-6,
+            "a fully dark cell must reach vanilla's ambient floor {expected}, not pure \
+             black and not the retired ramp's 0.2; got {}",
             underwater_brightness(0x00)
         );
         assert!((underwater_brightness(0xFF) - 1.0).abs() < 1e-6, "fully lit reaches 1.0");
     }
 
     /// The interior of the curve, which is where the retired linear ramp was
-    /// wrong. Both hypotheses are written out; the measurement must land on
-    /// vanilla's. `level = 8/15`, `get_brightness = 0.2222`, `notGamma` mixed at
-    /// the default gamma of 0.5 gives `0.4281`; the retired ramp gave `0.6267`.
+    /// wrong. All three hypotheses are written out; the measurement must land on
+    /// vanilla's. `level = 8/15`, `get_brightness = 0.2222`, plus the overworld
+    /// ambient `10/255`, `notGamma` mixed at the default gamma of 0.5 gives
+    /// `0.4819`. Dropping ambient gives `0.4281` and the retired ramp `0.6267`.
     #[test]
     fn underwater_brightness_follows_vanillas_curve_in_the_interior() {
         let level: f32 = 8.0 / 15.0;
         let curved = level / (4.0 - 3.0 * level);
-        let vanilla = curved + ((1.0 - (1.0 - curved).powi(4)) - curved) * 0.5;
+        let mix = |c: f32| c + ((1.0 - (1.0 - c).powi(4)) - c) * 0.5;
+        let vanilla = mix(curved + 10.0 / 255.0);
+        let ambient_free = mix(curved);
         let retired_ramp = 0.2 + 0.8 * level;
-        assert!((vanilla - 0.428_136).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!((vanilla - 0.481_948).abs() < 1e-5, "hypothesis drifted: {vanilla}");
+        assert!(
+            (ambient_free - 0.428_136).abs() < 1e-5,
+            "hypothesis drifted: {ambient_free}"
+        );
         assert!((retired_ramp - 0.626_667).abs() < 1e-5, "hypothesis drifted: {retired_ramp}");
         assert!(
             (underwater_brightness(0x80) - vanilla).abs() < 1e-5,
-            "sky 8 must tint at vanilla's {vanilla}, not the retired ramp's {retired_ramp}; got {}",
+            "sky 8 must tint at vanilla's {vanilla} -- not the retired ramp's \
+             {retired_ramp} and not the ambient-free {ambient_free}; got {}",
             underwater_brightness(0x80)
         );
     }

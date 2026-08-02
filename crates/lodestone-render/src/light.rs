@@ -37,13 +37,13 @@
 //! * [`not_gamma`] is `notGamma`, mixed in at [`BRIGHTNESS_FACTOR`]. This is not
 //!   optional decoration: it is the largest single term in a night frame.
 //!
-//! Two vanilla terms are deliberately **not** modelled here, and both are noted
-//! at their call sites rather than silently dropped:
+//! * [`AMBIENT_LIGHT`] is `AmbientColor`, which seeds the accumulator *before*
+//!   either light half is added. It is **not** black in the overworld — see that
+//!   constant's own docs, and the correction note at the bottom.
 //!
-//! * `AmbientColor` — `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` defaults to
-//!   `-16777216`, i.e. `0x000000`. Black in the overworld, so adding it is a
-//!   no-op. It is *not* zero in the Nether/End, which is where a future
-//!   per-dimension pass has to pick it up.
+//! One vanilla term is deliberately **not** modelled here, and it is noted at
+//! its call sites rather than silently dropped:
+//!
 //! * The additive **combine**. Vanilla adds the sky and block contributions
 //!   (with `BlockFactor` ≈ 1.4 and a warm `BLOCK_LIGHT_TINT`); [`light_term`]
 //!   takes their `max`. Fixing that faithfully makes the light term a *colour*
@@ -90,11 +90,46 @@
 //! in daylight the old ramp gives `0.840` where vanilla gives `0.719`, and at
 //! sky level 4 it gives `0.413` where vanilla gives `0.189`. And the `0.2` floor
 //! really is a hard mechanism, exactly as #386 says: an unlit surface read
-//! `0.200` where vanilla reads `0.000`.
+//! `0.200` where vanilla reads [`AMBIENT_LIGHT`]'s `0.0935`.
+//!
+//! # Two further corrections, from the jar
+//!
+//! Both of these were stated confidently in this file's first version and both
+//! are false. They were found by decoding the raw `ARGB` ints rather than
+//! trusting the prose around them.
+//!
+//! * **`AmbientColor` is not black in the overworld.** It is `0x0A0A0A`, so the
+//!   claim that "adding it is a no-op" was wrong and dropping it made every
+//!   unlit surface `0.000` instead of `0.0935` — overshooting past vanilla in the
+//!   course of fixing an overshoot the other way. Now modelled; see
+//!   [`AMBIENT_LIGHT`].
+//! * **`SKY_LIGHT_COLOR` is not constant white.** It is a *timeline* attribute
+//!   (`Timelines.java:72`) keyframed `-1` (white) at ticks 730 and 11270 and
+//!   `NIGHT_SKY_LIGHT_COLOR` at 13140 and 22860 — and that constant is
+//!   `colorFromFloat(1.0, 0.48, 0.48, 1.0)`, i.e. **blue**: red and green fall to
+//!   48% while blue holds at 100%. So vanilla's night light is not merely dimmer
+//!   than day, it is a different *hue*, which is why the grey specialisation in
+//!   [`not_gamma`] is a daylight-only convenience. This is the remaining reason
+//!   the light term has to become a `vec3`, alongside the warm
+//!   `BLOCK_LIGHT_TINT` of `(1.000, 0.847, 0.549)`.
 
 /// Vanilla's `Options.gamma` default, which `lightmap.fsh` consumes as
 /// `BrightnessFactor` to mix [`not_gamma`] in. See this module's "Configuration".
 pub const BRIGHTNESS_FACTOR: f32 = 0.5;
+
+/// The overworld's `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, as a grey scalar.
+///
+/// `DimensionTypes.java:36` sets it to `-16119286`, which is `0xFF0A0A0A` — grey
+/// `10/255`, **not** black. `lightmap.fsh` seeds its accumulator with
+/// `max(AmbientColor, nightVisionColor)` before adding either light half, so a
+/// fully unlit surface in vanilla is not pure black: it reads `0.0935` once
+/// [`not_gamma`] is mixed in. Dropping this term is what made caves render
+/// absolutely black.
+///
+/// It is grey in the overworld, which is the only reason the light term can stay
+/// a scalar. The Nether's `0x302821` and the End's `0x3F473F` are *not* grey and
+/// belong to the same per-dimension colour pass as the block-light tint.
+pub const AMBIENT_LIGHT: f32 = 10.0 / 255.0;
 
 /// Vanilla's `get_brightness`: one lightmap axis' response to a `0.0..=1.0` light
 /// level (the wire nibble over 15).
@@ -157,7 +192,10 @@ pub fn light_term(packed_light: u8, sky_darken: f32) -> f32 {
 pub fn light_term_from_levels(sky_level: f32, block_level: f32, sky_darken: f32) -> f32 {
     let sky = brightness(sky_level) * sky_darken;
     let block = brightness(block_level);
-    apply_brightness_option(sky.max(block))
+    // `AMBIENT_LIGHT` is *added*, as vanilla adds it — it is a floor under the
+    // whole range, not another candidate for the `max`. It clamps away at full
+    // light, so every full-bright path in the tree stays exactly 1.0.
+    apply_brightness_option(AMBIENT_LIGHT + sky.max(block))
 }
 
 #[cfg(test)]
@@ -210,12 +248,65 @@ mod tests {
     fn the_endpoints_are_exact() {
         assert!((apply_brightness_option(1.0) - 1.0).abs() < f32::EPSILON);
         assert!(apply_brightness_option(0.0).abs() < f32::EPSILON);
-        // The `0.2` floor is gone: this is the mechanism issue #386 named.
+        // Full light stays *exactly* 1.0 with the ambient term added, because it
+        // clamps away. This is what keeps every full-bright gate byte-identical.
+        assert!((light_term(0xFF, 1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// An unlit surface is vanilla's ambient floor, and the three candidate
+    /// values are far enough apart that nothing can pass this by accident: the
+    /// retired ramp's `0.2`, pure black, and vanilla's `0x0A0A0A`.
+    ///
+    /// The expected value is arithmetic on `10/255` and `Options.gamma`, written
+    /// out here rather than taken from [`AMBIENT_LIGHT`] or [`not_gamma`].
+    #[test]
+    fn an_unlit_surface_lands_on_vanillas_ambient_floor() {
+        let ambient = 10.0_f32 / 255.0;
+        let expected = {
+            let inv = 1.0 - ambient;
+            let ng = 1.0 - inv * inv * inv * inv;
+            ambient + (ng - ambient) * 0.5
+        };
         assert!(
-            light_term(0x00, 1.0).abs() < f32::EPSILON,
-            "an unlit surface must reach pure black; the retired ramp floored it at \
-             {}",
-            retired_linear_ramp(0.0)
+            (expected - 0.093_545_4).abs() < 1e-6,
+            "the hand-derived floor drifted: {expected}"
+        );
+
+        let ours = light_term(0x00, 1.0);
+        assert!(
+            (ours - expected).abs() < 1e-6,
+            "an unlit surface must read vanilla's ambient floor {expected}, not the \
+             retired ramp's {} and not pure black; got {ours}",
+            apply_brightness_option(retired_linear_ramp(0.0))
+        );
+        // Discrimination against both wrong hypotheses, not just one.
+        assert!(
+            ours > 0.05,
+            "dropping AmbientColor renders caves absolutely black; got {ours}"
+        );
+        assert!(
+            ours < 0.2,
+            "the retired 0.2 floor must be gone -- that is what made night readable"
+        );
+    }
+
+    /// Midnight under open sky, now that the floor is back. The ambient term is
+    /// additive, so it moves this off `0.453189` by exactly its own contribution
+    /// — and a build that dropped it again would land back on the old number.
+    #[test]
+    fn ambient_light_is_additive_not_another_max_candidate() {
+        let midnight = 0.24_f32;
+        let ours = light_term(0xF0, midnight);
+        // Were ambient folded in with a `max`, it would lose to sky light here
+        // and this would still read the ambient-free 0.453189.
+        assert!(
+            (ours - 0.453_189_1).abs() > 0.01,
+            "ambient must *add* to the sky term, not compete with it via max; got \
+             {ours}"
+        );
+        assert!(
+            (ours - 0.504_652).abs() < 1e-4,
+            "midnight under open sky must be 0.504652; got {ours}"
         );
     }
 
@@ -257,10 +348,18 @@ mod tests {
         // Hypothesis B, #386's table: the curve applied *after* `sky_darken`,
         // with no `notGamma` — `0.24 / (4 - 3 * 0.24)`.
         let issue_table = midnight / (4.0 - 3.0 * midnight);
-        // Vanilla: curve first (`1.0`), then `* SkyFactor`, then `notGamma`
-        // mixed at the default gamma of 0.5.
-        let vanilla = {
+        // Hypothesis C, this file's own first version: vanilla's chain but with
+        // `AmbientColor` dropped as a believed no-op.
+        let ambient_free = {
             let c = 1.0_f32 * midnight;
+            let ng = 1.0 - (1.0 - c) * (1.0 - c) * (1.0 - c) * (1.0 - c);
+            c + (ng - c) * 0.5
+        };
+        // Vanilla: `max(AmbientColor, …)` seeds the accumulator, then curve first
+        // (`1.0`), then `* SkyFactor` added in, then `notGamma` mixed at the
+        // default gamma of 0.5.
+        let vanilla = {
+            let c = 10.0_f32 / 255.0 + 1.0 * midnight;
             let ng = 1.0 - (1.0 - c) * (1.0 - c) * (1.0 - c) * (1.0 - c);
             c + (ng - c) * 0.5
         };
@@ -271,37 +370,54 @@ mod tests {
             "hypothesis B drifted: {issue_table}"
         );
         assert!(
-            (vanilla - 0.453_189_1).abs() < 1e-6,
+            (ambient_free - 0.453_189_1).abs() < 1e-6,
+            "hypothesis C drifted: {ambient_free}"
+        );
+        assert!(
+            (vanilla - 0.504_652).abs() < 1e-4,
             "vanilla's midnight value drifted: {vanilla}"
         );
         assert!(
             (ours - vanilla).abs() < 1e-6,
-            "midnight must land on vanilla's {vanilla}, not the retired ramp's {old} \
-             and not issue #386's {issue_table}; got {ours}"
+            "midnight must land on vanilla's {vanilla} -- not the retired ramp's \
+             {old}, not issue #386's {issue_table}, and not the ambient-free \
+             {ambient_free}; got {ours}"
         );
     }
 
-    /// A second interior level, because midnight alone cannot distinguish a
-    /// correct curve from one that happens to pass through a single point.
+    /// Four interior levels, because midnight alone cannot distinguish a correct
+    /// curve from one that happens to pass through a single point.
+    ///
+    /// Each row carries all three hypotheses: vanilla, the retired linear ramp,
+    /// and the ambient-free chain this file shipped first. The two margins both
+    /// **shrink as light rises** — the ambient term clamps toward saturation — so
+    /// they are asserted per-row rather than against one global threshold. At sky
+    /// 12 the ambient term is worth only `0.028`, which is precisely why dropping
+    /// it survived every daylight gate in the tree.
     #[test]
     fn a_daylight_mid_level_lands_on_vanillas_value() {
-        for (nibble, vanilla) in [
-            (4_u8, 0.188_632_9_f32),
-            (7, 0.363_117_6),
-            (8, 0.428_136_1),
-            (12, 0.718_75),
+        for (nibble, vanilla, ambient_free) in [
+            (4_u8, 0.264_885_9_f32, 0.188_632_9_f32),
+            (7, 0.423_042_0, 0.363_117_6),
+            (8, 0.481_948_0, 0.428_136_1),
+            (12, 0.747_067_5, 0.718_75),
         ] {
             let ours = light_term(nibble << 4, 1.0);
             let old = retired_linear_ramp(f32::from(nibble) / 15.0);
             assert!(
                 (ours - vanilla).abs() < 1e-5,
                 "sky {nibble} in daylight must be {vanilla} (vanilla), not {old} (the \
-                 retired ramp); got {ours}"
+                 retired ramp) and not {ambient_free} (ambient dropped); got {ours}"
             );
             assert!(
-                (ours - old).abs() > 0.1,
-                "sky {nibble} must discriminate between the two curves, but they are \
-                 {ours} and {old} apart by less than 0.1"
+                (ours - old).abs() > 0.09,
+                "sky {nibble} must discriminate against the retired ramp, but {ours} \
+                 and {old} are less than 0.09 apart"
+            );
+            assert!(
+                (ours - ambient_free).abs() > 0.02,
+                "sky {nibble} must discriminate against the ambient-free chain, but \
+                 {ours} and {ambient_free} are less than 0.02 apart"
             );
         }
     }

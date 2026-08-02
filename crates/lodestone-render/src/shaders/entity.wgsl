@@ -62,6 +62,11 @@ fn not_gamma_grey(c: f32) -> f32 {
 
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
+// The overworld's `AMBIENT_LIGHT_COLOR`, 0x0A0A0A. See the model shader for the
+// derivation; the two must move together or entities and terrain disagree about
+// what an unlit surface looks like.
+const AMBIENT_LIGHT: f32 = 0.039215688;
+
 // Only the *sky* half is darkened. A torch-lit mob is as bright at midnight as
 // at noon, which is vanilla's behaviour: `lightmap.fsh` scales the sky
 // contribution by `SkyFactor` and leaves the block contribution alone. Get this
@@ -69,7 +74,7 @@ const BRIGHTNESS_FACTOR: f32 = 0.5;
 fn lightmap_term(sky_level: f32, block_level: f32) -> f32 {
     let sky = light_brightness(sky_level) * sky_darken();
     let block = light_brightness(block_level);
-    let c = clamp(max(sky, block), 0.0, 1.0);
+    let c = clamp(AMBIENT_LIGHT + max(sky, block), 0.0, 1.0);
     return mix(c, not_gamma_grey(c), BRIGHTNESS_FACTOR);
 }
 
