@@ -114,10 +114,41 @@ pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 
 /// Fraction of the view distance at which fog begins.
 ///
-/// The outer quarter of the render volume is the fade band: near enough that
-/// the edge chunks dissolve rather than pop in, far enough that fog is not
-/// visible during normal play.
-pub const FOG_START_FRACTION: f32 = 0.75;
+/// **This is vanilla's span expressed as a fraction, not a taste knob** (issue
+/// #388). Vanilla does not use a fraction at all:
+/// `FogRenderer.setupFog` (`FogRenderer.java:198-200`) fades over an absolute
+/// band of `clamp(renderDistanceInBlocks / 10, 4, 64)` blocks ending at the view
+/// distance — see [`lodestone_render::fog::render_distance_fade_span`], which is
+/// the authoritative form and the one
+/// [`FogSettings::for_render_distance`](lodestone_render::fog::FogSettings::for_render_distance)
+/// uses. In the unclamped middle of that formula the band is exactly a tenth of
+/// the view distance, so the onset is exactly `0.9` — algebraically identical
+/// for every view distance from 40 to 640 blocks, i.e. render distances 3
+/// through 40, which is the whole range anyone plays at.
+///
+/// It was `0.75`, and that is the bug this issue was filed over: at render
+/// distance 16 the fade began 38 blocks early and a fragment 240 blocks out read
+/// **0.75** fogged where vanilla reads **0.375** — twice the haze, well inside
+/// terrain that is loaded and drawn. The fraction form also has no cap, so the
+/// error grew with the render distance the player chose: 32 blocks of fade at
+/// RD 8, 128 at RD 32, against vanilla's 12.8 and 51.2.
+///
+/// Outside `3..=40` chunks the fraction and the real formula part company (RD 2:
+/// `28.8` here against vanilla's `28.0`; RD 48: `691.2` against `704.0`) because
+/// only the formula has the 4-block floor and the 64-block cap.
+/// `sim::fog_for_render_distance` is the last caller still going through the
+/// fraction rather than `for_render_distance`; migrating it is a one-line change
+/// this one deliberately did not make, since that file is held elsewhere.
+/// `fog_start_fraction_matches_vanillas_span` below pins both the agreement and
+/// the divergence so the gap cannot widen unnoticed.
+pub const FOG_START_FRACTION: f32 = 0.9;
+
+/// The render distance [`RenderState::new`] seeds its bring-up fog with, in
+/// chunks — the same default `Config` carries, so a `RenderState` built before
+/// the shell has read a config is fogged for the distance it will most likely
+/// be asked for. Not authoritative for anything: every real path calls
+/// `set_fog` with the configured distance before it draws.
+const DEFAULT_RENDER_DISTANCE_CHUNKS: u32 = 8;
 
 /// Owns all GPU resources needed to render the world.
 #[derive(Debug)]
@@ -438,10 +469,15 @@ impl RenderState {
                 b: SKY_COLOR[2] as f64,
                 a: 1.0,
             },
-            // Fog fades into that same sky colour. Sized for the default 8-chunk
-            // render distance; the shell overrides it from its real render
-            // distance (and underwater state) via `set_fog`.
-            fog: FogSettings::for_view_distance(SKY_COLOR, 8.0 * 16.0, FOG_START_FRACTION),
+            // Fog fades into that same sky colour. Sized for `Config`'s default
+            // render distance, on vanilla's own span (issue #388) rather than a
+            // fraction; both shell bring-up paths override it from the *real*
+            // configured render distance via `set_fog` before the first frame
+            // (`app.rs`'s `sky_fog`), and the per-frame reconciliation then
+            // tracks dimension and submersion, so this value only ever reaches
+            // a screen in a test that builds a `RenderState` and never calls
+            // `set_fog`.
+            fog: FogSettings::for_render_distance(SKY_COLOR, DEFAULT_RENDER_DISTANCE_CHUNKS),
         }
     }
 
@@ -2560,6 +2596,68 @@ fn transparent_placeholder_atlas(device: &wgpu::Device, queue: &wgpu::Queue) -> 
 mod tests {
     use super::*;
     use lodestone_render::{HeadlessTarget, RenderTarget};
+
+    /// Issue #388. [`FOG_START_FRACTION`] is the shell's last fraction-shaped
+    /// fog knob — `sim::fog_for_render_distance` still multiplies by it instead
+    /// of calling
+    /// [`FogSettings::for_render_distance`](lodestone_render::fog::FogSettings::for_render_distance).
+    /// This asserts the two agree exactly wherever anyone plays, and states the
+    /// divergence outside that range as a number rather than leaving it to be
+    /// rediscovered.
+    ///
+    /// `0.9` is not a taste value: it is `1 - span/rd_blocks` wherever vanilla's
+    /// `clamp(rd_blocks/10, 4, 64)` is unclamped, which is an algebraic
+    /// identity, not a fit.
+    #[test]
+    fn fog_start_fraction_matches_vanillas_span() {
+        use lodestone_render::fog::{render_distance_fade_span, FogSettings};
+
+        // Render distances 3..=40 (48..=640 blocks) are the unclamped middle of
+        // vanilla's formula, and the fraction is exact across all of them.
+        for rd in 3..=40u32 {
+            let blocks = rd as f32 * 16.0;
+            let exact = FogSettings::for_render_distance(SKY_COLOR, rd);
+            let via_fraction = blocks * FOG_START_FRACTION;
+            assert!(
+                (exact.start - via_fraction).abs() < 1e-3,
+                "RD {rd}: span form starts at {:.3}, fraction form at {via_fraction:.3}",
+                exact.start
+            );
+            assert_eq!(exact.end, blocks, "RD {rd}: fog must end at the view distance");
+        }
+
+        // Outside it, only the span form has the floor and the cap. These two
+        // literals are the whole cost of not having migrated the call site.
+        assert!((FogSettings::for_render_distance(SKY_COLOR, 2).start - 28.0).abs() < 1e-3);
+        assert!((32.0 * FOG_START_FRACTION - 28.8).abs() < 1e-3);
+        assert!((FogSettings::for_render_distance(SKY_COLOR, 48).start - 704.0).abs() < 1e-3);
+        assert!((768.0 * FOG_START_FRACTION - 691.2).abs() < 1e-3);
+
+        // The control for the value itself: the fraction this shipped with does
+        // *not* satisfy the identity above, and misses by tens of blocks at
+        // every render distance — which is the bug, stated as a measurement.
+        const SHIPPED_UNTIL_388: f32 = 0.75;
+        for rd in [8u32, 16, 32] {
+            let blocks = rd as f32 * 16.0;
+            let exact = blocks - render_distance_fade_span(blocks);
+            let old = blocks * SHIPPED_UNTIL_388;
+            assert!(
+                exact - old > 19.0,
+                "RD {rd}: the old fraction was expected to start the fade far too \
+                 early; exact {exact:.1} vs old {old:.1}"
+            );
+        }
+    }
+
+    /// The bring-up default must be the same curve the shell will immediately
+    /// override it with, not a differently-shaped placeholder — a mismatch here
+    /// is a one-frame flash of the wrong fog on every launch.
+    #[test]
+    fn bring_up_fog_default_uses_vanillas_span() {
+        let d = FogSettings::for_render_distance(SKY_COLOR, DEFAULT_RENDER_DISTANCE_CHUNKS);
+        assert_eq!((d.start, d.end), (115.2, 128.0));
+        assert_eq!(d.color, SKY_COLOR, "and fades into the colour the frame clears to");
+    }
 
     /// The bytes the sky clear actually lands on in these tests' readbacks.
     ///

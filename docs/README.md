@@ -82,6 +82,11 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   per-section origin arena addressed by a dynamic offset, fixing a profiled
   ~4000 `queue.write_buffer` calls/frame (issue #75), and why the crack,
   entity and demo-world paths were deliberately left alone.
+- [Distance fog](./fog.md) — where the ramp starts and how wide it is: vanilla's
+  `clamp(view/10, 4, 64)` fade band (issue #388, replacing a 0.75 fraction that
+  was twice as hazy as vanilla in the outer fifth), the two terms vanilla
+  combines with `max`, and the spherical-versus-cylindrical metric this client
+  does not model yet. Colours live in the next entry.
 - [Dimension visuals](./dimension-visuals.md) — what already renders differently in
   the Nether/End (the sky-light default, now registry-driven), what is still a
   hardcoded fog and sky colour because the dimension type's `attributes` map is not

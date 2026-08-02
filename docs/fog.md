@@ -1,0 +1,189 @@
+# Distance fog
+
+## What it is
+
+The linear ramp that fades distant geometry into a flat colour, so the loaded
+world does not end in a hard wall of terrain against the sky. This doc owns the
+**distance math** — where the ramp starts, how wide it is, and which distance
+metric measures it. The **colours** it fades into, and how they are chosen per
+dimension and per biome, are [`dimension-visuals.md`](./dimension-visuals.md).
+
+Code: `crates/lodestone-render/src/fog.rs` (the math and the GPU uniform),
+`crates/lodestone-shell/src/gpu.rs` (`FOG_START_FRACTION`, `RenderState::set_fog`),
+`crates/lodestone-shell/src/sim.rs` (`fog_settings`, which picks a preset per
+frame), `crates/lodestone-shell/src/app.rs` (`sky_fog`, and the per-frame
+reconciliation).
+
+## How it works
+
+`FogSettings { color, sky_color, start, end }` is a world-space range from the
+eye. `FogUniform` packs it into three `vec4`s and every world shader applies
+
+```wgsl
+let amount = fog_amount(length(in.world - camera.fog_eye.xyz));
+mix(lit, camera.fog_color_start.rgb, amount)
+```
+
+`fog::fog_factor` is the CPU twin of `fog_amount`, so headless tests describe
+the shader's behaviour exactly.
+
+### Vanilla's two terms
+
+This is the part that matters and the part this client only half implements.
+`fog.glsl:23-30` combines **two independent ramps**, each with its own distance
+metric and its own start/end pair:
+
+```glsl
+float total_fog_value(float sphericalVertexDistance, float cylindricalVertexDistance,
+                      float environmentalStart, float environmantalEnd,
+                      float renderDistanceStart, float renderDistanceEnd) {
+    return max(linear_fog_value(sphericalVertexDistance,   environmentalStart, environmantalEnd),
+               linear_fog_value(cylindricalVertexDistance, renderDistanceStart, renderDistanceEnd));
+}
+```
+
+with
+
+```glsl
+float fog_cylindrical_distance(vec3 pos) {
+    return max(length(pos.xz), abs(pos.y));
+}
+```
+
+| term | metric | source of start/end |
+|---|---|---|
+| **environmental** | spherical | `visual/fog_start_distance` / `visual/fog_end_distance` attributes, or a `FogEnvironment` (water, lava, blindness, powdered snow) |
+| **render distance** | **cylindrical** | derived from the view distance, every frame, unconditionally |
+
+They are combined with `max`, so whichever is denser at a given fragment wins.
+The render-distance pair is set *after* the environment hook runs and is never
+skipped — a dimension with a declared environmental fog gets both.
+
+### The render-distance ramp (issue #388)
+
+`FogRenderer.setupFog`
+(`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:198-200`)
+is the whole of it:
+
+```java
+float renderDistanceFogSpan = Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F);
+fog.renderDistanceStart = renderDistanceInBlocks - renderDistanceFogSpan;
+fog.renderDistanceEnd = renderDistanceInBlocks;
+```
+
+The fade band is an **absolute, capped width measured back from the edge** — a
+tenth of the view distance, floored at 4 blocks, capped at 64. It is *not* a
+proportion of the view distance, which is what this client used until #388.
+
+`fog::render_distance_fade_span` is the authoritative Rust form;
+`FogSettings::for_render_distance` builds the settings from it.
+
+| render distance | view distance | vanilla span | vanilla start | old (`0.75`) start |
+|---|---|---|---|---|
+| 2 | 32 | 4.0 (floored) | 28.0 | 24.0 |
+| 8 | 128 | 12.8 | 115.2 | 96.0 |
+| 16 | 256 | 25.6 | 230.4 | 192.0 |
+| 32 | 512 | 51.2 | 460.8 | 384.0 |
+| 48 | 768 | 64.0 (capped) | 704.0 | 576.0 |
+
+The old fraction was wrong in magnitude, not just in onset. At render distance
+16, a fragment 240 blocks out read **0.75** fogged against vanilla's **0.375**.
+Because the band was proportional it also got *worse* as the player raised the
+render distance — 128 blocks of haze at RD 32 against vanilla's 51.2 — so a
+larger view distance looked hazier than a small one, which is the reported
+symptom.
+
+### Environmental ramps
+
+| preset | range | why |
+|---|---|---|
+| overworld / the End | none declared | attributes default to `0.0`/`1024.0` (`EnvironmentAttributes.java:18-24`) |
+| Nether | `10.0` .. `96.0` | `the_nether.json` declares both — a short haze independent of render distance |
+| water | eye .. `min(32, view)` | `WaterFogEnvironment`; ramps from the eye, so `start_fraction` 0 |
+| lava | `0` .. `3` | `LavaFogEnvironment`; near-opaque |
+
+`FogSettings::for_view_distance` is the constructor for these — a plain ramp
+over a range the caller states outright. **It must never acquire the
+render-distance span**: water fog ramps from the eye, and folding a span in
+would push its start to within four blocks of its end.
+
+The `0.0 .. 1024.0` default is *not* inert, which an earlier comment in
+`fog.rs` claimed. `linear(d, 0, 1024)` reaches `0.125` at 128 blocks and `0.5`
+at 512, so vanilla's overworld and End carry a mild spherical mid-field wash
+this client does not draw at all.
+
+## What this client does not do yet
+
+Both gaps need a wider `FogUniform` **and** an edit inside three shader bodies
+(`model.wgsl`, `entity.wgsl`, `fluid.wgsl`), so neither was closed by #388.
+
+1. **No environmental term.** Only one start/end pair reaches the GPU, so the
+   presets above are mutually exclusive rather than `max`-combined. In practice
+   this is exact for the Nether (see `FogSettings::nether`'s doc for why the
+   `max` provably cannot pick the other term at RD ≥ 6) and merely absent for
+   the overworld, where it errs toward *too little* fog.
+2. **Spherical distance where vanilla uses cylindrical.** Every shader takes
+   `length(world - eye)`. Along a ray pitched down 36.87°, cylindrical distance
+   is `0.8 ×` spherical, so at 300 blocks with RD 16 this client is **fully**
+   fogged where vanilla reads **0.375**. That gap is pinned by
+   `spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical`; if
+   the shaders gain cylindrical distance, that test fails and points here.
+
+3. **The sky disc's own fog end ignores the render distance.** Not strictly this
+   ramp, but found while measuring it and the same class of mistake.
+   `sky::SKY_FOG_END_DISTANCE` is a constant `512.0`, taken from
+   `SKY_FOG_END_DISTANCE`'s *registered default*. Vanilla clamps it:
+   `fog.skyEnd = min(renderDistance, attr)`
+   (`AtmosphericFogEnvironment.java:73`), so at render distance 8 vanilla's
+   horizon gradient completes at **128** blocks, not 512 — a far more compressed
+   ramp than this client draws. The same `skyFogEnd` also feeds
+   `getBaseColor`'s `skyColorMixFactor` (`:44-47`), so the disc's *colour* is
+   render-distance-dependent too. Owned by `sky.rs`/`sky_pipeline.rs`, so #388
+   left it alone.
+
+`FogUniform` has exactly two free lanes today (`eye.w` and `end_enabled.w` —
+`end_enabled.z` is the sky-darken factor), which is enough for an
+`environmental_start`/`environmental_end` pair without growing the struct.
+Note the 4-bind-group floor in `CLAUDE.md`: fog rides the group-0 camera uniform
+precisely so no fifth group is needed.
+
+## How to change it
+
+- **Changing the ramp shape** → `fog::render_distance_fade_span` and
+  `FogSettings::for_render_distance`. Every expectation in `fog.rs`'s
+  `ramp_gate` module is a hand-written literal taken from the Java above, not a
+  call back into our own formula, so changing the implementation will correctly
+  fail them.
+- **The one remaining fraction.** `sim::fog_for_render_distance` still calls
+  `for_view_distance(SKY_COLOR, rd * 16.0, gpu::FOG_START_FRACTION)`.
+  `FOG_START_FRACTION` is `0.9`, which is `1 - span/rd_blocks` wherever the
+  clamp is inactive — an algebraic identity, exact for render distances 3
+  through 40. Outside that range it loses the 4-block floor and the 64-block
+  cap (RD 2: `28.8` against `28.0`; RD 48: `691.2` against `704.0`). Migrating
+  that call to `FogSettings::for_render_distance(SKY_COLOR, render_distance)`
+  is a one-line change and deletes the constant.
+  `gpu.rs`'s `fog_start_fraction_matches_vanillas_span` pins both the agreement
+  and the divergence.
+- **Gotcha: a frame average cannot see a ramp defect.** Both models are 0 near
+  and 1 at the edge and their frame means sit within a few points of each other;
+  only sampling *by location* separates them. `ramp_gate` asserts per-sample and
+  prints a bounding box over the ray on failure —
+  `a_frame_average_could_not_have_caught_this` pins why.
+- **Gotcha: `FogSettings` carries the sky-disc colour too.** `set_fog` and
+  `set_clear_color` must be called as a pair; see `dimension-visuals.md`.
+
+## Configuration
+
+- `Config::render_distance` (chunks, default 8) — the only input to the
+  overworld ramp. Unbounded, so the span's floor and cap are reachable.
+- `gpu::FOG_START_FRACTION` — `0.9`; see above, and prefer not to add callers.
+- `gpu::SKY_COLOR` — what overworld fog fades into, shared with the frame clear.
+
+## Dependencies
+
+- `lodestone-render`'s `FogUniform`, consumed by the block, model, entity and
+  fluid pipelines and by the sky disc.
+- `lodestone-shell`'s `Sim::fog_settings` for per-frame preset selection, and
+  `app.rs`'s change-detected `set_fog`/`set_clear_color` pair.
+- Reference only: `.cache/mc/26.2/client-src/.../fog/FogRenderer.java`,
+  `.../fog/environment/*.java`, `assets/minecraft/shaders/include/fog.glsl`.

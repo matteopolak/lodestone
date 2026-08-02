@@ -93,14 +93,72 @@ impl FogSettings {
         }
     }
 
-    /// Distance fog that fades the outer edge of a `view_distance`-block render
-    /// volume. Fog begins at `start_fraction` of the view distance and reaches
-    /// full at the view distance itself, so the edge chunks dissolve rather
-    /// than pop. `start_fraction` is clamped to `0.0..=1.0`.
+    /// A plain linear ramp over a `view_distance`-block range, beginning at
+    /// `start_fraction` of it. `start_fraction` is clamped to `0.0..=1.0`.
+    ///
+    /// This is the **generic** constructor, and after issue #388 it is the wrong
+    /// one for the render-distance edge fade — use
+    /// [`for_render_distance`](Self::for_render_distance), which implements
+    /// vanilla's actual span rather than a fraction. What is left here is
+    /// vanilla's *environmental* fog shape: a range the caller states outright,
+    /// which is what water (`WaterFogEnvironment`), lava
+    /// (`LavaFogEnvironment`) and the declared
+    /// `visual/fog_start_distance`/`visual/fog_end_distance` attributes are.
+    /// Those must **not** acquire a render-distance span — water fog ramps from
+    /// the eye (`start_fraction` 0), and folding the span in would push its
+    /// start out to within four blocks of its end.
     #[must_use]
     pub fn for_view_distance(color: [f32; 3], view_distance: f32, start_fraction: f32) -> Self {
         let end = view_distance.max(0.0);
         let start = end * start_fraction.clamp(0.0, 1.0);
+        Self {
+            color,
+            sky_color: color,
+            start,
+            end,
+        }
+    }
+
+    /// Distance fog that fades the outer edge of the loaded world, on vanilla's
+    /// own curve (issue #388).
+    ///
+    /// Vanilla does **not** start this fog at a fraction of the view distance.
+    /// `FogRenderer.setupFog`
+    /// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/fog/FogRenderer.java:198-200`)
+    /// is three lines and they say something quite different:
+    ///
+    /// ```java
+    /// float renderDistanceFogSpan = Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F);
+    /// fog.renderDistanceStart = renderDistanceInBlocks - renderDistanceFogSpan;
+    /// fog.renderDistanceEnd = renderDistanceInBlocks;
+    /// ```
+    ///
+    /// The fade band is an **absolute, capped width** measured back from the
+    /// edge — a tenth of the view distance, never narrower than 4 blocks and
+    /// never wider than 64 — not a proportion of it. The two models diverge
+    /// fast, and always in the direction of this client being hazier: the old
+    /// `start_fraction = 0.75` put the onset at 75% of the view distance where
+    /// vanilla puts it at 90%, so at render distance 16 a fragment 240 blocks
+    /// out read **0.75** fogged against vanilla's **0.375** — twice the haze,
+    /// with the onset 38 blocks nearer.
+    ///
+    /// Note the cap is what makes this not merely "0.9 instead of 0.75": beyond
+    /// 640 blocks (render distance 40) the band stops widening, so the fade is a
+    /// progressively thinner rim rather than a quarter of an ever-larger volume.
+    ///
+    /// # What this still does not model
+    ///
+    /// Vanilla combines *two* terms (`fog.glsl`'s `total_fog_value`):
+    /// `max(linear(spherical, environmentalStart, environmentalEnd),
+    /// linear(cylindrical, renderDistanceStart, renderDistanceEnd))`. This
+    /// constructor is the second term only, and this client measures it with a
+    /// **spherical** distance because the shaders take `length(world - eye)`.
+    /// Both gaps need a shader change and a wider [`FogUniform`]; see
+    /// `docs/fog.md`.
+    #[must_use]
+    pub fn for_render_distance(color: [f32; 3], render_distance_chunks: u32) -> Self {
+        let end = render_distance_chunks as f32 * 16.0;
+        let start = (end - render_distance_fade_span(end)).max(0.0);
         Self {
             color,
             sky_color: color,
@@ -129,6 +187,15 @@ impl FogSettings {
     /// render distance shorter than 96 blocks (6 chunks) must not fog *past*
     /// the loaded world, exactly like [`FogSettings::for_view_distance`]'s
     /// `end`.
+    ///
+    /// Vanilla applies the render-distance term here **as well** — `setupFog`
+    /// sets `renderDistanceStart`/`End` unconditionally, after the environment
+    /// hook, and `total_fog_value` takes the `max` of the two. Collapsing that
+    /// to the environmental term alone is exact rather than an approximation
+    /// for every render distance at or above 6 chunks: the render-distance ramp
+    /// does not leave zero until `renderDistanceInBlocks - span`, which is
+    /// ≥ 86.4 blocks by then, and by 96 blocks the environmental term is already
+    /// saturated at 1.0, so the `max` can never pick the other one.
     #[must_use]
     pub fn nether(render_distance: u32) -> Self {
         let end = 96.0_f32.min(render_distance as f32 * 16.0);
@@ -143,12 +210,20 @@ impl FogSettings {
 
     /// The End's fog: a flat, near-black backdrop, since the dimension type
     /// carries no `visual/fog_start_distance`/`visual/fog_end_distance`
-    /// override (so vanilla's environmental-fog attributes fall back to their
-    /// defaults, `0`/`1024` blocks — effectively never triggering inside any
-    /// normal render distance) and the visible darkening instead comes from
+    /// override, so vanilla's environmental-fog attributes fall back to their
+    /// registered defaults, `0.0`/`1024.0`
+    /// (`EnvironmentAttributes.java:18-24`), and the visible darkening instead
+    /// comes from
     /// `visual/fog_color` (`#181318`) mixed with `visual/sky_color`
     /// (`#000000`) at the render-distance edge, exactly the mechanism
-    /// [`FogSettings::for_view_distance`] already models for the overworld.
+    /// [`FogSettings::for_render_distance`] models for the overworld.
+    ///
+    /// Those defaults are **not** inert, which an earlier version of this
+    /// comment claimed: `linear(spherical, 0.0, 1024.0)` is a real, very slow
+    /// spherical haze that reaches `0.125` at 128 blocks and `0.5` at 512, so
+    /// vanilla's End (and overworld) carry a mild mid-field wash this client
+    /// does not draw at all. It is the *environmental* term, needs its own
+    /// start/end pair in [`FogUniform`], and is tracked in `docs/fog.md`.
     ///
     /// This reuses that edge-fade shape with the End's colour rather than
     /// vanilla's separate `sky_color`/`fog_color` blend curve
@@ -156,17 +231,42 @@ impl FogSettings {
     /// no sky dome to blend into (the End draws its own starfield, which nothing
     /// in this renderer attempts), a single flat colour is the closest
     /// approximation reachable without a second bind-group slot or a new
-    /// uniform lane. `start_fraction` should be the same value the caller uses
-    /// for overworld fog (`crate::gpu::FOG_START_FRACTION` in the shell) so the
-    /// edge dissolves at the same fraction of view distance in every dimension.
+    /// uniform lane.
+    ///
+    /// `start_fraction` is a **floor**, not the shape: the band is vanilla's
+    /// [`render_distance_fade_span`] unless the caller asks for an even later
+    /// onset. Since every caller passes something at or below `0.9`
+    /// (`crate::gpu::FOG_START_FRACTION` in the shell), the span is what
+    /// actually decides, and the End fades on exactly the same curve as the
+    /// overworld — which is right, because the End declares no
+    /// `visual/fog_start_distance`/`visual/fog_end_distance`, so vanilla's End
+    /// fog *is* purely the render-distance term. The parameter survives only
+    /// because removing it would break the shell's call site, which another
+    /// change owns.
     #[must_use]
     pub fn the_end(render_distance: u32, start_fraction: f32) -> Self {
-        Self::for_view_distance(
-            srgb_u8_to_linear(END_FOG_SRGB),
-            render_distance as f32 * 16.0,
-            start_fraction,
-        )
+        let mut s = Self::for_render_distance(srgb_u8_to_linear(END_FOG_SRGB), render_distance);
+        s.start = s.start.max(s.end * start_fraction.clamp(0.0, 1.0));
+        s
     }
+}
+
+/// The width, in blocks, of vanilla's render-distance fade band for a view
+/// distance of `view_distance_blocks`:
+/// `Mth.clamp(renderDistanceInBlocks / 10.0F, 4.0F, 64.0F)`
+/// (`FogRenderer.java:198`).
+///
+/// A tenth of the view distance, floored at 4 blocks and **capped at 64**. The
+/// cap is the part a "fraction of view distance" model cannot express: past 640
+/// blocks the band stops growing, so the proportion of the visible world that is
+/// hazy shrinks as the render distance rises instead of staying fixed.
+///
+/// Worked values, so the curve is legible without running it: 32 blocks (RD 2)
+/// → 4.0 (floored); 128 (RD 8) → 12.8; 256 (RD 16) → 25.6; 512 (RD 32) → 51.2;
+/// 768 (RD 48) → 64.0 (capped).
+#[must_use]
+pub fn render_distance_fade_span(view_distance_blocks: f32) -> f32 {
+    (view_distance_blocks / 10.0).clamp(4.0, 64.0)
 }
 
 /// How far above the world bottom the void darkening starts, and where the
@@ -397,6 +497,328 @@ impl FogUniform {
 }
 
 #[cfg(test)]
+mod ramp_gate {
+    //! Issue #388's discriminator: **where the render-distance ramp starts and
+    //! how wide it is**, sampled along a ray at known distances.
+    //!
+    //! Not "distant things are foggier" — the old 0.75-fraction model satisfies
+    //! that too, and satisfied it while being twice as hazy as vanilla in the
+    //! outer fifth of the view. Every expectation below is a literal, written
+    //! out from vanilla's arithmetic by hand rather than computed by calling
+    //! [`render_distance_fade_span`], so this is not
+    //! `decode(encode(x)) == x` against our own formula. The source is
+    //! `FogRenderer.java:198-200` and `fog.glsl:13-21`:
+    //!
+    //! ```text
+    //! span  = clamp(rd_blocks / 10, 4, 64)
+    //! start = rd_blocks - span
+    //! end   = rd_blocks
+    //! f(d)  = clamp((d - start) / span, 0, 1)
+    //! ```
+    //!
+    //! Failure output is a **bounding box** over the ray — the first and last
+    //! sampled distance that disagreed, plus the worst one — never a fraction of
+    //! samples. A count cannot distinguish "the ramp is 38 blocks too early"
+    //! from "one endpoint is off by a rounding error", and telling those apart
+    //! is the entire job here.
+
+    use super::*;
+
+    /// A point `s` blocks from `eye` along unit direction `dir`.
+    fn along(eye: [f32; 3], dir: [f32; 3], s: f32) -> [f32; 3] {
+        [
+            eye[0] + dir[0] * s,
+            eye[1] + dir[1] * s,
+            eye[2] + dir[2] * s,
+        ]
+    }
+
+    /// What the shaders measure: `length(world - eye)`. Spherical, per
+    /// `model.wgsl`/`entity.wgsl`/`fluid.wgsl`'s `fog_amount(length(in.world -
+    /// camera.fog_eye.xyz))`.
+    fn spherical(eye: [f32; 3], p: [f32; 3]) -> f32 {
+        let d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    /// Vanilla's `fog_cylindrical_distance` (`fog.glsl:36-40`):
+    /// `max(length(pos.xz), abs(pos.y))`. This client does **not** use it; it is
+    /// here so the gap can be measured rather than described.
+    fn cylindrical(eye: [f32; 3], p: [f32; 3]) -> f32 {
+        let d = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
+        (d[0] * d[0] + d[2] * d[2]).sqrt().max(d[1].abs())
+    }
+
+    /// March `dir` from `eye`, comparing the settings' factor at each listed
+    /// distance against the hand-written expectation. Panics with a bounding box
+    /// over the ray, in blocks.
+    fn assert_ramp(what: &str, fog: &FogSettings, eye: [f32; 3], dir: [f32; 3], table: &[(f32, f32)]) {
+        const TOL: f32 = 1e-4;
+        let mut bad: Vec<(f32, f32, f32)> = Vec::new();
+        for &(s, expected) in table {
+            let p = along(eye, dir, s);
+            let got = fog_factor(spherical(eye, p), fog.start, fog.end);
+            if (got - expected).abs() > TOL {
+                bad.push((s, got, expected));
+            }
+        }
+        if bad.is_empty() {
+            return;
+        }
+        let lo = bad.iter().map(|b| b.0).fold(f32::INFINITY, f32::min);
+        let hi = bad.iter().map(|b| b.0).fold(f32::NEG_INFINITY, f32::max);
+        let worst = bad
+            .iter()
+            .max_by(|a, b| {
+                (a.1 - a.2)
+                    .abs()
+                    .partial_cmp(&(b.1 - b.2).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .copied()
+            .unwrap_or((0.0, 0.0, 0.0));
+        let mut detail = String::new();
+        for (s, got, expected) in &bad {
+            detail.push_str(&format!("\n    d={s:>7.1}  got {got:.4}  want {expected:.4}"));
+        }
+        panic!(
+            "{what}: ramp disagrees with vanilla over [{lo:.1}, {hi:.1}] blocks along the ray \
+             ({} of {} samples); worst at d={:.1}: got {:.4}, want {:.4}. \
+             Our ramp is {:.1}..{:.1}.{detail}",
+            bad.len(),
+            table.len(),
+            worst.0,
+            worst.1,
+            worst.2,
+            fog.start,
+            fog.end,
+        );
+    }
+
+    /// Eye deliberately off the origin and not at a round number, so a sample
+    /// that accidentally measured a world position instead of an eye-relative
+    /// one would not pass by coincidence.
+    const EYE: [f32; 3] = [137.5, 71.25, -412.0];
+    /// Level, +X. Chosen because `spherical == cylindrical` along it, which is
+    /// what makes these expectations vanilla-*exact* rather than an
+    /// approximation this client happens to agree with. The pitched case, where
+    /// the two metrics diverge, is pinned separately below.
+    const LEVEL_X: [f32; 3] = [1.0, 0.0, 0.0];
+
+    /// Render distance 16 — the case in the report. Vanilla: `span =
+    /// clamp(256/10, 4, 64) = 25.6`, so the fade runs `230.4 → 256`.
+    #[test]
+    fn ramp_matches_vanilla_at_render_distance_16() {
+        let fog = FogSettings::for_render_distance([0.2, 0.4, 0.8], 16);
+        assert_eq!(fog.end, 256.0);
+        assert_ramp(
+            "RD 16",
+            &fog,
+            EYE,
+            LEVEL_X,
+            &[
+                (96.0, 0.0),
+                (128.0, 0.0),
+                (192.0, 0.0),
+                (224.0, 0.0),
+                (230.4, 0.0),
+                (236.8, 0.25),
+                (243.2, 0.50),
+                (249.6, 0.75),
+                (256.0, 1.0),
+                (300.0, 1.0),
+            ],
+        );
+    }
+
+    /// The floor and the cap, which are the two things a fraction cannot
+    /// express. RD 2 (`32/10 = 3.2`, floored to 4) and RD 48 (`768/10 = 76.8`,
+    /// capped at 64).
+    #[test]
+    fn ramp_matches_vanilla_at_the_span_floor_and_cap() {
+        let near = FogSettings::for_render_distance([0.2, 0.4, 0.8], 2);
+        assert_ramp(
+            "RD 2 (span floored to 4)",
+            &near,
+            EYE,
+            LEVEL_X,
+            &[(24.0, 0.0), (28.0, 0.0), (29.0, 0.25), (30.0, 0.5), (32.0, 1.0)],
+        );
+
+        let far = FogSettings::for_render_distance([0.2, 0.4, 0.8], 48);
+        assert_ramp(
+            "RD 48 (span capped at 64)",
+            &far,
+            EYE,
+            LEVEL_X,
+            &[
+                (640.0, 0.0),
+                (704.0, 0.0),
+                (720.0, 0.25),
+                (736.0, 0.5),
+                (768.0, 1.0),
+            ],
+        );
+    }
+
+    /// RD 8 and RD 32, the two other distances anyone actually plays at.
+    #[test]
+    fn ramp_matches_vanilla_at_render_distances_8_and_32() {
+        assert_ramp(
+            "RD 8",
+            &FogSettings::for_render_distance([0.2, 0.4, 0.8], 8),
+            EYE,
+            LEVEL_X,
+            &[
+                (64.0, 0.0),
+                (96.0, 0.0),
+                (115.2, 0.0),
+                (118.4, 0.25),
+                (121.6, 0.5),
+                (124.8, 0.75),
+                (128.0, 1.0),
+            ],
+        );
+        assert_ramp(
+            "RD 32",
+            &FogSettings::for_render_distance([0.2, 0.4, 0.8], 32),
+            EYE,
+            LEVEL_X,
+            &[
+                (384.0, 0.0),
+                (460.8, 0.0),
+                (473.6, 0.25),
+                (486.4, 0.5),
+                (499.2, 0.75),
+                (512.0, 1.0),
+            ],
+        );
+    }
+
+    /// **The negative control.** The shipped-until-#388 model — a fixed 0.75
+    /// fraction of the view distance — must fail the RD 16 table, and must fail
+    /// it *in the outer fifth of the view*, not at the endpoints. Both endpoints
+    /// agree (0 near, 1 at the edge), which is exactly why a "distant things are
+    /// foggier" assertion could never see this.
+    ///
+    /// Asserting the panic message's bounding box, rather than merely that it
+    /// panicked, is what makes this a control for the *detector*: it proves the
+    /// gate localises the defect instead of reporting a global fraction.
+    #[test]
+    fn the_old_fraction_model_fails_this_gate() {
+        let old = FogSettings::for_view_distance([0.2, 0.4, 0.8], 16.0 * 16.0, 0.75);
+        assert_eq!((old.start, old.end), (192.0, 256.0), "the model being controlled for");
+
+        let err = std::panic::catch_unwind(|| {
+            assert_ramp(
+                "control",
+                &old,
+                EYE,
+                LEVEL_X,
+                &[
+                    (96.0, 0.0),
+                    (128.0, 0.0),
+                    (192.0, 0.0),
+                    (224.0, 0.0),
+                    (230.4, 0.0),
+                    (236.8, 0.25),
+                    (243.2, 0.50),
+                    (249.6, 0.75),
+                    (256.0, 1.0),
+                    (300.0, 1.0),
+                ],
+            );
+        })
+        .expect_err("the 0.75-fraction ramp must not satisfy vanilla's table");
+
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "<non-string panic>".to_owned());
+        assert!(
+            msg.contains("[224.0, 249.6]"),
+            "the control must localise to the outer fifth, where the two models \
+             actually differ — got: {msg}"
+        );
+        // And the magnitude, not just the location: at 224 blocks the old model
+        // is half-fogged where vanilla is perfectly clear.
+        assert!(msg.contains("d=  224.0  got 0.5000  want 0.0000"), "got: {msg}");
+    }
+
+    /// A frame's *average* fog moves under almost any change to these numbers,
+    /// so it is not evidence. This pins that the frame-average statistic the
+    /// gate above deliberately avoids genuinely cannot tell the two models
+    /// apart at the resolution that matters.
+    #[test]
+    fn a_frame_average_could_not_have_caught_this() {
+        let vanilla = FogSettings::for_render_distance([0.0; 3], 16);
+        let old = FogSettings::for_view_distance([0.0; 3], 256.0, 0.75);
+        // Averaged over the whole view volume both models are mostly zero, and
+        // the means land within a few percent of each other...
+        let mean = |f: &FogSettings| {
+            let n = 256;
+            (0..n)
+                .map(|i| fog_factor(i as f32, f.start, f.end))
+                .sum::<f32>()
+                / n as f32
+        };
+        let (a, b) = (mean(&vanilla), mean(&old));
+        assert!(
+            (a - b).abs() < 0.13,
+            "frame means {a:.3} vs {b:.3} — if these ever separate cleanly, say so"
+        );
+        // ...while at a single sampled location they differ by half the range.
+        let d = 224.0;
+        let gap = fog_factor(d, old.start, old.end) - fog_factor(d, vanilla.start, vanilla.end);
+        assert!(
+            gap > 0.49,
+            "at d={d} the two models must differ by ~0.5, got {gap:.3}"
+        );
+    }
+
+    /// The gap this change does **not** close, pinned so it cannot drift
+    /// unnoticed and so the next agent has a number rather than a description.
+    ///
+    /// Vanilla's render-distance term measures a **cylindrical** distance
+    /// (`max(length(pos.xz), abs(pos.y))`, `fog.glsl:36-40`); every shader here
+    /// measures a spherical one. Along a ray pitched down 36.87° the cylindrical
+    /// distance is `0.8 ×` the spherical, so this client reaches full fog while
+    /// vanilla is barely into its ramp. Closing it needs a wider [`FogUniform`]
+    /// **and** an edit inside three shader bodies.
+    #[test]
+    fn spherical_distance_over_fogs_a_pitched_ray_versus_vanillas_cylindrical() {
+        let fog = FogSettings::for_render_distance([0.2, 0.4, 0.8], 16);
+        let dir = [0.8, -0.6, 0.0];
+        let s = 300.0;
+        let p = along(EYE, dir, s);
+
+        let sph = spherical(EYE, p);
+        let cyl = cylindrical(EYE, p);
+        assert!((sph - 300.0).abs() < 1e-3, "spherical {sph}");
+        assert!((cyl - 240.0).abs() < 1e-3, "cylindrical {cyl}");
+
+        let ours = fog_factor(sph, fog.start, fog.end);
+        // Vanilla's total: max(environmental, renderDistance). The overworld
+        // declares no fog distances, so environmental is the registered default
+        // 0..1024 (`EnvironmentAttributes.java:18-24`).
+        let vanilla_env = fog_factor(cyl.max(sph), 0.0, 1024.0);
+        let vanilla_rd = fog_factor(cyl, fog.start, fog.end);
+        let vanilla = vanilla_env.max(vanilla_rd);
+
+        assert!((ours - 1.0).abs() < 1e-4, "ours {ours}");
+        assert!((vanilla_rd - 0.375).abs() < 1e-4, "vanilla rd term {vanilla_rd}");
+        assert!((vanilla - 0.375).abs() < 1e-4, "vanilla total {vanilla}");
+        assert!(
+            ours - vanilla > 0.6,
+            "the known spherical/cylindrical gap is ~0.625 at d=300 on a 36.87° \
+             down-ray; got {:.3}. If this shrank, the shaders gained cylindrical \
+             distance and this pin plus docs/fog.md need updating.",
+            ours - vanilla
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -510,7 +932,13 @@ mod tests {
     fn the_end_fog_is_a_flat_near_black_edge_fade() {
         let f = FogSettings::the_end(16, 0.75);
         assert_eq!(f.end, 256.0);
-        assert_eq!(f.start, 192.0);
+        // Vanilla's span, not the caller's fraction: `256 - clamp(25.6, 4, 64)`.
+        // The End declares no `visual/fog_start_distance`, so its fog *is* the
+        // render-distance term and must fade on the overworld's curve (#388).
+        assert_eq!(f.start, 230.4);
+        // The fraction is only a floor, so a caller demanding a *later* onset
+        // than vanilla's span still gets it.
+        assert_eq!(FogSettings::the_end(16, 0.95).start, 243.2);
         // `#181318` is dark and very slightly red/blue-leaning, but overall
         // near-black — nothing like the overworld's saturated sky blue.
         assert!(f.color.iter().all(|c| *c < 0.02), "expected near-black: {:?}", f.color);

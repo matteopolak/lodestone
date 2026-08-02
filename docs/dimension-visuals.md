@@ -64,6 +64,12 @@ consulted at all. That closes issue #34 properly: a data pack pointing a level c
 The name match above survives only as the fallback for a server that sends no
 `registry_data`. See [`registry-data-ingest.md`](./registry-data-ingest.md).
 
+> **Scope split.** This doc owns fog *colour* — which dimension and biome picks
+> which colour, and how it stays in step with the frame clear. The fog
+> **distance** math (where the ramp starts, how wide it is, which metric measures
+> it) moved to [`fog.md`](./fog.md) with issue #388. If you are here because fog
+> looked too thick rather than the wrong hue, that is the other doc.
+
 ### Fog colour and clear colour — both wired now
 
 `Sim::fog_settings()` (`crates/lodestone-shell/src/sim.rs`) now branches on the
@@ -94,7 +100,7 @@ This pass had already added the presets to `lodestone-render`:
 - `lodestone_render::fog::FogSettings::the_end(render_distance: u32,
   start_fraction: f32)` — a flat near-black edge-fade (`#181318`, the End
   dimension type's `visual/fog_color`), reusing the existing
-  `for_view_distance` shape rather than vanilla's separate
+  render-distance edge shape rather than vanilla's separate
   `sky_color`/`fog_color` distance blend (`AtmosphericFogEnvironment`'s
   `skyColorMixFactor`), and not attempting the End's actual starfield sky.
 
