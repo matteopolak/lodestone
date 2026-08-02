@@ -852,7 +852,16 @@ impl Menu {
         self.quick_craft_type = kind;
     }
 
-    pub(crate) fn quick_craft_slots(&self) -> &[usize] {
+    /// The slots this menu has accumulated from `ADD` packets during a drag —
+    /// vanilla's `AbstractContainerMenu.quickcraftSlots`.
+    ///
+    /// Public so the **screen's** paint set can be checked against it: the two
+    /// are grown independently (see [`can_drag_place_at`](Self::can_drag_place_at))
+    /// and their sizes are the divisors for the previewed split and the real
+    /// distribution respectively, so a drift between them is a wrong number on
+    /// screen. Empty except between a `START` and its `END`.
+    #[must_use]
+    pub fn quick_craft_slots(&self) -> &[usize] {
         &self.quick_craft_slots
     }
 

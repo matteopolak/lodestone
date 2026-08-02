@@ -290,6 +290,91 @@ There is no tooltip yet, so "below the tooltip" (vanilla's actual third layer)
 is currently moot — the carried stack is simply the topmost thing this screen
 draws.
 
+### The drag preview, and the one number that must not be re-derived (issue #378 part 2)
+
+While a paint-drag is held, vanilla shows the *provisional* result of releasing
+now: in each painted cell a 50%-white wash (`fill(…, -2130706433)` = `0x80FFFFFF`)
+under the stack that cell would receive, and on the cursor the count it would be
+left holding. This client accumulated the paint set and drew none of it.
+
+`ContainerFrame::with_drag(Some((kind, painted)))` turns it on; `app.rs` passes
+`MenuInput::drag_paint()` straight through. `None` — the default — draws nothing,
+so every headless caller and gate is unchanged.
+
+**The split arithmetic is not in this file.** `Menu::quick_craft_plan`
+(`lodestone-game/src/click.rs`) produces the per-cell totals, and
+`finish_quick_craft` distributes with the *same call*. Vanilla writes the formula
+out three times — `doClick`'s end arm (`AbstractContainerMenu.java:377-390`),
+`extractSlot` (`AbstractContainerScreen.java:202-222`) and
+`recalculateQuickCraftRemaining` (`:248-267`) — and a preview that disagreed with
+the outcome would be worse than no preview, so there is one copy here.
+
+Three details are transcribed on purpose and all three are easy to lose:
+
+* **`quickCraftSlots.size() == 1` draws nothing at all.** `extractSlot` `return`s
+  before anything (`:203-205`), so the cell blanks — including whatever it already
+  held. A one-cell drag is about to be re-dispatched as an ordinary click.
+* **A clamped count is yellow** (`:212-215`), which is why `QuickCraftCell` carries
+  a `clamped` flag rather than the caller re-deriving it. The ink is threaded
+  through `item_icon::draw_item_icon_counted`; every other caller passes
+  `COUNT_INK`.
+* **A `CLONE` drag's previewed cursor deliberately does not match the outcome.**
+  `recalculateQuickCraftRemaining` assigns `maxStackSize` outright (`:251-252`)
+  while `doClick` still subtracts per cell, so `remaining` goes negative and the
+  release empties the cursor. Vanilla shows a full stack anyway. Transcribed, not
+  fixed — see `tests/drag_preview_agreement.rs`. The *per-cell* counts agree.
+
+The wash goes in the **chrome** run (before `chrome_vertex_count`) so it lands
+under the icon it backs; the provisional counts land past that split like every
+other count.
+
+#### Why the screen's paint set can be trusted as the divisor
+
+`painted.len()` is the even-split divisor. The screen keeps its own paint set
+(`MenuInput.drag`) and the machine keeps its own (`Menu::quick_craft_slots`, grown
+from the `ADD` packets), and if their sizes ever differed the preview would divide
+by a different number than the distribution. They cannot, because both grow
+through **`Menu::can_drag_place_at`** — one predicate, called from both layers,
+which is also what fixed issue #378 part 1. `container.rs`'s
+`the_screens_paint_set_and_the_machines_stay_identical` asserts the equality
+end to end rather than leaving it as an argument.
+
+#### Proof
+
+Two halves, because neither is sufficient alone:
+
+* `lodestone-game/tests/drag_preview_agreement.rs` — hermetic. Reads the plan,
+  then runs the **real** `perform_drag`, then asserts previewed == produced per
+  cell, across 2-, 3- and 5-cell drags for both buttons plus occupied/clamped
+  cells and `CLONE`. It also states the shares as literals hand-derived from
+  `getQuickCraftPlaceCount`, and that is load-bearing: now that plan and outcome
+  share code, agreement alone is `decode(encode(x)) == x` and would survive two
+  symmetric misunderstandings. Measured — swapping the `EVEN` share to a `ceil`
+  leaves the agreement assertions green and the literal fails at `left: 4,
+  right: 3`.
+* `lodestone-shell/tests/container_drag_preview_pixels.rs` — the pixels. Four
+  frames differing only in the drag. Measured on a green tree:
+  preview vs no-drag in a painted cell **256 px, bbox x160..175 y94..109** (the
+  whole cell — the wash); the **unpainted** control cell **0 px**; a 3-share vs a
+  2-share in the same cell **8 px, bbox x170..175 y105..108**, a 6×4 box in the
+  bottom-right corner, which is exactly where a stack count sits; and two drags
+  whose share is the same number by different routes (`floor(7/3)` and
+  `floor(4/2)`) **0 px — pixel-identical**.
+
+  That last pair is the assertion "a number drew in each painted cell" cannot
+  make. Three controls were run one at a time and the table of which assertions
+  fire is in the gate's own header — the useful part is that **no single
+  assertion covers two of them**. With the preview absent entirely, the
+  same-share comparison passes *vacuously* (two blanks are identical) and only
+  the reaches-pixels assertion fires. With the `EVEN` share switched to `ceil`,
+  reaches-pixels passes happily and the split assertion fails at 8 px in the
+  count corner, while the magnitude assertion collapses to 0 px because
+  `ceil(9/3)` and `ceil(7/3)` are both 3. With `cell()` ignoring its index so
+  every cell previews, *only* position fires, at 256 px in a cell that was never
+  painted. That last one is `CLAUDE.md`'s magnitude species in miniature: three
+  assertions measuring *whether* something drew, all satisfied, and the thing was
+  in the wrong place.
+
 ### Keyboard: the number keys are `SWAP`, not slot selection (issue #378 part 3)
 
 While a container screen is open, `resolve_key`'s container arm consumes every key
