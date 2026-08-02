@@ -61,6 +61,7 @@ use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
 use crate::hud::item_icon::{ColourStream, push_sprite_quad};
 use crate::menu::nav::{MainButton, PauseButton};
+use crate::menu::widget::{self, Widget};
 
 /// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`
 /// returns seven 5-bit rows).
@@ -100,10 +101,14 @@ pub const MOSAIC: usize = 16;
 // same units vanilla's `Screen.width`/`height` are in.
 
 /// A vanilla button's height — `Button.DEFAULT_HEIGHT` (`Button.java:15`).
-const WIDGET_H: f32 = 20.0;
+///
+/// Read from [`widget::DEFAULT_HEIGHT`] rather than restated: the widget layer
+/// and every slot below must not be able to drift apart.
+const WIDGET_H: f32 = widget::DEFAULT_HEIGHT;
 /// A vanilla wide button — `Button.BIG_WIDTH` (`Button.java:14`), used for the
-/// title screen's top three rows (`TitleScreen.java:178,196,199`).
-const WIDE_W: f32 = 200.0;
+/// title screen's top three rows (`TitleScreen.java:178,196,199`). See
+/// [`WIDGET_H`] on why this is an alias rather than a literal.
+const WIDE_W: f32 = widget::BIG_WIDTH;
 /// The title screen's half-width button (`TitleScreen.java:146,148`). Note the
 /// pair is `[W/2-100, 98]` and `[W/2+2, 98]` — a **4 px** gutter, unlike the
 /// pause screen's 8 px one below.
@@ -159,29 +164,15 @@ const PAUSE_TITLE_Y: f32 = 40.0;
 /// `height - 10` (`TitleScreen.java:154,323`).
 const CORNER_TEXT_Y: f32 = -10.0;
 
-/// The three `widget/button*` sprites `AbstractButton.SPRITES` selects between
-/// (`AbstractButton.java:18-22`). All three are `nine_slice` in the pack; their
-/// border widths are read from the sibling `.png.mcmeta` by
-/// [`GuiAtlas`](lodestone_render::GuiAtlas), **not** hardcoded here — which
-/// matters, because `button_disabled`'s border is **1** while the other two are
-/// **3**.
-const SPRITE_BUTTON: &str = "widget/button";
-/// See [`SPRITE_BUTTON`]. Selected when enabled *and* hovered/focused.
-const SPRITE_BUTTON_HOVER: &str = "widget/button_highlighted";
-/// See [`SPRITE_BUTTON`]. Selected whenever the widget is inactive, hovered or
-/// not — `WidgetSprites::get` returns `disabledFocused == disabled` for the
-/// three-argument constructor (`WidgetSprites.java:15-25`).
-const SPRITE_BUTTON_OFF: &str = "widget/button_disabled";
-
 /// An active button's label colour: plain white, `ARGB.white(alpha)`
 /// (`AbstractButton.java:51` tints the sprite; the label itself is the
 /// component's own default).
+///
+/// Also the tint every *sprite* on this pass is drawn with, which is why it
+/// stays here rather than moving into [`widget`] alongside
+/// [`widget::ACTIVE_LABEL`] — the two happen to be the same white, but one is a
+/// widget's label colour and the other is this pipeline's untinted default.
 const LABEL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// An inactive button's label colour:
-/// `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` merges
-/// `Style.withColor(-6250336)` (`AbstractWidget.java:318`), and
-/// `-6250336 as u32 == 0xFF_A0_A0_A0` — grey 160.
-const LABEL_OFF: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1.0];
 /// Tint applied to a disabled button's *icon sprite*. Vanilla passes
 /// `this.alpha` (1.0) and relies on the disabled background alone
 /// (`SpriteIconButton.java:81`), so this is white.
@@ -1694,6 +1685,20 @@ pub fn build(
 /// Draws one vanilla widget: its `widget/button*` nine-slice background, then
 /// either its centred label or its centred 15×15 icon sprite.
 ///
+/// **This is [`widget::Widget`]'s consumer.** Nothing about which sprite or which
+/// label colour a state produces is decided here any more — a [`Widget`] is built
+/// from the row's own `enabled`/`selected` and then *asked*
+/// ([`Widget::background_sprite`], [`Widget::message_colour`]), so the title
+/// screen, the pause menu, the death screen and the account screen's action row
+/// share one copy of vanilla's rules instead of a three-way `if` per screen. That
+/// is the whole point of #393: the fourth screen must not write the blit a fourth
+/// time.
+///
+/// The rect still comes from [`row_rect`] rather than from the widget, and
+/// deliberately: that function is also `app.rs`'s hit-test, so it stays the single
+/// definition of where a row is until #394 gives the layout containers somewhere
+/// to write positions *to*.
+///
 /// Mirrors `AbstractButton.extractDefaultSprite` +
 /// `Button.Plain.extractContents` (`AbstractButton.java:43-53`,
 /// `Button.java:128-132`) and, for icons,
@@ -1711,60 +1716,75 @@ fn draw_widget(
     let Some((x, y, w, h)) = row_rect(rows, i, width, height) else {
         return;
     };
-    // `WidgetSprites::get(enabled, focused)` (`WidgetSprites.java:19-25`) with
-    // `AbstractButton`'s three-argument sprite set: disabled wins over hovered,
-    // which is why a greyed-out button under the cursor still looks greyed out.
-    let sprite = if !row.enabled {
-        SPRITE_BUTTON_OFF
-    } else if selected {
-        SPRITE_BUTTON_HOVER
-    } else {
-        SPRITE_BUTTON
-    };
-    if b.has_sprite(sprite) {
-        b.sprite(sprite, x, y, w, h, LABEL);
-    } else {
-        // Jar-less fallback: the flat fills the menu has always used, so the
-        // layout is still legible and still testable without a pack.
-        let fill = if !row.enabled {
-            ROW_OFF
-        } else if selected {
-            ROW_SEL
-        } else {
-            ROW_BG
-        };
-        b.rect(x, y, w, h, fill);
-        if selected {
-            b.outline(x, y, w, h, 1.0, FG);
-        }
-    }
-
-    if let Some(icon) = row.icon {
-        // `spriteOffset` is zero at every call site, so this is a plain centre.
-        let ix = x + (w - ICON_SPRITE) * 0.5;
-        let iy = y + (h - ICON_SPRITE) * 0.5;
-        b.sprite(icon, ix.floor(), iy.floor(), ICON_SPRITE, ICON_SPRITE, ICON_TINT);
+    // One widget, carrying this row's state. `focused` takes `selected` because
+    // the shell has a single row cursor that both the keyboard and
+    // `MenuNav::hover` move, and vanilla's sprite argument is
+    // `isHoveredOrFocused()` — see `menu::widget`'s docs.
+    //
+    // Built per frame, so the message is copied per frame. That is the same cost
+    // the row itself already pays — `frame_for` and `pause_frame` both rebuild
+    // every `MenuRow` with a fresh `label.to_string()` every frame — and a menu
+    // screen draws nine of these with no world behind it, so it is not worth a
+    // lifetime parameter on `Widget` to avoid.
+    let mut widget = Widget::button(x, y, w, h, row.label.as_str());
+    widget.active = row.enabled;
+    widget.focused = selected;
+    widget.icon = row.icon;
+    // `AbstractWidget.extractRenderState` wraps everything in `if (this.visible)`
+    // (`AbstractWidget.java:56-62`). No row sets this yet; the guard is here so
+    // that the day one does, it does not have to be remembered.
+    if !widget.visible {
         return;
     }
 
-    let colour = if row.enabled { LABEL } else { LABEL_OFF };
+    // `WidgetSprites::get(active, hoveredOrFocused)` (`WidgetSprites.java:18-24`)
+    // with `AbstractButton`'s three-argument sprite set: disabled wins over
+    // hovered, which is why a greyed-out button under the cursor still looks
+    // greyed out. The rule lives in `menu::widget`; this only asks.
+    match widget.background_sprite() {
+        Some(sprite) if b.has_sprite(sprite) => b.sprite(sprite, x, y, w, h, LABEL),
+        _ => {
+            // Jar-less fallback: the flat fills the menu has always used, so the
+            // layout is still legible and still testable without a pack.
+            let fill = if !widget.active {
+                ROW_OFF
+            } else if widget.focused {
+                ROW_SEL
+            } else {
+                ROW_BG
+            };
+            b.rect(x, y, w, h, fill);
+            if widget.focused {
+                b.outline(x, y, w, h, 1.0, FG);
+            }
+        }
+    }
+
+    if let Some(icon) = widget.icon {
+        // `spriteOffset` is zero at every call site, so this is a plain centre.
+        let (ix, iy) = widget.icon_rect(ICON_SPRITE);
+        b.sprite(icon, ix, iy, ICON_SPRITE, ICON_SPRITE, ICON_TINT);
+        return;
+    }
+
+    let colour = widget.message_colour();
     // `extractScrollingStringOverContents(output, message, 2)` →
     // `acceptScrollingWithDefaultCenter(msg, x+2, x+w-2, y, y+h)`
     // (`AbstractButton.java:39-41`, `AbstractWidget.java:92-98`), whose centre
     // is `(left + right) / 2` and whose top is
     // `(top + bottom - lineHeight) / 2 + 1` (`ActiveTextCollector.java:59,73`).
-    let (left, right) = (x + 2.0, x + w - 2.0);
-    let tw = b.text_width(&row.label, 1.0);
+    let (left, right) = widget.content_span();
+    let tw = b.text_width(&widget.message, 1.0);
     let label = if tw > right - left {
         // Vanilla scrolls an over-long label; we clip, which is the same static
         // frame a scroll happens to be showing at t=0.
-        clip_measured(b, &row.label, right - left)
+        clip_measured(b, &widget.message, right - left)
     } else {
-        row.label.as_str()
+        widget.message.as_str()
     };
     let tw = b.text_width(label, 1.0);
     let tx = ((left + right) * 0.5 - tw * 0.5).floor();
-    let ty = ((y + y + h - LINE_H) / 2.0).floor() + 1.0;
+    let ty = widget.label_top(LINE_H);
     b.text(label, tx, ty, 1.0, colour);
 }
 
@@ -3560,6 +3580,79 @@ mod tests {
     }
 
     #[test]
+    fn every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks() {
+        use crate::menu::nav::{MAIN_BUTTONS, PAUSE_BUTTONS};
+
+        // The island this rules out is the one #393 could most easily have
+        // landed: `menu/widget.rs` compiles, its own tests are green, and
+        // `draw_widget` keeps a private three-way `if` — so the widget layer is
+        // dead code while every existing gate still passes.
+        //
+        // The expected sprite here is produced by `WidgetSprites::get`
+        // (`menu::widget`), never spelled out, and the measurement is *which
+        // atlas region the frame's own UVs sample*. So a `draw_widget` that
+        // stopped consulting the widget would have to keep agreeing with
+        // vanilla's rule by coincidence, for all 36 (button, focused) pairs, to
+        // pass — and if the rule in `widget.rs` is wrong, this fails too.
+        let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
+        let slot = Slot {
+            origin: Origin::ScreenTop,
+            dx: -100.0,
+            dy: 40.0,
+            w: 200.0,
+            h: 20.0,
+        };
+        // Both real screens' real button states, labelled so a failure names the
+        // button rather than an index. `icon: None` throughout: the synthetic
+        // pack carries one icon sprite, and an icon quad would put a second
+        // region in the stream and make `all_uvs_within` a weaker question.
+        let cases: Vec<(&'static str, bool)> = MAIN_BUTTONS
+            .iter()
+            .map(|b| (b.label(), b.enabled()))
+            .chain(PAUSE_BUTTONS.iter().map(|b| (b.label(), b.enabled())))
+            .collect();
+        // The premise, checked rather than assumed: both screens really do carry
+        // a mix, or "the disabled sprite was chosen" is never exercised.
+        assert!(
+            cases.iter().any(|(_, e)| *e) && cases.iter().any(|(_, e)| !*e),
+            "neither screen has a disabled button any more, so this gate is vacuous"
+        );
+
+        for (label, enabled) in cases {
+            for focused in [false, true] {
+                let rows = vec![MenuRow {
+                    label: label.to_string(),
+                    enabled,
+                    slot: Some(slot),
+                    ..Default::default()
+                }];
+                let mut f = frame_with(rows, if focused { 0 } else { 99 });
+                f.vanilla = true;
+                let sprite = build(&f, Some(&atlas), None, V_W, V_H).sprite;
+
+                let expected = widget::BUTTON_SPRITES.get(enabled, focused);
+                let (min, max) = sprite_uv_bounds(&atlas, expected);
+                assert!(
+                    all_uvs_within(&sprite, min, max),
+                    "{label} (enabled={enabled}, focused={focused}) did not sample \
+                     {expected}, which is what WidgetSprites::get selects"
+                );
+                // The control for each case: flipping `active` must move the
+                // sample off this region, so "inside {expected}" is a real
+                // discriminator and not something every render satisfies.
+                let flipped = widget::BUTTON_SPRITES.get(!enabled, focused);
+                if flipped != expected {
+                    let (fmin, fmax) = sprite_uv_bounds(&atlas, flipped);
+                    assert!(
+                        !all_uvs_within(&sprite, fmin, fmax),
+                        "the detector cannot tell {expected} from {flipped}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn nine_slice_borders_come_from_the_mcmeta_not_a_constant() {
         // `widget/button` declares `border: 3` and `widget/button_disabled`
         // declares `border: 1` in the real 26.2 pack — read straight out of
@@ -3620,9 +3713,9 @@ mod tests {
         let off = render(false);
         let on = render(true);
         assert!(
-            coverage_of(&off, w, h, band, LABEL_OFF) > 0.02,
+            coverage_of(&off, w, h, band, widget::INACTIVE_LABEL) > 0.02,
             "no grey label ink in a disabled button's rect: {}",
-            coverage_of(&off, w, h, band, LABEL_OFF)
+            coverage_of(&off, w, h, band, widget::INACTIVE_LABEL)
         );
         assert_eq!(
             coverage_of(&off, w, h, band, LABEL),
@@ -3635,11 +3728,20 @@ mod tests {
             coverage_of(&on, w, h, band, LABEL)
         );
         assert_eq!(
-            coverage_of(&on, w, h, band, LABEL_OFF),
+            coverage_of(&on, w, h, band, widget::INACTIVE_LABEL),
             0.0,
             "an enabled label must not be drawn grey"
         );
-        assert_eq!(LABEL_OFF[0], 160.0 / 255.0, "vanilla's -6250336 is 0xFFA0A0A0");
+        // The colour under test comes from the widget layer, and *that* is
+        // checked against vanilla's signed ARGB integer by
+        // `widget::tests::vanillas_inactive_grey_is_derived_not_transcribed`
+        // rather than being restated here. What this line pins is that the two
+        // files still agree: the draw grey is the widget grey.
+        assert_eq!(
+            widget::INACTIVE_LABEL,
+            widget::argb_to_rgba(widget::INACTIVE_MESSAGE_ARGB),
+            "vanilla's -6250336 is 0xFFA0A0A0"
+        );
     }
 
     #[test]
@@ -3724,7 +3826,16 @@ mod tests {
         let atlas = crate::resources::load_menu_gui_atlas().expect(
             "no vanilla pack found; set LODESTONE_ASSETS to a root with client.jar",
         );
-        for id in [SPRITE_BUTTON, SPRITE_BUTTON_HOVER, SPRITE_BUTTON_OFF] {
+        // Every id the widget layer can select, taken from the record itself
+        // rather than relisted — so a sprite added to `WidgetSprites` is covered
+        // here the day it exists.
+        let button_ids = [
+            widget::BUTTON_SPRITES.enabled,
+            widget::BUTTON_SPRITES.disabled,
+            widget::BUTTON_SPRITES.enabled_focused,
+            widget::BUTTON_SPRITES.disabled_focused,
+        ];
+        for id in button_ids {
             assert!(atlas.contains(id), "the pack has no {id}");
             assert_eq!(
                 atlas.native_size(id),
@@ -3773,9 +3884,9 @@ mod tests {
                 .expect("nine-slice top-left");
             (tl.dst[2], tl.dst[3])
         };
-        assert_eq!(corner(SPRITE_BUTTON), (3.0, 3.0));
-        assert_eq!(corner(SPRITE_BUTTON_HOVER), (3.0, 3.0));
-        assert_eq!(corner(SPRITE_BUTTON_OFF), (1.0, 1.0));
+        assert_eq!(corner(widget::BUTTON_SPRITES.enabled), (3.0, 3.0));
+        assert_eq!(corner(widget::BUTTON_SPRITES.enabled_focused), (3.0, 3.0));
+        assert_eq!(corner(widget::BUTTON_SPRITES.disabled), (1.0, 1.0));
 
         // And the whole title frame draws through it: every sprite the two
         // screens ask for resolves to at least one quad.
