@@ -212,11 +212,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //
     // Hence: `overlay` stays vanilla's alpha with 0 meaning absent, and the red
     // weight is its complement, taken only when the overlay is actually present.
-    //
-    // No double quotes anywhere in this comment: it lives inside a Rust raw
-    // string, so one would end the shader source early and rustc would then parse
-    // the remaining English as code. That cost two builds on this edit alone, the
-    // second because the fix itself spelled out a raw-string literal.
     let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
     let overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
     let lit = srgb_to_linear(overlaid);

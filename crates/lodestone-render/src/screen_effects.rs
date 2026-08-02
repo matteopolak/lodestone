@@ -51,10 +51,12 @@
 //! composited after the world and the hand are already drawn. Vanilla runs
 //! both at once when submerged; nothing here changes `fog.rs`.
 //!
-//! # No double quotes in these shaders, ever
+//! # The shader is a file, not a string literal
 //!
-//! Same rule as every other shader in this crate: `"` inside a WGSL comment
-//! ends the Rust raw string early. Backticks only.
+//! `src/shaders/overlay.wgsl`, pulled in with `include_str!`, like every other
+//! shader in this crate. It used to be a Rust raw string, where one double
+//! quote inside a WGSL comment ended the literal and rustc parsed the prose
+//! after it as code. See `docs/shaders.md`.
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;

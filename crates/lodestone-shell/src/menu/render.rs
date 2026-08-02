@@ -2388,9 +2388,6 @@ impl MenuRenderer {
 
 const MENU_WGSL: &str = include_str!("../shaders/menu.wgsl");
 
-// NOTE: no double quote may appear anywhere below, not even in a comment — this
-// is a Rust `r-string`, so a quote would end it and rustc would then parse the
-// English prose as code. Use backticks. See CLAUDE.md.
 const MENU_SPRITE_WGSL: &str = include_str!("../shaders/menu_sprite.wgsl");
 
 #[cfg(test)]

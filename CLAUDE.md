@@ -418,11 +418,24 @@ transform cannot produce. Ask *where*, not *what*.
 - **Vanilla is not colour-managed.** Tint *and* shade multiply in **gamma** space
   (`srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`). Doing it in linear pulls every shade
   factor toward 1.0 and washes the image out.
-- **Never put a double quote inside a WGSL shader — not even in a comment.** The shaders live in
-  Rust `r"…"` raw strings, so a `"` terminates the string early and rustc then parses the rest of
-  your *prose* as code: `error: prefix 'yet' is unknown`, pointing at English. The errors look
-  nothing like the cause. Use backticks in shader comments. This has now bitten twice, the second
-  time immediately after being warned about it.
+- **Shaders live in `.wgsl` files. Never inline one in Rust again.**
+  `crates/lodestone-render/src/shaders/` and `crates/lodestone-shell/src/shaders/`, pulled in with
+  `include_str!` — still compile-time, still a `&'static str`, no runtime asset loading. See
+  [`docs/shaders.md`](./docs/shaders.md). "Just for a quick test" is not an exception:
+  `no_wgsl_is_inlined_in_rust_sources` fails on any `@vertex`/`@fragment` under a crate's `src/`.
+  The rule this replaces was *never put a double quote inside a shader, not even in a comment* —
+  because a `"` terminated the enclosing Rust raw string and rustc then parsed the remaining WGSL
+  and your *prose* as code: `error: prefix 'yet' is unknown`, pointing at English. The errors
+  looked nothing like the cause, and it bit **four times**, twice inside comments that were
+  themselves warning about the trap. Deleting the trap beat remembering it.
+  Two things worth keeping from that history. First, **a `"` in a `.wgsl` comment is now legal and
+  inert** — measured, not assumed: one put into `sky_disc.wgsl`'s comment left the suite green,
+  while the same `"` in *code* position failed with `expected expression, found "\""`. Write shader
+  comments normally. Second, **`cargo check` has never compiled a shader at any feature setting**,
+  so before `wgsl_valid` a WGSL syntax error could reach `main` with all three required checks
+  green — the only thing that read the WGSL was `create_shader_module`, inside an `#[ignore]`d GPU
+  gate. `cargo test --workspace` now runs all 22 shaders through naga's front end in ~0.02s with no
+  adapter.
 
 ## Live-server hazards
 
