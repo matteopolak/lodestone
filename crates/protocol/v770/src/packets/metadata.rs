@@ -778,7 +778,7 @@ mod tests {
     }
 
     /// Index 1, `INT`, decodes to `air_supply` — the field this seam exists to
-    /// close (`docs/air-supply.md`). Verified against `Entity.java:268`'s
+    /// close (`docs/sky-and-air-bubbles.md`). Verified against `Entity.java:268`'s
     /// `defineId` declaration order, not assumed.
     #[test]
     fn decodes_air_supply_at_index_1() {

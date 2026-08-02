@@ -200,6 +200,13 @@ pointing back here. This is not a placeholder pretending to work — the
 render mechanism is real and gated correctly, but there is genuinely no data
 to feed it yet.
 
+> **Historical, as of the "Closed" heading above.** That last paragraph describes
+> the state *before* #112 landed. `app.rs`'s `redraw()` now reads
+> `PlayerSnapshot::on_fire` off the shared handle
+> (`crates/lodestone-shell/src/app.rs:1543`), so production does pass `true`. It
+> matters for issue #390 below: the flag reaches real pixels, which is what made
+> a *stale* flag a real defect rather than a dormant one.
+
 ### The patch, as applied
 
 1. **`lodestone-ecs/src/session.rs`**: add a field to `Vitals` (or a sibling
@@ -229,6 +236,36 @@ to feed it yet.
 No change needed in `lodestone-shell/src/gpu.rs`, `gpu/screen_effects.rs`, or
 `lodestone-render` — the render half of this feature does not know or care
 where `on_fire` came from.
+
+## A session-scoped flag needs an explicit reset (issue #390)
+
+`Vitals::on_fire` is written by exactly one thing —
+`apply_local_player_on_fire`, off entity metadata naming our own id — and
+metadata only arrives when the server has something to say. So the field is
+**sticky**: whatever the last packet said stays true until the next one
+contradicts it, and a respawn does not produce a contradicting packet on its own.
+
+Vanilla never hits this because a respawn is a *new entity on both sides*:
+`PlayerList.respawn` does `new ServerPlayer(...)` (`PlayerList.java:393`), and
+the client throws away its `LocalPlayer` and builds another via
+`gameMode.createPlayer` (`ClientPacketListener.handleRespawn`, `:1286`), keeping
+only the entity id. The fresh entity's synched data starts at `Entity`'s
+declared defaults — shared flags `0`, air `getMaxAirSupply()`
+(`Entity.java:319`).
+
+We keep one long-lived entity across the whole session, so the clear has to be
+written down. `session::apply_local_player_state`'s `Respawned` arm now sets
+both `Vitals::on_fire` and `Vitals::air` back to `None`.
+
+**`None`, not `Some(false)`.** `None` is the documented "no reading yet" state
+and already reads as not-burning downstream; a literal would be us inventing a
+report the server never sent. Air's sibling bug is the visible one — see
+[`sky-and-air-bubbles.md`](./sky-and-air-bubbles.md#a-respawn-clears-the-metadata-fed-vitals-issue-390).
+
+**If you add another metadata-fed session field, add it to that arm.** The
+routing switch is the usual island factory here; this is the second one, and the
+failure is silent in both directions (`on_fire`'s absence reads as `false`, so
+nothing looks wrong until a player dies burning).
 
 ## How to change it, and the gotchas
 

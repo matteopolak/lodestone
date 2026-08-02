@@ -89,7 +89,7 @@ pub struct PlayerSnapshot {
     /// has no `_known` companion: it arrives on entity metadata, not
     /// `set_health`, and a plausible-looking `HudState::MAX_AIR` default before
     /// the first report is the same "not yet reported reads as full" convention
-    /// `HudState::default` already uses (`docs/air-supply.md`).
+    /// `HudState::default` already uses (`docs/sky-and-air-bubbles.md`).
     pub air: i32,
     /// Whether the player entity is burning — `Entity.FLAG_ONFIRE`, folded from
     /// `Vitals::on_fire` (issue #112).
