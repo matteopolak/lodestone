@@ -132,6 +132,13 @@ not fail, it draws garbage or nothing. That case used to `return` silently on a
 `world.get` miss and render an empty world with a clean log; it now counts into
 `TerrainMesh::drops` and warns with `branch = "id-space-mismatch"`.
 
+There is a **third** such fact — `ColumnSource`, whether an absent neighbour
+column is the edge of the world or a chunk still in flight — and it deliberately
+does *not* live here: unlike these two it never changes over a session's life, so
+it is fixed once on `TerrainMesh` from the worker pool's classifier rather than
+recomputed every `poll_net`. See
+[section mesh invalidation](./section-mesh-invalidation.md).
+
 ### Meshing stayed off the frame thread, and here is the argument
 
 The plan asks for `Update` systems that "enqueue and drain". That is exactly what
@@ -225,9 +232,11 @@ invalidate and nothing to clone. The rule is gone, not obeyed.
 - **Never hold the chunk read lock across a mesh.** The whole point of the
   copy-on-write `Arc<ChunkSection>` snapshots is snapshot-then-release.
   `TerrainMesh::mesh_column` takes the lock for the snapshot loop and drops it in
-  an explicit block *before* submitting, and the `Vec<Result<SectionSnapshot,
-  SectionKey>>` between the two exists for exactly that reason — not for
-  borrow-checker convenience.
+  an explicit block *before* submitting, and the `Vec<(SectionKey,
+  SnapshotOutcome)>` between the two exists for exactly that reason — not for
+  borrow-checker convenience. (That was a `Vec<Result<SectionSnapshot,
+  SectionKey>>` until issue #389 gave the snapshot a *third* outcome — see
+  [section mesh invalidation](./section-mesh-invalidation.md).)
 - **`TerrainMesh` is one resource on purpose.** Five separate resources would be
   five `ResMut`s of one invariant: a column that snapshots to nothing pushes a
   removal *and* may count a drop, and a drained mesh records an upload. Splitting
