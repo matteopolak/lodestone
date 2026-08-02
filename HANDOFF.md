@@ -846,6 +846,37 @@ Where minecraft-data is still the practical choice, record why.
 
 ---
 
+## Addendum — one uncommitted line in `app.rs`, deliberately (issue #378 part 2, 2026-08-01)
+
+`b3bb4e6` landed the container drag preview complete except for its single live
+wiring line, which is **in the working tree and in no commit**:
+
+```rust
+// crates/lodestone-shell/src/app.rs, in the container draw block
+let container_frame = ContainerFrame::new(container_menu, &container_title)
+    .with_inventory_label(&inventory_label)
+    .with_cursor(Some([self.cursor.0, self.cursor.1]))
+    .with_drag(self.menu_input.drag_paint())   // <- this line
+    .with_recipe_book(self.recipe_book.as_ref());
+```
+
+Not an oversight and not laziness about a one-liner. At the time, `app.rs` held ~110
+lines of another agent's in-flight #382 work (deleting `key.lodestone.toggleFly`,
+adding `InputAction::SwapOffhand`, removing `sync_present_mode`/`unlock_framerate`),
+and `git commit -F - -- <path>` commits **working-tree** content — so naming `app.rs`
+would have shipped their unfinished change under a drag-preview commit message. The
+same hazard that nearly shipped ~500 foreign lines in `sim.rs`.
+
+**So the preview is an island until this line is committed**, which is the defect class
+this file exists to catalogue — recorded here rather than left to be discovered.
+
+Whoever lands `app.rs` next: check the line is still there and let it ride along; it
+is four lines including its comment and clearly attributed. If it has been lost, it is
+one line and `MenuInput::drag_paint()` / `ContainerFrame::with_drag` are both public
+and documented. `tests/container_drag_preview_pixels.rs` proves the draw itself works,
+so a re-add needs no new gate — but nothing in the tree today proves the *live* screen
+passes the paint set, and that is exactly the gap.
+
 ## Addendum — "Islands": subsystems that are correct but not plugged in
 
 This is the **dominant defect class in this project** and the single most useful thing
