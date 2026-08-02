@@ -15,7 +15,7 @@ use lodestone_controller::{ControllerPlugin, InputState, RawInput, apply_look};
 pub use lodestone_ecs::SessionPhase;
 use lodestone_ecs::entity::{Attributes, EntityKind, MinecraftEntityId, Position};
 use lodestone_ecs::player::{
-    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, Flying, LocalPlayerPlugin,
+    ActionQueue, AttackStrengthTicker, CollisionSource, Dead, Egress, LocalPlayerPlugin,
     MovementIntent, NearbyEntities, PhysicsState, PlayerCollision, PrevPosition, Profile,
     SelectedSlot, Submersion, reset_local_player, spawn_local_player,
 };
@@ -44,7 +44,7 @@ use lodestone_world::{ChunkPos, World};
 
 use crate::audio::ShellAudio;
 use crate::blocks::id;
-use crate::camera_rig::{build_camera, third_person_camera};
+use crate::camera_rig::{ViewBob, bobbed_camera, build_camera, third_person_camera};
 use crate::chat::compose_chat_action;
 use crate::collision::{LiveCollision, WorldCollision};
 use crate::config::{Config, Mode};
@@ -589,6 +589,18 @@ pub struct Sim {
     /// view by 1.22 blocks in a single frame. Ticked once per physics tick beside
     /// [`Self::body_pose`], read interpolated in [`Self::camera`].
     eye_height_smoother: crate::camera_rig::EyeHeightSmoother,
+    /// The walk bob's phase and amplitude (issue #58) — like
+    /// [`Self::eye_height_smoother`] and [`Self::body_pose`], per-tick state that
+    /// cannot be a pure function of the current [`PlayerState`]. Ticked once per
+    /// physics tick in [`Self::step`], read interpolated in
+    /// [`Self::render_camera`] — **not** [`Self::camera`], which is the pick ray
+    /// and the audio listener; see that method's docs.
+    view_bob: ViewBob,
+    /// Vanilla's View Bobbing option ([`crate::config::Options::view_bobbing`]),
+    /// pushed down from the menu layer by [`Self::set_view_bobbing`] rather than
+    /// read from disk here — `Sim` owns no `Options`, and the menu is the only
+    /// thing that can change it.
+    view_bobbing: bool,
     /// Per-position chest lid animation state (issue #23) — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///
@@ -842,6 +854,11 @@ impl Sim {
             // from zero — vanilla's `Camera` is likewise aligned before its first
             // tick, not zero-initialised.
             eye_height_smoother: crate::camera_rig::EyeHeightSmoother::new(player.eye_height),
+            view_bob: ViewBob::new(),
+            // Vanilla's default. A fresh `Sim` bobs until told otherwise, so a
+            // caller that forgets `set_view_bobbing` gets the vanilla behaviour
+            // rather than a silently disabled feature.
+            view_bobbing: true,
             chest_lids: crate::block_entities::ChestLids::new(),
         };
         sim.refresh_mesh_policy();
@@ -1914,28 +1931,14 @@ impl Sim {
     /// A blank line sends nothing. No-op without a live connection. Returns
     /// whether anything was sent, so the caller can echo command feedback.
     ///
-    /// `/givedebug <item> <amount>` is intercepted first (see
-    /// [`crate::chat::intercept_give_debug`]): a well-formed line is translated to
-    /// the server's real `/give @s <item> <amount>` and both the translation and
-    /// the send happen here, so the user always sees what was actually sent. A
-    /// malformed line produces a local-only chat message and never reaches the
-    /// network — a debug command that fails silently is worse than none.
+    /// **Nothing is intercepted here.** A `/givedebug` wrapper used to run ahead
+    /// of [`compose_chat_action`] and rewrite itself into the server's real
+    /// `/give @s <item> <amount>`; issue #382 deleted it, because typing `/give`
+    /// does the same thing with no bespoke parser to keep in step with the
+    /// server's. Every line now goes to the server verbatim, and every command
+    /// response — including "you are not op" — arrives back over the ordinary
+    /// inbound chat path.
     pub fn send_chat(&mut self, line: &str) -> bool {
-        match crate::chat::intercept_give_debug(line) {
-            crate::chat::GiveDebugOutcome::Send { local_echo, action } => {
-                self.push_local_chat(local_echo);
-                if let Some(net) = &self.net {
-                    net.send_action(action);
-                    return true;
-                }
-                return false;
-            }
-            crate::chat::GiveDebugOutcome::Error(message) => {
-                self.push_local_chat(message);
-                return false;
-            }
-            crate::chat::GiveDebugOutcome::NotGiveDebug => {}
-        }
         let Some(action) = compose_chat_action(line) else {
             return false;
         };
@@ -1945,20 +1948,6 @@ impl Sim {
         } else {
             false
         }
-    }
-
-    /// Append a client-local line (never sent to the server) to the session's
-    /// chat feed, stamped with the driver's own clock. Used for local-only
-    /// feedback such as a malformed `/givedebug` line, mirroring how the
-    /// `NetUpdate::Chat` handler stamps an inbound server line.
-    fn push_local_chat(&mut self, text: impl Into<String>) {
-        let now = self.clock().secs;
-        let text = lodestone_model::Text::literal(text.into());
-        self.write_local(|w, local| {
-            if let Some(mut chat) = w.get_mut::<SessionChat>(local) {
-                chat.0.push_system(text, now);
-            }
-        });
     }
 
     /// The currently selected hotbar slot, `0..9`.
@@ -2032,31 +2021,6 @@ impl Sim {
     /// Sections that became empty (drained by the app to remove GPU meshes).
     pub fn drain_removals(&mut self) -> Vec<SectionKey> {
         self.terrain_mut(TerrainMesh::drain_removals)
-    }
-
-    /// Whether free-fly mode is active.
-    #[must_use]
-    pub fn flying(&self) -> bool {
-        self.read(|w| {
-            w.get::<Flying>(self.local)
-                .expect("the local player always carries Flying")
-                .0
-        })
-    }
-
-    /// Toggle free-fly (noclip) mode. Entering fly zeroes velocity so the player
-    /// doesn't keep any fall momentum.
-    pub fn toggle_fly(&mut self) {
-        let flying = !self.flying();
-        self.write_local(|w, local| {
-            if let Some(mut fly) = w.get_mut::<Flying>(local) {
-                fly.0 = flying;
-            }
-        });
-        self.player_mut(|player| {
-            player.velocity = Vec3d::ZERO;
-            player.on_ground = false;
-        });
     }
 
     /// Frames rendered per physics tick since start (fixed-timestep health).
@@ -2490,6 +2454,22 @@ impl Sim {
             let collision = self.tick_collision();
             let item_collision = self.item_collision();
             let nearby = self.tick_nearby_entities();
+            // The walk bob's amplitude reads the state vanilla's `updateBob` sees,
+            // which is the state **before** this tick's movement: `aiStep` calls
+            // `updateBob()` and only then `super.aiStep()`, so `getDeltaMovement()`
+            // is still last tick's post-friction velocity there. Captured here,
+            // before the `GameTick` write guard, for that reason and not merely
+            // for lock hygiene.
+            let (pre_position, pre_speed, pre_on_ground, pre_swimming) = {
+                let p = self.player();
+                (
+                    p.position,
+                    (p.velocity.x * p.velocity.x + p.velocity.z * p.velocity.z).sqrt() as f32,
+                    p.on_ground,
+                    p.pose == lodestone_physics::Pose::Swimming,
+                )
+            };
+            let pre_dead = self.is_dead();
             self.write(|w| {
                 w.insert_resource(collision);
                 w.insert_resource(item_collision);
@@ -2509,6 +2489,20 @@ impl Sim {
             // The camera's eye chases the entity's, half the gap per tick, so a
             // pose change eases instead of snapping. Same read guard as above.
             self.eye_height_smoother.tick(p.eye_height);
+            // The bob's *phase* is the distance the feet actually travelled, which
+            // is why this is a post-tick subtraction rather than a velocity:
+            // `LocalPlayer.move` adds `length(getX() - prevX, getZ() - prevZ) * 0.6`
+            // **after** `super.move` has already clipped the delta against
+            // collision, so walking into a wall does not advance the stride.
+            let moved = ((p.position.x - pre_position.x) as f32)
+                .hypot((p.position.z - pre_position.z) as f32);
+            self.view_bob.tick(
+                moved,
+                pre_speed,
+                pre_on_ground,
+                pre_dead,
+                pre_swimming,
+            );
             // Vanilla emits a movement packet every tick (20 Hz); mirror that so
             // the server sees our authoritative position/rotation and never has
             // to correct us. `TickSet::Send` produced it; this is where it and
@@ -2920,9 +2914,6 @@ impl Sim {
         }
         let dims = net.world_dimensions()?;
         let section_count = dims.section_count();
-        if section_count == 0 {
-            return None;
-        }
 
         let position = self.player().position;
         let block_x = position.x.floor() as i32;
@@ -2936,10 +2927,10 @@ impl Sim {
         let eye_si = block_y.div_euclid(16) - base_si;
         // Clamp rather than reject: an eye above the build limit still stands in
         // a biome, and the topmost section is the one that holds it.
-        let top = eye_si.clamp(
-            0,
-            i32::try_from(section_count).unwrap_or(0).saturating_sub(1),
-        );
+        let top = eye_si.clamp(0, i32::try_from(section_count).unwrap_or(0).saturating_sub(1));
+        if section_count == 0 {
+            return None;
+        }
 
         // Top-down: one lock acquisition for the whole column, then the highest
         // present section at or below the eye.
@@ -4025,7 +4016,6 @@ impl Sim {
         self.stats.world_bytes = store.read().heap_bytes();
         self.stats.rss_bytes = process_rss_bytes();
         self.stats.frames_per_tick = self.frames_per_tick();
-        self.stats.flying = self.flying();
         self.stats.target = self.target().map(|h| h.block);
         self.stats.status = self.status.clone();
     }
@@ -4111,9 +4101,51 @@ impl Sim {
     /// yet (`Self::live_collision` returning `None`) has nothing real to
     /// clamp against, so this falls back to the desired distance unclamped
     /// rather than jamming the camera into the eye.
+    /// Push vanilla's View Bobbing option down from the menu layer. Cheap and
+    /// idempotent; `app.rs` calls it once per presented frame rather than on the
+    /// toggle, for the same reason the deleted present-mode poll did — the menu
+    /// is pure and owns the `Options`, and `Sim` owns none.
+    pub fn set_view_bobbing(&mut self, on: bool) {
+        self.view_bobbing = on;
+    }
+
+    /// The interpolated walk bob this frame, or an all-zero frame when the option
+    /// is off. Exposed so a gate can assert the *input* to the camera fold
+    /// separately from the fold itself.
+    #[must_use]
+    pub fn bob_frame(&self) -> crate::camera_rig::BobFrame {
+        if !self.view_bobbing {
+            return crate::camera_rig::BobFrame::default();
+        }
+        self.view_bob.frame(self.clock().interp_alpha)
+    }
+
     #[must_use]
     pub fn render_camera(&self, aspect: f32) -> Camera {
-        let eye = self.camera(aspect);
+        // The bob lands **here and not in `Self::camera`**, which is deliberate
+        // and is the difference between a wobbling camera and a wobbling *game*:
+        // `Self::camera` is also the block-targeting ray origin and the audio
+        // listener, and vanilla bobs neither. `GameRenderer.renderLevel` folds the
+        // bob into the *projection matrix* (`:539`), so `Camera`'s own position
+        // and rotation — what `getPickRay` and the listener read — never see it.
+        //
+        // Not gated on `third_person`: 26.2's `renderLevel` applies `bobView`
+        // whenever `optionsRenderState.bobView` is set, with no camera-type check
+        // (`GameRenderer.java:534-536`), and `bobView` itself only tests
+        // `isPlayer`. Older versions did suppress it in third person and issue
+        // #58's body says so; re-read against `.cache/mc/26.2/client-src`, that is
+        // no longer true.
+        let eye = bobbed_camera(
+            self.camera(aspect),
+            self.bob_frame(),
+            // `bobHurt` is deliberately **not** driven from here yet: it is almost
+            // entirely a roll, and `bobbed_camera` cannot carry roll, so wiring it
+            // would produce a visibly wrong tilt rather than a slightly imprecise
+            // one. `ViewBob::hurt` and `BobFrame::hurt_roll_degrees` are
+            // implemented and tested against vanilla; see `docs/view-bobbing.md`
+            // for what the last hop needs.
+            0.0,
+        );
         if !self.third_person {
             return eye;
         }
@@ -6152,6 +6184,25 @@ mod tests {
         // can't pass — and neither can "nothing sends", guarded by the two above.
         assert!(!sim.send_chat("   "), "blank input must not send");
 
+        // Nothing is intercepted on the way out any more (#382). `/givedebug`
+        // used to be rewritten into `/give @s …` *here*, with a local echo
+        // pushed into the chat log and — when malformed — nothing sent at all.
+        // Both halves of that are now the server's business.
+        let before = sim.recent_chat(10).len();
+        assert!(
+            sim.send_chat("/givedebug minecraft:diamond_pickaxe 1"),
+            "a /givedebug line is now an ordinary command and must reach the wire"
+        );
+        assert!(
+            sim.send_chat("/givedebug"),
+            "even the malformed form goes to the server; nothing absorbs it locally"
+        );
+        assert_eq!(
+            sim.recent_chat(10).len(),
+            before,
+            "no local echo and no local error line — that was the wrapper's job"
+        );
+
         let sent: Vec<ClientAction> = std::iter::from_fn(|| actions.try_recv().ok()).collect();
         assert_eq!(
             sent,
@@ -6162,8 +6213,16 @@ mod tests {
                 ClientAction::SendChat {
                     text: "plain message".into()
                 },
+                // Verbatim, *not* rewritten to `give @s minecraft:diamond_pickaxe 1`
+                // — which is the whole assertion.
+                ClientAction::SendCommand {
+                    command: "givedebug minecraft:diamond_pickaxe 1".into()
+                },
+                ClientAction::SendCommand {
+                    command: "givedebug".into()
+                },
             ],
-            "exactly the two non-blank lines route, with the command slash stripped"
+            "exactly the four non-blank lines route, with the command slash stripped"
         );
     }
 
@@ -7485,26 +7544,108 @@ mod tests {
         assert!(!sim.place_block(), "placing inside the player is refused");
     }
 
+    /// Issue #58's precondition half: a real walking player must actually
+    /// accumulate `walkDist` and ease the amplitude up, and **only the render
+    /// camera** may see the result.
+    ///
+    /// The corridor is not decoration. The offline world is real generated
+    /// terrain (`lodestone-worldgen`), the player spawns on a slope, and walking
+    /// north walls them out after ~0.2 blocks — `distance_walked_scales_with_the`
+    /// speed test above learned that the hard way. A bob gate run against a
+    /// walled-in player reads `walk_phase: -0.0, bob: 0.0` and asserts nothing,
+    /// which is the *precondition* species of vacuous test.
     #[test]
-    fn fly_mode_ignores_gravity() {
+    fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
         let mut sim = Sim::new(test_config());
-        sim.toggle_fly();
-        assert!(sim.flying());
-        let y0 = sim.player().position.y;
-        // No vertical input: fly holds altitude (physics-walk would fall).
-        for _ in 0..40 {
-            sim.step(1.0 / 20.0);
+        // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180).
+        let feet_y = sim.player().position.y.floor() as i32;
+        for dz in -25..=1 {
+            for dx in -1..=1 {
+                sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+                sim.set_block_world([dx, feet_y, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+                sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+            }
         }
-        assert!(
-            (sim.player().position.y - y0).abs() < 1e-9,
-            "fly holds altitude"
-        );
-        // Jump ascends.
-        sim.input_mut(|i| i.set(lodestone_controller::Action::Jump, true));
+        // Settle on the fresh floor: while airborne `updateBob`'s `onGround` gate
+        // holds the amplitude at zero, so a gate that never lands measures the
+        // fall rather than the walk.
         for _ in 0..20 {
             sim.step(1.0 / 20.0);
         }
-        assert!(sim.player().position.y > y0, "jump lifts in fly mode");
+        assert!(
+            sim.player().on_ground,
+            "precondition: the player must be standing before the walk starts"
+        );
+        let still = sim.bob_frame();
+        assert_eq!(still.bob, 0.0, "a settled, still player has no amplitude");
+        assert_eq!(
+            sim.render_camera(1.0).position,
+            sim.camera(1.0).position,
+            "and with no bob the two cameras are bit-identical, not merely close"
+        );
+
+        let start = sim.player().position;
+        sim.input_mut(|i| i.set(lodestone_controller::Action::Forward, true));
+        for _ in 0..30 {
+            sim.step(1.0 / 20.0);
+        }
+        let travelled = (sim.player().position.z - start.z).abs();
+        assert!(
+            travelled > 1.0,
+            "precondition: the corridor must let the player actually walk; only \
+             {travelled:.3} blocks covered, so the bob below would be measuring a \
+             walled-in player"
+        );
+
+        let walking = sim.bob_frame();
+        assert!(
+            walking.bob > 0.02,
+            "the amplitude must ease up from real movement, got {}",
+            walking.bob
+        );
+        assert!(
+            walking.bob <= 0.1 + 1e-6,
+            "and must never exceed vanilla's 0.1 ceiling, got {}",
+            walking.bob
+        );
+        // `walkDist` is `distance * 0.6` accumulated, then negated, so a metre of
+        // travel is well over half a unit of phase.
+        assert!(
+            walking.walk_phase.abs() > 0.5,
+            "the stride phase must advance, got {}",
+            walking.walk_phase
+        );
+
+        // The half that would be a gameplay bug rather than a visual one.
+        // `Self::camera` is the block-targeting ray origin *and* the audio
+        // listener; vanilla bobs neither, because its bob is folded into the
+        // projection matrix and `getPickRay` never reads that.
+        assert_ne!(
+            sim.render_camera(1.0).position,
+            sim.camera(1.0).position,
+            "the drawn camera must bob"
+        );
+
+        // And the option zeroes the frame outright rather than scaling it, so
+        // `bobbed_camera` short-circuits and the two cameras are byte-equal again.
+        sim.set_view_bobbing(false);
+        assert_eq!(sim.bob_frame(), crate::camera_rig::BobFrame::default());
+        assert_eq!(
+            sim.render_camera(1.0).position,
+            sim.camera(1.0).position,
+            "with View Bobbing off, render_camera must be bit-identical to camera"
+        );
+        assert_eq!(sim.render_camera(1.0).pitch, sim.camera(1.0).pitch);
+        // Control: turning it back on restores the difference, so the equality
+        // above is the option working and not the walk having decayed.
+        sim.set_view_bobbing(true);
+        assert_ne!(
+            sim.render_camera(1.0).position,
+            sim.camera(1.0).position,
+            "control failed: the bob is gone regardless of the option, so the \
+             equality above proves nothing about the option"
+        );
     }
 
     #[test]
