@@ -11,9 +11,9 @@
 //! all draw through it, so there is one definition of vanilla's rules rather than
 //! one per screen.
 //!
-//! This is the first child of the menu-framework epic (#392/#393). Layout
-//! containers (#394) and focus/tab dispatch (#395) are deliberately *not* here —
-//! see [`LayoutElement`] for the seam they attach to.
+//! This is the first child of the menu-framework epic (#392/#393). The layout
+//! containers that arrange these (#394) live in [`super::layout`] and attach
+//! through [`LayoutElement`]; focus/tab dispatch (#395) is still absent.
 //!
 //! ## The disabled path is `active = false` and nothing else
 //!
@@ -446,12 +446,26 @@ impl Widget {
 /// Vanilla's `LayoutElement` (`gui/layouts/LayoutElement.java`), the interface
 /// every `AbstractLayout` arranges.
 ///
-/// **The seam, not the feature.** #394 ports `LinearLayout`,
+/// **The seam.** [`super::layout`] (#394) ports `LinearLayout`,
 /// `HeaderAndFooterLayout`, `FrameLayout` and `GridLayout`; all any of them needs
-/// of a child is to read its size and *write* its position, which is exactly this
-/// trait. Defining it now is what lets that work add containers without touching
-/// [`Widget`]. `visitWidgets` is omitted until there is a container to walk.
-pub trait LayoutElement {
+/// of a child is to read its size, *write* its position, and hand its leaves to a
+/// screen — which is exactly this trait. `Debug` is a supertrait so a container
+/// holding `Box<dyn LayoutElement>` children can still derive it (the workspace
+/// warns on `missing_debug_implementations`); every implementor here is plain
+/// data, so it costs nothing.
+///
+/// Two methods are not where vanilla puts them, both deliberately:
+///
+/// - **`visitWidgets`** is here rather than only on `Layout`, as in vanilla
+///   (`LayoutElement.java:29`), and it is **required** — vanilla makes it
+///   abstract too, which is why `SpacerElement` has to write an explicit empty
+///   body (`SpacerElement.java:61-63`). A defaulted no-op would let a future
+///   element type silently never reach a screen.
+/// - **`arrange_elements`** is here with a no-op default, where vanilla has it on
+///   `Layout` and tests `child instanceof Layout` in the default body
+///   (`Layout.java:14-20`). Behaviourally identical, and it saves a downcast from
+///   `dyn LayoutElement`.
+pub trait LayoutElement: core::fmt::Debug {
     /// `getX()`.
     fn x(&self) -> f32;
     /// `getY()`.
@@ -465,6 +479,15 @@ pub trait LayoutElement {
     /// `setY(int)`.
     fn set_y(&mut self, y: f32);
 
+    /// `visitWidgets(Consumer<AbstractWidget>)`: hand every drawable leaf under
+    /// this element to `visitor`, in insertion order.
+    ///
+    /// This is the only route from a layout tree to a draw — vanilla's screens
+    /// are literally `layout.visitWidgets(this::addRenderableWidget)`
+    /// (`PauseScreen.java:182`) — and the reason a `SpacerElement` is measured
+    /// but never drawn.
+    fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget));
+
     /// `setPosition(int, int)` — a default, as in vanilla.
     fn set_position(&mut self, x: f32, y: f32) {
         self.set_x(x);
@@ -475,6 +498,11 @@ pub trait LayoutElement {
     fn rectangle(&self) -> (f32, f32, f32, f32) {
         (self.x(), self.y(), self.width(), self.height())
     }
+
+    /// `Layout.arrangeElements()`: size this element from its children and place
+    /// them. A no-op for a leaf, which is what makes the recursion in
+    /// [`super::layout`]'s containers a plain `visit_children`.
+    fn arrange_elements(&mut self) {}
 }
 
 impl LayoutElement for Widget {
@@ -500,6 +528,12 @@ impl LayoutElement for Widget {
 
     fn set_y(&mut self, y: f32) {
         self.y = y;
+    }
+
+    /// A widget *is* a leaf: it visits itself, exactly as
+    /// `AbstractWidget.visitWidgets` does (`AbstractWidget.java:282-284`).
+    fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget)) {
+        visitor(self);
     }
 }
 

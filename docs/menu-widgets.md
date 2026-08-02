@@ -71,10 +71,12 @@ the account screen's action row. It builds a `Widget` from the row's
 decided in `render.rs` any more.
 
 The rect still comes from `row_rect`, deliberately: that function is also
-`app.rs`'s hit-test, so it stays the one definition of where a row is until #394
-gives layout containers somewhere to write positions to. `Widget` implements the
-`LayoutElement` seam (read size, write position) for that work to attach to;
-`visitWidgets` is omitted until there is a container to walk.
+`app.rs`'s hit-test, so it stays the one definition of where a row is. `Widget`
+implements the `LayoutElement` seam (read size, write position) that #394's
+containers attach through — see [`menu-layout.md`](./menu-layout.md), which added
+`visit_widgets` to that trait once there was a container to walk, and which feeds
+the title and pause rects into `row_rect` from an arranged tree rather than a
+table.
 
 **Pixels did not move.** That is the point — the conversion is a de-duplication,
 not a visual change, and `tests/menu_button_pixels.rs` is unchanged and still

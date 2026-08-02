@@ -60,8 +60,9 @@ use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
 use crate::hud::VanillaFont;
 use crate::hud::glyph_rows;
 use crate::hud::item_icon::{ColourStream, push_sprite_quad};
+use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
-use crate::menu::widget::{self, Widget};
+use crate::menu::widget::{self, LayoutElement, Widget};
 
 /// Bitmap-font cell metrics, matching [`crate::hud`]'s font (`glyph_rows`
 /// returns seven 5-bit rows).
@@ -143,17 +144,45 @@ const EDITION_H: f32 = 16.0;
 const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
 
 /// Width of vanilla's arranged pause-screen `GridLayout`: the widest cell is the
-/// 204 px `BUTTON_WIDTH_FULL` (`PauseScreen.java:53`) plus the default cell's
-/// 4 px left and right padding (`PauseScreen.java:93`), split across two
-/// columns of 106 — so the grid is 212 wide and a *half*-width 98 px button
-/// sits 4 px into its 106 px column. That is where the pause screen's 8 px
-/// gutter comes from, and why its full-width buttons start at `W/2 - 102`
-/// rather than the title screen's `W/2 - 100`.
+/// 204 px [`PAUSE_BUTTON_FULL_W`] plus the default cell's 4 px left and right
+/// padding, split across two columns of 106 — so the grid is 212 wide and a
+/// *half*-width 98 px button sits 4 px into its 106 px column. That is where the
+/// pause screen's 8 px gutter comes from, and why its full-width buttons start at
+/// `W/2 - 102` rather than the title screen's `W/2 - 100`.
+///
+/// **This is the hand derivation, not the value the draw uses.** Since #394 the
+/// grid is really built and arranged (`pause_menu_grid_with`) and
+/// [`pause_grid_size`] is what [`Origin::PauseGrid`] reads; this constant is the
+/// independent expectation `the_pause_grid_size_is_the_arranged_layouts_own`
+/// checks it against. Per `CLAUDE.md`, an expected value has to originate outside
+/// the code under test — so do not "simplify" this into a call to the layout.
 pub const PAUSE_GRID_W: f32 = 212.0;
 /// Height of the same grid: row 0 is `20 + paddingTop(50)` = 70
 /// (`PauseScreen.java:98`) and rows 1..4 are `20 + 4` = 24 each, for
-/// `70 + 4 * 24`.
+/// `70 + 4 * 24`. See [`PAUSE_GRID_W`] on why this stays a hand-derived
+/// constant.
 pub const PAUSE_GRID_H: f32 = 166.0;
+
+// -- vanilla's `PauseScreen` cell metrics (`PauseScreen.java:50-54`) ----------
+
+/// `PauseScreen.COLUMNS` (`PauseScreen.java:50`).
+const PAUSE_COLUMNS: usize = 2;
+/// `PauseScreen.MENU_PADDING_TOP` (`:51`) — the first cell's `paddingTop`, which
+/// is what pushes the whole menu below the "Game Menu" heading.
+const PAUSE_MENU_PADDING_TOP: i32 = 50;
+/// `PauseScreen.BUTTON_PADDING` (`:52`) — the default cell padding, applied as
+/// `padding(4, 4, 4, 0)`: left, top, right, **no bottom** (`:93`).
+const PAUSE_BUTTON_PADDING: i32 = 4;
+/// `PauseScreen.BUTTON_WIDTH_FULL` (`:53`). Note it is 204, not
+/// [`widget::BIG_WIDTH`]'s 200 — the pause screen is 4 px wider than the title
+/// screen's stack, which is exactly the 8 px gutter's other half.
+const PAUSE_BUTTON_FULL_W: f32 = 204.0;
+/// `PauseScreen.BUTTON_WIDTH_HALF` (`:54`), also `openScreenButton`'s explicit
+/// `.width(98)` (`:266-268`).
+const PAUSE_BUTTON_HALF_W: f32 = 98.0;
+/// The gap between the pause screen's four icon buttons —
+/// `LinearLayout.horizontal().spacing(4)` (`:101`).
+const PAUSE_ICON_SPACING: i32 = 4;
 /// Vanilla's font line height, used to centre a label in its widget
 /// (`ActiveTextCollector.java:73`).
 const LINE_H: f32 = 9.0;
@@ -373,10 +402,13 @@ pub enum Origin {
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
     /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
-    /// (`PauseScreen.java:181`), whose `alignInDimension` is
-    /// `(int) Mth.lerp(align, 0, length - widgetLength)`
-    /// (`FrameLayout.java:113-116`) — a truncating cast, hence the `floor`s —
-    /// with the grid's own size being [`PAUSE_GRID_W`]×[`PAUSE_GRID_H`].
+    /// (`PauseScreen.java:181`), and since #394 it is *evaluated* rather than
+    /// restated: [`layout::align_in_dimension`] applied to
+    /// [`pause_grid_size`], which is the arranged
+    /// [`GridLayout`](layout::GridLayout)'s own output. The `floor`s in the
+    /// formula above are vanilla's truncating `(int)` cast
+    /// (`FrameLayout.java:113-116`); the two differ only for a canvas narrower
+    /// than the grid, which `calculate_gui_scale`'s 320 px floor rules out.
     PauseGrid,
     /// `(0, h)` — bottom-left corner text (the title screen's version string).
     BottomLeft,
@@ -414,10 +446,13 @@ impl Origin {
         match self {
             Origin::ScreenTop => (width * 0.5, 0.0),
             Origin::TitleTop => (width * 0.5, (height / 4.0).floor() + 48.0),
-            Origin::PauseGrid => (
-                ((width - PAUSE_GRID_W) * 0.5).floor(),
-                ((height - PAUSE_GRID_H) * 0.25).floor(),
-            ),
+            Origin::PauseGrid => {
+                let (grid_w, grid_h) = pause_grid_size();
+                (
+                    layout::align_in_dimension(0.0, width, grid_w, 0.5),
+                    layout::align_in_dimension(0.0, height, grid_h, 0.25),
+                )
+            }
             Origin::BottomLeft => (0.0, height),
             Origin::BottomRight => (width, height),
             Origin::TopRight => (width, 0.0),
@@ -454,57 +489,213 @@ impl Slot {
     }
 }
 
+/// Vanilla's title-screen stack, **re-expressed** as a [`layout::LinearLayout`]
+/// column: three full-width rows, the three icon buttons as a nested centred
+/// horizontal row, then the Options/Quit pair as another horizontal row.
+///
+/// **Vanilla's `TitleScreen` uses no layout class at all** — it hand-centres on
+/// `this.width / 2 - 100` and steps `topPos` by 24 (`TitleScreen.java:105-205`),
+/// and #392's plan is explicit that a hand-arithmetic screen is legitimate
+/// vanilla. What makes this re-expression faithful rather than invented is that
+/// the two are *numerically identical*, which is not a coincidence:
+///
+/// - `spacing = 24` on 20 px buttons is a 4 px `rowSpacing`, so the rows land on
+///   `0, 24, 48, 72, 96` either way.
+/// - the column's width is `max(200, 68, 200) = 200`, so centring it on
+///   `width / 2` is `width / 2 - 100`;
+/// - `getHorizontalPosition(n, 3, 20)` is `width/2 - 34 + (n-1) * 24`
+///   (`TitleScreen.java:170-173`), and a 68 px row centred in the 200 px column
+///   is at `lerp(0.5, 0, 200 - 68) = 66`, i.e. `width/2 - 100 + 66` — the same
+///   `width/2 - 34`. The 34 is `totalWidth / 2` and the 66 is `(200 - 68) / 2`;
+///   they agree because `100 - 66 == 34`.
+/// - `98 + 4 + 98 == 200`, so the half-width pair fills the column exactly and
+///   its two children are at `+0` and `+102`.
+///
+/// `the_title_screen_rects_are_vanillas_own` asserts all eight rects against the
+/// hand-derived table, so if the equality above ever stops holding, it fails.
+fn title_menu_column() -> layout::LinearLayout {
+    let button = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
+        Box::new(Widget::button(0.0, 0.0, w, h, ""))
+    };
+    // The gap `spacing = 24` leaves between two 20 px buttons.
+    let row_spacing = (TITLE_PITCH - WIDGET_H) as i32;
+    let mut column = layout::LinearLayout::vertical().spacing(row_spacing);
+    for _ in 0..3 {
+        column.add_child(button(WIDE_W, WIDGET_H));
+    }
+    // `getHorizontalPosition` centres the icon row in the stack's width.
+    let mut icons = layout::LinearLayout::horizontal().spacing(row_spacing);
+    for _ in 0..3 {
+        icons.add_child(button(ICON_BTN, ICON_BTN));
+    }
+    column.add_child_settings(
+        Box::new(icons),
+        layout::LayoutSettings::defaults().align_horizontally_center(),
+    );
+    let mut pair = layout::LinearLayout::horizontal().spacing(row_spacing);
+    for _ in 0..2 {
+        pair.add_child(button(TITLE_HALF_W, WIDGET_H));
+    }
+    column.add_child(Box::new(pair));
+    column.arrange_elements();
+    column
+}
+
+/// Vanilla's `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`) as a real
+/// [`layout::GridLayout`], arranged.
+///
+/// `menu_padding_top` is `MENU_PADDING_TOP` (50) in production; it is a parameter
+/// only so `a_changed_cell_padding_moves_every_pause_rect` can run the negative
+/// control #394 asks for — change one `LayoutSettings` padding value and watch the
+/// rect assertions go red — against the real builder rather than a copy of it.
+///
+/// The full-width Options row is the `else` of vanilla's `hasSingleplayerServer()`
+/// fork (`:157-163`); this client has no integrated server, so that branch is the
+/// right one, and the grid therefore has five rows.
+fn pause_menu_grid_with(menu_padding_top: i32) -> layout::GridLayout {
+    let button = |w: f32, h: f32| -> Box<dyn widget::LayoutElement> {
+        Box::new(Widget::button(0.0, 0.0, w, h, ""))
+    };
+    let mut grid = layout::GridLayout::new();
+    {
+        // `gridLayout.defaultCellSetting().padding(4, 4, 4, 0)` (`:93`) — the
+        // *live* baseline, so every cell below inherits it.
+        let baseline = grid.default_cell_setting();
+        *baseline = baseline.padding_ltrb(
+            PAUSE_BUTTON_PADDING,
+            PAUSE_BUTTON_PADDING,
+            PAUSE_BUTTON_PADDING,
+            0,
+        );
+    }
+    let mut helper = grid.create_row_helper(PAUSE_COLUMNS);
+    // Back to Game: full width, and the one cell with the 50 px top padding.
+    let first = helper.new_cell_settings().padding_top(menu_padding_top);
+    helper.add_child_with(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS, first);
+    // Advancements and Statistics share a row, one column each.
+    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+    helper.add_child(button(PAUSE_BUTTON_HALF_W, WIDGET_H));
+    // The four icon buttons are a nested horizontal row, spanning both columns
+    // and horizontally centred in them (`:154`).
+    let mut icons = layout::LinearLayout::horizontal().spacing(PAUSE_ICON_SPACING);
+    for _ in 0..4 {
+        icons.add_child(button(ICON_BTN, ICON_BTN));
+    }
+    let centred = helper.new_cell_settings().align_horizontally_center();
+    helper.add_child_with(Box::new(icons), PAUSE_COLUMNS, centred);
+    // Options, then Disconnect: both full width.
+    helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
+    helper.add_spanning(button(PAUSE_BUTTON_FULL_W, WIDGET_H), PAUSE_COLUMNS);
+    drop(helper);
+    grid.arrange_elements();
+    grid
+}
+
+/// One arranged menu block: its own size, plus each leaf's rect in the order
+/// `visit_widgets` yields them (which is insertion order, in vanilla too).
+#[derive(Debug)]
+struct MenuBlock {
+    size: (f32, f32),
+    cells: Vec<(f32, f32, f32, f32)>,
+}
+
+impl MenuBlock {
+    /// Collect an **already-arranged** `root`'s leaves. `expected` is the number
+    /// of drawable leaves the caller's button table needs; a mismatch is a tree
+    /// that no longer describes the screen, and it must fail loudly rather than
+    /// silently shift every rect by one.
+    fn of(root: &dyn widget::LayoutElement, expected: usize) -> Self {
+        let cells = layout::widget_rects(root);
+        assert_eq!(
+            cells.len(),
+            expected,
+            "the arranged tree has {} drawable leaves, the screen has {expected}",
+            cells.len()
+        );
+        Self {
+            size: (root.width(), root.height()),
+            cells,
+        }
+    }
+}
+
+/// The title-screen column, arranged once.
+///
+/// Arranging is canvas-*independent* — only the final
+/// `FrameLayout.alignInRectangle` step depends on the screen size, and that is
+/// what [`Origin`] applies at draw time — so the tree is built once per process
+/// rather than per frame. [`super::layout`]'s module docs say which of vanilla's
+/// two two-phase timings this is, and why.
+fn title_block() -> &'static MenuBlock {
+    static BLOCK: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
+    // Vanilla's own eight. `MAIN_BUTTONS`' ninth, `Accounts`, is ours and is a
+    // corner widget outside the column entirely.
+    BLOCK.get_or_init(|| MenuBlock::of(&title_menu_column(), 8))
+}
+
+/// The pause-screen grid, arranged once. See [`title_block`].
+fn pause_block() -> &'static MenuBlock {
+    static BLOCK: std::sync::OnceLock<MenuBlock> = std::sync::OnceLock::new();
+    // All nine of `PAUSE_BUTTONS`, four of them inside the nested icon row.
+    BLOCK.get_or_init(|| MenuBlock::of(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP), 9))
+}
+
+/// The arranged pause grid's own `(width, height)` — what
+/// [`Origin::PauseGrid`] aligns in the screen rect.
+///
+/// Public so a gate can check it against the hand-derived
+/// [`PAUSE_GRID_W`]×[`PAUSE_GRID_H`] rather than restating either.
+#[must_use]
+pub fn pause_grid_size() -> (f32, f32) {
+    pause_block().size
+}
+
 /// Vanilla's rect for one title-screen widget, from
 /// `TitleScreen.init`/`createNormalMenuOptions`
-/// (`TitleScreen.java:105-205`).
+/// (`TitleScreen.java:105-205`) — **read out of the arranged
+/// `title_menu_column`**, not written down.
 ///
-/// The three icon buttons use `getHorizontalPosition(n, 3, 20)`
-/// (`TitleScreen.java:170-173`): `totalWidth = 3 * 20 + 2 * 4 = 68`, so
-/// `x = W/2 - 34 + (n - 1) * 24` for `n` in `1..=3`.
+/// The offsets are relative to [`Origin::TitleTop`], whose x is `width / 2`,
+/// so a cell's `dx` is its position in the column minus half the column's width.
 #[must_use]
 pub fn title_slot(button: MainButton) -> Slot {
-    let full = |dy: f32| Slot {
-        origin: Origin::TitleTop,
-        dx: -100.0,
-        dy,
-        w: WIDE_W,
-        h: WIDGET_H,
-    };
-    let icon = |dx: f32| Slot {
-        origin: Origin::TitleTop,
-        dx,
-        dy: TITLE_PITCH * 3.0,
-        w: ICON_BTN,
-        h: ICON_BTN,
-    };
-    let half = |dx: f32| Slot {
-        origin: Origin::TitleTop,
-        dx,
-        dy: TITLE_PITCH * 4.0,
-        w: TITLE_HALF_W,
-        h: WIDGET_H,
-    };
-    match button {
-        MainButton::Singleplayer => full(0.0),
-        MainButton::Multiplayer => full(TITLE_PITCH),
-        MainButton::Realms => full(TITLE_PITCH * 2.0),
-        MainButton::Friends => icon(-34.0),
-        MainButton::Language => icon(-10.0),
-        MainButton::Accessibility => icon(14.0),
-        MainButton::Options => half(-100.0),
-        MainButton::Quit => half(2.0),
+    // The insertion order of `title_menu_column`, which is also `MAIN_BUTTONS`'
+    // order for vanilla's own eight. Written as an exhaustive match rather than
+    // `button as usize` so adding a variant fails to compile instead of silently
+    // indexing the wrong cell.
+    let index = match button {
+        MainButton::Singleplayer => 0,
+        MainButton::Multiplayer => 1,
+        MainButton::Realms => 2,
+        MainButton::Friends => 3,
+        MainButton::Language => 4,
+        MainButton::Accessibility => 5,
+        MainButton::Options => 6,
+        MainButton::Quit => 7,
         // Not vanilla — see `MainButton::Accounts`'s docs and
         // `Origin::TopRight`'s. A corner widget, not one more stack row:
         // vanilla's own eight already reach to within 16 px of the bottom of
         // a 320×240 canvas, so nothing fits below them there. The gap above
-        // the logo (`y < LOGO_Y`) is free at every canvas size instead.
-        MainButton::Accounts => Slot {
-            origin: Origin::TopRight,
-            dx: -(ACCOUNTS_ENTRY_W + ACCOUNTS_ENTRY_MARGIN),
-            dy: ACCOUNTS_ENTRY_MARGIN,
-            w: ACCOUNTS_ENTRY_W,
-            h: WIDGET_H,
-        },
+        // the logo (`y < LOGO_Y`) is free at every canvas size instead. It is
+        // outside the arranged column entirely, which is why it returns early.
+        MainButton::Accounts => {
+            return Slot {
+                origin: Origin::TopRight,
+                dx: -(ACCOUNTS_ENTRY_W + ACCOUNTS_ENTRY_MARGIN),
+                dy: ACCOUNTS_ENTRY_MARGIN,
+                w: ACCOUNTS_ENTRY_W,
+                h: WIDGET_H,
+            };
+        }
+    };
+    let block = title_block();
+    let (x, y, w, h) = block.cells[index];
+    Slot {
+        origin: Origin::TitleTop,
+        dx: x - block.size.0 * 0.5,
+        dy: y,
+        w,
+        h,
     }
 }
 
@@ -516,43 +707,47 @@ const ACCOUNTS_ENTRY_W: f32 = 90.0;
 const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
-/// `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`), resolved by hand
-/// through `GridLayout.arrangeElements` (`GridLayout.java:25-89`) and
-/// `AbstractLayout.AbstractChildWrapper::setX`/`setY`
-/// (`AbstractLayout.java:73-85`).
+/// `PauseScreen.createPauseMenu` (`PauseScreen.java:91-183`) — **read out of the
+/// arranged grid** (`pause_menu_grid_with`) rather than resolved by hand.
 ///
-/// The derivation, since none of it is a round number by accident:
-/// column widths are `[106, 106]` (the 204+8 full-width cell split over two
-/// columns by `Divisor`); row heights are `[70, 24, 24, 24, 24]`, so row y
-/// offsets are `[0, 70, 94, 118, 142]`. Each child's own offset inside its cell
-/// is its `paddingLeft`/`paddingTop` because the default `xAlignment` is 0 — and
-/// with `padding(4, 4, 4, 0)` a full-width button's `mostOffset` is also 4, so
+/// It used to be a table of nine hand-derived offsets, and the derivation is
+/// worth keeping because it is what the port has to reproduce: column widths are
+/// `[106, 106]` (the 204+8 full-width cell split over two columns by `Divisor`);
+/// row heights are `[70, 24, 24, 24, 24]`, so row y offsets are
+/// `[0, 70, 94, 118, 142]`. Each child's own offset inside its cell is its
+/// `paddingLeft`/`paddingTop` because the default `xAlignment` is 0 — and with
+/// `padding(4, 4, 4, 0)` a full-width button's `mostOffset` is also 4, so
 /// alignment could not move it anyway. The icon row is the one centred cell
 /// (`alignHorizontallyCenter`, `PauseScreen.java:154`):
 /// `lerp(0.5, 4, 212 - 92 - 4) = 60`, and its own `LinearLayout` spaces four
 /// 20 px children 4 px apart from there — 60, 84, 108, 132.
+///
+/// That table now lives in `the_pause_screen_rects_are_vanillas_own`, where it is
+/// the *expectation* instead of the implementation — an expected value has to come
+/// from outside the code under test.
 #[must_use]
 pub fn pause_slot(button: PauseButton) -> Slot {
-    let cell = |dx: f32, dy: f32, w: f32, h: f32| Slot {
+    // `pause_menu_grid_with`'s insertion order, which is `PAUSE_BUTTONS`' order.
+    // Exhaustive rather than `button as usize` so a new variant is a compile
+    // error and not a silent off-by-one across every rect.
+    let index = match button {
+        PauseButton::BackToGame => 0,
+        PauseButton::Advancements => 1,
+        PauseButton::Statistics => 2,
+        PauseButton::ReportBugs => 3,
+        PauseButton::Feedback => 4,
+        PauseButton::Friends => 5,
+        PauseButton::PlayerReporting => 6,
+        PauseButton::Options => 7,
+        PauseButton::QuitToTitle => 8,
+    };
+    let (dx, dy, w, h) = pause_block().cells[index];
+    Slot {
         origin: Origin::PauseGrid,
         dx,
         dy,
         w,
         h,
-    };
-    match button {
-        PauseButton::BackToGame => cell(4.0, 50.0, 204.0, WIDGET_H),
-        PauseButton::Advancements => cell(4.0, 74.0, 98.0, WIDGET_H),
-        PauseButton::Statistics => cell(110.0, 74.0, 98.0, WIDGET_H),
-        PauseButton::ReportBugs => cell(60.0, 98.0, ICON_BTN, ICON_BTN),
-        PauseButton::Feedback => cell(84.0, 98.0, ICON_BTN, ICON_BTN),
-        PauseButton::Friends => cell(108.0, 98.0, ICON_BTN, ICON_BTN),
-        PauseButton::PlayerReporting => cell(132.0, 98.0, ICON_BTN, ICON_BTN),
-        // The full-width Options row is the `else` of vanilla's
-        // `hasSingleplayerServer()` fork (`PauseScreen.java:157-163`); this
-        // client has no integrated server, so that branch is the right one.
-        PauseButton::Options => cell(4.0, 122.0, 204.0, WIDGET_H),
-        PauseButton::QuitToTitle => cell(4.0, 146.0, 204.0, WIDGET_H),
     }
 }
 
@@ -3115,6 +3310,13 @@ mod tests {
         // `title_slot`: topPos = 480/4 + 48 = 168, rows every 24 px, the icon
         // row from `getHorizontalPosition(n, 3, 20)` = 427 - 34 + (n-1)*24, and
         // the Options/Quit pair at `W/2 - 100` / `W/2 + 2`, 98 wide.
+        //
+        // Since #394 `title_slot` computes these from an arranged
+        // `LinearLayout` column instead of holding them as constants, so this is
+        // the **no-move gate** for that conversion: the table is vanilla's own
+        // hand arithmetic (which uses no layout class at all) and the values come
+        // out of the layout tree. If the two ever disagree, one of them is wrong
+        // and this says which button.
         let expected = [
             (B::Singleplayer, (327.0, 168.0, 200.0, 20.0)),
             (B::Multiplayer, (327.0, 192.0, 200.0, 20.0)),
@@ -3147,6 +3349,13 @@ mod tests {
         // through `GridLayout.arrangeElements`, at 854×480: the 212×166 grid is
         // aligned (0.5, 0.25) so its origin is (321, 78); row y offsets inside it
         // are [0, 70, 94, 118, 142] and each child sits at its own padding.
+        //
+        // These nine rects were `pause_slot`'s *implementation* until #394 and are
+        // now its expectation: the values below come out of a real ported
+        // `GridLayout`, and the table is the independent derivation they have to
+        // agree with. Two derivations of the same arithmetic, one by hand from the
+        // Java and one by running a port of it — which is the only shape of gate
+        // that can catch a port that is self-consistently wrong.
         let gx = 321.0;
         let gy = 78.0;
         let expected = [
@@ -3184,6 +3393,59 @@ mod tests {
             (ax + aw + sx) / 2.0,
             V_W / 2.0,
             "the half-width pair straddles the centre line"
+        );
+    }
+
+    #[test]
+    fn the_pause_grid_size_is_the_arranged_layouts_own() {
+        // `Origin::PauseGrid` aligns the grid's *measured* size in the screen
+        // rect, so that size is load-bearing for all nine rects at once — a grid
+        // 2 px too wide moves every button 1 px left. `PAUSE_GRID_W`/`_H` are the
+        // hand derivation (204 + 4 + 4 wide; 70 + 4 * 24 tall) and this is the
+        // only place they are compared with what the port computes.
+        assert_eq!(pause_grid_size(), (PAUSE_GRID_W, PAUSE_GRID_H));
+        // The same numbers reached the other way, from the arranged tree rather
+        // than the cache, so the cache cannot be what is agreeing with itself.
+        let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP);
+        assert_eq!((grid.width(), grid.height()), (212.0, 166.0));
+        // And the grid really does hold nine drawable leaves in `PAUSE_BUTTONS`
+        // order — the four icon buttons among them come from a *nested*
+        // `LinearLayout`, so this is also the assertion that `visit_widgets`
+        // flattens the nesting rather than yielding the row as one child.
+        assert_eq!(
+            layout::widget_rects(&grid).len(),
+            crate::menu::nav::PAUSE_BUTTONS.len()
+        );
+    }
+
+    #[test]
+    fn a_changed_cell_padding_moves_every_pause_rect() {
+        // #394's negative control, executed rather than described: change one
+        // `LayoutSettings` padding value and the rect assertions must go red. The
+        // subject is the real builder with one argument varied, not a copy of it,
+        // so this cannot pass by testing something else.
+        //
+        // `MENU_PADDING_TOP` is row 0's `paddingTop`. Dropping it by 10 must
+        // (a) move Back to Game up 10, (b) shrink the grid 10, and therefore
+        // (c) move every *later* row up 10 as well — a silently no-op arrange pass
+        // would fail all three.
+        let real = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP));
+        let short = layout::widget_rects(&pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10));
+        assert_eq!(real[0].1, 50.0);
+        assert_eq!(short[0].1, 40.0, "row 0's padding must move row 0");
+        for (i, (r, s)) in real.iter().zip(&short).enumerate() {
+            assert_eq!(
+                r.1 - s.1,
+                10.0,
+                "widget {i} did not move with the row above it"
+            );
+            assert_eq!(r.0, s.0, "and nothing may move horizontally");
+        }
+        let grid = pause_menu_grid_with(PAUSE_MENU_PADDING_TOP - 10);
+        assert_eq!(
+            (grid.width(), grid.height()),
+            (PAUSE_GRID_W, PAUSE_GRID_H - 10.0),
+            "the grid's own height is the sum of its rows, so it must shrink too"
         );
     }
 
@@ -3475,6 +3737,34 @@ mod tests {
             })
     }
 
+    /// The **destination** bounding box of every sprite-stream vertex, back in
+    /// logical pixels — the inverse of `Quads::rect`'s
+    /// `(2x/w - 1, 1 - 2y/h)`.
+    ///
+    /// This is what turns "a sprite was drawn" into "a sprite was drawn *there*",
+    /// and it reports a box rather than a fraction so a failure says where
+    /// (`CLAUDE.md`: a gate that reports only a percentage cannot tell a shifted
+    /// widget from a missing one). `GuiAtlas::geometry`'s quads "tile the target
+    /// exactly, with no gaps or overlap", so for an integral rect this *is* the
+    /// rect — but the round trip through NDC and back costs a few `f32` ulps
+    /// (`327` can come back as `326.99997`), so callers compare within a hundredth
+    /// of a pixel rather than with `assert_eq!`. Two orders of magnitude below the
+    /// one pixel a real layout error moves something by.
+    fn sprite_dest_bounds(sprite: &[f32], w: f32, h: f32) -> (f32, f32, f32, f32) {
+        assert!(!sprite.is_empty(), "no sprite quads to measure");
+        let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+        let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+        for v in sprite.chunks_exact(SPRITE_FLOATS_PER_VERTEX) {
+            let px = (v[0] + 1.0) * 0.5 * w;
+            let py = (1.0 - v[1]) * 0.5 * h;
+            x0 = x0.min(px);
+            y0 = y0.min(py);
+            x1 = x1.max(px);
+            y1 = y1.max(py);
+        }
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
     /// Whether **any** emitted quad's UV *centre* lies strictly inside
     /// `(min, max)`.
     ///
@@ -3594,31 +3884,51 @@ mod tests {
         // stopped consulting the widget would have to keep agreeing with
         // vanilla's rule by coincidence, for all 36 (button, focused) pairs, to
         // pass — and if the rule in `widget.rs` is wrong, this fails too.
+        // #394 extends it in the other direction, without new machinery: each
+        // case is now drawn at that button's **own** slot, and the sprite's
+        // destination rect is asserted against it. `title_slot`/`pause_slot` read
+        // the arranged layout tree since #394, so this is also the gate that says
+        // the layout containers reach pixels — an arrange pass that silently
+        // no-opped would put every widget at the block's origin and fail here
+        // while every "a button drew something" check still passed.
         let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
-        let slot = Slot {
-            origin: Origin::ScreenTop,
-            dx: -100.0,
-            dy: 40.0,
-            w: 200.0,
-            h: 20.0,
-        };
-        // Both real screens' real button states, labelled so a failure names the
-        // button rather than an index. `icon: None` throughout: the synthetic
-        // pack carries one icon sprite, and an icon quad would put a second
-        // region in the stream and make `all_uvs_within` a weaker question.
-        let cases: Vec<(&'static str, bool)> = MAIN_BUTTONS
+        // Both real screens' real button states and real rects, labelled so a
+        // failure names the button rather than an index. `icon: None` throughout:
+        // the synthetic pack carries one icon sprite, and an icon quad would put a
+        // second region in the stream and make `all_uvs_within` a weaker question
+        // (it would not disturb `sprite_dest_bounds`, which the icon sits inside).
+        let cases: Vec<(&'static str, bool, Slot)> = MAIN_BUTTONS
             .iter()
-            .map(|b| (b.label(), b.enabled()))
-            .chain(PAUSE_BUTTONS.iter().map(|b| (b.label(), b.enabled())))
+            .map(|b| (b.label(), b.enabled(), title_slot(*b)))
+            .chain(
+                PAUSE_BUTTONS
+                    .iter()
+                    .map(|b| (b.label(), b.enabled(), pause_slot(*b))),
+            )
             .collect();
         // The premise, checked rather than assumed: both screens really do carry
         // a mix, or "the disabled sprite was chosen" is never exercised.
         assert!(
-            cases.iter().any(|(_, e)| *e) && cases.iter().any(|(_, e)| !*e),
+            cases.iter().any(|(_, e, _)| *e) && cases.iter().any(|(_, e, _)| !*e),
             "neither screen has a disabled button any more, so this gate is vacuous"
         );
+        // And the rects are really distinct, or the position half of this gate is
+        // satisfied by every widget landing in one place.
+        let distinct: std::collections::BTreeSet<(i32, i32)> = cases
+            .iter()
+            .map(|(_, _, s)| {
+                let (x, y, ..) = s.resolve(V_W, V_H);
+                (x as i32, y as i32)
+            })
+            .collect();
+        assert_eq!(
+            distinct.len(),
+            cases.len(),
+            "two buttons share a position, so a widget stuck at the wrong one \
+             could still pass"
+        );
 
-        for (label, enabled) in cases {
+        for (label, enabled, slot) in cases {
             for focused in [false, true] {
                 let rows = vec![MenuRow {
                     label: label.to_string(),
@@ -3648,6 +3958,25 @@ mod tests {
                         "the detector cannot tell {expected} from {flipped}"
                     );
                 }
+
+                // Where it drew, in logical pixels, against the layout's own
+                // answer for this button. The 0.01 is the NDC round trip's float
+                // error, not slack in the layout — see `sprite_dest_bounds`.
+                let drawn = sprite_dest_bounds(&sprite, V_W, V_H);
+                let want = slot.resolve(V_W, V_H);
+                let same = [
+                    (drawn.0, want.0),
+                    (drawn.1, want.1),
+                    (drawn.2, want.2),
+                    (drawn.3, want.3),
+                ]
+                .iter()
+                .all(|(a, b)| (a - b).abs() < 0.01);
+                assert!(
+                    same,
+                    "{label} (enabled={enabled}, focused={focused}) drew at {drawn:?}, \
+                     not at {want:?} where the layout placed it"
+                );
             }
         }
     }
